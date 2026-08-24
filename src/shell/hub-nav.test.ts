@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  chipLabel,
   chipDotClass,
   parseHubState,
   sortHubWorkspaces,
@@ -66,6 +67,13 @@ describe("chipDotClass", () => {
     expect(chipDotClass([], "uatu")).toBe("indicator-dot");
     expect(chipDotClass([summary("other", true)], "uatu")).toBe("indicator-dot");
     expect(chipDotClass([summary("uatu", true)], null)).toBe("indicator-dot");
+  });
+});
+
+describe("chipLabel", () => {
+  test("uses the latest display name and falls back to the stable id", () => {
+    expect(chipLabel([summary("uatu", true, "Uatu Docs")], "uatu")).toBe("Uatu Docs");
+    expect(chipLabel([summary("other", true)], "uatu")).toBe("uatu");
   });
 });
 

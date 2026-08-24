@@ -62,6 +62,11 @@ export function chipDotClass(workspaces: HubWorkspaceSummary[], currentId: strin
   return current?.running ? "indicator-dot is-live" : "indicator-dot";
 }
 
+export function chipLabel(workspaces: HubWorkspaceSummary[], currentId: string): string {
+  const current = workspaces.find(workspace => workspace.id === currentId);
+  return current ? workspaceMenuLabel(current) : currentId;
+}
+
 // Menu order: the current workspace first, then other running sessions,
 // then stopped workspaces, alphabetical within each group.
 export function sortHubWorkspaces(
@@ -161,7 +166,8 @@ export function initHubNav(): void {
   let latest: HubWorkspaceSummary[] = [];
 
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
-  const updateChipDot = () => {
+  const updateChip = () => {
+    label.textContent = chipLabel(latest, currentId);
     if (chipDot) {
       chipDot.className = chipDotClass(latest, currentId);
     }
@@ -269,9 +275,7 @@ export function initHubNav(): void {
       return;
     }
     latest = state.workspaces;
-    const current = state.workspaces.find(workspace => workspace.id === currentId);
-    label.textContent = current ? workspaceMenuLabel(current) : currentId;
-    updateChipDot();
+    updateChip();
     control.hidden = false;
 
     // A back/forward-cache restore revives this page exactly as it was —
@@ -284,7 +288,7 @@ export function initHubNav(): void {
       void fetchHubState().then(fresh => {
         if (fresh !== null) {
           latest = fresh.workspaces;
-          updateChipDot();
+          updateChip();
         }
       });
     });
@@ -303,7 +307,7 @@ export function initHubNav(): void {
       void fetchHubState().then(fresh => {
         if (fresh !== null) {
           latest = fresh.workspaces;
-          updateChipDot();
+          updateChip();
           if (!menu.hidden) {
             renderMenu();
           }

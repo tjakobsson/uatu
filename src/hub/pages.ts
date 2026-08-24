@@ -2004,7 +2004,7 @@ createWorkspaceForm.onsubmit = async event => {
   try {
     await api("/api/hub/workspaces/create", {
       parent: browsePath,
-      folderName: createWorkspaceFolder.value.trim(),
+      folderName: createWorkspaceFolder.value,
       displayName: createWorkspaceName.value.trim(),
       authentication,
       signing: createWorkspaceSigning.value || null,
@@ -2030,31 +2030,35 @@ function remoteKind(url) {
   if (/^(?:[^@/:\\s]+@)?(?:\\[[^\\]]+\\]|[^/:\\s]+):[^/].*$/.test(value) && !/^[a-z]:[\\\\/]/.test(value)) return "ssh";
   return null;
 }
+function normalizedUrlHost(url) {
+  const value = url.trim();
+  try {
+    const parsed = new URL(value);
+    if (!parsed.hostname) return null;
+    const hostname = parsed.hostname.endsWith(".") ? parsed.hostname.slice(0, -1) : parsed.hostname;
+    // WHATWG URL parsing erases an explicit default HTTPS port. Preserve the
+    // original authority spelling so an SSH assignment to :443 does not
+    // broaden into an all-ports host match.
+    const authority = value.slice(value.indexOf("://") + 3).split("/")[0].split("?")[0].split("#")[0] || parsed.host;
+    const port = parsed.port || (parsed.protocol === "https:" && /:0*443$/.test(authority) ? "443" : "");
+    return hostname.toLowerCase() + (port ? ":" + port : "");
+  } catch { return null; }
+}
 function cloneCompatible(credential, kind, url) {
   if (!credential.enabled || !kind) return false;
   if (kind === "ssh") return credential.type === "ssh" && credential.capabilities.includes("ssh-authentication");
   if (credential.type !== "token" || !credential.capabilities.includes("https-git")) return false;
   // Mirror the server's provider-host normalization (trailing dot, case)
   // so every URL the backend accepts for a stored token is selectable here.
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname.endsWith(".") ? parsed.hostname.slice(0, -1) : parsed.hostname;
-    const host = hostname.toLowerCase() + (parsed.port ? ":" + parsed.port : "");
-    return host === credential.metadata.host.toLowerCase();
-  }
-  catch { return false; }
+  const host = normalizedUrlHost(url);
+  return host !== null && host === credential.metadata.host.toLowerCase();
 }
 // Host a retained authentication selection applies to: tokens pin their
 // provider host; SSH keys use the clone URL's remote host.
 function remoteHostFromUrl(url) {
   const value = url.trim();
-  try {
-    const parsed = new URL(value);
-    if (parsed.hostname) {
-      const hostname = parsed.hostname.endsWith(".") ? parsed.hostname.slice(0, -1) : parsed.hostname;
-      return hostname.toLowerCase() + (parsed.port ? ":" + parsed.port : "");
-    }
-  } catch {}
+  const urlHost = normalizedUrlHost(value);
+  if (urlHost !== null) return urlHost;
   // The server's clone-remote pattern, inlined so a bracketed IPv6 literal
   // is captured whole instead of being cut at its first colon. Brackets
   // survive on an address (that is the stored host form) and are stripped

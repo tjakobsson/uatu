@@ -37,13 +37,24 @@ function folderMutationFunction(html: string) {
 // can be asserted against the server's for the same remote spelling.
 function retainedHostFunction(html: string) {
   const script = clientScript(html);
-  const start = script.indexOf("function remoteHostFromUrl");
+  const start = script.indexOf("function normalizedUrlHost");
   const end = script.indexOf("function updateCloneCredentials", start);
   const source = script.slice(start, end);
   return (remote: string, credential: { type: string; metadata: Record<string, string> }) =>
     new Function("document", `${source}\nreturn retainedHostFor;`)({
       getElementById: () => ({ value: remote }),
     })(credential) as string | null;
+}
+
+function cloneCompatibleFunction(html: string) {
+  const script = clientScript(html);
+  const start = script.indexOf("function normalizedUrlHost");
+  const end = script.indexOf("// Host a retained authentication selection applies", start);
+  return new Function(`${script.slice(start, end)}\nreturn cloneCompatible;`)() as (
+    credential: { enabled: boolean; type: string; capabilities: string[]; metadata: { host: string } },
+    kind: string,
+    remote: string,
+  ) => boolean;
 }
 
 // Extracts the clone page's terminal-result handling (resetCloneForm +
@@ -237,6 +248,8 @@ describe("clone page", () => {
     // colon (or falling back to github.com) would commit the retained key
     // for a host the cloned origin never presents.
     for (const remote of [
+      "https://GitHub.EXAMPLE.com.:443/owner/repo.git",
+      "https://github.example.com:0443/owner/repo.git",
       "git@[2001:db8::1]:owner/repo.git",
       "ssh://git@[2001:db8::1]/owner/repo.git",
       "git@github.example.com:owner/repo.git",
@@ -247,10 +260,20 @@ describe("clone page", () => {
       expect(retainedHostFor(remote, sshKey)).toBe(parseCloneRemote(remote).host!);
     }
     expect(retainedHostFor("git@[2001:db8::1]:owner/repo.git", sshKey)).toBe("[2001:db8::1]");
+    expect(retainedHostFor("https://github.example.com:443/owner/repo.git", sshKey)).toBe("github.example.com:443");
     // Tokens still pin their provider host, and an unusable remote keeps
     // the existing default.
     expect(retainedHostFor("git@[2001:db8::1]:owner/repo.git", token)).toBe("github.example.com");
     expect(retainedHostFor("not a remote", sshKey)).toBe("github.com");
+  });
+
+  test("matches HTTPS clone credentials without dropping explicit default ports", () => {
+    const cloneCompatible = cloneCompatibleFunction(htmlFor.clone());
+    const token = (host: string) => ({ enabled: true, type: "token", capabilities: ["https-git"], metadata: { host } });
+    const remote = "https://GitHub.EXAMPLE.com.:0443/owner/repo.git";
+    expect(cloneCompatible(token("github.example.com:443"), "https", remote)).toBe(true);
+    expect(cloneCompatible(token("github.example.com"), "https", remote)).toBe(false);
+    expect(cloneCompatible(token("github.example.com"), "https", "https://github.example.com/owner/repo.git")).toBe(true);
   });
 
   test("keeps the submitted clone form until the job succeeds", async () => {
@@ -343,6 +366,10 @@ describe("clone page", () => {
     expect(html).toContain("if (!name.trim()) return;");
     expect(html).not.toContain("renameFolderName.value.trim()");
     expect(html).not.toContain("newFolderName.value.trim()");
+    // Create workspace follows the same FolderName contract: trim only the
+    // display label, never the directory segment the user entered.
+    expect(html).toContain("folderName: createWorkspaceFolder.value,");
+    expect(html).not.toContain("folderName: createWorkspaceFolder.value.trim()");
   });
 
   test("retries needsStop with named workspace confirmation and stop authorization", async () => {
