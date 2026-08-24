@@ -506,6 +506,9 @@ describe("settings page", () => {
     }
     expect(html).toContain('api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: value })');
     expect(html).toContain('api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: null })');
+    expect(html).toContain("const value = input.value;");
+    expect(html).toContain("if (!value.trim())");
+    expect(html).not.toContain("const value = input.value.trim()");
     expect(html).toContain("is currently unavailable; onboarding falls back to");
     expect(html).toContain("Workspaces can still be added from anywhere.");
   });

@@ -57,6 +57,20 @@ describe("HubPreferencesStore", () => {
     });
   });
 
+  test("preserves significant whitespace in a default parent path", async () => {
+    const f = await fixture();
+    const padded = path.join(f.root, "workspaces ");
+    await fs.mkdir(padded);
+
+    expect(await f.store.setDefaultWorkspaceParent(padded)).toBe(padded);
+    expect(f.store.configuredDefaultWorkspaceParent()).toBe(padded);
+    expect(await f.store.resolveDefaultWorkspaceParent()).toEqual({
+      configured: padded,
+      configuredAvailable: true,
+      effective: padded,
+    });
+  });
+
   test("rejects relative, missing, file, and symlink parents without changing the value", async () => {
     const f = await fixture();
     await f.store.setDefaultWorkspaceParent(f.parent);

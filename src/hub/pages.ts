@@ -2444,8 +2444,8 @@ function initWorkspaceDefaults() {
   form.onsubmit = async event => {
     event.preventDefault();
     setLocalError(errorTarget, "");
-    const value = input.value.trim();
-    if (!value) { setLocalError(errorTarget, "Enter an absolute directory path, or use Clear."); return; }
+    const value = input.value;
+    if (!value.trim()) { setLocalError(errorTarget, "Enter an absolute directory path, or use Clear."); return; }
     const button = form.querySelector('button[type="submit"]');
     await withBusy(button, "Saving…", async () => {
       try {
