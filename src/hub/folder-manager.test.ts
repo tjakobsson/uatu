@@ -100,6 +100,43 @@ async function identityOf(candidate: string): Promise<{ dev: string; ino: string
   return { dev: String(stats.dev), ino: String(stats.ino) };
 }
 
+// Records the journal's durability-relevant filesystem calls in order: the
+// temporary file's handle, the rename that publishes the journal, the
+// unlink that clears it, the removal's rmdir, and every open/sync/close of
+// the journal's containing directory. `paths` is filled in after the
+// fixture exists; the injected hooks read it at call time.
+function journalDurabilityFs(events: string[], paths: { directory: string; journal: string }): typeof fs {
+  const label = (target: string): string | undefined => {
+    if (target === paths.directory) return "directory";
+    return target.startsWith(`${paths.journal}.`) ? "temp" : undefined;
+  };
+  return Object.assign({}, fs, {
+    open: (async (target: string, flags?: unknown, mode?: unknown) => {
+      const handle = await fs.open(target, flags as never, mode as never);
+      const name = label(target);
+      if (name === undefined) return handle;
+      events.push(`${name}:open`);
+      return {
+        writeFile: (...args: Parameters<typeof handle.writeFile>) => handle.writeFile(...args),
+        sync: async () => { events.push(`${name}:sync`); await handle.sync(); },
+        close: async () => { events.push(`${name}:close`); await handle.close(); },
+      } as unknown as typeof handle;
+    }) as typeof fs.open,
+    rename: async (from: string, to: string) => {
+      if (to === paths.journal) events.push("journal:rename");
+      return fs.rename(from, to);
+    },
+    unlink: async (target: string) => {
+      if (target === paths.journal) events.push("journal:unlink");
+      return fs.unlink(target);
+    },
+    rmdir: async (target: string) => {
+      events.push("folder:rmdir");
+      return fs.rmdir(target);
+    },
+  }) as typeof fs;
+}
+
 describe("FolderManager validation and unregistered operations", () => {
   test("accepts only closed absolute-path requests and visible single-segment names", async () => {
     const f = await fixture();
@@ -380,6 +417,58 @@ describe("FolderManager registered mutations", () => {
     expect((JSON.parse(await fs.readFile(f.journalPath, "utf8")) as { version: number }).version).toBe(1);
     releaseRename();
     completed(await operation);
+  });
+
+  test("persists the journal's own directory entry around the filesystem mutation", async () => {
+    // Syncing the temporary file makes only its CONTENTS durable. The
+    // rename that publishes the journal and the unlink that clears it are
+    // directory metadata, so without an fsync of the containing directory
+    // a host crash can lose the journal while the rmdir it fences survives
+    // the reboot — a registry entry pointing at a folder that is gone,
+    // with no recovery record. Both boundaries are asserted by order: the
+    // directory sync must land before the rmdir, and again after the clear.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({ fs: journalDurabilityFs(events, paths) });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(events).toEqual([
+      "temp:open", "temp:sync", "temp:close",
+      "journal:rename",
+      "directory:open", "directory:sync", "directory:close",
+      "folder:rmdir",
+      "journal:unlink",
+      "directory:open", "directory:sync", "directory:close",
+    ]);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("the Windows journal skips a directory fsync the platform cannot perform", async () => {
+    // Directory fsync is POSIX: on Windows fs.open of a directory fails
+    // outright, so the journal must not attempt it. NTFS journals its own
+    // metadata, and this file already degrades to what the platform offers.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({ fs: journalDurabilityFs(events, paths), platform: "win32" });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(events).toEqual([
+      "temp:open", "temp:sync", "temp:close",
+      "journal:rename",
+      "folder:rmdir",
+      "journal:unlink",
+    ]);
+    expect(await exists(f.journalPath)).toBe(false);
   });
 
   test("preserves an unresolved mutation journal by refusing all later mutations", async () => {

@@ -275,7 +275,35 @@ function parseJournal(value: unknown): PendingFolderMutation {
 class FolderMutationJournal {
   private counter = 0;
 
-  constructor(private readonly filePath: string, private readonly fs: FileSystem) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly fs: FileSystem,
+    // POSIX only; see syncDirectory.
+    private readonly syncsDirectory: boolean,
+  ) {}
+
+  // Persists the journal's own DIRECTORY ENTRY. handle.sync() below makes
+  // the temporary file's contents durable, and nothing more: the rename
+  // that publishes the journal, and the unlink that clears it, are
+  // directory metadata that a host crash can still lose. Without this
+  // fsync a power loss right after a write can drop the journal while the
+  // folder rename or rmdir it fences survives the reboot — the registry
+  // left pointing at the old path with no recovery record, which is the
+  // exact crash window the journal exists to close.
+  //
+  // Directory fsync is a POSIX primitive. Windows has no equivalent —
+  // opening a directory through fs.open fails outright there — but NTFS
+  // journals its own metadata, and this file already degrades to what the
+  // platform offers (the plain-rename fallback), so it degrades here too.
+  private async syncDirectory(): Promise<void> {
+    if (!this.syncsDirectory) return;
+    const handle = await this.fs.open(path.dirname(this.filePath), "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
 
   async read(): Promise<PendingFolderMutation | undefined> {
     try {
@@ -305,6 +333,11 @@ class FolderMutationJournal {
       await this.fs.rename(temp, this.filePath);
       created = false;
       await this.fs.chmod(this.filePath, 0o600);
+      // Fails the write: an unpersisted publication is no journal at all,
+      // and the caller must not cross the filesystem mutation boundary
+      // behind it. The error propagates raw, like every other failure
+      // here, and callers map it through safeFsError.
+      await this.syncDirectory();
     } catch (error) {
       if (created) await this.fs.rm(temp, { force: true }).catch(() => undefined);
       throw error;
@@ -316,7 +349,16 @@ class FolderMutationJournal {
       await this.fs.unlink(this.filePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Nothing was unlinked, so there is no directory entry to persist.
+      return;
     }
+    // Propagates, exactly like the unlink itself: a clear that is not
+    // durable can resurrect the journal across a reboot, and a resurrected
+    // journal fences every folder mutation, workspace registration, and
+    // session start until recovery resolves it. The callers already treat
+    // a failed clear as the recovery-required answer (failedMutationError,
+    // removeRegistered), and that is the honest answer here too.
+    await this.syncDirectory();
   }
 }
 
@@ -427,7 +469,11 @@ export class FolderManager {
 
   constructor(private readonly options: FolderManagerOptions) {
     this.fs = options.fs ?? nodeFs;
-    this.journal = new FolderMutationJournal(options.journalPath, this.fs);
+    // The one platform question this class asks: POSIX or Windows. It
+    // decides both the rename fallback below and whether the journal can
+    // fsync its containing directory.
+    const posix = (options.platform ?? process.platform) !== "win32";
+    this.journal = new FolderMutationJournal(options.journalPath, this.fs, posix);
     // The kernel-level no-replace rename applies only to the real
     // filesystem; an injected fs (failure-injection tests) exercises the
     // claimed-placeholder fallback its hooks can observe.
@@ -446,7 +492,7 @@ export class FolderManager {
     // just created block every rename, registered or not. There is no
     // Windows CI, so that path stays as simple as the platform allows:
     // probe the destination, then rename.
-    this.claimsDestination = (options.platform ?? process.platform) !== "win32";
+    this.claimsDestination = posix;
   }
 
   create(input: unknown): Promise<CreateFolderResult> {
