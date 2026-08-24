@@ -128,6 +128,10 @@ export type WorkspaceOnboardingOptions = {
   gitCommand?: () => string;
   git?: OnboardingGit;
   fs?: FileSystem;
+  // Test seam for the platform whose durability primitives apply; defaults
+  // to the running platform. Only "win32" vs everything else matters — see
+  // OnboardingJournalFile.syncDirectory. Mirrors FolderManagerOptions.
+  platform?: NodeJS.Platform;
 };
 
 function invalid(message: string): OnboardingError {
@@ -382,7 +386,37 @@ function parseJournal(value: unknown): PendingOnboarding {
 class OnboardingJournalFile {
   private counter = 0;
 
-  constructor(private readonly filePath: string, private readonly fs: FileSystem) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly fs: FileSystem,
+    // POSIX only; see syncDirectory.
+    private readonly syncsDirectory: boolean,
+  ) {}
+
+  // Persists the journal's own DIRECTORY ENTRY. handle.sync() below makes
+  // the temporary file's contents durable, and nothing more: the rename
+  // that publishes the journal, and the unlink that clears it, are
+  // directory metadata that a host crash can still lose. Without this
+  // fsync a power loss right after a write can drop the journal while the
+  // registry and credential-store commits it brackets reach disk — a
+  // half-onboarded workspace (registered with the previous assignment set,
+  // or assigned with no registration) and no record for startup recovery
+  // to reconcile it from, which is the exact crash window the journal
+  // exists to close.
+  //
+  // Directory fsync is a POSIX primitive. Windows has no equivalent —
+  // opening a directory through fs.open fails outright there — but NTFS
+  // journals its own metadata, so this degrades to what the platform
+  // offers, exactly as the folder-mutation journal does.
+  private async syncDirectory(): Promise<void> {
+    if (!this.syncsDirectory) return;
+    const handle = await this.fs.open(path.dirname(this.filePath), "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
 
   async read(): Promise<PendingOnboarding | undefined> {
     try {
@@ -412,6 +446,11 @@ class OnboardingJournalFile {
       await this.fs.rename(temp, this.filePath);
       created = false;
       await this.fs.chmod(this.filePath, 0o600);
+      // Fails the write: an unpersisted publication is no journal at all,
+      // and the caller must not begin the registry commit behind it. The
+      // error propagates raw, like every other failure here, and
+      // commitPlanned maps it and clears the unpublished record.
+      await this.syncDirectory();
     } catch (error) {
       if (created) await this.fs.rm(temp, { force: true }).catch(() => undefined);
       throw error;
@@ -423,7 +462,24 @@ class OnboardingJournalFile {
       await this.fs.unlink(this.filePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Nothing was unlinked, so there is no directory entry to persist.
+      return;
     }
+    // Swallowed, unlike the write path's sync above. The unlink already
+    // removed the journal from the live namespace, so the clear IS done;
+    // only its durability is in doubt. Reporting failure here would make
+    // every caller's catch branch act on a journal that no longer exists —
+    // the rollback branches would report recovery-required for state they
+    // just restored, and the success branch would answer a completed
+    // onboarding with a recovery demand. The residue of an unpersisted
+    // unlink is far milder: a power loss can resurrect the journal, and it
+    // resurrects describing an onboarding that COMPLETED, which is
+    // ordinary work for recover() (the committed branch confirms the
+    // desired assignments and clears it again). A fence until the next
+    // startup beats reporting a failure that did not happen. So after this
+    // point clear() throws only when the journal is still present, which
+    // is what its callers treat it as.
+    await this.syncDirectory().catch(() => undefined);
   }
 }
 
@@ -454,7 +510,13 @@ export class WorkspaceOnboardingCoordinator {
 
   constructor(private readonly options: WorkspaceOnboardingOptions) {
     this.fs = options.fs ?? nodeFs;
-    this.journal = new OnboardingJournalFile(options.journalPath, this.fs);
+    // The one platform question this class asks: POSIX or Windows. It
+    // decides only whether the journal can fsync its containing directory.
+    this.journal = new OnboardingJournalFile(
+      options.journalPath,
+      this.fs,
+      (options.platform ?? process.platform) !== "win32",
+    );
     this.git = options.git ?? {
       probe: folder => probeGitRepository(folder, options.gitCommand?.() ?? "git"),
       init: folder => gitInit(folder, options.gitCommand?.() ?? "git"),
@@ -774,7 +836,23 @@ export class WorkspaceOnboardingCoordinator {
       } catch (error) {
         // A Hub-owned state write, not a folder-path problem: EACCES here
         // is a retryable server failure, never a request correction.
-        throw new OnboardingError("internal", "onboarding journal write failed", { cause: error });
+        const failure = new OnboardingError("internal", "onboarding journal write failed", { cause: error });
+        // The failing step can be the directory fsync that publishes the
+        // record, which leaves a journal on disk describing a commit that
+        // never started. Clearing it keeps a transient sync failure from
+        // freezing every later onboarding, folder, and assignment mutation
+        // until a restart; a clear that itself fails is the same
+        // recovery-required case the rollback paths below report. The
+        // clear's own post-unlink sync failure is swallowed, so it cannot
+        // mask this error.
+        try {
+          await this.journal.clear();
+        } catch (clearError) {
+          throw new OnboardingError("recovery-required", "workspace onboarding failed and its journal could not be cleared; restart the Hub to reconcile", {
+            cause: new AggregateError([failure, clearError]),
+          });
+        }
+        throw failure;
       }
 
       let registered: WorkspaceEntry;

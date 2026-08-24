@@ -40,7 +40,49 @@ function fakeGit(behavior: GitBehavior = {}): OnboardingGit & { initialized: str
   };
 }
 
-async function fixture(git: GitBehavior = {}) {
+// Traces the journal's durability primitives in call order: the temporary
+// file's own open/sync/close, the rename that publishes it, the unlink that
+// clears it, and every fsync of the containing directory.
+function journalDurabilityFs(
+  events: string[],
+  paths: { directory: string; journal: string },
+  // Injects a directory-fsync failure, consulted at each directory sync
+  // (the pending event trace is the argument) so a test can fail the sync
+  // that publishes the journal, the one that persists its unlink, or both.
+  directorySyncFails: (events: readonly string[]) => boolean = () => false,
+): typeof fs {
+  const label = (target: string): string | undefined => {
+    if (target === paths.directory) return "directory";
+    return target.startsWith(`${paths.journal}.`) ? "temp" : undefined;
+  };
+  return Object.assign({}, fs, {
+    open: (async (target: string, flags?: unknown, mode?: unknown) => {
+      const handle = await fs.open(target, flags as never, mode as never);
+      const name = label(target);
+      if (name === undefined) return handle;
+      events.push(`${name}:open`);
+      return {
+        writeFile: (...args: Parameters<typeof handle.writeFile>) => handle.writeFile(...args),
+        sync: async () => {
+          events.push(`${name}:sync`);
+          if (name === "directory" && directorySyncFails(events)) throw new Error("injected directory fsync failure");
+          await handle.sync();
+        },
+        close: async () => { events.push(`${name}:close`); await handle.close(); },
+      } as unknown as typeof handle;
+    }) as typeof fs.open,
+    rename: async (from: string, to: string) => {
+      if (to === paths.journal) events.push("journal:rename");
+      return fs.rename(from, to);
+    },
+    unlink: async (target: string) => {
+      if (target === paths.journal) events.push("journal:unlink");
+      return fs.unlink(target);
+    },
+  }) as typeof fs;
+}
+
+async function fixture(git: GitBehavior = {}, options: { fs?: typeof fs; platform?: NodeJS.Platform } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-onboarding-")));
   tempDirectories.push(root);
   const state = path.join(root, "state");
@@ -84,6 +126,8 @@ async function fixture(git: GitBehavior = {}) {
     sessions,
     reservations,
     git: gitAdapter,
+    ...(options.fs ? { fs: options.fs } : {}),
+    ...(options.platform ? { platform: options.platform } : {}),
   });
   return {
     root,
@@ -485,6 +529,124 @@ describe("commit-boundary failure injection", () => {
     await expect(coordinator.configureExisting({ path: folder, displayName: "Repo" }))
       .rejects.toMatchObject({ code: "recovery-required" });
     expect(await journalExists(f.journalPath)).toBe(true);
+  });
+
+  // Records the registry commit in the shared trace so the assertions can
+  // place it relative to the journal's durability primitives.
+  function traceRegistryCommit(registry: WorkspaceRegistry, events: string[]): void {
+    const registerWithStatus = registry.registerWithStatus.bind(registry);
+    registry.registerWithStatus = (...args: Parameters<typeof registerWithStatus>) => {
+      events.push("registry:register");
+      return registerWithStatus(...args);
+    };
+  }
+
+  test("persists the journal's own directory entry around the two-store commit", async () => {
+    // Syncing the temporary file makes only its CONTENTS durable. The
+    // rename that publishes the journal and the unlink that clears it are
+    // directory metadata, so without an fsync of the containing directory a
+    // host crash can lose the journal while the registry and credential
+    // commits it brackets survive the reboot — a partially onboarded
+    // workspace with no record for recovery to reconcile it from. Both
+    // boundaries are asserted by order: the directory sync must land before
+    // the registry commit begins, and again after the clear.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({}, { fs: journalDurabilityFs(events, paths) });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    traceRegistryCommit(f.registry, events);
+    const folder = await gitRepository(f.folders, "repo");
+
+    expect((await f.coordinator.configureExisting({ path: folder, displayName: "Repo" })).created).toBe(true);
+    expect(events).toEqual([
+      "temp:open", "temp:sync", "temp:close",
+      "journal:rename",
+      "directory:open", "directory:sync", "directory:close",
+      "registry:register",
+      "journal:unlink",
+      "directory:open", "directory:sync", "directory:close",
+    ]);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
+  test("the Windows journal skips a directory fsync the platform cannot perform", async () => {
+    // Directory fsync is POSIX: on Windows fs.open of a directory fails
+    // outright, so the journal must not attempt it. NTFS journals its own
+    // metadata, and the sibling folder-mutation journal degrades the same
+    // way.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({}, { fs: journalDurabilityFs(events, paths), platform: "win32" });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    traceRegistryCommit(f.registry, events);
+    const folder = await gitRepository(f.folders, "repo");
+
+    expect((await f.coordinator.configureExisting({ path: folder, displayName: "Repo" })).created).toBe(true);
+    expect(events).toEqual([
+      "temp:open", "temp:sync", "temp:close",
+      "journal:rename",
+      "registry:register",
+      "journal:unlink",
+    ]);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
+  test("a directory sync failing before the commit boundary fails the write", async () => {
+    // The write path keeps its strictness: an unpersisted publication is no
+    // journal at all, and the caller must not begin the registry commit
+    // behind it. The clear that follows the failure hits the same injected
+    // fsync failure and swallows it, which must not mask the write's error
+    // or leave a record fencing every later mutation.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({}, { fs: journalDurabilityFs(events, paths, () => true) });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    traceRegistryCommit(f.registry, events);
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "repo");
+
+    await expect(f.coordinator.configureExisting({
+      path: folder,
+      displayName: "Repo",
+      authentication: [{ credentialId: "auth-key", host: "github.com" }],
+    })).rejects.toMatchObject({ code: "internal" });
+    expect(events).not.toContain("registry:register");
+    expect(f.registry.byPath(folder)).toBeUndefined();
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
+  test("a committed onboarding survives a directory sync that fails after the journal unlink", async () => {
+    // Past the unlink the journal is gone from the live namespace, so the
+    // clear is done and only its durability is in doubt. Failing here would
+    // answer a fully committed onboarding with a recovery demand; a power
+    // loss that resurrects the record instead describes a COMPLETED
+    // onboarding, which recover() confirms and clears again.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({}, {
+      fs: journalDurabilityFs(events, paths, pending => pending.includes("journal:unlink")),
+    });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "repo");
+
+    const result = await f.coordinator.configureExisting({
+      path: folder,
+      displayName: "Repo",
+      authentication: [{ credentialId: "auth-key", host: "github.com" }],
+    });
+    expect(result.created).toBe(true);
+    expect(events).toContain("journal:unlink");
+    expect(f.registry.byPath(folder)?.id).toBe(result.entry.id);
+    expect(f.credentials.snapshot().assignments).toEqual([
+      { workspaceId: result.entry.id, credentialId: "auth-key", role: "authentication", host: "github.com" },
+    ]);
+    expect(await journalExists(f.journalPath)).toBe(false);
   });
 
   test("a pending folder-mutation journal freezes onboarding", async () => {

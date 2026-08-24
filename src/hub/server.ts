@@ -93,6 +93,18 @@ function json(status: number, body: unknown, headers?: Record<string, string>): 
 
 const NO_STORE_HEADERS = { "cache-control": "no-store" };
 
+const ONBOARDING_ASSIGNMENT_FENCE = "a pending onboarding requires Hub recovery before credential assignment changes";
+
+// The onboarding fence's refusal raised from INSIDE a lifecycle operation,
+// where a Response cannot be returned directly. Every assignment route
+// answers it as the same 409 the admission check produces, ahead of the
+// credential-error mapping (whose message heuristics would call it a 500).
+class OnboardingAssignmentFenceError extends Error {
+  constructor() {
+    super(ONBOARDING_ASSIGNMENT_FENCE);
+  }
+}
+
 function closedJsonObject(value: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("request body must be an object");
   const body = value as Record<string, unknown>;
@@ -208,11 +220,27 @@ export function createHubFetchHandler(deps: HubDeps) {
   // mutation in between would make a deliberate revocation back to that
   // set indistinguishable from an unfinished commit. Mirrors the folder
   // manager's mutation freeze.
-  const assignmentsFencedByOnboarding = async (): Promise<Response | null> => {
-    if (deps.onboarding && await deps.onboarding.hasPendingRecovery()) {
-      return json(409, { error: "a pending onboarding requires Hub recovery before credential assignment changes" }, NO_STORE_HEADERS);
-    }
-    return null;
+  //
+  // A pure lstat of the journal path: it takes no lock, so it can be
+  // called at any depth without disturbing the locking order (workspace
+  // queues outermost, credential lock innermost).
+  const onboardingFencesAssignments = (): Promise<boolean> =>
+    deps.onboarding ? deps.onboarding.hasPendingRecovery() : Promise.resolve(false);
+  // Cheap admission fast-fail. NOT authoritative: onboarding publishes its
+  // journal from inside runExclusive on the workspace id it planned, so a
+  // check made before the request asks for that queue can read a clear
+  // journal and then queue behind the very commit that writes one.
+  const assignmentsFencedByOnboarding = async (): Promise<Response | null> =>
+    await onboardingFencesAssignments() ? json(409, { error: ONBOARDING_ASSIGNMENT_FENCE }, NO_STORE_HEADERS) : null;
+  // The authoritative check. Runs INSIDE the lifecycle operation that
+  // serializes against the onboarding commit: under the workspace queue no
+  // onboarding for this id can be mid-commit, while one that already
+  // finished — including one whose journal clear failed — has left its
+  // record on disk where this sees it. Without it an unassignment could
+  // return the set to its recorded pre-commit value and be reinstated
+  // later by recovery.
+  const assertAssignmentsUnfenced = async (): Promise<void> => {
+    if (await onboardingFencesAssignments()) throw new OnboardingAssignmentFenceError();
   };
   const stopProviderCliSessions = async (credentialId: string): Promise<void> => {
     const workspaceIds = sessions.runningWorkspaceIdsUsingCredential(credentialId);
@@ -1385,10 +1413,13 @@ export function createHubFetchHandler(deps: HubDeps) {
               ? [(value as Record<string, string>).credentialId]
               : [];
           });
-          const assignments = await sessions.runExclusive(workspaceId, () =>
-            withCredentialLocks(credentialIds, () => credentialApi.assignWorkspace(workspaceId, body)));
+          const assignments = await sessions.runExclusive(workspaceId, async () => {
+            await assertAssignmentsUnfenced();
+            return withCredentialLocks(credentialIds, () => credentialApi.assignWorkspace(workspaceId, body));
+          });
           return json(200, { assignments }, headers);
         } catch (error) {
+          if (error instanceof OnboardingAssignmentFenceError) return json(409, { error: error.message }, headers);
           const mapped = credentialApiError(error);
           return json(mapped.status, { error: mapped.message }, headers);
         }
@@ -1440,8 +1471,10 @@ export function createHubFetchHandler(deps: HubDeps) {
             }
             if (operation === "assign") {
               const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
-              const assignment = await sessions.runExclusive(workspaceId, () =>
-                deps.credentialApi!.metadata.runExclusiveCredential(credentialId, () => credentialApi.assign(credentialId, body)));
+              const assignment = await sessions.runExclusive(workspaceId, async () => {
+                await assertAssignmentsUnfenced();
+                return deps.credentialApi!.metadata.runExclusiveCredential(credentialId, () => credentialApi.assign(credentialId, body));
+              });
               return json(200, { assignment }, headers);
             }
             if (operation === "unassign") {
@@ -1451,13 +1484,19 @@ export function createHubFetchHandler(deps: HubDeps) {
               // cannot slip between them and keep the removed credential
               // projected into a live session.
               if (body.stop === true) {
-                let removed = false;
-                await sessions.stop(workspaceId, async () => {
-                  removed = await credentialApi.unassign(credentialId, body);
+                // The same single lifecycle operation sessions.stop() would
+                // have taken, opened directly so the onboarding fence is
+                // rechecked BEFORE the stop: a refused unassignment must not
+                // leave the workspace stopped for a change it never made.
+                const removed = await sessions.runExclusive(workspaceId, async () => {
+                  await assertAssignmentsUnfenced();
+                  await sessions.stopWhileLifecycleQueueHeld(workspaceId);
+                  return credentialApi.unassign(credentialId, body);
                 });
                 return json(200, { removed }, headers);
               }
-              const removed = await sessions.runExclusive(workspaceId, () => {
+              const removed = await sessions.runExclusive(workspaceId, async () => {
+                await assertAssignmentsUnfenced();
                 // A running child keeps its projected credential
                 // configuration, and the Hub-side helper serves tokens by
                 // id — removing only the catalog assignment would report a
@@ -1472,6 +1511,10 @@ export function createHubFetchHandler(deps: HubDeps) {
             }
             if (operation === "test") return json(200, { results: await credentialApi.test(credentialId, body) }, headers);
             return json(200, { deleted: await revokeExclusive(credentialId, async () => {
+              // Deleting takes the assignments with it, so it rechecks the
+              // fence under the queues it acquired, like the assignment
+              // routes above.
+              await assertAssignmentsUnfenced();
               if (credentialApi.preflightProviderCliRevocation(credentialId, body, "delete")) {
                 await stopProviderCliSessions(credentialId);
               }
@@ -1479,6 +1522,7 @@ export function createHubFetchHandler(deps: HubDeps) {
             }) }, headers);
           }
         } catch (error) {
+          if (error instanceof OnboardingAssignmentFenceError) return json(409, { error: error.message }, headers);
           const mapped = credentialApiError(error);
           return json(mapped.status, { error: mapped.message }, headers);
         }

@@ -401,6 +401,98 @@ describe("credential API integration", () => {
     expect(assigned.status).toBe(200);
   });
 
+  test("assignment mutations refuse a journal that lands while they wait for the workspace queue", async () => {
+    // The admission check above is only a fast-fail: onboarding publishes
+    // its journal from inside runExclusive on the workspace id it planned,
+    // so a request that reads a clear journal can then queue behind that
+    // very commit and mutate assignments once it releases the queue. An
+    // unassignment returning the set to its recorded pre-commit value would
+    // then be reinstated by recovery, which reads that set as an unfinished
+    // commit. The authoritative check therefore runs under the queue.
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const create = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Queue fence token",
+      host: "github.com",
+      token: "queue-fence-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await create.json()) as { credential: { id: string } }).credential.id;
+    const assigned = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(assigned.status).toBe(200);
+    const committed = f.metadata.snapshot().assignments;
+    expect(committed).toHaveLength(1);
+
+    const { writeFile, unlink } = await import("node:fs/promises");
+    // Occupy the workspace's lifecycle queue the way an onboarding commit
+    // does, and journal only after each request is past the route's outer
+    // checks: the check that fences them must be the one they make under
+    // the queue, not one they made before asking for it.
+    const raceUnderHeldQueue = async (send: () => Promise<Response>): Promise<Response> => {
+      let releaseQueue!: () => void;
+      const held = new Promise<void>(resolve => { releaseQueue = resolve; });
+      const holding = f.sessions.runExclusive(f.workspace.id, () => held);
+      const request = send();
+      try {
+        // Ample time for an in-process request to reach the route and queue
+        // behind the hold. A slower machine only weakens the proof — a
+        // journal that lands before the route runs is refused either way —
+        // so this can never make the test red.
+        await Bun.sleep(250);
+        await writeFile(f.onboardingJournal, "{}\n", { mode: 0o600 });
+        releaseQueue();
+        await holding;
+        return await request;
+      } finally {
+        releaseQueue();
+        await holding.catch(() => undefined);
+        await request.catch(() => undefined);
+        await unlink(f.onboardingJournal).catch(() => undefined);
+      }
+    };
+
+    const unassigned = await raceUnderHeldQueue(() => post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    }));
+    expect(unassigned.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/unassign", unassigned);
+    expect(await unassigned.json()).toEqual({
+      error: "a pending onboarding requires Hub recovery before credential assignment changes",
+    });
+    expect(f.metadata.snapshot().assignments).toEqual(committed);
+
+    // The workspace-scoped assignment API takes the same queue and answers
+    // the same refusal.
+    const replaced = await raceUnderHeldQueue(() => post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/credential-assignments`, {
+      authentication: { credentialId, host: "gitlab.com" },
+    }));
+    expect(replaced.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/credential-assignments", replaced);
+    expect(await replaced.json()).toEqual({
+      error: "a pending onboarding requires Hub recovery before credential assignment changes",
+    });
+    expect(f.metadata.snapshot().assignments).toEqual(committed);
+
+    // With no journal on disk the same request commits, so the refusals
+    // above were the fence and not an unrelated failure.
+    const unfenced = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(unfenced.status).toBe(200);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+  }, 30_000);
+
   test("enforces same-origin, strict bodies, references, and confirmed delete-and-unassign", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);
