@@ -81,6 +81,13 @@ export class HubPreferencesStore {
 
   // Owner-only atomic write: preferences are not secret, but the file lives
   // in the 0700 state root and mode 0600 keeps every Hub state file uniform.
+  //
+  // The rename is the commit point, and nothing fallible may follow it. The
+  // mode is therefore settled on the temporary file, while a failure is still
+  // an uncommitted write the caller can roll its in-memory copy back from. A
+  // chmod after the rename could fail with the new preference already on
+  // disk: the Hub would report the old default for the rest of the run and a
+  // restart would silently adopt the new one.
   private async save(): Promise<void> {
     const temp = `${this.filePath}.${process.pid}.${this.saveCounter += 1}.tmp`;
     let created = false;
@@ -93,9 +100,10 @@ export class HubPreferencesStore {
       } finally {
         await handle.close();
       }
+      // The open mode above is masked by the process umask; this is not.
+      await fs.chmod(temp, 0o600);
       await fs.rename(temp, this.filePath);
       created = false;
-      await fs.chmod(this.filePath, 0o600);
     } catch (error) {
       if (created) await fs.rm(temp, { force: true }).catch(() => undefined);
       throw error;

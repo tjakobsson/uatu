@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -134,6 +134,54 @@ describe("HubPreferencesStore", () => {
     await fs.rm(stateDir, { recursive: true, force: true });
     await expect(store.setDefaultWorkspaceParent(parent)).rejects.toMatchObject({ code: "internal" });
     expect(store.configuredDefaultWorkspaceParent()).toBeNull();
+  });
+
+  test("a failed chmod fails the save before it commits, leaving disk and memory agreed", async () => {
+    const f = await fixture();
+    const second = path.join(f.root, "other-workspaces");
+    await fs.mkdir(second);
+    await f.store.setDefaultWorkspaceParent(f.parent);
+
+    const chmodSpy = spyOn(fs, "chmod").mockRejectedValue(new Error("injected chmod failure"));
+    try {
+      await expect(f.store.setDefaultWorkspaceParent(second)).rejects.toMatchObject({ code: "internal" });
+    } finally {
+      chmodSpy.mockRestore();
+    }
+
+    // The rollback is honest: the uncommitted write left the old value on
+    // disk, so a restart sees exactly what the getter reports.
+    expect(f.store.configuredDefaultWorkspaceParent()).toBe(f.parent);
+    expect(JSON.parse(await fs.readFile(f.filePath, "utf8")).defaultWorkspaceParent).toBe(f.parent);
+    const reloaded = new HubPreferencesStore(f.filePath, () => f.home);
+    await reloaded.load();
+    expect(reloaded.configuredDefaultWorkspaceParent()).toBe(f.parent);
+
+    // The mode is set on the temporary file, never on the published one.
+    expect(chmodSpy.mock.calls.map(([target]) => target)).not.toContain(f.filePath);
+    expect(chmodSpy.mock.calls.every(([target]) => String(target).endsWith(".tmp"))).toBe(true);
+
+    // No temporary file survives the failure, and the next save still lands
+    // owner-only.
+    expect((await fs.readdir(f.root)).some(name => name.endsWith(".tmp"))).toBe(false);
+    await f.store.setDefaultWorkspaceParent(second);
+    expect((await fs.lstat(f.filePath)).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await fs.readFile(f.filePath, "utf8")).defaultWorkspaceParent).toBe(second);
+  });
+
+  test("clearing survives a failed chmod without diverging from disk", async () => {
+    const f = await fixture();
+    await f.store.setDefaultWorkspaceParent(f.parent);
+
+    const chmodSpy = spyOn(fs, "chmod").mockRejectedValue(new Error("injected chmod failure"));
+    try {
+      await expect(f.store.clearDefaultWorkspaceParent()).rejects.toMatchObject({ code: "internal" });
+    } finally {
+      chmodSpy.mockRestore();
+    }
+
+    expect(f.store.configuredDefaultWorkspaceParent()).toBe(f.parent);
+    expect(JSON.parse(await fs.readFile(f.filePath, "utf8")).defaultWorkspaceParent).toBe(f.parent);
   });
 
   test("the default parent does not constrain workspace registration", async () => {

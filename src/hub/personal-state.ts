@@ -402,8 +402,12 @@ export class PersonalWorkspaceStateStore {
     const temp = `${this.filePath}.${process.pid}.${(this.saveCounter += 1)}.tmp`;
     try {
       await fs.writeFile(temp, serialized, { mode: 0o600 });
+      // Settle the mode before publishing — the writeFile mode above is
+      // masked by the umask, and the rename is the commit point every
+      // mutation's rollback depends on: a failure after it would leave the
+      // new records on disk while the caller restored the old ones in memory.
+      await fs.chmod(temp, 0o600);
       await fs.rename(temp, this.filePath);
-      await fs.chmod(this.filePath, 0o600);
     } catch (error) {
       await fs.rm(temp, { force: true }).catch(() => undefined);
       throw error;
