@@ -4,8 +4,8 @@ import path from "node:path";
 import type { CredentialMetadataStore } from "./credential-store";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import { isPathAtOrBelow, normalizeAbsolutePath, PathReservationCoordinator } from "./path-reservations";
+import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceEntry, type WorkspaceRegistry } from "./registry";
 import { loadNoReplaceRename, type NoReplaceRename } from "./rename-no-replace";
-import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
 import type { SessionManager, SessionsStoppedResult } from "./sessions";
 
 const JOURNAL_VERSION = 1 as const;
@@ -86,6 +86,11 @@ type CredentialState = Pick<CredentialMetadataStore, "removeWorkspaceAssignments
 
 export type FolderManagerOptions = {
   journalPath: string;
+  // Journals of sibling coordinators (the onboarding journal) whose pending
+  // record also freezes folder mutations: a committed-but-uncleared
+  // onboarding is recognized during its recovery by id + path, so its
+  // folder must not move before that recovery reconciles.
+  recoveryJournalPaths?: readonly string[];
   registry: FolderRegistry;
   sessions: FolderSessions;
   personalState: PersonalState;
@@ -119,13 +124,15 @@ function absolutePath(value: unknown, field: string): string {
   return normalizeAbsolutePath(value);
 }
 
-// Control characters (Cc) AND Unicode format characters (Cf) are both
-// rejected: Cf covers the zero-width family, the bidi embedding and
-// override controls, and the BOM. None of them survive a nonempty check —
-// trim() leaves them in place — so a name made only of them would create a
-// directory that renders blank, and one containing a bidi control can make
-// the created folder display a name other than the path it occupies.
-const INVISIBLE_NAME_CHARACTER = /[\u0000-\u001f\u007f]|\p{Cf}/u;
+// The whole control category (Cc — the C0 range, DEL, and the C1 range
+// U+0080–U+009F) AND Unicode format characters (Cf — the zero-width family,
+// the bidi embedding and override controls, and the BOM) are rejected: the
+// same class validateWorkspaceDisplayName holds a display name to. None of
+// them survive a nonempty check — trim() leaves them in place — so a name
+// made only of them would create a directory that renders blank, and one
+// containing a bidi control can make the created folder display a name
+// other than the path it occupies.
+const INVISIBLE_NAME_CHARACTER = /[\p{Cc}\p{Cf}]/u;
 
 /**
  * The name rule itself, exported so the published `FolderName` pattern is
@@ -192,11 +199,17 @@ function safeFsError(error: unknown, fallback: string): FolderManagerError {
 }
 
 function parseEntry(value: unknown): WorkspaceEntry {
-  const entry = closedJournalObject(value, ["id", "path", "backend"], "workspace entry");
+  const entry = closedJournalObject(value, ["id", "path", "backend", "displayName"], "workspace entry");
   if (typeof entry.id !== "string" || entry.id === "" || entry.backend !== "local") {
     throw new Error("invalid workspace entry");
   }
-  return { id: entry.id, path: journalAbsolutePath(entry.path), backend: "local" };
+  const source = journalAbsolutePath(entry.path);
+  // Journals written before display names existed lack the field; default it
+  // exactly like registry migration so recovery restores a valid entry.
+  const displayName = entry.displayName === undefined
+    ? defaultWorkspaceDisplayName(source)
+    : validateWorkspaceDisplayName(entry.displayName);
+  return { id: entry.id, path: source, backend: "local", displayName };
 }
 
 function closedJournalObject(value: unknown, fields: readonly string[], label: string): Record<string, unknown> {
@@ -808,18 +821,28 @@ export class FolderManager {
   // success, clear it), while even an unregistered create or rename can
   // flip the existence probes recovery relies on — recreating a removed
   // journal source would restore the old registration onto an unrelated
-  // directory. Nothing proceeds until recover() has resolved the record.
-  // Public because workspace registration is fenced by the same record: it
-  // mints a stable id for a directory recovery may still have to restore an
-  // older entry onto, and a collision there leaves the Hub unstartable.
+  // directory. Sibling recovery journals (the onboarding journal) freeze
+  // mutations the same way: their recovery matches entries by recorded
+  // path, which a rename would invalidate. Nothing proceeds until the
+  // pending record is recovered. Public because workspace registration is
+  // fenced by the same records: it mints a stable id for a directory
+  // recovery may still have to restore an older entry onto, and a
+  // collision there leaves the Hub unstartable.
   async assertNoPendingMutation(): Promise<void> {
-    try {
-      await this.fs.lstat(this.options.journalPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw safeFsError(error, "folder mutation journal inspection failed");
+    for (const journalPath of [this.options.journalPath, ...this.options.recoveryJournalPaths ?? []]) {
+      let pending = true;
+      try {
+        await this.fs.lstat(journalPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw safeFsError(error, "recovery journal inspection failed");
+        }
+        pending = false;
+      }
+      if (pending) {
+        throw new FolderManagerError("conflict", "a pending recovery journal requires Hub recovery before further folder changes");
+      }
     }
-    throw new FolderManagerError("conflict", "a pending folder mutation requires recovery before further registered changes");
   }
 
   private async canonicalDirectory(folderPath: string): Promise<string> {

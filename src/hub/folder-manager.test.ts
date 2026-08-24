@@ -170,8 +170,10 @@ describe("FolderManager validation and unregistered operations", () => {
   test("rejects invisible formatting characters while accepting ordinary non-ASCII", async () => {
     const f = await fixture();
     // Every one of these survives trim() and would name a directory that
-    // renders blank (zero-width only, BOM only) or displays a name other
-    // than the path it occupies (an embedded bidi override or isolate).
+    // renders blank (zero-width only, BOM only, C1 controls only) or
+    // displays a name other than the path it occupies (an embedded bidi
+    // override or isolate, an embedded control). The whole Cc category is
+    // rejected, so the C1 range U+0080-U+009F is out too.
     const invisible = [
       "\u200b",
       "\u200b\u200c\u200d",
@@ -179,6 +181,9 @@ describe("FolderManager validation and unregistered operations", () => {
       "docs\u202egpj.txt",
       "docs\u2066hidden\u2069",
       "\u00ad",
+      "docs\u0085name",
+      "\u009f",
+      "\u0080\u009f",
     ];
     for (const name of invisible) {
       await expect(f.manager.create({ parent: f.folders, name })).rejects.toMatchObject({ code: "invalid-input" });
@@ -353,6 +358,19 @@ describe("FolderManager registered mutations", () => {
     expect(f.personalState.get("alice", parentEntry.id).documentPath).toBe("README.md");
     expect(f.credentials.snapshot().assignments).toEqual(assignments);
     expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("folder rename preserves a custom workspace display name", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "payments-service");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source, "local", "Payments API");
+
+    completed(await f.manager.rename({ path: source, name: "billing-service" }));
+    const renamed = f.registry.byId(entry.id);
+    expect(renamed?.path).toBe(path.join(f.folders, "billing-service"));
+    expect(renamed?.displayName).toBe("Payments API");
+    expect(renamed?.id).toBe(entry.id);
   });
 
   test("reports all running workspaces, then stops them before authorized rename", async () => {
@@ -593,6 +611,35 @@ describe("FolderManager registered mutations", () => {
     await f.manager.create({ parent: f.folders, name: "fresh" });
     completed(await f.manager.rename({ path: other, name: "renamed" }));
     expect(f.registry.byId(otherEntry.id)?.path).toBe(path.join(f.folders, "renamed"));
+  });
+
+  test("a pending sibling recovery journal freezes folder mutations", async () => {
+    const f = await fixture();
+    const registered = path.join(f.folders, "registered");
+    await fs.mkdir(registered);
+    const entry = await f.registry.register(registered);
+    const onboardingJournal = path.join(f.state, "pending-onboarding.json");
+    const manager = new FolderManager({
+      journalPath: f.journalPath,
+      recoveryJournalPaths: [onboardingJournal],
+      registry: f.registry,
+      sessions: f.sessions,
+      personalState: f.personalState,
+      credentials: f.credentials,
+      reservations: f.reservations,
+    });
+
+    // Onboarding recovery matches its committed entry by id + path; a
+    // rename while that journal lingers would break the match, and any
+    // mutation could disturb the state recovery reasons about.
+    await fs.writeFile(onboardingJournal, "{}\n", { mode: 0o600 });
+    await expect(manager.rename({ path: registered, name: "renamed" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(manager.remove({ path: registered })).rejects.toMatchObject({ code: "conflict" });
+    await expect(manager.create({ parent: f.folders, name: "blocked" })).rejects.toMatchObject({ code: "conflict" });
+
+    await fs.unlink(onboardingJournal);
+    completed(await manager.rename({ path: registered, name: "renamed" }));
+    expect(f.registry.byId(entry.id)?.path).toBe(path.join(f.folders, "renamed"));
   });
 
   test("reconciles persisted alias paths before canonical rename lookup", async () => {
@@ -1235,6 +1282,20 @@ describe("FolderManager journal recovery", () => {
     expect(f.registry.byId(entry.id)).toBeUndefined();
     expect(f.personalState.get("alice", entry.id)).toEqual({ version: 1 });
     expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("recovers a pre-display-name journal by defaulting names from basenames", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "legacy-repo");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    await f.registry.remove(entry.id);
+    const legacyEntry = { id: entry.id, path: source, backend: "local" } as WorkspaceEntry;
+    await writeJournal(f.journalPath, { version: 1, operation: "remove", source, entry: legacyEntry });
+
+    await f.manager.recover();
+    expect(f.registry.byId(entry.id)).toEqual({ ...legacyEntry, displayName: "legacy-repo" });
     expect(await exists(f.journalPath)).toBe(false);
   });
 

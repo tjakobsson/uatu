@@ -86,8 +86,15 @@ export const EMPTY_CLONE_CREDENTIAL_RESOLVER: CloneCredentialResolver = {
 
 type CloneRemote = { transport: "ssh" | "https" | "other"; host?: string };
 
+// The scp-style remote shape (`[user@]host:path`), with an optional
+// bracketed IPv6 literal for the host. Exported because the hub's clone
+// form must derive the same host from the same spelling: pages.ts inlines
+// this source into its client script rather than keeping a second regex
+// that can drift from what the server accepts.
+export const SCP_REMOTE_PATTERN = /^(?:[^@/:\s]+@)?(\[[^\]]+\]|[^/:\s]+):(.+)$/;
+
 export function parseCloneRemote(remote: string): CloneRemote {
-  const scp = /^(?:[^@/:\s]+@)?(\[[^\]]+\]|[^/:\s]+):(.+)$/.exec(remote);
+  const scp = SCP_REMOTE_PATTERN.exec(remote);
   const windowsDrivePath = /^[A-Za-z]:(?:[\\/]|.*[\\/])/.test(remote);
   if (scp && !windowsDrivePath && !/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) {
     // An IPv6 literal keeps its brackets — that is the normalized host form

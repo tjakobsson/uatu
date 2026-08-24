@@ -40,7 +40,7 @@ describe("LocalProcessBackend", () => {
       const workspace = await makeWorkspace();
       const backend = new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] });
 
-      running = await backend.start({ id: "backend-test", path: workspace, backend: "local" }, "/s/backend-test/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+      running = await backend.start({ id: "backend-test", path: workspace, backend: "local", displayName: "backend-test" }, "/s/backend-test/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
 
       expect(running.endpoint.hostname).toBe("127.0.0.1");
       expect(running.endpoint.port).toBeGreaterThan(0);
@@ -77,7 +77,7 @@ describe("LocalProcessBackend", () => {
       // Non-git folder without --force → the CLI's git preflight fails fast.
       const backend = new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] });
       await expect(
-        backend.start({ id: "nope", path: dir, backend: "local" }, "/s/nope/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+        backend.start({ id: "nope", path: dir, backend: "local", displayName: "nope" }, "/s/nope/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
       ).rejects.toThrow(/failed to start/);
     },
     60_000,
@@ -99,7 +99,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       ].join("; ")], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
     });
     const session = await backend.start(
-      { id: "slow-start", path: "/tmp", backend: "local" },
+      { id: "slow-start", path: "/tmp", backend: "local", displayName: "slow-start" },
       "/s/slow-start/",
       EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
     );
@@ -115,7 +115,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       spawn: () => Bun.spawn(["sh", "-c", "sleep 30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
     });
     await expect(
-      backend.start({ id: "hung", path: "/tmp", backend: "local" }, "/s/hung/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+      backend.start({ id: "hung", path: "/tmp", backend: "local", displayName: "hung" }, "/s/hung/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
     ).rejects.toThrow(/no session URL or startup output/);
   });
 
@@ -129,7 +129,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       spawn: () => Bun.spawn(["sh", "-c", "printf 'uatu: starting\\n'; sleep 30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
     });
     await expect(
-      backend.start({ id: "stalled", path: "/tmp", backend: "local" }, "/s/stalled/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+      backend.start({ id: "stalled", path: "/tmp", backend: "local", displayName: "stalled" }, "/s/stalled/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
     ).rejects.toThrow(/no session URL or startup output/);
   });
 
@@ -154,7 +154,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       },
     });
     const session = await backend.start(
-      { id: "kill-throw", path: "/tmp", backend: "local" },
+      { id: "kill-throw", path: "/tmp", backend: "local", displayName: "kill-throw" },
       "/s/kill-throw/",
       EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
     );
@@ -178,7 +178,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       },
     });
 
-    await expect(backend.start({ id: "spawn-throw", path: root, backend: "local" }, "/s/spawn-throw/", credentials))
+    await expect(backend.start({ id: "spawn-throw", path: root, backend: "local", displayName: "spawn-throw" }, "/s/spawn-throw/", credentials))
       .rejects.toThrow("synchronous spawn failure");
     expect(await readdir(path.join(credentials.runtimeRoot, "sessions", "spawn-throw"))).toEqual([]);
   });
@@ -193,7 +193,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       const script = 'printf "http://127"; sleep 0.3; printf ".0.0.1:43210/s/split/?t=abc\n"; sleep 30';
       const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
 
-      running = await backend.start({ id: "split", path: "/tmp", backend: "local" }, "/s/split/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+      running = await backend.start({ id: "split", path: "/tmp", backend: "local", displayName: "split" }, "/s/split/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
       expect(running.endpoint.hostname).toBe("127.0.0.1");
       expect(running.endpoint.port).toBe(43210);
       expect(running.token).toBe("abc");
@@ -218,7 +218,7 @@ describe("LocalProcessBackend stdout parsing", () => {
         const script = 'printf "http://127.0.0.1:43211/s/envcheck/?t=$UATU_OPENCODE_STARTUP_TIMEOUT_MS\n"; sleep 30';
         const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
 
-        running = await backend.start({ id: "envcheck", path: "/tmp", backend: "local" }, "/s/envcheck/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+        running = await backend.start({ id: "envcheck", path: "/tmp", backend: "local", displayName: "envcheck" }, "/s/envcheck/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
         expect(running.token).toBe("45123");
 
         const session = running;

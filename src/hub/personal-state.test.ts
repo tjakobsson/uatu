@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { promises as fs } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -142,6 +143,23 @@ describe("PersonalWorkspaceStateStore", () => {
     await mkdir(stateDir);
     await store.patch("tobias", "uatu", { follow: true });
     expect(store.get("tobias", "uatu")).toEqual({ version: 1, follow: true });
+  });
+
+  test("a failed chmod fails the write before it commits", async () => {
+    const { store, filePath } = await tempStore();
+    await store.patch("tobias", "uatu", { follow: true });
+
+    const chmodSpy = spyOn(fs, "chmod").mockRejectedValue(new Error("injected chmod failure"));
+    try {
+      await expect(store.patch("tobias", "uatu", { follow: false })).rejects.toThrow();
+    } finally {
+      chmodSpy.mockRestore();
+    }
+
+    // Rolled-back memory and the file on disk still tell the same story.
+    expect(store.get("tobias", "uatu")).toEqual({ version: 1, follow: true });
+    expect(JSON.parse(await readFile(filePath, "utf8")).records.tobias.uatu).toEqual({ version: 1, follow: true });
+    expect(chmodSpy.mock.calls.map(([target]) => target)).not.toContain(filePath);
   });
 
   test("failed registry removal restores personal state", async () => {

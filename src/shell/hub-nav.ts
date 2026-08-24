@@ -14,8 +14,28 @@ import { appBasePath } from "../shared/app-url";
 
 export type HubWorkspaceSummary = {
   id: string;
+  // Mutable human label; the id stays the routing identity. Pre-display-name
+  // hubs are tolerated by falling back to the id.
+  displayName: string;
+  path: string;
   running: boolean;
 };
+
+export function workspaceMenuLabel(workspace: HubWorkspaceSummary): string {
+  return workspace.displayName || workspace.id;
+}
+
+// Duplicate display names are legal; the menu disambiguates them with the
+// workspace path (or stable id when no path is known).
+export function workspaceMenuDetail(
+  workspaces: HubWorkspaceSummary[],
+  workspace: HubWorkspaceSummary,
+): string | null {
+  const label = workspaceMenuLabel(workspace);
+  const duplicates = workspaces.filter(candidate => workspaceMenuLabel(candidate) === label);
+  if (duplicates.length < 2) return null;
+  return workspace.path || workspace.id;
+}
 
 // Extracts the workspace id from a hub-shaped base path ("/s/uatu/" →
 // "uatu"). Null for the default "/" and for prefixes that are not
@@ -42,6 +62,11 @@ export function chipDotClass(workspaces: HubWorkspaceSummary[], currentId: strin
   return current?.running ? "indicator-dot is-live" : "indicator-dot";
 }
 
+export function chipLabel(workspaces: HubWorkspaceSummary[], currentId: string): string {
+  const current = workspaces.find(workspace => workspace.id === currentId);
+  return current ? workspaceMenuLabel(current) : currentId;
+}
+
 // Menu order: the current workspace first, then other running sessions,
 // then stopped workspaces, alphabetical within each group.
 export function sortHubWorkspaces(
@@ -52,7 +77,10 @@ export function sortHubWorkspaces(
     if (workspace.id === currentId) return 0;
     return workspace.running ? 1 : 2;
   };
-  return [...workspaces].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
+  return [...workspaces].sort((a, b) =>
+    rank(a) - rank(b)
+    || workspaceMenuLabel(a).localeCompare(workspaceMenuLabel(b))
+    || a.id.localeCompare(b.id));
 }
 
 // Signs out by submitting a real form POST, exactly as the hub dashboard's
@@ -63,6 +91,15 @@ export function sortHubWorkspaces(
 // page is never replaced before the request that clears the cookie has
 // actually gone out. Same-origin form posts send Origin, satisfying the hub's
 // CSRF check the same way the dashboard's does.
+// Whether a failed switcher start is the locked-credential rejection from
+// credential-context resolution — normal after a Hub restart, when every
+// encrypted assigned credential starts locked. The switcher has no masked
+// passphrase surface, so this failure routes to the dashboard's
+// credential-aware start flow instead of dead-ending at "start failed".
+export function startFailureNeedsHubUnlock(message: string): boolean {
+  return /locked|unlock/i.test(message);
+}
+
 export function submitHubSignOut(doc: Document): void {
   const form = doc.createElement("form");
   form.method = "post";
@@ -85,13 +122,18 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
   return {
     workspaces: workspaces
       .filter(
-        (entry): entry is { id: string; running: boolean } =>
+        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown } =>
           typeof entry === "object" &&
           entry !== null &&
           typeof (entry as { id?: unknown }).id === "string" &&
           typeof (entry as { running?: unknown }).running === "boolean",
       )
-      .map(({ id, running }) => ({ id, running })),
+      .map(entry => ({
+        id: entry.id,
+        displayName: typeof entry.displayName === "string" && entry.displayName !== "" ? entry.displayName : entry.id,
+        path: typeof entry.path === "string" ? entry.path : "",
+        running: entry.running,
+      })),
   };
 }
 
@@ -124,7 +166,8 @@ export function initHubNav(): void {
   let latest: HubWorkspaceSummary[] = [];
 
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
-  const updateChipDot = () => {
+  const updateChip = () => {
+    label.textContent = chipLabel(latest, currentId);
     if (chipDot) {
       chipDot.className = chipDotClass(latest, currentId);
     }
@@ -159,13 +202,49 @@ export function initHubNav(): void {
       item.appendChild(dot);
       const itemLabel = document.createElement("span");
       itemLabel.className = "hub-menu-label";
-      itemLabel.textContent = workspace.id;
+      itemLabel.textContent = workspaceMenuLabel(workspace);
       item.appendChild(itemLabel);
+      const detail = workspaceMenuDetail(latest, workspace);
+      if (detail !== null) {
+        const detailSpan = document.createElement("span");
+        detailSpan.className = "hub-menu-state";
+        detailSpan.textContent = detail;
+        item.appendChild(detailSpan);
+      }
       if (!workspace.running) {
         const state = document.createElement("span");
         state.className = "hub-menu-state";
         state.textContent = "stopped";
         item.appendChild(state);
+        // A stopped target's session URL answers 503; Start it instead of
+        // navigating into an unavailable page. Only a successful start
+        // navigates.
+        if (workspace.id !== currentId) {
+          item.addEventListener("click", event => {
+            event.preventDefault();
+            state.textContent = "starting…";
+            void fetch(`/api/hub/sessions/${encodeURIComponent(workspace.id)}/start`, { method: "POST" })
+              .then(async response => {
+                if (response.ok) {
+                  window.location.href = item.href;
+                  return;
+                }
+                const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+                const message = typeof body.error === "string" ? body.error : "";
+                if (startFailureNeedsHubUnlock(message)) {
+                  // The switcher has no passphrase surface; the dashboard's
+                  // credential-aware start flow collects it.
+                  state.textContent = "unlock in Hub…";
+                  window.location.href = "/";
+                  return;
+                }
+                state.textContent = "start failed";
+              })
+              .catch(() => {
+                state.textContent = "start failed";
+              });
+          });
+        }
       }
       menu.appendChild(item);
     }
@@ -196,8 +275,7 @@ export function initHubNav(): void {
       return;
     }
     latest = state.workspaces;
-    label.textContent = currentId;
-    updateChipDot();
+    updateChip();
     control.hidden = false;
 
     // A back/forward-cache restore revives this page exactly as it was —
@@ -210,7 +288,7 @@ export function initHubNav(): void {
       void fetchHubState().then(fresh => {
         if (fresh !== null) {
           latest = fresh.workspaces;
-          updateChipDot();
+          updateChip();
         }
       });
     });
@@ -229,7 +307,7 @@ export function initHubNav(): void {
       void fetchHubState().then(fresh => {
         if (fresh !== null) {
           latest = fresh.workspaces;
-          updateChipDot();
+          updateChip();
           if (!menu.hidden) {
             renderMenu();
           }

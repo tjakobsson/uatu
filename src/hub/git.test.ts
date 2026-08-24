@@ -28,7 +28,9 @@ describe("validCloneFolderName", () => {
     // The route trims before calling this, and trim() leaves every one of
     // these in place: a zero-width-only name would clone into a directory
     // that renders blank, and an embedded bidi control would make the
-    // checkout display a name other than the path it occupies.
+    // checkout display a name other than the path it occupies. The whole Cc
+    // category is rejected, C1 (U+0080-U+009F) included — those are as
+    // invisible as C0 and would name a checkout nobody can read back.
     for (const value of [
       "\u200b",
       "\u200b\u200c\u200d",
@@ -38,6 +40,9 @@ describe("validCloneFolderName", () => {
       "\u00ad",
       "bad\u0007name",
       "bad\u007fname",
+      "repo\u0085name",
+      "\u009f",
+      "\u0080\u009f",
     ]) {
       expect(validCloneFolderName(value)).toBe(false);
     }

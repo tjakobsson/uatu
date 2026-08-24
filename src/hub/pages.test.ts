@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING } from "./credential-context";
-import { clonePage, dashboardPage, loginPage, settingsPage } from "./pages";
+import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, parseCloneRemote } from "./credential-context";
+import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
 
 const htmlFor = {
   dashboard: () => dashboardPage("alice"),
@@ -30,6 +30,92 @@ function folderMutationFunction(html: string) {
       path: string,
       body: Record<string, unknown>,
     ) => Promise<unknown>;
+}
+
+// Extracts the clone form's retained-host resolution (remoteHostFromUrl +
+// retainedHostFor) with the clone-url input faked, so the client's parsing
+// can be asserted against the server's for the same remote spelling.
+function retainedHostFunction(html: string) {
+  const script = clientScript(html);
+  const start = script.indexOf("function normalizedUrlHost");
+  const end = script.indexOf("function updateCloneCredentials", start);
+  const source = script.slice(start, end);
+  return (remote: string, credential: { type: string; metadata: Record<string, string> }) =>
+    new Function("document", `${source}\nreturn retainedHostFor;`)({
+      getElementById: () => ({ value: remote }),
+    })(credential) as string | null;
+}
+
+function cloneCompatibleFunction(html: string) {
+  const script = clientScript(html);
+  const start = script.indexOf("function normalizedUrlHost");
+  const end = script.indexOf("// Host a retained authentication selection applies", start);
+  return new Function(`${script.slice(start, end)}\nreturn cloneCompatible;`)() as (
+    credential: { enabled: boolean; type: string; capabilities: string[]; metadata: { host: string } },
+    kind: string,
+    remote: string,
+  ) => boolean;
+}
+
+// Extracts the clone page's terminal-result handling (resetCloneForm +
+// finishClone) with the form controls and the page's side effects faked, so
+// what a given job result does to the submitted form can be exercised
+// directly. Returns the fake controls alongside the handler.
+function cloneFinishFunction(html: string) {
+  const script = clientScript(html);
+  const reset = script.slice(script.indexOf("function resetCloneForm"), script.indexOf("function parseCloneEvent"));
+  const finish = script.slice(script.indexOf("async function finishClone"), script.indexOf("function connectCloneEvents"));
+  expect(reset).toContain("cloneStartAfter.checked = false");
+  expect(finish).toContain("const status = result.status || result.result");
+  return () => {
+    const form = {
+      url: { value: "https://github.com/acme/docs.git" },
+      folderName: { value: "docs" },
+      displayName: { value: "Docs site" },
+      credential: { value: "cred-token" },
+      retainedAuth: { value: "cred-key" },
+      signing: { value: "cred-sign" },
+      startAfter: { checked: true },
+    };
+    const opened: string[] = [];
+    const handler = new Function(
+      "document",
+      "cloneDisplayName",
+      "cloneCredential",
+      "cloneRetainedAuth",
+      "cloneSigning",
+      "cloneStartAfter",
+      "updateCloneCredentialState",
+      "clearCloneState",
+      "setClonePhase",
+      "appendCloneOutput",
+      "cloneOutput",
+      "cloneResponse",
+      "cloneResponseLabel",
+      "loadBrowser",
+      "openSession",
+      "refreshWorkspaceState",
+      `let cloneNameTouched = true;\n${reset}\n${finish}\nreturn finishClone;`,
+    )(
+      { getElementById: (id: string) => (id === "clone-url" ? form.url : form.folderName) },
+      form.displayName,
+      form.credential,
+      form.retainedAuth,
+      form.signing,
+      form.startAfter,
+      () => {},
+      () => {},
+      () => {},
+      () => {},
+      { textContent: "" },
+      { value: "" },
+      { textContent: "" },
+      async () => {},
+      (id: string) => opened.push(id),
+      async () => {},
+    ) as (result: Record<string, unknown>) => Promise<void>;
+    return { form, opened, finishClone: handler };
+  };
 }
 
 describe("authenticated Hub pages", () => {
@@ -66,8 +152,18 @@ describe("authenticated Hub pages", () => {
     expect(html).toContain('parts.push("✎ Signing: " + signing.join(", "))');
     expect(html).toContain("if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(");
     expect(html).toContain("Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?");
-    expect(html.indexOf("if (!hasCredentialAssignments(w.credentialAssignments)")).toBeLessThan(html.indexOf("uiBusy += 1", html.indexOf('label: "Resume"')));
-    expect(html).toContain("prepareWorkspaceResume(w, errorTarget)");
+    const startFlow = html.indexOf("async function startRegisteredWorkspace");
+    expect(startFlow).toBeGreaterThan(0);
+    expect(html.indexOf("if (!hasCredentialAssignments(w.credentialAssignments)", startFlow)).toBeLessThan(html.indexOf("uiBusy += 1", startFlow));
+    expect(html).toContain("prepareWorkspaceResume(w, target)");
+    expect(html).toContain('label: "Start"');
+    expect(html).toContain('label: "Rename workspace"');
+    expect(html).toContain('label: "Remove from Hub"');
+    expect(html).not.toContain('label: "Resume"');
+    expect(html).not.toContain('label: "Forget"');
+    // Rows title by mutable display name with the path as secondary detail.
+    expect(html).toContain("title: workspaceLabel(w)");
+    expect(html).toContain('"/display-name", { displayName: next }');
     expect(html).toContain("Unlock credentials for ");
     expect(html).toContain("Unlock and resume");
     expect(html).toContain('field.credential.id) + "/unlock"');
@@ -84,7 +180,11 @@ describe("clone page", () => {
     }
     expect(document.querySelector('#clone-response[type="password"]')).not.toBeNull();
     expect(html).toContain("folderNameInput.value.trim()");
-    expect(html).toContain("{ url, dest: browsePath, folderName }");
+    expect(html).toContain("{ url, dest: browsePath, folderName, start: cloneStartAfter.checked }");
+    // Start after clone is explicit and defaults off; stopped completion is the norm.
+    expect(document.querySelector("#clone-start-after[type=checkbox]")?.hasAttribute("checked")).toBe(false);
+    expect(html).toContain("Workspace added. Start it from its folder row or the dashboard.");
+    expect(html).toContain("if (workspaceId && result.running !== false) {");
     expect(html).toContain("Available for any Git or SSH prompt");
   });
 
@@ -113,19 +213,108 @@ describe("clone page", () => {
     expect(select.options[0]?.value).toBe("");
     expect(select.options[0]?.textContent).toContain("answer prompts interactively");
     expect(document.querySelector('#clone-unlock-passphrase[type="password"]')).not.toBeNull();
-    expect(document.getElementById("clone-retain-assignment")?.hasAttribute("disabled")).toBe(true);
+    expect((document.getElementById("clone-retained-auth") as HTMLSelectElement).options[0]?.textContent).toBe("None");
     expect(document.querySelector("[data-shared-uid-warning] span")?.textContent).toBe(LOCAL_CREDENTIAL_ASSIGNMENT_WARNING);
     expect(document.querySelector("[data-dismiss-shared-uid]")).not.toBeNull();
     expect(html).toContain("uatu.hub.notice.shared-uid-v1:YWxpY2U");
     expect(html).toContain("cloneCompatible");
     expect(html).toContain("isCredentialLocked(selectedCredential)");
     expect(html).toContain("request.credentialId = selectedCredential.id");
-    expect(html).toContain("request.retainAssignment = cloneRetainAssignment.checked");
+    // A requested start must not be doomed by locked retained or signing
+    // credentials: they go through the masked dialog before the job is
+    // created, with the already-unlocked clone credential excluded.
+    expect(html).toContain("Unlock credentials to start after clone");
+    expect(html).toContain('"Unlock and clone"');
+    expect(html).toContain("item.id !== selectedCredential.id");
+    // The clone identity is never an implicit workspace grant: nothing
+    // pre-fills the retained control, so an untouched form retains nothing.
+    expect(html).toContain("The clone credential is never retained on its own");
+    expect(html).toContain("NEVER pre-fills this control");
+    expect(html).not.toContain("cloneRetainedAuth.value = selected");
+    expect(html).toContain("request.retainedAuthentication = [{ credentialId: retainedCredential.id, host: retainedHostFor(retainedCredential) }]");
+    expect(html).not.toContain("retainAssignment");
     expect(html).toContain('(?:[^@/:\\s]+@)?');
     expect(html).toContain('value.startsWith("git+ssh://")');
     // HTTPS hosts are normalized like the backend before token matching.
     expect(html).toContain('parsed.hostname.endsWith(".")');
     expect(html).not.toContain("at > 0");
+  });
+
+  test("resolves the retained SSH host from the same remote spellings the server parses", () => {
+    const retainedHostFor = retainedHostFunction(htmlFor.clone());
+    const sshKey = { type: "ssh", metadata: {} };
+    const token = { type: "token", metadata: { host: "github.example.com" } };
+    // A bracketed IPv6 literal survives whole — cutting it at the first
+    // colon (or falling back to github.com) would commit the retained key
+    // for a host the cloned origin never presents.
+    for (const remote of [
+      "https://GitHub.EXAMPLE.com.:443/owner/repo.git",
+      "https://github.example.com:0443/owner/repo.git",
+      "git@[2001:db8::1]:owner/repo.git",
+      "ssh://git@[2001:db8::1]/owner/repo.git",
+      "git@github.example.com:owner/repo.git",
+      "ssh://git@github.example.com/owner/repo.git",
+      "git@192.0.2.10:owner/repo.git",
+      "git@[github.example.com]:owner/repo.git",
+    ]) {
+      expect(retainedHostFor(remote, sshKey)).toBe(parseCloneRemote(remote).host!);
+    }
+    expect(retainedHostFor("git@[2001:db8::1]:owner/repo.git", sshKey)).toBe("[2001:db8::1]");
+    expect(retainedHostFor("https://github.example.com:443/owner/repo.git", sshKey)).toBe("github.example.com:443");
+    // Tokens still pin their provider host, and an unusable remote keeps
+    // the existing default.
+    expect(retainedHostFor("git@[2001:db8::1]:owner/repo.git", token)).toBe("github.example.com");
+    expect(retainedHostFor("not a remote", sshKey)).toBe("github.com");
+  });
+
+  test("matches HTTPS clone credentials without dropping explicit default ports", () => {
+    const cloneCompatible = cloneCompatibleFunction(htmlFor.clone());
+    const token = (host: string) => ({ enabled: true, type: "token", capabilities: ["https-git"], metadata: { host } });
+    const remote = "https://GitHub.EXAMPLE.com.:0443/owner/repo.git";
+    expect(cloneCompatible(token("github.example.com:443"), "https", remote)).toBe(true);
+    expect(cloneCompatible(token("github.example.com"), "https", remote)).toBe(false);
+    expect(cloneCompatible(token("github.example.com"), "https", "https://github.example.com/owner/repo.git")).toBe(true);
+  });
+
+  test("keeps the submitted clone form until the job succeeds", async () => {
+    const html = htmlFor.clone();
+    // Accepting the job must not clear the form: the same controls are what
+    // finishClone re-enables for the retry after a failed job.
+    const submit = html.slice(html.indexOf("cloneForm.onsubmit"), html.indexOf("cloneResponseForm.onsubmit"));
+    expect(submit).toContain("sessionStorage.setItem(cloneJobStorageKey, cloneJobId)");
+    for (const cleared of [
+      'input.value = ""',
+      'folderNameInput.value = ""',
+      'cloneDisplayName.value = ""',
+      'cloneRetainedAuth.value = ""',
+      'cloneSigning.value = ""',
+      "cloneStartAfter.checked = false",
+    ]) {
+      expect(submit).not.toContain(cleared);
+    }
+    const buildClone = cloneFinishFunction(html);
+    for (const status of ["clone-failed", "register-failed", "cleanup-failed", "start-failed", "cancelled", "timed-out"]) {
+      const { form, finishClone } = buildClone();
+      await finishClone({ status, error: "remote hung up" });
+      expect(form.url.value).toBe("https://github.com/acme/docs.git");
+      expect(form.displayName.value).toBe("Docs site");
+      expect(form.credential.value).toBe("cred-token");
+      expect(form.retainedAuth.value).toBe("cred-key");
+      expect(form.signing.value).toBe("cred-sign");
+      expect(form.startAfter.checked).toBe(true);
+    }
+    // Only a successful terminal result clears it, including the run that
+    // navigates straight into the started session.
+    for (const result of [
+      { status: "succeeded", workspaceId: "ws-1", running: false },
+      { status: "succeeded", workspaceId: "ws-1" },
+    ]) {
+      const { form, opened, finishClone } = buildClone();
+      await finishClone(result);
+      expect([form.url.value, form.folderName.value, form.displayName.value, form.credential.value, form.retainedAuth.value, form.signing.value]).toEqual(["", "", "", "", "", ""]);
+      expect(form.startAfter.checked).toBe(false);
+      expect(opened).toEqual(result.running === false ? [] : ["ws-1"]);
+    }
   });
 
   test("renders accessible folder management controls and a prefilled rename dialog", () => {
@@ -150,8 +339,8 @@ describe("clone page", () => {
     expect(document.querySelectorAll('[role="alert"]').length).toBeGreaterThanOrEqual(4);
     expect(html).toContain('input.value = name;');
     expect(html).toContain('input.select();');
-    expect(html).toContain('ariaLabel: "Rename " + dir.name');
-    expect(html).toContain('ariaLabel: "Remove " + dir.name');
+    expect(html).toContain('ariaLabel: "Rename folder " + dir.name');
+    expect(html).toContain('ariaLabel: "Remove folder " + dir.name');
     expect(html).toContain('Only empty folders can be removed. This cannot be undone.');
   });
 
@@ -164,6 +353,11 @@ describe("clone page", () => {
     expect(html).toContain('refreshWorkspaceState().catch(() => {})');
     expect(html).toContain('response.status === 404 && browseParent');
     expect(html).toContain("another client may have renamed or removed it");
+    // A configured-but-unavailable default parent silently falls back to
+    // home; the page must say so before the user onboards into home.
+    expect(html).toContain('id="defaults-fallback-notice"');
+    expect(html).toContain("updateDefaultsFallbackNotice(state.workspaceDefaults)");
+    expect(html).toContain("is currently unavailable — showing ");
     // Folder names may legitimately carry whitespace (the rename field is
     // even pre-filled with the current basename); only emptiness is judged
     // trimmed and the submitted name keeps its whitespace.
@@ -172,6 +366,10 @@ describe("clone page", () => {
     expect(html).toContain("if (!name.trim()) return;");
     expect(html).not.toContain("renameFolderName.value.trim()");
     expect(html).not.toContain("newFolderName.value.trim()");
+    // Create workspace follows the same FolderName contract: trim only the
+    // display label, never the directory segment the user entered.
+    expect(html).toContain("folderName: createWorkspaceFolder.value,");
+    expect(html).not.toContain("folderName: createWorkspaceFolder.value.trim()");
   });
 
   test("retries needsStop with named workspace confirmation and stop authorization", async () => {
@@ -230,7 +428,91 @@ describe("clone page", () => {
   });
 });
 
+describe("add workspace page", () => {
+  test("labels the page Add workspace and organizes three entry modes", () => {
+    const html = htmlFor.clone();
+    expect(html).toContain("Add workspace</a>");
+    expect(html).toContain("UatuCode Hub — Add workspace");
+    expect(html).toContain("<h2>Add workspace</h2>");
+    expect(html).toContain("Create a new workspace, pick an existing folder below, or clone a repository.");
+    const document = documentFor("clone");
+    expect(document.getElementById("create-workspace-open")).not.toBeNull();
+    expect(document.getElementById("add-workspace-dialog")).not.toBeNull();
+    expect(document.getElementById("clone-form")).not.toBeNull();
+  });
+
+  test("the existing-folder dialog carries name, path, credentials, and both add actions", () => {
+    const html = htmlFor.clone();
+    const document = documentFor("clone");
+    for (const id of [
+      "add-workspace-path", "add-workspace-name", "add-workspace-auth", "add-workspace-host",
+      "add-workspace-signing", "add-workspace-error", "add-workspace-cancel", "add-workspace-start", "add-workspace-submit",
+    ]) {
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+    expect(document.querySelector('#add-workspace-dialog[aria-labelledby="add-workspace-title"]')).not.toBeNull();
+    expect(document.getElementById("add-workspace-submit")?.textContent).toBe("Add workspace");
+    expect(document.getElementById("add-workspace-start")?.textContent).toBe("Add and start");
+    // The display name prefills from the folder basename and stays editable.
+    expect(html).toContain("addWorkspaceName.value = name;");
+    expect(html).toContain("addWorkspaceName.select();");
+    // The commit is stopped-by-default; Add-and-start carries the explicit
+    // start intent through the same lifecycle-protected request (after the
+    // masked unlock for locked selected credentials) — a separate start
+    // after the commit could target an entry another client already forgot.
+    expect(html).toContain('api("/api/hub/workspaces/configure", request)');
+    expect(html).toContain("if (start) request.start = true;");
+    expect(html).toContain("submitAddWorkspace(true)");
+    expect(html).toContain("Unlock credentials to start the workspace");
+    expect(html).toContain("openSession(result.workspace.id)");
+    expect(html).toContain("result.recoveryRequired");
+    // Cancellation is mutation-free and errors preserve the form.
+    expect(html).toContain("Cancellation is mutation-free: nothing was sent.");
+    expect(html).toContain("setLocalError(addWorkspaceError, error.message)");
+  });
+
+  test("the create-workspace dialog links names until edited and reports retained folders", () => {
+    const html = htmlFor.clone();
+    const document = documentFor("clone");
+    for (const id of [
+      "create-workspace-parent", "create-workspace-folder", "create-workspace-name",
+      "create-workspace-auth", "create-workspace-signing", "create-workspace-error", "create-workspace-submit",
+    ]) {
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+    expect(html).toContain("if (createNameLinked) createWorkspaceName.value = createWorkspaceFolder.value;");
+    expect(html).toContain('api("/api/hub/workspaces/create"');
+    expect(html).toContain("Creates the folder, runs git init, and adds the workspace stopped.");
+    expect(html).toContain('Use "Add workspace" on the retained folder to finish adding it.');
+    expect(html).toContain("setCreateWorkspaceBusy(true)");
+  });
+
+  test("browser rows are lifecycle-aware with display-name detail", () => {
+    const html = htmlFor.clone();
+    expect(html).toContain('label: "Open"');
+    expect(html).toContain('label: "Start"');
+    expect(html).toContain('label: "Add workspace"');
+    expect(html).toContain('dir.running ? "running" : "stopped"');
+    expect(html).toContain("'workspace \"' + dir.displayName + '\"'");
+  });
+});
+
 describe("settings page", () => {
+  test("manages the default workspace parent with fallback explanation", () => {
+    const html = htmlFor.settings();
+    const document = documentFor("settings");
+    for (const id of ["workspace-defaults-form", "workspace-defaults-parent", "workspace-defaults-clear", "workspace-defaults-status", "workspace-defaults-error"]) {
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+    expect(html).toContain('api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: value })');
+    expect(html).toContain('api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: null })');
+    expect(html).toContain("const value = input.value;");
+    expect(html).toContain("if (!value.trim())");
+    expect(html).not.toContain("const value = input.value.trim()");
+    expect(html).toContain("is currently unavailable; onboarding falls back to");
+    expect(html).toContain("Workspaces can still be added from anywhere.");
+  });
+
   test("shares the dismissible shared-UID advisory with clone", () => {
     const alice = htmlFor.settings();
     const bob = settingsPage("bob");
@@ -311,5 +593,32 @@ describe("settings page", () => {
     expect(html).not.toContain('showError("")');
     expect(html).toContain("@media (max-width: 520px)");
     expect(html).not.toMatch(/least[- ]privilege|credential isolation|isolated credential/i);
+  });
+});
+
+describe("stopped session page", () => {
+  test("titles by display name and offers Start and Configure for registered workspaces", () => {
+    const html = stoppedSessionPage("payments-service", true, "Payments API");
+    expect(html).toContain("<strong>Payments API</strong>");
+    expect(html).toContain('id="stopped-start"');
+    expect(html).toContain(">Configure</a>");
+    expect(html).toContain('"/api/hub/sessions/payments-service/start"');
+    expect(html).not.toContain("<strong>payments-service</strong>");
+    // A locked-credential rejection routes to the dashboard's masked
+    // unlock flow instead of dead-ending on this page.
+    expect(html).toContain("/locked|unlock/i.test(error.message)");
+    expect(html).toContain('location.href = "/"');
+  });
+
+  test("an unregistered id only links back to the dashboard", () => {
+    const html = stoppedSessionPage("gone", false);
+    expect(html).toContain("<strong>gone</strong>");
+    expect(html).not.toContain('id="stopped-start"');
+    expect(html).toContain('href="/"');
+  });
+
+  test("escapes display names and ids", () => {
+    const html = stoppedSessionPage("x", true, "<script>alert(1)</script>");
+    expect(html).not.toContain("<script>alert(1)</script>");
   });
 });

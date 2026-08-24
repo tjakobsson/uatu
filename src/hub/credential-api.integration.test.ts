@@ -15,8 +15,11 @@ import {
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
 import { CredentialToolManager } from "./credential-tools";
 import { CredentialApi, credentialApiError } from "./credential-api";
+import { FolderManager } from "./folder-manager";
 import { OpenPgpCredentialManager } from "./openpgp-credentials";
 import { PersonalWorkspaceStateStore } from "./personal-state";
+import { WorkspaceOnboardingCoordinator } from "./onboarding";
+import { PathReservationCoordinator } from "./path-reservations";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -137,12 +140,37 @@ async function fixture(root: string) {
       { name: "bob", passwordHash: await hashPassword("bob password") },
     ],
   };
+  const onboardingJournal = path.join(state, "pending-onboarding.json");
+  const folderJournal = path.join(state, "pending-folder-mutation.json");
+  const reservations = new PathReservationCoordinator();
+  const onboarding = new WorkspaceOnboardingCoordinator({
+    journalPath: onboardingJournal,
+    recoveryJournalPaths: [folderJournal],
+    registry,
+    credentials: metadata,
+    sessions,
+    reservations,
+  });
+  // Wired as main.ts does: the two recovery journals fence each other, and
+  // the assignment routes are fenced by both.
+  const folderManager = new FolderManager({
+    journalPath: folderJournal,
+    recoveryJournalPaths: [onboardingJournal],
+    registry,
+    sessions,
+    personalState,
+    credentials: metadata,
+    reservations,
+  });
   const server = startHubServer({
     config,
     registry,
     sessions,
     sessionStore,
     personalState,
+    onboarding,
+    folderManager,
+    reservations,
     credentialApi: {
       metadata,
       tools,
@@ -153,7 +181,7 @@ async function fixture(root: string) {
     },
   });
   servers.push(server);
-  return { server, metadata, tokenStore, tokens, workspace, state, openpgp, registry, personalState, sessions, backendEvents };
+  return { server, metadata, tokenStore, tokens, workspace, state, openpgp, registry, personalState, sessions, backendEvents, onboardingJournal, folderJournal };
 }
 
 async function login(origin: string, name: string, password: string): Promise<string> {
@@ -341,6 +369,255 @@ describe("credential API integration", () => {
     expect(restartText).toContain(credentialId);
     expect(restartText).not.toContain(secret);
     expect(restarted.tokenStore.get(credentialId)).toBe(secret);
+  }, 30_000);
+
+  test("assignment mutations freeze while an onboarding journal is pending", async () => {
+    // Onboarding recovery compares the workspace's current assignments
+    // against the journaled pre-commit set; a mutation while the journal
+    // lingers would make a deliberate revocation back to that set
+    // indistinguishable from an unfinished commit.
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const create = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Fence token",
+      host: "github.com",
+      token: "fence-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await create.json()) as { credential: { id: string } }).credential.id;
+
+    const { writeFile, unlink } = await import("node:fs/promises");
+    await writeFile(f.onboardingJournal, "{}\n", { mode: 0o600 });
+    const fencedAssign = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(fencedAssign.status).toBe(409);
+    expect(((await fencedAssign.json()) as { error: string }).error).toContain("pending onboarding");
+    const fencedUnassign = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(fencedUnassign.status).toBe(409);
+    const fencedDelete = await post(origin, cookie, `/api/hub/credentials/${credentialId}/delete`, { confirm: true, unassign: true });
+    expect(fencedDelete.status).toBe(409);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+    expect(f.metadata.snapshot().credentials.some(item => item.id === credentialId)).toBe(true);
+
+    await unlink(f.onboardingJournal);
+    const assigned = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(assigned.status).toBe(200);
+  });
+
+  test("assignment mutations freeze while a folder-mutation journal is pending", async () => {
+    // A registered folder removal journals, rmdirs the directory, and only
+    // then strips assignments and unregisters. If that tail fails — the
+    // assignment cleanup, the forget, or the journal clear — the journal
+    // stays pending while the registry entry can still be visible. Writing
+    // an assignment against that doomed workspace would answer success and
+    // then be deleted by FolderManager.recover() completing the removal, so
+    // the folder journal fences assignments exactly as the onboarding one
+    // does.
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const create = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Folder fence token",
+      host: "github.com",
+      token: "folder-fence-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await create.json()) as { credential: { id: string } }).credential.id;
+    // A second, differently hosted credential so the replacement and the
+    // extra assignment below are changes the routes would otherwise accept —
+    // a host the seeded credential does not cover would be refused as a 400
+    // and prove nothing about the fence.
+    const createOther = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Folder fence token (gitlab)",
+      host: "gitlab.com",
+      token: "folder-fence-secret-2",
+      capabilities: ["https-git"],
+    });
+    const otherId = ((await createOther.json()) as { credential: { id: string } }).credential.id;
+    const seeded = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(seeded.status).toBe(200);
+    const committed = f.metadata.snapshot().assignments;
+    expect(committed).toHaveLength(1);
+
+    const { writeFile, unlink } = await import("node:fs/promises");
+    await writeFile(f.folderJournal, "{}\n", { mode: 0o600 });
+    const fencedReplace = await post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/credential-assignments`, {
+      authentication: { credentialId: otherId, host: "gitlab.com" },
+    });
+    expect(fencedReplace.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/credential-assignments", fencedReplace);
+    expect(await fencedReplace.json()).toEqual({
+      error: "a pending recovery journal requires Hub recovery before further folder changes",
+    });
+    const fencedUnassign = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(fencedUnassign.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/unassign", fencedUnassign);
+    const fencedAssign = await post(origin, cookie, `/api/hub/credentials/${otherId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "gitlab.com",
+    });
+    expect(fencedAssign.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/assign", fencedAssign);
+    const fencedDelete = await post(origin, cookie, `/api/hub/credentials/${credentialId}/delete`, { confirm: true, unassign: true });
+    expect(fencedDelete.status).toBe(409);
+    // Nothing landed: neither the replacement, the removal, nor the delete.
+    expect(f.metadata.snapshot().assignments).toEqual(committed);
+    expect(f.metadata.snapshot().credentials.some(item => item.id === credentialId)).toBe(true);
+
+    // With the journal recovered the same requests commit, so the refusals
+    // above were the fence and not an unrelated failure.
+    await unlink(f.folderJournal);
+    const unfenced = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(unfenced.status).toBe(200);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+  }, 30_000);
+
+  test("assignment mutations refuse a journal that lands while they wait for the workspace queue", async () => {
+    // The admission check above is only a fast-fail: onboarding publishes
+    // its journal from inside runExclusive on the workspace id it planned,
+    // so a request that reads a clear journal can then queue behind that
+    // very commit and mutate assignments once it releases the queue. An
+    // unassignment returning the set to its recorded pre-commit value would
+    // then be reinstated by recovery, which reads that set as an unfinished
+    // commit. The authoritative check therefore runs under the queue.
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const create = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Queue fence token",
+      host: "github.com",
+      token: "queue-fence-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await create.json()) as { credential: { id: string } }).credential.id;
+    const assigned = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(assigned.status).toBe(200);
+    const committed = f.metadata.snapshot().assignments;
+    expect(committed).toHaveLength(1);
+
+    const { writeFile, unlink } = await import("node:fs/promises");
+    // Occupy the workspace's lifecycle queue the way an onboarding commit
+    // does, and journal only after each request is past the route's outer
+    // checks: the check that fences them must be the one they make under
+    // the queue, not one they made before asking for it.
+    const raceUnderHeldQueue = async (journalPath: string, send: () => Promise<Response>): Promise<Response> => {
+      let releaseQueue!: () => void;
+      const held = new Promise<void>(resolve => { releaseQueue = resolve; });
+      const holding = f.sessions.runExclusive(f.workspace.id, () => held);
+      const request = send();
+      try {
+        // Ample time for an in-process request to reach the route and queue
+        // behind the hold. A slower machine only weakens the proof — a
+        // journal that lands before the route runs is refused either way —
+        // so this can never make the test red.
+        await Bun.sleep(250);
+        await writeFile(journalPath, "{}\n", { mode: 0o600 });
+        releaseQueue();
+        await holding;
+        return await request;
+      } finally {
+        releaseQueue();
+        await holding.catch(() => undefined);
+        await request.catch(() => undefined);
+        await unlink(journalPath).catch(() => undefined);
+      }
+    };
+
+    const unassigned = await raceUnderHeldQueue(f.onboardingJournal, () => post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    }));
+    expect(unassigned.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/unassign", unassigned);
+    expect(await unassigned.json()).toEqual({
+      error: "a pending onboarding requires Hub recovery before credential assignment changes",
+    });
+    expect(f.metadata.snapshot().assignments).toEqual(committed);
+
+    // The workspace-scoped assignment API takes the same queue and answers
+    // the same refusal.
+    const replaced = await raceUnderHeldQueue(f.onboardingJournal, () => post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/credential-assignments`, {
+      authentication: { credentialId, host: "gitlab.com" },
+    }));
+    expect(replaced.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/credential-assignments", replaced);
+    expect(await replaced.json()).toEqual({
+      error: "a pending onboarding requires Hub recovery before credential assignment changes",
+    });
+    expect(f.metadata.snapshot().assignments).toEqual(committed);
+
+    // The folder journal races the same way and is answered by the same
+    // under-the-queue check: a registered removal writes it from inside
+    // runWithSessionsStopped, which holds this workspace's lifecycle queue,
+    // so a request already waiting on that queue reaches its recheck only
+    // after the record is on disk.
+    const folderUnassigned = await raceUnderHeldQueue(f.folderJournal, () => post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    }));
+    expect(folderUnassigned.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/unassign", folderUnassigned);
+    expect(await folderUnassigned.json()).toEqual({
+      error: "a pending recovery journal requires Hub recovery before further folder changes",
+    });
+    expect(f.metadata.snapshot().assignments).toEqual(committed);
+
+    const folderReplaced = await raceUnderHeldQueue(f.folderJournal, () => post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/credential-assignments`, {
+      authentication: { credentialId, host: "gitlab.com" },
+    }));
+    expect(folderReplaced.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/credential-assignments", folderReplaced);
+    expect(await folderReplaced.json()).toEqual({
+      error: "a pending recovery journal requires Hub recovery before further folder changes",
+    });
+    expect(f.metadata.snapshot().assignments).toEqual(committed);
+
+    // With no journal on disk the same request commits, so the refusals
+    // above were the fence and not an unrelated failure.
+    const unfenced = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(unfenced.status).toBe(200);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
   }, 30_000);
 
   test("enforces same-origin, strict bodies, references, and confirmed delete-and-unassign", async () => {

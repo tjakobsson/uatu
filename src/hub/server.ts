@@ -49,7 +49,9 @@ import {
   type BridgeData,
   type UpgradableServer,
 } from "./proxy";
-import type { WorkspaceRegistry } from "./registry";
+import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
+import { OnboardingError, resolveOnboardingAssignments, type WorkspaceOnboardingCoordinator } from "./onboarding";
+import { HubPreferencesError, type HubPreferencesStore } from "./preferences";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import type { SessionManager } from "./sessions";
 import type { TerminalSessionInfo } from "../terminal/server";
@@ -67,6 +69,8 @@ export type HubDeps = {
   sessions: SessionManager;
   sessionStore: HubSessionStore;
   personalState: PersonalWorkspaceStateStore;
+  preferences?: HubPreferencesStore;
+  onboarding?: WorkspaceOnboardingCoordinator;
   folderManager?: Pick<FolderManager, "create" | "rename" | "remove" | "assertNoPendingMutation">;
   reservations?: PathReservationCoordinator;
   cloneJobs?: CloneJobManager;
@@ -89,12 +93,39 @@ function json(status: number, body: unknown, headers?: Record<string, string>): 
 
 const NO_STORE_HEADERS = { "cache-control": "no-store" };
 
+const ONBOARDING_ASSIGNMENT_FENCE = "a pending onboarding requires Hub recovery before credential assignment changes";
+
+// The onboarding fence's refusal raised from INSIDE a lifecycle operation,
+// where a Response cannot be returned directly. Every assignment route
+// answers it as the same 409 the admission check produces, ahead of the
+// credential-error mapping (whose message heuristics would call it a 500).
+class OnboardingAssignmentFenceError extends Error {
+  constructor() {
+    super(ONBOARDING_ASSIGNMENT_FENCE);
+  }
+}
+
 function closedJsonObject(value: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("request body must be an object");
   const body = value as Record<string, unknown>;
   const accepted = new Set(allowed);
   if (Object.keys(body).some(key => !accepted.has(key))) throw new Error("request contains an unknown field");
   return body;
+}
+
+function parseRetainedAuthentication(value: unknown): Array<{ credentialId: string; host: string }> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("retainedAuthentication must be an array of credential selections");
+  return value.map(item => {
+    const selection = closedJsonObject(item, ["credentialId", "host"]);
+    if (typeof selection.credentialId !== "string" || selection.credentialId === "") {
+      throw new Error("retainedAuthentication requires a credentialId");
+    }
+    if (typeof selection.host !== "string" || selection.host === "") {
+      throw new Error("retainedAuthentication requires a host");
+    }
+    return { credentialId: selection.credentialId, host: selection.host };
+  });
 }
 
 function htmlResponse(body: string, status = 200): Response {
@@ -182,6 +213,56 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (result !== REVOKE_RETRY) return result;
       workspaceIds = [...new Set([...workspaceIds, ...affectedWorkspaces()])].sort();
     }
+  };
+  // Assignment mutations freeze while a pending onboarding journal exists:
+  // its recovery decides between completing and preserving by comparing
+  // the current assignment set against the journaled pre-commit set, and a
+  // mutation in between would make a deliberate revocation back to that
+  // set indistinguishable from an unfinished commit. Mirrors the folder
+  // manager's mutation freeze.
+  //
+  // A pure lstat of the journal path: it takes no lock, so it can be
+  // called at any depth without disturbing the locking order (workspace
+  // queues outermost, credential lock innermost).
+  const onboardingFencesAssignments = (): Promise<boolean> =>
+    deps.onboarding ? deps.onboarding.hasPendingRecovery() : Promise.resolve(false);
+  // Cheap admission fast-fail. NOT authoritative: onboarding publishes its
+  // journal from inside runExclusive on the workspace id it planned, so a
+  // check made before the request asks for that queue can read a clear
+  // journal and then queue behind the very commit that writes one.
+  const assignmentsFencedByOnboarding = async (): Promise<Response | null> =>
+    await onboardingFencesAssignments() ? json(409, { error: ONBOARDING_ASSIGNMENT_FENCE }, NO_STORE_HEADERS) : null;
+  // The authoritative check. Runs INSIDE the lifecycle operation that
+  // serializes against the onboarding commit: under the workspace queue no
+  // onboarding for this id can be mid-commit, while one that already
+  // finished — including one whose journal clear failed — has left its
+  // record on disk where this sees it. Without it an unassignment could
+  // return the set to its recorded pre-commit value and be reinstated
+  // later by recovery.
+  //
+  // Both recovery journals fence assignments, so both are checked — the
+  // same layering the start route uses. A registered folder removal writes
+  // its journal, rmdirs the directory, and only then strips assignments and
+  // unregisters; if that tail fails, the journal stays pending while the
+  // registry entry can still be visible. An assignment written against that
+  // doomed workspace would answer 200 and then be deleted by
+  // FolderManager.recover() finishing the removal. The folder fence covers
+  // the onboarding journal too when it is wired as a sibling recovery path,
+  // but the onboarding check runs first so assemblies that wire onboarding
+  // without a folder manager — and the message callers already see — are
+  // unchanged.
+  //
+  // Serialization matches the onboarding argument exactly: registered
+  // folder mutations journal from inside runWithSessionsStopped, which
+  // holds the lifecycle queue of every affected workspace, so under the
+  // queue no removal of THIS workspace can be mid-journal while one that
+  // already passed the point of no return has left its record on disk.
+  // Both checks are pure lstats that take no lock, so they sit at any depth
+  // without disturbing the locking order (workspace queues outermost,
+  // credential lock innermost).
+  const assertAssignmentsUnfenced = async (): Promise<void> => {
+    if (await onboardingFencesAssignments()) throw new OnboardingAssignmentFenceError();
+    await deps.folderManager?.assertNoPendingMutation();
   };
   const stopProviderCliSessions = async (credentialId: string): Promise<void> => {
     const workspaceIds = sessions.runningWorkspaceIdsUsingCredential(credentialId);
@@ -363,6 +444,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
         return {
           id: entry.id,
+          displayName: entry.displayName,
           path: entry.path,
           backend: entry.backend,
           running: running !== undefined,
@@ -384,7 +466,25 @@ export function createHubFetchHandler(deps: HubDeps) {
       hubApiRevision: HUB_API_REVISION,
       workspaceApiRevision: WORKSPACE_API_REVISION,
     };
-    return json(200, { version: formatBuildIdentifier(BUILD), ...compatibility, workspaces });
+    const workspaceDefaults = await workspaceDefaultsState();
+    return json(200, {
+      version: formatBuildIdentifier(BUILD),
+      ...compatibility,
+      workspaces,
+      ...(workspaceDefaults === undefined ? {} : { workspaceDefaults }),
+    });
+  };
+
+  // The configured/effective default workspace parent, shaped for clients:
+  // the saved value stays visible while unavailable so Settings can repair it.
+  const workspaceDefaultsState = async () => {
+    if (!deps.preferences) return undefined;
+    const state = await deps.preferences.resolveDefaultWorkspaceParent();
+    return {
+      configured: state.configured,
+      configuredAvailable: state.configuredAvailable,
+      effective: state.effective,
+    };
   };
 
   // GET /api/hub/browse?path=<abs> — one level of the hub host's directory
@@ -394,7 +494,12 @@ export function createHubFetchHandler(deps: HubDeps) {
   // Filesystem visibility here is within the documented trust model: hub
   // users already hold shell access through the embedded terminal.
   const browse = async (url: URL): Promise<Response> => {
-    const requested = url.searchParams.get("path") ?? os.homedir();
+    // Pathless browsing starts from the effective default workspace parent
+    // (the configured one while usable, the daemon user's home otherwise).
+    // An explicit path is never constrained to that subtree.
+    const requested = url.searchParams.get("path")
+      ?? (await deps.preferences?.resolveDefaultWorkspaceParent())?.effective
+      ?? os.homedir();
     if (!path.isAbsolute(requested)) {
       return json(400, { error: "path must be absolute" });
     }
@@ -419,7 +524,15 @@ export function createHubFetchHandler(deps: HubDeps) {
             .then(() => true)
             .catch(() => false);
           const registered = registry.byPath(folder);
-          return { name: dirent.name, git, registeredId: registered?.id ?? null };
+          return {
+            name: dirent.name,
+            git,
+            registeredId: registered?.id ?? null,
+            // Lifecycle-aware registration data: the browser row can offer
+            // Add workspace / Start / Open without a second round trip.
+            displayName: registered?.displayName ?? null,
+            running: registered !== undefined && sessions.isRunning(registered.id),
+          };
         }),
     );
     const parent = path.dirname(resolved);
@@ -476,6 +589,59 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
     if (!isDirectory) {
       return json(404, { error: `no such folder: ${folder}` });
+    }
+    // Compatibility shorthand: when the onboarding coordinator is wired
+    // (the real hub assembly), the legacy operation adapts into it with a
+    // basename-derived display name and no initial assignments, keeping its
+    // historical start-by-default behavior and failed-start rollback.
+    if (deps.onboarding) {
+      let result;
+      try {
+        result = await deps.onboarding.configureExisting({
+          path: folder,
+          displayName: defaultWorkspaceDisplayName(folder),
+          init: body.init === true,
+          start: false,
+        });
+      } catch (error) {
+        if (error instanceof OnboardingError) {
+          if (error.committedEntry) {
+            // Same reasoning as onboardingErrorResponse, in the legacy
+            // shape: the registration fully committed and only the journal
+            // failed to clear, so a 500 would falsely say nothing happened
+            // while retries are fenced by the pending journal. The commit
+            // raises this before it reaches the start step, so no session
+            // was spawned and none is spawned now — a start requested here
+            // is left to the client to retry after recovery.
+            return json(200, { id: error.committedEntry.id, running: false, recoveryRequired: error.message });
+          }
+          if (error.code === "needs-init") return json(409, { needsInit: true, error: `${folder} is not a git repository` });
+          if (error.code === "not-found") return json(404, { error: `no such folder: ${folder}` });
+          if (error.code === "conflict") return json(409, { error: error.message });
+          if (error.code === "invalid-input") return json(400, { error: error.message });
+          // The admission fence refuses before any commit — a pending
+          // recovery journal is a caller-actionable conflict here, like the
+          // session-start and assignment fences, not a Hub-internal failure.
+          if (error.code === "recovery-pending") return json(409, { error: error.message });
+          return json(500, { error: error.message });
+        }
+        return json(500, { error: error instanceof Error ? error.message : String(error) });
+      }
+      const { entry, created } = result;
+      if (body.start === false) {
+        return json(200, { id: entry.id, running: false });
+      }
+      try {
+        await sessions.start(entry.id, created ? async () => {
+          if (!(await registry.remove(entry.id))) throw new Error(`workspace registration was not removed: ${entry.id}`);
+          await deps.credentialApi?.metadata.removeWorkspaceAssignments(entry.id);
+        } : undefined);
+      } catch (error) {
+        // A folder that fails to serve is not left registered — mirroring the
+        // launcher rule that a declined/failed folder leaves no trace.
+        return json(500, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return json(200, { id: entry.id });
     }
     const reservation = cloneJobs.reserveTarget(folder);
     if (!reservation) {
@@ -558,12 +724,190 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
   };
 
+  // Maps coordinator failures onto documented actionable responses:
+  // validation 400, missing folder 404, conflicts/init-confirmation/
+  // credential incompatibility 409, git and internal failures 500. A
+  // retained initialized repository is always identified for retry.
+  const onboardingErrorResponse = (error: unknown): Response => {
+    if (error instanceof OnboardingError) {
+      if (error.committedEntry) {
+        // The configuration fully committed; only the journal failed to
+        // clear. A 500 would read as "nothing happened" while retries are
+        // fenced by the pending recovery journal — report the preserved
+        // stopped workspace instead. startError stays reserved for an
+        // explicitly requested start; the recovery requirement travels in
+        // its own field.
+        return json(200, {
+          ...onboardingSuccess({ entry: error.committedEntry, started: false, startError: null }),
+          recoveryRequired: error.message,
+        }, NO_STORE_HEADERS);
+      }
+      const body: Record<string, unknown> = { error: error.message };
+      if (error.retainedPath !== undefined) body.retainedPath = error.retainedPath;
+      if (error.code === "needs-init") return json(409, { needsInit: true, ...body }, NO_STORE_HEADERS);
+      const status = error.code === "invalid-input" ? 400
+        : error.code === "not-found" ? 404
+        : error.code === "conflict" || error.code === "credential" || error.code === "recovery-pending" ? 409
+        : 500;
+      return json(status, body, NO_STORE_HEADERS);
+    }
+    return json(500, { error: error instanceof Error ? error.message : String(error) }, NO_STORE_HEADERS);
+  };
+
+  // Closed success payload shared by configure and create: the committed
+  // workspace plus explicit start outcome. startError is non-null exactly
+  // when an explicitly requested start failed after the configuration
+  // committed — the workspace is preserved stopped for retry.
+  const onboardingSuccess = (result: {
+    entry: { id: string; displayName: string; path: string; backend: string };
+    started: boolean;
+    startError: string | null;
+  }) => ({
+    workspace: {
+      id: result.entry.id,
+      displayName: result.entry.displayName,
+      path: result.entry.path,
+      backend: result.entry.backend,
+      running: result.started,
+    },
+    started: result.started,
+    startError: result.startError,
+  });
+
+  // POST /api/hub/workspaces/configure — register an existing folder with a
+  // display name, credential selections, and explicit start intent.
+  const configureWorkspace = async (request: Request): Promise<Response> => {
+    if (!deps.onboarding) return json(503, { error: "workspace onboarding is unavailable" }, NO_STORE_HEADERS);
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { error: "invalid JSON body" }, NO_STORE_HEADERS);
+    }
+    try {
+      const result = await deps.onboarding.configureExisting(body);
+      if (result.alreadyRegistered) {
+        return json(409, { error: `folder is already a registered workspace: ${result.entry.path}` }, NO_STORE_HEADERS);
+      }
+      return json(200, onboardingSuccess(result), NO_STORE_HEADERS);
+    } catch (error) {
+      return onboardingErrorResponse(error);
+    }
+  };
+
+  // POST /api/hub/workspaces/create — create a new child Git repository
+  // under a parent and register it configured and stopped.
+  const createConfiguredWorkspace = async (request: Request): Promise<Response> => {
+    if (!deps.onboarding) return json(503, { error: "workspace onboarding is unavailable" }, NO_STORE_HEADERS);
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { error: "invalid JSON body" }, NO_STORE_HEADERS);
+    }
+    try {
+      return json(200, onboardingSuccess(await deps.onboarding.createWorkspace(body)), NO_STORE_HEADERS);
+    } catch (error) {
+      return onboardingErrorResponse(error);
+    }
+  };
+
+  // POST /api/hub/workspaces/<id>/display-name — rename the workspace label
+  // only. Valid while running or stopped; never touches the session, path,
+  // stable id, or assignments.
+  const updateWorkspaceDisplayName = async (request: Request, workspaceId: string): Promise<Response> => {
+    let body: Record<string, unknown>;
+    try {
+      body = closedJsonObject(await request.json(), ["displayName"]);
+    } catch {
+      return json(400, { error: "invalid JSON body or unknown field" }, NO_STORE_HEADERS);
+    }
+    // Validation happens here so the update call can only fail on
+    // persistence — a 400 is a request correction, a 500 is retryable.
+    let displayName: string;
+    try {
+      displayName = validateWorkspaceDisplayName(body.displayName);
+    } catch (error) {
+      return json(400, { error: error instanceof Error ? error.message : String(error) }, NO_STORE_HEADERS);
+    }
+    if (!registry.byId(workspaceId)) {
+      return json(404, { error: `unknown workspace: ${workspaceId}` }, NO_STORE_HEADERS);
+    }
+    try {
+      // The display name lives in the registry entry, so it is fenced by
+      // the recovery journals exactly as the other registered-state
+      // mutations are. A registered rename or removal that outlived its
+      // mutation journalled whole entries — display name included — and
+      // recovery restores them verbatim: renaming now would report success
+      // and then be silently reverted to the journalled label at the next
+      // restart, with nothing left to tell the user their rename was lost.
+      // Fails closed, so an uninspectable journal is treated as pending.
+      //
+      // The check runs INSIDE this workspace's lifecycle operation, not
+      // before it. Registered renames and removals journal from within
+      // their runWithSessionsStopped callback, which holds the lifecycle
+      // queue of every affected workspace — this one included, since the
+      // journalled entries are exactly the registrations at or below the
+      // mutated folder. Under the queue no mutation of this workspace can
+      // be mid-journal, while one that already finished (including a
+      // rename that failed its rollback) has left its record on disk where
+      // this check sees it. A check before the queue would instead admit
+      // the rename and let a folder mutation reserve the workspace,
+      // journal, and release the queue before the update lands. Holding
+      // the queue costs one registry save; nothing here starts or stops a
+      // session, so a running workspace is renamed without interruption.
+      const updated = await sessions.runExclusive(workspaceId, async () => {
+        await deps.folderManager?.assertNoPendingMutation();
+        return registry.updateDisplayName(workspaceId, displayName);
+      });
+      if (!updated) return json(404, { error: `unknown workspace: ${workspaceId}` }, NO_STORE_HEADERS);
+      return json(200, {
+        workspace: {
+          id: updated.id,
+          displayName: updated.displayName,
+          path: updated.path,
+          backend: updated.backend,
+          running: sessions.isRunning(updated.id),
+        },
+      }, NO_STORE_HEADERS);
+    } catch (error) {
+      if (error instanceof FolderManagerError) return folderError(error);
+      return json(500, { error: "workspace display name could not be persisted" }, NO_STORE_HEADERS);
+    }
+  };
+
+  // POST /api/hub/settings/workspace-defaults — configure or clear (null)
+  // the Hub-wide default workspace parent.
+  const updateWorkspaceDefaults = async (request: Request): Promise<Response> => {
+    if (!deps.preferences) return json(503, { error: "workspace defaults are unavailable" }, NO_STORE_HEADERS);
+    let body: Record<string, unknown>;
+    try {
+      body = closedJsonObject(await request.json(), ["defaultWorkspaceParent"]);
+    } catch {
+      return json(400, { error: "invalid JSON body or unknown field" }, NO_STORE_HEADERS);
+    }
+    try {
+      if (body.defaultWorkspaceParent === null) {
+        await deps.preferences.clearDefaultWorkspaceParent();
+      } else {
+        await deps.preferences.setDefaultWorkspaceParent(body.defaultWorkspaceParent);
+      }
+    } catch (error) {
+      const invalid = error instanceof HubPreferencesError && error.code === "invalid-input";
+      return json(invalid ? 400 : 500, { error: error instanceof Error ? error.message : String(error) }, NO_STORE_HEADERS);
+    }
+    return json(200, await workspaceDefaultsState(), NO_STORE_HEADERS);
+  };
+
   // A clone is a user-owned, addressable job: creation returns immediately;
   // output is replayable SSE; input and cancellation are POST mutations.
   const createCloneJob = async (request: Request, owner: string): Promise<Response> => {
     let body: Record<string, unknown>;
     try {
-      body = closedJsonObject(await request.json(), ["url", "dest", "folderName", "credentialId", "retainAssignment"]);
+      body = closedJsonObject(await request.json(), [
+        "url", "dest", "folderName", "credentialId", "retainAssignment",
+        "displayName", "retainedAuthentication", "signing", "start",
+      ]);
     } catch {
       return json(400, { error: "invalid JSON body or unknown field" });
     }
@@ -585,9 +929,43 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (body.retainAssignment !== undefined && typeof body.retainAssignment !== "boolean") {
       return json(400, { error: "retainAssignment must be a boolean" });
     }
+    if (body.start !== undefined && typeof body.start !== "boolean") {
+      return json(400, { error: "start must be a boolean" });
+    }
+    // The workspace display name is independent of the checkout folder name;
+    // omitted, it defaults from the checkout folder at registration time.
+    let workspaceDisplayName: string | undefined;
+    if (body.displayName !== undefined) {
+      try {
+        workspaceDisplayName = validateWorkspaceDisplayName(body.displayName);
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    // Retained workspace authentication is a separate explicit choice from
+    // the clone identity; the legacy retainAssignment flag maps onto it.
+    let retainedAuthentication: Array<{ credentialId: string; host: string }>;
+    try {
+      retainedAuthentication = parseRetainedAuthentication(body.retainedAuthentication);
+    } catch (error) {
+      return json(400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    if (body.signing !== undefined && body.signing !== null && (typeof body.signing !== "string" || body.signing === "")) {
+      return json(400, { error: "signing must be a credential id" });
+    }
+    const signing = typeof body.signing === "string" ? body.signing : null;
     const credentialId = typeof body.credentialId === "string" ? body.credentialId : undefined;
     if (body.retainAssignment === true && !credentialId) {
       return json(400, { error: "retainAssignment requires credentialId" });
+    }
+    // Preflight the retained selections against the catalog so an invalid
+    // choice fails before a potentially long clone rather than after it.
+    if (deps.credentialApi && (retainedAuthentication.length > 0 || signing !== null)) {
+      try {
+        resolveOnboardingAssignments("preflight", { authentication: retainedAuthentication, signing }, deps.credentialApi.metadata.snapshot());
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : String(error) });
+      }
     }
     try {
       const credential = await cloneJobs.resolveCredential(url, credentialId);
@@ -595,11 +973,41 @@ export function createHubFetchHandler(deps: HubDeps) {
       // assignment; rejecting retention here beats cloning fully and then
       // rolling the registration back over an assign the metadata parser
       // was always going to refuse.
+      let retainedHost: string | undefined;
       if (body.retainAssignment === true && credential) {
         try {
-          normalizeProviderHost(credential.host);
+          retainedHost = normalizeProviderHost(credential.host);
         } catch {
           throw new Error(`selected credential cannot retain an assignment for this clone host: ${credential.host}`);
+        }
+      }
+      // Legacy retention flag: retain the clone identity as the workspace
+      // authentication default for its host — still an explicit request,
+      // never an implicit consequence of selecting a clone credential. The
+      // merge compares normalized hosts: the identical selection dedupes,
+      // and a different credential for the same logical host is a request
+      // conflict surfaced now — either variant slipping through would fail
+      // only after the clone completed, leaving the checkout unregistered.
+      // Decided here, with the other request validation: it reads the
+      // request fields and the credential metadata just resolved, and
+      // nothing the reservation or the journal fence protects — no registry,
+      // no disk. So it is settled before the target is reserved and long
+      // before the mkdir below, and a conflicting request cannot leave the
+      // destination hierarchy it named behind on disk.
+      const retained = [...retainedAuthentication];
+      if (retainedHost !== undefined && credential && deps.onboarding) {
+        const sameHost = retained.find(selection => {
+          try {
+            return normalizeProviderHost(selection.host) === retainedHost;
+          } catch {
+            return selection.host === retainedHost;
+          }
+        });
+        if (sameHost && sameHost.credentialId !== credential.credentialId) {
+          return json(400, { error: `retainAssignment conflicts with a retainedAuthentication selection for host: ${retainedHost}` });
+        }
+        if (!sameHost) {
+          retained.push({ credentialId: credential.credentialId, host: retainedHost });
         }
       }
       const resolvedDest = path.resolve(dest);
@@ -718,6 +1126,10 @@ export function createHubFetchHandler(deps: HubDeps) {
         job = cloneJobs.create(owner, url, target, {
           credential,
           retainAssignment: body.retainAssignment === true,
+          displayName: workspaceDisplayName,
+          retainedAuthentication: retained,
+          signing,
+          start: body.start === true,
           reservation,
         });
         return json(202, job);
@@ -948,7 +1360,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       const running = sessions.get(workspaceId);
       if (!running) {
-        return htmlResponse(stoppedSessionPage(workspaceId, registry.byId(workspaceId) !== undefined), 503);
+        return htmlResponse(stoppedSessionPage(workspaceId, registry.byId(workspaceId) !== undefined, registry.byId(workspaceId)?.displayName), 503);
       }
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         return upgradeToBridge(request, server, running);
@@ -971,6 +1383,10 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
     if (pathname === "/api/hub/browse" && request.method === "GET") {
       return browse(url);
+    }
+    if (pathname === "/api/hub/settings/workspace-defaults" && request.method === "GET") {
+      if (!deps.preferences) return json(503, { error: "workspace defaults are unavailable" }, NO_STORE_HEADERS);
+      return json(200, await workspaceDefaultsState(), NO_STORE_HEADERS);
     }
     if (pathname === CREDENTIAL_PATH && request.method === "GET" && credentialApi) {
       return json(200, { credentials: await credentialApi.listCredentials() }, { "cache-control": "no-store" });
@@ -1024,6 +1440,8 @@ export function createHubFetchHandler(deps: HubDeps) {
       const workspaceCredentialAssignments = /^\/api\/hub\/workspaces\/([^/]+)\/credential-assignments$/.exec(pathname);
       if (workspaceCredentialAssignments && credentialApi) {
         const headers = NO_STORE_HEADERS;
+        const fenced = await assignmentsFencedByOnboarding();
+        if (fenced) return fenced;
         try {
           const workspaceId = decodeURIComponent(workspaceCredentialAssignments[1]!);
           const body = await readCredentialJson(request);
@@ -1033,10 +1451,17 @@ export function createHubFetchHandler(deps: HubDeps) {
               ? [(value as Record<string, string>).credentialId]
               : [];
           });
-          const assignments = await sessions.runExclusive(workspaceId, () =>
-            withCredentialLocks(credentialIds, () => credentialApi.assignWorkspace(workspaceId, body)));
+          const assignments = await sessions.runExclusive(workspaceId, async () => {
+            await assertAssignmentsUnfenced();
+            return withCredentialLocks(credentialIds, () => credentialApi.assignWorkspace(workspaceId, body));
+          });
           return json(200, { assignments }, headers);
         } catch (error) {
+          if (error instanceof OnboardingAssignmentFenceError) return json(409, { error: error.message }, headers);
+          // The folder-journal fence raised under the queue; answered with
+          // the manager's own code (409 for a pending journal) rather than
+          // the credential mapping, whose heuristics would call it a 500.
+          if (error instanceof FolderManagerError) return folderError(error);
           const mapped = credentialApiError(error);
           return json(mapped.status, { error: mapped.message }, headers);
         }
@@ -1065,6 +1490,10 @@ export function createHubFetchHandler(deps: HubDeps) {
           if (action) {
             const credentialId = decodeURIComponent(action[1]!);
             const operation = action[2]!;
+            if (operation === "assign" || operation === "unassign" || operation === "delete") {
+              const fenced = await assignmentsFencedByOnboarding();
+              if (fenced) return fenced;
+            }
             if (operation === "unlock" || operation === "test") {
               const client = clientKeyForRateLimit(server.requestIP?.(request)?.address ?? null, request.headers.get("x-forwarded-for"));
               if (!credentialLimiter.allow(`${session.user}:${client}:passphrase`, 10)) return json(429, { error: "too many credential operations; wait a minute and try again" }, headers);
@@ -1084,8 +1513,10 @@ export function createHubFetchHandler(deps: HubDeps) {
             }
             if (operation === "assign") {
               const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
-              const assignment = await sessions.runExclusive(workspaceId, () =>
-                deps.credentialApi!.metadata.runExclusiveCredential(credentialId, () => credentialApi.assign(credentialId, body)));
+              const assignment = await sessions.runExclusive(workspaceId, async () => {
+                await assertAssignmentsUnfenced();
+                return deps.credentialApi!.metadata.runExclusiveCredential(credentialId, () => credentialApi.assign(credentialId, body));
+              });
               return json(200, { assignment }, headers);
             }
             if (operation === "unassign") {
@@ -1095,13 +1526,19 @@ export function createHubFetchHandler(deps: HubDeps) {
               // cannot slip between them and keep the removed credential
               // projected into a live session.
               if (body.stop === true) {
-                let removed = false;
-                await sessions.stop(workspaceId, async () => {
-                  removed = await credentialApi.unassign(credentialId, body);
+                // The same single lifecycle operation sessions.stop() would
+                // have taken, opened directly so the onboarding fence is
+                // rechecked BEFORE the stop: a refused unassignment must not
+                // leave the workspace stopped for a change it never made.
+                const removed = await sessions.runExclusive(workspaceId, async () => {
+                  await assertAssignmentsUnfenced();
+                  await sessions.stopWhileLifecycleQueueHeld(workspaceId);
+                  return credentialApi.unassign(credentialId, body);
                 });
                 return json(200, { removed }, headers);
               }
-              const removed = await sessions.runExclusive(workspaceId, () => {
+              const removed = await sessions.runExclusive(workspaceId, async () => {
+                await assertAssignmentsUnfenced();
                 // A running child keeps its projected credential
                 // configuration, and the Hub-side helper serves tokens by
                 // id — removing only the catalog assignment would report a
@@ -1116,6 +1553,10 @@ export function createHubFetchHandler(deps: HubDeps) {
             }
             if (operation === "test") return json(200, { results: await credentialApi.test(credentialId, body) }, headers);
             return json(200, { deleted: await revokeExclusive(credentialId, async () => {
+              // Deleting takes the assignments with it, so it rechecks the
+              // fence under the queues it acquired, like the assignment
+              // routes above.
+              await assertAssignmentsUnfenced();
               if (credentialApi.preflightProviderCliRevocation(credentialId, body, "delete")) {
                 await stopProviderCliSessions(credentialId);
               }
@@ -1123,6 +1564,9 @@ export function createHubFetchHandler(deps: HubDeps) {
             }) }, headers);
           }
         } catch (error) {
+          if (error instanceof OnboardingAssignmentFenceError) return json(409, { error: error.message }, headers);
+          // As above: the folder-journal fence keeps the manager's status.
+          if (error instanceof FolderManagerError) return folderError(error);
           const mapped = credentialApiError(error);
           return json(mapped.status, { error: mapped.message }, headers);
         }
@@ -1147,6 +1591,19 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       if (pathname === "/api/hub/workspaces") {
         return createWorkspace(request);
+      }
+      if (pathname === "/api/hub/workspaces/configure") {
+        return configureWorkspace(request);
+      }
+      if (pathname === "/api/hub/workspaces/create") {
+        return createConfiguredWorkspace(request);
+      }
+      const displayNameUpdate = /^\/api\/hub\/workspaces\/([^/]+)\/display-name$/.exec(pathname);
+      if (displayNameUpdate) {
+        return updateWorkspaceDisplayName(request, decodeURIComponent(displayNameUpdate[1]!));
+      }
+      if (pathname === "/api/hub/settings/workspace-defaults") {
+        return updateWorkspaceDefaults(request);
       }
       if (deps.folderManager) {
         if (pathname === "/api/hub/folders/create") return mutateFolder(request, "create");
@@ -1185,6 +1642,26 @@ export function createHubFetchHandler(deps: HubDeps) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
         }
         if (action[2] === "start") {
+          // A pending onboarding journal can cover a partially configured
+          // registration (an assignment commit whose rollback also
+          // failed); starting it would project the previous or empty
+          // assignment set. Frozen until recovery, like assignment
+          // mutations and folder changes.
+          if (deps.onboarding && await deps.onboarding.hasPendingRecovery()) {
+            return json(409, { error: "a pending onboarding requires Hub recovery before session starts" }, NO_STORE_HEADERS);
+          }
+          // A pending folder mutation freezes starts for the mirror-image
+          // reason: a registered rename or removal whose filesystem and
+          // registry halves diverged leaves the registry pointing at the
+          // journaled source path. Starting now either fails against a
+          // directory that is gone or — if something recreated that path —
+          // serves the workspace from unrelated content. Failing closed on
+          // an uninspectable journal, as the mutation routes do.
+          try {
+            await deps.folderManager?.assertNoPendingMutation();
+          } catch (error) {
+            return folderError(error);
+          }
           try {
             // Starting is fenced by the folder-mutation journal from inside
             // the workspace's lifecycle operation (see SessionManager.start):

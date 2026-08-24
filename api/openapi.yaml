@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 4.8.0-experimental
+  version: 5.8.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 4 and workspace revision 8
+  summary: Hub revision 5 and workspace revision 8
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -14,7 +14,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 4
+    hubApiRevision: 5
     workspaceApiRevision: 8
 servers:
   - url: https://{hubHost}
@@ -80,9 +80,10 @@ paths:
               schema: { $ref: '#/components/schemas/HubState' }
               example:
                 version: 0.5.1 (abcdef0)
-                hubApiRevision: 4
+                hubApiRevision: 5
                 workspaceApiRevision: 8
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 8, shells: [{ attached: false, label: zsh }] }]
+                workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 8, shells: [{ attached: false, label: zsh }] }]
+                workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -198,6 +199,12 @@ paths:
       operationId: hubCreateWorkspace
       tags: [Hub]
       summary: Register and optionally start a workspace
+      description: |
+        A registration that commits but whose recovery journal cannot be
+        cleared answers 200 with `recoveryRequired` instead of an error: the
+        workspace is registered and stopped, a requested start was not
+        attempted, and every further workspace change is refused until the
+        Hub restarts and recovers.
       requestBody:
         required: true
         content:
@@ -216,19 +223,178 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceConflict' }
         '500': { $ref: '#/components/responses/Error' }
+  /api/hub/workspaces/configure:
+    post:
+      operationId: hubConfigureWorkspace
+      tags: [Hub]
+      summary: Register an existing folder as a configured stopped workspace
+      description: |
+        Atomically commits the registration, display name, and selected
+        credential assignments before any optional start. The default start
+        intent is false; the normal result is a configured stopped workspace.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigureWorkspaceRequest' }
+            example: { path: /src/payments-service, displayName: Payments API, authentication: [{ credentialId: cred-1, host: github.com }], signing: cred-2, start: false }
+      responses:
+        '200':
+          description: The committed workspace and explicit start outcome.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceOnboardingResult' }
+              example: { workspace: { id: payments-service, displayName: Payments API, path: /src/payments-service, backend: local, running: false }, started: false, startError: null }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '409':
+          description: Already registered, path reserved, init confirmation required, credential selection conflict, or a pending recovery journal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceOnboardingError' }
+        '500':
+          description: Git initialization, persistence, or recovery failure. No partial registration or assignment is retained.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceOnboardingError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/workspaces/create:
+    post:
+      operationId: hubCreateConfiguredWorkspace
+      tags: [Hub]
+      summary: Create and register a new stopped Git workspace
+      description: |
+        Creates one visible child folder under an absolute parent without
+        replacing anything, runs `git init`, and commits the registration and
+        credential assignments as one result. Failures after initialization
+        retain the new repository and report its path for retry through the
+        configure operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateConfiguredWorkspaceRequest' }
+            example: { parent: /srv/workspaces, folderName: payments-service, displayName: Payments API, start: false }
+      responses:
+        '200':
+          description: The created, initialized, committed workspace.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceOnboardingResult' }
+              example: { workspace: { id: payments-service, displayName: Payments API, path: /srv/workspaces/payments-service, backend: local, running: false }, started: false, startError: null }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '409':
+          description: Destination exists, is reserved, a credential selection conflicts, or a pending recovery journal awaits Hub recovery.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceOnboardingError' }
+        '500':
+          description: Git initialization or persistence failure. `retainedPath` identifies an initialized repository that was kept.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceOnboardingError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/workspaces/{workspaceId}/display-name:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    post:
+      operationId: hubUpdateWorkspaceDisplayName
+      tags: [Hub]
+      summary: Rename a workspace display name
+      description: Changes only the mutable display name. Valid while the workspace is running or stopped; the session, folder, stable id, URL, personal state, and assignments are untouched. Refused with 409 while a recovery journal awaits Hub recovery; the check runs inside the workspace lifecycle operation, so a folder mutation cannot journal between it and the update.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWorkspaceDisplayNameRequest' }
+            example: { displayName: Payments API }
+      responses:
+        '200':
+          description: The updated workspace.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceSummaryResponse' }
+              example: { workspace: { id: payments-service, displayName: Payments API, path: /src/payments-service, backend: local, running: true } }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '409':
+          description: A pending recovery journal awaits Hub recovery. The journal records whole registry entries, display name included, and recovery restores them verbatim — so a rename admitted now would be silently reverted at the next restart.
+          headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: a pending recovery journal requires Hub recovery before further folder changes }
+        '500':
+          description: The validated name could not be persisted (a retryable registry save failure, not a request problem).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: workspace display name could not be persisted }
+  /api/hub/settings/workspace-defaults:
+    get:
+      operationId: hubGetWorkspaceDefaults
+      tags: [Hub]
+      summary: Read the default workspace parent preference
+      responses:
+        '200':
+          description: Configured and effective default workspace parent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceDefaults' }
+              example: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+    post:
+      operationId: hubUpdateWorkspaceDefaults
+      tags: [Hub]
+      summary: Configure or clear the default workspace parent
+      description: |
+        Requires an existing direct non-symbolic-link directory; the canonical
+        path is persisted Hub-wide. The default guides initial create, clone,
+        and browse locations only — it never constrains where workspaces may
+        be registered. Null clears the preference.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWorkspaceDefaultsRequest' }
+            example: { defaultWorkspaceParent: /srv/workspaces }
+      responses:
+        '200':
+          description: The resulting configured and effective values.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceDefaults' }
+              example: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/NoStoreError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/sessions/{workspaceId}/start:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     post:
       operationId: hubStartWorkspace
       tags: [Hub]
       summary: Start a registered workspace
-      description: Refused with 409 while a pending folder mutation awaits recovery; the check runs inside the workspace lifecycle operation, so a folder mutation cannot journal between it and the start.
+      description: Refused with 409 while a pending onboarding journal or a pending folder mutation awaits Hub recovery; the folder check also runs inside the workspace lifecycle operation, so a folder mutation cannot journal between it and the start.
       responses:
         '200': { $ref: '#/components/responses/WorkspaceAction' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
+        '409':
+          description: A pending onboarding journal or folder-mutation journal awaits Hub recovery; starts are refused so a partially configured workspace cannot run and so no session is spawned at a path recovery must still move or restore.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: a pending onboarding requires Hub recovery before session starts }
         '500': { $ref: '#/components/responses/Error' }
   /api/hub/sessions/{workspaceId}/stop:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
@@ -1234,12 +1400,14 @@ components:
         workspaces:
           type: array
           items: { $ref: '#/components/schemas/HubWorkspace' }
+        workspaceDefaults: { $ref: '#/components/schemas/WorkspaceDefaults' }
       additionalProperties: false
     HubWorkspace:
       type: object
-      required: [id, path, backend, running, credentialRestartRequired, credentialAssignments, workspaceApiRevision]
+      required: [id, displayName, path, backend, running, credentialRestartRequired, credentialAssignments, workspaceApiRevision]
       properties:
         id: { $ref: '#/components/schemas/WorkspaceId' }
+        displayName: { $ref: '#/components/schemas/WorkspaceDisplayName' }
         path: { type: string }
         backend: { type: string, const: local }
         running: { type: boolean }
@@ -1263,20 +1431,21 @@ components:
         parent: { type: [string, 'null'] }
         dirs:
           type: array
-          items: { type: object, required: [name, git, registeredId], properties: { name: { type: string }, git: { type: boolean }, registeredId: { oneOf: [{ $ref: '#/components/schemas/WorkspaceId' }, { type: 'null' }] } }, additionalProperties: false }
+          items: { type: object, required: [name, git, registeredId, displayName, running], properties: { name: { type: string }, git: { type: boolean }, registeredId: { oneOf: [{ $ref: '#/components/schemas/WorkspaceId' }, { type: 'null' }] }, displayName: { oneOf: [{ $ref: '#/components/schemas/WorkspaceDisplayName' }, { type: 'null' }], description: "Registered workspace display name; null for unregistered directories." }, running: { type: boolean, description: "Whether the registered workspace currently has a live session. Always false for unregistered directories." } }, additionalProperties: false }
       additionalProperties: false
     FolderName:
       type: string
       minLength: 1
-      pattern: '^(?!\.)(?![\s\S]*[\\/\x00-\x1f\x7f\p{Cf}])[\s\S]*\S[\s\S]*$'
+      pattern: '^(?!\.)(?![\s\S]*[\\/\p{Cc}\p{Cf}])[\s\S]*\S[\s\S]*$'
       description: >-
-        A visible, non-hidden single path segment. Dot-prefixed names, path separators, control characters,
-        Unicode format characters (Cf — the zero-width family, the bidi embedding and override controls, the
-        BOM, and the tag characters), and names made only of whitespace or format characters are rejected: none
-        of them survive a nonempty check, and a bidi control can make a folder display a name other than the
-        path it occupies. The pattern is a Unicode-mode expression, as JSON Schema requires, so its `\p{Cf}`
-        escape covers the format characters above the BMP as well; it accepts exactly the names the server
-        accepts.
+        A visible, non-hidden single path segment. Dot-prefixed names, path separators, control characters
+        (Cc — the C0 range, DEL, and the C1 range U+0080–U+009F), Unicode format characters (Cf — the
+        zero-width family, the bidi embedding and override controls, the BOM, and the tag characters), and
+        names made only of whitespace or format characters are rejected: none of them survive a nonempty
+        check, and a bidi control can make a folder display a name other than the path it occupies. The
+        pattern is a Unicode-mode expression, as JSON Schema requires, so its `\p{Cc}` and `\p{Cf}` escapes
+        cover the whole categories, format characters above the BMP included; it accepts exactly the names the
+        server accepts.
     CreateFolderRequest:
       type: object
       required: [parent, name]
@@ -1341,7 +1510,97 @@ components:
     WorkspaceAction:
       type: object
       required: [id]
-      properties: { id: { $ref: '#/components/schemas/WorkspaceId' }, running: { type: boolean }, wasRunning: { type: boolean }, forgotten: { type: boolean } }
+      properties:
+        id: { $ref: '#/components/schemas/WorkspaceId' }
+        running: { type: boolean }
+        wasRunning: { type: boolean }
+        forgotten: { type: boolean }
+        recoveryRequired: { type: string, description: "Registration only: the workspace committed but its recovery journal could not be cleared. The workspace is registered and stopped — any requested start was not attempted — and the Hub needs a restart before starts, assignment changes, folder mutations, and further registration resume." }
+      additionalProperties: false
+    WorkspaceDisplayName:
+      type: string
+      minLength: 1
+      maxLength: 64
+      description: Mutable human-facing workspace label. Trimmed, 1-64 visible characters, no control characters. Never unique and never part of URLs; the stable workspace id is the routing identity.
+    AuthenticationSelection:
+      type: object
+      required: [credentialId, host]
+      properties:
+        credentialId: { $ref: '#/components/schemas/CredentialId' }
+        host: { type: string, minLength: 1, description: Normalized provider host this credential becomes the authentication default for. }
+      additionalProperties: false
+    ConfigureWorkspaceRequest:
+      type: object
+      required: [path, displayName]
+      properties:
+        path: { type: string, minLength: 1, description: Absolute path of the existing direct non-symbolic-link folder to register. }
+        displayName: { $ref: '#/components/schemas/WorkspaceDisplayName' }
+        authentication: { type: array, items: { $ref: '#/components/schemas/AuthenticationSelection' }, description: At most one default per provider host. }
+        signing: { oneOf: [{ $ref: '#/components/schemas/CredentialId' }, { type: 'null' }], description: Default commit-signing credential. }
+        init: { type: boolean, default: false, description: Explicit confirmation to run `git init` on a non-Git folder. }
+        start: { type: boolean, default: false, description: "Explicit start intent. Omitted or false, the workspace finishes registered and stopped." }
+      additionalProperties: false
+    CreateConfiguredWorkspaceRequest:
+      type: object
+      required: [parent, folderName, displayName]
+      properties:
+        parent: { type: string, minLength: 1, description: Absolute path of the existing direct parent directory. }
+        folderName: { $ref: '#/components/schemas/FolderName' }
+        displayName: { $ref: '#/components/schemas/WorkspaceDisplayName' }
+        authentication: { type: array, items: { $ref: '#/components/schemas/AuthenticationSelection' } }
+        signing: { oneOf: [{ $ref: '#/components/schemas/CredentialId' }, { type: 'null' }] }
+        start: { type: boolean, default: false }
+      additionalProperties: false
+    OnboardedWorkspace:
+      type: object
+      required: [id, displayName, path, backend, running]
+      properties:
+        id: { $ref: '#/components/schemas/WorkspaceId' }
+        displayName: { $ref: '#/components/schemas/WorkspaceDisplayName' }
+        path: { type: string }
+        backend: { type: string, const: local }
+        running: { type: boolean }
+      additionalProperties: false
+    WorkspaceOnboardingResult:
+      type: object
+      required: [workspace, started, startError]
+      properties:
+        workspace: { $ref: '#/components/schemas/OnboardedWorkspace' }
+        started: { type: boolean }
+        startError: { type: [string, 'null'], description: "Non-null exactly when an explicitly requested start failed after the configuration committed; the workspace is preserved stopped for retry." }
+        recoveryRequired: { type: string, description: "Present when the configuration committed but its recovery journal could not be cleared: the workspace is preserved stopped, and the Hub needs a restart before starts, assignment changes, folder mutations, and further onboarding resume." }
+      additionalProperties: false
+    WorkspaceOnboardingError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, minLength: 1 }
+        needsInit: { type: boolean, const: true, description: The folder is not a Git repository; re-submit with init true after user confirmation. }
+        retainedPath: { type: string, description: "A created repository was initialized before the failure and is retained at this path; retry through the Existing folder flow." }
+      additionalProperties: false
+    UpdateWorkspaceDisplayNameRequest:
+      type: object
+      required: [displayName]
+      properties: { displayName: { $ref: '#/components/schemas/WorkspaceDisplayName' } }
+      additionalProperties: false
+    WorkspaceSummaryResponse:
+      type: object
+      required: [workspace]
+      properties: { workspace: { $ref: '#/components/schemas/OnboardedWorkspace' } }
+      additionalProperties: false
+    WorkspaceDefaults:
+      type: object
+      required: [configured, configuredAvailable, effective]
+      properties:
+        configured: { type: [string, 'null'], description: "The saved canonical default workspace parent, retained for diagnosis even while unavailable." }
+        configuredAvailable: { type: boolean, description: Whether the configured directory is currently a readable direct directory. }
+        effective: { type: string, description: "Where pathless browse/create/clone flows start: the configured parent while usable, the daemon user's home otherwise." }
+      additionalProperties: false
+    UpdateWorkspaceDefaultsRequest:
+      type: object
+      required: [defaultWorkspaceParent]
+      properties:
+        defaultWorkspaceParent: { type: [string, 'null'], description: "Absolute path of an existing direct non-symbolic-link directory, or null to clear the preference." }
       additionalProperties: false
     DeviceSessionList:
       type: object
@@ -1523,7 +1782,16 @@ components:
     CreateCloneJobRequest:
       type: object
       required: [url, dest]
-      properties: { url: { type: string }, dest: { type: string }, folderName: { type: string, description: "Checkout folder name, trimmed before use. Absent, blank, or whitespace-only derives it from the clone URL. Any other value must be one visible path segment — `.`, `..`, path separators, control characters, and Unicode format characters (Cf) answer 400 — but, unlike FolderName, a dot-prefixed checkout is accepted." }, credentialId: { $ref: '#/components/schemas/CredentialId' }, retainAssignment: { type: boolean, default: false } }
+      properties:
+        url: { type: string }
+        dest: { type: string }
+        folderName: { type: string, description: "Checkout folder name, independent of the workspace display name, trimmed before use. Absent, blank, or whitespace-only derives it from the clone URL. Any other value must be one visible path segment — `.`, `..`, path separators, control characters, and Unicode format characters (Cf) answer 400 — but, unlike FolderName, a dot-prefixed checkout is accepted." }
+        credentialId: { $ref: '#/components/schemas/CredentialId', description: Clone authentication identity. Never retained as a workspace assignment unless explicitly requested. }
+        retainAssignment: { type: boolean, default: false, description: Explicitly retain the clone credential as the workspace authentication default for its host. }
+        displayName: { $ref: '#/components/schemas/WorkspaceDisplayName', description: Workspace display name; defaults from the checkout folder name. }
+        retainedAuthentication: { type: array, items: { $ref: '#/components/schemas/AuthenticationSelection' }, description: "Workspace authentication defaults committed with the registration, independent of the clone identity." }
+        signing: { oneOf: [{ $ref: '#/components/schemas/CredentialId' }, { type: 'null' }], description: Default commit-signing credential committed with the registration. }
+        start: { type: boolean, default: false, description: "Explicit start-after-clone intent. Omitted or false, a successful clone finishes as a registered stopped workspace." }
       dependentSchemas:
         retainAssignment:
           if: { properties: { retainAssignment: { const: true } } }

@@ -4,7 +4,9 @@ import {
   type CloneCredentialResolver,
   type ResolvedCloneCredential,
 } from "./credential-context";
-import type { WorkspaceEntry } from "./registry";
+import { OnboardingError } from "./onboarding";
+import type { PersonalWorkspaceStateStore } from "./personal-state";
+import { defaultWorkspaceDisplayName, type WorkspaceEntry } from "./registry";
 import {
   normalizeAbsolutePath,
   PathReservationCoordinator,
@@ -13,8 +15,12 @@ import {
 
 export type CloneJobPhase = "cloning" | "registering" | "starting";
 export type CloneJobResult =
-  | { status: "succeeded"; workspaceId: string; target: string }
-  | { status: "clone-failed" | "register-failed" | "start-failed" | "cleanup-failed"; target: string; error: string }
+  // `running` distinguishes a stopped registered completion (the default)
+  // from an explicitly requested started one; only the latter navigates.
+  | { status: "succeeded"; workspaceId: string; target: string; running: boolean }
+  // A start-failed result carries the workspaceId when the configuration
+  // committed and the stopped workspace was preserved for retry.
+  | { status: "clone-failed" | "register-failed" | "start-failed" | "cleanup-failed"; target: string; error: string; workspaceId?: string }
   | { status: "cancelled" | "timed-out"; target: string; reason?: "inactivity" | "lifetime" };
 
 export type CloneJobEvent =
@@ -24,8 +30,25 @@ export type CloneJobEvent =
 
 type Registry = {
   byPath(target: string): WorkspaceEntry | undefined;
-  register(target: string): Promise<WorkspaceEntry>;
+  register(target: string, backend?: "local", displayName?: string): Promise<WorkspaceEntry>;
   remove(workspaceId: string): Promise<boolean>;
+};
+
+// The onboarding coordinator seam: clone completion commits registration
+// and the explicitly retained assignments as one coherent result, and
+// cancellation rollback removes whatever that commit installed.
+type CloneOnboarding = {
+  configureCloned(options: {
+    path: string;
+    displayName: string;
+    authentication: Array<{ credentialId: string; host: string }>;
+    signing: string | null;
+    // A requested first start runs inside the coordinator's
+    // lifecycle-protected commit; a separately queued start could run
+    // after a forget that observed the registration mid-commit.
+    start?: boolean;
+  }): Promise<{ entry: WorkspaceEntry; started?: boolean; startError?: string | null }>;
+  removeWorkspaceAssignments(workspaceId: string): Promise<unknown>;
 };
 
 // The lifecycle hooks mirror SessionManager: registration and assignment
@@ -48,6 +71,13 @@ export type CloneJobManagerOptions = {
   registry: Registry;
   sessions: Sessions;
   credentials?: CloneCredentialResolver;
+  onboarding?: CloneOnboarding;
+  // When present, cancellation rollback forgets the registration through
+  // the personal-state store's durable pending-forget record, so a crash
+  // between the registry removal and the retained-assignment removal is
+  // finished by startup recovery instead of leaving hidden assignments
+  // for an unregistered id.
+  personalState?: Pick<PersonalWorkspaceStateStore, "forgetWorkspace">;
   id?: () => string;
   timer?: CloneJobTimer;
   maxReplayBytes?: number;
@@ -80,6 +110,14 @@ type Job = {
   pendingOutput: string;
   retainAssignment: boolean;
   assigned: boolean;
+  // Independent workspace configuration: the display name is separate from
+  // the checkout folder, retained authentication is separate from the clone
+  // identity, and start is explicit intent defaulting off.
+  displayName?: string;
+  retainedAuthentication: Array<{ credentialId: string; host: string }>;
+  signing: string | null;
+  start: boolean;
+  assignedRetained: boolean;
   done: Promise<void>;
   resolveDone(): void;
   reservation: PathReservation;
@@ -98,6 +136,8 @@ export class CloneJobManager {
   private readonly registry: Registry;
   private readonly sessions: Sessions;
   private readonly credentials: CloneCredentialResolver;
+  private readonly onboarding?: CloneOnboarding;
+  private readonly personalState?: Pick<PersonalWorkspaceStateStore, "forgetWorkspace">;
   private readonly makeId: () => string;
   private readonly timer: CloneJobTimer;
   private readonly maxReplayBytes: number;
@@ -112,6 +152,8 @@ export class CloneJobManager {
     this.registry = options.registry;
     this.sessions = options.sessions;
     this.credentials = options.credentials ?? EMPTY_CLONE_CREDENTIAL_RESOLVER;
+    this.onboarding = options.onboarding;
+    this.personalState = options.personalState;
     this.makeId = options.id ?? (() => crypto.randomUUID());
     this.timer = options.timer ?? defaultTimer;
     this.maxReplayBytes = options.maxReplayBytes ?? 64 * 1024;
@@ -133,6 +175,10 @@ export class CloneJobManager {
     options: {
       credential?: ResolvedCloneCredential;
       retainAssignment?: boolean;
+      displayName?: string;
+      retainedAuthentication?: Array<{ credentialId: string; host: string }>;
+      signing?: string | null;
+      start?: boolean;
       reservation?: PathReservation;
     } = {},
   ): { jobId: string } {
@@ -163,6 +209,11 @@ export class CloneJobManager {
       pendingOutput: "",
       retainAssignment: options.retainAssignment === true,
       assigned: false,
+      displayName: options.displayName,
+      retainedAuthentication: options.retainedAuthentication ?? [],
+      signing: options.signing ?? null,
+      start: options.start === true,
+      assignedRetained: false,
       events: [],
       replayBytes: 0,
       nextEventId: 1,
@@ -325,18 +376,83 @@ export class CloneJobManager {
         });
         return;
       }
+      let commitStarted = false;
+      let commitStartError: string | null = null;
       try {
-        job.registered = await this.registry.register(job.target);
+        if (this.onboarding) {
+          // The coordinator commits registration and the explicitly retained
+          // assignments as one coherent result while this job still holds
+          // the target's path reservation. The clone identity is never
+          // retained implicitly — only selections listed here commit. A
+          // requested start rides inside the same lifecycle-protected
+          // commit so a forget queued mid-commit cannot slip before it.
+          const result = await this.onboarding.configureCloned({
+            path: job.target,
+            displayName: job.displayName ?? defaultWorkspaceDisplayName(job.target),
+            authentication: job.retainedAuthentication,
+            signing: job.signing,
+            start: job.start && !job.stop,
+          });
+          commitStarted = result.started === true;
+          commitStartError = result.startError ?? null;
+          job.registered = result.entry;
+          job.assignedRetained = job.retainedAuthentication.length > 0 || job.signing !== null;
+        } else {
+          job.registered = await this.registry.register(job.target, "local", job.displayName);
+        }
       } catch (error) {
-        await this.finish(job, job.stop ?? { status: "register-failed", target: job.target, error: errorText(error) });
+        const committed = error instanceof OnboardingError ? error.committedEntry : undefined;
+        if (!committed) {
+          await this.finish(job, job.stop ?? { status: "register-failed", target: job.target, error: errorText(error) });
+          return;
+        }
+        // Both stores committed and only the onboarding journal failed to
+        // clear: the workspace is fully registered and restart recovery
+        // will simply confirm it. Reporting a registration failure here
+        // would be false — the job reports the preserved stopped
+        // workspace, or honors a cancellation with a rollback that is
+        // itself reported as a cleanup failure.
+        job.registered = committed;
+        job.assignedRetained = job.retainedAuthentication.length > 0 || job.signing !== null;
+        if (job.stop) {
+          // The cancellation still rolls the commit back, and recovery
+          // stays coherent with that: it recognizes a committed journal
+          // entry by finding its registration, so a removed registration
+          // makes recovery restore the recorded previous state — no entry
+          // and the pre-commit assignments — which is exactly this
+          // rollback. What must not be hidden is the journal itself. It
+          // survives on disk and fences starts, folder mutations,
+          // assignment changes, and further onboarding until the Hub
+          // restarts, so this reports a cleanup failure rather than the
+          // plain cancellation a client would read as normal cleanup.
+          const rollbackError = await this.rollback(job, committed);
+          await this.finish(job, this.pendingJournalFailure(job, rollbackError));
+          return;
+        }
+        if (job.start) {
+          await this.finish(job, {
+            status: "start-failed",
+            target: job.target,
+            workspaceId: committed.id,
+            error: "workspace registered, but the Hub needs a restart to reconcile its onboarding journal before starting it",
+          });
+          return;
+        }
+        await this.finish(job, { status: "succeeded", workspaceId: committed.id, target: job.target, running: false });
         return;
       }
-      if (job.stop) {
+      // A cancellation that raced a commit whose requested start already
+      // ran must flow through the stop-then-rollback path below — a plain
+      // rollback would remove the registration under a running session.
+      if (job.stop && !commitStarted) {
         await this.finishAfterRollback(job, job.registered);
         return;
       }
 
-      if (job.credential && job.retainAssignment) {
+      // Legacy clone-credential retention: only for assemblies without the
+      // onboarding coordinator; the coordinator path commits retained
+      // selections above.
+      if (!this.onboarding && job.credential && job.retainAssignment) {
         try {
           await this.sessions.runExclusive(job.registered.id, () =>
             this.credentials.assign(job.registered!.id, job.credential!));
@@ -350,31 +466,60 @@ export class CloneJobManager {
           return;
         }
       }
-      if (job.stop) {
+      if (job.stop && !commitStarted) {
         await this.finishAfterRollback(job, job.registered);
         return;
       }
 
-      this.setPhase(job, "starting");
-      // undefined = the lifecycle hook never ran and the rollback still must.
-      let hookRollbackError: string | null | undefined;
-      try {
-        await this.sessions.start(job.registered.id, async () => {
-          hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
-        });
-      } catch (error) {
-        const rollbackError = hookRollbackError === undefined
-          ? await this.rollback(job, job.registered)
-          : hookRollbackError;
-        if (job.stop) {
-          await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
-          return;
-        }
-        const detail = rollbackError ? `${errorText(error)}; registration rollback failed: ${rollbackError}` : errorText(error);
-        await this.finish(job, { status: "start-failed", target: job.target, error: detail });
+      if (!job.start) {
+        // The default completion: a configured stopped workspace. No
+        // session, no navigation — the page offers Start and dashboard.
+        await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target, running: false });
         return;
       }
+
+      this.setPhase(job, "starting");
+      if (this.onboarding) {
+        // The requested start already ran inside the commit's lifecycle
+        // section; a failure preserved the stopped workspace. A start
+        // skipped because a cancellation raced the commit is treated as a
+        // failure of the cancelled job, resolved by the rollback below.
+        if (!commitStarted) {
+          if (job.stop) {
+            await this.finishAfterRollback(job, job.registered);
+            return;
+          }
+          await this.finish(job, {
+            status: "start-failed",
+            target: job.target,
+            error: commitStartError ?? "the requested start did not run",
+            workspaceId: job.registered.id,
+          });
+          return;
+        }
+      } else {
+        // undefined = the lifecycle hook never ran and the rollback still must.
+        let hookRollbackError: string | null | undefined;
+        try {
+          await this.sessions.start(job.registered.id, async () => {
+            hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
+          });
+        } catch (error) {
+          const rollbackError = hookRollbackError === undefined
+            ? await this.rollback(job, job.registered)
+            : hookRollbackError;
+          if (job.stop) {
+            await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
+            return;
+          }
+          const detail = rollbackError ? `${errorText(error)}; registration rollback failed: ${rollbackError}` : errorText(error);
+          await this.finish(job, { status: "start-failed", target: job.target, error: detail });
+          return;
+        }
+      }
       if (job.stop) {
+        // undefined = the lifecycle hook never ran and the rollback still must.
+        let hookRollbackError: string | null | undefined;
         try {
           await this.sessions.stop(job.registered.id, async () => {
             hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
@@ -393,7 +538,7 @@ export class CloneJobManager {
         await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
         return;
       }
-      await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target });
+      await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target, running: true });
     } catch (error) {
       if (job.process) await this.terminateProcess(job).catch(() => undefined);
       await this.finish(job, { status: "clone-failed", target: job.target, error: errorText(error) });
@@ -483,7 +628,32 @@ export class CloneJobManager {
         job.assigned = false;
         unassigned = true;
       }
-      if (!(await this.registry.remove(entry.id))) throw new Error("workspace registration was not removed");
+      // Retained assignments are removed only AFTER the registration is
+      // gone: a failed registry removal (which the registry rolls back
+      // itself) must leave the still-registered workspace with its full
+      // committed configuration, never registered-but-stripped. With the
+      // personal-state store, both steps run under its durable
+      // pending-forget record, so a crash between them is finished by
+      // startup recovery instead of leaving hidden assignments for an
+      // unregistered id.
+      if (this.personalState) {
+        await this.personalState.forgetWorkspace(
+          entry.id,
+          () => this.registry.remove(entry.id),
+          async () => {
+            if (job.assignedRetained && this.onboarding) {
+              await this.onboarding.removeWorkspaceAssignments(entry.id);
+            }
+          },
+        );
+        job.assignedRetained = false;
+      } else {
+        if (!(await this.registry.remove(entry.id))) throw new Error("workspace registration was not removed");
+        if (job.assignedRetained && this.onboarding) {
+          await this.onboarding.removeWorkspaceAssignments(entry.id);
+          job.assignedRetained = false;
+        }
+      }
       return null;
     } catch (error) {
       if (unassigned && job.credential) {
@@ -501,6 +671,22 @@ export class CloneJobManager {
   private async finishAfterRollback(job: Job, entry: WorkspaceEntry): Promise<void> {
     const rollbackError = await this.rollback(job, entry);
     await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop!);
+  }
+
+  // A cancellation that raced a commit whose journal could not be cleared:
+  // the required Hub restart travels in the result's error, the one channel
+  // a stopped job can still report through (finish() collapses every other
+  // status back to the cancellation).
+  private pendingJournalFailure(job: Job, rollbackError: string | null): CloneJobResult {
+    const restart = "the Hub must be restarted to reconcile its onboarding journal before starts, "
+      + "folder mutations, assignment changes, and further onboarding resume";
+    return {
+      status: "cleanup-failed",
+      target: job.target,
+      error: rollbackError
+        ? `clone cancellation could not remove the workspace registration: ${rollbackError}; ${restart}`
+        : `the cancelled clone's workspace registration was rolled back, but ${restart}`,
+    };
   }
 
   private rollbackFailure(job: Job, error: string): CloneJobResult {

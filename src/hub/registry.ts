@@ -19,7 +19,41 @@ export type WorkspaceEntry = {
   // Absolute path of the workspace folder on the hub host.
   path: string;
   backend: WorkspaceBackend;
+  // Mutable human-facing label. Unlike `id` it may change at any time, may
+  // duplicate another workspace's name, and never participates in routing.
+  displayName: string;
 };
+
+export const WORKSPACE_DISPLAY_NAME_MAX_LENGTH = 64;
+
+// A display name is a trimmed human label of 1-64 visible code points with
+// no control characters. Uniqueness is deliberately NOT required — stable
+// ids and paths disambiguate.
+export function validateWorkspaceDisplayName(value: unknown): string {
+  if (typeof value !== "string") throw new Error("workspace display name must be a string");
+  const trimmed = value.trim();
+  if (trimmed === "") throw new Error("workspace display name must not be empty");
+  // Cf covers invisible formatting: zero-width characters (a name of only
+  // those renders blank yet passes the emptiness check) and bidi overrides
+  // (which can visually spoof other workspace labels).
+  if (/[\p{Cc}\p{Cf}]/u.test(trimmed)) throw new Error("workspace display name must not contain control or formatting characters");
+  if ([...trimmed].length > WORKSPACE_DISPLAY_NAME_MAX_LENGTH) {
+    throw new Error(`workspace display name must be at most ${WORKSPACE_DISPLAY_NAME_MAX_LENGTH} characters`);
+  }
+  return trimmed;
+}
+
+// Deterministic default for entries registered (or persisted) before display
+// names existed: the folder basename, sanitized just enough to satisfy
+// validation.
+export function defaultWorkspaceDisplayName(folderPath: string): string {
+  // Cc AND Cf: generated defaults must satisfy the same invariant as
+  // user-supplied names — a basename of zero-width characters would
+  // otherwise migrate into a blank (or bidi-spoofed) persisted name.
+  const base = path.basename(folderPath).replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
+  const bounded = [...base].slice(0, WORKSPACE_DISPLAY_NAME_MAX_LENGTH).join("").trim();
+  return bounded === "" ? "workspace" : bounded;
+}
 
 export type RegistryData = {
   workspaces: WorkspaceEntry[];
@@ -72,14 +106,33 @@ export class WorkspaceRegistry {
       this.workspaces = [];
       return;
     }
-    this.workspaces = workspaces.filter(
-      (entry): entry is WorkspaceEntry =>
-        typeof entry === "object" &&
-        entry !== null &&
-        typeof (entry as WorkspaceEntry).id === "string" &&
-        typeof (entry as WorkspaceEntry).path === "string" &&
-        (entry as WorkspaceEntry).backend === "local",
-    );
+    let migrated = false;
+    this.workspaces = workspaces
+      .filter(
+        (entry): entry is { id: string; path: string; backend: "local"; displayName?: unknown } =>
+          typeof entry === "object" &&
+          entry !== null &&
+          typeof (entry as WorkspaceEntry).id === "string" &&
+          typeof (entry as WorkspaceEntry).path === "string" &&
+          (entry as WorkspaceEntry).backend === "local",
+      )
+      .map(entry => {
+        let displayName: string;
+        try {
+          displayName = validateWorkspaceDisplayName(entry.displayName);
+        } catch {
+          // Pre-display-name snapshot (or a hand-mangled one): default from
+          // the basename without touching id or path.
+          displayName = defaultWorkspaceDisplayName(entry.path);
+          migrated = true;
+        }
+        return { id: entry.id, path: entry.path, backend: "local" as const, displayName };
+      });
+    if (migrated) {
+      // Persist the derived names through the serialized writer so the file
+      // reaches the new schema exactly once, atomically.
+      await this.enqueueMutation(() => this.save());
+    }
   }
 
   // Persist the current state atomically. Only ever called from inside the
@@ -161,7 +214,11 @@ export class WorkspaceRegistry {
       if (entries.some(entry => !path.isAbsolute(entry.path))) {
         throw new Error("invalid workspace recovery entry");
       }
-      const restored = entries.map(entry => ({ ...entry, path: normalizeAbsolutePath(entry.path) }));
+      const restored = entries.map(entry => ({
+        ...entry,
+        path: normalizeAbsolutePath(entry.path),
+        displayName: validateWorkspaceDisplayName(entry.displayName),
+      }));
       if (restored.some(entry => entry.backend !== "local")) {
         throw new Error("invalid workspace recovery entry");
       }
@@ -201,15 +258,22 @@ export class WorkspaceRegistry {
   // workspaces root; existence is checked at the API boundary, so an entry
   // whose folder later disappears stays registered (surfacing as a failed
   // start, never a silent forget).
-  register(folderPath: string, backend: WorkspaceBackend = "local"): Promise<WorkspaceEntry> {
-    return this.registerWithStatus(folderPath, backend).then(result => result.entry);
+  register(folderPath: string, backend: WorkspaceBackend = "local", displayName?: string): Promise<WorkspaceEntry> {
+    return this.registerWithStatus(folderPath, backend, displayName).then(result => result.entry);
   }
 
-  registerWithStatus(folderPath: string, backend: WorkspaceBackend = "local"): Promise<{ entry: WorkspaceEntry; created: boolean }> {
+  registerWithStatus(
+    folderPath: string,
+    backend: WorkspaceBackend = "local",
+    displayName?: string,
+  ): Promise<{ entry: WorkspaceEntry; created: boolean }> {
     return this.enqueueMutation(async () => {
       if (!path.isAbsolute(folderPath)) {
         throw new Error(`workspace path must be absolute: ${folderPath}`);
       }
+      const validatedName = displayName === undefined
+        ? defaultWorkspaceDisplayName(folderPath)
+        : validateWorkspaceDisplayName(displayName);
       const existing = this.byPath(folderPath);
       if (existing) {
         return { entry: existing, created: false };
@@ -223,7 +287,7 @@ export class WorkspaceRegistry {
         suffix += 1;
       }
 
-      const entry: WorkspaceEntry = { id, path: folderPath, backend };
+      const entry: WorkspaceEntry = { id, path: folderPath, backend, displayName: validatedName };
       this.workspaces.push(entry);
       try {
         await this.save();
@@ -235,6 +299,28 @@ export class WorkspaceRegistry {
         throw error;
       }
       return { entry, created: true };
+    });
+  }
+
+  // Updates only the display name. Deliberately outside session lifecycle and
+  // folder-mutation coordination: a rename has no filesystem or process side
+  // effect, so it is safe while the workspace is running or stopped.
+  updateDisplayName(id: string, displayName: string): Promise<WorkspaceEntry | undefined> {
+    return this.enqueueMutation(async () => {
+      const validated = validateWorkspaceDisplayName(displayName);
+      const index = this.workspaces.findIndex(entry => entry.id === id);
+      if (index === -1) return undefined;
+      const previous = this.workspaces;
+      const current = previous[index]!;
+      if (current.displayName === validated) return { ...current };
+      this.workspaces = previous.map(entry => (entry.id === id ? { ...entry, displayName: validated } : entry));
+      try {
+        await this.save();
+      } catch (error) {
+        this.workspaces = previous;
+        throw error;
+      }
+      return { ...this.workspaces[index]! };
     });
   }
 
