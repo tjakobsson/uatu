@@ -2,7 +2,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 
 import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate } from "./normalization";
+import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate, type NormalizedSessionLifecycle } from "./normalization";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
 import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderAttachment, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
@@ -34,7 +35,14 @@ const DEFAULT_PAGE_SIZE = 50;
 // Sized so reconstructAttribution reads a whole subagent transcript in one
 // call in practice; its cursor loop is the backstop, not the plan.
 const RECONSTRUCTION_READ_LIMIT = 10_000;
+const INVENTORY_SESSION_LIMIT = 2_048;
 type MessageModel = { model: string; createdAt: number };
+type InventorySessionMetadata = {
+  inWorkspace: boolean;
+  parentId: string | null;
+  title: string;
+  deleted: boolean;
+};
 
 export class InteractionConflictError extends Error {
   constructor(message = "interaction request is stale or already resolved") {
@@ -174,6 +182,8 @@ export class OpenCodeChatAdapter {
   private readonly questionCreatedAt = new Map<string, number>();
   private readonly permissionCreatedAt = new Map<string, number>();
   private readonly sessionParents = new Map<string, string | null>();
+  private readonly inventorySessions = new Map<string, InventorySessionMetadata>();
+  private readonly inventory = new ConversationInventoryBroadcaster();
   // Conversations with a turn in flight, tracked at the adapter so the fact
   // survives projection eviction. This is what distinguishes "the store says
   // running because OpenCode died mid-turn" from "running right now".
@@ -227,6 +237,8 @@ export class OpenCodeChatAdapter {
   private readonly providerEventMemory = createProviderEventMemory();
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
+  private disposalPromise: Promise<void> | null = null;
+  private disposed = false;
 
   constructor(options: ChatAdapterOptions) {
     this.provider = options.provider;
@@ -250,11 +262,12 @@ export class OpenCodeChatAdapter {
     const sessions = await this.provider.listSessions();
     const accepted: ConversationSummary[] = [];
     for (let session of sessions) {
-      if (!await isSessionInWorkspace(session.directory, this.workspacePath)) continue;
+      const metadata = await this.classifyInventorySession(session);
+      if (!metadata.inWorkspace) continue;
       // Subagent children stay out of the picker: they are reached from the
       // parent's subagent rows, and listing them as peers buries the real
       // conversations under machine-titled entries.
-      if (session.parentId) continue;
+      if (metadata.parentId) continue;
       if (this.provider.renameSession && isDefaultConversationTitle(session.title)) {
         try {
           let page = await this.provider.listMessages(session.id, { limit: 100 });
@@ -269,7 +282,11 @@ export class OpenCodeChatAdapter {
             .filter(item => item.type === "user_message" && item.text.trim())
             .sort((left, right) => left.createdAt - right.createdAt)[0];
           if (firstUserMessage?.type === "user_message") {
-            session = await this.provider.renameSession(session.id, deriveConversationTitle(firstUserMessage.text));
+            const renamed = await this.provider.renameSession(session.id, deriveConversationTitle(firstUserMessage.text));
+            const renamedMetadata = await this.classifyInventorySession(renamed);
+            if (!renamedMetadata.inWorkspace) throw new ConversationNotFoundError();
+            this.rememberInventorySession(renamed.id, renamedMetadata, true);
+            session = renamed;
           }
         } catch {
           // A title repair must not make an otherwise usable conversation disappear.
@@ -298,8 +315,9 @@ export class OpenCodeChatAdapter {
 
   async createConversation(): Promise<ConversationSnapshot> {
     const configuration = this.newConversationDefaults ?? await this.provider.newConversationConfiguration();
-    const session = await this.provider.createSession(this.id(), configuration);
-    await this.requireSession(session.id);
+    const created = await this.provider.createSession(this.id(), configuration);
+    const session = await this.requireSession(created.id);
+    this.rememberInventorySession(session.id, await this.classifyInventorySession(session), true);
     const projection = this.projection(session.id);
     this.configurations.set(session.id, configuration);
     return {
@@ -500,7 +518,12 @@ export class OpenCodeChatAdapter {
     return { snapshot: handoff.snapshot, events: handoff.subscription };
   }
 
+  subscribeInventory(signal?: AbortSignal): ConversationInventorySubscription {
+    return this.inventory.subscribe(signal);
+  }
+
   startEventPump(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     if (this.pumpPromise) return this.pumpPromise;
     const controller = new AbortController();
     this.pumpController = controller;
@@ -512,6 +535,7 @@ export class OpenCodeChatAdapter {
       this.pumpController = null;
       this.pumpPromise = null;
     });
+    this.inventory.invalidate();
     return this.pumpPromise;
   }
 
@@ -520,6 +544,13 @@ export class OpenCodeChatAdapter {
     await this.pumpPromise?.catch(error => {
       if (!isAbortError(error)) throw error;
     });
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposalPromise) return this.disposalPromise;
+    this.disposed = true;
+    this.inventory.dispose();
+    return this.disposalPromise = this.stopEventPump();
   }
 
   async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
@@ -756,7 +787,9 @@ export class OpenCodeChatAdapter {
           session = await this.requireSession(conversationId);
           if (isDefaultConversationTitle(session.title)) {
             session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
-            if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
+            const metadata = await this.classifyInventorySession(session);
+            if (!metadata.inWorkspace) throw new ConversationNotFoundError();
+            this.rememberInventorySession(session.id, metadata, true);
             conversation = this.summary(session, projection.status);
             projection.replay.publish({ type: "conversation.updated", conversation });
           }
@@ -914,7 +947,9 @@ export class OpenCodeChatAdapter {
     return this.receipts.run(`rename:${conversationId}:${requestId}`, async () => {
       await this.requireSession(conversationId);
       const renamed = await this.provider.renameSession!(conversationId, title);
-      if (!await isSessionInWorkspace(renamed.directory, this.workspacePath)) throw new ConversationNotFoundError();
+      const metadata = await this.classifyInventorySession(renamed);
+      if (!metadata.inWorkspace) throw new ConversationNotFoundError();
+      this.rememberInventorySession(renamed.id, metadata, true);
       const conversation = this.summary(renamed);
       this.projection(conversationId).replay.publish({ type: "conversation.updated", conversation });
       return { conversation };
@@ -1157,7 +1192,7 @@ export class OpenCodeChatAdapter {
     const known = this.sessionParents.get(id);
     if (known !== undefined) return known;
     const parentId = (await this.provider.getSession(id))?.parentId ?? null;
-    this.sessionParents.set(id, parentId);
+    boundedSet(this.sessionParents, id, parentId, INVENTORY_SESSION_LIMIT);
     return parentId;
   }
 
@@ -1301,6 +1336,13 @@ export class OpenCodeChatAdapter {
         }
         if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
           this.countDiscard(normalized.outcome, normalized.eventType);
+        }
+        if (normalized.sessionLifecycle) {
+          await this.applySessionLifecycle(normalized.sessionLifecycle);
+          if (signal.aborted) break;
+          // A deleted session is already gone. Its event metadata is the full
+          // confinement and parentage authority; never follow it with a lookup.
+          if (normalized.sessionLifecycle.kind === "deleted") continue;
         }
         if (!normalized.conversationId) continue;
         // An event with no timeline updates can still carry a child's model
@@ -1505,6 +1547,40 @@ export class OpenCodeChatAdapter {
     return session;
   }
 
+  private async classifyInventorySession(
+    session: Pick<ProviderSession, "id" | "title" | "directory" | "parentId">,
+    deleted = false,
+  ): Promise<InventorySessionMetadata> {
+    const parentId = session.parentId ?? null;
+    boundedSet(this.sessionParents, session.id, parentId, INVENTORY_SESSION_LIMIT);
+    return {
+      inWorkspace: await isSessionInWorkspace(session.directory, this.workspacePath),
+      parentId,
+      title: session.title,
+      deleted,
+    };
+  }
+
+  private rememberInventorySession(id: string, next: InventorySessionMetadata, invalidate: boolean): void {
+    const previous = this.inventorySessions.get(id);
+    boundedSet(this.inventorySessions, id, next, INVENTORY_SESSION_LIMIT);
+    if (!invalidate) return;
+    const wasVisible = inventoryVisible(previous);
+    const isVisible = inventoryVisible(next);
+    if (wasVisible !== isVisible || (isVisible && previous?.title !== next.title)) this.inventory.invalidate();
+  }
+
+  private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<void> {
+    const next = await this.classifyInventorySession(lifecycle, lifecycle.kind === "deleted");
+    const previous = this.inventorySessions.get(lifecycle.id);
+    const eventDescribesVisibleSession = next.inWorkspace && next.parentId === null;
+    const relevantDeletion = lifecycle.kind === "deleted"
+      && previous?.deleted !== true
+      && (inventoryVisible(previous) || eventDescribesVisibleSession);
+    this.rememberInventorySession(lifecycle.id, next, lifecycle.kind !== "deleted");
+    if (relevantDeletion) this.inventory.invalidate();
+  }
+
   private async configuration(id: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration> {
     const cached = this.configurations.get(id);
     if (cached) return cached;
@@ -1563,6 +1639,10 @@ export class OpenCodeChatAdapter {
   private summary(session: ProviderSession, status: ConversationStatus = this.projections.get(session.id)?.status ?? "idle"): ConversationSummary {
     return { id: session.id, title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt, status };
   }
+}
+
+function inventoryVisible(metadata: InventorySessionMetadata | undefined): boolean {
+  return metadata?.inWorkspace === true && metadata.parentId === null && !metadata.deleted;
 }
 
 /** A `question` tool part moving in any direction: asked, answered, or failed. */

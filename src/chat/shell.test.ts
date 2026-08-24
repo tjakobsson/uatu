@@ -57,5 +57,10 @@ describe("chat shell accessibility", () => {
     expect(html).not.toContain("New agent");
     expect(document.querySelector("#chat-command-menu")?.getAttribute("role")).toBe("listbox");
     expect(document.querySelector("#chat-input")?.getAttribute("aria-controls")).toBe("chat-command-menu");
+    expect(document.querySelector("#chat-conversation-unseen-count")?.tagName).toBe("BUTTON");
+    expect(document.querySelector("#chat-conversation-unseen-count .chat-conversation-unseen-number")).not.toBeNull();
+    expect(document.querySelector("#chat-conversation-inventory-live")?.getAttribute("aria-live")).toBe("polite");
+    expect(document.querySelector("#chat-conversation-inventory-live")?.getAttribute("aria-atomic")).toBe("true");
+    expect(document.querySelector("#chat-conversation-unavailable")?.getAttribute("role")).toBe("status");
   });
 });

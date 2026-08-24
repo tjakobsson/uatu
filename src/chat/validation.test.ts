@@ -5,6 +5,7 @@ import {
   parseChatCommand,
   parseChatEvent,
   parseChatModel,
+  parseConversationInventoryEvent,
   parseConversationItem,
   parseConversationConfiguration,
   parseConversationSnapshot,
@@ -126,6 +127,15 @@ describe("chat domain validation", () => {
       { ...base, sequence: 9, type: "resync", reason: "retention-gap" },
     ];
     for (const event of events) expect(parseChatEvent(event)).toBeDefined();
+  });
+
+  test("accepts only the normalized conversation inventory event", () => {
+    expect(parseConversationInventoryEvent({ type: "conversation.inventory" })).toEqual({
+      type: "conversation.inventory",
+    });
+    expect(() => parseConversationInventoryEvent({ type: "conversation.created" })).toThrow(/type/);
+    expect(() => parseConversationInventoryEvent({ type: "conversation.inventory", conversationId: "c1" })).toThrow(/unknown/);
+    expect(() => parseConversationInventoryEvent(null)).toThrow(/object/);
   });
 
   test("rejects malformed identities, statuses, ordering, and unknown variants", () => {

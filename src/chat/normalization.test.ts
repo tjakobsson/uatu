@@ -145,6 +145,144 @@ describe("OpenCode v2 normalization", () => {
   });
 });
 
+describe("session lifecycle normalization", () => {
+  const baseSession = {
+    id: "ses_inventory",
+    directory: "/workspace/project",
+    title: "Inventory work",
+    time: { created: 100, updated: 200 },
+  };
+
+  for (const kind of ["created", "updated", "deleted"] as const) {
+    for (const envelope of ["data", "properties"] as const) {
+      test(`normalizes session.${kind} from the ${envelope} envelope`, () => {
+        const info = envelope === "data"
+          ? { ...baseSession, parentID: "ses_parent" }
+          : { ...baseSession, parentId: "ses_parent" };
+        const normalized = normalizeProviderEvent({
+          id: `${envelope}-${kind}`,
+          type: `session.${kind}`,
+          [envelope]: { ...(envelope === "data" ? { sessionID: baseSession.id } : {}), info },
+        });
+
+        expect(normalized).toEqual({
+          conversationId: baseSession.id,
+          updates: [],
+          outcome: "handled",
+          eventType: `session.${kind}`,
+          sessionLifecycle: {
+            kind,
+            id: baseSession.id,
+            directory: baseSession.directory,
+            title: baseSession.title,
+            parentId: "ses_parent",
+          },
+        });
+      });
+    }
+  }
+
+  test("keeps session.updated configuration behavior beside lifecycle metadata", () => {
+    const native = normalizeProviderEvent({
+      type: "session.updated",
+      data: {
+        sessionID: baseSession.id,
+        info: {
+          ...baseSession,
+          agent: "plan",
+          model: { providerID: "anthropic", id: "claude-sonnet", variant: "high" },
+        },
+      },
+    });
+    expect(native).toEqual(expect.objectContaining({
+      outcome: "handled",
+      configuration: {
+        mode: "plan",
+        model: { providerId: "anthropic", modelId: "claude-sonnet" },
+        variant: "high",
+      },
+      replaceModel: true,
+      sessionLifecycle: expect.objectContaining({ kind: "updated", id: baseSession.id }),
+    }));
+
+    const compatibility = normalizeProviderEvent({
+      type: "session.updated",
+      properties: {
+        info: {
+          ...baseSession,
+          agent: "build",
+          providerID: "openai",
+          modelID: "gpt-5.6-sol",
+          variant: "default",
+        },
+      },
+    });
+    expect(compatibility).toEqual(expect.objectContaining({
+      conversationId: baseSession.id,
+      outcome: "handled",
+      configuration: {
+        mode: "build",
+        model: { providerId: "openai", modelId: "gpt-5.6-sol" },
+      },
+      replaceModel: true,
+    }));
+    expect(compatibility.configuration).not.toHaveProperty("variant");
+  });
+
+  test("does not include timestamps in inventory identity", () => {
+    const lifecycle = (created: number, updated: number) => normalizeProviderEvent({
+      type: "session.updated",
+      data: { info: { ...baseSession, time: { created, updated } } },
+    }).sessionLifecycle;
+
+    expect(lifecycle(1, 2)).toEqual(lifecycle(10_000, 20_000));
+    expect(lifecycle(1, 2)).toEqual({
+      kind: "updated",
+      id: baseSession.id,
+      directory: baseSession.directory,
+      title: baseSession.title,
+    });
+  });
+
+  test("accepts location directories and an explicitly empty parent as top-level metadata", () => {
+    const normalized = normalizeProviderEvent({
+      type: "session.created",
+      properties: {
+        info: {
+          id: "ses_location",
+          location: { directory: "/workspace/location" },
+          title: "Located session",
+          parentID: "",
+        },
+      },
+    });
+
+    expect(normalized.sessionLifecycle).toEqual({
+      kind: "created",
+      id: "ses_location",
+      directory: "/workspace/location",
+      title: "Located session",
+    });
+    expect(normalized.outcome).toBe("handled");
+  });
+
+  test("reports malformed recognized lifecycle events as unparseable", () => {
+    const malformed = [
+      { type: "session.created", data: { sessionID: "ses_missing_info" } },
+      { type: "session.updated", properties: { info: { ...baseSession, directory: undefined } } },
+      { type: "session.deleted", data: { info: { ...baseSession, title: undefined } } },
+      { type: "session.deleted", properties: { info: { ...baseSession, parentID: 42 } } },
+    ];
+
+    for (const event of malformed) {
+      const normalized = normalizeProviderEvent(event);
+      expect(normalized.outcome).toBe("unparseable");
+      expect(normalized.updates).toEqual([]);
+      expect(normalized.sessionLifecycle).toBeUndefined();
+    }
+  });
+});
+
 describe("provider text reconciliation", () => {
   test("deduplicates overlap, replay, and a cumulative update arriving after a delta", () => {
     const text = new ProviderTextReconciler();

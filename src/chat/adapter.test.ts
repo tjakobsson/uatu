@@ -15,6 +15,7 @@ import { UnsupportedVariantSelectionError } from "./provider";
 import type { ChatEvent, ChatModel, ConversationItem, ModelSelection } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
+import type { ConversationInventorySubscription } from "./inventory-broadcaster";
 
 class EventQueue implements AsyncIterable<ProviderEvent> {
   private values: ProviderEvent[] = [];
@@ -123,6 +124,15 @@ function applyEvent(adapter: OpenCodeChatAdapter, conversationId: string, event:
   for (const update of normalizeProviderEvent(event).updates) adapter.projectionForTests(conversationId).apply(update);
 }
 
+async function expectInventorySignal(subscription: ConversationInventorySubscription): Promise<void> {
+  const result = await Promise.race([
+    subscription.next(),
+    Bun.sleep(500).then(() => "timeout" as const),
+  ]);
+  expect(result).not.toBe("timeout");
+  expect((result as IteratorResult<void>).done).toBe(false);
+}
+
 describe("OpenCode conversation inventory and history", () => {
   test("repairs a persisted default title from its first user message", async () => {
     const provider = new FakeProvider();
@@ -137,8 +147,12 @@ describe("OpenCode conversation inventory and history", () => {
       return renamed;
     };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
 
     expect((await adapter.listConversations())[0]?.title).toBe("Investigate authenticated model discovery");
+    await expectInventorySignal(inventory);
+    inventory.cancel();
   });
 
   test("repairs a persisted default title from before the newest message page", async () => {
@@ -153,8 +167,12 @@ describe("OpenCode conversation inventory and history", () => {
       return renamed;
     };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
 
     expect((await adapter.listConversations())[0]?.title).toBe("Name the conversation from this prompt");
+    await expectInventorySignal(inventory);
+    inventory.cancel();
   });
 
 
@@ -263,6 +281,8 @@ describe("OpenCode conversation inventory and history", () => {
     const provider = new FakeProvider();
     provider.newConfiguration = { model: { providerId: "recent", modelId: "model" }, mode: "build" };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "created" });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
     const created = await adapter.createConversation();
     expect(created).toEqual(expect.objectContaining({
       conversation: expect.objectContaining({ id: "created" }),
@@ -272,6 +292,8 @@ describe("OpenCode conversation inventory and history", () => {
     }));
     expect((await adapter.history("created")).configuration).toEqual(provider.newConfiguration);
     expect(await adapter.getConversation("created")).toEqual(expect.objectContaining({ id: "created" }));
+    await expectInventorySignal(inventory);
+    inventory.cancel();
   });
 
   test("stale running activity from a dead server is closed out on load", async () => {
@@ -355,6 +377,138 @@ describe("OpenCode conversation inventory and history", () => {
 });
 
 describe("filtered provider event pump", () => {
+  test("a list fetch cannot acknowledge a delayed lifecycle event for another client", async () => {
+    const provider = new FakeProvider();
+    const external = fixtureSession("external");
+    provider.sessions = [external];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    expect((await adapter.listConversations()).map(conversation => conversation.id)).toEqual(["external"]);
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    provider.eventQueue.push({ type: "session.created", data: { info: external } });
+    await expectInventorySignal(inventory);
+
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("invalidates only for top-level lifecycle changes in the canonical workspace", async () => {
+    const provider = new FakeProvider();
+    const local = fixtureSession("local");
+    const child = { ...fixtureSession("child"), parentId: "local" };
+    const foreign = fixtureSession("foreign", `${process.cwd()}-foreign`);
+    provider.sessions = [local, child, foreign];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.listConversations();
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    // A list fetch does not acknowledge lifecycle metadata. The first unknown
+    // local update invalidates conservatively, even if only timestamps changed.
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...local, time: { updated: 99 } } } });
+    await expectInventorySignal(inventory);
+
+    let settled = false;
+    const afterNoise = inventory.next().then(result => { settled = true; return result; });
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...local, time: { updated: 100 } } } });
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...child, title: "Child renamed" } } });
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...foreign, title: "Foreign renamed" } } });
+    await Bun.sleep(20);
+    expect(settled).toBe(false);
+
+    const renamed = { ...local, title: "Local renamed" };
+    provider.eventQueue.push({ type: "session.updated", data: { info: renamed } });
+    expect((await afterNoise).done).toBe(false);
+
+    settled = false;
+    const afterDuplicate = inventory.next().then(result => { settled = true; return result; });
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...renamed, time: { updated: 100 } } } });
+    provider.eventQueue.push({ type: "session.created", data: { info: { ...child, id: "new-child" } } });
+    await Bun.sleep(20);
+    expect(settled).toBe(false);
+
+    const created = fixtureSession("created");
+    provider.eventQueue.push({ type: "session.created", data: { info: created } });
+    expect((await afterDuplicate).done).toBe(false);
+
+    const promotedChild = inventory.next();
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...child, parentId: undefined, title: "Child promoted" } } });
+    expect((await promotedChild).done).toBe(false);
+
+    const demotedChild = inventory.next();
+    provider.eventQueue.push({ type: "session.updated", data: { info: child } });
+    expect((await demotedChild).done).toBe(false);
+
+    const deleted = inventory.next();
+    provider.eventQueue.push({ type: "session.deleted", data: { info: created } });
+    expect((await deleted).done).toBe(false);
+
+    settled = false;
+    const afterDuplicateDelete = inventory.next().then(result => { settled = true; return result; });
+    provider.eventQueue.push({ type: "session.deleted", data: { info: created } });
+    await Bun.sleep(20);
+    expect(settled).toBe(false);
+
+    await adapter.dispose();
+    expect((await afterDuplicateDelete).done).toBe(true);
+    await pump;
+  });
+
+  test("classifies deleted sessions from event metadata without looking them up", async () => {
+    const provider = new FakeProvider();
+    let lookups = 0;
+    provider.getSession = async () => { lookups += 1; return null; };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    provider.eventQueue.push({ type: "session.deleted", data: { info: fixtureSession("deleted") } });
+    await expectInventorySignal(inventory);
+    expect(lookups).toBe(0);
+
+    await adapter.dispose();
+    await pump;
+  });
+
+  test("pump stops are restartable while adapter disposal closes inventory subscriptions", async () => {
+    const provider = new FakeProvider();
+    let starts = 0;
+    provider.events = signal => ({
+      async *[Symbol.asyncIterator]() {
+        starts += 1;
+        while (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+      },
+    });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+
+    const first = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+    expect(adapter.startEventPump()).toBe(first);
+    await adapter.stopEventPump();
+    await first;
+
+    const restarted = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+    expect(starts).toBe(2);
+    await adapter.stopEventPump();
+    await restarted;
+
+    const waiting = inventory.next();
+    await adapter.dispose();
+    expect((await waiting).done).toBe(true);
+    expect((await adapter.subscribeInventory().next()).done).toBe(true);
+  });
+
   test("validates the current session directory before every publication", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local"), fixtureSession("foreign", `${process.cwd()}-foreign`)];
@@ -362,7 +516,7 @@ describe("filtered provider event pump", () => {
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ id: "foreign-event", type: "session.next.text.delta", data: { sessionID: "foreign", partID: "x", delta: "secret" } });
     provider.eventQueue.push({ id: "local-event", type: "session.next.text.delta", data: { sessionID: "local", partID: "x", delta: "safe" } });
-    await Bun.sleep(1);
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
     provider.sessions[0] = fixtureSession("local", `${process.cwd()}-moved`);
     provider.eventQueue.push({ id: "moved-event", type: "session.next.text.delta", data: { sessionID: "local", partID: "x", delta: " hidden" } });
     await Bun.sleep(1);
@@ -699,6 +853,8 @@ describe("prompt, abort, permission, and question mutations", () => {
       return renamed;
     };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
     const subscriber = await adapter.subscribe("session");
     const [first, retry] = await Promise.all([
       adapter.renameConversation("session", "rename-1", "  Manual title  "),
@@ -707,6 +863,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(first).toEqual(retry);
     expect(first.conversation.title).toBe("Manual title");
     expect(renames).toBe(1);
+    await expectInventorySignal(inventory);
     expect((await subscriber.events[Symbol.asyncIterator]().next()).value).toEqual(expect.objectContaining({ type: "conversation.updated" }));
     subscriber.events.cancel();
     await adapter.prompt("session", "prompt-1", "This must not replace the manual title");
@@ -716,8 +873,10 @@ describe("prompt, abort, permission, and question mutations", () => {
     await expect(adapter.renameConversation("session", "large", "é".repeat(101))).rejects.toBeInstanceOf(InvalidConversationTitleError);
     adapter.projectionForTests("session").statusUpdate("running");
     const whileRunning = await adapter.renameConversation("session", "running", "Renamed while running");
+    await expectInventorySignal(inventory);
     expect(whileRunning.conversation).toEqual(expect.objectContaining({ title: "Renamed while running", status: "running" }));
     expect(adapter.projectionForTests("session").status).toBe("running");
+    inventory.cancel();
   });
 
   test("a manual rename during prompt validation wins over first-prompt naming", async () => {
@@ -806,15 +965,19 @@ describe("prompt, abort, permission, and question mutations", () => {
       return renamed;
     };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
     const selection = { providerId: "anthropic", modelId: "claude" };
 
     const accepted = await adapter.prompt("session", "request", "Implement model selection cleanly across the workspace", selection);
     expect(provider.modelSwitches).toEqual([]);
     expect(accepted.conversation?.title).toBe("Implement model selection cleanly across the workspace");
     expect(provider.sessions[0]!.title).toBe("Implement model selection cleanly across the workspace");
+    await expectInventorySignal(inventory);
 
     await expect(adapter.prompt("session", "other", "retry", { providerId: "anthropic", modelId: "missing" }))
       .rejects.toBeInstanceOf(InvalidModelSelectionError);
+    inventory.cancel();
   });
 
   test("passes a listed mode through and refuses an unknown one", async () => {

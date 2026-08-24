@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
+import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
 import type { ChatAvailability, ConversationSnapshot, ConversationSummary, MessageAttachment, ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
@@ -14,6 +15,7 @@ const TOKEN = "chat-test-token";
 class FakeChatService implements WorkspaceChatService {
   readonly conversation: ConversationSummary = { id: "local", title: "Local", createdAt: 1, updatedAt: 1, status: "idle" };
   readonly replay = new ConversationReplay("generation", "local", 10_000);
+  readonly inventory = new ConversationInventoryBroadcaster();
   prompts = 0;
   retries = 0;
   renames = 0;
@@ -29,6 +31,7 @@ class FakeChatService implements WorkspaceChatService {
   async modes() { return [{ name: "build", description: "Full read-write mode" }, { name: "plan", description: "Read-only planning mode" }]; }
   async commands() { return [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" as const }]; }
   async listConversations() { return [this.conversation]; }
+  async subscribeInventory(options: { signal?: AbortSignal } = {}) { return this.inventory.subscribe(options.signal); }
   async createConversation() { return this.snapshot(); }
   async history(id: string) { this.require(id); return this.snapshot(); }
   async subscribe(id: string, options: { cursor?: string; signal?: AbortSignal } = {}) {
@@ -74,7 +77,7 @@ class FakeChatService implements WorkspaceChatService {
   async cancel(id: string) { this.require(id); return { cancelled: true } as const; }
   async respondPermission(id: string, _interactionId: string, _requestId: string, outcome: PermissionOutcome) { this.require(id); return { outcome }; }
   async respondQuestion(id: string, _interactionId: string, _requestId: string, outcome: QuestionOutcome) { this.require(id); this.questionResponses.push(outcome); return { outcome }; }
-  async dispose() {}
+  async dispose() { this.inventory.dispose(); }
 
   private snapshot(): ConversationSnapshot {
     return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: [] };
@@ -123,11 +126,12 @@ describe("workspace chat routes", () => {
     service.models = async () => { calls += 1; return []; };
     const table = routes(service);
     service.commands = async () => { calls += 1; return []; };
-    for (const pathname of ["/api/chat/status", "/api/chat/models", "/api/chat/commands"]) {
+    for (const pathname of ["/api/chat/status", "/api/chat/models", "/api/chat/commands", "/api/chat/conversations/events"]) {
       const handler = table[pathname] as { GET(request: Request): Promise<Response> };
       expect((await handler.GET(new Request(`http://127.0.0.1:4711${pathname}`))).status).toBe(401);
     }
     expect(calls).toBe(0);
+    expect(service.inventory.subscriberCount()).toBe(0);
   });
 
   test("serves status, inventory, creation, and snapshot under a relocated base path", async () => {
@@ -147,6 +151,69 @@ describe("workspace chat routes", () => {
     expect(created.status).toBe(201);
     const snapshot = table["/s/project/api/chat/conversations/:conversationId"] as { GET(request: Request & { params: Record<string, string> }): Promise<Response> };
     expect((await (await snapshot.GET(request("/s/project/api/chat/conversations/local?limit=50", {}, { conversationId: "local" }) as never)).json() as { conversation: { id: string } }).conversation.id).toBe("local");
+  });
+
+  test("streams the normalized initial inventory signal under a relocated base path", async () => {
+    const service = new FakeChatService();
+    const table = routes(service, "/s/project/");
+    const keys = Object.keys(table);
+    expect(keys.indexOf("/s/project/api/chat/conversations/events"))
+      .toBeLessThan(keys.indexOf("/s/project/api/chat/conversations/:conversationId"));
+    const handler = table["/s/project/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
+
+    const response = await handler.GET(request("/s/project/api/chat/conversations/events"));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store, no-transform");
+    expect(response.headers.get("x-accel-buffering")).toBe("no");
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toBe('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+    expect(new TextDecoder().decode(first.value)).not.toContain("id:");
+    await reader.cancel();
+    expect(service.inventory.subscriberCount()).toBe(0);
+  });
+
+  test("coalesces inventory invalidations while the client is not pulling", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
+    const response = await handler.GET(request("/api/chat/conversations/events"));
+    const reader = response.body!.getReader();
+    const frame = 'event: inventory\ndata: {"type":"conversation.inventory"}\n\n';
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(frame);
+
+    service.inventory.invalidate();
+    service.inventory.invalidate();
+    service.inventory.invalidate();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(frame);
+
+    let settled = false;
+    const waiting = reader.read().then(result => {
+      settled = true;
+      return result;
+    });
+    await Bun.sleep(5);
+    expect(settled).toBe(false);
+    service.inventory.invalidate();
+    expect(new TextDecoder().decode((await waiting).value)).toBe(frame);
+    await reader.cancel();
+  });
+
+  test("cleans up inventory subscriptions on request abort", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
+    const controller = new AbortController();
+    const response = await handler.GET(request("/api/chat/conversations/events", { signal: controller.signal }));
+    const reader = response.body!.getReader();
+    await reader.read();
+    expect(service.inventory.subscriberCount()).toBe(1);
+    const waiting = reader.read();
+
+    controller.abort();
+
+    expect((await waiting).done).toBe(true);
+    expect(service.inventory.subscriberCount()).toBe(0);
   });
 
   test("rejects foreign origins and malformed bodies before mutation, and joins retried prompts", async () => {
