@@ -4,6 +4,13 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.6.1](https://github.com/tjakobsson/uatu/compare/v0.6.0...v0.6.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **chat:** keep conversation inventory synchronized ([4020179](https://github.com/tjakobsson/uatu/commit/40201798b11584e1fe22f6f4666e3553b1825427))
+
 ## [0.6.0](https://github.com/tjakobsson/uatu/compare/v0.5.1...v0.6.0) (2026-08-24)
 
 
