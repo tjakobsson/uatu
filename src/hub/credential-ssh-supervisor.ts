@@ -7,6 +7,7 @@ const STOP_TIMEOUT_MS = 2_000;
 const POLL_MS = 20;
 const MAX_MESSAGE_BYTES = 4_096;
 const CONTROL_VERSION = 1;
+const BOOT_ID_PATTERN = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 
 export type GuardianCommand = "status" | "stop";
 
@@ -22,8 +23,7 @@ export type SocketIdentity = {
   inode: number;
 };
 
-export type SshAgentOwnership = {
-  version: 2;
+type SshAgentOwnershipBase = {
   nonce: string;
   agentPid: number;
   supervisorPid: number;
@@ -31,8 +31,13 @@ export type SshAgentOwnership = {
   controlSocket: SocketIdentity;
 };
 
+export type SshAgentOwnership = SshAgentOwnershipBase & (
+  | { version: 2 }
+  | { version: 3; bootId: string }
+);
+
 type SupervisorConfig = {
-  version: 1;
+  version: 1 | 2;
   nonce: string;
   runtimeDirectory: string;
   sshAgentPath: string;
@@ -40,6 +45,7 @@ type SupervisorConfig = {
   controlSocketPath: string;
   ownershipPath: string;
   servicePath: string;
+  bootId?: string;
 };
 
 type AgentProcess = {
@@ -61,6 +67,10 @@ function isMissing(error: unknown): boolean {
 function exactObject(value: unknown, keys: string[]): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
     && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+}
+
+export function isBootId(value: unknown): value is string {
+  return typeof value === "string" && BOOT_ID_PATTERN.test(value);
 }
 
 export async function socketIdentity(socketPath: string): Promise<SocketIdentity> {
@@ -88,14 +98,19 @@ export function sameSocketIdentity(actual: SocketIdentity, expected: SocketIdent
 }
 
 export function parseOwnership(value: unknown): SshAgentOwnership {
-  if (!exactObject(value, ["version", "nonce", "agentPid", "supervisorPid", "agentSocket", "controlSocket"])) {
+  const baseKeys = ["version", "nonce", "agentPid", "supervisorPid", "agentSocket", "controlSocket"];
+  const version = typeof value === "object" && value !== null && "version" in value ? value.version : undefined;
+  const keys = version === 3 ? [...baseKeys, "bootId"] : baseKeys;
+  if (!exactObject(value, keys)) {
     throw new Error("invalid record");
   }
   const identity = (candidate: unknown): candidate is SocketIdentity => exactObject(candidate, ["type", "uid", "mode", "device", "inode"])
     && candidate.type === "socket"
     && [candidate.uid, candidate.mode, candidate.device, candidate.inode]
       .every(item => typeof item === "number" && Number.isSafeInteger(item) && item >= 0);
-  if (value.version !== 2 || typeof value.nonce !== "string" || !/^[a-f0-9]{64}$/.test(value.nonce)
+  if ((value.version !== 2 && value.version !== 3)
+    || (value.version === 3 && !isBootId(value.bootId))
+    || typeof value.nonce !== "string" || !/^[a-f0-9]{64}$/.test(value.nonce)
     || typeof value.agentPid !== "number" || !Number.isSafeInteger(value.agentPid) || value.agentPid <= 0
     || typeof value.supervisorPid !== "number" || !Number.isSafeInteger(value.supervisorPid) || value.supervisorPid <= 0
     || !identity(value.agentSocket) || !identity(value.controlSocket)) throw new Error("invalid record");
@@ -112,8 +127,12 @@ async function privateDirectory(directory: string): Promise<void> {
 }
 
 function parseConfig(value: unknown): SupervisorConfig {
-  const keys = ["version", "nonce", "runtimeDirectory", "sshAgentPath", "agentSocketPath", "controlSocketPath", "ownershipPath", "servicePath"];
-  if (!exactObject(value, keys) || value.version !== 1 || typeof value.nonce !== "string" || !/^[a-f0-9]{64}$/.test(value.nonce)) {
+  const baseKeys = ["version", "nonce", "runtimeDirectory", "sshAgentPath", "agentSocketPath", "controlSocketPath", "ownershipPath", "servicePath"];
+  const version = typeof value === "object" && value !== null && "version" in value ? value.version : undefined;
+  const keys = version === 2 ? [...baseKeys, "bootId"] : baseKeys;
+  if (!exactObject(value, keys) || (value.version !== 1 && value.version !== 2)
+    || (value.version === 2 && !isBootId(value.bootId))
+    || typeof value.nonce !== "string" || !/^[a-f0-9]{64}$/.test(value.nonce)) {
     throw new Error("invalid SSH supervisor startup configuration");
   }
   for (const key of keys.slice(2)) {
@@ -453,14 +472,16 @@ export async function runSshAgentSupervisor(options: SshAgentSupervisorOptions =
     });
     void child.exited.then(() => { childExited = true; }, () => { childExited = true; });
     agentIdentity = await waitForSocket(config.agentSocketPath, child, startTimeoutMs);
-    ownership = {
-      version: 2,
+    const ownershipFields = {
       nonce: config.nonce,
       agentPid: child.pid,
       supervisorPid: process.pid,
       agentSocket: agentIdentity,
       controlSocket: controlIdentity,
     };
+    ownership = config.bootId
+      ? { version: 3, bootId: config.bootId, ...ownershipFields }
+      : { version: 2, ...ownershipFields };
     process.stdout.write(`${JSON.stringify({ ready: ownership })}\n`);
     const commit = JSON.parse(await lines.read(startTimeoutMs)) as Record<string, unknown>;
     if (!exactObject(commit, ["commit"]) || commit.commit !== config.nonce) throw new Error("invalid SSH supervisor commit");

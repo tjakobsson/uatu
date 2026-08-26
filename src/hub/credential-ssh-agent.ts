@@ -5,6 +5,7 @@ import path from "node:path";
 import { resolveUatuArgv } from "./backend";
 import {
   guardianMac,
+  isBootId,
   parseOwnership,
   sameSocketIdentity,
   socketIdentity,
@@ -16,6 +17,7 @@ const START_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 2_000;
 const POLL_MS = 20;
 const MAX_MESSAGE_BYTES = 4_096;
+const LINUX_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 
 type SupervisorProcess = ReturnType<typeof Bun.spawn<"pipe", "pipe", "ignore">>;
 
@@ -24,6 +26,7 @@ export type ManagedSshAgentOptions = {
   sshAgentPath?: string;
   uatuArgv?: string[];
   servicePath?: string;
+  bootId?: string | null;
   startTimeoutMs?: number;
   stopTimeoutMs?: number;
   spawnSupervisor?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => SupervisorProcess;
@@ -39,6 +42,16 @@ async function privateDirectory(directory: string): Promise<void> {
   if ((stats.mode & 0o777) !== 0o700) throw new Error("SSH agent runtime has unsafe permissions");
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
     throw new Error("SSH agent runtime is not owned by the current user");
+  }
+}
+
+async function linuxBootId(): Promise<string | null> {
+  if (process.platform !== "linux") return null;
+  try {
+    const bootId = (await fs.readFile(LINUX_BOOT_ID_PATH, "utf8")).trim().toLowerCase();
+    return isBootId(bootId) ? bootId : null;
+  } catch {
+    return null;
   }
 }
 
@@ -170,6 +183,7 @@ export class ManagedSshAgent {
     }
 
     const nonce = randomBytes(32).toString("hex");
+    const bootId = await this.currentBootId();
     const uatuArgv = this.options.uatuArgv ?? resolveUatuArgv();
     const spawn = this.options.spawnSupervisor ?? ((argv, spawnOptions) => Bun.spawn(argv, spawnOptions) as SupervisorProcess);
     const child = spawn([...uatuArgv, "--ssh-agent-supervisor"], {
@@ -183,7 +197,7 @@ export class ManagedSshAgent {
     let ownership: SshAgentOwnership | undefined;
     try {
       input.write(`${JSON.stringify({
-        version: 1,
+        version: bootId ? 2 : 1,
         nonce,
         runtimeDirectory: this.options.runtimeDirectory,
         sshAgentPath,
@@ -191,6 +205,7 @@ export class ManagedSshAgent {
         controlSocketPath: this.controlSocketPath,
         ownershipPath: this.ownershipPath,
         servicePath: this.options.servicePath ?? process.env.PATH ?? "",
+        ...(bootId ? { bootId } : {}),
       })}\n`);
       const ready = JSON.parse(await readLine(child.stdout, this.startTimeoutMs, child)) as { ready?: unknown };
       ownership = parseOwnership(ready.ready);
@@ -241,11 +256,52 @@ export class ManagedSshAgent {
       await this.assertNoGuardianQuarantines();
       return;
     }
+    const bootId = await this.currentBootId();
+    if (record.version === 3 && bootId && record.bootId !== bootId) {
+      await this.removePreviousBootArtifacts(record);
+      await this.assertNoGuardianQuarantines();
+      return;
+    }
     await assertSocket(this.socketPath, record.agentSocket);
     await assertSocket(this.controlSocketPath, record.controlSocket);
     await this.request(record, "stop");
     await this.waitForAllArtifactsToDisappear(record);
     await this.assertNoGuardianQuarantines();
+  }
+
+  private currentBootId(): Promise<string | null> {
+    if (this.options.bootId === undefined) return linuxBootId();
+    return Promise.resolve(isBootId(this.options.bootId) ? this.options.bootId : null);
+  }
+
+  private async removePreviousBootArtifacts(record: SshAgentOwnership): Promise<void> {
+    const sockets: Array<{ path: string; expected: SshAgentOwnership["agentSocket"] }> = [];
+    const validateSocket = async (socketPath: string, expected: SshAgentOwnership["agentSocket"]): Promise<void> => {
+      let actual;
+      try { actual = await socketIdentity(socketPath); } catch (error) { if (isMissing(error)) return; throw error; }
+      if (!sameSocketIdentity(actual, expected)) {
+        throw new Error("SSH guardian socket from a previous boot does not match its ownership record");
+      }
+      sockets.push({ path: socketPath, expected });
+    };
+    await validateSocket(this.socketPath, record.agentSocket);
+    await validateSocket(this.controlSocketPath, record.controlSocket);
+    const current = await readOwnership(this.ownershipPath);
+    if (!current || JSON.stringify(current) !== JSON.stringify(record)) {
+      throw new Error("SSH guardian ownership changed during previous-boot recovery");
+    }
+    for (const socket of sockets) {
+      const actual = await socketIdentity(socket.path);
+      if (!sameSocketIdentity(actual, socket.expected)) {
+        throw new Error("SSH guardian socket changed during previous-boot recovery");
+      }
+      await fs.rm(socket.path);
+    }
+    const final = await readOwnership(this.ownershipPath);
+    if (!final || JSON.stringify(final) !== JSON.stringify(record)) {
+      throw new Error("SSH guardian ownership changed during previous-boot recovery");
+    }
+    await fs.rm(this.ownershipPath);
   }
 
   shutdown(): Promise<void> {
@@ -301,7 +357,10 @@ export class ManagedSshAgent {
         try { client?.terminate(); } catch { /* The socket may already be closed. */ }
         error ? reject(error) : resolve();
       };
-      const failed = () => finish(new Error("SSH guardian request failed"));
+      const failed = () => finish(new Error(
+        `SSH guardian request failed. Restart uatu hub; if the problem persists, stop it, confirm no uatu-managed `
+          + `ssh-agent or supervisor remains, then remove ${this.options.runtimeDirectory} and restart.`,
+      ));
       const timer = setTimeout(failed, this.stopTimeoutMs);
       try {
         client = await Bun.connect<{ input: string; bytes: number }>({
