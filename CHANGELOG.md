@@ -4,6 +4,13 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.6.2](https://github.com/tjakobsson/uatu/compare/v0.6.1...v0.6.2) (2026-08-28)
+
+
+### Bug Fixes
+
+* **hub:** recover SSH guardian after Linux restart ([#306](https://github.com/tjakobsson/uatu/issues/306)) ([7150fcf](https://github.com/tjakobsson/uatu/commit/7150fcf8c91a4cee27260f2efc450686ee2633b1))
+
 ## [0.6.1](https://github.com/tjakobsson/uatu/compare/v0.6.0...v0.6.1) (2026-08-24)
 
 
