@@ -264,12 +264,18 @@ describe("ManagedSshAgent", () => {
     await first.start();
     const record = await ownership(runtime);
     await killManaged(record);
-    await rm(first.controlSocketPath);
-    const replacement = Bun.listen({ unix: first.controlSocketPath, socket: { data() {} } });
-    await chmod(first.controlSocketPath, 0o600);
+    const replacementPath = path.join(runtime, "replacement-control.sock");
+    const replacement = Bun.listen({ unix: replacementPath, socket: { data() {} } });
+    await chmod(replacementPath, 0o600);
+    const replacementIdentity = await socketIdentity(replacementPath);
+    expect(replacementIdentity).not.toEqual(record.controlSocket);
+    await rename(replacementPath, first.controlSocketPath);
     try {
       const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
-      await expect(recovery.recover()).rejects.toThrow("does not match its ownership record");
+      const error = await recovery.recover().then(() => null, reason => reason as Error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toContain("socket identity changed during cleanup");
+      expect(error?.message).toContain(`remove ${runtime}`);
       expect(await pathExists(first.socketPath)).toBe(true);
       expect(await pathExists(first.controlSocketPath)).toBe(true);
       expect(JSON.parse(await readFile(path.join(runtime, "ssh-agent.json"), "utf8"))).toEqual(record);

@@ -283,7 +283,7 @@ async function stopChild(child: AgentProcess, timeoutMs: number): Promise<void> 
   if (!(await waitForExit(child, timeoutMs))) throw new Error("managed SSH agent did not exit after SIGKILL");
 }
 
-async function restoreQuarantine(quarantinePath: string, originalPath: string): Promise<void> {
+export async function restoreQuarantine(quarantinePath: string, originalPath: string): Promise<void> {
   try {
     await fs.lstat(originalPath);
   } catch (error) {
@@ -295,7 +295,7 @@ async function restoreQuarantine(quarantinePath: string, originalPath: string): 
   throw new Error("SSH guardian artifact changed during cleanup; quarantine preserved");
 }
 
-async function quarantineSocket(
+export async function quarantineSocket(
   socketPath: string,
   expected: SocketIdentity,
   nonce: string,
@@ -320,7 +320,7 @@ async function quarantineSocket(
   }
 }
 
-async function unlinkQuarantinedSocket(
+export async function unlinkQuarantinedSocket(
   quarantinePath: string,
   originalPath: string,
   expected: SocketIdentity,

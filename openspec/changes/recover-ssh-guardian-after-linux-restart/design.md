@@ -35,7 +35,7 @@ Alternatives considered:
 
 ### Clean only exact artifacts from a different boot
 
-Recovery takes the automatic path only when both the record and current environment provide valid, different Linux boot IDs. Every socket that still exists must pass the existing owner, mode, type, device, and inode checks against the record. Missing sockets are accepted because abrupt shutdown may interrupt normal cleanup. The ownership record is revalidated and removed last so an interrupted recovery can retry from the same proof.
+Recovery takes the automatic path only when both the record and current environment provide valid, different Linux boot IDs. Every socket that still exists is atomically renamed to its nonce-specific quarantine path, then must pass the existing owner, mode, type, device, and inode checks against the record before unlinking. Missing sockets are accepted because abrupt shutdown may interrupt normal cleanup. The ownership record is quarantined and revalidated after the sockets, then removed last so an interrupted recovery can retry from the same proof.
 
 No numeric PID is signaled. Current-boot records continue through authenticated guardian control, and any identity mismatch aborts cleanup.
 

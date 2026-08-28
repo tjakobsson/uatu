@@ -7,8 +7,11 @@ import {
   guardianMac,
   isBootId,
   parseOwnership,
+  quarantineSocket,
+  restoreQuarantine,
   sameSocketIdentity,
   socketIdentity,
+  unlinkQuarantinedSocket,
   type SshAgentOwnership,
   type GuardianCommand,
 } from "./credential-ssh-supervisor";
@@ -258,7 +261,15 @@ export class ManagedSshAgent {
     }
     const bootId = await this.currentBootId();
     if (record.version === 3 && bootId && record.bootId !== bootId) {
-      await this.removePreviousBootArtifacts(record);
+      try {
+        await this.removePreviousBootArtifacts(record);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "unknown cleanup error";
+        throw new Error(
+          `SSH guardian previous-boot recovery failed: ${detail}. ${unreadableRecordAdvice(this.ownershipPath)}`,
+          { cause: error },
+        );
+      }
       await this.assertNoGuardianQuarantines();
       return;
     }
@@ -275,33 +286,53 @@ export class ManagedSshAgent {
   }
 
   private async removePreviousBootArtifacts(record: SshAgentOwnership): Promise<void> {
-    const sockets: Array<{ path: string; expected: SshAgentOwnership["agentSocket"] }> = [];
-    const validateSocket = async (socketPath: string, expected: SshAgentOwnership["agentSocket"]): Promise<void> => {
-      let actual;
-      try { actual = await socketIdentity(socketPath); } catch (error) { if (isMissing(error)) return; throw error; }
-      if (!sameSocketIdentity(actual, expected)) {
-        throw new Error("SSH guardian socket from a previous boot does not match its ownership record");
-      }
-      sockets.push({ path: socketPath, expected });
+    const sockets = [
+      { path: this.socketPath, expected: record.agentSocket },
+      { path: this.controlSocketPath, expected: record.controlSocket },
+    ];
+    const quarantined: Array<{ quarantine: string; original: string; expected: SshAgentOwnership["agentSocket"] }> = [];
+    let ownershipQuarantine: string | undefined;
+    const restoreAll = async () => {
+      await Promise.allSettled([
+        ...quarantined.map(item => restoreQuarantine(item.quarantine, item.original)),
+        ...(ownershipQuarantine ? [restoreQuarantine(ownershipQuarantine, this.ownershipPath)] : []),
+      ]);
     };
-    await validateSocket(this.socketPath, record.agentSocket);
-    await validateSocket(this.controlSocketPath, record.controlSocket);
-    const current = await readOwnership(this.ownershipPath);
-    if (!current || JSON.stringify(current) !== JSON.stringify(record)) {
-      throw new Error("SSH guardian ownership changed during previous-boot recovery");
-    }
-    for (const socket of sockets) {
-      const actual = await socketIdentity(socket.path);
-      if (!sameSocketIdentity(actual, socket.expected)) {
-        throw new Error("SSH guardian socket changed during previous-boot recovery");
+    try {
+      for (const socket of sockets) {
+        const quarantine = await quarantineSocket(socket.path, socket.expected, record.nonce, true);
+        if (quarantine) quarantined.push({ quarantine, original: socket.path, expected: socket.expected });
       }
-      await fs.rm(socket.path);
+      ownershipQuarantine = `${this.ownershipPath}.${record.nonce}.quarantine`;
+      try { await fs.lstat(ownershipQuarantine); throw new Error("SSH guardian record quarantine already exists"); }
+      catch (error) { if (!isMissing(error)) throw error; }
+      await fs.rename(this.ownershipPath, ownershipQuarantine);
+      const current = await readOwnership(ownershipQuarantine);
+      if (!current || JSON.stringify(current) !== JSON.stringify(record)) {
+        throw new Error("SSH guardian ownership changed during previous-boot recovery");
+      }
+    } catch (error) {
+      await restoreAll();
+      throw error;
     }
-    const final = await readOwnership(this.ownershipPath);
+
+    const socketCleanup = await Promise.allSettled(quarantined.map(item => unlinkQuarantinedSocket(
+      item.quarantine,
+      item.original,
+      item.expected,
+      this.stopTimeoutMs,
+    )));
+    const failed = socketCleanup.find(result => result.status === "rejected");
+    if (failed?.status === "rejected") {
+      if (ownershipQuarantine) await restoreQuarantine(ownershipQuarantine, this.ownershipPath).catch(() => undefined);
+      throw failed.reason;
+    }
+    const final = await readOwnership(ownershipQuarantine);
     if (!final || JSON.stringify(final) !== JSON.stringify(record)) {
+      await restoreQuarantine(ownershipQuarantine, this.ownershipPath).catch(() => undefined);
       throw new Error("SSH guardian ownership changed during previous-boot recovery");
     }
-    await fs.rm(this.ownershipPath);
+    await fs.rm(ownershipQuarantine);
   }
 
   shutdown(): Promise<void> {
