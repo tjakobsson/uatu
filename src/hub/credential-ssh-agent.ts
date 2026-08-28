@@ -48,6 +48,15 @@ async function privateDirectory(directory: string): Promise<void> {
   }
 }
 
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await fs.open(directory, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function linuxBootId(): Promise<string | null> {
   if (process.platform !== "linux") return null;
   try {
@@ -224,12 +233,7 @@ export class ManagedSshAgent {
       } finally {
         await record.close();
       }
-      const runtimeDirectory = await fs.open(this.options.runtimeDirectory, "r");
-      try {
-        await runtimeDirectory.sync();
-      } finally {
-        await runtimeDirectory.close();
-      }
+      await syncDirectory(this.options.runtimeDirectory);
       input.write(`${JSON.stringify({ commit: nonce })}\n`);
       input.end();
       const ack = JSON.parse(await readLine(child.stdout, this.startTimeoutMs, child)) as { ack?: unknown };
@@ -246,7 +250,14 @@ export class ManagedSshAgent {
   }
 
   private async recoverRecordedAgent(): Promise<void> {
-    const record = await readOwnership(this.ownershipPath);
+    let record = await readOwnership(this.ownershipPath);
+    let ownershipQuarantine: string | undefined;
+    const quarantined = await this.readQuarantinedOwnership();
+    if (record && quarantined) throw new Error("SSH guardian quarantine artifacts require manual recovery");
+    if (!record && quarantined) {
+      record = quarantined?.record;
+      ownershipQuarantine = quarantined?.path;
+    }
     if (!record) {
       for (const artifact of [this.socketPath, this.controlSocketPath]) {
         try {
@@ -262,7 +273,8 @@ export class ManagedSshAgent {
     const bootId = await this.currentBootId();
     if (record.version === 3 && bootId && record.bootId !== bootId) {
       try {
-        await this.removePreviousBootArtifacts(record);
+        await this.assertExpectedPreviousBootQuarantines(record, ownershipQuarantine);
+        await this.removePreviousBootArtifacts(record, ownershipQuarantine);
       } catch (error) {
         const detail = error instanceof Error ? error.message : "unknown cleanup error";
         throw new Error(
@@ -273,6 +285,7 @@ export class ManagedSshAgent {
       await this.assertNoGuardianQuarantines();
       return;
     }
+    await this.assertNoGuardianQuarantines();
     await assertSocket(this.socketPath, record.agentSocket);
     await assertSocket(this.controlSocketPath, record.controlSocket);
     await this.request(record, "stop");
@@ -285,13 +298,30 @@ export class ManagedSshAgent {
     return Promise.resolve(isBootId(this.options.bootId) ? this.options.bootId : null);
   }
 
-  private async removePreviousBootArtifacts(record: SshAgentOwnership): Promise<void> {
+  private async readQuarantinedOwnership(): Promise<{ record: SshAgentOwnership; path: string } | undefined> {
+    const prefix = "ssh-agent.json.";
+    const suffix = ".quarantine";
+    const entries = (await fs.readdir(this.options.runtimeDirectory))
+      .filter(entry => entry.startsWith(prefix) && entry.endsWith(suffix));
+    if (entries.length === 0) return undefined;
+    if (entries.length !== 1) throw new Error("SSH guardian quarantine artifacts require manual recovery");
+    const quarantinePath = path.join(this.options.runtimeDirectory, entries[0]!);
+    const record = await readOwnership(quarantinePath);
+    const nonce = entries[0]!.slice(prefix.length, -suffix.length);
+    if (!record || record.nonce !== nonce) throw new Error("SSH guardian quarantine artifacts require manual recovery");
+    return { record, path: quarantinePath };
+  }
+
+  private async removePreviousBootArtifacts(
+    record: SshAgentOwnership,
+    existingOwnershipQuarantine?: string,
+  ): Promise<void> {
     const sockets = [
       { path: this.socketPath, expected: record.agentSocket },
       { path: this.controlSocketPath, expected: record.controlSocket },
     ];
     const quarantined: Array<{ quarantine: string; original: string; expected: SshAgentOwnership["agentSocket"] }> = [];
-    let ownershipQuarantine: string | undefined;
+    let ownershipQuarantine = existingOwnershipQuarantine;
     const restoreAll = async () => {
       await Promise.allSettled([
         ...quarantined.map(item => restoreQuarantine(item.quarantine, item.original)),
@@ -300,13 +330,35 @@ export class ManagedSshAgent {
     };
     try {
       for (const socket of sockets) {
+        const existingQuarantine = `${socket.path}.${record.nonce}.quarantine`;
+        try {
+          const actual = await socketIdentity(existingQuarantine);
+          if (!sameSocketIdentity(actual, socket.expected)) {
+            throw new Error("SSH guardian socket quarantine does not match its ownership record");
+          }
+          try {
+            await fs.lstat(socket.path);
+            throw new Error("SSH guardian socket and its quarantine both exist");
+          } catch (error) {
+            if (!isMissing(error)) throw error;
+          }
+          quarantined.push({ quarantine: existingQuarantine, original: socket.path, expected: socket.expected });
+          continue;
+        } catch (error) {
+          if (!isMissing(error)) throw error;
+        }
         const quarantine = await quarantineSocket(socket.path, socket.expected, record.nonce, true);
         if (quarantine) quarantined.push({ quarantine, original: socket.path, expected: socket.expected });
       }
-      ownershipQuarantine = `${this.ownershipPath}.${record.nonce}.quarantine`;
-      try { await fs.lstat(ownershipQuarantine); throw new Error("SSH guardian record quarantine already exists"); }
-      catch (error) { if (!isMissing(error)) throw error; }
-      await fs.rename(this.ownershipPath, ownershipQuarantine);
+      if (!ownershipQuarantine) {
+        ownershipQuarantine = `${this.ownershipPath}.${record.nonce}.quarantine`;
+        try { await fs.lstat(ownershipQuarantine); throw new Error("SSH guardian record quarantine already exists"); }
+        catch (error) { if (!isMissing(error)) throw error; }
+        await fs.rename(this.ownershipPath, ownershipQuarantine);
+      } else {
+        try { await fs.lstat(this.ownershipPath); throw new Error("SSH guardian record and its quarantine both exist"); }
+        catch (error) { if (!isMissing(error)) throw error; }
+      }
       const current = await readOwnership(ownershipQuarantine);
       if (!current || JSON.stringify(current) !== JSON.stringify(record)) {
         throw new Error("SSH guardian ownership changed during previous-boot recovery");
@@ -327,12 +379,14 @@ export class ManagedSshAgent {
       if (ownershipQuarantine) await restoreQuarantine(ownershipQuarantine, this.ownershipPath).catch(() => undefined);
       throw failed.reason;
     }
+    await syncDirectory(this.options.runtimeDirectory);
     const final = await readOwnership(ownershipQuarantine);
     if (!final || JSON.stringify(final) !== JSON.stringify(record)) {
       await restoreQuarantine(ownershipQuarantine, this.ownershipPath).catch(() => undefined);
       throw new Error("SSH guardian ownership changed during previous-boot recovery");
     }
     await fs.rm(ownershipQuarantine);
+    await syncDirectory(this.options.runtimeDirectory);
   }
 
   shutdown(): Promise<void> {
@@ -455,11 +509,27 @@ export class ManagedSshAgent {
   }
 
   private async assertNoGuardianQuarantines(): Promise<void> {
-    const entries = await fs.readdir(this.options.runtimeDirectory);
-    const quarantine = /^(?:ssh-agent\.sock|ssh-agent-control\.sock|ssh-agent\.json)\.[a-f0-9]{64}\.quarantine$/;
-    if (entries.some(entry => quarantine.test(entry))) {
+    if ((await this.guardianQuarantines()).length > 0) {
       throw new Error("SSH guardian quarantine artifacts require manual recovery");
     }
+  }
+
+  private async assertExpectedPreviousBootQuarantines(
+    record: SshAgentOwnership,
+    ownershipQuarantine?: string,
+  ): Promise<void> {
+    const expected = new Set(this.quarantinePaths(record).map(item => path.basename(item)));
+    const actual = await this.guardianQuarantines();
+    if (actual.some(entry => !expected.has(entry))
+      || (ownershipQuarantine && path.basename(ownershipQuarantine) !== path.basename(this.quarantinePaths(record)[2]!))) {
+      throw new Error("SSH guardian quarantine artifacts require manual recovery");
+    }
+  }
+
+  private async guardianQuarantines(): Promise<string[]> {
+    const prefixes = ["ssh-agent.sock.", "ssh-agent-control.sock.", "ssh-agent.json."];
+    return (await fs.readdir(this.options.runtimeDirectory))
+      .filter(entry => entry.endsWith(".quarantine") && prefixes.some(prefix => entry.startsWith(prefix)));
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {

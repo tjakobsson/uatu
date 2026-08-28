@@ -258,6 +258,62 @@ describe("ManagedSshAgent", () => {
     expect(await pathExists(path.join(runtime, "ssh-agent.json"))).toBe(false);
   });
 
+  test("resumes previous-boot recovery from a quarantined ownership record", async () => {
+    const { runtime, executable } = await fixture();
+    const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+    const publicPaths = [first.socketPath, first.controlSocketPath, path.join(runtime, "ssh-agent.json")];
+    const quarantines = publicPaths.map(filePath => `${filePath}.${record.nonce}.quarantine`);
+    for (let index = 0; index < publicPaths.length; index += 1) {
+      await rename(publicPaths[index]!, quarantines[index]!);
+    }
+    await rm(quarantines[0]!);
+
+    const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
+    await recovery.recover();
+
+    for (const artifact of [...publicPaths, ...quarantines]) expect(await pathExists(artifact)).toBe(false);
+  });
+
+  test("resumes previous-boot recovery while the public ownership record remains", async () => {
+    const { runtime, executable } = await fixture();
+    const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+    const socketQuarantine = `${first.socketPath}.${record.nonce}.quarantine`;
+    await rename(first.socketPath, socketQuarantine);
+
+    const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
+    await recovery.recover();
+
+    for (const artifact of [
+      first.socketPath,
+      first.controlSocketPath,
+      path.join(runtime, "ssh-agent.json"),
+      socketQuarantine,
+    ]) expect(await pathExists(artifact)).toBe(false);
+  });
+
+  test("refuses public and quarantined ownership records together", async () => {
+    const { runtime, executable } = await fixture();
+    const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+    const ownershipPath = path.join(runtime, "ssh-agent.json");
+    const quarantine = `${ownershipPath}.${record.nonce}.quarantine`;
+    await rename(ownershipPath, quarantine);
+    await writeFile(ownershipPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+
+    const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
+    await expect(recovery.recover()).rejects.toThrow("quarantine artifacts require manual recovery");
+    expect(await pathExists(ownershipPath)).toBe(true);
+    expect(await pathExists(quarantine)).toBe(true);
+  });
+
   test("preserves a replaced previous-boot socket", async () => {
     const { runtime, executable } = await fixture();
     const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
@@ -372,6 +428,16 @@ describe("ManagedSshAgent", () => {
         await rename(quarantines[index]!, publicPaths[index]!);
       }
     }
+  });
+
+  test("refuses malformed guardian quarantine names", async () => {
+    const { runtime } = await fixture();
+    const quarantine = path.join(runtime, "ssh-agent.sock.not-a-nonce.quarantine");
+    await writeFile(quarantine, "preserve me");
+
+    const recovery = new ManagedSshAgent({ runtimeDirectory: runtime, uatuArgv: CLI_ARGV });
+    await expect(recovery.recover()).rejects.toThrow("quarantine artifacts require manual recovery");
+    expect(await readFile(quarantine, "utf8")).toBe("preserve me");
   });
 
   test("serializes shutdown during startup and startup during shutdown", async () => {

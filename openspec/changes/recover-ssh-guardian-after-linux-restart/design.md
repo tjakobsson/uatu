@@ -35,7 +35,7 @@ Alternatives considered:
 
 ### Clean only exact artifacts from a different boot
 
-Recovery takes the automatic path only when both the record and current environment provide valid, different Linux boot IDs. Every socket that still exists is atomically renamed to its nonce-specific quarantine path, then must pass the existing owner, mode, type, device, and inode checks against the record before unlinking. Missing sockets are accepted because abrupt shutdown may interrupt normal cleanup. The ownership record is quarantined and revalidated after the sockets, then removed last so an interrupted recovery can retry from the same proof.
+Recovery takes the automatic path only when both the record and current environment provide valid, different Linux boot IDs. Every socket that still exists is atomically renamed to its nonce-specific quarantine path, then must pass the existing owner, mode, type, device, and inode checks against the record before unlinking. Missing sockets are accepted because abrupt shutdown may interrupt normal cleanup. The ownership record is quarantined and revalidated after the sockets, then removed last. If recovery itself is interrupted after that rename, the next startup accepts one nonce-matched quarantined ownership record as the proof needed to validate and resume cleanup; ambiguous or current-boot quarantine state remains fail-closed.
 
 No numeric PID is signaled. Current-boot records continue through authenticated guardian control, and any identity mismatch aborts cleanup.
 
@@ -47,7 +47,7 @@ A version-2 record has no proof that it predates the current boot, so it retains
 
 - [The Linux boot ID is unavailable or malformed] -> Emit version 2 and preserve existing fail-closed behavior with actionable guidance.
 - [An upgrade encounters a stale version-2 record] -> Require one manual recovery; all fresh Linux records use version 3 afterward.
-- [Cleanup is interrupted after removing one socket] -> Keep the ownership record until last and allow missing recorded sockets on the next previous-boot recovery attempt.
+- [Cleanup is interrupted after quarantining or removing an artifact] -> Resume from one nonce-matched quarantined ownership record, revalidate remaining socket quarantines, and allow already-removed recorded sockets.
 - [A socket path is replaced before recovery] -> Recheck exact socket identity immediately before removal and preserve mismatched state.
 - [Rolling back while a version-3 guardian record exists] -> The older binary rejects the unsupported record with whole-runtime manual recovery guidance; credential secrets remain outside the runtime directory.
 
