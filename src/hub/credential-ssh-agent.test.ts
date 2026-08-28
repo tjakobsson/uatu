@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "n
 import path from "node:path";
 
 import { ManagedSshAgent } from "./credential-ssh-agent";
-import { socketIdentity, type SshAgentOwnership } from "./credential-ssh-supervisor";
+import { parseOwnership, socketIdentity, type SshAgentOwnership } from "./credential-ssh-supervisor";
 import { discoverExecutable } from "./credential-tools";
 
 const tempDirectories: string[] = [];
@@ -47,7 +47,7 @@ async function fixture(): Promise<{ runtime: string; executable: string }> {
   return { runtime, executable };
 }
 
-function manager(runtime: string, executable: string, options: { stopTimeoutMs?: number } = {}): ManagedSshAgent {
+function manager(runtime: string, executable: string, options: { stopTimeoutMs?: number; bootId?: string | null } = {}): ManagedSshAgent {
   const agent = new ManagedSshAgent({ runtimeDirectory: runtime, sshAgentPath: executable, uatuArgv: CLI_ARGV, ...options });
   agents.push(agent);
   return agent;
@@ -79,6 +79,20 @@ function processExists(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+async function killManaged(record: SshAgentOwnership): Promise<void> {
+  for (const pid of [record.supervisorPid, record.agentPid]) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
+  }
+  guardianPids.delete(record.supervisorPid);
+  const deadline = Date.now() + 2_000;
+  while ((processExists(record.supervisorPid) || processExists(record.agentPid)) && Date.now() < deadline) {
+    await Bun.sleep(20);
+  }
+  if (processExists(record.supervisorPid) || processExists(record.agentPid)) {
+    throw new Error("managed processes did not exit after simulated WSL shutdown");
+  }
+}
+
 describe("ManagedSshAgent", () => {
   test("starts through the source CLI and shuts down through its authenticated guardian", async () => {
     const { runtime, executable } = await fixture();
@@ -86,7 +100,8 @@ describe("ManagedSshAgent", () => {
 
     expect(await agent.start()).toBe(path.join(runtime, "ssh-agent.sock"));
     const record = await ownership(runtime);
-    expect(record.version).toBe(2);
+    expect([2, 3]).toContain(record.version);
+    if (record.version === 3) expect(record.bootId).toMatch(/^[a-f0-9-]{36}$/);
     expect(record.nonce).toMatch(/^[a-f0-9]{64}$/);
     expect(record.agentPid).toBeGreaterThan(0);
     expect(record.supervisorPid).toBeGreaterThan(0);
@@ -98,6 +113,23 @@ describe("ManagedSshAgent", () => {
     expect(await pathExists(agent.socketPath)).toBe(false);
     expect(await pathExists(agent.controlSocketPath)).toBe(false);
     expect(await Bun.file(path.join(runtime, "ssh-agent.json")).exists()).toBe(false);
+  });
+
+  test("writes version 3 ownership with a boot ID and falls back to version 2 without a valid one", async () => {
+    const { runtime, executable } = await fixture();
+    const bootId = "11111111-1111-4111-8111-111111111111";
+    const versioned = manager(runtime, executable, { bootId });
+    await versioned.start();
+    const versionedRecord = await ownership(runtime);
+    expect(versionedRecord).toMatchObject({ version: 3, bootId });
+    await versioned.shutdown();
+    guardianPids.delete(versionedRecord.supervisorPid);
+
+    const fallback = manager(runtime, executable, { bootId: "not-a-boot-id" });
+    await fallback.start();
+    const fallbackRecord = await ownership(runtime);
+    expect(fallbackRecord.version).toBe(2);
+    expect(fallbackRecord).not.toHaveProperty("bootId");
   });
 
   test("recovers a real surviving guardian before starting fresh without numeric process.kill", async () => {
@@ -204,6 +236,111 @@ describe("ManagedSshAgent", () => {
     expect(JSON.parse(await readFile(path.join(runtime, "ssh-agent.json"), "utf8"))).toEqual(record);
   });
 
+  test("removes exact previous-boot artifacts after an interrupted WSL shutdown", async () => {
+    const { runtime, executable } = await fixture();
+    const oldBootId = "11111111-1111-4111-8111-111111111111";
+    const newBootId = "22222222-2222-4222-8222-222222222222";
+    const first = manager(runtime, executable, { bootId: oldBootId });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+
+    // WSL teardown may interrupt guardian cleanup after removing only one path.
+    await rm(first.controlSocketPath, { force: true });
+    expect(await pathExists(first.socketPath)).toBe(true);
+    expect(await pathExists(path.join(runtime, "ssh-agent.json"))).toBe(true);
+
+    const recovery = manager(runtime, executable, { bootId: newBootId });
+    await recovery.recover();
+
+    expect(await pathExists(first.socketPath)).toBe(false);
+    expect(await pathExists(first.controlSocketPath)).toBe(false);
+    expect(await pathExists(path.join(runtime, "ssh-agent.json"))).toBe(false);
+  });
+
+  test("resumes previous-boot recovery from a quarantined ownership record", async () => {
+    const { runtime, executable } = await fixture();
+    const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+    const publicPaths = [first.socketPath, first.controlSocketPath, path.join(runtime, "ssh-agent.json")];
+    const quarantines = publicPaths.map(filePath => `${filePath}.${record.nonce}.quarantine`);
+    for (let index = 0; index < publicPaths.length; index += 1) {
+      await rename(publicPaths[index]!, quarantines[index]!);
+    }
+    await rm(quarantines[0]!);
+
+    const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
+    await recovery.recover();
+
+    for (const artifact of [...publicPaths, ...quarantines]) expect(await pathExists(artifact)).toBe(false);
+  });
+
+  test("resumes previous-boot recovery while the public ownership record remains", async () => {
+    const { runtime, executable } = await fixture();
+    const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+    const socketQuarantine = `${first.socketPath}.${record.nonce}.quarantine`;
+    await rename(first.socketPath, socketQuarantine);
+
+    const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
+    await recovery.recover();
+
+    for (const artifact of [
+      first.socketPath,
+      first.controlSocketPath,
+      path.join(runtime, "ssh-agent.json"),
+      socketQuarantine,
+    ]) expect(await pathExists(artifact)).toBe(false);
+  });
+
+  test("refuses public and quarantined ownership records together", async () => {
+    const { runtime, executable } = await fixture();
+    const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+    const ownershipPath = path.join(runtime, "ssh-agent.json");
+    const quarantine = `${ownershipPath}.${record.nonce}.quarantine`;
+    await rename(ownershipPath, quarantine);
+    await writeFile(ownershipPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+
+    const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
+    await expect(recovery.recover()).rejects.toThrow("quarantine artifacts require manual recovery");
+    expect(await pathExists(ownershipPath)).toBe(true);
+    expect(await pathExists(quarantine)).toBe(true);
+  });
+
+  test("preserves a replaced previous-boot socket", async () => {
+    const { runtime, executable } = await fixture();
+    const first = manager(runtime, executable, { bootId: "11111111-1111-4111-8111-111111111111" });
+    await first.start();
+    const record = await ownership(runtime);
+    await killManaged(record);
+    const replacementPath = path.join(runtime, "replacement-control.sock");
+    const replacement = Bun.listen({ unix: replacementPath, socket: { data() {} } });
+    await chmod(replacementPath, 0o600);
+    const replacementIdentity = await socketIdentity(replacementPath);
+    expect(replacementIdentity).not.toEqual(record.controlSocket);
+    await rename(replacementPath, first.controlSocketPath);
+    try {
+      const recovery = manager(runtime, executable, { bootId: "22222222-2222-4222-8222-222222222222" });
+      const error = await recovery.recover().then(() => null, reason => reason as Error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toContain("socket identity changed during cleanup");
+      expect(error?.message).toContain(`remove ${runtime}`);
+      expect(await pathExists(first.socketPath)).toBe(true);
+      expect(await pathExists(first.controlSocketPath)).toBe(true);
+      expect(JSON.parse(await readFile(path.join(runtime, "ssh-agent.json"), "utf8"))).toEqual(record);
+    } finally {
+      replacement.stop(true);
+      await rm(first.controlSocketPath, { force: true });
+    }
+  });
+
   test("an unresponsive identity-matched control socket times out and is preserved", async () => {
     const { runtime, executable } = await fixture();
     const first = manager(runtime, executable);
@@ -291,6 +428,16 @@ describe("ManagedSshAgent", () => {
         await rename(quarantines[index]!, publicPaths[index]!);
       }
     }
+  });
+
+  test("refuses malformed guardian quarantine names", async () => {
+    const { runtime } = await fixture();
+    const quarantine = path.join(runtime, "ssh-agent.sock.not-a-nonce.quarantine");
+    await writeFile(quarantine, "preserve me");
+
+    const recovery = new ManagedSshAgent({ runtimeDirectory: runtime, uatuArgv: CLI_ARGV });
+    await expect(recovery.recover()).rejects.toThrow("quarantine artifacts require manual recovery");
+    expect(await readFile(quarantine, "utf8")).toBe("preserve me");
   });
 
   test("serializes shutdown during startup and startup during shutdown", async () => {
@@ -399,11 +546,11 @@ describe("ManagedSshAgent", () => {
 });
 
 describe("unreadable ownership records", () => {
-  // There is deliberately no migration here. The only format that ever
-  // preceded v2 — a v1 record with { pid, socketDevice, socketInode } —
-  // existed solely in pre-merge feature-branch builds and never shipped in
-  // any release, so an unreadable record means a different build's guardian
-  // or disk damage. The error must name the file and give advice that
+  // Version 2 shipped without a boot identity and remains readable after the
+  // version 3 extension. The v1 format with { pid, socketDevice, socketInode }
+  // existed solely in pre-merge feature-branch builds and never shipped.
+  // Any other unreadable record means a different build's guardian or disk
+  // damage. The error must name the file and give advice that
   // retires everything together: deleting only the record would orphan a
   // live guardian and strand its sockets as unowned artifacts.
   test("names the file and directs recovery at the whole runtime directory", async () => {
@@ -429,5 +576,19 @@ describe("unreadable ownership records", () => {
     }), { mode: 0o600 });
 
     await expect(manager(runtime, executable).start()).rejects.toThrow(`remove ${runtime}`);
+  });
+
+  test("continues to parse the shipped version 2 ownership format", () => {
+    const socket = { type: "socket" as const, uid: 501, mode: 0o600, device: 1, inode: 2 };
+    const record = {
+      version: 2 as const,
+      nonce: "a".repeat(64),
+      agentPid: 10,
+      supervisorPid: 11,
+      agentSocket: socket,
+      controlSocket: { ...socket, inode: 3 },
+    };
+
+    expect(parseOwnership(record)).toEqual(record);
   });
 });
