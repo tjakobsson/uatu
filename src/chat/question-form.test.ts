@@ -179,7 +179,7 @@ describe("question form interactions", () => {
     childInput.value = "child answer";
     syncQuestionControl(childInput);
 
-    expect(parent.closest("[data-chat-item-id]")?.textContent).toContain("Requested by a subagent");
+    expect(parent.closest("[data-chat-item-id]")?.textContent).toContain("Requested by Subagent");
     expect(child.closest("[data-chat-item-id]")?.textContent).not.toContain("Requested by a subagent");
     expect(collectQuestionAnswers(parent)).toEqual([["A"]]);
     expect(collectQuestionAnswers(child)).toEqual([["child answer"]]);

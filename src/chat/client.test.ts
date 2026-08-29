@@ -44,6 +44,62 @@ describe("chat API client", () => {
     expect(requests[6]!.init?.method).toBe("PATCH");
   });
 
+  test("posts reversible-history receipts through the base path and validates their results", async () => {
+    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
+    resetAppBasePathForTests();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const responses = [
+      {
+        outcome: "changed",
+        state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:first", text: "Try again" }] },
+        restoredDraft: { text: "Try again" },
+      },
+      {
+        outcome: "nothing-to-redo",
+        state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+      },
+      {
+        outcome: "changed",
+        state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:selected", text: "Selected" }] },
+        restoredDraft: { text: "Selected" },
+      },
+      {
+        outcome: "changed",
+        state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+      },
+    ];
+    const client = new ChatApiClient(async (url, init) => {
+      requests.push({ url: String(url), init });
+      return Response.json(responses.shift());
+    });
+
+    expect(await client.undo("c/1", "undo-1")).toEqual(expect.objectContaining({ outcome: "changed" }));
+    expect(await client.redo("c/1", "redo-1")).toEqual(expect.objectContaining({ outcome: "nothing-to-redo" }));
+    expect(await client.revert("c/1", "message:selected", "revert-1")).toEqual(expect.objectContaining({ outcome: "changed" }));
+    expect(await client.restore("c/1", "message:selected", "restore-1")).toEqual(expect.objectContaining({ outcome: "changed" }));
+    expect(requests.map(entry => entry.url)).toEqual([
+      "/s/work/api/chat/conversations/c%2F1/undo",
+      "/s/work/api/chat/conversations/c%2F1/redo",
+      "/s/work/api/chat/conversations/c%2F1/revert",
+      "/s/work/api/chat/conversations/c%2F1/restore",
+    ]);
+    expect(requests.map(entry => JSON.parse(entry.init!.body as string))).toEqual([
+      { requestId: "undo-1" },
+      { requestId: "redo-1" },
+      { requestId: "revert-1", messageId: "message:selected" },
+      { requestId: "restore-1", messageId: "message:selected" },
+    ]);
+  });
+
+  test("rejects malformed reversible-history results", async () => {
+    const client = new ChatApiClient(async () => Response.json({
+      outcome: "changed",
+      state: { staged: false, canUndo: true, canRedo: true, revertedMessages: [] },
+    }));
+
+    await expect(client.undo("c1", "undo-1")).rejects.toThrow("cannot redo without a staged boundary");
+  });
+
   test("reconnects from the latest event cursor and cleanup closes the stream", () => {
     const sources: FakeEventSource[] = [];
     const client = new ChatApiClient(fetch, url => {

@@ -4796,15 +4796,16 @@ body.is-resizing-chat .chat-resizer {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 1rem;
+  row-gap: 0.4rem;
   padding: 1rem 1.5rem 0.8rem;
   border-bottom: 1px solid var(--border-soft);
   background: var(--surface-raised);
 }
 
-.chat-header > div:first-child {
-  flex: 0 1 auto;
+.chat-header .chat-identity {
+  flex: 1 1 100%;
   min-width: 0;
 }
 
@@ -4819,14 +4820,13 @@ body.is-resizing-chat .chat-resizer {
    back (shrinking, not pushing the surface switch out of the header) when
    the title is long. */
 .chat-header .chat-conversation-controls {
-  flex: 1 1 auto;
-  justify-content: flex-end;
+  flex: 1 1 100%;
   min-width: 0;
 }
 
 .chat-header .chat-conversation-controls select {
-  flex: 0 1 auto;
-  min-width: 4rem;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .chat-conversation-controls,
@@ -5472,6 +5472,7 @@ body.is-resizing-chat .chat-resizer {
 }
 
 .chat-user-message {
+  position: relative;
   width: fit-content;
   max-width: 82%;
   margin-left: auto;
@@ -5480,6 +5481,49 @@ body.is-resizing-chat .chat-resizer {
   background: var(--accent-soft);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.chat-user-message:has(.chat-message-actions) {
+  margin-bottom: 2.5rem;
+}
+
+.chat-message-actions {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  display: flex;
+  padding-top: 0.2rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chat-user-message:hover .chat-message-actions,
+.chat-user-message:focus-within .chat-message-actions {
+  opacity: 1;
+}
+
+.chat-message-revert {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  color: var(--text-subtle);
+  background: var(--surface-raised);
+  cursor: pointer;
+}
+
+.chat-message-revert:hover,
+.chat-message-revert:focus-visible {
+  border-color: var(--border-medium);
+  color: var(--text-strong);
+}
+
+.chat-message-revert:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .chat-user-message.is-pending {
@@ -6663,7 +6707,7 @@ html[data-ui-mode="touch"] .chat-header {
   gap: 0.65rem;
 }
 
-html[data-ui-mode="touch"] .chat-header > div:first-child {
+html[data-ui-mode="touch"] .chat-header .chat-identity {
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -7084,6 +7128,83 @@ body.terminal-transcript-open .touch-tab-bar {
   pointer-events: none !important;
 }
 
+/* The provider's hidden suffix stays reachable while a boundary is staged.
+   Like the queue, this dock sits beside the composer rather than pretending
+   reverted turns are still part of the active transcript. */
+.chat-reverted {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-raised);
+}
+
+.chat-reverted[hidden] {
+  display: none;
+}
+
+.chat-reverted > summary {
+  padding: 0.45rem max(1rem, calc((100% - 52rem) / 2));
+  color: var(--text-subtle);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.chat-reverted-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 8.5rem;
+  overflow-y: auto;
+  padding: 0 max(1rem, calc((100% - 52rem) / 2)) 0.5rem;
+}
+
+.chat-reverted-message {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
+  background: var(--surface-muted);
+}
+
+.chat-reverted-message p {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-reverted-restore {
+  min-height: 2rem;
+  padding: 0.25rem 0.35rem;
+  border: 0;
+  color: var(--accent);
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.chat-reverted-restore:hover,
+.chat-reverted-restore:focus-visible {
+  text-decoration: underline;
+}
+
+.chat-reverted-restore:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-reverted:not([hidden]) + .chat-queue {
+  border-top: none;
+}
+
+.chat-reverted:not([hidden]) + .chat-queue[hidden] + .chat-composer {
+  border-top: none;
+}
+
 /* Messages the workspace holds until the agent is ready: docked to the
    composer, outside the timeline scroll, so they sit against the input
    wherever the transcript ends and however far the reader has scrolled.
@@ -7097,7 +7218,7 @@ body.terminal-transcript-open .touch-tab-bar {
   padding: 0.5rem max(1rem, calc((100% - 52rem) / 2)) 0;
   border-top: 1px solid var(--border-soft);
   background: var(--surface-raised);
-  max-height: 30vh;
+  max-height: 8.5rem;
   overflow-y: auto;
 }
 
@@ -7468,7 +7589,9 @@ html[data-ui-mode="touch"] .chat-task-list {
 }
 
 html[data-chat-keyboard] #chat-task-list-items,
-html[data-chat-keyboard] #chat-subagents-items {
+html[data-chat-keyboard] #chat-subagents-items,
+html[data-chat-keyboard] .chat-reverted-items,
+html[data-chat-keyboard] .chat-queue {
   display: none;
 }
 
@@ -7524,6 +7647,20 @@ html[data-ui-mode="touch"] .chat-activity summary {
 
 html[data-ui-mode="touch"] .chat-user-message {
   padding: 0.55rem 0.7rem;
+}
+
+html[data-ui-mode="touch"] .chat-user-message:has(.chat-message-actions) {
+  margin-bottom: 2.5rem;
+}
+
+html[data-ui-mode="touch"] .chat-message-actions {
+  opacity: 1;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .chat-message-actions {
+    opacity: 1;
+  }
 }
 
 html[data-ui-mode="touch"] .chat-header {

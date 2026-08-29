@@ -18,6 +18,7 @@ export class ProviderUpdateCoalescer {
   private readonly onFlush: CoalescerOptions["onFlush"];
   private readonly buffers = new Map<string, NormalizedProviderUpdate[]>();
   private readonly tails = new Map<string, Promise<void>>();
+  private readonly epochs = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
 
@@ -55,6 +56,17 @@ export class ProviderUpdateCoalescer {
     for (const id of [...this.buffers.keys()]) this.flushConversation(id);
   }
 
+  /** Drops buffered updates made obsolete by an authoritative rewrite. */
+  discard(conversationId: string): void {
+    this.buffers.delete(conversationId);
+    this.epochs.set(conversationId, (this.epochs.get(conversationId) ?? 0) + 1);
+    if (!this.tails.has(conversationId)) this.epochs.delete(conversationId);
+    if (this.buffers.size === 0 && this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+
   dispose(): void {
     this.flushAll();
     this.disposed = true;
@@ -69,10 +81,17 @@ export class ProviderUpdateCoalescer {
     const buffer = this.buffers.get(conversationId);
     if (!buffer || buffer.length === 0) return;
     this.buffers.delete(conversationId);
+    const epoch = this.epochs.get(conversationId) ?? 0;
     const tail = this.tails.get(conversationId) ?? Promise.resolve();
-    const next = tail.then(() => this.onFlush(conversationId, buffer)).catch(() => undefined).then(() => {
+    const next = tail.then(() => {
+      if ((this.epochs.get(conversationId) ?? 0) !== epoch) return;
+      return this.onFlush(conversationId, buffer);
+    }).catch(() => undefined).then(() => {
       // Release the chain once it is the last one queued for this conversation.
-      if (this.tails.get(conversationId) === next) this.tails.delete(conversationId);
+      if (this.tails.get(conversationId) === next) {
+        this.tails.delete(conversationId);
+        if (!this.buffers.has(conversationId)) this.epochs.delete(conversationId);
+      }
     });
     this.tails.set(conversationId, next);
   }

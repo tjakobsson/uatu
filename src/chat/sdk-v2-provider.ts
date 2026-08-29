@@ -6,7 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../shared/bounded-map";
-import { UnsupportedVariantSelectionError } from "./provider";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
 import type {
   OpenCodeProvider,
   PendingPermission,
@@ -18,10 +18,17 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "./provider";
-import { normalizeQuestion, permissionDiff } from "./normalization";
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection } from "./types";
+import { normalizeProviderMessage, normalizeQuestion, permissionDiff } from "./normalization";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
+type ReversibleTurn = { id: string; providerId: string; draft: RestoredDraft; summary: string };
+type ReversibleHistoryContext = {
+  compatibility: boolean;
+  turns: ReversibleTurn[];
+  boundaryIndex?: number;
+  state: ReversibleHistoryState;
+};
 
 export function createSdkV2Provider(options: {
   endpoint: string;
@@ -77,7 +84,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     return {
       id: "opencode",
       name: "OpenCode",
-      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments"],
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments", "reversible-history"],
     };
   }
 
@@ -214,25 +221,9 @@ export class SdkV2Provider implements OpenCodeProvider {
   }
 
   async getSession(id: string): Promise<ProviderSession | null> {
-    const classic = await this.client.session.get({ sessionID: id, directory: this.directory }) as Result<unknown>;
-    if (classic.data) {
-      if (isCompatibilitySession(classic.data)) this.compatibilitySessions.add(id);
-      const session = toSession(classic.data);
-      this.inheritTransport(session);
-      return session;
-    }
-    // Only a store miss falls through — a transient 401/5xx must surface as a
-    // failure, or the pump misreads it as "conversation gone" and silently
-    // drops frames like completion and permission requests.
-    ensureLookupMiss(classic);
-    const result = await this.client.v2.session.get({ sessionID: id }) as Result<unknown>;
-    if (result.error !== undefined) {
-      ensureLookupMiss(result);
-      return null;
-    }
-    if (!result.data) return null;
-    const response = result.data as { data?: unknown };
-    const session = toSession(response.data ?? response);
+    const found = await this.lookupSession(id);
+    if (!found) return null;
+    const session = toSession(found.raw);
     this.inheritTransport(session);
     return session;
   }
@@ -242,7 +233,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     const classic = await this.client.session.get({ sessionID: sessionId, directory: this.directory }) as Result<unknown>;
     if (classic.data) {
       sessions.push(classic.data);
-      if (isCompatibilitySession(classic.data)) this.compatibilitySessions.add(sessionId);
+      this.compatibilitySessions.add(sessionId);
     } else ensureLookupMiss(classic);
 
     const native = await this.client.v2.session.get({ sessionID: sessionId }) as Result<unknown>;
@@ -276,15 +267,22 @@ export class SdkV2Provider implements OpenCodeProvider {
    * classic store and read back empty from v2 (and vice versa). Reading only
    * one shows an empty transcript for half the user's conversations, so both
    * are merged, deduplicated by message id, and paged locally.
-   */
+  */
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>> {
-    const merged = await this.allMessages(sessionId);
-    const end = clampIndex(options.cursor, merged.length);
+    const complete = await this.allMessages(sessionId);
+    const session = await this.lookupSession(sessionId);
+    const boundaryId = stringValue(asRecord(asRecord(session?.raw).revert).messageID);
+    const boundaryIndex = boundaryId ? complete.findIndex(message => messageIdentity(message) === boundaryId) : -1;
+    // Some OpenCode versions may already hide the reverted suffix. If their
+    // session still names a boundary absent from that response, the returned
+    // messages are the only visible history we can preserve safely.
+    const visible = boundaryIndex >= 0 ? complete.slice(0, boundaryIndex) : complete;
+    const end = clampIndex(options.cursor, visible.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     return {
-      items: merged.slice(start, end),
+      items: visible.slice(start, end),
       nextCursor: start > 0 ? String(start) : undefined,
-      configurationItems: merged,
+      configurationItems: visible,
     };
   }
 
@@ -306,8 +304,7 @@ export class SdkV2Provider implements OpenCodeProvider {
       if (!byId.has(id)) byId.set(id, item);
     }
 
-    return [...byId.values()].sort((left, right) =>
-      messageCreatedAt(left) - messageCreatedAt(right) || messageIdentity(left).localeCompare(messageIdentity(right)));
+    return [...byId.values()].sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right));
   }
 
   private async legacyMessages(sessionId: string): Promise<ProviderMessage[]> {
@@ -326,6 +323,130 @@ export class SdkV2Provider implements OpenCodeProvider {
     const messages = Array.isArray(result.data) ? result.data as ProviderMessage[] : [];
     if (messages.length > 0) this.compatibilitySessions.add(sessionId);
     return messages;
+  }
+
+  async getReversibleHistoryState(sessionId: string): Promise<ReversibleHistoryState> {
+    return (await this.reversibleHistoryContext(sessionId)).state;
+  }
+
+  async undo(sessionId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleHistoryContext(sessionId);
+    const index = context.boundaryIndex ?? context.turns.length;
+    const target = context.turns[index - 1];
+    if (!target) return { outcome: "nothing-to-undo", state: context.state };
+    return this.stageRevert(sessionId, context, index - 1);
+  }
+
+  async redo(sessionId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleHistoryContext(sessionId);
+    if (context.boundaryIndex === undefined) return { outcome: "nothing-to-redo", state: context.state };
+    return this.restoreThrough(sessionId, context, context.boundaryIndex);
+  }
+
+  async revert(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleHistoryContext(sessionId);
+    const index = context.turns.findIndex(turn => turn.id === messageId);
+    const visibleEnd = context.boundaryIndex ?? context.turns.length;
+    if (index < 0 || index >= visibleEnd) throw new ReversibleHistoryTargetError();
+    return this.stageRevert(sessionId, context, index);
+  }
+
+  async restore(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleHistoryContext(sessionId);
+    const index = context.turns.findIndex(turn => turn.id === messageId);
+    if (context.boundaryIndex === undefined || index < context.boundaryIndex) throw new ReversibleHistoryTargetError();
+    return this.restoreThrough(sessionId, context, index);
+  }
+
+  private async restoreThrough(sessionId: string, context: ReversibleHistoryContext, index: number): Promise<ReversibleHistoryResult> {
+    const next = context.turns[index + 1];
+    if (next) {
+      return this.stageRevert(sessionId, context, index + 1);
+    }
+
+    if (context.compatibility) {
+      ensureSuccess(await this.client.session.unrevert({ sessionID: sessionId, directory: this.directory }));
+    } else {
+      ensureSuccess(await this.client.v2.session.revert.clear({ sessionID: sessionId }));
+    }
+    return {
+      outcome: "changed",
+      state: reversibleState(context.turns),
+    };
+  }
+
+  private async stageRevert(sessionId: string, context: ReversibleHistoryContext, index: number): Promise<ReversibleHistoryResult> {
+    const target = context.turns[index];
+    if (!target) throw new ReversibleHistoryTargetError();
+    if (context.compatibility) {
+      ensureSuccess(await this.client.session.revert({
+        sessionID: sessionId,
+        directory: this.directory,
+        messageID: target.providerId,
+      }));
+    } else {
+      unwrap(await this.client.v2.session.revert.stage({ sessionID: sessionId, messageID: target.providerId }));
+    }
+    return {
+      outcome: "changed",
+      state: reversibleState(context.turns, index),
+      restoredDraft: target.draft,
+    };
+  }
+
+  private async reversibleHistoryContext(sessionId: string): Promise<ReversibleHistoryContext> {
+    const messages = await this.allMessages(sessionId);
+    const session = await this.lookupSession(sessionId);
+    if (!session) throw new Error("OpenCode session disappeared while reading reversible history");
+    const { compatibility, raw: rawSession } = session;
+
+    const turns = messages.flatMap(message => {
+      try {
+        const item = normalizeProviderMessage(message).find(candidate => candidate.type === "user_message");
+        if (!item || item.type !== "user_message") return [];
+        const providerId = messageIdentity(message);
+        if (!providerId) return [];
+        return [{
+          id: item.id,
+          providerId,
+          draft: {
+            text: item.text,
+            ...(item.attachments?.length ? { attachments: item.attachments } : {}),
+          },
+          summary: item.text.trim() || item.attachments?.map(attachment => attachment.name).join(", ") || "Message",
+        }];
+      } catch {
+        return [];
+      }
+    });
+    const revert = asRecord(asRecord(rawSession).revert);
+    const boundaryId = stringValue(revert.messageID);
+    const boundaryIndex = boundaryId ? turns.findIndex(turn => turn.providerId === boundaryId) : undefined;
+    const knownBoundary = boundaryIndex !== undefined && boundaryIndex >= 0 ? boundaryIndex : undefined;
+    const state = reversibleState(turns, knownBoundary, boundaryId !== undefined);
+    return { compatibility, turns, ...(knownBoundary === undefined ? {} : { boundaryIndex: knownBoundary }), state };
+  }
+
+  private async lookupSession(sessionId: string): Promise<{ raw: unknown; compatibility: boolean } | null> {
+    const classic = await this.client.session.get({ sessionID: sessionId, directory: this.directory }) as Result<unknown>;
+    if (classic.data) {
+      // In the pinned SDK this method calls /session/{id}; a successful lookup
+      // identifies the classic store even for TUI sessions with no Uatu metadata
+      // and no messages yet.
+      this.compatibilitySessions.add(sessionId);
+      return { raw: classic.data, compatibility: true };
+    }
+    // Only a store miss falls through. Auth and server failures must not be
+    // mistaken for a native session or a deleted conversation.
+    ensureLookupMiss(classic);
+    const native = await this.client.v2.session.get({ sessionID: sessionId }) as Result<unknown>;
+    if (native.error !== undefined) {
+      ensureLookupMiss(native);
+      return null;
+    }
+    if (!native.data) return null;
+    const response = asRecord(native.data);
+    return { raw: response.data ?? native.data, compatibility: false };
   }
 
   async *events(signal: AbortSignal): AsyncIterable<ProviderEvent> {
@@ -520,6 +641,17 @@ export class SdkV2Provider implements OpenCodeProvider {
   async rejectQuestion(_sessionId: string, requestId: string): Promise<void> {
     ensureSuccess(await this.client.question.reject({ requestID: requestId, directory: this.directory }));
   }
+}
+
+function reversibleState(turns: ReversibleTurn[], boundaryIndex?: number, staged = boundaryIndex !== undefined): ReversibleHistoryState {
+  return {
+    staged,
+    canUndo: staged ? boundaryIndex !== undefined && boundaryIndex > 0 : turns.length > 0,
+    canRedo: staged && boundaryIndex !== undefined,
+    revertedMessages: boundaryIndex === undefined
+      ? []
+      : turns.slice(boundaryIndex).map(turn => ({ id: turn.id, text: turn.summary })),
+  };
 }
 
 const BUILTIN_COMMANDS: ChatCommand[] = [

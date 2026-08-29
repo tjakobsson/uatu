@@ -13,6 +13,7 @@ import type {
   ModelSelection,
   PermissionOutcome,
   QuestionOutcome,
+  ReversibleHistoryResult,
 } from "./types";
 import {
   parseChatMode,
@@ -24,6 +25,7 @@ import {
   parseConversationSnapshot,
   parseConversationConfiguration,
   parseConversationSummary,
+  parseReversibleHistoryResult,
 } from "./validation";
 
 export class ChatTransportError extends Error {
@@ -184,6 +186,38 @@ export class ChatApiClient {
 
   cancel(conversationId: string, requestId: string): Promise<{ cancelled: boolean }> {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/cancel`), { requestId }, value => value as { cancelled: boolean });
+  }
+
+  undo(conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/undo`),
+      { requestId },
+      parseReversibleHistoryResult,
+    );
+  }
+
+  redo(conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/redo`),
+      { requestId },
+      parseReversibleHistoryResult,
+    );
+  }
+
+  revert(conversationId: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/revert`),
+      { requestId, messageId },
+      parseReversibleHistoryResult,
+    );
+  }
+
+  restore(conversationId: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/restore`),
+      { requestId, messageId },
+      parseReversibleHistoryResult,
+    );
   }
 
   permission(conversationId: string, interactionId: string, requestId: string, outcome: PermissionOutcome): Promise<unknown> {

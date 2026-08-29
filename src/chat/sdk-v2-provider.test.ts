@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
 import { normalizePersistedConversationConfiguration, resolveNewConversationConfiguration, SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
+import { ReversibleHistoryTargetError } from "./provider";
 
 describe("OpenCode v2 identity policy", () => {
   test("declares durable conversation rename support", () => {
@@ -652,10 +653,19 @@ describe("OpenCode v2 identity policy", () => {
 describe("history across both OpenCode message stores", () => {
   function client(v2Pages: Array<{ data: unknown[]; next?: string }>, legacy: unknown[]): OpencodeClient {
     let page = 0;
+    const classic = legacy.length > 0;
     return {
-      session: { messages: async () => ({ data: legacy }) },
+      session: {
+        get: async () => classic
+          ? { data: session("ses_history") }
+          : { error: { message: "missing" }, response: { status: 404 } },
+        messages: async () => ({ data: legacy }),
+      },
       v2: {
         session: {
+          get: async () => classic
+            ? { error: { message: "missing" }, response: { status: 404 } }
+            : { data: { data: session("ses_history") } },
           messages: async () => {
             const current = v2Pages[page] ?? { data: [] };
             page += 1;
@@ -703,9 +713,13 @@ describe("history across both OpenCode message stores", () => {
     const calls: Array<Record<string, unknown>> = [];
     let page = 0;
     const paging = {
-      session: { messages: async () => ({ data: [] }) },
+      session: {
+        get: async () => ({ error: { message: "missing" }, response: { status: 404 } }),
+        messages: async () => ({ data: [] }),
+      },
       v2: {
         session: {
+          get: async () => ({ data: { data: session("ses_paged") } }),
           messages: async (input: Record<string, unknown>) => {
             calls.push(input);
             if (input.order !== undefined && input.cursor !== undefined) {
@@ -728,12 +742,333 @@ describe("history across both OpenCode message stores", () => {
 
   test("survives an OpenCode build without the classic endpoint", async () => {
     const modernOnly = {
-      v2: { session: { messages: async () => ({ data: { data: [modern("msg_only", 1)], cursor: { next: null } } }) } },
+      session: { get: async () => ({ error: { message: "missing" }, response: { status: 404 } }) },
+      v2: { session: {
+        get: async () => ({ data: { data: session("ses_v2") } }),
+        messages: async () => ({ data: { data: [modern("msg_only", 1)], cursor: { next: null } } }),
+      } },
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(modernOnly, "/workspace");
     expect((await provider.listMessages("ses_v2", { limit: 10 })).items).toHaveLength(1);
   });
 });
+
+describe("reversible history across both OpenCode stores", () => {
+  const availableId = "11111111-2222-4333-8444-555555555555";
+  const classicUser = (id: string, created: number, text: string, attachment: "available" | "missing" | undefined = undefined) => ({
+    info: { id, role: "user", time: { created } },
+    parts: [
+      { type: "text", text },
+      ...(attachment === undefined ? [] : [
+        ...(attachment === "available" ? [{
+          type: "text", synthetic: true,
+          text: `Called the Read tool with the following input: {"filePath":"/state/${availableId}.png"}`,
+        }] : []),
+        { type: "file", mime: "image/png", filename: `${attachment}.png`, url: "data:image/png;base64,AAAA" },
+      ]),
+    ],
+  });
+  const nativeUser = (id: string, created: number, text: string, attachment: "available" | "missing" | undefined = undefined) => ({
+    id, type: "user", time: { created }, text,
+    ...(attachment === undefined ? {} : { files: [{
+      uri: attachment === "available" ? `file:///state/${availableId}.png` : "data:image/png;base64,AAAA",
+      mime: "image/png",
+      name: `${attachment}.png`,
+    }] }),
+  });
+
+  function reversibleClient(
+    store: "classic" | "native",
+    turns: unknown[],
+    initialBoundary?: string,
+    options: { metadata?: boolean } = {},
+  ) {
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const raw = {
+      ...session(`ses_${store}`),
+      ...(store === "classic" && options.metadata !== false ? { metadata: { "uatu.transport": "compatibility" } } : {}),
+      ...(initialBoundary ? { revert: { messageID: initialBoundary } } : {}),
+    };
+    const stage = (name: string, input: Record<string, unknown>) => {
+      calls.push([name, input]);
+      raw.revert = { messageID: input.messageID as string };
+      return store === "classic" ? { data: raw } : { data: { data: raw.revert } };
+    };
+    const clear = (name: string, input: Record<string, unknown>) => {
+      calls.push([name, input]);
+      delete raw.revert;
+      return { data: undefined };
+    };
+    const client = {
+      session: {
+        get: async () => store === "classic"
+          ? { data: raw }
+          : { error: { message: "missing" }, response: { status: 404 } },
+        messages: async () => ({ data: store === "classic" ? turns : [] }),
+        revert: async (input: Record<string, unknown>) => stage("classic.revert", input),
+        unrevert: async (input: Record<string, unknown>) => clear("classic.unrevert", input),
+      },
+      v2: {
+        session: {
+          get: async () => store === "native"
+            ? { data: { data: raw } }
+            : { error: { message: "missing" }, response: { status: 404 } },
+          messages: async () => ({ data: { data: store === "native" ? turns : [], cursor: { next: null } } }),
+          revert: {
+            stage: async (input: Record<string, unknown>) => stage("v2.stage", input),
+            clear: async (input: Record<string, unknown>) => clear("v2.clear", input),
+          },
+        },
+      },
+    } as unknown as OpencodeClient;
+    return { client, calls };
+  }
+
+  test("derives clear, oldest, and newest state from authoritative boundaries and excludes synthetic messages", async () => {
+    const turns = [
+      nativeUser("msg_1", 1, "first"),
+      { id: "msg_synthetic", type: "synthetic", time: { created: 2 }, text: "bookkeeping" },
+      nativeUser("msg_2", 3, "second"),
+    ];
+    const clear = reversibleClient("native", turns);
+    expect(await new SdkV2Provider(clear.client, "/workspace").getReversibleHistoryState("ses_native"))
+      .toEqual({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] });
+
+    const oldest = reversibleClient("native", turns, "msg_1");
+    expect(await new SdkV2Provider(oldest.client, "/workspace").getReversibleHistoryState("ses_native"))
+      .toEqual({
+        staged: true,
+        canUndo: false,
+        canRedo: true,
+        revertedMessages: [
+          { id: "message:msg_1", text: "first" },
+          { id: "message:msg_2", text: "second" },
+        ],
+      });
+
+    const newest = reversibleClient("native", turns, "msg_2");
+    expect(await new SdkV2Provider(newest.client, "/workspace").getReversibleHistoryState("ses_native"))
+      .toEqual({ staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:msg_2", text: "second" }] });
+  });
+
+  test("filters classic and native visible history at the boundary before pagination and configuration recovery", async () => {
+    for (const store of ["classic", "native"] as const) {
+      const turns = store === "classic"
+        ? [
+            {
+              ...classicUser("msg_z", 1, "first"),
+              info: {
+                ...classicUser("msg_z", 1, "first").info,
+                agent: "build",
+                model: { providerID: "openai", modelID: "visible" },
+              },
+            },
+            { info: { id: "msg_y", role: "assistant", time: { created: 1 } }, parts: [] },
+            {
+              ...classicUser("msg_a", 1, "hidden"),
+              info: {
+                ...classicUser("msg_a", 1, "hidden").info,
+                agent: "plan",
+                model: { providerID: "openai", modelID: "hidden" },
+              },
+            },
+            classicUser("msg_suffix", 2, "also hidden"),
+          ]
+        : [
+            { ...nativeUser("msg_z", 1, "first"), agent: "build", model: { providerID: "openai", id: "visible" } },
+            { id: "msg_y", type: "assistant", time: { created: 1 }, text: "reply" },
+            { ...nativeUser("msg_a", 1, "hidden"), agent: "plan", model: { providerID: "openai", id: "hidden" } },
+            nativeUser("msg_suffix", 2, "also hidden"),
+          ];
+      const fixture = reversibleClient(store, turns, "msg_a");
+      const provider = new SdkV2Provider(fixture.client, "/workspace");
+
+      const newest = await provider.listMessages(`ses_${store}`, { limit: 1 });
+      expect(newest.items.map(messageId)).toEqual(["msg_y"]);
+      expect(newest.configurationItems?.map(messageId)).toEqual(["msg_z", "msg_y"]);
+      expect(await provider.getConversationConfiguration(`ses_${store}`, newest.configurationItems)).toEqual({
+        model: { providerId: "openai", modelId: "visible" },
+        mode: "build",
+      });
+      expect(newest.nextCursor).toBe("1");
+      const older = await provider.listMessages(`ses_${store}`, { limit: 1, cursor: newest.nextCursor });
+      expect(older.items.map(messageId)).toEqual(["msg_z"]);
+      expect(older.nextCursor).toBeUndefined();
+    }
+  });
+
+  test("keeps provider-returned history when no boundary exists or its id is absent", async () => {
+    const turns = [nativeUser("msg_1", 1, "first"), nativeUser("msg_2", 2, "second")];
+    const clear = reversibleClient("native", turns);
+    const missing = reversibleClient("native", turns, "msg_already_hidden");
+
+    expect((await new SdkV2Provider(clear.client, "/workspace").listMessages("ses_native", { limit: 10 })).items.map(messageId))
+      .toEqual(["msg_1", "msg_2"]);
+    expect((await new SdkV2Provider(missing.client, "/workspace").listMessages("ses_native", { limit: 10 })).items.map(messageId))
+      .toEqual(["msg_1", "msg_2"]);
+  });
+
+  test("detects an empty metadata-free classic TUI session from the classic lookup", async () => {
+    const fixture = reversibleClient("classic", [], undefined, { metadata: false });
+    const provider = new SdkV2Provider(fixture.client, "/workspace");
+
+    expect(await provider.getReversibleHistoryState("ses_classic"))
+      .toEqual({ staged: false, canUndo: false, canRedo: false, revertedMessages: [] });
+    expect(await provider.undo("ses_classic")).toEqual({
+      outcome: "nothing-to-undo",
+      state: { staged: false, canUndo: false, canRedo: false, revertedMessages: [] },
+    });
+    expect(fixture.calls).toEqual([]);
+  });
+
+  test("uses native stage and clear shapes while Redo advances one hidden user turn", async () => {
+    const fixture = reversibleClient("native", [
+      nativeUser("msg_1", 1, "first"),
+      nativeUser("msg_2", 2, "second", "available"),
+      nativeUser("msg_3", 3, "third", "missing"),
+    ]);
+    const provider = new SdkV2Provider(fixture.client, "/workspace");
+
+    expect(await provider.undo("ses_native")).toEqual(expect.objectContaining({
+      outcome: "changed",
+      restoredDraft: { text: "third", attachments: [{ name: "missing.png", mimeType: "image/png" }] },
+    }));
+    expect((await provider.listMessages("ses_native", { limit: 10 })).items.map(messageId))
+      .toEqual(["msg_1", "msg_2"]);
+    expect(await provider.undo("ses_native")).toEqual(expect.objectContaining({
+      restoredDraft: { text: "second", attachments: [{ id: availableId, name: "available.png", mimeType: "image/png" }] },
+    }));
+    expect(await provider.redo("ses_native")).toEqual(expect.objectContaining({
+      restoredDraft: { text: "third", attachments: [{ name: "missing.png", mimeType: "image/png" }] },
+    }));
+    expect(await provider.redo("ses_native")).toEqual({
+      outcome: "changed",
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+    });
+    expect(fixture.calls).toEqual([
+      ["v2.stage", { sessionID: "ses_native", messageID: "msg_3" }],
+      ["v2.stage", { sessionID: "ses_native", messageID: "msg_2" }],
+      ["v2.stage", { sessionID: "ses_native", messageID: "msg_3" }],
+      ["v2.clear", { sessionID: "ses_native" }],
+    ]);
+  });
+
+  test("reverts directly to a selected visible turn and restores through a selected hidden turn", async () => {
+    const fixture = reversibleClient("native", [
+      nativeUser("msg_1", 1, "first"),
+      nativeUser("msg_2", 2, "second"),
+      nativeUser("msg_3", 3, "third"),
+      nativeUser("msg_4", 4, "fourth"),
+    ]);
+    const provider = new SdkV2Provider(fixture.client, "/workspace");
+
+    expect(await provider.revert("ses_native", "message:msg_2")).toEqual({
+      outcome: "changed",
+      state: {
+        staged: true,
+        canUndo: true,
+        canRedo: true,
+        revertedMessages: [
+          { id: "message:msg_2", text: "second" },
+          { id: "message:msg_3", text: "third" },
+          { id: "message:msg_4", text: "fourth" },
+        ],
+      },
+      restoredDraft: { text: "second" },
+    });
+    await expect(provider.revert("ses_native", "message:msg_3")).rejects.toBeInstanceOf(ReversibleHistoryTargetError);
+    await expect(provider.restore("ses_native", "message:msg_1")).rejects.toBeInstanceOf(ReversibleHistoryTargetError);
+
+    expect(await provider.restore("ses_native", "message:msg_3")).toEqual({
+      outcome: "changed",
+      state: {
+        staged: true,
+        canUndo: true,
+        canRedo: true,
+        revertedMessages: [{ id: "message:msg_4", text: "fourth" }],
+      },
+      restoredDraft: { text: "fourth" },
+    });
+    expect(await provider.restore("ses_native", "message:msg_4")).toEqual({
+      outcome: "changed",
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+    });
+    expect(fixture.calls).toEqual([
+      ["v2.stage", { sessionID: "ses_native", messageID: "msg_2" }],
+      ["v2.stage", { sessionID: "ses_native", messageID: "msg_4" }],
+      ["v2.clear", { sessionID: "ses_native" }],
+    ]);
+  });
+
+  test("uses exact classic revert and unrevert shapes", async () => {
+    const fixture = reversibleClient("classic", [
+      classicUser("msg_1", 1, "first"),
+      classicUser("msg_2", 2, "second", "available"),
+    ]);
+    const provider = new SdkV2Provider(fixture.client, "/workspace");
+
+    await provider.undo("ses_classic");
+    const oldest = await provider.undo("ses_classic");
+    expect(oldest.state).toEqual({
+      staged: true,
+      canUndo: false,
+      canRedo: true,
+      revertedMessages: [
+        { id: "message:msg_1", text: "first" },
+        { id: "message:msg_2", text: "second" },
+      ],
+    });
+    expect(oldest.restoredDraft).toEqual({ text: "first" });
+    await provider.redo("ses_classic");
+    await provider.redo("ses_classic");
+    expect(fixture.calls).toEqual([
+      ["classic.revert", { sessionID: "ses_classic", directory: "/workspace", messageID: "msg_2" }],
+      ["classic.revert", { sessionID: "ses_classic", directory: "/workspace", messageID: "msg_1" }],
+      ["classic.revert", { sessionID: "ses_classic", directory: "/workspace", messageID: "msg_2" }],
+      ["classic.unrevert", { sessionID: "ses_classic", directory: "/workspace" }],
+    ]);
+  });
+
+  test("uses classic transport shapes for selected Revert and Restore", async () => {
+    const fixture = reversibleClient("classic", [
+      classicUser("msg_1", 1, "first"),
+      classicUser("msg_2", 2, "second"),
+      classicUser("msg_3", 3, "third"),
+    ]);
+    const provider = new SdkV2Provider(fixture.client, "/workspace");
+
+    await provider.revert("ses_classic", "message:msg_1");
+    await provider.restore("ses_classic", "message:msg_2");
+    await provider.restore("ses_classic", "message:msg_3");
+    expect(fixture.calls).toEqual([
+      ["classic.revert", { sessionID: "ses_classic", directory: "/workspace", messageID: "msg_1" }],
+      ["classic.revert", { sessionID: "ses_classic", directory: "/workspace", messageID: "msg_3" }],
+      ["classic.unrevert", { sessionID: "ses_classic", directory: "/workspace" }],
+    ]);
+  });
+
+  test("reports harmless oldest Undo and unstaged Redo without transport calls", async () => {
+    const oldest = reversibleClient("classic", [classicUser("msg_1", 1, "first")], "msg_1");
+    const provider = new SdkV2Provider(oldest.client, "/workspace");
+    expect(await provider.undo("ses_classic")).toEqual({
+      outcome: "nothing-to-undo",
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:msg_1", text: "first" }] },
+    });
+
+    const clear = reversibleClient("native", [nativeUser("msg_1", 1, "first")]);
+    expect(await new SdkV2Provider(clear.client, "/workspace").redo("ses_native")).toEqual({
+      outcome: "nothing-to-redo",
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+    });
+    expect(oldest.calls).toEqual([]);
+    expect(clear.calls).toEqual([]);
+  });
+});
+
+function messageId(value: unknown): string {
+  const message = value as { id?: string; info?: { id?: string } };
+  return message.id ?? message.info?.id ?? "";
+}
 
 function session(id: string) {
   return {

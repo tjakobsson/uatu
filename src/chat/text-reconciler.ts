@@ -29,6 +29,11 @@ export class ProviderTextReconciler {
     return this.text.get(identity) ?? "";
   }
 
+  clear(): void {
+    this.text.clear();
+    this.confirmed.clear();
+  }
+
   seed(identity: string, value: string): void {
     const merged = mergeText(this.text.get(identity) ?? "", value);
     this.text.set(identity, merged);

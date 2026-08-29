@@ -141,6 +141,9 @@ export type NormalizedProviderEvent = {
   // Inventory identity deliberately excludes provider timestamps. They change
   // during ordinary session activity without changing picker membership.
   sessionLifecycle?: NormalizedSessionLifecycle;
+  // Revert lifecycle events invalidate the visible transcript. The adapter
+  // fetches provider history rather than presenting these events as notices.
+  revertLifecycle?: "staged" | "committed" | "cleared";
 };
 
 // Event types recognized as deliberately carrying nothing for the timeline.
@@ -246,7 +249,7 @@ export function normalizeProviderEvent(value: unknown, memory?: ProviderEventMem
   const eventType = optionalString(record(value).type) ?? "";
   try {
     const matched = normalizeKnownEvent(value, memory);
-    if (matched) return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle ? "handled" : "ignored", eventType };
+    if (matched) return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle || matched.revertLifecycle ? "handled" : "ignored", eventType };
     return {
       conversationId: conversationIdOf(value),
       updates: [],
@@ -279,6 +282,7 @@ type KnownEvent = {
   configuration?: ConversationConfiguration;
   replaceModel?: boolean;
   sessionLifecycle?: NormalizedSessionLifecycle;
+  revertLifecycle?: "staged" | "committed" | "cleared";
 };
 
 function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): KnownEvent | undefined {
@@ -378,14 +382,15 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
     case "session.next.shell.started":
     case "session.next.shell.ended": {
       const callId = optionalString(data.callID) ?? eventId;
+      const exitCode = number(data.exitCode);
       return { conversationId, updates: [{ kind: "upsert", item: {
         id: `command:${callId}`,
         type: "command",
         createdAt,
         command: text(data.command) || "command",
         output: optionalString(data.output),
-        exitCode: number(data.exitCode),
-        status: String(event.type).endsWith("ended") ? (number(data.exitCode) === 0 ? "completed" : "failed") : "running",
+        exitCode,
+        status: String(event.type).endsWith("ended") ? (exitCode === undefined || exitCode === 0 ? "completed" : "failed") : "running",
       } }] };
     }
     case "session.next.tool.called":
@@ -418,17 +423,13 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
     case "session.next.revert.staged":
     case "session.next.revert.committed":
     case "session.next.revert.cleared":
-      return { conversationId, updates: [{ kind: "upsert", item: {
-        id: `notice:${eventId}`,
-        type: "notice",
-        createdAt,
-        level: "warning",
-        message: event.type === "session.next.revert.cleared"
-          ? "Revert cleared. Earlier changes apply again."
-          : event.type === "session.next.revert.committed"
-            ? "Changes reverted. Work shown above this point no longer applies."
-            : "Revert staged. Work shown above this point is pending reversal.",
-      } }] };
+      return {
+        conversationId,
+        updates: [],
+        revertLifecycle: event.type === "session.next.revert.staged"
+          ? "staged"
+          : event.type === "session.next.revert.committed" ? "committed" : "cleared",
+      };
     case "session.next.step.ended":
       return { conversationId, updates: normalizeDiffs(data, createdAt) };
     // OpenCode 1.18 announces one request under two naming generations: v2 is
@@ -828,20 +829,26 @@ function normalizePart(part: RecordValue, createdAt: number): NormalizedProvider
 
 function normalizeToolPart(part: RecordValue, createdAt: number): NormalizedProviderUpdate {
   const state = record(part.state);
+  const metadata = record(state.metadata);
   const name = text(part.name ?? part.tool) || "tool";
   const id = optionalString(part.id) ?? optionalString(part.callID) ?? name;
   const input = typeof state.input === "string" ? state.input : json(state.input);
-  const output = toolContent(state.content) || optionalString(state.output) || json(state.result);
+  const output = toolContent(state.content)
+    ?? (typeof state.output === "string" ? state.output : undefined)
+    ?? (typeof metadata.output === "string" ? metadata.output : undefined)
+    ?? json(state.result);
   const error = errorMessage(state.error);
   if (isCommand(name, state)) {
+    const exitCode = number(metadata.exit) ?? number(metadata.exitCode);
+    const status = activityStatus(state.status);
     return { kind: "upsert", item: {
       id: `tool:${id}`,
       type: "command",
       createdAt,
       command: commandText(state),
-      status: activityStatus(state.status),
+      status: exitCode !== undefined && exitCode !== 0 ? "failed" : status,
       output,
-      exitCode: number(record(state.metadata).exitCode),
+      exitCode,
     } };
   }
   // A `task` tool's metadata names the child session the subagent ran as;
@@ -866,8 +873,10 @@ function normalizeToolEvent(event: RecordValue, data: RecordValue, conversationI
     status: String(event.type).endsWith("success") ? "completed" : String(event.type).endsWith("failed") ? "error" : "running",
     input: data.input,
     content: data.content,
+    output: data.output,
     result: data.result,
     error: data.error,
+    metadata: data.metadata,
   };
   return {
     conversationId,

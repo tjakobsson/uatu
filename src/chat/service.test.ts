@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import type { OpenCodeProvider } from "./provider";
-import type { ChatAgent } from "./types";
+import type { ChatAgent, ReversibleHistoryResult } from "./types";
 
 // What `provider()` below declares — the ready state carries it once the
 // adapter exists, so every ready assertion names it.
 const FAKE_AGENT: ChatAgent = { id: "opencode", name: "OpenCode", capabilities: ["models", "commands", "permissions"] };
-import { OpenCodeChatAdapter } from "./adapter";
+import { OpenCodeChatAdapter, ReversibleHistoryUnsupportedError } from "./adapter";
 import { OpenCodeService, type SpawnedOpenCode } from "./opencode-service";
 import { LazyOpenCodeChatService } from "./service";
 
@@ -105,6 +105,53 @@ describe("LazyOpenCodeChatService", () => {
 
     expect((await waiting).done).toBe(true);
     expect((await inventory.next()).done).toBe(true);
+    await service.dispose();
+  });
+
+  test("forwards reversible-history results and adapter failures unchanged", async () => {
+    const changed: ReversibleHistoryResult = {
+      outcome: "changed",
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:restored", text: "Restored prompt" }] },
+      restoredDraft: { text: "Restored prompt" },
+    };
+    const noOp: ReversibleHistoryResult = {
+      outcome: "nothing-to-redo",
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+    };
+    let undo: (id: string, requestId: string) => Promise<ReversibleHistoryResult> = async () => changed;
+    let redo: (id: string, requestId: string) => Promise<ReversibleHistoryResult> = async () => noOp;
+    let revert: (id: string, messageId: string, requestId: string) => Promise<ReversibleHistoryResult> = async () => changed;
+    let restore: (id: string, messageId: string, requestId: string) => Promise<ReversibleHistoryResult> = async () => noOp;
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime: fixtureRuntime(),
+      createProvider: () => provider(),
+      createAdapter: options => {
+        const adapter = new OpenCodeChatAdapter({ ...options, generation: "test" });
+        adapter.undo = (id, requestId) => undo(id, requestId);
+        adapter.redo = (id, requestId) => redo(id, requestId);
+        adapter.revert = (id, messageId, requestId) => revert(id, messageId, requestId);
+        adapter.restore = (id, messageId, requestId) => restore(id, messageId, requestId);
+        return adapter;
+      },
+    });
+
+    expect(await service.undo("conversation", "undo-1")).toEqual(changed);
+    expect(await service.redo("conversation", "redo-1")).toEqual(noOp);
+    expect(await service.revert("conversation", "message:selected", "revert-1")).toEqual(changed);
+    expect(await service.restore("conversation", "message:selected", "restore-1")).toEqual(noOp);
+
+    const unsupported = new ReversibleHistoryUnsupportedError();
+    undo = async () => { throw unsupported; };
+    await expect(service.undo("conversation", "undo-2")).rejects.toBe(unsupported);
+
+    const providerFailure = new Error("provider failed");
+    redo = async () => { throw providerFailure; };
+    await expect(service.redo("conversation", "redo-2")).rejects.toBe(providerFailure);
+    revert = async () => { throw providerFailure; };
+    await expect(service.revert("conversation", "message:selected", "revert-2")).rejects.toBe(providerFailure);
+    restore = async () => { throw providerFailure; };
+    await expect(service.restore("conversation", "message:selected", "restore-2")).rejects.toBe(providerFailure);
     await service.dispose();
   });
 

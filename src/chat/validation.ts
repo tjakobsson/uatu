@@ -19,6 +19,8 @@ import type {
   QueuedMessage,
   QuestionOutcome,
   QuestionRequest,
+  ReversibleHistoryResult,
+  ReversibleHistoryState,
   StructuredQuestion,
 } from "./types";
 
@@ -173,7 +175,7 @@ export function parseChatCommand(value: unknown): ChatCommand {
   if (/\s|\//.test(record.name as string)) throw new Error("command name is invalid");
   expectString(record.description, "command description");
   expectString(record.argumentHint, "command argument hint");
-  expectOneOf(record.kind, ["command", "skill"], "command kind");
+  expectOneOf(record.kind, ["command", "skill", "local-operation"], "command kind");
   return value as ChatCommand;
 }
 
@@ -335,7 +337,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
 
 export function parseConversationSnapshot(value: unknown): ConversationSnapshot {
   const record = expectRecord(value, "conversation snapshot");
-  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "queued", "olderCursor"], "conversation snapshot");
+  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "queued", "reversibleHistory", "olderCursor"], "conversation snapshot");
   parseConversationSummary(record.conversation);
   parseConversationConfiguration(record.configuration);
   expectIdentity(record.generation, "generation");
@@ -343,8 +345,41 @@ export function parseConversationSnapshot(value: unknown): ConversationSnapshot 
   if (!Array.isArray(record.items)) throw new Error("snapshot items must be an array");
   record.items.forEach(parseConversationItem);
   if (record.queued !== undefined) parseQueuedMessages(record.queued);
+  if (record.reversibleHistory !== undefined) parseReversibleHistoryState(record.reversibleHistory);
   if (record.olderCursor !== undefined) expectNonEmptyString(record.olderCursor, "older cursor");
   return value as ConversationSnapshot;
+}
+
+export function parseReversibleHistoryState(value: unknown): ReversibleHistoryState {
+  const record = expectRecord(value, "reversible history state");
+  expectKeys(record, ["staged", "canUndo", "canRedo", "revertedMessages"], "reversible history state");
+  for (const key of ["staged", "canUndo", "canRedo"] as const) {
+    if (typeof record[key] !== "boolean") throw new Error(`reversible history ${key} must be a boolean`);
+  }
+  if (!Array.isArray(record.revertedMessages)) throw new Error("reversible history revertedMessages must be an array");
+  for (const value of record.revertedMessages) {
+    const message = expectRecord(value, "reverted user message");
+    expectKeys(message, ["id", "text"], "reverted user message");
+    expectIdentity(message.id, "reverted user message id");
+    expectString(message.text, "reverted user message text");
+  }
+  if (!record.staged && record.canRedo) throw new Error("reversible history cannot redo without a staged boundary");
+  if (!record.staged && record.revertedMessages.length > 0) throw new Error("reversible history cannot list reverted messages without a staged boundary");
+  return value as ReversibleHistoryState;
+}
+
+export function parseReversibleHistoryResult(value: unknown): ReversibleHistoryResult {
+  const record = expectRecord(value, "reversible history result");
+  expectKeys(record, ["outcome", "state", "restoredDraft"], "reversible history result");
+  expectOneOf(record.outcome, ["changed", "nothing-to-undo", "nothing-to-redo"], "reversible history outcome");
+  parseReversibleHistoryState(record.state);
+  if (record.restoredDraft !== undefined) {
+    const draft = expectRecord(record.restoredDraft, "restored draft");
+    expectKeys(draft, ["text", "attachments"], "restored draft");
+    expectString(draft.text, "restored draft text");
+    if (draft.attachments !== undefined) parseMessageAttachments(draft.attachments, "restored draft attachment");
+  }
+  return value as ReversibleHistoryResult;
 }
 
 export function parseQueuedMessages(value: unknown): QueuedMessage[] {
@@ -416,7 +451,7 @@ export function parseChatEvent(value: unknown): ChatEvent {
     }
     case "resync":
       expectKeys(record, ["generation", "sequence", "conversationId", "type", "reason"], "resync event");
-      expectOneOf(record.reason, ["generation-changed", "retention-gap", "invalid-cursor"], "resync reason");
+      expectOneOf(record.reason, ["generation-changed", "retention-gap", "invalid-cursor", "conversation-rewritten"], "resync reason");
       break;
     default:
       throw new Error(`invalid chat event type: ${type}`);

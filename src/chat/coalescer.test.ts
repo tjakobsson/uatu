@@ -91,6 +91,23 @@ describe("ProviderUpdateCoalescer", () => {
     expect(sink.flushes.map(flush => flush.conversationId).sort()).toEqual(["c1", "c2"]);
   });
 
+  test("discard invalidates buffered and already-queued flushes without dropping later updates", async () => {
+    const sink = collect();
+    const coalescer = new ProviderUpdateCoalescer({ windowMs: 5_000, onFlush: sink.onFlush });
+    coalescer.push("c1", [textUpdate("part:stale", "old"), { kind: "status", status: "completed" }]);
+    // The urgent status queued a flush on the promise tail, but it has not run
+    // yet. A rewrite must invalidate that work as well as the visible buffer.
+    coalescer.discard("c1");
+    coalescer.push("c1", [textUpdate("part:fresh", "new")]);
+    coalescer.flushAll();
+    await coalescer.settled();
+
+    expect(sink.flushes).toEqual([{
+      conversationId: "c1",
+      updates: [textUpdate("part:fresh", "new")],
+    }]);
+  });
+
   test("flushAll drains pending work and dispose stops accepting more", async () => {
     const sink = collect();
     const coalescer = new ProviderUpdateCoalescer({ windowMs: 5_000, onFlush: sink.onFlush });

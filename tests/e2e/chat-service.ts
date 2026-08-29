@@ -3,9 +3,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { ConversationReplay } from "../../src/chat/replay";
-import { deriveConversationTitle, QueuedMessageNotHeldError, UnknownAttachmentError } from "../../src/chat/adapter";
+import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../../src/chat/adapter";
 import { createAttachmentStore } from "../../src/chat/attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "../../src/chat/inventory-broadcaster";
+import { ReversibleHistoryTargetError } from "../../src/chat/provider";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import type {
@@ -22,16 +23,32 @@ import type {
   PermissionOutcome,
   QueuedMessage,
   QuestionOutcome,
+  ReversibleHistoryResult,
+  ReversibleHistoryState,
 } from "../../src/chat/types";
+
+export type ReversibleFileFixture = {
+  relativePath: string;
+  baseline: string | null;
+  versions: Record<string, string | null>;
+};
+
+type FakeE2EChatServiceOptions = {
+  restoreFile?: (relativePath: string, contents: string | null) => Promise<void>;
+};
 
 export class FakeE2EChatService implements WorkspaceChatService {
   private generation = "e2e-chat-1";
   private nextId = 1;
   private readonly conversations = new Map<string, ConversationSummary>();
   private readonly items = new Map<string, Map<string, ConversationItem>>();
+  private readonly authoritativeItems = new Map<string, ConversationItem[]>();
+  private readonly revertBoundaries = new Map<string, string>();
+  private readonly reversibleFiles = new Map<string, ReversibleFileFixture[]>();
   private readonly replay = new Map<string, ConversationReplay>();
   private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly receipts = new Map<string, unknown>();
+  private readonly reversibleLanes = new Map<string, Promise<void>>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
   // Mirrors the real adapter's workspace-held queue: busy submissions wait
   // here, deliver on the turn's own end, pause on cancellation.
@@ -62,10 +79,12 @@ export class FakeE2EChatService implements WorkspaceChatService {
   promptModes: string[] = [];
   promptVariants: string[] = [];
   promptConfigurations: ConversationConfiguration[] = [];
+  reversibleAttempts: Array<{ direction: "undo" | "redo" | "revert" | "restore"; conversationId: string; requestId: string }> = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
   private failNextPrompt = false;
+  private failNextReversible: "undo" | "redo" | null = null;
   private failNextHistory = false;
   private failNextOlderHistory = false;
   // When set, status() reports a failed startup carrying diagnostics, so the
@@ -84,6 +103,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
     workspacePath: "uatu-e2e",
     root: mkdtempSync(path.join(os.tmpdir(), "uatu-e2e-attachments-")),
   });
+
+  constructor(private readonly options: FakeE2EChatServiceOptions = {}) {}
 
   private static defaultModels(): ChatModel[] {
     return [
@@ -146,6 +167,15 @@ export class FakeE2EChatService implements WorkspaceChatService {
     else this.failNextHistory = true;
   }
 
+  failReversible(direction: "undo" | "redo"): void {
+    this.failNextReversible = direction;
+  }
+
+  configureReversibleFiles(id: string, files: ReversibleFileFixture[]): void {
+    this.require(id);
+    this.reversibleFiles.set(id, structuredClone(files));
+  }
+
   async models() {
     return structuredClone(this.modelInventory);
   }
@@ -158,11 +188,19 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async commands() {
-    return [
+    const commands = [
       { name: "review", description: "Review the current work", argumentHint: "[focus]", kind: "command" as const },
+      { name: "openspec-archive-change", description: "Archive a completed OpenSpec change", argumentHint: "[change]", kind: "skill" as const },
       { name: "compact", description: "Compact the conversation context", argumentHint: "", kind: "command" as const },
       { name: "summarize", description: "Summarize and compact the conversation context", argumentHint: "", kind: "command" as const },
     ];
+    return this.capabilities.includes("reversible-history")
+      ? [
+          ...commands,
+          { name: "undo", description: "Undo the latest user turn", argumentHint: "", kind: "local-operation" as const },
+          { name: "redo", description: "Redo the next hidden user turn", argumentHint: "", kind: "local-operation" as const },
+        ]
+      : commands;
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
@@ -207,6 +245,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     };
     this.conversations.set(id, conversation);
     this.items.set(id, new Map());
+    this.authoritativeItems.set(id, []);
     this.configurations.set(id, this.nextCreatedConfiguration);
     this.nextCreatedConfiguration = {};
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
@@ -296,6 +335,15 @@ export class FakeE2EChatService implements WorkspaceChatService {
     if (JSON.stringify(previousConfiguration) !== JSON.stringify(configuration)) {
       this.replay.get(id)!.publish({ type: "conversation.configuration", configuration });
     }
+    // A restored draft starts a replacement branch. Commit the hidden suffix
+    // first, then admit this prompt before any older held messages resume.
+    if (this.revertBoundaries.has(id)) {
+      this.commitRevertedBranch(id);
+      const messageId = this.dispatch(id, text, requestId, attachmentRefs);
+      const result = { messageId, held: false, configuration };
+      this.receipts.set(key, result);
+      return result;
+    }
     // A busy conversation — or one with a backlog, which preserves order —
     // holds the message instead of delivering it, exactly like the adapter.
     const queue = this.queues.get(id) ?? [];
@@ -342,6 +390,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private dispatch(id: string, text: string, requestId?: string, attachments?: MessageAttachment[]): string {
     const messageId = `message-${this.nextId++}`;
     const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, ...(requestId ? { requestId } : {}), ...(attachments?.length ? { attachments } : {}) };
+    this.authoritativeItems.get(id)!.push(item);
     this.items.get(id)!.set(item.id, item);
     this.replay.get(id)!.publish({ type: "item.upsert", item });
     this.setStatus(id, "running");
@@ -349,7 +398,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   private deliverNext(id: string): void {
-    if (this.dormant.has(id)) return;
+    if (this.dormant.has(id) || this.revertBoundaries.has(id)) return;
     const queue = this.queues.get(id);
     const held = queue?.[0];
     if (!queue || !held) return;
@@ -388,6 +437,22 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const result = { cancelled: true } as const;
     this.receipts.set(key, result);
     return result;
+  }
+
+  async undo(id: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.reversibleHistoryMutation(id, requestId, "undo");
+  }
+
+  async redo(id: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.reversibleHistoryMutation(id, requestId, "redo");
+  }
+
+  async revert(id: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.reversibleHistoryMutation(id, requestId, "revert", messageId);
+  }
+
+  async restore(id: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.reversibleHistoryMutation(id, requestId, "restore", messageId);
   }
 
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
@@ -438,15 +503,21 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.promptModes = [];
     this.promptVariants = [];
     this.promptConfigurations = [];
+    this.reversibleAttempts = [];
     this.failNextPrompt = false;
+    this.failNextReversible = null;
     this.failNextHistory = false;
     this.failNextOlderHistory = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();
     this.items.clear();
+    this.authoritativeItems.clear();
+    this.revertBoundaries.clear();
+    this.reversibleFiles.clear();
     this.replay.clear();
     this.configurations.clear();
     this.receipts.clear();
+    this.reversibleLanes.clear();
     this.olderItems.clear();
     this.queues.clear();
     this.dormant.clear();
@@ -470,6 +541,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.conversations.set(id, conversation);
     if (child) this.children.add(id);
     this.items.set(id, new Map(items.map(item => [item.id, item])));
+    this.authoritativeItems.set(id, structuredClone(items));
     this.configurations.set(id, configuration);
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     if (older.length) this.olderItems.set(id, older);
@@ -488,6 +560,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     };
     this.conversations.set(id, conversation);
     this.items.set(id, new Map());
+    this.authoritativeItems.set(id, []);
     this.configurations.set(id, {});
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     if (options.child) this.children.add(id);
@@ -507,6 +580,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const conversation = this.require(id);
     this.conversations.delete(id);
     this.items.delete(id);
+    this.authoritativeItems.delete(id);
+    this.revertBoundaries.delete(id);
+    this.reversibleFiles.delete(id);
     this.configurations.delete(id);
     this.olderItems.delete(id);
     this.queues.delete(id);
@@ -569,6 +645,15 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   publishItem(id: string, item: ConversationItem): ChatEvent {
     this.require(id);
+    const authoritative = this.authoritativeItems.get(id)!;
+    const existing = authoritative.findIndex(candidate => candidate.id === item.id);
+    if (existing < 0) authoritative.push(item);
+    else authoritative[existing] = item;
+    const itemIndex = existing < 0 ? authoritative.length - 1 : existing;
+    const boundaryIndex = this.boundaryIndex(id);
+    if (boundaryIndex !== undefined && itemIndex >= boundaryIndex) {
+      return this.replay.get(id)!.publish({ type: "resync", reason: "conversation-rewritten" });
+    }
     this.items.get(id)!.set(item.id, item);
     return this.replay.get(id)!.publish({ type: "item.upsert", item });
   }
@@ -577,6 +662,11 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const item = this.items.get(id)?.get(itemId);
     if (item?.type === "assistant_message") this.items.get(id)!.set(itemId, { ...item, markdown: item.markdown + delta });
     if (item?.type === "reasoning") this.items.get(id)!.set(itemId, { ...item, text: item.text + delta });
+    const authoritative = this.authoritativeItems.get(id) ?? [];
+    const sourceIndex = authoritative.findIndex(candidate => candidate.id === itemId);
+    const source = authoritative[sourceIndex];
+    if (source?.type === "assistant_message") authoritative[sourceIndex] = { ...source, markdown: source.markdown + delta };
+    if (source?.type === "reasoning") authoritative[sourceIndex] = { ...source, text: source.text + delta };
     return this.replay.get(id)!.publish({ type: "item.text_delta", itemId, delta });
   }
 
@@ -638,6 +728,150 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return conversation;
   }
 
+  private reversibleHistoryMutation(id: string, requestId: string, direction: "undo" | "redo" | "revert" | "restore", messageId?: string): Promise<ReversibleHistoryResult> {
+    this.require(id);
+    const key = `${direction}:${id}:${requestId}`;
+    const existing = this.receipts.get(key) as ReversibleHistoryResult | Promise<ReversibleHistoryResult> | undefined;
+    if (existing) return Promise.resolve(existing);
+    const previous = this.reversibleLanes.get(id) ?? Promise.resolve();
+    const pending = previous.catch(() => undefined).then(() => this.performReversibleHistoryMutation(id, requestId, direction, messageId));
+    this.receipts.set(key, pending);
+    const settled = pending.then(result => {
+      this.receipts.set(key, result);
+      return result;
+    }, error => {
+      this.receipts.delete(key);
+      throw error;
+    });
+    const tail = settled.then(() => undefined, () => undefined);
+    this.reversibleLanes.set(id, tail);
+    void tail.then(() => { if (this.reversibleLanes.get(id) === tail) this.reversibleLanes.delete(id); });
+    return settled;
+  }
+
+  private async performReversibleHistoryMutation(id: string, requestId: string, direction: "undo" | "redo" | "revert" | "restore", messageId?: string): Promise<ReversibleHistoryResult> {
+    if (!this.capabilities.includes("reversible-history")) throw new ReversibleHistoryUnsupportedError();
+    this.reversibleAttempts.push({ direction, conversationId: id, requestId });
+    if ((direction === "undo" || direction === "redo") && this.failNextReversible === direction) {
+      this.failNextReversible = null;
+      throw new Error(`${direction} rejected by fixture`);
+    }
+
+    const authoritative = this.authoritativeItems.get(id)!;
+    const currentBoundary = this.boundaryIndex(id);
+    let restored: ConversationItem | undefined;
+    if (direction === "undo" || direction === "revert") {
+      const before = currentBoundary ?? authoritative.length;
+      if (direction === "revert") {
+        const index = authoritative.findIndex(item => item.id === messageId && item.type === "user_message");
+        if (index < 0 || index >= before) throw new ReversibleHistoryTargetError();
+        restored = authoritative[index];
+        this.revertBoundaries.set(id, restored!.id);
+      } else {
+        for (let index = before - 1; index >= 0; index -= 1) {
+          if (authoritative[index]?.type === "user_message") {
+            restored = authoritative[index];
+            this.revertBoundaries.set(id, restored.id);
+            break;
+          }
+        }
+      }
+      if (!restored) {
+        return { outcome: "nothing-to-undo", state: this.reversibleState(id) };
+      }
+      const status = this.require(id).status;
+      if (status === "running" || status === "sending") this.setStatus(id, "interrupted");
+    } else if (direction === "redo") {
+      if (currentBoundary === undefined) {
+        return { outcome: "nothing-to-redo", state: this.reversibleState(id) };
+      }
+      for (let index = currentBoundary + 1; index < authoritative.length; index += 1) {
+        if (authoritative[index]?.type === "user_message") {
+          restored = authoritative[index];
+          this.revertBoundaries.set(id, restored.id);
+          break;
+        }
+      }
+      if (!restored) this.revertBoundaries.delete(id);
+    } else {
+      if (currentBoundary === undefined) throw new ReversibleHistoryTargetError();
+      const target = authoritative.findIndex((item, index) => index >= currentBoundary && item.id === messageId && item.type === "user_message");
+      if (target < 0) throw new ReversibleHistoryTargetError();
+      for (let index = target + 1; index < authoritative.length; index += 1) {
+        if (authoritative[index]?.type === "user_message") {
+          restored = authoritative[index];
+          this.revertBoundaries.set(id, restored.id);
+          break;
+        }
+      }
+      if (!restored) this.revertBoundaries.delete(id);
+    }
+
+    this.replaceVisibleHistory(id);
+    await this.restoreReversibleFiles(id);
+    this.replay.get(id)!.publish({ type: "resync", reason: "conversation-rewritten" });
+    const state = this.reversibleState(id);
+    const result: ReversibleHistoryResult = {
+      outcome: "changed",
+      state,
+      ...(restored?.type === "user_message"
+        ? { restoredDraft: { text: restored.text, ...(restored.attachments?.length ? { attachments: structuredClone(restored.attachments) } : {}) } }
+        : {}),
+    };
+    if (!state.staged) this.deliverNext(id);
+    return result;
+  }
+
+  private boundaryIndex(id: string): number | undefined {
+    const boundary = this.revertBoundaries.get(id);
+    if (!boundary) return undefined;
+    const index = this.authoritativeItems.get(id)!.findIndex(item => item.id === boundary);
+    return index < 0 ? undefined : index;
+  }
+
+  private reversibleState(id: string): ReversibleHistoryState {
+    const authoritative = this.authoritativeItems.get(id) ?? [];
+    const boundary = this.boundaryIndex(id);
+    const visibleEnd = boundary ?? authoritative.length;
+    return {
+      staged: boundary !== undefined,
+      canUndo: authoritative.slice(0, visibleEnd).some(item => item.type === "user_message"),
+      canRedo: boundary !== undefined,
+      revertedMessages: boundary === undefined
+        ? []
+        : authoritative.slice(boundary)
+          .filter((item): item is Extract<ConversationItem, { type: "user_message" }> => item.type === "user_message")
+          .map(item => ({ id: item.id, text: item.text.trim() || item.attachments?.map(attachment => attachment.name).join(", ") || "Message" })),
+    };
+  }
+
+  private replaceVisibleHistory(id: string): void {
+    const authoritative = this.authoritativeItems.get(id)!;
+    const end = this.boundaryIndex(id) ?? authoritative.length;
+    this.items.set(id, new Map(authoritative.slice(0, end).map(item => [item.id, structuredClone(item)])));
+  }
+
+  private commitRevertedBranch(id: string): void {
+    const boundary = this.boundaryIndex(id);
+    if (boundary === undefined) return;
+    this.authoritativeItems.get(id)!.splice(boundary);
+    this.revertBoundaries.delete(id);
+    this.replaceVisibleHistory(id);
+    this.replay.get(id)!.publish({ type: "resync", reason: "conversation-rewritten" });
+  }
+
+  private async restoreReversibleFiles(id: string): Promise<void> {
+    if (!this.options.restoreFile) return;
+    const visible = [...this.items.get(id)!.values()];
+    for (const fixture of this.reversibleFiles.get(id) ?? []) {
+      let contents = fixture.baseline;
+      for (const item of visible) {
+        if (item.type === "user_message" && Object.hasOwn(fixture.versions, item.id)) contents = fixture.versions[item.id]!;
+      }
+      await this.options.restoreFile(fixture.relativePath, contents);
+    }
+  }
+
   private snapshot(id: string): ConversationSnapshot {
     const conversation = this.require(id);
     return {
@@ -647,6 +881,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
       cursor: this.replay.get(id)!.latestCursor(),
       items: [...this.items.get(id)!.values()],
       queued: structuredClone(this.queues.get(id) ?? []),
+      ...(this.capabilities.includes("reversible-history")
+        ? { reversibleHistory: this.reversibleState(id) }
+        : {}),
     };
   }
 

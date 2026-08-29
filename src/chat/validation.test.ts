@@ -11,6 +11,8 @@ import {
   parseConversationSnapshot,
   parseConversationSummary,
   parseInteractionRequest,
+  parseReversibleHistoryResult,
+  parseReversibleHistoryState,
 } from "./validation";
 
 const summary = {
@@ -60,6 +62,8 @@ describe("chat domain validation", () => {
   test("accepts strict command metadata", () => {
     expect(parseChatCommand({ name: "review", description: "Review changes", argumentHint: "[focus]", kind: "skill" }))
       .toEqual(expect.objectContaining({ name: "review", kind: "skill" }));
+    expect(parseChatCommand({ name: "undo", description: "Undo a turn", argumentHint: "", kind: "local-operation" }))
+      .toEqual(expect.objectContaining({ name: "undo", kind: "local-operation" }));
     expect(() => parseChatCommand({ name: "bad/name", description: "", argumentHint: "", kind: "command" })).toThrow();
   });
 
@@ -91,6 +95,7 @@ describe("chat domain validation", () => {
       cursor: "generation-1:10",
       items,
       queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11, requestId: "request-9" }],
+      reversibleHistory: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:user-1", text: "hello" }] },
       olderCursor: "before:user-1",
     };
     expect(parseConversationSnapshot(snapshot)).toBeDefined();
@@ -125,6 +130,7 @@ describe("chat domain validation", () => {
       { ...base, sequence: 7, type: "conversation.queue", queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11 }], change: { kind: "held", messageId: "held-1" } },
       { ...base, sequence: 8, type: "conversation.queue", queued: [], change: { kind: "delivered", messageId: "held-1" } },
       { ...base, sequence: 9, type: "resync", reason: "retention-gap" },
+      { ...base, sequence: 10, type: "resync", reason: "conversation-rewritten" },
     ];
     for (const event of events) expect(parseChatEvent(event)).toBeDefined();
   });
@@ -158,6 +164,26 @@ describe("chat domain validation", () => {
     expect(() => parseConversationConfiguration({ variant: "high" })).toThrow(/requires a model/);
     expect(() => parseConversationConfiguration({ model: { providerId: "openai", modelId: "gpt" }, extra: true })).toThrow(/unknown/);
     expect(() => parseConversationConfiguration({ mode: "" })).toThrow();
+  });
+
+  test("strictly validates reversible history state and mutation results", () => {
+    expect(parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] })).toBeDefined();
+    expect(parseReversibleHistoryResult({
+      outcome: "changed",
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:user-1", text: "Try another approach" }] },
+      restoredDraft: {
+        text: "Try another approach",
+        attachments: [{ id: "attachment-1", name: "screen.png", mimeType: "image/png" }],
+      },
+    })).toBeDefined();
+    expect(() => parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: true, revertedMessages: [] })).toThrow(/cannot redo/);
+    expect(() => parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: false, revertedMessages: [{ id: "message:user-1", text: "hidden" }] })).toThrow(/cannot list reverted messages/);
+    expect(() => parseReversibleHistoryState({ staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "", text: "hidden" }] })).toThrow(/id/);
+    expect(() => parseReversibleHistoryResult({
+      outcome: "changed",
+      state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:user-1", text: "draft" }] },
+      restoredDraft: { text: "draft", data: "bytes" },
+    })).toThrow(/unknown/);
   });
 
   test("token usage parses on assistant and tool items and stays a closed shape", () => {

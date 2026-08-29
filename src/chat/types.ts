@@ -46,6 +46,7 @@ export type ChatCapability =
   // context window is and what each subagent cost.
   | "context"
   | "conversation-rename"
+  | "reversible-history"
   // The agent accepts image attachments on a prompt. Whether a particular
   // model can see them is per-model (`ChatModel.imageInput`), not per-agent.
   | "attachments";
@@ -127,7 +128,30 @@ export type ChatCommand = {
   name: string;
   description: string;
   argumentHint: string;
-  kind: "command" | "skill";
+  kind: "command" | "skill" | "local-operation";
+};
+
+export type RestoredDraft = {
+  text: string;
+  attachments?: MessageAttachment[];
+};
+
+export type RevertedUserMessage = {
+  id: string;
+  text: string;
+};
+
+export type ReversibleHistoryState = {
+  staged: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  revertedMessages: RevertedUserMessage[];
+};
+
+export type ReversibleHistoryResult = {
+  outcome: "changed" | "nothing-to-undo" | "nothing-to-redo";
+  state: ReversibleHistoryState;
+  restoredDraft?: RestoredDraft;
 };
 
 // A way of working a prompt can run under — the agent's own named modes
@@ -330,6 +354,7 @@ export type ConversationSnapshot = {
   // Held messages in submission order. Optional on the wire so a snapshot
   // producer with no queue concept stays parseable; absent means empty.
   queued?: QueuedMessage[];
+  reversibleHistory?: ReversibleHistoryState;
   olderCursor?: string;
 };
 
@@ -355,5 +380,5 @@ export type ChatEvent = ChatEventBase & (
   // nothing pays only the few queued entries a conversation can hold. `change`
   // names what happened for announcements.
   | { type: "conversation.queue"; queued: QueuedMessage[]; change: { kind: "held" | "removed" | "delivered"; messageId: string } }
-  | { type: "resync"; reason: "generation-changed" | "retention-gap" | "invalid-cursor" }
+  | { type: "resync"; reason: "generation-changed" | "retention-gap" | "invalid-cursor" | "conversation-rewritten" }
 );
