@@ -13,6 +13,7 @@ import type { Serve } from "bun";
 
 import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
+import { ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome } from "../chat/types";
@@ -753,6 +754,22 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return requestId instanceof Response ? requestId : run(() => deps.chatService.redo(id, requestId));
       }),
     },
+    [p("/api/chat/conversations/:conversationId/revert")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "messageId"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        const messageId = bodyIdentity(body, "messageId");
+        if (requestId instanceof Response) return requestId;
+        return messageId instanceof Response ? messageId : run(() => deps.chatService.revert(id, messageId, requestId));
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/restore")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "messageId"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        const messageId = bodyIdentity(body, "messageId");
+        if (requestId instanceof Response) return requestId;
+        return messageId instanceof Response ? messageId : run(() => deps.chatService.restore(id, messageId, requestId));
+      }),
+    },
     [p("/api/chat/conversations/:conversationId/queue/:messageId")]: {
       DELETE: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
         const messageId = routeIdentity(request, "messageId");
@@ -918,6 +935,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
   if (error instanceof ReversibleHistoryUnsupportedError) return chatError(409, error.message);
+  if (error instanceof ReversibleHistoryTargetError) return chatError(409, error.message);
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);

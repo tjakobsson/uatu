@@ -136,10 +136,16 @@ export type RestoredDraft = {
   attachments?: MessageAttachment[];
 };
 
+export type RevertedUserMessage = {
+  id: string;
+  text: string;
+};
+
 export type ReversibleHistoryState = {
   staged: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  revertedMessages: RevertedUserMessage[];
 };
 
 export type ReversibleHistoryResult = {

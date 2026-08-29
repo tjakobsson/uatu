@@ -22,6 +22,21 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
 test.describe("desktop OpenCode chat", () => {
   test.beforeEach(async ({ page, request }) => bootChat(page, request));
 
+  test("keeps workspace identity above full-width conversation controls", async ({ page }) => {
+    const rows = await page.locator(".chat-header").evaluate(header => {
+      const identity = header.querySelector(".chat-identity")!.getBoundingClientRect();
+      const controls = header.querySelector(".chat-conversation-controls")!.getBoundingClientRect();
+      const childrenContained = [...header.querySelector(".chat-conversation-controls")!.children].filter(child => getComputedStyle(child).display !== "none").every(child => {
+        const bounds = child.getBoundingClientRect();
+        return bounds.left >= controls.left - 1 && bounds.right <= controls.right + 1;
+      });
+      return { identityTop: identity.top, identityBottom: identity.bottom, controlsTop: controls.top, identityWidth: identity.width, controlsWidth: controls.width, childrenContained };
+    });
+    expect(rows.controlsTop).toBeGreaterThanOrEqual(rows.identityBottom);
+    expect(Math.abs(rows.identityWidth - rows.controlsWidth)).toBeLessThan(2);
+    expect(rows.childrenContained).toBe(true);
+  });
+
   test("creates, resumes, queues, cancels, and retains the mounted surface", async ({ page }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
@@ -166,6 +181,14 @@ test.describe("desktop OpenCode chat", () => {
     await expect(menu).toContainText("/review");
     await page.keyboard.press("Enter");
     await expect(input).toHaveValue("Use /review ");
+    await expect(menu).toBeHidden();
+
+    await input.fill("/archive");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("option")).toHaveCount(1);
+    await expect(menu).toContainText("/openspec-archive-change");
+    await page.keyboard.press("Enter");
+    await expect(input).toHaveValue("/openspec-archive-change ");
     await expect(menu).toBeHidden();
 
     await input.fill("/review API routes");

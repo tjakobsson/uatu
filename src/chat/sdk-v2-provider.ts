@@ -6,7 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../shared/bounded-map";
-import { UnsupportedVariantSelectionError } from "./provider";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
 import type {
   OpenCodeProvider,
   PendingPermission,
@@ -22,6 +22,13 @@ import { normalizeProviderMessage, normalizeQuestion, permissionDiff } from "./n
 import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
+type ReversibleTurn = { id: string; providerId: string; draft: RestoredDraft; summary: string };
+type ReversibleHistoryContext = {
+  compatibility: boolean;
+  turns: ReversibleTurn[];
+  boundaryIndex?: number;
+  state: ReversibleHistoryState;
+};
 
 export function createSdkV2Provider(options: {
   endpoint: string;
@@ -327,43 +334,34 @@ export class SdkV2Provider implements OpenCodeProvider {
     const index = context.boundaryIndex ?? context.turns.length;
     const target = context.turns[index - 1];
     if (!target) return { outcome: "nothing-to-undo", state: context.state };
-
-    if (context.compatibility) {
-      ensureSuccess(await this.client.session.revert({
-        sessionID: sessionId,
-        directory: this.directory,
-        messageID: target.id,
-      }));
-    } else {
-      unwrap(await this.client.v2.session.revert.stage({ sessionID: sessionId, messageID: target.id }));
-    }
-    return {
-      outcome: "changed",
-      state: { staged: true, canUndo: index - 1 > 0, canRedo: true },
-      restoredDraft: target.draft,
-    };
+    return this.stageRevert(sessionId, context, index - 1);
   }
 
   async redo(sessionId: string): Promise<ReversibleHistoryResult> {
     const context = await this.reversibleHistoryContext(sessionId);
     if (context.boundaryIndex === undefined) return { outcome: "nothing-to-redo", state: context.state };
+    return this.restoreThrough(sessionId, context, context.boundaryIndex);
+  }
 
-    const next = context.turns[context.boundaryIndex + 1];
+  async revert(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleHistoryContext(sessionId);
+    const index = context.turns.findIndex(turn => turn.id === messageId);
+    const visibleEnd = context.boundaryIndex ?? context.turns.length;
+    if (index < 0 || index >= visibleEnd) throw new ReversibleHistoryTargetError();
+    return this.stageRevert(sessionId, context, index);
+  }
+
+  async restore(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleHistoryContext(sessionId);
+    const index = context.turns.findIndex(turn => turn.id === messageId);
+    if (context.boundaryIndex === undefined || index < context.boundaryIndex) throw new ReversibleHistoryTargetError();
+    return this.restoreThrough(sessionId, context, index);
+  }
+
+  private async restoreThrough(sessionId: string, context: ReversibleHistoryContext, index: number): Promise<ReversibleHistoryResult> {
+    const next = context.turns[index + 1];
     if (next) {
-      if (context.compatibility) {
-        ensureSuccess(await this.client.session.revert({
-          sessionID: sessionId,
-          directory: this.directory,
-          messageID: next.id,
-        }));
-      } else {
-        unwrap(await this.client.v2.session.revert.stage({ sessionID: sessionId, messageID: next.id }));
-      }
-      return {
-        outcome: "changed",
-        state: { staged: true, canUndo: true, canRedo: true },
-        restoredDraft: next.draft,
-      };
+      return this.stageRevert(sessionId, context, index + 1);
     }
 
     if (context.compatibility) {
@@ -373,16 +371,30 @@ export class SdkV2Provider implements OpenCodeProvider {
     }
     return {
       outcome: "changed",
-      state: { staged: false, canUndo: context.turns.length > 0, canRedo: false },
+      state: reversibleState(context.turns),
     };
   }
 
-  private async reversibleHistoryContext(sessionId: string): Promise<{
-    compatibility: boolean;
-    turns: Array<{ id: string; draft: RestoredDraft }>;
-    boundaryIndex?: number;
-    state: ReversibleHistoryState;
-  }> {
+  private async stageRevert(sessionId: string, context: ReversibleHistoryContext, index: number): Promise<ReversibleHistoryResult> {
+    const target = context.turns[index];
+    if (!target) throw new ReversibleHistoryTargetError();
+    if (context.compatibility) {
+      ensureSuccess(await this.client.session.revert({
+        sessionID: sessionId,
+        directory: this.directory,
+        messageID: target.providerId,
+      }));
+    } else {
+      unwrap(await this.client.v2.session.revert.stage({ sessionID: sessionId, messageID: target.providerId }));
+    }
+    return {
+      outcome: "changed",
+      state: reversibleState(context.turns, index),
+      restoredDraft: target.draft,
+    };
+  }
+
+  private async reversibleHistoryContext(sessionId: string): Promise<ReversibleHistoryContext> {
     const messages = await this.allMessages(sessionId);
     const session = await this.lookupSession(sessionId);
     if (!session) throw new Error("OpenCode session disappeared while reading reversible history");
@@ -392,14 +404,16 @@ export class SdkV2Provider implements OpenCodeProvider {
       try {
         const item = normalizeProviderMessage(message).find(candidate => candidate.type === "user_message");
         if (!item || item.type !== "user_message") return [];
-        const id = messageIdentity(message);
-        if (!id) return [];
+        const providerId = messageIdentity(message);
+        if (!providerId) return [];
         return [{
-          id,
+          id: item.id,
+          providerId,
           draft: {
             text: item.text,
             ...(item.attachments?.length ? { attachments: item.attachments } : {}),
           },
+          summary: item.text.trim() || item.attachments?.map(attachment => attachment.name).join(", ") || "Message",
         }];
       } catch {
         return [];
@@ -407,14 +421,9 @@ export class SdkV2Provider implements OpenCodeProvider {
     });
     const revert = asRecord(asRecord(rawSession).revert);
     const boundaryId = stringValue(revert.messageID);
-    const boundaryIndex = boundaryId ? turns.findIndex(turn => turn.id === boundaryId) : undefined;
+    const boundaryIndex = boundaryId ? turns.findIndex(turn => turn.providerId === boundaryId) : undefined;
     const knownBoundary = boundaryIndex !== undefined && boundaryIndex >= 0 ? boundaryIndex : undefined;
-    const staged = boundaryId !== undefined;
-    const state: ReversibleHistoryState = {
-      staged,
-      canUndo: staged ? knownBoundary !== undefined && knownBoundary > 0 : turns.length > 0,
-      canRedo: staged && knownBoundary !== undefined,
-    };
+    const state = reversibleState(turns, knownBoundary, boundaryId !== undefined);
     return { compatibility, turns, ...(knownBoundary === undefined ? {} : { boundaryIndex: knownBoundary }), state };
   }
 
@@ -632,6 +641,17 @@ export class SdkV2Provider implements OpenCodeProvider {
   async rejectQuestion(_sessionId: string, requestId: string): Promise<void> {
     ensureSuccess(await this.client.question.reject({ requestID: requestId, directory: this.directory }));
   }
+}
+
+function reversibleState(turns: ReversibleTurn[], boundaryIndex?: number, staged = boundaryIndex !== undefined): ReversibleHistoryState {
+  return {
+    staged,
+    canUndo: staged ? boundaryIndex !== undefined && boundaryIndex > 0 : turns.length > 0,
+    canRedo: staged && boundaryIndex !== undefined,
+    revertedMessages: boundaryIndex === undefined
+      ? []
+      : turns.slice(boundaryIndex).map(turn => ({ id: turn.id, text: turn.summary })),
+  };
 }
 
 const BUILTIN_COMMANDS: ChatCommand[] = [

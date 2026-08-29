@@ -204,6 +204,22 @@ export class ChatApiClient {
     );
   }
 
+  revert(conversationId: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/revert`),
+      { requestId, messageId },
+      parseReversibleHistoryResult,
+    );
+  }
+
+  restore(conversationId: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/restore`),
+      { requestId, messageId },
+      parseReversibleHistoryResult,
+    );
+  }
+
   permission(conversationId: string, interactionId: string, requestId: string, outcome: PermissionOutcome): Promise<unknown> {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/permissions/${encodeURIComponent(interactionId)}`), { requestId, outcome }, value => value);
   }

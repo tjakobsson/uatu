@@ -8,7 +8,7 @@ beforeAll(() => {
   (globalThis as Record<string, unknown>).document = dom.document;
 });
 
-const { QueueDockRenderer, TimelineRenderer, subagentEntries } = await import("./timeline-renderer");
+const { QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, subagentEntries } = await import("./timeline-renderer");
 
 function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjection> = {}): ChatProjection {
   return {
@@ -852,6 +852,43 @@ describe("foreign request origins", () => {
     expect(own.querySelector("[data-open-conversation]")).toBeNull();
     expect(foreign.querySelector(".chat-request-origin")?.textContent).toBe("Requested by a subagent of this conversation.");
     expect(foreign.querySelector("[data-open-conversation]")).toBeNull();
+  });
+});
+
+describe("reversible-history controls", () => {
+  test("renders Revert only when the main timeline declares the capability", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "message:user", type: "user_message", createdAt: 1, text: "try this" };
+    renderer.render(host, projectionWith([item]), new Set());
+    expect(host.querySelector("[data-history-revert]")).toBeNull();
+
+    renderer.render(host, projectionWith([item]), new Set(), true, true);
+    const button = host.querySelector<HTMLButtonElement>("[data-history-revert]")!;
+    expect(button.dataset.historyRevert).toBe("message:user");
+    expect(button.getAttribute("aria-label")).toBe("Revert message");
+  });
+
+  test("reconciles escaped hidden turns and hides the dock when restored", () => {
+    const shell = document.createElement("details");
+    const label = document.createElement("span");
+    const items = document.createElement("div");
+    shell.append(label, items);
+    const renderer = new RevertedMessagesDockRenderer(shell, label, items);
+    renderer.render([
+      { id: 'message:\"one', text: "first <turn>" },
+      { id: "message:two", text: "second turn" },
+    ]);
+
+    expect(shell.hidden).toBe(false);
+    expect(label.textContent).toBe("2 reverted messages");
+    expect(items.querySelectorAll("[data-history-restore]")).toHaveLength(2);
+    expect(items.querySelector("img")).toBeNull();
+    expect(items.textContent).toContain("first <turn>");
+
+    renderer.render([]);
+    expect(shell.hidden).toBe(true);
+    expect(items.childElementCount).toBe(0);
   });
 });
 

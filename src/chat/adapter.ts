@@ -5,7 +5,7 @@ import { ProviderUpdateCoalescer } from "./coalescer";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate, type NormalizedSessionLifecycle } from "./normalization";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderAttachment, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderAttachment, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
@@ -334,7 +334,8 @@ export class OpenCodeChatAdapter {
 
   agent(): ChatAgent {
     const agent = this.provider.describe();
-    const reversible = this.provider.getReversibleHistoryState && this.provider.undo && this.provider.redo;
+    const reversible = this.provider.getReversibleHistoryState
+      && this.provider.undo && this.provider.redo && this.provider.revert && this.provider.restore;
     if (reversible || !agent.capabilities.includes("reversible-history")) return agent;
     return { ...agent, capabilities: agent.capabilities.filter(capability => capability !== "reversible-history") };
   }
@@ -1074,30 +1075,51 @@ export class OpenCodeChatAdapter {
     return this.runReversibleMutation("redo", conversationId, requestId);
   }
 
-  private runReversibleMutation(direction: "undo" | "redo", conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
-    return this.receipts.run(`${direction}:${conversationId}:${requestId}`, () =>
+  revert(conversationId: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.runReversibleMutation("revert", conversationId, requestId, messageId);
+  }
+
+  restore(conversationId: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.runReversibleMutation("restore", conversationId, requestId, messageId);
+  }
+
+  private runReversibleMutation(operation: "undo" | "redo" | "revert" | "restore", conversationId: string, requestId: string, messageId?: string): Promise<ReversibleHistoryResult> {
+    return this.receipts.run(`${operation}:${conversationId}:${requestId}`, () =>
       this.enqueuePromptAdmission(conversationId, async () => {
         const provider = this.requireReversibleHistoryProvider();
         await this.requireSession(conversationId);
-        const before = await provider.getReversibleHistoryState(conversationId);
+        const before = operation === "revert" || operation === "restore"
+          ? await this.reconcileReversibleHistory(conversationId)
+          : await provider.getReversibleHistoryState(conversationId);
         this.rememberReversibleHistory(conversationId, before);
-        if (direction === "undo" && !before.canUndo) {
+        if (operation === "undo" && !before.canUndo) {
           return { outcome: "nothing-to-undo", state: before };
         }
-        if (direction === "redo" && !before.canRedo) {
+        if (operation === "redo" && !before.canRedo) {
           return { outcome: "nothing-to-redo", state: before };
+        }
+        if (operation === "revert") {
+          const target = this.projection(conversationId).items().find(item => item.id === messageId);
+          if (target?.type !== "user_message") throw new ReversibleHistoryTargetError();
+        }
+        if (operation === "restore" && !before.revertedMessages.some(message => message.id === messageId)) {
+          throw new ReversibleHistoryTargetError();
         }
 
         this.reversibleMutations.add(conversationId);
         try {
-          if (direction === "undo" && this.turnActive(conversationId, this.projection(conversationId))) {
+          if ((operation === "undo" || operation === "revert") && this.turnActive(conversationId, this.projection(conversationId))) {
             // Pause first. OpenCode can publish idle before interrupt() returns.
             await this.provider.interrupt(conversationId);
             this.projection(conversationId).statusUpdate("interrupted");
           }
-          const result = direction === "undo"
+          const result = operation === "undo"
             ? await provider.undo(conversationId)
-            : await provider.redo(conversationId);
+            : operation === "redo"
+              ? await provider.redo(conversationId)
+              : operation === "revert"
+                ? await provider.revert(conversationId, messageId!)
+                : await provider.restore(conversationId, messageId!);
           const normalized = await this.normalizeRestoredDraft(result);
           let state = normalized.state;
           try {
@@ -1120,15 +1142,18 @@ export class OpenCodeChatAdapter {
       }));
   }
 
-  private requireReversibleHistoryProvider(): Required<Pick<OpenCodeProvider, "getReversibleHistoryState" | "undo" | "redo">> {
+  private requireReversibleHistoryProvider(): Required<Pick<OpenCodeProvider, "getReversibleHistoryState" | "undo" | "redo" | "revert" | "restore">> {
     if (!this.provider.describe().capabilities.includes("reversible-history")
-      || !this.provider.getReversibleHistoryState || !this.provider.undo || !this.provider.redo) {
+      || !this.provider.getReversibleHistoryState || !this.provider.undo || !this.provider.redo
+      || !this.provider.revert || !this.provider.restore) {
       throw new ReversibleHistoryUnsupportedError();
     }
     return {
       getReversibleHistoryState: this.provider.getReversibleHistoryState.bind(this.provider),
       undo: this.provider.undo.bind(this.provider),
       redo: this.provider.redo.bind(this.provider),
+      revert: this.provider.revert.bind(this.provider),
+      restore: this.provider.restore.bind(this.provider),
     };
   }
 
@@ -1984,7 +2009,10 @@ function sameConfiguration(left: ConversationConfiguration, right: ConversationC
 }
 
 function sameReversibleHistory(left: ReversibleHistoryState | undefined, right: ReversibleHistoryState): boolean {
-  return left?.staged === right.staged && left.canUndo === right.canUndo && left.canRedo === right.canRedo;
+  return left?.staged === right.staged
+    && left.canUndo === right.canUndo
+    && left.canRedo === right.canRedo
+    && JSON.stringify(left.revertedMessages) === JSON.stringify(right.revertedMessages);
 }
 
 function sameConversationItems(left: ConversationItem[], right: ConversationItem[]): boolean {

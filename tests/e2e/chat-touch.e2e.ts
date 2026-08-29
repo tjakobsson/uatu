@@ -33,6 +33,22 @@ const messages = (prefix: string, count: number, start = 0): ConversationItem[] 
   text: `${prefix} message ${index} ${"content ".repeat(12)}`,
 }));
 
+test("keeps workspace identity above full-width conversation controls", async ({ page, request }) => {
+  await boot(page, request);
+  const rows = await page.locator(".chat-header").evaluate(header => {
+    const identity = header.querySelector(".chat-identity")!.getBoundingClientRect();
+    const controls = header.querySelector(".chat-conversation-controls")!.getBoundingClientRect();
+    const childrenContained = [...header.querySelector(".chat-conversation-controls")!.children].filter(child => getComputedStyle(child).display !== "none").every(child => {
+      const bounds = child.getBoundingClientRect();
+      return bounds.left >= controls.left - 1 && bounds.right <= controls.right + 1;
+    });
+    return { identityBottom: identity.bottom, controlsTop: controls.top, identityWidth: identity.width, controlsWidth: controls.width, childrenContained };
+  });
+  expect(rows.controlsTop).toBeGreaterThanOrEqual(rows.identityBottom);
+  expect(Math.abs(rows.identityWidth - rows.controlsWidth)).toBeLessThan(2);
+  expect(rows.childrenContained).toBe(true);
+});
+
 test("four tabs preserve chat state and keyboard navigation", async ({ page, request }) => {
   await boot(page, request);
   await expect(page.locator("#touch-tab-bar [role=tab]")).toHaveCount(4);
@@ -281,8 +297,18 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
   await page.locator("#chat-input").focus();
   await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
   await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await page.evaluate(() => {
+    const reverted = document.querySelector<HTMLDetailsElement>("#chat-reverted")!;
+    reverted.hidden = false;
+    document.querySelector("#chat-reverted-items")!.replaceChildren(...Array.from({ length: 8 }, () => document.createElement("article")));
+    const queue = document.querySelector<HTMLElement>("#chat-queue")!;
+    queue.hidden = false;
+    queue.replaceChildren(...Array.from({ length: 8 }, () => document.createElement("article")));
+  });
   await page.evaluate(() => window.visualViewport!.dispatchEvent(new Event("resize")));
   await expect(page.locator("#chat-surface")).toHaveCSS("--chat-visual-height", "460px");
+  await expect(page.locator("#chat-reverted-items")).toBeHidden();
+  await expect(page.locator("#chat-queue")).toBeHidden();
   const geometry = await page.evaluate(() => {
     const composer = document.querySelector("#chat-composer")!.getBoundingClientRect();
     return { bottom: composer.bottom, visualHeight: window.visualViewport!.height, marginBottom: getComputedStyle(document.querySelector("#chat-composer")!).marginBottom };

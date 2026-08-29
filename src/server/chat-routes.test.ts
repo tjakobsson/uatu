@@ -8,6 +8,7 @@ import type { WorkspaceChatService } from "../chat/service";
 import type { ChatAvailability, ConversationSnapshot, ConversationSummary, MessageAttachment, ModelSelection, PermissionOutcome, QuestionOutcome, ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
+import { ReversibleHistoryTargetError } from "../chat/provider";
 import { buildRoutes } from "./routes";
 
 const TOKEN = "chat-test-token";
@@ -24,7 +25,7 @@ class FakeChatService implements WorkspaceChatService {
   selectedAgent: string | undefined;
   questionResponses: QuestionOutcome[] = [];
   removals: string[] = [];
-  reversibleMutations = { undo: 0, redo: 0 };
+  reversibleMutations = { undo: 0, redo: 0, revert: 0, restore: 0 };
   private readonly reversibleReceipts = new Map<string, ReversibleHistoryResult>();
 
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
@@ -85,7 +86,7 @@ class FakeChatService implements WorkspaceChatService {
     this.reversibleMutations.undo += 1;
     const result: ReversibleHistoryResult = {
       outcome: "changed",
-      state: { staged: true, canUndo: false, canRedo: true },
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:restored", text: "Restored prompt" }] },
       restoredDraft: { text: "Restored prompt" },
     };
     this.reversibleReceipts.set(key, result);
@@ -99,7 +100,34 @@ class FakeChatService implements WorkspaceChatService {
     this.reversibleMutations.redo += 1;
     const result: ReversibleHistoryResult = {
       outcome: "nothing-to-redo",
-      state: { staged: false, canUndo: true, canRedo: false },
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+    };
+    this.reversibleReceipts.set(key, result);
+    return result;
+  }
+  async revert(id: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    this.require(id);
+    const key = `revert:${id}:${requestId}`;
+    const existing = this.reversibleReceipts.get(key);
+    if (existing) return existing;
+    this.reversibleMutations.revert += 1;
+    const result: ReversibleHistoryResult = {
+      outcome: "changed",
+      state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: messageId, text: "Selected prompt" }] },
+      restoredDraft: { text: "Selected prompt" },
+    };
+    this.reversibleReceipts.set(key, result);
+    return result;
+  }
+  async restore(id: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    this.require(id);
+    const key = `restore:${id}:${requestId}`;
+    const existing = this.reversibleReceipts.get(key);
+    if (existing) return existing;
+    this.reversibleMutations.restore += 1;
+    const result: ReversibleHistoryResult = {
+      outcome: "changed",
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
     };
     this.reversibleReceipts.set(key, result);
     return result;
@@ -260,12 +288,14 @@ describe("workspace chat routes", () => {
     expect(service.prompts).toBe(1);
   });
 
-  test("runs idempotent undo and no-op redo through the standard mutation gate", async () => {
+  test("runs idempotent reversible-history mutations through the standard mutation gate", async () => {
     const service = new FakeChatService();
     const table = routes(service);
     type Handler = { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
     const undo = table["/api/chat/conversations/:conversationId/undo"] as Handler;
     const redo = table["/api/chat/conversations/:conversationId/redo"] as Handler;
+    const revert = table["/api/chat/conversations/:conversationId/revert"] as Handler;
+    const restore = table["/api/chat/conversations/:conversationId/restore"] as Handler;
     const send = (handler: Handler, requestId: string, body: Record<string, unknown> = { requestId }, origin = "http://127.0.0.1:4711") => handler.POST(request("/api/chat/conversations/local/history", {
       method: "POST",
       headers: { origin, "content-type": "application/json" },
@@ -281,12 +311,12 @@ describe("workspace chat routes", () => {
     expect(changed.status).toBe(200);
     expect(await changed.json()).toEqual({
       outcome: "changed",
-      state: { staged: true, canUndo: false, canRedo: true },
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:restored", text: "Restored prompt" }] },
       restoredDraft: { text: "Restored prompt" },
     });
     expect(await retry.json()).toEqual({
       outcome: "changed",
-      state: { staged: true, canUndo: false, canRedo: true },
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:restored", text: "Restored prompt" }] },
       restoredDraft: { text: "Restored prompt" },
     });
     expect(service.reversibleMutations.undo).toBe(1);
@@ -295,9 +325,32 @@ describe("workspace chat routes", () => {
     expect(noOp.status).toBe(200);
     expect(await noOp.json()).toEqual({
       outcome: "nothing-to-redo",
-      state: { staged: false, canUndo: true, canRedo: false },
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
     });
     expect(service.reversibleMutations.redo).toBe(1);
+
+    expect((await send(revert, "revert-1", { requestId: "revert-1" })).status).toBe(400);
+    expect((await send(restore, "restore-1", { requestId: "restore-1", messageId: "", extra: true })).status).toBe(400);
+    const reverted = await send(revert, "revert-1", { requestId: "revert-1", messageId: "message:selected" });
+    const revertedRetry = await send(revert, "revert-1", { requestId: "revert-1", messageId: "message:selected" });
+    expect(await reverted.json()).toEqual({
+      outcome: "changed",
+      state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:selected", text: "Selected prompt" }] },
+      restoredDraft: { text: "Selected prompt" },
+    });
+    expect(await revertedRetry.json()).toEqual({
+      outcome: "changed",
+      state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:selected", text: "Selected prompt" }] },
+      restoredDraft: { text: "Selected prompt" },
+    });
+    expect(service.reversibleMutations.revert).toBe(1);
+
+    const restored = await send(restore, "restore-1", { requestId: "restore-1", messageId: "message:selected" });
+    expect(await restored.json()).toEqual({
+      outcome: "changed",
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+    });
+    expect(service.reversibleMutations.restore).toBe(1);
   });
 
   test("maps unsupported reversible history to conflict and provider failures to 500", async () => {
@@ -321,6 +374,16 @@ describe("workspace chat routes", () => {
     const failed = await send();
     expect(failed.status).toBe(500);
     expect(await failed.json()).toEqual({ error: "chat operation failed" });
+
+    service.revert = async () => { throw new ReversibleHistoryTargetError(); };
+    const revert = table["/api/chat/conversations/:conversationId/revert"] as Handler;
+    const stale = await revert.POST(request("/api/chat/conversations/local/revert", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: crypto.randomUUID(), messageId: "message:stale" }),
+    }, { conversationId: "local" }) as never);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({ error: "reversible-history message is no longer available" });
   });
 
   test("removes a held message, guards the origin, and maps a delivered message to conflict", async () => {

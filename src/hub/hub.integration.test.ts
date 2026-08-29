@@ -2998,6 +2998,8 @@ describe("hub end to end", () => {
       ["POST", "/s/myproject/api/chat/conversations/local/cancel", "/s/{workspaceId}/api/chat/conversations/{conversationId}/cancel", { requestId: "stopped" }],
       ["POST", "/s/myproject/api/chat/conversations/local/undo", "/s/{workspaceId}/api/chat/conversations/{conversationId}/undo", { requestId: "stopped-undo" }],
       ["POST", "/s/myproject/api/chat/conversations/local/redo", "/s/{workspaceId}/api/chat/conversations/{conversationId}/redo", { requestId: "stopped-redo" }],
+      ["POST", "/s/myproject/api/chat/conversations/local/revert", "/s/{workspaceId}/api/chat/conversations/{conversationId}/revert", { requestId: "stopped-revert", messageId: "message:user" }],
+      ["POST", "/s/myproject/api/chat/conversations/local/restore", "/s/{workspaceId}/api/chat/conversations/{conversationId}/restore", { requestId: "stopped-restore", messageId: "message:user" }],
       ["DELETE", "/s/myproject/api/chat/conversations/local/queue/held-1", "/s/{workspaceId}/api/chat/conversations/{conversationId}/queue/{messageId}", { requestId: "stopped-unqueue" }],
       ["POST", "/s/myproject/api/chat/conversations/local/permissions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}", { requestId: "stopped", outcome: "rejected" }],
       ["POST", "/s/myproject/api/chat/conversations/local/questions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/questions/{interactionId}", { requestId: "stopped", outcome: { kind: "rejected" } }],

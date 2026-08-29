@@ -41,6 +41,14 @@ async function historyCommand(page: Page, operation: "undo" | "redo") {
   return response;
 }
 
+async function selectedHistory(page: Page, operation: "revert" | "restore", messageId: string) {
+  const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith(`/${operation}`));
+  const control = page.locator(`[data-history-${operation}="${messageId}"]`);
+  if (await page.locator("html").getAttribute("data-ui-mode") === "touch") await control.tap();
+  else await control.click();
+  return response;
+}
+
 async function send(page: Page, text: string) {
   const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith("/prompts"));
   await page.locator("#chat-input").fill(text);
@@ -125,6 +133,33 @@ test.describe("reversible Chat history", () => {
       page.on("request", request => {
         if (new URL(request.url()).pathname.endsWith("/prompts")) promptRequests += 1;
       });
+
+      expect((await selectedHistory(page, "revert", "message:second")).status()).toBe(200);
+      await expect(page.locator("#chat-input")).toHaveValue("second instruction");
+      await expect(page.locator("#chat-items")).not.toContainText("second instruction");
+      await expect(other.locator("#chat-items")).not.toContainText("second instruction");
+      await expect(page.locator("#chat-reverted-items .chat-reverted-message")).toHaveCount(2);
+      await expect(other.locator("#chat-reverted-items .chat-reverted-message")).toHaveCount(2);
+      await expect(other.locator("#chat-input")).toHaveValue("other client's private draft");
+      await expect(page.locator("#preview")).toContainText("First state");
+
+      expect((await selectedHistory(page, "restore", "message:second")).status()).toBe(200);
+      await expect(page.locator("#chat-input")).toHaveValue("third instruction");
+      await expect(page.locator("#chat-items")).toContainText("second answer");
+      await expect(other.locator("#chat-items")).toContainText("second answer");
+      await expect(page.locator("#chat-reverted-items .chat-reverted-message")).toHaveCount(1);
+      await expect(other.locator("#chat-reverted-items .chat-reverted-message")).toHaveCount(1);
+      await expect(other.locator("#chat-input")).toHaveValue("other client's private draft");
+      await expect(page.locator("#preview")).toContainText("Second state");
+
+      expect((await selectedHistory(page, "restore", "message:third")).status()).toBe(200);
+      await expect(page.locator("#chat-input")).toHaveValue("");
+      await expect(page.locator("#chat-items")).toContainText("third answer");
+      await expect(other.locator("#chat-items")).toContainText("third answer");
+      await expect(page.locator("#chat-reverted")).toBeHidden();
+      await expect(other.locator("#chat-reverted")).toBeHidden();
+      await expect(other.locator("#chat-input")).toHaveValue("other client's private draft");
+      await expect(page.locator("#preview")).toContainText("Third state");
 
       expect((await historyCommand(page, "undo")).status()).toBe(200);
       await expect(page.locator("#chat-input")).toHaveValue("third instruction");
@@ -252,8 +287,18 @@ test.describe("reversible Chat history", () => {
         if (new URL(request.url()).pathname.endsWith("/prompts")) promptRequests += 1;
       });
 
-      const first = await postHistory(page, conversationId, "undo", "fixed-undo");
-      const retry = await postHistory(page, conversationId, "undo", "fixed-undo");
+      expect((await selectedHistory(page, "revert", "message:second")).status()).toBe(200);
+      await expect(page.locator("#chat-reverted-items .chat-reverted-message")).toHaveCount(2);
+      await expect(page.locator("#chat-composer-status-live")).toHaveText("Revert complete");
+      await expect(page.locator('[data-history-restore="message:third"]')).toBeEnabled();
+      expect((await selectedHistory(page, "restore", "message:third")).status()).toBe(200);
+      await expect(page.locator("#chat-reverted")).toBeHidden();
+      await expect(page.locator("#chat-items")).toContainText("third answer");
+
+      const [first, retry] = await Promise.all([
+        postHistory(page, conversationId, "undo", "fixed-undo"),
+        postHistory(page, conversationId, "undo", "fixed-undo"),
+      ]);
       expect(first).toEqual(retry);
       expect(first).toMatchObject({ status: 200, body: { outcome: "changed", restoredDraft: { text: "third instruction" } } });
       await expect(page.locator("#chat-items")).not.toContainText("third instruction");

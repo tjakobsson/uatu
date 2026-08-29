@@ -95,7 +95,7 @@ describe("chat domain validation", () => {
       cursor: "generation-1:10",
       items,
       queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11, requestId: "request-9" }],
-      reversibleHistory: { staged: true, canUndo: true, canRedo: true },
+      reversibleHistory: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:user-1", text: "hello" }] },
       olderCursor: "before:user-1",
     };
     expect(parseConversationSnapshot(snapshot)).toBeDefined();
@@ -167,19 +167,21 @@ describe("chat domain validation", () => {
   });
 
   test("strictly validates reversible history state and mutation results", () => {
-    expect(parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: false })).toBeDefined();
+    expect(parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] })).toBeDefined();
     expect(parseReversibleHistoryResult({
       outcome: "changed",
-      state: { staged: true, canUndo: false, canRedo: true },
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:user-1", text: "Try another approach" }] },
       restoredDraft: {
         text: "Try another approach",
         attachments: [{ id: "attachment-1", name: "screen.png", mimeType: "image/png" }],
       },
     })).toBeDefined();
-    expect(() => parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: true })).toThrow(/cannot redo/);
+    expect(() => parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: true, revertedMessages: [] })).toThrow(/cannot redo/);
+    expect(() => parseReversibleHistoryState({ staged: false, canUndo: true, canRedo: false, revertedMessages: [{ id: "message:user-1", text: "hidden" }] })).toThrow(/cannot list reverted messages/);
+    expect(() => parseReversibleHistoryState({ staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "", text: "hidden" }] })).toThrow(/id/);
     expect(() => parseReversibleHistoryResult({
       outcome: "changed",
-      state: { staged: true, canUndo: true, canRedo: true },
+      state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:user-1", text: "draft" }] },
       restoredDraft: { text: "draft", data: "bytes" },
     })).toThrow(/unknown/);
   });

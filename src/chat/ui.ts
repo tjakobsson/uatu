@@ -9,7 +9,7 @@ import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
+import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
 import { contextTokens, totalTokens } from "./usage";
 import {
   addAcceptedDraft,
@@ -61,6 +61,9 @@ export function initChat(api = new ChatApiClient()): void {
   const renameCancel = document.querySelector<HTMLButtonElement>("#chat-rename-cancel");
   const olderButton = document.querySelector<HTMLButtonElement>("#chat-load-older");
   const latestButton = document.querySelector<HTMLButtonElement>("#chat-latest");
+  const revertedShell = document.querySelector<HTMLDetailsElement>("#chat-reverted");
+  const revertedLabel = document.querySelector<HTMLElement>("#chat-reverted-label");
+  const revertedItems = document.querySelector<HTMLElement>("#chat-reverted-items");
   const queueDockElement = document.querySelector<HTMLElement>("#chat-queue");
   const form = document.querySelector<HTMLFormElement>("#chat-composer");
   const input = document.querySelector<HTMLTextAreaElement>("#chat-input");
@@ -122,6 +125,9 @@ export function initChat(api = new ChatApiClient()): void {
   const viewport = new ChatViewportController(surface, form, timeline, anchor);
   const renderer = new TimelineRenderer();
   const queueDock = new QueueDockRenderer();
+  const revertedDock = revertedShell && revertedLabel && revertedItems
+    ? new RevertedMessagesDockRenderer(revertedShell, revertedLabel, revertedItems)
+    : null;
   let presentation = readPresentation();
   let conversations: ConversationSummary[] = [];
   let models: ChatModel[] = [];
@@ -219,7 +225,8 @@ export function initChat(api = new ChatApiClient()): void {
   const historyMutations = new Set<string>();
   const pendingHistoryResyncs = new Set<string>();
   const historyRefreshRequired = new Set<string>();
-  const historyRetries = new Map<string, { operation: LocalHistoryOperation; requestId: string; result?: ReversibleHistoryResult }>();
+  type HistoryOperation = LocalHistoryOperation | "revert" | "restore";
+  const historyRetries = new Map<string, { operation: HistoryOperation; messageId?: string; requestId: string; result?: ReversibleHistoryResult }>();
   let commandInventoryAvailable = true;
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
@@ -823,10 +830,18 @@ export function initChat(api = new ChatApiClient()): void {
     if (event.animationName === "chat-jump-flash") (event.target as HTMLElement).classList.remove("is-jump-target");
   });
 
+  const syncHistoryControls = () => {
+    const historyBusy = submitting || (projection ? historyMutations.has(projection.conversationId) : false);
+    for (const button of items.querySelectorAll<HTMLButtonElement>("[data-history-revert]")) button.disabled = historyBusy;
+    for (const button of revertedItems?.querySelectorAll<HTMLButtonElement>("[data-history-restore]") ?? []) button.disabled = historyBusy;
+  };
+
   const renderNow = (newContent: boolean) => {
     rendering = true;
-    const dirty = renderer.render(items, projection, expanded, declares("subagents"));
+    const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"));
+    revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
     queueDock.render(queueDockElement, projection?.queued ?? []);
+    syncHistoryControls();
     rendering = false;
     syncTaskList();
     syncSubagents();
@@ -1358,6 +1373,7 @@ export function initChat(api = new ChatApiClient()): void {
     send.setAttribute("aria-label", running ? "Cancel response" : "Send message");
     send.title = running ? "Cancel response" : "Send message";
     configurationTrigger.disabled = submitting || !projection;
+    syncHistoryControls();
     olderButton.hidden = !projection?.olderCursor;
     syncRoutineStatus();
     syncWaiting();
@@ -1808,6 +1824,20 @@ export function initChat(api = new ChatApiClient()): void {
       .finally(() => { target.disabled = false; });
   });
 
+  revertedItems?.addEventListener("pointerdown", event => {
+    if (event.pointerType === "touch" && (event.target as Element).closest("[data-history-restore]")) event.preventDefault();
+  });
+
+  revertedItems?.addEventListener("click", event => {
+    const target = (event.target as Element).closest<HTMLButtonElement>("[data-history-restore]");
+    if (!target || !projection || submitting || historyMutations.has(projection.conversationId)) return;
+    const messageId = target.dataset.historyRestore;
+    if (!messageId) return;
+    target.disabled = true;
+    void runHistoryOperation("restore", projection.conversationId, messageId)
+      .finally(() => { if (target.isConnected) target.disabled = false; });
+  });
+
   olderButton.addEventListener("click", async () => {
     if (!projection?.olderCursor) return;
     const current = projection;
@@ -1817,7 +1847,7 @@ export function initChat(api = new ChatApiClient()): void {
       const page = await api.snapshot(current.conversationId, current.olderCursor);
       if (projection?.conversationId !== current.conversationId) return;
       projection = prependSnapshot(projection, page);
-      const dirty = renderer.render(items, projection, expanded, declares("subagents"));
+      const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"));
       timeline.scrollTop = anchor.afterMutation(geometry());
       for (const node of dirty) { decorateFileLinks(node); decorateAttachmentImages(node); }
     } catch (error) { announce(messageOf(error), true); }
@@ -1920,7 +1950,7 @@ export function initChat(api = new ChatApiClient()): void {
    */
   const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null) => {
     container.addEventListener("click", event => {
-      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation], [data-chat-copy]");
+      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
       if (!target) return;
       if (target instanceof HTMLButtonElement && target.dataset.chatCopy) {
         const text = target.closest("pre")?.querySelector(":scope > code")?.textContent;
@@ -1941,7 +1971,15 @@ export function initChat(api = new ChatApiClient()): void {
       }
       const itemElement = target.closest<HTMLElement>("[data-chat-item-id]");
       const item = source.items.find(candidate => candidate.id === itemElement?.dataset.chatItemId);
-      if (!item || item.type === "user_message" || item.type === "assistant_message") return;
+      if (!item || item.type === "assistant_message") return;
+      if (item.type === "user_message") {
+        if (target.dataset.historyRevert === undefined || source !== projection || submitting || historyMutations.has(source.conversationId)) return;
+        const button = target as HTMLButtonElement;
+        button.disabled = true;
+        void runHistoryOperation("revert", source.conversationId, item.id)
+          .finally(() => { if (button.isConnected) button.disabled = false; });
+        return;
+      }
       if (item.type === "permission" && target.dataset.permissionOutcome) {
         void resolvePermission(source, item.id, target.dataset.permissionOutcome as PermissionOutcome);
       } else if (item.type === "question" && target.dataset.questionReject !== undefined) {
@@ -2333,8 +2371,19 @@ export function initChat(api = new ChatApiClient()): void {
     return unavailable.length;
   };
 
-  const installChangedHistoryResult = async (operation: LocalHistoryOperation, conversationId: string, result: ReversibleHistoryResult): Promise<boolean> => {
-    const label = operation === "undo" ? "Undo" : "Redo";
+  const historyLabel = (operation: HistoryOperation) => operation[0]!.toUpperCase() + operation.slice(1);
+  const historyRetryInstruction = (operation: HistoryOperation) => operation === "undo" || operation === "redo"
+    ? `Submit /${operation} again`
+    : `Choose ${historyLabel(operation)} message again`;
+  const historyPreservedState = (operation: HistoryOperation) => operation === "undo" || operation === "redo"
+    ? "command and attachments"
+    : "composer and attachments";
+  const historyProgressLabel = (operation: HistoryOperation) => operation === "restore"
+    ? "Restoring..."
+    : `${historyLabel(operation)}ing...`;
+
+  const installChangedHistoryResult = async (operation: HistoryOperation, conversationId: string, result: ReversibleHistoryResult): Promise<boolean> => {
+    const label = historyLabel(operation);
     retryRequests.delete(conversationId);
     invalidateAttachmentStaging(conversationId);
     if (activeConversationId() !== conversationId) {
@@ -2357,7 +2406,7 @@ export function initChat(api = new ChatApiClient()): void {
     }
     if (!refreshed) {
       historyRefreshRequired.add(conversationId);
-      const message = `${label} completed, but the conversation could not be refreshed. Submit /${operation} again to reconnect; the command and attachments were kept.`;
+      const message = `${label} completed, but the conversation could not be refreshed. ${historyRetryInstruction(operation)} to reconnect; the ${historyPreservedState(operation)} were kept.`;
       setComposerError(message, conversationId);
       noteComposer(message);
       return false;
@@ -2373,34 +2422,38 @@ export function initChat(api = new ChatApiClient()): void {
     return true;
   };
 
-  const runHistoryOperation = async (operation: LocalHistoryOperation, conversationId: string) => {
-    const label = operation === "undo" ? "Undo" : "Redo";
+  const runHistoryOperation = async (operation: HistoryOperation, conversationId: string, messageId?: string) => {
+    const label = historyLabel(operation);
     submitting = true;
     historyMutations.add(conversationId);
     setComposerError(null, conversationId);
-    noteComposer(`${label}ing...`);
+    noteComposer(historyProgressLabel(operation));
     closeCommandMenu();
     syncControls();
     try {
       const pending = historyRetries.get(conversationId);
-      if (pending?.result) {
+      if (pending?.result && pending.operation === operation && pending.messageId === messageId) {
         await installChangedHistoryResult(pending.operation, conversationId, pending.result);
         return;
       }
       if (historyRefreshRequired.has(conversationId)) {
         const refreshed = await refreshSelectedConversation(conversationId);
         if (!refreshed) {
-          const message = `The conversation could not be refreshed. Submit /${operation} again to retry; the command and attachments were kept.`;
+          const message = `The conversation could not be refreshed. ${historyRetryInstruction(operation)} to retry; the ${historyPreservedState(operation)} were kept.`;
           setComposerError(message, conversationId);
           noteComposer(message);
           return;
         }
       }
 
-      const retry: { operation: LocalHistoryOperation; requestId: string; result?: ReversibleHistoryResult } =
-        pending?.operation === operation ? pending : { operation, requestId: newRequestId() };
+      const retry: { operation: HistoryOperation; messageId?: string; requestId: string; result?: ReversibleHistoryResult } =
+        pending?.operation === operation && pending.messageId === messageId
+          ? pending
+          : { operation, ...(messageId ? { messageId } : {}), requestId: newRequestId() };
       historyRetries.set(conversationId, retry);
-      const result = await api[operation](conversationId, retry.requestId);
+      const result = operation === "undo" || operation === "redo"
+        ? await api[operation](conversationId, retry.requestId)
+        : await api[operation](conversationId, messageId!, retry.requestId);
       if (result.outcome !== "changed") {
         historyRetries.delete(conversationId);
         if (pendingHistoryResyncs.delete(conversationId)) {
@@ -2423,12 +2476,13 @@ export function initChat(api = new ChatApiClient()): void {
       retry.result = result;
       await installChangedHistoryResult(operation, conversationId, result);
     } catch (error) {
-      let message = `${label} failed: ${messageOf(error)}. Command and attachments kept.`;
+      const preserved = historyPreservedState(operation);
+      let message = `${label} failed: ${messageOf(error)}. ${preserved[0]!.toUpperCase()}${preserved.slice(1)} kept.`;
       if (pendingHistoryResyncs.delete(conversationId)) {
         const refreshed = await refreshSelectedConversation(conversationId);
         if (!refreshed && activeConversationId() === conversationId) {
           historyRefreshRequired.add(conversationId);
-          message += ` The conversation also needs to reconnect; submit /${operation} again to retry.`;
+          message += ` The conversation also needs to reconnect; ${historyRetryInstruction(operation)} to retry.`;
         }
       }
       setComposerError(message, conversationId);

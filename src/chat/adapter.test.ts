@@ -11,7 +11,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "./provider";
-import { UnsupportedVariantSelectionError } from "./provider";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
 import type { ChatEvent, ChatModel, ConversationItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
@@ -71,6 +71,8 @@ class FakeProvider implements OpenCodeProvider {
   getReversibleHistoryState?: OpenCodeProvider["getReversibleHistoryState"];
   undo?: OpenCodeProvider["undo"];
   redo?: OpenCodeProvider["redo"];
+  revert?: OpenCodeProvider["revert"];
+  restore?: OpenCodeProvider["restore"];
   configurations = new Map<string, import("./types").ConversationConfiguration>();
   newConfiguration: import("./types").ConversationConfiguration = {};
 
@@ -609,18 +611,23 @@ describe("filtered provider event pump", () => {
 });
 
 describe("reversible history coordination", () => {
-  function enabled(initial: ReversibleHistoryState, messages: ProviderMessage[] = []) {
+  type TestHistoryState = Omit<ReversibleHistoryState, "revertedMessages"> & Partial<Pick<ReversibleHistoryState, "revertedMessages">>;
+  const completeState = (state: TestHistoryState): ReversibleHistoryState => ({ ...state, revertedMessages: state.revertedMessages ?? [] });
+
+  function enabled(initial: TestHistoryState, messages: ProviderMessage[] = []) {
     const provider = new FakeProvider();
     provider.agent.capabilities.push("reversible-history");
     provider.sessions = [fixtureSession("session")];
-    let state = initial;
+    let state = completeState(initial);
     let visible = messages;
     provider.getReversibleHistoryState = async () => state;
+    provider.revert = async () => ({ outcome: "changed", state });
+    provider.restore = async () => ({ outcome: "changed", state });
     provider.listMessages = async () => ({ items: visible });
     return {
       provider,
       state: () => state,
-      setState: (next: ReversibleHistoryState) => { state = next; },
+      setState: (next: TestHistoryState) => { state = completeState(next); },
       setVisible: (next: ProviderMessage[]) => { visible = next; },
     };
   }
@@ -644,10 +651,93 @@ describe("reversible history coordination", () => {
 
     await expect(adapter.undo("session", "u2")).resolves.toEqual({
       outcome: "nothing-to-undo",
-      state: { staged: false, canUndo: false, canRedo: false },
+      state: { staged: false, canUndo: false, canRedo: false, revertedMessages: [] },
     });
     expect(undoCalls).toBe(0);
     expect(fixture.provider.interrupts).toEqual([]);
+  });
+
+  test("sets and restores a selected boundary once while reconciling authoritative history", async () => {
+    const first = { id: "first", type: "user", time: { created: 1 }, text: "first prompt" };
+    const second = { id: "second", type: "user", time: { created: 2 }, text: "second prompt" };
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [first, second]);
+    const targeted: Array<["revert" | "restore", string]> = [];
+    fixture.provider.revert = async (_sessionId, messageId) => {
+      targeted.push(["revert", messageId]);
+      fixture.setState({
+        staged: true,
+        canUndo: true,
+        canRedo: true,
+        revertedMessages: [{ id: "message:second", text: "second prompt" }],
+      });
+      fixture.setVisible([first]);
+      return { outcome: "changed", state: fixture.state(), restoredDraft: { text: "second prompt" } };
+    };
+    fixture.provider.restore = async (_sessionId, messageId) => {
+      targeted.push(["restore", messageId]);
+      fixture.setState({ staged: false, canUndo: true, canRedo: false });
+      fixture.setVisible([first, second]);
+      return { outcome: "changed", state: fixture.state() };
+    };
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("session");
+    adapter.projectionForTests("session").statusUpdate("running");
+
+    const [firstCall, retry] = await Promise.all([
+      adapter.revert("session", "message:second", "revert-1"),
+      adapter.revert("session", "message:second", "revert-1"),
+    ]);
+    expect(retry).toEqual(firstCall);
+    expect(firstCall).toEqual({
+      outcome: "changed",
+      state: {
+        staged: true,
+        canUndo: true,
+        canRedo: true,
+        revertedMessages: [{ id: "message:second", text: "second prompt" }],
+      },
+      restoredDraft: { text: "second prompt" },
+    });
+    expect(targeted).toEqual([["revert", "message:second"]]);
+    expect(fixture.provider.interrupts).toEqual(["session"]);
+    expect((await adapter.history("session")).items).toEqual([expect.objectContaining({ text: "first prompt" })]);
+
+    await expect(adapter.restore("session", "message:second", "restore-1")).resolves.toEqual({
+      outcome: "changed",
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+    });
+    expect(targeted).toEqual([
+      ["revert", "message:second"],
+      ["restore", "message:second"],
+    ]);
+    expect((await adapter.history("session")).items).toEqual([
+      expect.objectContaining({ text: "first prompt" }),
+      expect.objectContaining({ text: "second prompt" }),
+    ]);
+  });
+
+  test("rejects a stale selected target before interrupting active work or releasing its queue", async () => {
+    const visible = { id: "visible", type: "user", time: { created: 1 }, text: "visible prompt" };
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [visible]);
+    let revertCalls = 0;
+    fixture.provider.revert = async () => {
+      revertCalls += 1;
+      return { outcome: "changed", state: fixture.state() };
+    };
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    await adapter.history("session");
+    adapter.projectionForTests("session").statusUpdate("running");
+    const held = await adapter.prompt("session", "held", "keep queued");
+
+    await expect(adapter.revert("session", "message:stale", "revert-stale")).rejects.toBeInstanceOf(ReversibleHistoryTargetError);
+    expect(revertCalls).toBe(0);
+    expect(fixture.provider.interrupts).toEqual([]);
+    expect(fixture.provider.prompts).toEqual([]);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: held.messageId, text: "keep queued" })]);
   });
 
   test("joins lost-response retries, closes the interrupt-idle race, and keeps restored drafts private", async () => {
@@ -706,7 +796,7 @@ describe("reversible history coordination", () => {
     expect(fixture.provider.prompts).toEqual([]);
     expect(first).toEqual({
       outcome: "changed",
-      state: { staged: true, canUndo: false, canRedo: true },
+      state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [] },
       restoredDraft: {
         text: "private draft",
         attachments: [
@@ -725,7 +815,7 @@ describe("reversible history coordination", () => {
       subscription.cancel();
     }
     const snapshot = await adapter.history("session");
-    expect(snapshot.reversibleHistory).toEqual({ staged: true, canUndo: false, canRedo: true });
+    expect(snapshot.reversibleHistory).toEqual({ staged: true, canUndo: false, canRedo: true, revertedMessages: [] });
     expect(snapshot.queued).toEqual([expect.objectContaining({ id: held.messageId, text: "older queued message" })]);
     await expect(adapter.removeQueued("session", held.messageId, "remove-held")).resolves.toEqual({ removed: true });
   });
@@ -790,7 +880,7 @@ describe("reversible history coordination", () => {
     expect((await iterator.next()).value).toEqual(expect.objectContaining({ type: "resync", reason: "conversation-rewritten" }));
     expect(adapter.projectionForTests("session").items()).toEqual([]);
     const refreshed = await adapter.subscribe("session");
-    expect(refreshed.snapshot.reversibleHistory).toEqual({ staged: false, canUndo: true, canRedo: false });
+    expect(refreshed.snapshot.reversibleHistory).toEqual({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] });
     refreshed.events.cancel();
 
     subscription.events.cancel();
@@ -841,7 +931,7 @@ describe("reversible history coordination", () => {
     expect(events.some(event => event.type === "item.upsert" && event.item.type === "notice")).toBe(false);
     expect(fixture.provider.prompts).toEqual([]);
     const snapshot = await adapter.subscribe("session");
-    expect(snapshot.snapshot.reversibleHistory).toEqual({ staged: true, canUndo: false, canRedo: true });
+    expect(snapshot.snapshot.reversibleHistory).toEqual({ staged: true, canUndo: false, canRedo: true, revertedMessages: [] });
     expect(snapshot.snapshot.queued).toEqual([expect.objectContaining({ id: held.messageId })]);
     snapshot.events.cancel();
     const duplicateEvent = await Promise.race([iterator.next(), Bun.sleep(120).then(() => "timeout" as const)]);
@@ -1056,7 +1146,7 @@ describe("reversible history coordination", () => {
     fail = false;
     await expect(adapter.redo("session", "redo-clear")).resolves.toEqual({
       outcome: "changed",
-      state: { staged: false, canUndo: true, canRedo: false },
+      state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
     });
     await waitUntil(() => fixture.provider.prompts.length === 1);
     expect(fixture.provider.prompts[0]).toEqual(expect.objectContaining({ text: "held while staged" }));

@@ -38,6 +38,13 @@ export class UnsupportedVariantSelectionError extends Error {
   }
 }
 
+export class ReversibleHistoryTargetError extends Error {
+  constructor(message = "reversible-history message is no longer available") {
+    super(message);
+    this.name = "ReversibleHistoryTargetError";
+  }
+}
+
 export type ProviderPermissionReply = "once" | "always" | "reject";
 
 // Provider-neutral by contract: identity, display name, mime, and where the
@@ -79,6 +86,8 @@ export interface OpenCodeProvider {
   getReversibleHistoryState?(sessionId: string): Promise<ReversibleHistoryState>;
   undo?(sessionId: string): Promise<ReversibleHistoryResult>;
   redo?(sessionId: string): Promise<ReversibleHistoryResult>;
+  revert?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
+  restore?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;

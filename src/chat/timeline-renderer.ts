@@ -5,7 +5,7 @@ import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ActivityStatus, ConversationItem, ConversationStatus, MessageAttachment, PermissionOutcome, QueuedMessage, QuestionRequest, TokenUsage, ToolItem } from "./types";
+import type { ActivityStatus, ConversationItem, ConversationStatus, MessageAttachment, PermissionOutcome, QueuedMessage, QuestionRequest, RevertedUserMessage, TokenUsage, ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -22,7 +22,7 @@ export class TimelineRenderer {
   private conversationId: string | null = null;
 
   /** Reconciles the DOM under `target` and returns the created or changed nodes. */
-  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true): HTMLElement[] {
+  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true, allowRevert = false): HTMLElement[] {
     if (!projection) {
       this.reset();
       clearChildren(target);
@@ -92,7 +92,7 @@ export class TimelineRenderer {
       // when a later user message is visible remains incomplete.
       const completedAssistant = item.type === "assistant_message"
         && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
-      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(completedAssistant)].join("\u0001");
+      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant)].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
@@ -131,7 +131,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant));
+      const node = buildNode(renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert));
       if (completedAssistant) decorateAssistantCopyActions(node);
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
@@ -541,12 +541,69 @@ export class QueueDockRenderer {
   }
 }
 
+function renderReverted(message: RevertedUserMessage): string {
+  const id = escapeHtmlAttribute(message.id);
+  return `<article class="chat-reverted-message" role="listitem" data-chat-reverted-id="${id}"><p>${escapeHtml(message.text)}</p><button type="button" class="chat-reverted-restore" data-history-restore="${id}">Restore message</button></article>`;
+}
+
+export class RevertedMessagesDockRenderer {
+  private readonly entries = new Map<string, { node: HTMLElement; message: RevertedUserMessage }>();
+
+  constructor(
+    private readonly shell: HTMLDetailsElement,
+    private readonly label: HTMLElement,
+    private readonly target: HTMLElement,
+  ) {}
+
+  render(messages: readonly RevertedUserMessage[]): void {
+    const ordered: HTMLElement[] = [];
+    for (const message of messages) {
+      const entry = this.entries.get(message.id);
+      if (entry?.message.text === message.text) {
+        ordered.push(entry.node);
+        continue;
+      }
+      const node = buildNode(renderReverted(message));
+      entry?.node.remove();
+      this.entries.set(message.id, { node, message });
+      ordered.push(node);
+    }
+    const live = new Set(messages.map(message => message.id));
+    for (const [id, entry] of this.entries) {
+      if (live.has(id)) continue;
+      entry.node.remove();
+      this.entries.delete(id);
+    }
+    let cursor = this.target.firstElementChild;
+    for (const node of ordered) {
+      if (node === cursor) {
+        cursor = cursor.nextElementSibling;
+        continue;
+      }
+      this.target.insertBefore(node, cursor);
+    }
+    this.label.textContent = `${messages.length} reverted ${messages.length === 1 ? "message" : "messages"}`;
+    this.shell.hidden = messages.length === 0;
+  }
+
+  reset(): void {
+    this.entries.clear();
+    this.target.replaceChildren();
+    this.shell.hidden = true;
+  }
+}
+
 type RequestOrigin = { conversationId: string; label: string };
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
-  if (item.type === "user_message") return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}>${renderMessageAttachments(item.attachments)}${item.text ? `<div>${escapeHtml(item.text)}</div>` : ""}</article>`;
+  if (item.type === "user_message") {
+    const action = allowRevert
+      ? `<footer class="chat-message-actions"><button type="button" class="chat-message-revert" data-history-revert="${id}" aria-label="Revert message" title="Revert message"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6 4 2.5 7.5 6 11M3 7.5h6a4 4 0 0 1 4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button></footer>`
+      : "";
+    return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}>${renderMessageAttachments(item.attachments)}${item.text ? `<div>${escapeHtml(item.text)}</div>` : ""}${action}</article>`;
+  }
   if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown)}</div></article>`;
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);

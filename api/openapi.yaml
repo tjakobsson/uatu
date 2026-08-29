@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 5.9.0-experimental
+  version: 5.10.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 5 and workspace revision 9
+  summary: Hub revision 5 and workspace revision 10
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 5
-    workspaceApiRevision: 9
+    workspaceApiRevision: 10
 servers:
   - url: https://{hubHost}
     variables:
@@ -81,8 +81,8 @@ paths:
               example:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 5
-                workspaceApiRevision: 9
-                workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 9, shells: [{ attached: false, label: zsh }] }]
+                workspaceApiRevision: 10
+                workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 10, shells: [{ attached: false, label: zsh }] }]
                 workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
@@ -749,7 +749,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 9, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
+              example: { workspaceApiRevision: 10, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -1052,6 +1052,46 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
       responses:
         '200': { description: Redo outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/revert:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    post:
+      operationId: workspaceRevertChatConversation
+      tags: [Chat]
+      summary: Revert from a selected visible user message idempotently
+      description: Requires the agent to declare `reversible-history`. The selected user turn and every later turn become hidden. Interrupts active work before changing the boundary. The selected turn is returned as a private restored draft only to the invoking client.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryTargetRequest' } } } }
+      responses:
+        '200': { description: Revert outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/restore:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    post:
+      operationId: workspaceRestoreChatConversation
+      tags: [Chat]
+      summary: Restore through a selected hidden user message idempotently
+      description: Requires the agent to declare `reversible-history`. Restores the selected user turn and all earlier hidden turns by advancing or clearing the suffix boundary. Resumes paused queued messages when the newest hidden turn is restored. Any remaining boundary draft belongs only to the invoking client.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryTargetRequest' } } } }
+      responses:
+        '200': { description: Restore outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -1935,7 +1975,9 @@ components:
       additionalProperties: false
     ConversationSnapshot: { type: object, required: [conversation, configuration, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' }, description: "Held messages in submission order, so a client joining mid-run presents the same queue as one that watched it build." }, reversibleHistory: { $ref: '#/components/schemas/ReversibleHistoryState' }, olderCursor: { type: string } }, additionalProperties: false }
     ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    ReversibleHistoryState: { type: object, required: [staged, canUndo, canRedo], properties: { staged: { type: boolean }, canUndo: { type: boolean }, canRedo: { type: boolean, description: "False whenever no revert boundary is staged." } }, additionalProperties: false }
+    ReversibleHistoryTargetRequest: { type: object, required: [requestId, messageId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, messageId: { type: string, minLength: 1, maxLength: 512, description: "Canonical user-message id from the visible timeline or current revertedMessages list, as appropriate for the operation." } }, additionalProperties: false }
+    RevertedUserMessage: { type: object, required: [id, text], description: "A hidden user turn at or after the staged suffix boundary. Listed oldest first so a client can offer restore-through controls.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, text: { type: string } }, additionalProperties: false }
+    ReversibleHistoryState: { type: object, required: [staged, canUndo, canRedo, revertedMessages], properties: { staged: { type: boolean }, canUndo: { type: boolean }, canRedo: { type: boolean, description: "False whenever no revert boundary is staged." }, revertedMessages: { type: array, items: { $ref: '#/components/schemas/RevertedUserMessage' }, description: "Hidden user turns in chronological order. Empty when no boundary is staged." } }, additionalProperties: false }
     RestoredDraft: { type: object, required: [text], properties: { text: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } } }, additionalProperties: false }
     ReversibleHistoryResult: { type: object, required: [outcome, state], properties: { outcome: { enum: [changed, nothing-to-undo, nothing-to-redo] }, state: { $ref: '#/components/schemas/ReversibleHistoryState' }, restoredDraft: { $ref: '#/components/schemas/RestoredDraft', description: "Editable turn returned only to the client that invoked this mutation." } }, additionalProperties: false }
     ConversationRenameRequest:

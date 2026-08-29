@@ -42,3 +42,20 @@
 - [x] 7.1 Run `bun run typecheck`, `bun run api:validate`, `bunx @fission-ai/openspec validate --all --strict`, and the focused Chat unit suites; resolve every failure.
 - [x] 7.2 Run `bun run check:licenses` and `bun run build`; verify the existing pinned OpenCode SDK needs no dependency change and the production binary builds.
 - [x] 7.3 Run the complete `bun test` suite and the affected Chat Playwright files with `workers: 1`; verify request handling, shell output, queueing, attachments, drill-down, and conversation inventory retain their existing behavior.
+
+## 8. Selected-Message Revert And Restore
+
+- [x] 8.1 Extend reversible-history state with the hidden user-message suffix, add strict selected Revert and Restore request contracts, and publish workspace API revision 10; verify runtime, route, and API contract validation.
+- [x] 8.2 Implement canonical selected-boundary Revert and per-message Restore in classic and native-v2 providers while retaining one-step Undo and Redo; verify focused provider tests cover direct older boundaries, middle restore, newest restore, and stale targets.
+- [x] 8.3 Thread selected mutations through adapter idempotency, admission serialization, interruption, queue pause, authoritative reconciliation, service, routes, and client; verify only the caller receives restored composer state while all clients receive the shared hidden-message list.
+- [x] 8.4 Add inline Revert message actions and a synchronized reverted-message restore dock without exposing main-conversation controls in drill-downs; verify renderer, UI, and multi-client browser coverage matches OpenCode's boundary behavior.
+
+## 9. Command Discovery And Header Layout
+
+- [x] 9.1 Rank slash-command suggestions by exact, prefix, segment, substring, and subsequence match quality with deterministic ties; verify `/archive` discovers and inserts `/openspec-archive-change` in unit and browser tests.
+- [x] 9.2 Give workspace/agent identity and conversation controls separate rows in the shared desktop/touch Chat header; verify markup and desktop/touch geometry coverage.
+
+## 10. Follow-Up Validation
+
+- [x] 10.1 Run typecheck, strict API/OpenSpec validation, focused Chat unit suites, and affected Chat Playwright files with one worker; resolve every failure.
+- [x] 10.2 Run the complete unit suite, license audit, production build, final diff review, and refresh the light-mode PR screenshots without adding image files to the feature commit.

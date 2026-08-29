@@ -17,12 +17,14 @@ The adapter also owns a queue of accepted prompts. Undo must serialize with that
 - Preserve request ownership through rendering and reuse the existing transcript drill-down.
 - Match the shell-output fields and lifecycle emitted by the pinned OpenCode protocol without changing transcript output bounds.
 - Provide provider-neutral, idempotent Undo and Redo mutations with OpenCode-specific transport selection isolated in the SDK provider.
+- Match OpenCode Web's direct user-message revert and reverted-message restore controls over the same boundary model.
 - Treat OpenCode as the authority for revert boundaries, file restoration, and visible history.
 - Keep queued-message delivery, multi-client replay, and private composer drafts correct across conversation rewrites.
+- Make provider commands discoverable by meaningful name fragments and keep the Chat header usable at the minimum desktop panel width.
 
 **Non-Goals:**
 
-- Add arbitrary history branching, a visual branch browser, per-message revert buttons, or conversation forking.
+- Add arbitrary history branching, deletion of a middle turn while retaining its suffix, a visual branch browser, or conversation forking.
 - Reimplement file reversal from UatuCode file-change events or diffs.
 - Let browsers call the OpenCode server directly.
 - Change permission or question ownership and response semantics.
@@ -66,6 +68,14 @@ For classic sessions, stage and clear map to `session.revert` and `session.unrev
 
 The adapter will not calculate file changes or mutate its projection before the provider succeeds. Keeping boundary calculation in the SDK provider avoids leaking OpenCode message and session shapes into provider-neutral service and route layers.
 
+### Expose OpenCode's selected-message boundary and restore dock
+
+Visible main-conversation user turns will expose a `Revert message` action carrying the canonical conversation-item ID. The provider will retain the canonical and provider IDs for every authoritative user turn, validate that the selected target is currently visible, and stage that target in one classic or native-v2 request. This is the same boundary operation used by Undo; it is not a loop of one-step Undo requests.
+
+Reversible history state will include the complete hidden user-message suffix from the staged boundary onward. A dock above the composer will render those messages with `Restore message` controls. Restoring a selected hidden message advances history through that message by staging the next hidden user turn, or clears the boundary when the selected message is newest. The invoking client receives the next boundary draft while every client receives the shared hidden-message list through snapshot reconciliation.
+
+Selected revert and restore mutations use the same admission lane, interruption, queue pause, idempotency, and authoritative reconciliation rules as Undo and Redo. Invalid, stale, or wrong-side targets are conflicts rather than inferred operations. Controls are shown only in the main transcript, not in subagent drill-downs.
+
 ### Serialize reverts with prompt admission and queue delivery
 
 Undo and Redo will use the same per-conversation mutation lane that guards prompt admission. Before Undo interrupts a running turn, the adapter will mark delivery paused for that conversation. The idle event caused by interruption therefore cannot release a held message. The pause remains while a revert is staged.
@@ -87,6 +97,16 @@ Only the mutation response returns an editable draft to its caller. Other client
 The workspace API will add authenticated, origin-protected Undo and Redo operations under a conversation. Each accepts the existing client-generated `requestId` shape and uses adapter receipts keyed by conversation, direction, and request ID. A retried response returns the original normalized result without moving the boundary twice.
 
 Responses include the operation outcome, staged state, and optional restored draft. The API schema, runtime validation, fake E2E service, and workspace API revision will change together. Existing prompt, command, cancellation, and request-response operations are unchanged.
+
+Selected-message Revert and Restore add dedicated authenticated operations accepting `requestId` and canonical `messageId`. Keeping them distinct from one-step Undo and Redo preserves precise idempotency receipts and avoids making an optional target silently change command semantics. The expanded reversible-history state requires the next workspace API revision.
+
+### Rank slash commands by match quality
+
+Command discovery will remain name-based and case-insensitive, but will rank exact, whole-name prefix, segment-prefix, contiguous-substring, and ordered-subsequence matches in that order. This makes `/archive` discover `/openspec-archive-change` without changing command submission, provider order, or command names. Deterministic name tie-breakers avoid locale-dependent ordering.
+
+### Use two Chat header rows at every viewport
+
+The shared Chat header markup will identify its workspace/agent row explicitly. Base desktop styles, rather than only touch overrides, will give that identity and the conversation controls separate full-width rows. Touch-specific density remains unchanged, and the conversation picker continues to shrink within its own row.
 
 ## Risks / Trade-offs
 

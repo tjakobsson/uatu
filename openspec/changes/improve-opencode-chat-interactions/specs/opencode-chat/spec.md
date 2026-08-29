@@ -164,11 +164,11 @@ A pending request SHALL remain discoverable and answerable even when the server 
 ## ADDED Requirements
 
 ### Requirement: Chat supports reversible conversation undo and redo
-When the connected agent declares reversible-history support, Chat SHALL offer local `/undo` and `/redo` commands that operate on the selected conversation and MUST NOT send those command strings as ordinary prompts or provider-defined slash commands. Undo SHALL stage the previous visible user turn as the conversation's revert boundary, hide that turn and all later work from the current transcript, and restore the affected workspace files through the agent's revert operation. The invoking client SHALL receive the reverted non-synthetic prompt text and any still-available attachments as an editable composer draft; other clients' private drafts MUST NOT be overwritten.
+When the connected agent declares reversible-history support, Chat SHALL offer local `/undo` and `/redo` commands that operate on the selected conversation and MUST NOT send those command strings as ordinary prompts or provider-defined slash commands. Each visible user turn in the main transcript SHALL also offer a direct Revert message action. Undo SHALL stage the previous visible user turn as the conversation's revert boundary; direct Revert SHALL stage the selected visible user turn in one boundary mutation rather than repeated Undo mutations. Both SHALL hide the boundary turn and all later work from the current transcript and restore affected workspace files through the agent's revert operation. The invoking client SHALL receive the boundary turn's non-synthetic prompt text and any still-available attachments as an editable composer draft; other clients' private drafts MUST NOT be overwritten.
 
 If work is running, Undo SHALL interrupt it before changing the boundary. Messages queued behind that work MUST NOT be admitted between interruption and the completed revert. Existing queued messages SHALL remain visible and removable but paused while a revert is staged; they SHALL resume only after Redo clears the revert or after the user submits a replacement prompt, with that replacement admitted before the older queue resumes.
 
-Repeated Undo SHALL move the boundary backward one visible user turn at a time. Redo SHALL move it forward one hidden user turn at a time, restoring that turn to the invoking client's composer, and SHALL clear the staged revert when it advances past the newest hidden turn. Submitting a replacement prompt while a revert is staged SHALL commit the reverted history before starting the replacement turn, after which the hidden turns can no longer be restored by Redo.
+Repeated Undo SHALL move the boundary backward one visible user turn at a time. While a boundary is staged, Chat SHALL list the hidden user turns from the boundary onward and offer a Restore message action for each. Redo SHALL move forward one hidden user turn at a time. Restoring a selected hidden turn SHALL make history current through that turn in one mutation by staging the following hidden user turn, or SHALL clear the boundary when the selected turn is newest. The invoking client's composer SHALL receive the next boundary turn when one remains and SHALL clear when the original transcript is fully restored. Submitting a replacement prompt while a revert is staged SHALL commit the reverted history before starting the replacement turn, after which the hidden turns can no longer be restored by Redo or Restore.
 
 Every successful boundary change SHALL reconcile the authoritative conversation so all connected clients agree on visible history and workspace state. Mutation retries MUST be idempotent. If interruption or the requested boundary change fails, Chat SHALL report the failure and MUST NOT claim that history or files changed.
 
@@ -187,6 +187,12 @@ Every successful boundary change SHALL reconcile the authoritative conversation 
 - **THEN** the latest visible user turn and all later work disappear from the visible transcript
 - **AND** affected workspace files return to their state before that turn
 - **AND** the invoking client's composer receives the turn's non-synthetic text and available attachments
+
+#### Scenario: A selected visible message becomes the boundary directly
+- **WHEN** the user invokes Revert message on an earlier visible user turn
+- **THEN** that selected turn and every later turn disappear from the visible transcript
+- **AND** the agent receives one revert operation naming the selected turn
+- **AND** the invoking client's composer receives the selected turn for editing
 
 #### Scenario: Undo interrupts active work before reverting
 - **WHEN** the user invokes Undo while the selected conversation is running
@@ -213,6 +219,24 @@ Every successful boundary change SHALL reconcile the authoritative conversation 
 - **THEN** the staged revert is cleared
 - **AND** the original transcript and workspace state become current again
 - **AND** paused queued messages may resume
+
+#### Scenario: Reverted messages remain visible in a restore dock
+- **WHEN** a revert boundary is staged
+- **THEN** Chat lists every hidden user turn from the boundary onward outside the active transcript
+- **AND** each listed turn offers a Restore message action
+- **AND** every connected client sees the same list without losing its private composer draft
+
+#### Scenario: Restore advances through the selected hidden message
+- **WHEN** the user restores a hidden user turn that has later hidden turns
+- **THEN** the boundary advances to the following hidden user turn in one mutation
+- **AND** the selected turn and its prior history return to the active transcript
+- **AND** the invoking client's composer receives the following boundary turn
+
+#### Scenario: Restoring the newest hidden message clears the boundary
+- **WHEN** the user restores the newest hidden user turn
+- **THEN** the staged revert is cleared
+- **AND** the original transcript and workspace state become current again
+- **AND** the invoking client's restored composer draft is cleared
 
 #### Scenario: A replacement prompt commits the reverted branch
 - **WHEN** the user edits the restored draft and submits it while a revert is staged
@@ -243,3 +267,25 @@ Every successful boundary change SHALL reconcile the authoritative conversation 
 - **WHEN** no revert is staged and the user invokes Redo
 - **THEN** Chat reports that there is nothing to redo
 - **AND** the conversation and workspace state do not change
+
+### Requirement: Chat discovers commands by meaningful name fragments
+Slash-command suggestions SHALL match command names case-insensitively by exact name, whole-name prefix, segment prefix, contiguous substring, and ordered subsequence, in that priority order. Matching SHALL affect discovery only; Chat MUST still insert and submit the command's actual complete name. Equal-quality suggestions SHALL have deterministic ordering.
+
+#### Scenario: A command is found by a later name segment
+- **WHEN** the user enters `/archive`
+- **AND** the agent offers `/openspec-archive-change`
+- **THEN** that command appears in the suggestion list
+- **AND** choosing it inserts `/openspec-archive-change` rather than the query text
+
+#### Scenario: Stronger command matches rank first
+- **WHEN** exact, prefix, segment, substring, and subsequence matches exist for a query
+- **THEN** they appear in that order
+- **AND** unrelated commands are omitted
+
+### Requirement: Chat separates identity from conversation controls
+The Chat header SHALL place workspace and agent identity on its own row above the conversation selector and actions in desktop and touch layouts. Conversation controls SHALL remain usable without competing with identity text at the minimum supported panel width.
+
+#### Scenario: Desktop Chat uses an uncrowded two-row header
+- **WHEN** Chat is open in the desktop side panel
+- **THEN** workspace and agent identity occupy a row above the conversation controls
+- **AND** the conversation selector and actions remain within the header width

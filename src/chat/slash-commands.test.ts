@@ -18,10 +18,44 @@ describe("slash command completion", () => {
     expect(slashCommandQuery("path/to", 7)).toBeNull();
   });
 
-  test("filters by prefix and sorts command names", () => {
+  test("sorts an empty query alphabetically and matches prefixes", () => {
     expect(matchingCommands("/", 1, commands)?.commands.map(command => command.name))
       .toEqual(["compact", "openspec-apply", "review"]);
-    expect(matchingCommands("/op", 3, commands)?.commands.map(command => command.name)).toEqual(["openspec-apply"]);
+    expect(matchingCommands("/op", 3, commands)?.commands.map(command => command.name)).toEqual(["openspec-apply", "compact"]);
+  });
+
+  test("ranks fuzzy matches by match type and excludes unrelated commands", () => {
+    const fuzzyCommands: ChatCommand[] = [
+      { name: "a-r-c", description: "Subsequence", argumentHint: "", kind: "command" },
+      { name: "monarch", description: "Substring", argumentHint: "", kind: "command" },
+      { name: "openspec-archive-change", description: "Segment", argumentHint: "", kind: "command" },
+      { name: "archive", description: "Exact", argumentHint: "", kind: "command" },
+      { name: "archives", description: "Prefix", argumentHint: "", kind: "command" },
+      { name: "review", description: "Unrelated", argumentHint: "", kind: "command" },
+    ];
+
+    expect(matchingCommands("/ArC", 4, fuzzyCommands)?.commands.map(command => command.name)).toEqual([
+      "archive",
+      "archives",
+      "openspec-archive-change",
+      "monarch",
+      "a-r-c",
+    ]);
+    expect(matchingCommands("/archive", 8, fuzzyCommands)?.commands.map(command => command.name)).toContain("openspec-archive-change");
+  });
+
+  test("uses match position, subsequence gaps, and names as deterministic tie-breakers", () => {
+    const names = ["a-long-arc", "z-arc", "aaaarc", "zarc", "xazbcy", "azbcy", "alpha", "Alpha"];
+    const tieCommands = names.map(name => ({ name, description: "", argumentHint: "", kind: "command" as const }));
+
+    expect(matchingCommands("/arc", 4, tieCommands)?.commands.map(command => command.name)).toEqual([
+      "z-arc",
+      "a-long-arc",
+      "zarc",
+      "aaaarc",
+    ]);
+    expect(matchingCommands("/abc", 4, tieCommands)?.commands.map(command => command.name)).toEqual(["azbcy", "xazbcy"]);
+    expect(matchingCommands("/", 1, tieCommands.slice(-2))?.commands.map(command => command.name)).toEqual(["Alpha", "alpha"]);
   });
 
   test("replaces only the active token and leaves room for arguments", () => {
@@ -57,9 +91,11 @@ describe("slash command completion", () => {
     const provider = {
       describe: () => ({ id: "test", name: "Test", capabilities: ["commands", "reversible-history"] }),
       listCommands: async () => commands,
-      getReversibleHistoryState: async () => ({ staged: false, canUndo: true, canRedo: false }),
-      undo: async () => ({ outcome: "nothing-to-undo", state: { staged: false, canUndo: false, canRedo: false } }),
-      redo: async () => ({ outcome: "nothing-to-redo", state: { staged: false, canUndo: true, canRedo: false } }),
+      getReversibleHistoryState: async () => ({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] }),
+      undo: async () => ({ outcome: "nothing-to-undo", state: { staged: false, canUndo: false, canRedo: false, revertedMessages: [] } }),
+      redo: async () => ({ outcome: "nothing-to-redo", state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] } }),
+      revert: async () => ({ outcome: "changed", state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:user", text: "prompt" }] } }),
+      restore: async () => ({ outcome: "changed", state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] } }),
       command: async () => { providerCommandCalls += 1; return { messageId: "unexpected" }; },
     } as unknown as OpenCodeProvider;
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });

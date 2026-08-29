@@ -352,11 +352,19 @@ export function parseConversationSnapshot(value: unknown): ConversationSnapshot 
 
 export function parseReversibleHistoryState(value: unknown): ReversibleHistoryState {
   const record = expectRecord(value, "reversible history state");
-  expectKeys(record, ["staged", "canUndo", "canRedo"], "reversible history state");
+  expectKeys(record, ["staged", "canUndo", "canRedo", "revertedMessages"], "reversible history state");
   for (const key of ["staged", "canUndo", "canRedo"] as const) {
     if (typeof record[key] !== "boolean") throw new Error(`reversible history ${key} must be a boolean`);
   }
+  if (!Array.isArray(record.revertedMessages)) throw new Error("reversible history revertedMessages must be an array");
+  for (const value of record.revertedMessages) {
+    const message = expectRecord(value, "reverted user message");
+    expectKeys(message, ["id", "text"], "reverted user message");
+    expectIdentity(message.id, "reverted user message id");
+    expectString(message.text, "reverted user message text");
+  }
   if (!record.staged && record.canRedo) throw new Error("reversible history cannot redo without a staged boundary");
+  if (!record.staged && record.revertedMessages.length > 0) throw new Error("reversible history cannot list reverted messages without a staged boundary");
   return value as ReversibleHistoryState;
 }
 

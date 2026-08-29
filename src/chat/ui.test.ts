@@ -42,11 +42,14 @@ describe("chat reversible-history composer", () => {
 
     const undoResults: Array<Promise<ReversibleHistoryResult>> = [];
     const redoResults: Array<Promise<ReversibleHistoryResult>> = [];
+    const revertResults: Array<Promise<ReversibleHistoryResult>> = [];
+    const restoreResults: Array<Promise<ReversibleHistoryResult>> = [];
     const commandResults: Array<() => Promise<ChatCommand[]>> = [async () => { throw new Error("inventory unavailable"); }];
     const snapshotResults: Array<() => Promise<ConversationSnapshot>> = [];
     const prompts: Array<{ conversationId: string; text: string; attachments?: unknown[] }> = [];
     const snapshotDrafts: string[] = [];
     const undoRequestIds: string[] = [];
+    const targetedCalls: Array<{ operation: "revert" | "restore"; conversationId: string; messageId: string; requestId: string }> = [];
     const streamFailures: Error[] = [];
     const uploadResults: Array<Promise<{ id: string; mimeType: string; sizeBytes: number }>> = [];
     const streams: Array<{
@@ -92,6 +95,14 @@ describe("chat reversible-history composer", () => {
         return await undoResults.shift()!;
       },
       redo: async () => await redoResults.shift()!,
+      revert: async (conversationId: string, messageId: string, requestId: string) => {
+        targetedCalls.push({ operation: "revert", conversationId, messageId, requestId });
+        return await revertResults.shift()!;
+      },
+      restore: async (conversationId: string, messageId: string, requestId: string) => {
+        targetedCalls.push({ operation: "restore", conversationId, messageId, requestId });
+        return await restoreResults.shift()!;
+      },
       prompt: async (conversationId: string, _requestId: string, text: string, _model: unknown, _mode: unknown, _variant: unknown, attachments?: unknown[]) => {
         prompts.push({ conversationId, text, attachments });
         return { messageId: `message-${prompts.length}`, held: false, configuration: {} };
@@ -113,6 +124,52 @@ describe("chat reversible-history composer", () => {
         () => select.value === "one" && !form.hidden,
         () => document.querySelector("#chat-state")?.textContent ?? "no chat state",
       );
+
+      const visibleTurns = historySnapshot("one", false);
+      snapshotResults.push(async () => visibleTurns);
+      streams.at(-1)!.resync();
+      await waitUntil(() => document.querySelectorAll("[data-history-revert]").length === 2);
+      const revertedState = {
+        staged: true,
+        canUndo: true,
+        canRedo: true,
+        revertedMessages: [{ id: "message:second", text: "second prompt" }],
+      };
+      const reverted = deferred<ReversibleHistoryResult>();
+      revertResults.push(reverted.promise);
+      snapshotResults.push(async () => historySnapshot("one", true));
+      document.querySelector<HTMLButtonElement>('[data-history-revert="message:second"]')!.click();
+      document.querySelector<HTMLButtonElement>('[data-history-revert="message:first"]')!.click();
+      expect(targetedCalls).toHaveLength(1);
+      reverted.resolve({
+        outcome: "changed",
+        state: revertedState,
+        restoredDraft: { text: "second prompt" },
+      });
+      await waitUntil(() => input.value === "second prompt" && document.querySelector("[data-history-restore]") !== null);
+      expect(targetedCalls[0]).toEqual(expect.objectContaining({
+        operation: "revert",
+        conversationId: "one",
+        messageId: "message:second",
+      }));
+      expect(document.querySelector("#chat-reverted")?.hasAttribute("hidden")).toBe(false);
+      expect(document.querySelector("#chat-reverted-items")?.textContent).toContain("second prompt");
+
+      const restored = deferred<ReversibleHistoryResult>();
+      restoreResults.push(restored.promise);
+      snapshotResults.push(async () => visibleTurns);
+      document.querySelector<HTMLButtonElement>('[data-history-restore="message:second"]')!.click();
+      await waitUntil(() => live.textContent === "Restoring...");
+      restored.resolve({
+        outcome: "changed",
+        state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+      });
+      await waitUntil(() => input.value === "" && document.querySelector("#chat-reverted")?.hasAttribute("hidden") === true);
+      expect(targetedCalls[1]).toEqual(expect.objectContaining({
+        operation: "restore",
+        conversationId: "one",
+        messageId: "message:second",
+      }));
 
       uploadResults.push(Promise.resolve({ id: "existing", mimeType: "image/png", sizeBytes: 3 }));
       chooseFiles(attachInput, [new File(["old"], "existing.png", { type: "image/png" })]);
@@ -186,13 +243,13 @@ describe("chat reversible-history composer", () => {
       submit(form, input, "/undo");
       await waitUntil(() => live.textContent === "Undoing...");
       streams.at(-1)!.resync();
-      noOpUndo.resolve({ outcome: "nothing-to-undo", state: { staged: false, canUndo: false, canRedo: false } });
+      noOpUndo.resolve({ outcome: "nothing-to-undo", state: { staged: false, canUndo: false, canRedo: false, revertedMessages: [] } });
       await waitUntil(() => live.textContent === "Nothing more to undo");
       expect(streams.at(-1)?.closed).toBe(false);
       expect(input.value).toBe("/undo");
       expect(document.querySelector("#chat-attachments")?.textContent).toContain("existing.png");
 
-      redoResults.push(Promise.resolve({ outcome: "nothing-to-redo", state: { staged: false, canUndo: true, canRedo: false } }));
+      redoResults.push(Promise.resolve({ outcome: "nothing-to-redo", state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] } }));
       submit(form, input, "/redo");
       await waitUntil(() => live.textContent === "Nothing to redo");
       expect(input.value).toBe("/redo");
@@ -338,10 +395,26 @@ function snapshot(id: string): ConversationSnapshot {
   return { conversation: conversation(id), configuration: {}, generation: "g", cursor: `cursor-${id}`, items: [] };
 }
 
+function historySnapshot(id: string, reverted: boolean): ConversationSnapshot {
+  const first = { id: "message:first", type: "user_message" as const, createdAt: 1, text: "first prompt" };
+  const response = { id: "message:response", type: "assistant_message" as const, createdAt: 2, markdown: "response" };
+  const second = { id: "message:second", type: "user_message" as const, createdAt: 3, text: "second prompt" };
+  return {
+    conversation: conversation(id),
+    configuration: {},
+    generation: "g",
+    cursor: `cursor-${id}`,
+    items: reverted ? [first, response] : [first, response, second],
+    reversibleHistory: reverted
+      ? { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: second.id, text: second.text }] }
+      : { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
+  };
+}
+
 function changed(text: string, attachments: Array<{ id?: string; name: string; mimeType: string }>): ReversibleHistoryResult {
   return {
     outcome: "changed",
-    state: { staged: true, canUndo: true, canRedo: true },
+    state: { staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:restored", text }] },
     restoredDraft: { text, attachments },
   };
 }
