@@ -1425,6 +1425,22 @@ export function initChat(api = new ChatApiClient()): void {
     syncControls();
   };
 
+  const newConversationAnnouncement = (configuration: ConversationConfiguration): string => {
+    const displayedModel = configuration.model
+      ? models.find(model => sameModel(model.selection, configuration.model!))
+      : undefined;
+    const chooser = agent?.name ?? "the agent";
+    return [
+      `Started new conversation${agent ? ` with ${agent.name}` : ""}.`,
+      declares("models")
+        ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `chosen by ${chooser}`)}.`
+        : "",
+      declares("modes") && modes.length > 0
+        ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${chooser}`}.`
+        : "",
+    ].filter(Boolean).join(" ");
+  };
+
   const stopConversationRefreshRecovery = () => {
     const recovery = conversationRefreshRecovery;
     conversationRefreshRecovery = null;
@@ -1748,7 +1764,10 @@ export function initChat(api = new ChatApiClient()): void {
       presentation.selectedId = snapshot.conversation.id;
       selectedConversationDeleted = false;
       patchChooser(snapshot.conversation.id);
-      void selectConversation(snapshot.conversation.id);
+      if (await selectConversation(snapshot.conversation.id)) {
+        input.focus();
+        announce(newConversationAnnouncement(projection?.configuration ?? snapshot.configuration));
+      }
     } catch (error) { announce(messageOf(error), true); }
     finally { newButton.disabled = false; }
   });

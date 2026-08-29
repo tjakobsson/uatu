@@ -118,6 +118,8 @@ test.describe("conversation configuration and rename", () => {
     });
     await page.getByRole("button", { name: "New conversation", exact: true }).click();
     await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: chosen by Fixture Agent/);
+    await expect(page.locator("#chat-input")).toBeFocused();
+    await expect(page.locator("#chat-state")).toHaveText("Started new conversation with Fixture Agent. Model: Claude Sonnet. Mode: Build.");
     await openChatConfiguration(page);
     await expect(page.locator("#chat-configuration-variant option").filter({ hasText: "current, unavailable" })).toHaveCount(0);
   });
