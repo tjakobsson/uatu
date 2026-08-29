@@ -132,25 +132,26 @@ The `hub` subcommand SHALL accept `--exit-on-stdin-close`: when set, the hub SHA
 - **THEN** every child session process is terminated and the hub exits
 
 ### Requirement: Workspaces are registered with stable identifiers and a backend field
-The hub SHALL maintain a persistent workspace registry where each entry records a stable workspace id, the workspace source (an absolute folder path anywhere on the filesystem), and a session backend identifier. Registration SHALL validate that the path is absolute and refers to an existing directory. The id SHALL be a slug derived from the workspace folder name, suffixed on collision, and SHALL never change once assigned, so session URLs (`/s/<id>/…`) survive hub and session restarts. In this change the only valid backend identifier SHALL be `local`; the field SHALL exist in the registry schema so additional backends are additive.
+The hub SHALL maintain a persistent workspace registry where each entry records a stable workspace id, mutable user-facing display name, workspace source as an absolute canonical folder path, and session backend identifier. Registration SHALL validate that the path is absolute and refers to an existing directory. The id SHALL be a slug derived from the workspace folder name, suffixed on collision, and SHALL never change once assigned, so session URLs (`/s/<id>/…`) survive Hub and session restarts, folder renames, and display-name changes. Display names SHALL default from the folder basename but SHALL NOT determine identity or uniqueness. In this change the only valid backend identifier SHALL be `local`; the field SHALL remain in the registry schema so additional backends are additive.
 
-Registry persistence SHALL be serialized and atomic — concurrent mutations may neither interleave writes nor let an older snapshot finish last, and a crash mid-write MUST NOT corrupt the file. The hub MUST NOT prune registry entries at startup based on their location; an entry whose folder no longer exists SHALL remain registered and surface as failing to start, never as silently forgotten.
+Registry persistence SHALL be serialized and atomic. Concurrent mutations may neither interleave writes nor let an older snapshot finish last, and a crash mid-write MUST NOT corrupt the file. The Hub MUST NOT prune registry entries at startup based on their location; an entry whose folder no longer exists SHALL remain registered and surface as failing to start, never as silently forgotten.
 
 #### Scenario: Workspace id is stable across restarts
-- **WHEN** a workspace for `~/src/uatu` is created, the hub restarts, and the session is resumed
-- **THEN** the session is reachable at the same `/s/<id>/` prefix as before the restart
+- **WHEN** a workspace display name and source folder are renamed and the Hub restarts
+- **THEN** the workspace retains its original id and `/s/<id>/` prefix
+- **AND** it exposes the new display name and source path
 
 #### Scenario: Slug collision is suffixed
 - **WHEN** two workspaces with the same folder name are registered
 - **THEN** the second receives a distinct suffixed id and the first keeps its id
 
 #### Scenario: Arbitrary absolute paths are registrable
-- **WHEN** workspaces at `~/src/uatu` and `~/Documents/notes` are registered
-- **THEN** both appear in the registry with stable ids and both sessions are servable
+- **WHEN** workspaces at `~/src/uatu` and `~/Documents/notes` are registered while another default parent is configured
+- **THEN** both appear in the registry with stable ids and user-facing display names and both sessions are servable
 
 #### Scenario: A relative or missing path is rejected
 - **WHEN** a registration request names a relative path or a path that is not an existing directory
-- **THEN** the hub rejects it and the registry is unchanged
+- **THEN** the Hub rejects it and the registry is unchanged
 
 ### Requirement: Sessions are started and stopped through a session backend interface
 The hub SHALL manage session processes exclusively through a backend interface whose contract is: given a workspace descriptor, base path, and resolved credential assignment context, start a session and return a loopback HTTP endpoint plus the child's session token; and stop a previously started session. Hub components (proxy, dashboard, auth) MUST NOT depend on how the endpoint or credential context is produced. The shipped `local` backend SHALL spawn `uatu serve <folder> --no-open --exit-on-stdin-close --base-path /s/<id>/` with explicit Git, signing, SSH-client, and provider-tool selection derived from the workspace's assignments, parse the tokened URL from the child's first stdout line, hold the child's stdin open for its lifetime, and stop the session via SIGTERM. It MUST NOT forward ambient agent sockets, and normal tool configuration MUST NOT select unassigned stored credentials. Because local sessions share the daemon UID and may share Hub-managed runtime resources, these selections are advisory and MUST NOT be represented as OS-enforced isolation.
@@ -227,3 +228,114 @@ The Hub SHALL start managed credential processes only in dedicated owner-only ru
 - **WHEN** the Hub begins graceful shutdown with Hub-owned SSH and OpenPGP agents running
 - **THEN** active clone jobs and workspace sessions stop before the Hub terminates its owned agents
 - **AND** unrelated system agents remain running
+
+### Requirement: Hub exposes authenticated folder mutation operations
+The Hub SHALL expose public authenticated POST operations to create a folder from an absolute parent path and child name, rename a folder from an absolute source path and new sibling name, and remove an absolute folder path. Cookie-authenticated requests MUST pass the Hub's same-origin check. The Hub MUST reject relative paths, invalid names, non-directory or symbolic-link sources, rename destinations that already exist, and removal of any non-empty folder. A mutation MUST NOT recursively delete content or overwrite an existing filesystem entry.
+
+#### Scenario: Cross-origin folder mutation is rejected
+- **WHEN** a cookie-authenticated cross-origin request attempts to create, rename, or remove a folder
+- **THEN** the Hub rejects it without changing the filesystem or workspace registry
+
+#### Scenario: Rename never replaces a destination
+- **WHEN** a rename's destination path already names any filesystem entry
+- **THEN** the Hub reports a conflict and leaves both source and destination unchanged
+
+#### Scenario: Remove delegates emptiness enforcement to the filesystem
+- **WHEN** a remove request names a directory containing a file, hidden entry, or child directory
+- **THEN** the operation fails without recursively removing any entry
+
+### Requirement: Folder mutations preserve registered workspace identity and consistency
+Before renaming a folder, the Hub SHALL identify every registered workspace whose path is the source or a descendant of it. A successful rename MUST update all affected registered paths by replacing the source prefix, MUST preserve every workspace id, backend, personal state, credential assignment, and session URL, and MUST persist the path updates as one registry mutation. Removing an empty folder that is itself a registered workspace MUST remove that registration and its associated personal state and credential assignments. A folder mutation and its registry or metadata changes MUST either complete coherently or be recovered or rolled back so a process interruption does not silently leave a registered path at the pre-mutation location after the folder moved.
+
+#### Scenario: Registered descendant paths move together
+- **WHEN** registered workspaces at `/srv/group/a` and `/srv/group/nested/b` are stopped and `/srv/group` is renamed to `/srv/team`
+- **THEN** their ids remain unchanged
+- **AND** their persisted paths become `/srv/team/a` and `/srv/team/nested/b` in one registry update
+
+#### Scenario: Registered rename survives Hub restart
+- **WHEN** a registered workspace is renamed and the Hub restarts
+- **THEN** the workspace remains registered under the same id at the renamed path
+
+#### Scenario: Failed registered rename remains coherent
+- **WHEN** the filesystem rename or registry persistence fails
+- **THEN** the Hub reports failure
+- **AND** recovery or rollback leaves every affected registration pointing to the location where its folder exists
+
+#### Scenario: Empty registered removal clears durable metadata
+- **WHEN** removal of an empty registered workspace succeeds
+- **THEN** the folder, registry entry, all users' personal workspace state, and credential assignments for that workspace are absent after a Hub restart
+
+### Requirement: Folder mutations coordinate with sessions and clone targets
+The Hub SHALL serialize a registered folder mutation against lifecycle operations for every affected workspace. Without explicit stop authorization, a request affecting a running or starting workspace MUST return a conflict that identifies every workspace requiring a stop and MUST change nothing. With explicit stop authorization, the Hub MUST await and stop any in-flight or running affected session before performing the mutation, and no concurrent start may observe or use a partially updated path. The Hub MUST also reject create, rename, or removal operations whose source, destination, or affected subtree conflicts with an active clone target; folder mutation and clone reservation checks SHALL be coordinated so neither can enter a path reserved by the other.
+
+#### Scenario: Mutation reports sessions requiring a stop
+- **WHEN** a rename affects running workspace `alpha` and starting descendant workspace `beta` without stop authorization
+- **THEN** the Hub returns a conflict identifying both `alpha` and `beta`
+- **AND** neither session, folder, nor registration changes
+
+#### Scenario: Authorized mutation stops an in-flight start
+- **WHEN** the same rename is retried with stop authorization while a workspace start is in flight
+- **THEN** the Hub waits for that start, stops the resulting session and shells, and only then renames the folder and updates registrations
+
+#### Scenario: Concurrent start waits for rename
+- **WHEN** a start request arrives while its registered workspace path is being renamed
+- **THEN** the start observes the fully committed new path or fails without spawning a child
+- **AND** it never starts against an intermediate or stale path
+
+#### Scenario: Active clone protects its path hierarchy
+- **WHEN** an active clone target lies at, above, or below a proposed folder mutation source or destination
+- **THEN** the Hub rejects the mutation without moving or removing the clone target or its containing path
+
+### Requirement: Hub stores mutable workspace display names
+Every workspace registration SHALL include a non-empty user-facing display name separate from its immutable stable id and filesystem path. Display names MAY contain spaces, punctuation, and duplicate another workspace's display name within a bounded length. Renaming a workspace SHALL atomically persist only the display name and SHALL NOT change its id, `/s/<id>/` URL, source path, backend, personal state, credential assignments, or running session. Existing registry entries without a display name SHALL load with a deterministic default derived from their folder basename without changing their id.
+
+#### Scenario: Existing registry entry receives a default name
+- **WHEN** the Hub loads a registry entry written before display names existed
+- **THEN** it exposes and persists a display name derived from the source folder basename
+- **AND** its stable id and URL remain unchanged
+
+#### Scenario: Duplicate display names are accepted
+- **WHEN** two workspaces are named `API`
+- **THEN** both names are stored unchanged
+- **AND** their distinct ids and paths continue to identify them unambiguously
+
+#### Scenario: Running workspace is renamed
+- **WHEN** a workspace display-name update succeeds while its session is running
+- **THEN** subsequent Hub state and navigation use the new display name
+- **AND** the child process is neither stopped nor restarted
+
+### Requirement: Hub atomically configures new workspace registrations
+The Hub SHALL provide authenticated operations that register an existing folder or create a new child repository with a display name, optional authentication and signing assignments, and an explicit start choice. The default start choice SHALL be false. Before reporting success, the Hub MUST persist the registration and all requested assignments as one coherent onboarding result; a validation, initialization, registry, or assignment failure MUST leave no partial registration or assignment. If an explicitly requested first start fails after configuration commits, the Hub SHALL preserve the stopped configured workspace and report the startup failure rather than deleting the user's completed registration.
+
+Creating a workspace SHALL derive the destination from an absolute parent plus one visible child segment, reserve the path hierarchy, create without replacement, initialize Git, and register only that newly created folder. A failure after folder creation SHALL perform bounded cleanup only when the Hub can prove the created repository contains no user-added content; otherwise it SHALL retain the folder and report the recovery action required.
+
+#### Scenario: Existing folder is configured stopped
+- **WHEN** a valid Git repository, display name, and assignments are submitted without start authorization
+- **THEN** the Hub atomically records them and returns a stopped workspace
+
+#### Scenario: Assignment validation fails
+- **WHEN** a requested credential is missing, disabled, incompatible, or conflicts with another selected default
+- **THEN** the operation fails without retaining the new registration or any requested assignment
+
+#### Scenario: Explicit first start fails
+- **WHEN** registration and assignments commit but an explicitly requested session start fails
+- **THEN** the Hub reports the start failure and preserves the configured stopped workspace for correction and retry
+
+#### Scenario: Newly created repository is initialized
+- **WHEN** a valid parent, unused folder name, display name, and assignments are submitted to Create workspace
+- **THEN** the Hub creates the child, runs Git initialization, and records one stopped workspace for its canonical path
+
+### Requirement: Hub stores a default workspace parent preference
+The Hub SHALL persist an optional absolute default workspace parent directory in Hub-owned state. Updating it SHALL require an existing direct non-symbolic-link directory and SHALL use authenticated same-origin mutation protection. The value SHALL guide initial create, clone, and browse locations but MUST NOT constrain registration, folder operations, or shell access to that subtree. If the saved path later becomes missing or unreadable, the Hub SHALL retain the preference for diagnosis while returning the daemon user's home as the effective onboarding default.
+
+#### Scenario: Preference survives restart
+- **WHEN** an authenticated user saves `/srv/workspaces` and the Hub restarts
+- **THEN** Hub state reports `/srv/workspaces` as the configured and effective onboarding parent while it remains usable
+
+#### Scenario: Preference is not a workspace root
+- **WHEN** `/srv/workspaces` is configured and a user registers `/opt/project`
+- **THEN** the Hub accepts `/opt/project` under the existing host-access rules
+
+#### Scenario: Saved preference is unavailable
+- **WHEN** the configured directory disappears after it was saved
+- **THEN** Hub state identifies it as unavailable and provides the daemon user's home as the effective default

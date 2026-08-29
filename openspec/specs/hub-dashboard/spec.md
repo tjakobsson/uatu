@@ -40,18 +40,18 @@ Running and stopped workspace rows SHALL show a neutral summary of assigned auth
 - **AND** backend startup validation reports a disabled or otherwise unavailable credential
 
 ### Requirement: Dashboard lists sessions and workspaces with live status
-The hub SHALL serve an authenticated dashboard listing running sessions and stopped registered workspaces. Each running session SHALL show its workspace name and path and a live shell summary sourced from the child's terminal session inventory (shell count, attached/detached, best-effort foreground-process label); each stopped workspace SHALL offer resume. Activating a running session SHALL navigate to its `/s/<id>/` URL. The dashboard SHALL be served under the hub origin so it shares the PWA installation with the sessions it links to.
+The hub SHALL serve an authenticated dashboard listing running sessions and stopped registered workspaces. Every row SHALL use the mutable workspace display name as its title and show the source path as secondary text; stable ids MAY appear as advanced URL details but MUST NOT be the primary label. Each running session SHALL show a live shell summary sourced from the child's terminal session inventory (shell count, attached/detached, best-effort foreground-process label); each stopped workspace SHALL offer Start. Activating Open for a running session SHALL navigate to its `/s/<id>/` URL. The dashboard SHALL be served under the hub origin so it shares the PWA installation with the sessions it links to.
 
 #### Scenario: Running session shows live shell detail
 - **WHEN** a session has two shells, one running a long-lived TUI, and the user opens the dashboard
-- **THEN** the session's row reports the shells and the foreground-process label
+- **THEN** the session's row reports the shells and the foreground-process label under its workspace display name
 
 #### Scenario: Jump into a session
-- **WHEN** the user activates a running session's entry
-- **THEN** the browser navigates to that session's `/s/<id>/` URL and the SPA loads
+- **WHEN** the user activates Open on a running session's entry
+- **THEN** the browser navigates to that session's stable `/s/<id>/` URL and the SPA loads
 
 #### Scenario: Resume a stopped workspace
-- **WHEN** the user activates resume on a stopped workspace
+- **WHEN** the user activates Start on a stopped workspace
 - **THEN** the hub starts a session for it via the workspace's backend and the entry becomes running
 
 ### Requirement: Dashboard can stop a running session
@@ -73,37 +73,37 @@ The dashboard SHALL offer a forget action on stopped workspaces that removes the
 - **THEN** the hub rejects it and the registration is unchanged
 
 ### Requirement: Clone page adds folders through a server-side directory browser
-The authenticated `/clone` page SHALL offer workspace registration by browsing the hub host's filesystem, not by typing paths: the hub SHALL expose a directory-listing API that, for a given absolute path (defaulting to the daemon user's home), returns its parent and its child directories — each with its name, whether it is a git repository, and its registered workspace id if any — listing directories only and hiding dot-directories. The clone page SHALL present this as a drill-down browser ending in an "add this folder" action. Filesystem visibility through the browser is within the documented trust model: hub users already hold shell access through the embedded terminal.
+The authenticated `/clone` page SHALL offer workspace registration by browsing the hub host's filesystem, not by typing source paths: the hub SHALL expose a directory-listing API that starts from the configured default workspace parent when available and otherwise the daemon user's home, and returns a directory's parent and child directories with name, Git status, registration identity, and running state. It SHALL list directories only and hide dot-directories. Selecting an unregistered repository SHALL open the Add workspace configuration flow. Selecting a registered stopped workspace SHALL offer Start; selecting a running workspace SHALL offer Open.
 
-Registration SHALL submit the browsed absolute path. Adding a non-git folder SHALL apply the git preflight: the hub probes with `git rev-parse --show-toplevel` and, when the probe definitively reports no repository, answers with a needs-initialization response so the client can confirm and resubmit with initialization requested; on decline the folder MUST NOT be registered or served. When the probe fails for any other reason the hub SHALL skip the offer and start the session, letting the CLI's own git preflight report. The clone page SHALL additionally offer `git clone <url>` with a browsed destination directory, an optional single-folder checkout name defaulting to the name derived from the remote, and an optional compatible Hub credential fetched independently from the public credential API. A selected credential SHALL become the clone command's configured identity and MAY be retained as an assignment after successful registration; with no selected credential, the existing interactive PTY flow SHALL remain available. Clone MUST NOT inherit an ambient external SSH agent, automatically fall back to an unselected stored credential, persist interactively supplied credentials, or pass `--force` to the server. The local-backend warning SHALL make clear that same-UID processes can bypass this normal tool configuration.
+Adding a non-Git folder as a workspace SHALL require explicit Git initialization confirmation before registration. The clone page SHALL additionally offer `git clone <url>` with a browsed destination directory, an optional visible single-segment checkout folder name defaulting from the remote, an independently editable workspace display name defaulting from that folder, optional compatible clone authentication, optional retained workspace authentication and signing assignments, and an explicit Start after clone choice that defaults off. Clone MUST NOT inherit an ambient external SSH agent, automatically fall back to an unselected stored credential, persist interactively supplied credentials, or pass `--force` to the server. The local-backend warning SHALL make clear that same-UID processes can bypass normal tool configuration.
 
 #### Scenario: Browsing to and adding a folder
-- **WHEN** the user drills into `~/src`, selects a git repository folder, and confirms adding it
-- **THEN** the hub registers the folder with a stable id and starts its session
+- **WHEN** the user selects a Git repository folder and completes Add workspace
+- **THEN** the Hub registers it stopped with a stable id, display name, and chosen assignments
 
 #### Scenario: Registered folders are marked while browsing
-- **WHEN** the directory browser lists a folder that is already a registered workspace
-- **THEN** the listing shows it as registered rather than offering to add it again
+- **WHEN** the directory browser lists a registered workspace
+- **THEN** it offers Start when stopped and Open when running rather than offering Add
 
 #### Scenario: Non-git folder is initialized and served
-- **WHEN** the user adds a folder that is not inside a git worktree and confirms initialization
-- **THEN** the hub runs `git init` there, registers the workspace, and starts its session
+- **WHEN** the user selects a non-Git folder, confirms initialization, and completes Add workspace
+- **THEN** the Hub runs `git init`, records the workspace configuration, and leaves it stopped unless Add and start was explicitly selected
 
 #### Scenario: Declined initialization leaves no trace
 - **WHEN** the user adds a non-git folder and declines initialization
 - **THEN** no session starts and the folder is not added to the registry
 
 #### Scenario: Clone into a browsed destination
-- **WHEN** the user submits a repository URL, picks a destination directory, and selects a compatible Hub credential
-- **THEN** the hub starts an observable clone configured to select that credential, registers the result with a stable id after the clone succeeds, and starts its session
+- **WHEN** the user submits a repository URL, chooses checkout and workspace names, selects compatible credentials, and leaves Start after clone off
+- **THEN** the Hub clones into the selected child folder and registers the result stopped with those assignments
 
 #### Scenario: Clone with a custom checkout folder
-- **WHEN** the user submits a repository URL with a valid custom checkout folder name
-- **THEN** the hub clones into that folder rather than the name derived from the remote
+- **WHEN** the user submits a valid custom checkout folder name
+- **THEN** the Hub clones into that folder independently of the workspace display name
 - **AND** path-like names and dot segments are rejected before a clone job starts
 
 #### Scenario: Already-loaded SSH key is used without prompting
-- **WHEN** the clone URL uses SSH and the selected Hub SSH credential is unlocked and usable
+- **WHEN** the clone URL uses SSH and the selected clone credential is unlocked and usable
 - **THEN** the clone uses the Hub-managed agent and completes without asking for the key passphrase again
 
 #### Scenario: Failed clone or init is reported
@@ -111,7 +111,7 @@ Registration SHALL submit the browsed absolute path. Adding a non-git folder SHA
 - **THEN** the clone page shows the Git error output and no workspace is registered
 
 ### Requirement: Clone page handles interactive clone progress
-The authenticated `/clone` page SHALL show live terminal output and current phase for an in-progress clone and SHALL provide an always-available masked response input that writes one response to the clone terminal without displaying or retaining the submitted value. Recognizing a common credential, trust, or verification prompt MAY focus or label the response input, but unrecognized terminal prompts MUST remain answerable. The clone page SHALL provide cancellation while the clone is active and SHALL report cancellation, timeout, clone failure, registration or session-start failure, and successful completion distinctly. On successful registration and session start, the clone page SHALL navigate to the resulting workspace session. Once a clone reaches any terminal outcome, the prompt input and cancellation controls SHALL no longer appear active, while failure output remains visible and the clone form is available for retry. Unlocking a selected stored credential SHALL use the credential operation's masked secret path; responses entered into the clone PTY SHALL remain one-operation inputs and MUST NOT silently create or update a stored credential.
+The authenticated `/clone` page SHALL show live terminal output and current phase for an in-progress clone and SHALL provide an always-available masked response input that writes one response to the clone terminal without displaying or retaining the submitted value. Recognizing a common credential, trust, or verification prompt MAY focus or label the response input, but unrecognized terminal prompts MUST remain answerable. The clone page SHALL provide cancellation while the clone is active and SHALL report cancellation, timeout, clone failure, registration failure, optional session-start failure, and successful completion distinctly. Successful clone and registration SHALL finish on the stopped workspace unless Start after clone was selected; only a successful requested start SHALL navigate into the workspace session. Once a clone reaches any terminal outcome, prompt input and cancellation controls SHALL no longer appear active, while failure output remains visible and the clone form is available for retry. Unlocking a selected stored credential SHALL use the credential operation's masked secret path; responses entered into the clone PTY SHALL remain one-operation inputs and MUST NOT silently create or update a stored credential.
 
 #### Scenario: Selected credential requires unlock
 - **WHEN** a selected stored credential is locked when the user submits a clone
@@ -141,20 +141,28 @@ The authenticated `/clone` page SHALL show live terminal output and current phas
 - **THEN** its output and terminal status remain visible
 - **AND** prompt input and cancellation are hidden while the clone form is available for retry
 
+#### Scenario: Clone succeeds without requested start
+- **WHEN** the user completes an interactive clone with Start after clone off
+- **THEN** the clone page reports that the workspace was added and provides Start and return-to-dashboard actions
+
 #### Scenario: Clone succeeds after interaction
-- **WHEN** the user supplies the required responses and the clone, registration, and session start all succeed
-- **THEN** the clone page reports completion and navigates to the new workspace session
+- **WHEN** the clone, registration, assignment, and requested session start all succeed
+- **THEN** the clone page reports completion and navigates to the workspace's stable session URL
 
 ### Requirement: Hub-served sessions expose hub navigation
-When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace, whose menu links to the hub dashboard and to every registered workspace (running state indicated; stopped workspaces labeled) and offers a sign-out entry. Outside a hub — plain `uatu serve`, a bare `--base-path` invocation — the affordance MUST stay hidden. (Desktop sessions are hub sessions and show the switcher.) The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
+When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace by its display name, whose menu links to the hub dashboard and to every registered workspace by display name with running or stopped state and offers a sign-out entry. Duplicate display names SHALL be disambiguated with path or stable-id detail. Outside a hub, including plain `uatu serve` and a bare `--base-path` invocation, the affordance MUST stay hidden. The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
 
 #### Scenario: Switching workspaces from inside a session
 - **WHEN** a user inside a hub-served session opens the workspace switcher
-- **THEN** they see the hub dashboard link and the other workspaces with running/stopped state
-- **AND** activating one navigates to that workspace's session URL
+- **THEN** they see the dashboard and sibling workspaces by display name with running or stopped state
+- **AND** activating a running workspace navigates to its stable session URL while a stopped workspace offers Start
+
+#### Scenario: Duplicate names are distinguishable
+- **WHEN** two registered workspaces share one display name
+- **THEN** the switcher provides path or stable-id detail that distinguishes them without requiring names to be unique
 
 #### Scenario: No hub affordance outside a hub
-- **WHEN** the SPA runs under plain `uatu serve` (default base path) or under a base path with no hub answering at the origin root
+- **WHEN** the SPA runs under plain `uatu serve` or under a base path with no hub answering at the origin root
 - **THEN** the workspace switcher is not shown
 
 ### Requirement: The workspace switcher chip reflects real session state
@@ -238,3 +246,122 @@ The dashboard SHALL show the signed-in user's active sessions — device label, 
 #### Scenario: Revoking the current session signs out
 - **WHEN** a user revokes the session marked as current
 - **THEN** the response clears the cookie and lands on the login page
+
+### Requirement: Directory browser manages folders
+The authenticated Hub directory browser SHALL let users create an empty child folder in the currently browsed directory, rename a listed child folder, and remove a listed child folder only when it is empty. These actions SHALL be available for both unregistered folders and registered workspaces. Folder names MUST be non-empty visible single path segments; path separators, dot segments, NUL, and names beginning with `.` MUST be rejected. The browser SHALL refresh the affected listing after a successful mutation and SHALL show an actionable error without navigating away when a mutation fails.
+
+#### Scenario: Create an empty folder
+- **WHEN** a user enters a valid unused name while browsing a writable directory
+- **THEN** the Hub creates that directory as an immediate child
+- **AND** the refreshed browser lists the new folder
+
+#### Scenario: Invalid or colliding name is rejected
+- **WHEN** a user attempts to create or rename a folder with an invalid name or a name already used in the destination directory
+- **THEN** the Hub rejects the mutation without replacing or changing any existing folder
+- **AND** the browser explains the conflict
+
+#### Scenario: Rename an unregistered folder
+- **WHEN** a user renames an unregistered folder to a valid unused sibling name
+- **THEN** the folder and all of its contents move to the new path
+- **AND** the browser remains in the containing directory and shows the new name
+
+#### Scenario: Remove an empty folder
+- **WHEN** a user confirms removal of an empty folder
+- **THEN** the folder is removed and disappears from the refreshed listing
+
+#### Scenario: Non-empty removal is rejected
+- **WHEN** a user attempts to remove a folder containing any entry, including a hidden entry
+- **THEN** the Hub leaves the folder and its contents unchanged
+- **AND** the browser reports that only empty folders can be removed
+
+### Requirement: Registered folder mutations offer coordinated session stopping
+When rename or removal affects one or more registered workspaces, the browser SHALL preserve workspace registration semantics rather than treating the folders as unrelated filesystem entries. If every affected workspace is stopped, the action SHALL proceed without an additional session-stop prompt. If any affected workspace is running or starting, the browser SHALL identify the affected workspaces and offer to stop them and continue. Confirming MUST stop all affected sessions, including any start already in flight, before mutating the folder; declining MUST leave sessions, folders, and registrations unchanged. The control SHALL remain disabled with an in-progress label while stopping and mutation are underway.
+
+#### Scenario: Rename a stopped registered workspace
+- **WHEN** a user renames a registered workspace whose session is stopped
+- **THEN** the folder is renamed while its stable workspace id and `/s/<id>/` URL remain unchanged
+- **AND** the dashboard reports the new path for that workspace
+
+#### Scenario: User confirms stop and rename
+- **WHEN** a rename affects a running registered workspace and the user confirms the offered stop-and-continue action
+- **THEN** the Hub terminates the workspace session and its shells before renaming the folder
+- **AND** the workspace remains registered under its existing id at the new path
+
+#### Scenario: User declines session stopping
+- **WHEN** a folder mutation would affect a running or starting workspace and the user declines the offered stop
+- **THEN** no affected session is stopped
+- **AND** no folder or registration is changed
+
+#### Scenario: Rename affects nested registered workspaces
+- **WHEN** a renamed folder contains multiple registered workspace descendants
+- **THEN** the stop offer names every running or starting affected workspace
+- **AND** after all affected workspaces are stopped, every registration keeps its id and points to the corresponding path beneath the renamed folder
+
+#### Scenario: Remove an empty registered workspace
+- **WHEN** a user removes an empty registered workspace folder after any active session has been stopped
+- **THEN** the folder and its workspace registration are removed
+- **AND** associated personal workspace state and credential assignments are removed
+
+### Requirement: Dashboard configures a workspace before first start
+Selecting an unregistered Git repository in the directory browser SHALL open an Add workspace form instead of registering or starting it immediately. The form SHALL show the canonical folder path, prefill an editable workspace display name from the folder basename, allow separate compatible authentication and signing credential selections, and offer Add workspace as the primary action plus Add and start as an explicit alternative. Add workspace SHALL finish with a stopped registered workspace. Cancelling SHALL leave the folder, registry, credentials, and sessions unchanged.
+
+#### Scenario: Existing repository is added stopped
+- **WHEN** a user selects an unregistered Git repository, accepts the default display name, optionally selects credentials, and activates Add workspace
+- **THEN** the Hub registers the workspace and its selected assignments without starting a session
+- **AND** the dashboard shows it in the stopped workspace list ready to Start
+
+#### Scenario: User explicitly adds and starts
+- **WHEN** the same user activates Add and start
+- **THEN** the Hub commits the workspace configuration before starting its session
+- **AND** startup uses the selected credential assignments
+
+#### Scenario: Add is cancelled
+- **WHEN** the user closes or cancels the Add workspace form
+- **THEN** no registration, assignment, filesystem, or session mutation occurs
+
+### Requirement: Dashboard creates a new stopped workspace
+The dashboard SHALL provide a Create workspace flow with a workspace display name, a visible single-segment folder name, an absolute parent directory defaulted from Hub Settings, and optional authentication and signing credentials. On success the Hub SHALL create the child folder, initialize an empty Git repository, register the workspace with its chosen display name and assignments, and leave it stopped. Existing destinations, invalid names, unavailable parents, Git initialization failures, and configuration persistence failures SHALL produce actionable errors without starting a session or silently adopting an existing folder.
+
+#### Scenario: New workspace is created under the default parent
+- **WHEN** a user accepts the configured default parent, enters workspace and folder names, selects credentials, and confirms creation
+- **THEN** the Hub creates and initializes the child repository
+- **AND** it appears as a stopped workspace with the selected display name and assignments
+
+#### Scenario: Workspace and folder names differ
+- **WHEN** a user enters display name `Payments API` and folder name `payments-service`
+- **THEN** the workspace is shown as `Payments API`
+- **AND** its source path ends in `payments-service`
+
+#### Scenario: Destination already exists
+- **WHEN** the requested child folder already names any filesystem entry
+- **THEN** creation fails without registering, starting, replacing, or modifying that entry
+
+### Requirement: Settings manages the default workspace parent
+Hub Settings SHALL let an authenticated user configure or clear one absolute default workspace parent directory. The setting SHALL be validated as an existing direct directory before it is saved. Create, clone, and directory-browser flows SHALL initially open at that directory when configured and readable, otherwise they SHALL fall back to the daemon user's home with an explanation. The default SHALL remain a convenience only: users MAY browse and register folders elsewhere, and clearing it SHALL restore the home-directory default.
+
+#### Scenario: Default parent is used by onboarding
+- **WHEN** `/srv/workspaces` is configured and a user opens Create workspace or Clone
+- **THEN** the parent or browser starts at `/srv/workspaces`
+- **AND** the user can still navigate elsewhere
+
+#### Scenario: Configured parent becomes unavailable
+- **WHEN** the saved default parent no longer exists or cannot be read
+- **THEN** onboarding falls back to the daemon user's home
+- **AND** the page explains that the configured default is unavailable
+
+#### Scenario: Invalid parent is not saved
+- **WHEN** a user submits a relative path, missing path, file, or symbolic-link directory as the default parent
+- **THEN** Settings rejects it and preserves the previous value
+
+### Requirement: Workspace and filesystem actions use distinct language
+Workspace rows and directory rows SHALL distinguish Rename workspace, Rename folder, Remove from Hub, and Remove folder. Rename workspace SHALL be available while stopped or running and SHALL change only the workspace display name. Rename folder SHALL retain the existing coordinated filesystem behavior and stable URL id. Remove from Hub SHALL preserve the folder, while Remove folder SHALL retain its empty-directory restriction. A stopped registered directory SHALL offer Start rather than Open; a running workspace SHALL offer Open.
+
+#### Scenario: Running workspace display name is changed
+- **WHEN** a user renames a running workspace from `API` to `Payments API`
+- **THEN** Hub-owned workspace lists and navigation show `Payments API`
+- **AND** its session, folder path, stable id, and URL remain unchanged
+
+#### Scenario: Stopped registered folder is selected
+- **WHEN** the directory browser lists a registered workspace with no running session
+- **THEN** its primary action is Start
+- **AND** activating it uses the normal credential-aware start flow rather than navigating to an unavailable session

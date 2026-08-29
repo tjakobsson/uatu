@@ -18,7 +18,7 @@ The Hub SHALL maintain persistent credential records for SSH authentication, SSH
 - **THEN** the Hub rejects it without changing stored or agent state
 
 ### Requirement: Hub manages dedicated credential runtimes
-The Hub SHALL use dedicated owner-only runtime locations for every SSH or OpenPGP agent it manages and MUST give Hub clone jobs and workspace sessions explicit paths to those runtimes. It MUST NOT load keys into, lock, stop, reconfigure, or delete sockets belonging to an inherited system agent. Hub shutdown SHALL stop only agents whose ownership and lifecycle the Hub can prove; stale runtime state SHALL be validated and recovered without signaling unrelated processes.
+The Hub SHALL use dedicated owner-only runtime locations for every SSH or OpenPGP agent it manages and MUST give Hub clone jobs and workspace sessions explicit paths to those runtimes. It MUST NOT load keys into, lock, stop, reconfigure, or delete sockets belonging to an inherited system agent. Hub shutdown SHALL stop only agents whose ownership and lifecycle the Hub can prove; stale runtime state SHALL be validated and recovered without signaling unrelated processes. On Linux, the Hub SHALL retain enough boot identity in newly created SSH guardian ownership state to distinguish exact managed artifacts left by an earlier system boot.
 
 #### Scenario: Ambient agents remain untouched
 - **WHEN** the Hub starts with system `SSH_AUTH_SOCK` and GnuPG sockets already present
@@ -29,6 +29,16 @@ The Hub SHALL use dedicated owner-only runtime locations for every SSH or OpenPG
 - **WHEN** startup finds a socket or process record in the Hub credential runtime location that it cannot prove belongs to its managed agent
 - **THEN** the Hub refuses to signal that process
 - **AND** it reports the affected credential runtime unavailable with recovery guidance
+
+#### Scenario: Linux restart leaves managed SSH sockets behind
+- **WHEN** startup finds an owner-only SSH guardian record from an earlier Linux boot and every remaining guardian socket exactly matches the identity recorded for it
+- **THEN** the Hub removes the remaining previous-boot guardian artifacts without signaling any recorded PID
+- **AND** it can start a fresh managed SSH agent without manual cleanup
+
+#### Scenario: Previous-boot socket identity does not match
+- **WHEN** startup finds a previous-boot ownership record but a remaining guardian socket does not exactly match its recorded identity
+- **THEN** the Hub preserves the unprovable artifacts
+- **AND** it reports the credential runtime unavailable with recovery guidance
 
 ### Requirement: Credential tooling is discoverable and testable
 The Hub SHALL auto-detect the executables required by each credential capability from its service environment and SHALL allow an authenticated user to configure an explicit absolute executable path. A configured path MUST be validated as an executable regular file before use. The settings test action SHALL distinguish binary discovery, compatible version, agent operation, and usable-key or signing readiness; it SHALL return bounded sanitized diagnostics and platform-appropriate installation guidance without returning environment secrets or unrestricted command output. Tool readiness SHALL be re-evaluated at Hub startup and after configuration changes, and one unavailable optional tool MUST NOT disable unrelated credential types.
@@ -101,21 +111,35 @@ The Hub SHALL store HTTPS/provider credentials with an explicit provider host an
 - **THEN** the Hub configures that provider CLI without exposing the token through the Git credential helper
 
 ### Requirement: Hub assigns credentials to workspaces without overstating isolation
-New credentials SHALL have no workspace assignments by default. An authenticated user SHALL be able to grant and revoke credentials for selected registered workspaces, and the Hub SHALL configure normal Git, signing, and provider-tool selection from those assignments when it starts a clone job or workspace session. Assignments SHALL permit at most one default authentication credential per provider host and one default commit-signing credential per workspace so normal tool selection is deterministic. For the local backend, every assignment surface and API SHALL identify the workspace boundary as advisory because all workspaces share the daemon OS UID, and SHALL warn that another local workspace may be able to discover or exercise credentials outside its assignments. The persisted assignment model MUST distinguish individual credentials so a future isolated backend can project and enforce only the selected set.
+New credentials SHALL have no workspace assignments by default. An authenticated user SHALL be able to grant and revoke credentials for selected registered workspaces and SHALL be able to select compatible authentication and signing defaults while creating, cloning, or registering a workspace before its first start. Onboarding assignment selection and workspace registration SHALL commit as one coherent result: invalid, unavailable, incompatible, or conflicting selections MUST NOT leave a partial new registration or assignment. The Hub SHALL configure normal Git, signing, and provider-tool selection from assignments when it starts a clone job or workspace session. Clone authentication and retained workspace authentication SHALL be presented as separate choices, with the selected clone credential offered as the default retained assignment but never retained without explicit user choice.
+
+Assignments SHALL permit at most one default authentication credential per provider host and one default commit-signing credential per workspace so normal tool selection is deterministic. For the local backend, every assignment surface and API SHALL identify the workspace boundary as advisory because all workspaces share the daemon OS UID, and SHALL warn that another local workspace may be able to discover or exercise credentials outside its assignments. The persisted assignment model MUST distinguish individual credentials so a future isolated backend can project and enforce only the selected set.
+
+#### Scenario: Credentials are assigned before first start
+- **WHEN** a user adds or creates a workspace with compatible authentication and signing credentials
+- **THEN** the Hub records both assignments before the workspace can be started
+- **AND** the first start resolves that committed configuration
 
 #### Scenario: Credential is assigned during clone
-- **WHEN** a user selects a credential for a clone and chooses to retain the assignment
-- **THEN** the clone's normal Git credential selection is configured for that credential rather than another stored or ambient identity
-- **AND** successful workspace registration records the credential assignment
+- **WHEN** a user selects a clone credential and explicitly chooses it as the retained workspace authentication default
+- **THEN** the clone uses that credential and successful registration records the assignment before any requested start
+
+#### Scenario: Clone identity is not retained implicitly
+- **WHEN** a user selects a credential for cloning but declines workspace retention
+- **THEN** the checked-out workspace has no assignment solely because that credential performed the clone
+
+#### Scenario: Invalid onboarding assignment rolls back
+- **WHEN** a selected credential becomes unavailable or conflicts before onboarding commits
+- **THEN** the new workspace registration and every requested assignment remain absent
 
 #### Scenario: Local workspace grant is displayed honestly
-- **WHEN** a user assigns a credential to a workspace using the local backend
-- **THEN** settings warns that the shared UID prevents an enforceable per-workspace secret boundary
-- **AND** the UI does not describe the assignment as sandboxing or least-privilege isolation
+- **WHEN** a user assigns a credential during onboarding or in Settings using the local backend
+- **THEN** the UI warns that the shared UID prevents an enforceable per-workspace secret boundary
+- **AND** it does not describe the assignment as sandboxing or least-privilege isolation
 
 #### Scenario: Conflicting defaults are rejected
-- **WHEN** a workspace already has a default authentication credential for `github.com` or a default commit-signing credential and a user assigns another conflicting default
-- **THEN** the Hub requires the user to replace the existing default rather than persisting an ambiguous selection
+- **WHEN** onboarding or later configuration selects conflicting authentication defaults for one host or multiple signing defaults
+- **THEN** the Hub requires an explicit single default rather than persisting an ambiguous selection
 
 #### Scenario: One authentication host is unassigned
 - **WHEN** the same credential is assigned to one workspace for multiple authentication hosts and the user removes one host assignment
