@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { ConversationProjection } from "./adapter";
 import { ConversationReplay, encodeReplayCursor } from "./replay";
 
 async function next<T>(iterator: AsyncIterator<T>): Promise<T> {
@@ -37,6 +38,29 @@ describe("conversation replay", () => {
     const stale = replay.handoff(() => null, encodeReplayCursor({ generation: "old", sequence: 2 })).subscription[Symbol.asyncIterator]();
     expect(await next(stale)).toEqual(expect.objectContaining({ type: "resync", reason: "generation-changed" }));
     expect((await stale.next()).done).toBe(true);
+  });
+
+  test("a conversation rewrite resyncs existing subscribers and a fresh snapshot recovers", async () => {
+    const replay = new ConversationReplay("generation", "session", 10_000);
+    const projection = new ConversationProjection(replay);
+    projection.seed([
+      { id: "message:kept", type: "user_message", createdAt: 1, text: "kept" },
+      { id: "message:removed", type: "user_message", createdAt: 2, text: "removed" },
+    ]);
+    const existing = replay.handoff(cursor => ({ cursor, items: projection.items() }));
+
+    projection.replace([
+      { id: "message:kept", type: "user_message", createdAt: 1, text: "kept" },
+    ]);
+
+    const rewrite = await next(existing.subscription[Symbol.asyncIterator]());
+    expect(rewrite).toEqual(expect.objectContaining({ type: "resync", reason: "conversation-rewritten" }));
+
+    const fresh = replay.handoff(cursor => ({ cursor, items: projection.items() }));
+    expect(fresh.snapshot.items.map(item => item.id)).toEqual(["message:kept"]);
+    expect(fresh.snapshot.cursor).toBe(replay.latestCursor());
+    existing.subscription.cancel();
+    fresh.subscription.cancel();
   });
 
   test("a stalled subscriber's backlog is bounded and ends the stream instead of growing", async () => {

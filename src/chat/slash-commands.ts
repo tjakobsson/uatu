@@ -6,6 +6,14 @@ export type SlashCommandQuery = {
   query: string;
 };
 
+export type LocalHistoryOperation = "undo" | "redo";
+
+export function localHistoryOperation(value: string, commands: ChatCommand[], reversibleHistory = false): LocalHistoryOperation | null {
+  const name = value === "/undo" ? "undo" : value === "/redo" ? "redo" : null;
+  if (!name) return null;
+  return reversibleHistory || commands.some(command => command.name === name && command.kind === "local-operation") ? name : null;
+}
+
 export function slashCommandQuery(value: string, caret: number): SlashCommandQuery | null {
   const before = value.slice(0, caret);
   const match = /(?:^|\s)\/([^\s/]*)$/.exec(before);
@@ -24,7 +32,7 @@ export function matchingCommands(value: string, caret: number, commands: ChatCom
 }
 
 export function insertCommand(value: string, query: SlashCommandQuery, command: ChatCommand): { value: string; caret: number } {
-  const insertion = `/${command.name} `;
+  const insertion = `/${command.name}${command.kind === "local-operation" ? "" : " "}`;
   const next = value.slice(0, query.start) + insertion + value.slice(query.end);
   return { value: next, caret: query.start + insertion.length };
 }

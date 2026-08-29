@@ -98,3 +98,36 @@ test("a pending edit permission shows its diff, and a resolved one recedes", asy
   await expect(card).not.toHaveAttribute("open", /.*/);
   await expect(card.locator("ul code")).toContainText("src/app.ts");
 });
+
+test("a surfaced subagent request opens its transcript without changing the parent selection", async ({ page, request }) => {
+  await request.post("/__e2e/reset");
+  const child = await request.post("/__e2e/chat", { data: { action: "seed", title: "Child transcript", child: true, items: [
+    { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
+  ] } }).then(response => response.json()) as { conversation: { id: string } };
+  const requestItem: ConversationItem = {
+    id: "permission:surfaced", type: "permission", createdAt: 3, requestId: "surfaced",
+    conversationId: child.conversation.id, action: "bash", resources: ["bun test"], status: "pending",
+  };
+  const parent = await request.post("/__e2e/chat", { data: { action: "seed", title: "Parent", items: [
+    {
+      id: "tool:agent", type: "tool", createdAt: 2, name: "task", status: "completed",
+      input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+      childConversationId: child.conversation.id,
+    },
+    requestItem,
+  ] } }).then(response => response.json()) as { conversation: { id: string } };
+  const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await openChatPanel(page);
+
+  const card = page.locator('[data-chat-item-id="permission:surfaced"]');
+  await expect(card.locator(".chat-request-origin")).toContainText("Requested by explore · Review renderer.");
+  await card.getByRole("button", { name: "Open transcript" }).click();
+  await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent.conversation.id);
+
+  await page.locator("#chat-drilldown-back").click();
+  await expect(page.locator("#chat-drilldown")).toBeHidden();
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent.conversation.id);
+  await expect(card).toBeVisible();
+});

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, UnknownAttachmentError } from "./adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -12,7 +12,7 @@ import type {
   ProviderSession,
 } from "./provider";
 import { UnsupportedVariantSelectionError } from "./provider";
-import type { ChatEvent, ChatModel, ConversationItem, ModelSelection } from "./types";
+import type { ChatEvent, ChatModel, ConversationItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
 import type { ConversationInventorySubscription } from "./inventory-broadcaster";
@@ -68,6 +68,9 @@ class FakeProvider implements OpenCodeProvider {
   listPermissions?: OpenCodeProvider["listPermissions"];
   listQuestions?: OpenCodeProvider["listQuestions"];
   listModes?: OpenCodeProvider["listModes"];
+  getReversibleHistoryState?: OpenCodeProvider["getReversibleHistoryState"];
+  undo?: OpenCodeProvider["undo"];
+  redo?: OpenCodeProvider["redo"];
   configurations = new Map<string, import("./types").ConversationConfiguration>();
   newConfiguration: import("./types").ConversationConfiguration = {};
 
@@ -122,6 +125,11 @@ function sumInput(item: ConversationItem | undefined): number | undefined {
 
 function applyEvent(adapter: OpenCodeChatAdapter, conversationId: string, event: ProviderEvent): void {
   for (const update of normalizeProviderEvent(event).updates) adapter.projectionForTests(conversationId).apply(update);
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 1_000 && !predicate(); attempt += 1) await Bun.sleep(1);
+  expect(predicate()).toBe(true);
 }
 
 async function expectInventorySignal(subscription: ConversationInventorySubscription): Promise<void> {
@@ -597,6 +605,461 @@ describe("filtered provider event pump", () => {
     // "a" still has a live subscriber, so "b" is the eviction target.
     expect(adapter.projectionForTests("a")).toBe(before);
     events.cancel();
+  });
+});
+
+describe("reversible history coordination", () => {
+  function enabled(initial: ReversibleHistoryState, messages: ProviderMessage[] = []) {
+    const provider = new FakeProvider();
+    provider.agent.capabilities.push("reversible-history");
+    provider.sessions = [fixtureSession("session")];
+    let state = initial;
+    let visible = messages;
+    provider.getReversibleHistoryState = async () => state;
+    provider.listMessages = async () => ({ items: visible });
+    return {
+      provider,
+      state: () => state,
+      setState: (next: ReversibleHistoryState) => { state = next; },
+      setVisible: (next: ProviderMessage[]) => { visible = next; },
+    };
+  }
+
+  test("requires both the capability and every provider operation, and avoids interrupting a no-op", async () => {
+    const incomplete = new FakeProvider();
+    incomplete.sessions = [fixtureSession("session")];
+    incomplete.agent.capabilities.push("reversible-history");
+    const unsupported = new OpenCodeChatAdapter({ provider: incomplete, workspacePath: process.cwd() });
+    await expect(unsupported.undo("session", "u1")).rejects.toBeInstanceOf(ReversibleHistoryUnsupportedError);
+
+    const fixture = enabled({ staged: false, canUndo: false, canRedo: false });
+    let undoCalls = 0;
+    fixture.provider.undo = async () => {
+      undoCalls += 1;
+      return { outcome: "nothing-to-undo", state: fixture.state() };
+    };
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    adapter.projectionForTests("session").statusUpdate("running");
+
+    await expect(adapter.undo("session", "u2")).resolves.toEqual({
+      outcome: "nothing-to-undo",
+      state: { staged: false, canUndo: false, canRedo: false },
+    });
+    expect(undoCalls).toBe(0);
+    expect(fixture.provider.interrupts).toEqual([]);
+  });
+
+  test("joins lost-response retries, closes the interrupt-idle race, and keeps restored drafts private", async () => {
+    const availableId = "11111111-2222-4333-8444-555555555555";
+    const missingId = "99999999-0000-4000-8000-000000000000";
+    const latest = { id: "latest", type: "user", time: { created: 1 }, text: "private draft" };
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [latest]);
+    let undoCalls = 0;
+    fixture.provider.undo = async () => {
+      undoCalls += 1;
+      fixture.setState({ staged: true, canUndo: false, canRedo: true });
+      fixture.setVisible([]);
+      return {
+        outcome: "changed",
+        state: fixture.state(),
+        restoredDraft: {
+          text: "private draft",
+          attachments: [
+            { id: availableId, name: "available.png", mimeType: "image/png" },
+            { id: missingId, name: "missing.png", mimeType: "image/png" },
+            { name: "provider-placeholder.png", mimeType: "image/webp" },
+          ],
+        },
+      };
+    };
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({
+      provider: fixture.provider,
+      workspacePath: process.cwd(),
+      generation: "g",
+      id: () => "held",
+      resolveAttachment: async id => id === availableId
+        ? { id, mimeType: "image/png", absolutePath: "/state/available.png" }
+        : null,
+    });
+    await adapter.history("session");
+    adapter.projectionForTests("session").statusUpdate("running");
+    const held = await adapter.prompt("session", "queued", "older queued message");
+    expect(held.held).toBe(true);
+    const firstClient = await adapter.subscribe("session");
+    const secondClient = await adapter.subscribe("session");
+
+    fixture.provider.interrupt = async sessionId => {
+      fixture.provider.interrupts.push(sessionId);
+      adapter.projectionForTests("session").statusUpdate("idle");
+      await Bun.sleep(5);
+    };
+    const [first, retry] = await Promise.all([
+      adapter.undo("session", "undo-1"),
+      adapter.undo("session", "undo-1"),
+    ]);
+
+    expect(retry).toEqual(first);
+    expect(undoCalls).toBe(1);
+    expect(fixture.provider.interrupts).toEqual(["session"]);
+    expect(fixture.provider.prompts).toEqual([]);
+    expect(first).toEqual({
+      outcome: "changed",
+      state: { staged: true, canUndo: false, canRedo: true },
+      restoredDraft: {
+        text: "private draft",
+        attachments: [
+          { id: availableId, name: "available.png", mimeType: "image/png" },
+          { name: "missing.png", mimeType: "image/png" },
+          { name: "provider-placeholder.png", mimeType: "image/webp" },
+        ],
+      },
+    });
+    for (const subscription of [firstClient.events, secondClient.events]) {
+      const iterator = subscription[Symbol.asyncIterator]();
+      const events: ChatEvent[] = [];
+      while (!events.some(event => event.type === "resync")) events.push((await iterator.next()).value!);
+      expect(events.find(event => event.type === "resync")).toEqual(expect.objectContaining({ reason: "conversation-rewritten" }));
+      expect(JSON.stringify(events)).not.toContain("private draft");
+      subscription.cancel();
+    }
+    const snapshot = await adapter.history("session");
+    expect(snapshot.reversibleHistory).toEqual({ staged: true, canUndo: false, canRedo: true });
+    expect(snapshot.queued).toEqual([expect.objectContaining({ id: held.messageId, text: "older queued message" })]);
+    await expect(adapter.removeQueued("session", held.messageId, "remove-held")).resolves.toEqual({ removed: true });
+  });
+
+  test("local and repeated lifecycle triggers converge to one rewrite and discard stale coalesced updates", async () => {
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [
+      { id: "latest", type: "user", time: { created: 1 }, text: "discard me" },
+    ]);
+    fixture.provider.undo = async () => {
+      fixture.setState({ staged: true, canUndo: false, canRedo: true });
+      fixture.setVisible([]);
+      fixture.provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "session" } });
+      return { outcome: "changed", state: fixture.state(), restoredDraft: { text: "discard me" } };
+    };
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 40 });
+    await adapter.history("session");
+    const subscription = await adapter.subscribe("session");
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    const pump = adapter.startEventPump();
+    fixture.provider.eventQueue.push({ type: "session.next.text.delta", data: { sessionID: "session", partID: "stale", delta: "stale branch" } });
+
+    await adapter.undo("session", "undo-1");
+    fixture.provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "session" } });
+    const first = await iterator.next();
+    expect(first.value).toEqual(expect.objectContaining({ type: "resync", reason: "conversation-rewritten" }));
+    await Bun.sleep(80);
+    expect(adapter.projectionForTests("session").items()).toEqual([]);
+    const duplicate = await Promise.race([iterator.next(), Bun.sleep(30).then(() => "timeout" as const)]);
+    expect(duplicate).toBe("timeout");
+
+    subscription.events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("external staged, cleared, and committed events reconcile provider history and state", async () => {
+    const original = { id: "original", type: "user", time: { created: 1 }, text: "original" };
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [original]);
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("session");
+    const subscription = await adapter.subscribe("session");
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    const pump = adapter.startEventPump();
+
+    fixture.setState({ staged: true, canUndo: false, canRedo: true });
+    fixture.setVisible([]);
+    fixture.provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "session" } });
+    expect((await iterator.next()).value).toEqual(expect.objectContaining({ type: "resync", reason: "conversation-rewritten" }));
+    expect(adapter.projectionForTests("session").items()).toEqual([]);
+
+    fixture.setState({ staged: false, canUndo: true, canRedo: false });
+    fixture.setVisible([original]);
+    fixture.provider.eventQueue.push({ type: "session.next.revert.cleared", data: { sessionID: "session" } });
+    expect((await iterator.next()).value).toEqual(expect.objectContaining({ type: "resync", reason: "conversation-rewritten" }));
+    expect(adapter.projectionForTests("session").items()).toEqual([expect.objectContaining({ text: "original" })]);
+
+    fixture.setVisible([]);
+    fixture.provider.eventQueue.push({ type: "session.next.revert.committed", data: { sessionID: "session" } });
+    expect((await iterator.next()).value).toEqual(expect.objectContaining({ type: "resync", reason: "conversation-rewritten" }));
+    expect(adapter.projectionForTests("session").items()).toEqual([]);
+    const refreshed = await adapter.subscribe("session");
+    expect(refreshed.snapshot.reversibleHistory).toEqual({ staged: false, canUndo: true, canRedo: false });
+    refreshed.events.cancel();
+
+    subscription.events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a staged outage beyond the former retry window still recovers with one paused queue", async () => {
+    const original = { id: "original", type: "user", time: { created: 1 }, text: "discard me" };
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [original]);
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("session");
+    adapter.projectionForTests("session").statusUpdate("running");
+    const held = await adapter.prompt("session", "held", "wait until the revert settles");
+    const subscription = await adapter.subscribe("session");
+    const iterator = subscription.events[Symbol.asyncIterator]();
+
+    let historyReads = 0;
+    let recovered = false;
+    fixture.provider.listMessages = async () => {
+      historyReads += 1;
+      if (!recovered) throw new Error("provider restarting");
+      return { items: [] };
+    };
+    fixture.setState({ staged: true, canUndo: false, canRedo: true });
+    fixture.setVisible([]);
+    const pump = adapter.startEventPump();
+    for (let duplicate = 0; duplicate < 3; duplicate += 1) {
+      fixture.provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "session" } });
+    }
+    await waitUntil(() => historyReads >= 1);
+    // The idle event caused by the external interrupt cannot release the head
+    // while the authoritative reads are backing off.
+    adapter.projectionForTests("session").statusUpdate("idle");
+    await Bun.sleep(1_050);
+    expect(historyReads).toBeGreaterThanOrEqual(5);
+    expect(adapter.projectionForTests("session").items()).toEqual([expect.objectContaining({ text: "discard me" })]);
+    expect(fixture.provider.prompts).toEqual([]);
+
+    recovered = true;
+    await waitUntil(() => adapter.projectionForTests("session").items().length === 0);
+
+    const events: ChatEvent[] = [];
+    while (!events.some(event => event.type === "resync")) events.push((await iterator.next()).value!);
+    expect(events.filter(event => event.type === "resync")).toHaveLength(1);
+    expect(events.some(event => event.type === "item.upsert" && event.item.type === "notice")).toBe(false);
+    expect(fixture.provider.prompts).toEqual([]);
+    const snapshot = await adapter.subscribe("session");
+    expect(snapshot.snapshot.reversibleHistory).toEqual({ staged: true, canUndo: false, canRedo: true });
+    expect(snapshot.snapshot.queued).toEqual([expect.objectContaining({ id: held.messageId })]);
+    snapshot.events.cancel();
+    const duplicateEvent = await Promise.race([iterator.next(), Bun.sleep(120).then(() => "timeout" as const)]);
+    expect(duplicateEvent).toBe("timeout");
+
+    subscription.events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("transient cleared and committed reconciliation failures replace history and resume one held queue", async () => {
+    for (const lifecycle of ["cleared", "committed"] as const) {
+      const authoritative = { id: `authoritative-${lifecycle}`, type: "user", time: { created: 2 }, text: `after ${lifecycle}` };
+      const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
+      fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+      fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+      const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: `g-${lifecycle}` });
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await adapter.prompt("session", `held-${lifecycle}`, `resume after ${lifecycle}`);
+      fixture.setState({ staged: true, canUndo: false, canRedo: true });
+      fixture.setVisible([]);
+      await adapter.history("session");
+      adapter.projectionForTests("session").statusUpdate("interrupted");
+      adapter.projectionForTests("session").upsert({ id: "message:stale", type: "user_message", createdAt: 1, text: "stale branch" });
+      const subscription = await adapter.subscribe("session");
+      const iterator = subscription.events[Symbol.asyncIterator]();
+
+      let stateReads = 0;
+      fixture.provider.getReversibleHistoryState = async () => {
+        stateReads += 1;
+        if (stateReads <= 2) throw new Error("transient state failure");
+        return fixture.state();
+      };
+      fixture.setState({ staged: false, canUndo: true, canRedo: false });
+      fixture.setVisible([authoritative]);
+      const pump = adapter.startEventPump();
+      for (let duplicate = 0; duplicate < 3; duplicate += 1) {
+        fixture.provider.eventQueue.push({ type: `session.next.revert.${lifecycle}`, data: { sessionID: "session" } });
+      }
+
+      await waitUntil(() => stateReads >= 3 && fixture.provider.prompts.length === 1);
+      expect(fixture.provider.prompts[0]).toEqual(expect.objectContaining({ id: held.messageId, text: `resume after ${lifecycle}` }));
+      expect(adapter.projectionForTests("session").items()).toContainEqual(expect.objectContaining({ text: `after ${lifecycle}` }));
+      expect(adapter.projectionForTests("session").has("message:stale")).toBe(false);
+
+      const events: ChatEvent[] = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const next = await Promise.race([iterator.next(), Bun.sleep(20).then(() => "timeout" as const)]);
+        if (next === "timeout") break;
+        events.push((next as IteratorResult<ChatEvent>).value!);
+      }
+      expect(events.filter(event => event.type === "resync")).toHaveLength(1);
+      expect(events.some(event => event.type === "item.upsert" && event.item.type === "notice")).toBe(false);
+
+      subscription.events.cancel();
+      await adapter.stopEventPump();
+      await pump;
+    }
+  });
+
+  test("disposing the adapter cancels a pending lifecycle retry", async () => {
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    await adapter.history("session");
+    let reads = 0;
+    fixture.provider.listMessages = async () => {
+      reads += 1;
+      throw new Error("provider unavailable");
+    };
+    const pump = adapter.startEventPump();
+    fixture.provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "session" } });
+    await waitUntil(() => reads === 1);
+    await Bun.sleep(5); // let the failed attempt arm its retry timer
+    await adapter.dispose();
+    await pump;
+    await Bun.sleep(120);
+    expect(reads).toBe(1);
+  });
+
+  test("deleting a conversation cancels its pending lifecycle retry", async () => {
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    await adapter.history("session");
+    let reads = 0;
+    fixture.provider.listMessages = async () => {
+      reads += 1;
+      throw new Error("provider unavailable");
+    };
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+    fixture.provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "session" } });
+    await waitUntil(() => reads === 1);
+    await Bun.sleep(5);
+
+    const deleted = inventory.next();
+    fixture.provider.eventQueue.push({ type: "session.deleted", data: { info: fixtureSession("session") } });
+    expect((await deleted).done).toBe(false);
+    await Bun.sleep(120);
+    expect(reads).toBe(1);
+
+    inventory.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("moving a conversation out of the workspace cancels an in-flight lifecycle reconciliation", async () => {
+    const original = { id: "original", type: "user", time: { created: 1 }, text: "keep after move" };
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [original]);
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    await adapter.history("session");
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+    const known = inventory.next();
+    fixture.provider.eventQueue.push({ type: "session.updated", data: { info: fixture.provider.sessions[0]! } });
+    expect((await known).done).toBe(false);
+
+    let reads = 0;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>(resolve => {
+      fixture.provider.listMessages = async () => {
+        reads += 1;
+        if (reads === 1) {
+          resolve();
+          await new Promise<void>(release => { releaseRead = release; });
+          return { items: [], nextCursor: "must-not-be-read" };
+        }
+        return { items: [] };
+      };
+    });
+    fixture.setState({ staged: true, canUndo: false, canRedo: true });
+    fixture.provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "session" } });
+    await readStarted;
+
+    const moved = fixtureSession("session", `${process.cwd()}-moved`);
+    fixture.provider.sessions[0] = moved;
+    const movedSignal = inventory.next();
+    fixture.provider.eventQueue.push({ type: "session.updated", data: { info: moved } });
+    expect((await movedSignal).done).toBe(false);
+    releaseRead();
+    await Bun.sleep(120);
+
+    expect(reads).toBe(1);
+    expect(adapter.projectionForTests("session").items()).toEqual([expect.objectContaining({ text: "keep after move" })]);
+
+    inventory.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a replacement prompt commits first and older held messages resume after its turn", async () => {
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
+    const order: string[] = [];
+    fixture.provider.prompt = async (sessionId, input) => {
+      fixture.provider.prompts.push({ sessionId, ...input });
+      order.push(input.text);
+      if (input.text === "replacement") {
+        fixture.setState({ staged: false, canUndo: true, canRedo: false });
+        fixture.setVisible([{ id: input.id, type: "user", time: { created: 2 }, text: input.text }]);
+      }
+      return { messageId: input.id };
+    };
+    let id = 0;
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), id: () => `id-${++id}` });
+    adapter.projectionForTests("session").statusUpdate("running");
+    const older = await adapter.prompt("session", "older", "older queued");
+    fixture.setState({ staged: true, canUndo: false, canRedo: true });
+    await adapter.history("session");
+    adapter.projectionForTests("session").statusUpdate("interrupted");
+
+    const replacement = await adapter.prompt("session", "replacement", "replacement");
+    expect(replacement.held).toBe(false);
+    expect(order).toEqual(["replacement"]);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: older.messageId })]);
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await waitUntil(() => order.length === 2);
+    expect(order).toEqual(["replacement", "older queued"]);
+  });
+
+  test("Redo clearing the boundary resumes the held queue while failures keep it paused", async () => {
+    const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
+    fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
+    let fail = true;
+    fixture.provider.redo = async (): Promise<ReversibleHistoryResult> => {
+      if (fail) throw new Error("redo failed");
+      fixture.setState({ staged: false, canUndo: true, canRedo: false });
+      return { outcome: "changed", state: fixture.state() };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    adapter.projectionForTests("session").statusUpdate("running");
+    const held = await adapter.prompt("session", "held", "held while staged");
+    fixture.setState({ staged: true, canUndo: false, canRedo: true });
+    await adapter.history("session");
+    adapter.projectionForTests("session").statusUpdate("interrupted");
+
+    await expect(adapter.redo("session", "redo-failed")).rejects.toThrow("redo failed");
+    await Bun.sleep(20);
+    expect(fixture.provider.prompts).toEqual([]);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: held.messageId })]);
+
+    fail = false;
+    await expect(adapter.redo("session", "redo-clear")).resolves.toEqual({
+      outcome: "changed",
+      state: { staged: false, canUndo: true, canRedo: false },
+    });
+    await waitUntil(() => fixture.provider.prompts.length === 1);
+    expect(fixture.provider.prompts[0]).toEqual(expect.objectContaining({ text: "held while staged" }));
   });
 });
 

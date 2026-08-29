@@ -1,5 +1,5 @@
 import { mergeAssistantMessage } from "./usage";
-import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, MessageAttachment, QueuedMessage } from "./types";
+import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, MessageAttachment, QueuedMessage, ReversibleHistoryState } from "./types";
 
 export type AcceptedDraft = { requestId: string; messageId: string; text: string; attachments?: MessageAttachment[] };
 export type ChatProjection = {
@@ -9,6 +9,7 @@ export type ChatProjection = {
   cursor: string;
   conversation?: ConversationSummary;
   configuration?: ConversationConfiguration;
+  reversibleHistory?: ReversibleHistoryState;
   items: ConversationItem[];
   status: ConversationStatus;
   olderCursor?: string;
@@ -41,6 +42,7 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
     cursor: snapshot.cursor,
     conversation: snapshot.conversation,
     configuration: snapshot.configuration,
+    reversibleHistory: snapshot.reversibleHistory,
     items: deduplicate(snapshot.items),
     status: snapshot.conversation.status,
     olderCursor: snapshot.olderCursor,

@@ -7,9 +7,9 @@ import { ChatApiClient, ChatTransportError, type ChatEventStream } from "./clien
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
 import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
-import { insertCommand, matchingCommands } from "./slash-commands";
+import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
+import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
 import { contextTokens, totalTokens } from "./usage";
 import {
   addAcceptedDraft,
@@ -22,7 +22,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type TokenUsage } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -33,6 +33,8 @@ import { ConversationInventoryTracker, SerializedInventoryReconciler, dedupeConv
 const PRESENTATION_KEY = "uatu:chat-presentation";
 const SAVE_DEBOUNCE_MS = 400;
 const MAX_EXPANDED_ENTRIES = 400;
+const REFRESH_RETRY_INITIAL_MS = 100;
+const REFRESH_RETRY_MAX_MS = 5_000;
 type Presentation = {
   selectedId?: string;
   drafts: Record<string, string>;
@@ -46,7 +48,7 @@ type Presentation = {
 
 const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, dismissedSubagents: {} };
 
-export function initChat(): void {
+export function initChat(api = new ChatApiClient()): void {
   const surface = document.querySelector<HTMLElement>("#chat-surface");
   const timeline = document.querySelector<HTMLElement>("#chat-timeline");
   const items = document.querySelector<HTMLElement>("#chat-items");
@@ -116,7 +118,6 @@ export function initChat(): void {
   const drilldownOlder = document.querySelector<HTMLButtonElement>("#chat-drilldown-older");
   if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !queueDockElement || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDetails || !configurationModeSummary || !configurationVariantSummary || !configurationVariantValue || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
 
-  const api = new ChatApiClient();
   const anchor = new TimelineAnchorController();
   const viewport = new ChatViewportController(surface, form, timeline, anchor);
   const renderer = new TimelineRenderer();
@@ -133,6 +134,15 @@ export function initChat(): void {
   let inventoryStream: ChatEventStream | null = null;
   let selectionGeneration = 0;
   let selectedConversationDeleted = false;
+  let disposed = false;
+  type ConversationRefreshRecovery = {
+    conversationId: string;
+    token: number;
+    delayMs: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    wake: (() => void) | null;
+  };
+  let conversationRefreshRecovery: ConversationRefreshRecovery | null = null;
   const inventoryTracker = new ConversationInventoryTracker();
   const syncInventoryAwareness = (announceIncrease = false) => {
     renderConversationInventoryAwareness(document, inventoryTracker.unseenCount);
@@ -206,6 +216,11 @@ export function initChat(): void {
   // request id would let the server replay the first acceptance receipt for a
   // payload the provider never saw.
   const retryRequests = new Map<string, { text: string; requestId: string; attachments: string }>();
+  const historyMutations = new Set<string>();
+  const pendingHistoryResyncs = new Set<string>();
+  const historyRefreshRequired = new Set<string>();
+  const historyRetries = new Map<string, { operation: LocalHistoryOperation; requestId: string; result?: ReversibleHistoryResult }>();
+  let commandInventoryAvailable = true;
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -403,8 +418,6 @@ export function initChat(): void {
   // One policy for what a drill-down is titled, read from the structured
   // entries rather than scraped from whichever markup happens to carry the
   // text — the track row and the timeline row must produce the same title.
-  const subagentLabel = (entry: SubagentEntry): string =>
-    entry.subagent ? `${entry.subagent} · ${entry.description}` : entry.description;
   const subagentLabelFor = (conversationId: string, source: ChatProjection | null): string => {
     const entry = source ? subagentEntries(source.items).find(candidate => candidate.conversationId === conversationId) : undefined;
     return entry ? subagentLabel(entry) : "Subagent";
@@ -908,6 +921,7 @@ export function initChat(): void {
   // ------------------------------------------------------------------
   type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
   const pendingAttachments = new Map<string, PendingAttachment[]>();
+  const unavailableAttachments = new Map<string, MessageAttachment[]>();
   // One serialized staging chain per conversation. Serialization makes the
   // per-message bound check honest — a second paste near the eight-image
   // limit runs after the first and sees its result instead of racing past
@@ -915,6 +929,7 @@ export function initChat(): void {
   // nothing new was appended while it waited) so an image attached moments
   // before Enter joins the message it was attached for.
   const attachmentStaging = new Map<string, Promise<void>>();
+  const attachmentStagingGeneration = new Map<string, number>();
   // Attachments riding an in-flight submission still count against the
   // per-message cap: a failure restores them to pending, and an intake that
   // ignored them could push the restored draft past eight and make every
@@ -961,9 +976,27 @@ export function initChat(): void {
     return conversationId ? pendingAttachments.get(conversationId) ?? [] : [];
   };
 
+  const currentUnavailableAttachments = (): MessageAttachment[] => {
+    const conversationId = activeConversationId();
+    return conversationId ? unavailableAttachments.get(conversationId) ?? [] : [];
+  };
+
   const setPendingAttachments = (conversationId: string, entries: PendingAttachment[]) => {
     if (entries.length > 0) pendingAttachments.set(conversationId, entries);
     else pendingAttachments.delete(conversationId);
+  };
+
+  const setUnavailableAttachments = (conversationId: string, entries: MessageAttachment[]) => {
+    if (entries.length > 0) unavailableAttachments.set(conversationId, entries);
+    else unavailableAttachments.delete(conversationId);
+  };
+
+  const revokeAttachmentPreviews = (entries: readonly PendingAttachment[]) => {
+    for (const entry of entries) if (entry.previewUrl.startsWith("blob:")) URL.revokeObjectURL(entry.previewUrl);
+  };
+
+  const invalidateAttachmentStaging = (conversationId: string) => {
+    attachmentStagingGeneration.set(conversationId, (attachmentStagingGeneration.get(conversationId) ?? 0) + 1);
   };
 
   // Whether the displayed model can see images. No selection means the agent
@@ -993,8 +1026,9 @@ export function initChat(): void {
   const renderAttachments = () => {
     if (!attachmentsStrip) return;
     const entries = currentPendingAttachments();
+    const unavailable = currentUnavailableAttachments();
     attachmentsStrip.textContent = "";
-    attachmentsStrip.hidden = entries.length === 0;
+    attachmentsStrip.hidden = entries.length === 0 && unavailable.length === 0;
     for (const entry of entries) {
       const item = document.createElement("span");
       item.className = "chat-attachment";
@@ -1027,6 +1061,32 @@ export function initChat(): void {
         syncControls();
       });
       item.append(view, name, remove);
+      attachmentsStrip.append(item);
+    }
+    for (const entry of unavailable) {
+      const item = document.createElement("span");
+      item.className = "chat-attachment is-missing";
+      item.setAttribute("role", "listitem");
+      const placeholder = document.createElement("span");
+      placeholder.className = "chat-attachment-missing";
+      placeholder.setAttribute("aria-hidden", "true");
+      placeholder.textContent = "?";
+      const name = document.createElement("span");
+      name.className = "chat-attachment-name";
+      name.textContent = entry.name;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "chat-attachment-remove";
+      remove.setAttribute("aria-label", `Remove unavailable ${entry.name}`);
+      remove.textContent = "\u00d7";
+      remove.addEventListener("click", () => {
+        const conversationId = activeConversationId();
+        if (!conversationId) return;
+        setUnavailableAttachments(conversationId, currentUnavailableAttachments().filter(candidate => candidate !== entry));
+        renderAttachments();
+        syncControls();
+      });
+      item.append(placeholder, name, remove);
       attachmentsStrip.append(item);
     }
   };
@@ -1067,9 +1127,11 @@ export function initChat(): void {
       setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
       return;
     }
+    const generation = attachmentStagingGeneration.get(conversationId) ?? 0;
     const noteRefusal = () => noteAttachmentRefusal(conversationId);
     const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
       for (const file of files) {
+        if ((attachmentStagingGeneration.get(conversationId) ?? 0) !== generation) return;
         if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
           setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`, conversationId);
           noteRefusal();
@@ -1091,6 +1153,7 @@ export function initChat(): void {
         }
         try {
           const stored = await api.uploadAttachment(conversationId, file);
+          if ((attachmentStagingGeneration.get(conversationId) ?? 0) !== generation) return;
           // Keyed to the conversation the upload was staged for, which may no
           // longer be the selected one by the time the round trip returns.
           const entries = pendingAttachments.get(conversationId) ?? [];
@@ -1346,7 +1409,112 @@ export function initChat(): void {
     syncControls();
   };
 
-  const selectConversation = async (id: string) => {
+  const stopConversationRefreshRecovery = () => {
+    const recovery = conversationRefreshRecovery;
+    conversationRefreshRecovery = null;
+    if (!recovery) return;
+    if (recovery.timer !== null) clearTimeout(recovery.timer);
+    recovery.wake?.();
+  };
+
+  const recoverSelectedConversation = (id: string) => {
+    const token = selectionGeneration;
+    if (disposed || activeConversationId() !== id) return;
+    if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) return;
+    stopConversationRefreshRecovery();
+    const recovery: ConversationRefreshRecovery = {
+      conversationId: id,
+      token,
+      delayMs: REFRESH_RETRY_INITIAL_MS,
+      timer: null,
+      wake: null,
+    };
+    conversationRefreshRecovery = recovery;
+    void (async () => {
+      while (!disposed && conversationRefreshRecovery === recovery && selectionGeneration === token && activeConversationId() === id) {
+        if (await refreshSelectedConversation(id)) return;
+        if (disposed || conversationRefreshRecovery !== recovery || selectionGeneration !== token || activeConversationId() !== id) return;
+        await new Promise<void>(resolve => {
+          recovery.wake = () => {
+            recovery.wake = null;
+            resolve();
+          };
+          recovery.timer = setTimeout(() => {
+            recovery.timer = null;
+            recovery.wake?.();
+          }, recovery.delayMs);
+        });
+        recovery.delayMs = Math.min(recovery.delayMs * 2, REFRESH_RETRY_MAX_MS);
+      }
+    })().finally(() => {
+      if (conversationRefreshRecovery === recovery) stopConversationRefreshRecovery();
+    });
+  };
+
+  const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number) => {
+    projection = projectionFromSnapshot(snapshot, acceptedDrafts);
+    historyRefreshRequired.delete(snapshot.conversation.id);
+    projectionEpoch += 1;
+    conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
+    renderConfiguration();
+    renderAttachments();
+    announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
+    anchor.restore(presentation.anchors[snapshot.conversation.id] ?? null);
+    scheduleRender(false, false);
+    stream = api.stream(snapshot.conversation.id, snapshot.cursor, {
+      event: (event, cursor) => {
+        if (!projection || token !== selectionGeneration) return;
+        const result = applyChatEvent(projection, event, cursor);
+        if (result.outcome === "gap" || result.outcome === "resync") {
+          recoverSelectedConversation(snapshot.conversation.id);
+          return;
+        }
+        projection = result.projection;
+        if (event.type === "conversation.configuration") renderConfiguration();
+        if (event.type === "conversation.status") {
+          if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
+          else if (event.status === "sending" || event.status === "running") setComposerError(null);
+        }
+        if (event.type === "conversation.updated") {
+          conversations = conversations.map(conversation => conversation.id === event.conversation.id ? event.conversation : conversation);
+          const option = Array.from(select.options).find(candidate => candidate.value === event.conversation.id);
+          if (option) option.text = displayConversationTitle(event.conversation);
+          if (chatTitle) chatTitle.textContent = displayConversationTitle(event.conversation);
+          if (renameInput && renameForm && !renameForm.hidden && document.activeElement !== renameInput) renameInput.value = event.conversation.title;
+        }
+        if (result.outcome === "applied") { announce(""); scheduleRender(true); }
+      },
+      resync: () => {
+        if (token !== selectionGeneration) return;
+        if (historyMutations.has(snapshot.conversation.id)) pendingHistoryResyncs.add(snapshot.conversation.id);
+        else recoverSelectedConversation(snapshot.conversation.id);
+      },
+      error: error => { if (token === selectionGeneration) announce(error.message, true); },
+    });
+  };
+
+  async function refreshSelectedConversation(id: string): Promise<boolean> {
+    const token = selectionGeneration;
+    const current = projection;
+    if (disposed || !current || current.conversationId !== id || activeConversationId() !== id) return false;
+    try {
+      const snapshot = await api.snapshot(id);
+      if (disposed || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
+      const previousStream = stream;
+      installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
+      if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
+        stopConversationRefreshRecovery();
+      }
+      previousStream?.close();
+      return true;
+    } catch (error) {
+      if (token === selectionGeneration && activeConversationId() === id) announce(messageOf(error), true);
+      return false;
+    }
+  }
+
+  const selectConversation = async (id: string): Promise<boolean> => {
+    stopConversationRefreshRecovery();
     selectedConversationDeleted = false;
     renderSelectedConversationDeleted(document, false);
     // Choosing a conversation is leaving whatever turn was being drilled into:
@@ -1380,47 +1548,12 @@ export function initChat(): void {
     syncControls();
     try {
       const snapshot = await api.snapshot(id);
-      if (token !== selectionGeneration) return;
-      projection = projectionFromSnapshot(snapshot, acceptedDrafts);
-      // Every snapshot install invalidates in-flight held echoes: the fresh
-      // projection's queueRevision restarts at zero, so a revision captured
-      // before the reload could coincide with it and let a stale echo
-      // through. The epoch is what cannot be coincided with.
-      projectionEpoch += 1;
-      conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
-      renderConfiguration();
-      renderAttachments();
-      announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
-      anchor.restore(presentation.anchors[id] ?? null);
-      scheduleRender(false, false);
-      stream = api.stream(id, snapshot.cursor, {
-        event: (event, cursor) => {
-          if (!projection || token !== selectionGeneration) return;
-          const result = applyChatEvent(projection, event, cursor);
-          if (result.outcome === "gap" || result.outcome === "resync") {
-            void selectConversation(id);
-            return;
-          }
-          projection = result.projection;
-          if (event.type === "conversation.configuration") renderConfiguration();
-          if (event.type === "conversation.status") {
-            if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
-            else if (event.status === "sending" || event.status === "running") setComposerError(null);
-          }
-          if (event.type === "conversation.updated") {
-            conversations = conversations.map(conversation => conversation.id === event.conversation.id ? event.conversation : conversation);
-            const option = Array.from(select.options).find(candidate => candidate.value === event.conversation.id);
-            if (option) option.text = displayConversationTitle(event.conversation);
-            if (chatTitle) chatTitle.textContent = displayConversationTitle(event.conversation);
-            if (renameInput && renameForm && !renameForm.hidden && document.activeElement !== renameInput) renameInput.value = event.conversation.title;
-          }
-          if (result.outcome === "applied") { announce(""); scheduleRender(true); }
-        },
-        resync: () => { if (token === selectionGeneration) void selectConversation(id); },
-        error: error => { if (token === selectionGeneration) announce(error.message, true); },
-      });
+      if (token !== selectionGeneration) return false;
+      installConversationSnapshot(snapshot, acceptedDrafts, token);
+      return true;
     } catch (error) {
       if (token === selectionGeneration) announce(messageOf(error), true);
+      return false;
     }
   };
 
@@ -1480,6 +1613,7 @@ export function initChat(): void {
 
   const enterSelectedConversationDeleted = () => {
     if (selectedConversationDeleted) return;
+    stopConversationRefreshRecovery();
     selectedConversationDeleted = true;
     const selectedId = presentation.selectedId;
     if (selectedId) {
@@ -2173,9 +2307,167 @@ export function initChat(): void {
     }
     finally { cancelling = false; syncControls(); }
   });
+
+  const installRestoredDraft = (conversationId: string, draft: RestoredDraft | undefined, updateVisible: boolean) => {
+    const restored = draft ?? { text: "" };
+    const available: PendingAttachment[] = [];
+    const unavailable: MessageAttachment[] = [];
+    for (const attachment of restored.attachments ?? []) {
+      if (attachment.id) {
+        available.push({ ...attachment, id: attachment.id, previewUrl: api.attachmentUrl(attachment.id) });
+      } else {
+        unavailable.push(attachment);
+      }
+    }
+    revokeAttachmentPreviews(pendingAttachments.get(conversationId) ?? []);
+    setPendingAttachments(conversationId, available);
+    setUnavailableAttachments(conversationId, unavailable);
+    presentation.drafts[conversationId] = restored.text;
+    save();
+    if (!updateVisible) return unavailable.length;
+    input.value = restored.text;
+    autosize(input);
+    renderAttachments();
+    syncControls();
+    input.focus();
+    return unavailable.length;
+  };
+
+  const installChangedHistoryResult = async (operation: LocalHistoryOperation, conversationId: string, result: ReversibleHistoryResult): Promise<boolean> => {
+    const label = operation === "undo" ? "Undo" : "Redo";
+    retryRequests.delete(conversationId);
+    invalidateAttachmentStaging(conversationId);
+    if (activeConversationId() !== conversationId) {
+      const unavailable = installRestoredDraft(conversationId, result.restoredDraft, false);
+      if (unavailable > 0) {
+        setComposerError(`${unavailable} restored ${unavailable === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.`, conversationId);
+      }
+      historyRetries.delete(conversationId);
+      noteComposer(null);
+      return true;
+    }
+
+    const refreshed = await refreshSelectedConversation(conversationId);
+    pendingHistoryResyncs.delete(conversationId);
+    if (activeConversationId() !== conversationId) {
+      installRestoredDraft(conversationId, result.restoredDraft, false);
+      historyRetries.delete(conversationId);
+      noteComposer(null);
+      return true;
+    }
+    if (!refreshed) {
+      historyRefreshRequired.add(conversationId);
+      const message = `${label} completed, but the conversation could not be refreshed. Submit /${operation} again to reconnect; the command and attachments were kept.`;
+      setComposerError(message, conversationId);
+      noteComposer(message);
+      return false;
+    }
+
+    const unavailable = installRestoredDraft(conversationId, result.restoredDraft, true);
+    const unavailableMessage = unavailable > 0
+      ? `${unavailable} restored ${unavailable === 1 ? "attachment is" : "attachments are"} unavailable and will not be sent.`
+      : null;
+    historyRetries.delete(conversationId);
+    setComposerError(unavailableMessage, conversationId);
+    noteComposer(unavailableMessage ? `${label} complete. ${unavailableMessage}` : `${label} complete`);
+    return true;
+  };
+
+  const runHistoryOperation = async (operation: LocalHistoryOperation, conversationId: string) => {
+    const label = operation === "undo" ? "Undo" : "Redo";
+    submitting = true;
+    historyMutations.add(conversationId);
+    setComposerError(null, conversationId);
+    noteComposer(`${label}ing...`);
+    closeCommandMenu();
+    syncControls();
+    try {
+      const pending = historyRetries.get(conversationId);
+      if (pending?.result) {
+        await installChangedHistoryResult(pending.operation, conversationId, pending.result);
+        return;
+      }
+      if (historyRefreshRequired.has(conversationId)) {
+        const refreshed = await refreshSelectedConversation(conversationId);
+        if (!refreshed) {
+          const message = `The conversation could not be refreshed. Submit /${operation} again to retry; the command and attachments were kept.`;
+          setComposerError(message, conversationId);
+          noteComposer(message);
+          return;
+        }
+      }
+
+      const retry: { operation: LocalHistoryOperation; requestId: string; result?: ReversibleHistoryResult } =
+        pending?.operation === operation ? pending : { operation, requestId: newRequestId() };
+      historyRetries.set(conversationId, retry);
+      const result = await api[operation](conversationId, retry.requestId);
+      if (result.outcome !== "changed") {
+        historyRetries.delete(conversationId);
+        if (pendingHistoryResyncs.delete(conversationId)) {
+          const refreshed = await refreshSelectedConversation(conversationId);
+          if (!refreshed && activeConversationId() === conversationId) {
+            historyRefreshRequired.add(conversationId);
+            const message = `${result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo"}, but the conversation could not be refreshed. Submit /${operation} again to reconnect.`;
+            setComposerError(message, conversationId);
+            noteComposer(message);
+            return;
+          }
+        }
+        if (activeConversationId() === conversationId) {
+          noteComposer(result.outcome === "nothing-to-undo" ? "Nothing more to undo" : "Nothing to redo");
+        } else {
+          noteComposer(null);
+        }
+        return;
+      }
+      retry.result = result;
+      await installChangedHistoryResult(operation, conversationId, result);
+    } catch (error) {
+      let message = `${label} failed: ${messageOf(error)}. Command and attachments kept.`;
+      if (pendingHistoryResyncs.delete(conversationId)) {
+        const refreshed = await refreshSelectedConversation(conversationId);
+        if (!refreshed && activeConversationId() === conversationId) {
+          historyRefreshRequired.add(conversationId);
+          message += ` The conversation also needs to reconnect; submit /${operation} again to retry.`;
+        }
+      }
+      setComposerError(message, conversationId);
+      if (activeConversationId() === conversationId) noteComposer(message);
+      else noteComposer(null);
+    } finally {
+      historyMutations.delete(conversationId);
+      submitting = false;
+      syncControls();
+    }
+  };
+
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (!projection || submitting) return;
+    const operation = localHistoryOperation(input.value, commands, declares("reversible-history"));
+    if (operation) {
+      const conversationId = projection.conversationId;
+      if (!commandInventoryAvailable) {
+        submitting = true;
+        noteComposer("Reloading commands...");
+        syncControls();
+        const loaded = await loadCommandInventory();
+        submitting = false;
+        if (!loaded) {
+          const message = `Chat commands could not be loaded. Submit /${operation} again to retry; the command and attachments were kept.`;
+          setComposerError(message, conversationId);
+          noteComposer(activeConversationId() === conversationId ? message : null);
+          syncControls();
+          return;
+        }
+        if (activeConversationId() !== conversationId) {
+          syncControls();
+          return;
+        }
+      }
+      await runHistoryOperation(operation, conversationId);
+      return;
+    }
     // In-flight staging is prospective content: an image-only submit during
     // its own upload waits for the drain below rather than being refused.
     if (!input.value.trim() && currentPendingAttachments().length === 0 && !attachmentStaging.has(projection.conversationId)) return;
@@ -2277,6 +2569,7 @@ export function initChat(): void {
     }
     // Captured and cleared optimistically like the text; restored on failure.
     const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
+    const stagedUnavailableAttachments = [...(unavailableAttachments.get(conversationId) ?? [])];
     const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
     submittedAttachmentReserve.set(conversationId, (submittedAttachmentReserve.get(conversationId) ?? 0) + stagedAttachments.length);
     const releaseAttachmentReserve = () => {
@@ -2308,6 +2601,7 @@ export function initChat(): void {
     // on failure the draft is removed and the text restored.
     projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
     setPendingAttachments(conversationId, []);
+    setUnavailableAttachments(conversationId, []);
     renderAttachments();
     noteComposer("Sending...");
     syncControls();
@@ -2369,6 +2663,7 @@ export function initChat(): void {
       // reserve releases only now that they are pending again, so intake
       // during the flight could never overfill the restored draft.
       setPendingAttachments(conversationId, [...stagedAttachments, ...(pendingAttachments.get(conversationId) ?? [])]);
+      setUnavailableAttachments(conversationId, [...stagedUnavailableAttachments, ...(unavailableAttachments.get(conversationId) ?? [])]);
       releaseAttachmentReserve();
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
@@ -2402,6 +2697,8 @@ export function initChat(): void {
   observer?.observe(items);
   viewport.start();
   window.addEventListener("pagehide", () => {
+    disposed = true;
+    stopConversationRefreshRecovery();
     flushSave();
     stream?.close();
     inventoryStream?.close();
@@ -2421,6 +2718,18 @@ export function initChat(): void {
   // it retries on the next Chat activation and on credential refresh.
   let bootstrapped = false;
   let bootstrapping = false;
+
+  async function loadCommandInventory(): Promise<boolean> {
+    try {
+      commands = await api.commands();
+      commandInventoryAvailable = true;
+      return true;
+    } catch {
+      commands = [];
+      commandInventoryAvailable = false;
+      return false;
+    }
+  }
 
   const startInventoryStream = () => {
     if (inventoryStream) return;
@@ -2520,15 +2829,18 @@ export function initChat(): void {
       // A capability the agent does not declare is not fetched at all. The
       // mode list stays fault-tolerant on top of that: a declared list that
       // fails to load hides the picker rather than blocking chat.
-      const [nextModels, nextConversations, nextCommands, nextModes] = await Promise.all([
+      if (!declares("commands") && !declares("reversible-history")) {
+        commands = [];
+        commandInventoryAvailable = true;
+      }
+      const [nextModels, nextConversations, , nextModes] = await Promise.all([
         declares("models") ? api.models() : Promise.resolve([] as ChatModel[]),
         api.conversations(),
-        declares("commands") ? api.commands().catch(() => []) : Promise.resolve([] as ChatCommand[]),
+        declares("commands") || declares("reversible-history") ? loadCommandInventory() : Promise.resolve(true),
         declares("modes") ? api.modes().catch(() => [] as ChatMode[]) : Promise.resolve([] as ChatMode[]),
       ]);
       models = nextModels;
       conversations = dedupeConversationInventory(nextConversations);
-      commands = nextCommands;
       modes = nextModes;
       // Bootstrap is the silent page-local baseline. The stream starts only
       // after this point, so its mandatory initial frame reconciles rather

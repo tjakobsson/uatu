@@ -27,6 +27,9 @@ import type {
   QueuedMessage,
   QuestionOutcome,
   QuestionRequest,
+  RestoredDraft,
+  ReversibleHistoryResult,
+  ReversibleHistoryState,
   TokenUsage,
 } from "./types";
 import { ConversationNotFoundError, isSessionInWorkspace } from "./workspace";
@@ -86,6 +89,13 @@ export class ConversationRenameUnsupportedError extends Error {
   }
 }
 
+export class ReversibleHistoryUnsupportedError extends Error {
+  constructor() {
+    super("reversible conversation history is not supported");
+    this.name = "ReversibleHistoryUnsupportedError";
+  }
+}
+
 export class QueuedMessageNotHeldError extends Error {
   constructor() {
     super("message is no longer held");
@@ -135,6 +145,20 @@ type HeldMessage = QueuedMessage & {
   mode?: string;
   variant?: string;
 };
+
+type RevertLifecycle = "staged" | "committed" | "cleared";
+type RevertReconciliation = {
+  revision: number;
+  lifecycle: RevertLifecycle;
+  failures: number;
+  running: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+// Retry forever, but cap the rate. Provider restarts routinely exceed a short
+// fixed retry window, and no second lifecycle event is guaranteed afterwards.
+const REVERT_RECONCILIATION_INITIAL_RETRY_MS = 50;
+const REVERT_RECONCILIATION_MAX_RETRY_MS = 500;
 
 // Just the slice of MetricsRegistry the adapter needs, so chat does not depend
 // on the debug module's shape.
@@ -197,6 +221,12 @@ export class OpenCodeChatAdapter {
   private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly configurationReads = new Map<string, Promise<ConversationConfiguration>>();
   private readonly promptAdmissions = new Map<string, Promise<void>>();
+  private readonly reversibleHistory = new Map<string, ReversibleHistoryState>();
+  // Set before an interrupt or rewrite read. Provider idle events can arrive
+  // before those calls resolve, so delivery must consult this independently
+  // of the eventual staged state.
+  private readonly reversibleMutations = new Set<string>();
+  private readonly revertReconciliations = new Map<string, RevertReconciliation>();
   // Messages accepted while the conversation was busy, held here until the
   // turn ends. Adapter-level like liveTurns, not projection state: a held
   // message must survive projection eviction, or an LRU pass would silently
@@ -235,6 +265,7 @@ export class OpenCodeChatAdapter {
   // mark, and only the mark lets history() skip the read.
   private readonly completeAttributions = new Set<string>();
   private readonly providerEventMemory = createProviderEventMemory();
+  private eventCoalescer: ProviderUpdateCoalescer | null = null;
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
   private disposalPromise: Promise<void> | null = null;
@@ -302,15 +333,21 @@ export class OpenCodeChatAdapter {
   }
 
   agent(): ChatAgent {
-    return this.provider.describe();
+    const agent = this.provider.describe();
+    const reversible = this.provider.getReversibleHistoryState && this.provider.undo && this.provider.redo;
+    if (reversible || !agent.capabilities.includes("reversible-history")) return agent;
+    return { ...agent, capabilities: agent.capabilities.filter(capability => capability !== "reversible-history") };
   }
 
   async modes(): Promise<ChatMode[]> {
     return this.provider.listModes ? this.provider.listModes() : [];
   }
 
-  commands(): Promise<ChatCommand[]> {
-    return this.provider.listCommands();
+  async commands(): Promise<ChatCommand[]> {
+    const commands = await this.provider.listCommands();
+    if (!this.agent().capabilities.includes("reversible-history")) return commands;
+    const localNames = new Set(REVERSIBLE_HISTORY_COMMANDS.map(command => command.name));
+    return [...commands.filter(command => !localNames.has(command.name)), ...REVERSIBLE_HISTORY_COMMANDS];
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
@@ -320,6 +357,7 @@ export class OpenCodeChatAdapter {
     this.rememberInventorySession(session.id, await this.classifyInventorySession(session), true);
     const projection = this.projection(session.id);
     this.configurations.set(session.id, configuration);
+    const reversibleHistory = await this.readReversibleHistoryState(session.id);
     return {
       conversation: this.summary(session),
       configuration,
@@ -327,6 +365,7 @@ export class OpenCodeChatAdapter {
       cursor: projection.replay.latestCursor(),
       items: [],
       queued: [],
+      ...(reversibleHistory ? { reversibleHistory } : {}),
     };
   }
 
@@ -487,6 +526,7 @@ export class OpenCodeChatAdapter {
     }
     const projection = this.projection(id);
     projection.seed(items);
+    const reversibleHistory = await this.readReversibleHistoryState(id);
     return {
       conversation: this.summary(session, projection.status),
       configuration,
@@ -496,6 +536,7 @@ export class OpenCodeChatAdapter {
       // A client joining or reloading mid-run gets the same held queue a
       // client that watched it build presents.
       queued: this.queuedMessages(id),
+      ...(reversibleHistory ? { reversibleHistory } : {}),
       olderCursor: page.nextCursor ? encodeHistoryCursor({ provider: page.nextCursor }) : undefined,
     };
   }
@@ -507,14 +548,19 @@ export class OpenCodeChatAdapter {
     const session = await this.requireSession(id);
     const projection = this.projection(id);
     const configuration = await this.configuration(id);
-    const handoff = projection.replay.handoff(cursor => ({
-      conversation: this.summary(session, projection.status),
-      configuration,
-      generation: this.generation,
-      cursor,
-      items: projection.items(),
-      queued: this.queuedMessages(id),
-    }), options.cursor, options.signal);
+    const reversibleHistory = await this.readReversibleHistoryState(id);
+    const handoff = projection.replay.handoff(cursor => {
+      const currentReversibleHistory = this.reversibleHistory.get(id) ?? reversibleHistory;
+      return {
+        conversation: this.summary(session, projection.status),
+        configuration,
+        generation: this.generation,
+        cursor,
+        items: projection.items(),
+        queued: this.queuedMessages(id),
+        ...(currentReversibleHistory ? { reversibleHistory: currentReversibleHistory } : {}),
+      };
+    }, options.cursor, options.signal);
     return { snapshot: handoff.snapshot, events: handoff.subscription };
   }
 
@@ -549,6 +595,10 @@ export class OpenCodeChatAdapter {
   dispose(): Promise<void> {
     if (this.disposalPromise) return this.disposalPromise;
     this.disposed = true;
+    for (const pending of this.revertReconciliations.values()) {
+      if (pending.timer !== null) clearTimeout(pending.timer);
+    }
+    this.revertReconciliations.clear();
     this.inventory.dispose();
     return this.disposalPromise = this.stopEventPump();
   }
@@ -588,6 +638,24 @@ export class OpenCodeChatAdapter {
         // unknown reference is refused while the submitting client still has
         // the draft to restore.
         const attachmentRefs = await this.validateAttachments(attachments);
+        const reversible = await this.readReversibleHistoryState(conversationId);
+        if (reversible?.staged) {
+          // OpenCode commits a staged boundary when it accepts a new prompt.
+          // This submission is the replacement branch, not another held
+          // message, so it goes ahead of the queue that Undo paused.
+          const dispatched = await this.dispatchPrompt(conversationId, projection, session, {
+            messageId: this.id(),
+            text,
+            requestId,
+            ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+            ...(variantModel ? { model: variantModel } : {}),
+            ...(mode ? { mode } : {}),
+            ...(variant ? { variant } : {}),
+          });
+          this.dormantQueues.delete(conversationId);
+          await this.reconcileReversibleHistory(conversationId).catch(() => undefined);
+          return { ...dispatched, held: false };
+        }
         const busy = this.turnActive(conversationId, projection);
         const queue = this.heldQueues.get(conversationId) ?? [];
         // Order is absolute: while anything is held, a new submission joins the
@@ -861,13 +929,13 @@ export class OpenCodeChatAdapter {
   // and its failures are reported through the conversation itself (a failed
   // status plus a paused queue), not to whichever caller happened to trip it.
   private scheduleDelivery(conversationId: string): void {
-    if (this.dormantQueues.has(conversationId)) return;
+    if (this.deliveryPaused(conversationId)) return;
     if (!this.heldQueues.get(conversationId)?.length) return;
     void this.enqueuePromptAdmission(conversationId, () => this.deliverNextHeld(conversationId)).catch(() => undefined);
   }
 
   private async deliverNextHeld(conversationId: string): Promise<void> {
-    if (this.dormantQueues.has(conversationId)) return;
+    if (this.deliveryPaused(conversationId)) return;
     const queue = this.heldQueues.get(conversationId);
     const held = queue?.[0];
     if (!queue || !held) return;
@@ -901,7 +969,7 @@ export class OpenCodeChatAdapter {
     // an LRU eviction during the lookup would leave a captured projection
     // stale, and the dispatch must publish where current subscribers listen.
     const projection = this.projection(conversationId);
-    if (this.turnActive(conversationId, projection)) return;
+    if (this.deliveryPaused(conversationId) || this.turnActive(conversationId, projection)) return;
     try {
       await this.dispatchPrompt(conversationId, projection, session, {
         messageId: held.id,
@@ -922,6 +990,13 @@ export class OpenCodeChatAdapter {
       // user's next submission or removal decides what happens.
       this.dormantQueues.add(conversationId);
     }
+  }
+
+  private deliveryPaused(conversationId: string): boolean {
+    return this.dormantQueues.has(conversationId)
+      || this.reversibleMutations.has(conversationId)
+      || this.revertReconciliations.has(conversationId)
+      || this.reversibleHistory.get(conversationId)?.staged === true;
   }
 
   // OpenCode applies prompts to one conversation in admission order. Keep the
@@ -989,6 +1064,218 @@ export class OpenCodeChatAdapter {
         throw error;
       }
     }));
+  }
+
+  undo(conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.runReversibleMutation("undo", conversationId, requestId);
+  }
+
+  redo(conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.runReversibleMutation("redo", conversationId, requestId);
+  }
+
+  private runReversibleMutation(direction: "undo" | "redo", conversationId: string, requestId: string): Promise<ReversibleHistoryResult> {
+    return this.receipts.run(`${direction}:${conversationId}:${requestId}`, () =>
+      this.enqueuePromptAdmission(conversationId, async () => {
+        const provider = this.requireReversibleHistoryProvider();
+        await this.requireSession(conversationId);
+        const before = await provider.getReversibleHistoryState(conversationId);
+        this.rememberReversibleHistory(conversationId, before);
+        if (direction === "undo" && !before.canUndo) {
+          return { outcome: "nothing-to-undo", state: before };
+        }
+        if (direction === "redo" && !before.canRedo) {
+          return { outcome: "nothing-to-redo", state: before };
+        }
+
+        this.reversibleMutations.add(conversationId);
+        try {
+          if (direction === "undo" && this.turnActive(conversationId, this.projection(conversationId))) {
+            // Pause first. OpenCode can publish idle before interrupt() returns.
+            await this.provider.interrupt(conversationId);
+            this.projection(conversationId).statusUpdate("interrupted");
+          }
+          const result = direction === "undo"
+            ? await provider.undo(conversationId)
+            : await provider.redo(conversationId);
+          const normalized = await this.normalizeRestoredDraft(result);
+          let state = normalized.state;
+          try {
+            state = await this.reconcileReversibleHistory(conversationId);
+          } catch {
+            // The boundary already moved. Keep its receipt idempotent and the
+            // queue conservatively paused from the provider's returned state;
+            // its lifecycle event can retry the authoritative read.
+            this.rememberReversibleHistory(conversationId, normalized.state);
+          }
+          if (!state.staged) this.dormantQueues.delete(conversationId);
+          return { ...normalized, state };
+        } catch (error) {
+          this.rememberReversibleHistory(conversationId, before);
+          throw error;
+        } finally {
+          this.reversibleMutations.delete(conversationId);
+          this.scheduleDelivery(conversationId);
+        }
+      }));
+  }
+
+  private requireReversibleHistoryProvider(): Required<Pick<OpenCodeProvider, "getReversibleHistoryState" | "undo" | "redo">> {
+    if (!this.provider.describe().capabilities.includes("reversible-history")
+      || !this.provider.getReversibleHistoryState || !this.provider.undo || !this.provider.redo) {
+      throw new ReversibleHistoryUnsupportedError();
+    }
+    return {
+      getReversibleHistoryState: this.provider.getReversibleHistoryState.bind(this.provider),
+      undo: this.provider.undo.bind(this.provider),
+      redo: this.provider.redo.bind(this.provider),
+    };
+  }
+
+  private async readReversibleHistoryState(conversationId: string): Promise<ReversibleHistoryState | undefined> {
+    if (!this.agent().capabilities.includes("reversible-history")) return undefined;
+    const state = await this.requireReversibleHistoryProvider().getReversibleHistoryState(conversationId);
+    this.rememberReversibleHistory(conversationId, state);
+    return state;
+  }
+
+  private rememberReversibleHistory(conversationId: string, state: ReversibleHistoryState): void {
+    const previous = this.reversibleHistory.get(conversationId);
+    this.reversibleHistory.set(conversationId, state);
+    if (previous?.staged && !state.staged) this.scheduleDelivery(conversationId);
+  }
+
+  private async normalizeRestoredDraft(result: ReversibleHistoryResult): Promise<ReversibleHistoryResult> {
+    const draft = result.restoredDraft;
+    if (!draft?.attachments?.length) return result;
+    const attachments: MessageAttachment[] = [];
+    for (const attachment of draft.attachments) {
+      if (!attachment.id || !this.resolveAttachment) {
+        attachments.push({ name: attachment.name, mimeType: attachment.mimeType });
+        continue;
+      }
+      try {
+        const stored = await this.resolveAttachment(attachment.id);
+        attachments.push(stored
+          ? { id: stored.id, name: attachment.name, mimeType: stored.mimeType }
+          : { name: attachment.name, mimeType: attachment.mimeType });
+      } catch {
+        attachments.push({ name: attachment.name, mimeType: attachment.mimeType });
+      }
+    }
+    const restoredDraft: RestoredDraft = { text: draft.text, attachments };
+    return { ...result, restoredDraft };
+  }
+
+  private async reconcileReversibleHistory(conversationId: string, isCurrent?: () => boolean): Promise<ReversibleHistoryState> {
+    const provider = this.requireReversibleHistoryProvider();
+    const [items, state] = await Promise.all([
+      this.authoritativeVisibleHistory(conversationId, isCurrent),
+      provider.getReversibleHistoryState(conversationId),
+    ]);
+    if (this.disposed || (isCurrent && !isCurrent())) throw new Error("reversible history reconciliation was cancelled");
+    const projection = this.projection(conversationId);
+    const changed = !sameReversibleHistory(this.reversibleHistory.get(conversationId), state)
+      || !sameConversationItems(projection.items(), items);
+    // No buffered update from the discarded branch may apply after replace.
+    this.eventCoalescer?.discard(conversationId);
+    this.rememberReversibleHistory(conversationId, state);
+    if (changed) projection.replace(items);
+    return state;
+  }
+
+  private scheduleRevertReconciliation(conversationId: string, lifecycle: RevertLifecycle): void {
+    if (this.disposed) return;
+    const existing = this.revertReconciliations.get(conversationId);
+    if (existing) {
+      existing.revision += 1;
+      existing.lifecycle = lifecycle;
+      return;
+    }
+    const pending: RevertReconciliation = {
+      revision: 1,
+      lifecycle,
+      failures: 0,
+      running: false,
+      timer: null,
+    };
+    this.revertReconciliations.set(conversationId, pending);
+    void this.runRevertReconciliation(conversationId, pending);
+  }
+
+  private async runRevertReconciliation(conversationId: string, pending: RevertReconciliation): Promise<void> {
+    if (this.disposed || this.revertReconciliations.get(conversationId) !== pending || pending.running) return;
+    pending.running = true;
+    const revision = pending.revision;
+    const isCurrent = () => this.revertReconciliations.get(conversationId) === pending && pending.revision === revision;
+    try {
+      await this.enqueuePromptAdmission(conversationId, async () => {
+        if (!isCurrent()) return;
+        await this.requireSession(conversationId);
+        if (!isCurrent()) return;
+        await this.reconcileReversibleHistory(conversationId, isCurrent);
+      });
+      pending.running = false;
+      pending.failures = 0;
+      if (this.disposed || this.revertReconciliations.get(conversationId) !== pending) return;
+      if (pending.revision !== revision) {
+        void this.runRevertReconciliation(conversationId, pending);
+        return;
+      }
+      this.finishRevertReconciliation(conversationId, pending);
+    } catch {
+      pending.running = false;
+      if (this.disposed || this.revertReconciliations.get(conversationId) !== pending) return;
+      if (pending.revision !== revision) {
+        pending.failures = 0;
+        void this.runRevertReconciliation(conversationId, pending);
+        return;
+      }
+      pending.failures = Math.min(pending.failures + 1, 5);
+      const exponent = Math.min(pending.failures - 1, 4);
+      const delay = Math.min(REVERT_RECONCILIATION_INITIAL_RETRY_MS * 2 ** exponent, REVERT_RECONCILIATION_MAX_RETRY_MS);
+      pending.timer = setTimeout(() => {
+        pending.timer = null;
+        void this.runRevertReconciliation(conversationId, pending);
+      }, delay);
+    }
+  }
+
+  private finishRevertReconciliation(conversationId: string, pending: RevertReconciliation): void {
+    if (this.revertReconciliations.get(conversationId) !== pending) return;
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    this.revertReconciliations.delete(conversationId);
+    this.scheduleDelivery(conversationId);
+  }
+
+  private cancelRevertReconciliation(conversationId: string): void {
+    const pending = this.revertReconciliations.get(conversationId);
+    if (!pending) return;
+    pending.revision += 1;
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    this.revertReconciliations.delete(conversationId);
+  }
+
+  private async authoritativeVisibleHistory(conversationId: string, isCurrent?: () => boolean): Promise<ConversationItem[]> {
+    const messages: ProviderMessage[] = [];
+    let cursor: string | undefined;
+    do {
+      if (isCurrent && !isCurrent()) throw new Error("reversible history reconciliation was cancelled");
+      const page = await this.provider.listMessages(conversationId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
+      messages.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    const items = messages.flatMap(message => normalizeProviderMessage(message));
+    if (!this.liveTurns.has(conversationId)) {
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index]!;
+        if ((item.type === "tool" || item.type === "command" || item.type === "reasoning") && (item.status === "running" || item.status === "pending")) {
+          items[index] = { ...item, status: "cancelled" };
+        }
+      }
+    }
+    items.sort((left, right) => left.createdAt - right.createdAt);
+    return [...new Map(items.map(item => [item.id, item])).values()];
   }
 
   respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }> {
@@ -1321,6 +1608,7 @@ export class OpenCodeChatAdapter {
         }
       },
     });
+    this.eventCoalescer = coalescer;
     try {
       for await (const event of this.provider.events(signal)) {
         if (signal.aborted) break;
@@ -1350,7 +1638,7 @@ export class OpenCodeChatAdapter {
         // reasoning parts emits. Attribution must see those; only an event
         // carrying nothing at all is skipped.
         if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined
-          && normalized.removedMessageId === undefined && normalized.configuration === undefined) continue;
+          && normalized.removedMessageId === undefined && normalized.configuration === undefined && normalized.revertLifecycle === undefined) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.
@@ -1361,6 +1649,11 @@ export class OpenCodeChatAdapter {
           throw error;
         }
         if (signal.aborted) break;
+        if (normalized.revertLifecycle) {
+          coalescer.discard(normalized.conversationId);
+          this.scheduleRevertReconciliation(normalized.conversationId, normalized.revertLifecycle);
+          continue;
+        }
         if (normalized.configuration) {
           const current = await this.configuration(normalized.conversationId);
           const configuration = { ...current, ...normalized.configuration };
@@ -1398,6 +1691,7 @@ export class OpenCodeChatAdapter {
     } finally {
       coalescer.dispose();
       await coalescer.settled();
+      if (this.eventCoalescer === coalescer) this.eventCoalescer = null;
     }
   }
 
@@ -1571,7 +1865,9 @@ export class OpenCodeChatAdapter {
   }
 
   private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<void> {
+    if (lifecycle.kind === "deleted") this.cancelRevertReconciliation(lifecycle.id);
     const next = await this.classifyInventorySession(lifecycle, lifecycle.kind === "deleted");
+    if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
     const previous = this.inventorySessions.get(lifecycle.id);
     const eventDescribesVisibleSession = next.inWorkspace && next.parentId === null;
     const relevantDeletion = lifecycle.kind === "deleted"
@@ -1653,9 +1949,15 @@ function isQuestionToolUpdate(update: NormalizedProviderUpdate): boolean {
 export function parseSlashCommand(text: string, commands: ChatCommand[]): { name: string; arguments: string } | undefined {
   if (!text.startsWith("/") || text.startsWith("//")) return undefined;
   const match = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(text);
-  if (!match || !commands.some(command => command.name === match[1])) return undefined;
+  if (!match || REVERSIBLE_HISTORY_COMMANDS.some(command => command.name === match[1])) return undefined;
+  if (!commands.some(command => command.name === match[1] && command.kind !== "local-operation")) return undefined;
   return { name: match[1]!, arguments: match[2]?.trim() ?? "" };
 }
+
+const REVERSIBLE_HISTORY_COMMANDS: ChatCommand[] = [
+  { name: "undo", description: "Undo the latest user turn", argumentHint: "", kind: "local-operation" },
+  { name: "redo", description: "Redo the next hidden user turn", argumentHint: "", kind: "local-operation" },
+];
 
 export function deriveConversationTitle(prompt: string): string {
   const compact = prompt.replace(/\s+/g, " ").trim().replace(/^(?:#{1,6}|>|[-*+]|\d+[.)])\s+/, "");
@@ -1679,6 +1981,14 @@ function sameConfiguration(left: ConversationConfiguration, right: ConversationC
     && (left.model === undefined
       ? right.model === undefined
       : right.model !== undefined && sameSelection(left.model, right.model));
+}
+
+function sameReversibleHistory(left: ReversibleHistoryState | undefined, right: ReversibleHistoryState): boolean {
+  return left?.staged === right.staged && left.canUndo === right.canUndo && left.canRedo === right.canRedo;
+}
+
+function sameConversationItems(left: ConversationItem[], right: ConversationItem[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export class ConversationProjection {
@@ -1713,6 +2023,13 @@ export class ConversationProjection {
       if (item.type === "assistant_message") this.text.seed(item.id.replace(/^part:/, ""), item.markdown);
       else if (item.type === "reasoning") this.text.seed(item.id.replace(/^part:|^reasoning:/, ""), item.text);
     }
+  }
+
+  replace(items: ConversationItem[]): ChatEvent {
+    this.timeline.clear();
+    this.text.clear();
+    this.seed(items);
+    return this.replay.publish({ type: "resync", reason: "conversation-rewritten" });
   }
 
   apply(update: NormalizedProviderUpdate): ChatEvent | undefined {

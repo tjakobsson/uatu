@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 9 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Added capability-gated, idempotent `workspaceUndoChatConversation` and `workspaceRedoChatConversation` operations. Both accept a client `requestId` and return the operation outcome, current reversible-history state, and an optional restored composer draft for the invoking client.
+- `ConversationSnapshot` gained optional `reversibleHistory`, `ChatCommand.kind` gained `local-operation`, and `ChatResyncEvent.reason` gained `conversation-rewritten`.
+- The `reversible-history` capability declares support for local `/undo` and `/redo`; those commands never use ordinary prompt or provider-command operations.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 9 or accept the new closed-object fields and enum variants. Clients may ignore reversible history unless the agent declares the capability. Clients that implement it must preserve local composer drafts when another client triggers a `conversation-rewritten` resync.
+
 ## Hub 5 / Workspace 8 - Unreleased
 
 Compatibility: breaking (Hub and workspace)

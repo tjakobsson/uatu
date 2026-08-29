@@ -176,6 +176,33 @@ test("a subagent transcript pushes as a screen and the back gesture pops it", as
   await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
 });
 
+test("a surfaced request opens its child transcript and returns to the selected parent", async ({ page, request }) => {
+  const parent = await boot(page, request);
+  const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
+    { id: "part:request-child", type: "assistant_message", createdAt: 1, markdown: "request owner findings" },
+  ] });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "tool:request-agent", type: "tool", createdAt: 2, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Audit request", subagent_type: "explore", prompt: "go" }),
+    childConversationId: child.conversation.id,
+  } });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "question:surfaced-touch", type: "question", createdAt: 3, requestId: "surfaced-touch",
+    conversationId: child.conversation.id, status: "pending",
+    questions: [{ header: "Scope", prompt: "Which scope?", multiple: false, allowFreeForm: false, options: [{ label: "Focused", description: "" }] }],
+  } });
+
+  const card = page.locator('[data-chat-item-id="question:surfaced-touch"]');
+  await card.getByRole("button", { name: "Open transcript" }).click();
+  await expect(page.locator("#chat-drilldown-items")).toContainText("request owner findings");
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+
+  await page.locator("#chat-drilldown-back").click();
+  await expect(page.locator("#chat-drilldown")).toBeHidden();
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+  await expect(card).toBeVisible();
+});
+
 test("a request the parent is waiting on stays reachable over the pushed screen", async ({ page, request }) => {
   const parent = await boot(page, request);
   const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [

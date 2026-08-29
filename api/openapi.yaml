@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 5.8.0-experimental
+  version: 5.9.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 5 and workspace revision 8
+  summary: Hub revision 5 and workspace revision 9
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 5
-    workspaceApiRevision: 8
+    workspaceApiRevision: 9
 servers:
   - url: https://{hubHost}
     variables:
@@ -81,8 +81,8 @@ paths:
               example:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 5
-                workspaceApiRevision: 8
-                workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 8, shells: [{ attached: false, label: zsh }] }]
+                workspaceApiRevision: 9
+                workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 9, shells: [{ attached: false, label: zsh }] }]
                 workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
@@ -749,7 +749,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 8, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
+              example: { workspaceApiRevision: 9, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -1019,6 +1019,46 @@ paths:
         '413': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/undo:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    post:
+      operationId: workspaceUndoChatConversation
+      tags: [Chat]
+      summary: Move the reversible-history boundary back one user turn idempotently
+      description: Requires the agent to declare `reversible-history`. Interrupts active work before changing the boundary. The optional restored draft belongs only to the invoking client.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
+      responses:
+        '200': { description: Undo outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/redo:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    post:
+      operationId: workspaceRedoChatConversation
+      tags: [Chat]
+      summary: Move the reversible-history boundary forward one user turn idempotently
+      description: Requires the agent to declare `reversible-history`. Clearing the newest boundary resumes any paused queued messages. The optional restored draft belongs only to the invoking client.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
+      responses:
+        '200': { description: Redo outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
@@ -1851,10 +1891,10 @@ components:
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, variants: { type: array, items: { type: string, minLength: 1 }, description: "Reasoning variants the model advertises (e.g. high, xhigh). Absent when it offers none." }, contextLimit: { type: integer, minimum: 1, description: "The model's context-window size in tokens, when reported." }, imageInput: { type: boolean, description: "Whether this model can see image attachments, as the agent reports it. Absent means not reported, which clients treat as no." } }, additionalProperties: false }
     ChatModelList: { type: object, required: [models], properties: { models: { type: array, items: { $ref: '#/components/schemas/ChatModel' } } }, additionalProperties: false }
-    ChatAgent: { type: object, required: [id, name, capabilities], description: "The agent Chat is talking to. Capabilities are declared positively: a capability is listed or the agent does not have it. `conversation-rename` means the conversation title can be persisted through the rename operation. `attachments` means prompts accept image attachments; whether a selected model can see them is per-model (`ChatModel.imageInput`).", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 512 }, capabilities: { type: array, items: { type: string, minLength: 1, description: "Recognized today: modes, models, commands, questions, permissions, subagents, variants, context, conversation-rename, attachments. Open on purpose — a later revision adds capabilities without a breaking change, and a client MUST ignore a name it does not recognize rather than reject the agent." } } }, additionalProperties: false }
+    ChatAgent: { type: object, required: [id, name, capabilities], description: "The agent Chat is talking to. Capabilities are declared positively: a capability is listed or the agent does not have it. `conversation-rename` means the conversation title can be persisted through the rename operation. `attachments` means prompts accept image attachments; whether a selected model can see them is per-model (`ChatModel.imageInput`). `reversible-history` enables the dedicated Undo and Redo operations.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 512 }, capabilities: { type: array, items: { type: string, minLength: 1, description: "Recognized today: modes, models, commands, questions, permissions, subagents, variants, context, conversation-rename, attachments, reversible-history. Open on purpose: a later revision adds capabilities without a breaking change, and a client MUST ignore a name it does not recognize rather than reject the agent." } } }, additionalProperties: false }
     ChatMode: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string } }, additionalProperties: false }
     ChatModeList: { type: object, required: [modes], properties: { modes: { type: array, items: { $ref: '#/components/schemas/ChatMode' } } }, additionalProperties: false }
-    ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill] } }, additionalProperties: false }
+    ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill, local-operation] } }, additionalProperties: false }
     ChatCommandList: { type: object, required: [commands], properties: { commands: { type: array, items: { $ref: '#/components/schemas/ChatCommand' } } }, additionalProperties: false }
     ConversationSummary:
       type: object
@@ -1893,8 +1933,11 @@ components:
         variant: { type: string, minLength: 1, maxLength: 512, description: "Reasoning variant of `model`. Invalid without `model` in the same configuration record." }
       dependentRequired: { variant: [model] }
       additionalProperties: false
-    ConversationSnapshot: { type: object, required: [conversation, configuration, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' }, description: "Held messages in submission order, so a client joining mid-run presents the same queue as one that watched it build." }, olderCursor: { type: string } }, additionalProperties: false }
+    ConversationSnapshot: { type: object, required: [conversation, configuration, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' }, description: "Held messages in submission order, so a client joining mid-run presents the same queue as one that watched it build." }, reversibleHistory: { $ref: '#/components/schemas/ReversibleHistoryState' }, olderCursor: { type: string } }, additionalProperties: false }
     ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
+    ReversibleHistoryState: { type: object, required: [staged, canUndo, canRedo], properties: { staged: { type: boolean }, canUndo: { type: boolean }, canRedo: { type: boolean, description: "False whenever no revert boundary is staged." } }, additionalProperties: false }
+    RestoredDraft: { type: object, required: [text], properties: { text: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } } }, additionalProperties: false }
+    ReversibleHistoryResult: { type: object, required: [outcome, state], properties: { outcome: { enum: [changed, nothing-to-undo, nothing-to-redo] }, state: { $ref: '#/components/schemas/ReversibleHistoryState' }, restoredDraft: { $ref: '#/components/schemas/RestoredDraft', description: "Editable turn returned only to the client that invoked this mutation." } }, additionalProperties: false }
     ConversationRenameRequest:
       type: object
       required: [requestId, title]
@@ -1924,7 +1967,7 @@ components:
         - { type: object, required: [generation, sequence, conversationId, type, conversation], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.updated }, conversation: { allOf: [{ $ref: '#/components/schemas/ConversationSummary' }], description: "Updated summary for this conversation. Its id is the event conversationId." } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, queued, change], description: "Restates the whole held queue after a change, so replayed or duplicated frames converge on the same state.", properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.queue }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' } }, change: { type: object, required: [kind, messageId], properties: { kind: { enum: [held, removed, delivered] }, messageId: { type: string } }, additionalProperties: false } }, additionalProperties: false }
         - { $ref: '#/components/schemas/ChatResyncEvent' }
-    ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor] } }, additionalProperties: false }
+    ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor, conversation-rewritten] } }, additionalProperties: false }
     DocumentMeta:
       type: object
       required: [id, name, relativePath, mtimeMs, rootId, kind]

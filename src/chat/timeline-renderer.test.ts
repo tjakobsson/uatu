@@ -768,8 +768,8 @@ describe("requests owned by different conversations do not block each other", ()
     ]), new Set());
     // The decision reaches the user's other conversations, so who is asking is
     // part of what they need to decide.
-    expect(host.querySelector('[data-chat-item-id="permission:sub"]')?.textContent).toContain("Requested by a subagent");
-    expect(host.querySelector('[data-chat-item-id="permission:own"]')?.textContent).not.toContain("Requested by a subagent");
+    expect(host.querySelector('[data-chat-item-id="permission:sub"]')?.textContent).toContain("Requested by Subagent.");
+    expect(host.querySelector('[data-chat-item-id="permission:own"]')?.textContent).not.toContain("Requested by");
   });
 
   test("a single-owner timeline behaves exactly as before", () => {
@@ -781,6 +781,77 @@ describe("requests owned by different conversations do not block each other", ()
     ]), new Set());
     const states = [...host.querySelectorAll("[data-request-state]")].map(n => (n as HTMLElement).dataset.requestState);
     expect(states).toEqual(["queued", "needs-answer"]);
+  });
+});
+
+describe("foreign request origins", () => {
+  const childId = "child-1";
+  const task: ConversationItem = {
+    id: "tool:agent", type: "tool", createdAt: 1, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    childConversationId: childId,
+  };
+  const permission: ConversationItem = {
+    id: "permission:child", type: "permission", createdAt: 2, requestId: "child-permission",
+    conversationId: childId, action: "bash", resources: ["bun test"], status: "pending",
+  };
+
+  test("pending and resolved permission and question cards retain labelled transcript controls", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const resolvedQuestion: ConversationItem = {
+      ...question, id: "question:child", conversationId: childId, status: "resolved",
+      outcome: { kind: "answered", answers: [["a"]] },
+    };
+    renderer.render(host, projectionWith([task, permission, resolvedQuestion]), new Set());
+
+    for (const id of ["permission:child", "question:child"]) {
+      const card = host.querySelector(`[data-chat-item-id="${id}"]`)!;
+      expect(card.querySelector(".chat-request-origin")?.textContent).toContain("Requested by explore · Review renderer.");
+      expect(card.querySelector<HTMLButtonElement>("[data-open-conversation]")?.dataset.openConversation).toBe(childId);
+    }
+  });
+
+  test("late task attribution replaces the generic fallback without changing the request", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const childQuestion = { ...question, conversationId: childId } satisfies ConversationItem;
+    renderer.render(host, projectionWith([childQuestion]), new Set());
+    const fallback = host.querySelector('[data-chat-item-id="question:q1"]')!;
+    expect(fallback.querySelector(".chat-request-origin")?.textContent).toContain("Requested by Subagent.");
+
+    renderer.render(host, projectionWith([childQuestion, task]), new Set());
+    const attributed = host.querySelector('[data-chat-item-id="question:q1"]')!;
+    expect(attributed).not.toBe(fallback);
+    expect(attributed.querySelector(".chat-request-origin")?.textContent).toContain("Requested by explore · Review renderer.");
+  });
+
+  test("escapes hostile child IDs in transcript controls", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const hostile = `child\"><img src=x onerror="globalThis.pwned=true">`;
+    renderer.render(host, projectionWith([
+      { ...task, childConversationId: hostile },
+      { ...permission, conversationId: hostile },
+    ]), new Set());
+
+    const control = host.querySelector<HTMLButtonElement>("[data-open-conversation]")!;
+    expect(control.dataset.openConversation).toBe(hostile);
+    expect(host.querySelector("img")).toBeNull();
+  });
+
+  test("own requests have no origin and capability-disabled foreign requests have no dead control", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const ownQuestion = { ...question, conversationId: "c1" } satisfies ConversationItem;
+    renderer.render(host, projectionWith([task, ownQuestion, permission]), new Set(), false);
+
+    const own = host.querySelector('[data-chat-item-id="question:q1"]')!;
+    const foreign = host.querySelector('[data-chat-item-id="permission:child"]')!;
+    expect(own.querySelector(".chat-request-origin")).toBeNull();
+    expect(own.querySelector("[data-open-conversation]")).toBeNull();
+    expect(foreign.querySelector(".chat-request-origin")?.textContent).toBe("Requested by a subagent of this conversation.");
+    expect(foreign.querySelector("[data-open-conversation]")).toBeNull();
   });
 });
 
@@ -820,5 +891,38 @@ describe("tool output is streamed live and bounded when finished", () => {
     renderer.render(host, projectionWith([item]), new Set());
     expect(host.querySelector(".chat-output-more")).toBeNull();
     expect(host.querySelector('[data-chat-item-id="tool:t3"] pre')!.textContent).toContain("line 4");
+  });
+
+  test("a running shell update keeps one keyed row and only its bounded tail", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const command = (output: string): ConversationItem => ({
+      id: "tool:shell", type: "command", createdAt: 1, command: "bun test", status: "running", output,
+    });
+
+    renderer.render(host, projectionWith([command(lines(20))]), new Set());
+    renderer.render(host, projectionWith([command(lines(30))]), new Set());
+
+    expect(host.querySelectorAll('[data-chat-item-id="tool:shell"]')).toHaveLength(1);
+    const stream = host.querySelector(".chat-tool-stream")!;
+    expect(stream.textContent!.split("\n")).toHaveLength(12);
+    expect(stream.textContent).toContain("line 30");
+    expect(stream.textContent).not.toContain("line 18\n");
+  });
+
+  test("a fast-completed shell retains inspectable output behind the existing bound", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = {
+      id: "tool:fast-shell", type: "command", createdAt: 1, command: "bun test", status: "completed", output: lines(30), exitCode: 0,
+    };
+    renderer.render(host, projectionWith([item], { status: "idle" }), new Set());
+
+    expect(host.querySelectorAll('[data-chat-item-id="tool:fast-shell"]')).toHaveLength(1);
+    expect(host.querySelector('[data-chat-item-id="tool:fast-shell"] .chat-activity-status')!.textContent).toBe("completed");
+    const more = host.querySelector(".chat-output-more") as HTMLDetailsElement;
+    expect(more.querySelector("summary")!.textContent).toContain("Show 18 more lines");
+    expect(more.hasAttribute("open")).toBe(false);
+    expect(more.textContent).toContain("line 30");
   });
 });

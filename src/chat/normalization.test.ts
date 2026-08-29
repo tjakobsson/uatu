@@ -353,6 +353,59 @@ describe("provider text reconciliation", () => {
       expect.objectContaining({ type: "tool", status: "running", output: "line one\nline two" }),
     ]);
   });
+
+  test("a live shell keeps rolling metadata output until final output replaces it", () => {
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const running = { id: "shell-1", type: "session.next.tool.progress", data: {
+      sessionID: "s", callID: "shell", timestamp: 1, name: "bash",
+      input: { command: "bun test" }, metadata: { output: "running line" },
+    } };
+    const completed = { id: "shell-2", type: "session.next.tool.success", data: {
+      sessionID: "s", callID: "shell", timestamp: 1, name: "bash",
+      input: { command: "bun test" }, output: "final line", metadata: { output: "stale rolling line", exit: 0 },
+    } };
+
+    for (const update of normalizeProviderEvent(running).updates) projection.apply(update);
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "tool:shell", type: "command", status: "running", output: "running line" }),
+    ]);
+
+    for (const update of normalizeProviderEvent(completed).updates) projection.apply(update);
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "tool:shell", type: "command", status: "completed", output: "final line", exitCode: 0 }),
+    ]);
+  });
+
+  test("shell metadata accepts exit and compatibility exitCode for zero and non-zero outcomes", () => {
+    for (const [metadata, status, exitCode] of [
+      [{ exit: 0 }, "completed", 0],
+      [{ exit: 7 }, "failed", 7],
+      [{ exitCode: 0 }, "completed", 0],
+      [{ exitCode: 9 }, "failed", 9],
+    ] as const) {
+      const normalized = normalizeProviderEvent({ id: `exit-${exitCode}`, type: "session.next.tool.success", data: {
+        sessionID: "s", callID: `call-${String(exitCode)}-${"exit" in metadata ? "native" : "compat"}`,
+        name: "bash", input: { command: "check" }, output: "result", metadata,
+      } });
+      expect(normalized.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({
+        type: "command", status, output: "result", exitCode,
+      }) });
+    }
+  });
+
+  test("an exact legacy shell-ended event without an exit code ends and retains output", () => {
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const fixtures = [
+      { id: "legacy-start", type: "session.next.shell.started", properties: { sessionID: "s", callID: "legacy", command: "printf done" } },
+      { id: "legacy-end", type: "session.next.shell.ended", properties: { sessionID: "s", callID: "legacy", command: "printf done", output: "done" } },
+    ];
+    for (const fixture of fixtures) {
+      for (const update of normalizeProviderEvent(fixture).updates) projection.apply(update);
+    }
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "command:legacy", type: "command", status: "completed", output: "done" }),
+    ]);
+  });
 });
 
 // Token usage is a message-level fact, so it rides ONE item keyed by the
@@ -656,14 +709,20 @@ describe("compaction and revert stop the transcript from lying", () => {
       .toEqual(expect.objectContaining({ type: "notice", message: expect.stringContaining("compacted") }));
   });
 
-  test("reverted work is not presented as current", () => {
-    for (const [type, fragment] of [
-      ["session.next.revert.staged", "pending reversal"],
-      ["session.next.revert.committed", "no longer applies"],
-      ["session.next.revert.cleared", "apply again"],
+  test("revert lifecycle events request authoritative reconciliation without adding notices", () => {
+    for (const [type, lifecycle] of [
+      ["session.next.revert.staged", "staged"],
+      ["session.next.revert.committed", "committed"],
+      ["session.next.revert.cleared", "cleared"],
     ] as const) {
-      expect(items({ id: type, type, data: { sessionID: "s" } })[0])
-        .toEqual(expect.objectContaining({ type: "notice", level: "warning", message: expect.stringContaining(fragment) }));
+      const normalized = normalizeProviderEvent({ id: type, type, data: { sessionID: "s" } });
+      expect(normalized).toEqual(expect.objectContaining({
+        conversationId: "s",
+        outcome: "handled",
+        updates: [],
+        revertLifecycle: lifecycle,
+      }));
+      expect(items({ id: type, type, data: { sessionID: "s" } })).toEqual([]);
     }
   });
 

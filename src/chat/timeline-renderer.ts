@@ -58,6 +58,12 @@ export class TimelineRenderer {
 
     const todoLabels = todoActivityLabels(projection.items);
     const durations = turnDurations(projection.items);
+    const childLabels = new Map<string, string>();
+    for (const entry of subagentEntries(projection.items)) {
+      if (entry.conversationId && !childLabels.has(entry.conversationId)) {
+        childLabels.set(entry.conversationId, subagentLabel(entry));
+      }
+    }
 
     // An assistant message with no text is data, not a bubble: the usage
     // carrier for a tool-only message (`usage:<id>` from normalization) and a
@@ -76,6 +82,9 @@ export class TimelineRenderer {
       // cached node is only reused when it would render identically.
       const foreign = (item.type === "permission" || item.type === "question")
         && item.conversationId !== undefined && item.conversationId !== projection.conversationId;
+      const origin = foreign
+        ? { conversationId: item.conversationId!, label: childLabels.get(item.conversationId!) ?? "Subagent" }
+        : undefined;
       const entry = this.entries.get(item.id);
       // Completion is monotonic for an item. A new turn makes the conversation
       // active again, but must not revoke copy actions from an answer that was
@@ -83,12 +92,12 @@ export class TimelineRenderer {
       // when a later user message is visible remains incomplete.
       const completedAssistant = item.type === "assistant_message"
         && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
-      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents), String(completedAssistant)].join("\u0001");
+      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(completedAssistant)].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
       }
-      if (entry && entry.active === active && patchInPlace(entry, item, completedAssistant)) {
+      if (entry && entry.active === active && (item.type !== "question" || entry.variant === variant) && patchInPlace(entry, item, completedAssistant)) {
         entry.variant = variant;
         nodes.set(item.id, entry.node);
         dirty.push(entry.node);
@@ -122,7 +131,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, duration, foreign, readerClosed, allowSubagents, completedAssistant));
+      const node = buildNode(renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant));
       if (completedAssistant) decorateAssistantCopyActions(node);
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
@@ -270,6 +279,10 @@ export type SubagentEntry = {
   model?: string;
   usage?: TokenUsage;
 };
+
+export function subagentLabel(entry: SubagentEntry): string {
+  return entry.subagent ? `${entry.subagent} · ${entry.description}` : entry.description;
+}
 
 /**
  * Subagents launched in this conversation, in the order they started. Unlike
@@ -528,7 +541,9 @@ export class QueueDockRenderer {
   }
 }
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
+type RequestOrigin = { conversationId: string; label: string };
+
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   if (item.type === "user_message") return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}>${renderMessageAttachments(item.attachments)}${item.text ? `<div>${escapeHtml(item.text)}</div>` : ""}</article>`;
@@ -541,8 +556,8 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   if (item.type === "file_change") {
     return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(item.operation)}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
   }
-  if (item.type === "permission") return renderPermission(item, open, activeRequest, foreign);
-  if (item.type === "question") return renderQuestion(item, open, activeRequest, foreign);
+  if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents);
+  if (item.type === "question") return renderQuestion(item, open, activeRequest, origin, allowSubagents);
   if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents);
   // A command's text is the subject, not the label. As a label it lands in the
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
@@ -761,11 +776,13 @@ function requestAttributes(state: RequestState): string {
 // raised itself, which undercuts the reason for surfacing it: the user is being
 // asked to make a decision — one that reaches their other conversations — and
 // needs to know who is asking.
-function requestOrigin(foreign: boolean): string {
-  return foreign ? `<p class="chat-request-origin">Requested by a subagent of this conversation.</p>` : "";
+function requestOrigin(origin: RequestOrigin | undefined, allowSubagents: boolean): string {
+  if (!origin) return "";
+  if (!allowSubagents) return `<p class="chat-request-origin">Requested by a subagent of this conversation.</p>`;
+  return `<p class="chat-request-origin">Requested by ${escapeHtml(origin.label)}. <button type="button" data-open-conversation="${escapeHtmlAttribute(origin.conversationId)}">Open transcript</button></p>`;
 }
 
-function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, foreign = false): string {
+function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true): string {
   const pending = item.status === "pending";
   // `approved-session` is the transported value and stays. Verified against a
   // live OpenCode 1.18.18: this reply carries past the request into every later
@@ -792,7 +809,7 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // What "Allow" would apply, shown where the choice is made. Only while the
   // request is still open — a receded, resolved card does not re-show the diff.
   const changePreview = pending && item.diff ? `<div class="chat-request-change">${chatDiffMarkup(patchDiffLines(item.diff))}</div>` : "";
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(foreign)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${changePreview}${body}</details>`;
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${changePreview}${body}</details>`;
 }
 
 // The receded form's label — what was decided, in words, since the summary no
@@ -804,7 +821,7 @@ function permissionOutcomeLabel(outcome: PermissionOutcome | undefined): string 
   return "Resolved";
 }
 
-function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, foreign = false): string {
+function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true): string {
   const pending = item.status === "pending";
   // Questions are stepped through one at a time behind a tab strip, the way
   // OpenCode's own client presents them. Stacking every question at once buries
@@ -832,7 +849,7 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, f
   const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : resolvedBody;
   const state = requestState(item.status, active);
   const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</span>` : requestBadge(state);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${summaryTrace}</summary>${requestOrigin(foreign)}${body}</details>`;
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}${body}</details>`;
 }
 
 export function decorateFileLinks(container: HTMLElement): void {

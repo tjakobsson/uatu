@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatEvent, ConversationSnapshot } from "./types";
+import { ConversationProjection } from "./adapter";
 import { addAcceptedDraft, applyChatEvent, dropQueuedMessage, noteQueuedMessage, prependSnapshot, projectionFromSnapshot } from "./projection";
+import { ConversationReplay } from "./replay";
 
 const snapshot = (items: ConversationSnapshot["items"] = []): ConversationSnapshot => ({
   conversation: { id: "c1", title: "Chat", createdAt: 1, updatedAt: 1, status: "running" },
@@ -134,6 +136,24 @@ describe("chat projection", () => {
     const current = projectionFromSnapshot(snapshot([{ id: "new", type: "user_message", createdAt: 2, text: "new" }]));
     const page = snapshot([{ id: "old", type: "user_message", createdAt: 1, text: "old" }, { id: "new", type: "user_message", createdAt: 2, text: "new" }]);
     expect(prependSnapshot(current, page).items.map(item => item.id)).toEqual(["old", "new"]);
+  });
+
+  test("authoritative replacement removes a suffix and resets text reconciliation", () => {
+    const server = new ConversationProjection(new ConversationReplay("g1", "c1", 10_000));
+    server.seed([
+      { id: "part:answer", type: "assistant_message", createdAt: 1, markdown: "kept discarded" },
+      { id: "message:discarded", type: "user_message", createdAt: 2, text: "discarded turn" },
+    ]);
+
+    const event = server.replace([
+      { id: "part:answer", type: "assistant_message", createdAt: 1, markdown: "kept" },
+    ]);
+    server.apply({ kind: "text", itemId: "part:answer", identity: "answer", mode: "incremental", text: " fresh" });
+
+    expect(event).toEqual(expect.objectContaining({ type: "resync", reason: "conversation-rewritten" }));
+    expect(server.items()).toEqual([
+      expect.objectContaining({ id: "part:answer", markdown: "kept fresh" }),
+    ]);
   });
 
   test("projects configuration and conversation updates in sequence", () => {

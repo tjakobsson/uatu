@@ -34,7 +34,7 @@ import {
 } from "../../src/server/routes";
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
-import { FakeE2EChatService } from "./chat-service";
+import { FakeE2EChatService, type ReversibleFileFixture } from "./chat-service";
 import type { ChatCapability, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus } from "../../src/chat/types";
 
 // One-shot artificial latency for GET /api/terminal/sessions, armed by tests
@@ -53,7 +53,19 @@ let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
 let personalState: Record<string, unknown> = { version: 1 };
-const chatService = new FakeE2EChatService();
+const chatService = new FakeE2EChatService({
+  restoreFile: async (relativePath, contents) => {
+    const target = path.resolve(activeWorkspaceRoot, relativePath);
+    const relative = path.relative(activeWorkspaceRoot, target);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("invalid reversible file path");
+    if (contents === null) {
+      await fs.rm(target, { force: true });
+      return;
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents, "utf8");
+  },
+});
 const terminalEnabled = await terminalBackendAvailable();
 let watchSession = await createSession({ resetWorkspace: true });
 const terminalServer = terminalEnabled
@@ -167,6 +179,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     child?: boolean;
     invalidate?: boolean;
     configuration?: ConversationConfiguration;
+    reversibleFiles?: ReversibleFileFixture[];
   };
   switch (body.action) {
     case "seed":
@@ -201,6 +214,12 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "configuration":
       if (body.conversationId && body.configuration) return Response.json(chatService.publishConfiguration(body.conversationId, body.configuration));
       break;
+    case "reversibleFiles":
+      if (body.conversationId) {
+        chatService.configureReversibleFiles(body.conversationId, body.reversibleFiles ?? []);
+        return Response.json({ ok: true });
+      }
+      break;
     case "nextConversationConfiguration":
       chatService.configureNextConversation(body.configuration ?? {});
       return Response.json({ ok: true });
@@ -208,7 +227,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       chatService.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants, promptConfigurations: chatService.promptConfigurations, ...chatService.inventoryStats() });
+      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants, promptConfigurations: chatService.promptConfigurations, reversibleAttempts: chatService.reversibleAttempts, ...chatService.inventoryStats() });
     case "inventoryInvalidate":
       chatService.invalidateInventory();
       return Response.json({ ok: true });
@@ -229,6 +248,12 @@ async function handleE2EChat(request: Request): Promise<Response> {
       return Response.json({ ok: true });
     case "failPrompt":
       chatService.failPrompt();
+      return Response.json({ ok: true });
+    case "failUndo":
+      chatService.failReversible("undo");
+      return Response.json({ ok: true });
+    case "failRedo":
+      chatService.failReversible("redo");
       return Response.json({ ok: true });
     case "failHistory":
       chatService.failHistory(false);

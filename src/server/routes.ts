@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError, UnknownAttachmentError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
@@ -741,6 +741,18 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return requestId instanceof Response ? requestId : run(() => deps.chatService.cancel(id, requestId));
       }),
     },
+    [p("/api/chat/conversations/:conversationId/undo")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        return requestId instanceof Response ? requestId : run(() => deps.chatService.undo(id, requestId));
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/redo")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        return requestId instanceof Response ? requestId : run(() => deps.chatService.redo(id, requestId));
+      }),
+    },
     [p("/api/chat/conversations/:conversationId/queue/:messageId")]: {
       DELETE: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
         const messageId = routeIdentity(request, "messageId");
@@ -905,6 +917,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof ChatQueueFullError) return chatError(429, error.message);
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
+  if (error instanceof ReversibleHistoryUnsupportedError) return chatError(409, error.message);
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);

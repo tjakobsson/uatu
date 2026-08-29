@@ -5,9 +5,9 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
-import type { ChatAvailability, ConversationSnapshot, ConversationSummary, MessageAttachment, ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
+import type { ChatAvailability, ConversationSnapshot, ConversationSummary, MessageAttachment, ModelSelection, PermissionOutcome, QuestionOutcome, ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
-import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError } from "../chat/adapter";
+import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
 import { buildRoutes } from "./routes";
 
 const TOKEN = "chat-test-token";
@@ -24,6 +24,8 @@ class FakeChatService implements WorkspaceChatService {
   selectedAgent: string | undefined;
   questionResponses: QuestionOutcome[] = [];
   removals: string[] = [];
+  reversibleMutations = { undo: 0, redo: 0 };
+  private readonly reversibleReceipts = new Map<string, ReversibleHistoryResult>();
 
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
   async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
@@ -75,6 +77,33 @@ class FakeChatService implements WorkspaceChatService {
     return { conversation: { ...this.conversation, title } };
   }
   async cancel(id: string) { this.require(id); return { cancelled: true } as const; }
+  async undo(id: string, requestId: string): Promise<ReversibleHistoryResult> {
+    this.require(id);
+    const key = `undo:${id}:${requestId}`;
+    const existing = this.reversibleReceipts.get(key);
+    if (existing) return existing;
+    this.reversibleMutations.undo += 1;
+    const result: ReversibleHistoryResult = {
+      outcome: "changed",
+      state: { staged: true, canUndo: false, canRedo: true },
+      restoredDraft: { text: "Restored prompt" },
+    };
+    this.reversibleReceipts.set(key, result);
+    return result;
+  }
+  async redo(id: string, requestId: string): Promise<ReversibleHistoryResult> {
+    this.require(id);
+    const key = `redo:${id}:${requestId}`;
+    const existing = this.reversibleReceipts.get(key);
+    if (existing) return existing;
+    this.reversibleMutations.redo += 1;
+    const result: ReversibleHistoryResult = {
+      outcome: "nothing-to-redo",
+      state: { staged: false, canUndo: true, canRedo: false },
+    };
+    this.reversibleReceipts.set(key, result);
+    return result;
+  }
   async respondPermission(id: string, _interactionId: string, _requestId: string, outcome: PermissionOutcome) { this.require(id); return { outcome }; }
   async respondQuestion(id: string, _interactionId: string, _requestId: string, outcome: QuestionOutcome) { this.require(id); this.questionResponses.push(outcome); return { outcome }; }
   async dispose() { this.inventory.dispose(); }
@@ -229,6 +258,69 @@ describe("workspace chat routes", () => {
     expect(first.status).toBe(202);
     expect(await duplicate.json()).toEqual(await first.json());
     expect(service.prompts).toBe(1);
+  });
+
+  test("runs idempotent undo and no-op redo through the standard mutation gate", async () => {
+    const service = new FakeChatService();
+    const table = routes(service);
+    type Handler = { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const undo = table["/api/chat/conversations/:conversationId/undo"] as Handler;
+    const redo = table["/api/chat/conversations/:conversationId/redo"] as Handler;
+    const send = (handler: Handler, requestId: string, body: Record<string, unknown> = { requestId }, origin = "http://127.0.0.1:4711") => handler.POST(request("/api/chat/conversations/local/history", {
+      method: "POST",
+      headers: { origin, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }, { conversationId: "local" }) as never);
+
+    expect((await send(undo, "undo-1", { requestId: "undo-1" }, "https://attacker.example")).status).toBe(403);
+    expect((await send(undo, "undo-1", { requestId: "undo-1", direction: "back" })).status).toBe(400);
+    expect((await send(undo, "")).status).toBe(400);
+
+    const changed = await send(undo, "undo-1");
+    const retry = await send(undo, "undo-1");
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toEqual({
+      outcome: "changed",
+      state: { staged: true, canUndo: false, canRedo: true },
+      restoredDraft: { text: "Restored prompt" },
+    });
+    expect(await retry.json()).toEqual({
+      outcome: "changed",
+      state: { staged: true, canUndo: false, canRedo: true },
+      restoredDraft: { text: "Restored prompt" },
+    });
+    expect(service.reversibleMutations.undo).toBe(1);
+
+    const noOp = await send(redo, "redo-1");
+    expect(noOp.status).toBe(200);
+    expect(await noOp.json()).toEqual({
+      outcome: "nothing-to-redo",
+      state: { staged: false, canUndo: true, canRedo: false },
+    });
+    expect(service.reversibleMutations.redo).toBe(1);
+  });
+
+  test("maps unsupported reversible history to conflict and provider failures to 500", async () => {
+    const service = new FakeChatService();
+    const table = routes(service);
+    type Handler = { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const undo = table["/api/chat/conversations/:conversationId/undo"] as Handler;
+    const send = () => undo.POST(request("/api/chat/conversations/local/undo", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: crypto.randomUUID() }),
+    }, { conversationId: "local" }) as never);
+
+    const unsupported = new ReversibleHistoryUnsupportedError();
+    service.undo = async () => { throw unsupported; };
+    const conflict = await send();
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ error: unsupported.message });
+
+    service.undo = async () => { throw new Error("provider failed"); };
+    const failed = await send();
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toEqual({ error: "chat operation failed" });
   });
 
   test("removes a held message, guards the origin, and maps a delivered message to conflict", async () => {

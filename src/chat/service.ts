@@ -17,6 +17,7 @@ import type {
   PermissionOutcome,
   ModelSelection,
   QuestionOutcome,
+  ReversibleHistoryResult,
 } from "./types";
 
 export interface WorkspaceChatService {
@@ -46,6 +47,8 @@ export interface WorkspaceChatService {
   resolveAttachment(id: string): Promise<StoredAttachment | null>;
   renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: ConversationSummary }>;
   cancel(id: string, requestId: string): Promise<{ cancelled: true }>;
+  undo(id: string, requestId: string): Promise<ReversibleHistoryResult>;
+  redo(id: string, requestId: string): Promise<ReversibleHistoryResult>;
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   dispose(): Promise<void>;
@@ -170,6 +173,8 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   }
   async resolveAttachment(id: string) { return this.attachmentStore.resolve(id); }
   async cancel(id: string, requestId: string) { return (await this.requireAdapter()).abort(id, requestId); }
+  async undo(id: string, requestId: string) { return (await this.requireAdapter()).undo(id, requestId); }
+  async redo(id: string, requestId: string) { return (await this.requireAdapter()).redo(id, requestId); }
   async renameConversation(id: string, requestId: string, title: string) { return (await this.requireAdapter()).renameConversation(id, requestId, title); }
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
     return (await this.requireAdapter()).respondPermission(id, interactionId, requestId, outcome);
