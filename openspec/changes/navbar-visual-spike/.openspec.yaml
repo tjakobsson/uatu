@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-08-30
+goal: Validate the desktop navigation and surface-toggle UX visually before
+  proposing production behavior.
+skip_specs: true

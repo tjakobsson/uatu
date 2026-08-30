@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Uatu navbar visual spike</title>
+  <style>
+    @font-face {
+      font-family: "Hack Nerd Font Mono";
+      src: local("Hack Nerd Font Mono");
+      font-weight: normal;
+      font-style: normal;
+    }
+
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --canvas: light-dark(#fbfcfd, #0d1117);
+      --rail: light-dark(#ffffff, #0d1117);
+      --panel: light-dark(#ffffff, #0d1117);
+      --panel-2: light-dark(#ffffff, #161b22);
+      --surface-subtle: light-dark(#f6f8fa, #161b22);
+      --line: light-dark(#d0d7de, #30363d);
+      --line-soft: light-dark(#e6eaef, #21262d);
+      --text: light-dark(#1f2328, #e6edf3);
+      --muted: light-dark(#57606a, #8b949e);
+      --quiet: light-dark(#6e7781, #6e7681);
+      --accent: light-dark(#0969da, #4493f8);
+      --accent-soft: light-dark(#ddf4ff, #121d2f);
+      --teal: #1ca8a7;
+      --violet: light-dark(#8250df, #a371f7);
+      --amber: light-dark(#bf8700, #d29922);
+      --danger: light-dark(#cf222e, #f85149);
+      --mono: "Hack Nerd Font Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--canvas); color: var(--text); }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    [hidden] { display: none !important; }
+
+    .spike-shell { display: grid; grid-template-columns: 64px minmax(0, 1fr); width: 100vw; height: 100vh; background: var(--canvas); }
+    .watermark {
+      position: fixed; z-index: 20; right: 18px; bottom: 14px; padding: 5px 9px;
+      border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: color-mix(in srgb, var(--panel-2) 92%, transparent);
+      font: 700 10px/1 var(--mono); letter-spacing: .11em; text-transform: uppercase; pointer-events: none;
+    }
+
+    .navbar { position: relative; z-index: 10; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 5px; border-right: 1px solid var(--line-soft); background: var(--rail); }
+    .brand { display: grid; place-items: center; width: 36px; height: 36px; margin-bottom: 10px; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--teal); background: var(--panel); font: 800 13px/1 var(--mono); letter-spacing: -.08em; }
+    .nav-rule { width: 28px; height: 1px; margin: 5px 0; background: var(--line); }
+    .nav-spacer { flex: 1; }
+    .nav-button { position: relative; display: grid; place-items: center; width: 42px; height: 39px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+    .nav-button:hover { color: var(--text); background: var(--surface-subtle); }
+    .nav-button[data-selected="true"], .nav-button[aria-expanded="true"] { color: var(--text); border-color: var(--line); background: var(--surface-subtle); box-shadow: inset 0 1px 2px rgba(31, 35, 40, .08); }
+    .nav-button[data-selected="true"]::after { content: ""; position: absolute; right: 3px; width: 4px; height: 4px; border-radius: 50%; background: var(--text); opacity: .52; }
+    .nav-button[data-active="true"]::before { content: ""; position: absolute; left: -6px; width: 2px; height: 22px; border-radius: 0 3px 3px 0; background: var(--text); }
+    .nav-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+    .nav-button .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .badge { position: absolute; top: 2px; right: 1px; min-width: 15px; height: 15px; padding: 0 4px; border: 2px solid var(--rail); border-radius: 9px; color: #ffffff; background: var(--amber); font: 800 9px/11px var(--mono); }
+    .attention-dot { position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border: 2px solid var(--rail); border-radius: 50%; background: var(--violet); box-sizing: content-box; }
+
+    .workspace { position: relative; display: grid; grid-template-columns: 286px minmax(0, 1fr); min-width: 0; min-height: 0; }
+    .workspace:not([data-files="true"]) { grid-template-columns: minmax(0, 1fr); }
+    .files-panel { position: relative; min-width: 0; border-right: 1px solid var(--line-soft); background: var(--panel); }
+    .panel-heading { display: flex; align-items: center; justify-content: space-between; height: 48px; padding: 0 14px; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); }
+    .eyebrow { color: var(--muted); font: 700 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+    .repo-mark { width: 7px; height: 7px; margin-right: 7px; display: inline-block; border-radius: 50%; background: var(--accent); }
+    .panel-action { border: 0; color: var(--muted); background: transparent; cursor: pointer; font-size: 17px; }
+    .workspace-context { display: flex; align-items: center; min-width: 0; padding: 5px 7px; border: 1px solid transparent; border-radius: 6px; color: var(--text); background: transparent; cursor: pointer; }
+    .workspace-context:hover, .workspace-context[aria-expanded="true"] { border-color: var(--line-soft); background: var(--surface-subtle); }
+    .workspace-context-copy { min-width: 0; overflow: hidden; font: 600 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .workspace-context-copy span { color: var(--muted); font-weight: 400; }
+    .workspace-context-chevron { margin-left: 7px; color: var(--muted); font-size: 9px; }
+    .workspace-switcher { position: absolute; z-index: 18; top: 43px; left: 10px; right: 10px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); box-shadow: 0 8px 24px rgba(31, 35, 40, .18); }
+    .switcher-heading { padding: 11px 12px 7px; color: var(--muted); font: 700 9px var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+    .worktree-option { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 7px; align-items: center; width: calc(100% - 10px); margin: 0 5px 4px; padding: 8px; border: 1px solid transparent; border-radius: 6px; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+    .worktree-option:hover { background: var(--surface-subtle); }
+    .worktree-option[aria-selected="true"] { border-color: var(--line-soft); background: var(--accent-soft); }
+    .worktree-option > span:nth-child(2) { display: block; min-width: 0; }
+    .worktree-status { width: 7px; height: 7px; border-radius: 50%; background: var(--success, #2da44e); }
+    .worktree-status.busy { background: var(--attention); }
+    .worktree-name { display: block; overflow: hidden; font: 600 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .worktree-path { display: block; margin-top: 2px; overflow: hidden; color: var(--muted); font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .worktree-meta { color: var(--muted); font: 9px var(--mono); white-space: nowrap; }
+    .switcher-note { padding: 7px 12px 10px; border-top: 1px solid var(--line-soft); color: var(--muted); font: 9px/1.4 var(--mono); }
+    .files-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; margin: 11px; padding: 2px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface-subtle); }
+    .files-tab { padding: 5px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 11px; cursor: pointer; }
+    .files-tab[aria-selected="true"] { color: var(--accent); background: var(--panel-2); box-shadow: 0 1px 2px rgba(36, 41, 47, .08); }
+    .tree { padding: 2px 8px 14px; font: 12px/1.9 var(--mono); white-space: nowrap; overflow: hidden; }
+    .tree-row { display: flex; align-items: center; min-width: 0; padding: 1px 7px; border-radius: 5px; color: var(--muted); }
+    .tree-row.active { color: var(--accent); background: var(--accent-soft); }
+    .tree-row.indent-1 { padding-left: 21px; }
+    .tree-row.indent-2 { padding-left: 38px; }
+    .tree-row .chevron { width: 15px; color: var(--quiet); }
+    .tree-row .file-icon { width: 18px; color: var(--quiet); }
+    .tree-row .status { margin-left: auto; padding-left: 8px; color: var(--amber); }
+    .search-box { display: flex; margin: 4px 11px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .search-box input { width: 100%; padding: 8px 10px; border: 0; outline: 0; color: var(--text); background: transparent; font: 12px var(--mono); }
+    .result-summary { padding: 0 13px 8px; color: var(--muted); font: 10px var(--mono); }
+    .result { margin: 0 7px 5px; padding: 9px; border: 1px solid transparent; border-radius: 7px; }
+    .result:first-of-type { border-color: var(--line-soft); background: var(--accent-soft); }
+    .result-path { overflow: hidden; color: var(--text); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .result-line { margin-top: 6px; color: var(--muted); font: 11px/1.45 var(--mono); }
+    .workspace-view-title { padding: 3px 13px 9px; color: var(--muted); font: 10px var(--mono); }
+    .workspace-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 0 10px 10px; }
+    .workspace-summary .summary-cell { padding: 7px; }
+    .workspace-summary .summary-number { font-size: 14px; }
+    .workspace-panel-list { padding: 0 7px 11px; }
+    .workspace-panel-list .status-row, .workspace-panel-list .commit-row { padding: 7px 5px; }
+    .workspace-panel-list .commit-row { grid-template-columns: 48px minmax(0, 1fr) 30px; }
+    .compare-target { display: flex; gap: 2px; margin: 0 10px 11px; padding: 2px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface-subtle); }
+    .compare-button { flex: 1; padding: 6px 4px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 10px; cursor: pointer; }
+    .compare-button[aria-pressed="true"] { color: var(--accent); background: var(--panel-2); box-shadow: 0 1px 2px rgba(36, 41, 47, .08); }
+    .repo-identity { display: inline-block; margin: 0 11px 11px; padding: 3px 8px; border-radius: 999px; color: #ffffff; background: #1f6feb; font-size: 10px; font-weight: 650; }
+    .overview-facts { padding: 0 11px; }
+    .overview-fact { display: flex; justify-content: space-between; gap: 12px; padding: 6px 1px; border-top: 1px solid var(--line-soft); font-size: 10px; }
+    .overview-fact dt { color: var(--muted); }
+    .overview-fact dd { min-width: 0; margin: 0; overflow: hidden; font-family: var(--mono); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+    .untracked-note { margin: 10px 11px 0; padding: 7px 8px; border: 1px solid color-mix(in srgb, var(--attention) 35%, var(--line-soft)); border-radius: 6px; color: var(--muted); background: color-mix(in srgb, var(--attention) 8%, var(--panel)); font: 9px var(--mono); }
+    mark { color: #101217; background: var(--amber); border-radius: 2px; }
+
+    .work-area { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--canvas); }
+    .surface-row { display: grid; min-width: 0; min-height: 0; }
+    .surface-row[data-count="2"] { grid-template-columns: minmax(360px, 1.15fr) minmax(310px, .85fr); }
+    .surface { min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); }
+    .surface + .surface { border-left: 1px solid var(--line-soft); }
+    .surface-header { display: flex; align-items: center; gap: 9px; height: 48px; padding: 0 15px; border-bottom: 1px solid var(--line-soft); background: color-mix(in srgb, var(--canvas) 72%, transparent); }
+    .surface-title { font-size: 12px; font-weight: 650; }
+    .surface-meta { min-width: 0; overflow: hidden; color: var(--muted); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .surface-tools { display: flex; gap: 5px; margin-left: auto; }
+    .tool-pill { padding: 4px 7px; border: 1px solid var(--line-soft); border-radius: 6px; color: var(--muted); background: var(--surface-subtle); font: 10px var(--mono); }
+
+    .preview-scroll { height: calc(100% - 48px); overflow: hidden; padding: 22px clamp(22px, 4vw, 48px); background: var(--canvas); color: var(--text); }
+    .preview-scroll article { max-width: 820px; margin: 0 auto; padding: 38px 44px; border: 1px solid var(--line-soft); border-radius: 16px; background: var(--panel); }
+    .preview-scroll .doc-kicker { color: var(--muted); font: 600 10px var(--mono); letter-spacing: .18em; text-transform: uppercase; }
+    .preview-scroll h1 { margin: 10px 0 10px; font: 600 clamp(26px, 3vw, 36px)/1.16 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: -.02em; }
+    .preview-scroll .lead { max-width: 680px; margin: 0 0 24px; color: var(--muted); font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .preview-scroll h2 { margin: 25px 0 8px; font: 600 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .preview-scroll p, .preview-scroll li { color: var(--text); font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .preview-scroll pre { margin: 15px 0; padding: 13px 15px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 6px; color: var(--text); background: var(--surface-subtle); font: 11px/1.55 var(--mono); }
+    .callout { margin-top: 20px; padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--text); font: 11px/1.5 var(--mono); }
+
+    .chat { display: grid; grid-template-rows: 48px minmax(0, 1fr) auto; }
+    .chat .surface-header { grid-row: 1; }
+    .timeline { grid-row: 2; overflow: hidden; padding: 17px; }
+    .message { margin-bottom: 16px; }
+    .message-head { margin-bottom: 5px; color: var(--muted); font: 700 10px var(--mono); text-transform: uppercase; }
+    .message-body { color: var(--text); font-size: 12px; line-height: 1.55; }
+    .message.user { margin-left: 18%; padding: 10px 12px; border: 0; border-radius: 12px 12px 3px 12px; background: var(--accent-soft); }
+    .command-card { margin-top: 9px; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--muted); background: var(--surface-subtle); font: 10px/1.45 var(--mono); }
+    .composer { grid-row: 3; margin: 0 13px 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); }
+    .composer-placeholder { padding: 11px; color: var(--quiet); font-size: 11px; }
+    .composer-actions { display: flex; justify-content: space-between; padding: 0 8px 8px; color: var(--muted); font: 10px var(--mono); }
+    .send { padding: 4px 8px; border-radius: 5px; color: #ffffff; background: var(--accent); }
+
+    .terminal { height: 224px; border-top: 1px solid var(--line-soft); color: #e6edf3; background: #0b1220; }
+    .terminal .surface-header { color: rgba(230, 237, 243, .7); border-color: rgba(255, 255, 255, .08); background: rgba(0, 0, 0, .18); text-transform: uppercase; letter-spacing: .04em; }
+    .terminal .tool-pill { color: rgba(230, 237, 243, .7); border-color: rgba(255, 255, 255, .1); background: transparent; }
+    .terminal-body { height: calc(100% - 48px); padding: 12px 15px; color: #aab5ad; font: 11px/1.55 var(--mono); }
+    .prompt { color: var(--accent); }
+    .terminal-dim { color: #657069; }
+    .terminal-ok { color: #98c9a9; }
+
+    .empty-launcher { display: grid; place-items: center; height: 100%; background: var(--canvas); }
+    .launcher-card { width: min(430px, 76%); padding: 30px; border: 1px solid var(--line-soft); border-radius: 8px; text-align: center; background: var(--panel); box-shadow: 0 8px 24px rgba(31, 35, 40, .12); }
+    .launcher-mark { display: grid; place-items: center; width: 44px; height: 44px; margin: 0 auto 15px; border: 1px solid var(--line); border-radius: 8px; color: var(--teal); font: 800 14px var(--mono); }
+    .launcher-card h2 { margin: 0 0 8px; font-size: 17px; }
+    .launcher-card p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .launcher-keys { display: flex; justify-content: center; gap: 7px; margin-top: 18px; }
+    .launcher-keys span { padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface-subtle); font: 10px var(--mono); }
+
+    .context-panel { position: absolute; z-index: 15; left: 57px; width: 350px; max-height: calc(100vh - 30px); overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); box-shadow: 0 8px 24px rgba(31, 35, 40, .18); }
+    .context-panel::before { content: ""; position: absolute; left: -6px; top: 18px; width: 10px; height: 10px; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--panel-2); transform: rotate(45deg); }
+    .context-panel[data-panel="changes"] { top: 327px; }
+    .context-panel[data-panel="git"] { top: 375px; width: 430px; }
+    .context-title { padding: 15px 16px 5px; font-size: 13px; font-weight: 700; }
+    .context-subtitle { padding: 0 16px 13px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+    .change-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; padding: 13px; }
+    .summary-cell { padding: 9px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface-subtle); }
+    .summary-number { display: block; font: 700 17px var(--mono); }
+    .summary-label { color: var(--muted); font: 9px var(--mono); text-transform: uppercase; }
+    .status-list, .commit-list { padding: 3px 8px 11px; }
+    .status-row, .commit-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 7px; align-items: start; padding: 8px; border-radius: 6px; font: 10px/1.35 var(--mono); }
+    .status-row:hover, .commit-row:first-child { background: var(--surface-subtle); }
+    .status-code.add { color: var(--accent); }
+    .status-code.mod { color: var(--amber); }
+    .status-path, .commit-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-lines, .commit-time { color: var(--quiet); }
+    .commit-row { grid-template-columns: 54px minmax(0, 1fr) 54px; }
+    .commit-hash { color: var(--violet); }
+    .setting { padding: 15px 16px 17px; }
+    .setting-row { display: flex; gap: 14px; align-items: flex-start; }
+    .setting-copy { flex: 1; }
+    .setting-name { font-size: 12px; font-weight: 650; }
+    .setting-description { margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+    .prototype-note { margin-top: 12px; padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--amber) 50%, var(--line-soft)); border-radius: 6px; color: var(--muted); background: color-mix(in srgb, var(--amber) 10%, var(--panel)); font: 9px/1.45 var(--mono); }
+    .switch { position: relative; width: 34px; height: 20px; padding: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-subtle); cursor: pointer; }
+    .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: #919baa; transition: left .12s; }
+    .switch[aria-checked="true"] { border-color: var(--accent); background: var(--accent); }
+    .switch[aria-checked="true"]::after { left: 17px; background: #ffffff; }
+    .settings-backdrop { position: fixed; z-index: 30; inset: 0 0 0 64px; display: grid; place-items: center; padding: 36px; background: light-dark(rgba(15, 23, 42, .42), rgba(0, 0, 0, .6)); }
+    .settings-modal { display: grid; grid-template-rows: 58px minmax(0, 1fr); width: min(780px, calc(100vw - 110px)); height: min(520px, calc(100vh - 90px)); overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 20px 40px -10px rgba(15, 23, 42, .35); }
+    .settings-header { display: flex; align-items: center; padding: 0 18px 0 21px; border-bottom: 1px solid var(--line-soft); }
+    .settings-heading { font-size: 15px; font-weight: 650; }
+    .settings-caption { margin-left: 10px; color: var(--muted); font-size: 10px; }
+    .settings-close { display: grid; place-items: center; width: 30px; height: 30px; margin-left: auto; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 18px; }
+    .settings-close:hover { color: var(--text); border-color: var(--line-soft); background: var(--surface-subtle); }
+    .settings-layout { display: grid; grid-template-columns: 182px minmax(0, 1fr); min-height: 0; }
+    .settings-categories { padding: 14px 10px; border-right: 1px solid var(--line-soft); background: var(--surface-subtle); }
+    .settings-category { display: flex; align-items: center; width: 100%; gap: 9px; padding: 8px 10px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; text-align: left; font-size: 12px; }
+    .settings-category[aria-selected="true"] { color: var(--text); background: var(--panel); box-shadow: 0 1px 2px rgba(36, 41, 47, .08); }
+    .settings-category svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+    .settings-content { overflow: hidden; padding: 26px 30px; }
+    .settings-content h2 { margin: 0; font-size: 17px; }
+    .settings-intro { margin: 6px 0 23px; color: var(--muted); font-size: 11px; }
+    .settings-group { margin-bottom: 25px; }
+    .settings-group-title { padding-bottom: 8px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font: 700 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .settings-modal .setting { padding: 15px 2px; }
+    .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 12px 2px; }
+    .settings-row + .settings-row { border-top: 1px solid var(--line-soft); }
+    .setting-value { min-width: 122px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--surface-subtle); font-size: 11px; text-align: left; }
+    .settings-modal .prototype-note { margin: 2px 0 0; }
+
+    @media (max-width: 1050px) {
+      .workspace { grid-template-columns: 238px minmax(0, 1fr); }
+      .surface-row[data-count="2"] { grid-template-columns: minmax(300px, 1fr) minmax(280px, .82fr); }
+      .preview-scroll { padding: 25px 30px; }
+      .preview-scroll .lead { font-size: 14px; }
+      .context-panel[data-panel="git"] { width: 390px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="spike-shell">
+    <nav class="navbar" aria-label="Workspace navigation">
+      <div class="brand" aria-hidden="true">U</div>
+      <button class="nav-button" data-control="files" aria-label="Workspace" title="Workspace">
+        <svg viewBox="0 0 24 24"><path d="M3.5 6.5h6l2 2h9v10h-17z"/><path d="M3.5 6.5v-2h6l2 2"/></svg><span class="label">Workspace</span>
+      </button>
+      <button class="nav-button" data-control="preview" aria-label="Preview" title="Preview">
+        <svg viewBox="0 0 24 24"><path d="M4 3.5h11l5 5v12H4z"/><path d="M15 3.5v5h5M8 13h8M8 16.5h6"/></svg><span class="label">Preview</span>
+      </button>
+      <button class="nav-button" data-control="chat" aria-label="Chat, 3 new messages" title="Chat">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16v12H9l-5 4z"/><path d="M8 9h8M8 13h5"/></svg><span class="label">Chat</span><span class="badge" aria-hidden="true">3</span>
+      </button>
+      <button class="nav-button" data-control="terminal" aria-label="Terminal, activity" title="Terminal">
+        <svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="m7.5 9 3 3-3 3M13 15h4"/></svg><span class="label">Terminal</span><span class="attention-dot" aria-hidden="true"></span>
+      </button>
+      <div class="nav-rule"></div>
+      <button class="nav-button" data-control="follow" aria-label="Follow" title="Follow">
+        <svg viewBox="0 0 24 24"><path d="M12 4v4M12 16v4M4 12h4M16 12h4"/><circle cx="12" cy="12" r="4"/></svg><span class="label">Follow</span>
+      </button>
+      <div class="nav-spacer"></div>
+      <button class="nav-button" data-control="settings" aria-label="Settings" aria-haspopup="dialog" title="Settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.7-1.7.9-2-2.1-2.1-2 .9-1.7-.7-.7-2h-3l-.7 2-1.7.7-2-.9-2.1 2.1.9 2-.7 1.7-2 .7v3l2 .7.7 1.7-.9 2 2.1 2.1 2-.9 1.7.7.7 2h3l.7-2 1.7-.7 2 .9 2.1-2.1-.9-2 .7-1.7z"/></svg><span class="label">Settings</span>
+      </button>
+    </nav>
+
+    <main class="workspace" data-files="true">
+      <aside class="files-panel" data-surface="files">
+        <div class="panel-heading"><button class="workspace-context" data-workspace-switcher-toggle aria-label="Switch workspace context" aria-expanded="false"><span class="repo-mark"></span><span class="workspace-context-copy">uatu <span>/</span> <span data-workspace-branch>main</span></span><span class="workspace-context-chevron">⌄</span></button><button class="panel-action" aria-label="More workspace actions">···</button></div>
+        <div class="workspace-switcher" data-workspace-switcher hidden>
+          <div class="switcher-heading">Open worktree sessions</div>
+          <button class="worktree-option" data-worktree="main" aria-selected="true"><span class="worktree-status"></span><span><span class="worktree-name">uatu / main</span><span class="worktree-path">~/src/uatu</span></span><span class="worktree-meta">6 changed</span></button>
+          <button class="worktree-option" data-worktree="navbar-study" aria-selected="false"><span class="worktree-status busy"></span><span><span class="worktree-name">uatu / navbar-study</span><span class="worktree-path">~/worktrees/uatu-navbar</span></span><span class="worktree-meta">2 changed</span></button>
+          <button class="worktree-option" data-worktree="docs-refresh" aria-selected="false"><span class="worktree-status"></span><span><span class="worktree-name">uatu / docs-refresh</span><span class="worktree-path">~/worktrees/uatu-docs</span></span><span class="worktree-meta">clean</span></button>
+          <div class="switcher-note">Fixture contexts only · lifecycle and persistence undefined</div>
+        </div>
+        <div class="files-tabs" role="tablist" aria-label="Workspace panel view">
+          <button class="files-tab" role="tab" data-files-view="files" aria-selected="true">Files</button>
+          <button class="files-tab" role="tab" data-files-view="search" aria-selected="false">Search</button>
+          <button class="files-tab" role="tab" data-files-view="changes" aria-selected="false">Changes</button>
+          <button class="files-tab" role="tab" data-files-view="history" aria-selected="false">History</button>
+        </div>
+        <div data-files-content="files">
+          <div class="tree">
+            <div class="tree-row"><span class="chevron">⌄</span><span>src</span></div>
+            <div class="tree-row indent-1"><span class="chevron">⌄</span><span>shell</span></div>
+            <div class="tree-row indent-2 active"><span class="file-icon">◇</span><span data-tree-active-file>tab-bar.ts</span><span class="status">M</span></div>
+            <div class="tree-row indent-2"><span class="file-icon">◇</span><span>ui-mode.ts</span></div>
+            <div class="tree-row indent-1"><span class="chevron">›</span><span>preview</span></div>
+            <div class="tree-row indent-1"><span class="chevron">›</span><span>sidebar</span></div>
+            <div class="tree-row indent-1"><span class="chevron">›</span><span>terminal</span></div>
+            <div class="tree-row"><span class="chevron">⌄</span><span>tests</span></div>
+            <div class="tree-row indent-1"><span class="chevron">›</span><span>e2e</span><span class="status">2</span></div>
+            <div class="tree-row"><span class="file-icon">◇</span><span>ARCHITECTURE.md</span><span class="status">M</span></div>
+            <div class="tree-row"><span class="file-icon">◇</span><span>README.md</span></div>
+            <div class="tree-row"><span class="file-icon">◇</span><span>package.json</span></div>
+          </div>
+        </div>
+        <div data-files-content="search" hidden>
+          <label class="search-box"><input value="navigation state" aria-label="Search files"></label>
+          <div class="result-summary">7 results in 4 files</div>
+          <div class="result"><div class="result-path">src/shell/state.ts · 42</div><div class="result-line">export const <mark>navigationState</mark> = {</div></div>
+          <div class="result"><div class="result-path">src/shell/tab-bar.ts · 118</div><div class="result-line">apply<mark>NavigationState</mark>(next)</div></div>
+          <div class="result"><div class="result-path">ARCHITECTURE.md · 207</div><div class="result-line">The desktop <mark>navigation state</mark>...</div></div>
+        </div>
+        <div data-files-content="changes" hidden>
+          <div class="workspace-view-title">Change Overview</div>
+          <div class="compare-target" role="group" aria-label="Compare against"><button class="compare-button" data-compare-target="base" aria-pressed="true">Since base</button><button class="compare-button" data-compare-target="last-commit" aria-pressed="false">Since last commit</button></div>
+          <span class="repo-identity" title="~/src/uatu">uatu</span>
+          <dl class="overview-facts"><div class="overview-fact"><dt>Branch</dt><dd data-workspace-branch>main</dd></div><div class="overview-fact"><dt>Commit</dt><dd data-overview-commit>a41dc8e</dd></div><div class="overview-fact"><dt>Status</dt><dd>dirty</dd></div><div class="overview-fact"><dt>Base</dt><dd>main (fallback base) · 42b8a0f</dd></div><div class="overview-fact"><dt>Changes</dt><dd data-changes-anchor>vs main</dd></div></dl>
+          <div class="untracked-note">Includes untracked files</div>
+        </div>
+        <div data-files-content="history" hidden>
+          <div class="workspace-view-title">Recent commits on <span data-workspace-branch>main</span></div>
+          <div class="workspace-panel-list"><div class="commit-row"><span class="commit-hash">a41dc8e</span><span class="commit-subject" data-history-primary>feat(shell): preserve active surface across navigation</span><span class="commit-time">18m</span></div><div class="commit-row"><span class="commit-hash">790ce21</span><span class="commit-subject">fix(chat): retain pending composer text</span><span class="commit-time">2h</span></div><div class="commit-row"><span class="commit-hash">42b8a0f</span><span class="commit-subject">test(e2e): cover constrained desktop</span><span class="commit-time">1d</span></div><div class="commit-row"><span class="commit-hash">f08dc36</span><span class="commit-subject">docs: clarify follow-mode behavior</span><span class="commit-time">2d</span></div></div>
+        </div>
+      </aside>
+
+      <section class="work-area">
+        <div class="surface-row" data-count="1">
+          <section class="surface preview" data-surface="preview">
+            <header class="surface-header"><span class="surface-title">Preview</span><span class="surface-meta" data-preview-path>docs/workspace-navigation.md</span><span class="surface-tools"><span class="tool-pill">Rendered</span><span class="tool-pill">Split</span></span></header>
+            <div class="preview-scroll"><article>
+              <div class="doc-kicker" data-preview-kicker>Workspace shell · draft</div>
+              <h1 data-preview-title>Navigation should explain the workspace</h1>
+              <p class="lead" data-preview-lead>A durable launcher separates what is visible from what has attention, while leaving the document at the center of the desktop experience.</p>
+              <h2>Surface model</h2>
+              <p>Files, Preview, Chat, and Terminal are independent surfaces. More than one can be present without suggesting that the controls are browser-style tabs.</p>
+              <pre><code>visible:  [files, preview]
+active:   preview
+follow:   enabled
+attention: chat(3), terminal</code></pre>
+              <div class="callout">Visual spike only. Interaction details shown here are evidence for review, not production requirements.</div>
+              <h2>Context stays temporary</h2>
+              <p>Files, search, changes, and history share the active workspace context while settings remain a separate modal.</p>
+            </article></div>
+          </section>
+
+          <section class="surface chat" data-surface="chat" hidden>
+            <header class="surface-header"><span class="surface-title">Chat</span><span class="surface-meta">Review the navigation spike</span><span class="surface-tools"><span class="tool-pill">OpenCode</span></span></header>
+            <div class="timeline">
+              <div class="message user"><div class="message-head">You</div><div class="message-body">Compare the selected and active states, especially when Preview and Chat are both open.</div></div>
+              <div class="message"><div class="message-head">Assistant</div><div class="message-body">I’ll inspect the surface hierarchy and keep the findings separate from implementation recommendations.</div><div class="command-card">$ git diff --stat<br><span class="terminal-dim">3 files changed, 184 insertions(+), 29 deletions(-)</span></div></div>
+              <div class="message"><div class="message-head">Assistant</div><div class="message-body">The persistent fill communicates visibility. The slim marker communicates the most recently used surface.</div></div>
+            </div>
+            <div class="composer"><div class="composer-placeholder">Ask about this workspace…</div><div class="composer-actions"><span>⌘ ↵ to send</span><span class="send">Send</span></div></div>
+          </section>
+        </div>
+
+        <section class="terminal" data-surface="terminal" hidden>
+          <header class="surface-header"><span class="surface-title">Terminal</span><span class="surface-meta">uatu · zsh</span><span class="surface-tools"><span class="tool-pill">1 session</span><span class="tool-pill">+</span></span></header>
+          <div class="terminal-body"><span class="prompt">tobias@studio</span> <span class="terminal-dim">~/src/uatu</span> % bun test src/shell<br><span class="terminal-ok">✓ 184 pass</span><br><span class="terminal-dim">0 fail · 611 expect() calls · 1.84s</span><br><br><span class="prompt">tobias@studio</span> <span class="terminal-dim">~/src/uatu</span> % <span class="terminal-cursor">▋</span></div>
+        </section>
+
+        <section class="empty-launcher" data-empty-launcher hidden>
+          <div class="launcher-card"><div class="launcher-mark">U</div><h2>Choose a surface</h2><p>Open Workspace, Preview, Chat, or Terminal from the navbar to continue.</p><div class="launcher-keys"><span>Workspace</span><span>Preview</span><span>Chat</span><span>Terminal</span></div></div>
+        </section>
+      </section>
+    </main>
+
+    <div class="settings-backdrop" data-panel="settings" hidden>
+      <section class="settings-modal" data-settings-modal role="dialog" aria-label="Settings modal">
+        <header class="settings-header"><span class="settings-heading">Settings</span><span class="settings-caption">Visual spike · fixture controls</span><button class="settings-close" data-settings-close aria-label="Close Settings">×</button></header>
+        <div class="settings-layout">
+          <nav class="settings-categories" aria-label="Settings categories">
+            <button class="settings-category" aria-selected="true"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="3"/><path d="M16 11.5v-3l-2-.6-.8-1.8.9-1.8-2.2-1.2-1.3 1.5H8.5L7.1 3.1 4.9 4.3l.9 1.8L5 7.9l-2 .6v3l2 .6.8 1.8-.9 1.8 2.2 1.2 1.4-1.5h2.1l1.3 1.5 2.2-1.2-.9-1.8.8-1.8z"/></svg>General</button>
+            <button class="settings-category" aria-selected="false"><svg viewBox="0 0 20 20"><path d="M3 4h14v10H3zM7 17h6M10 14v3"/></svg>Appearance</button>
+            <button class="settings-category" aria-selected="false"><svg viewBox="0 0 20 20"><path d="M4 3h12v14H4zM7 7h6M7 10h6M7 13h4"/></svg>Documents</button>
+            <button class="settings-category" aria-selected="false"><svg viewBox="0 0 20 20"><path d="M3 5h14v10H3zM6 8l2 2-2 2M10 12h3"/></svg>Terminal</button>
+          </nav>
+          <div class="settings-content">
+            <h2>General</h2><p class="settings-intro">Workspace presentation preferences for this prototype.</p>
+            <div class="settings-group"><div class="settings-group-title">Workspace</div>
+              <div class="setting"><div class="setting-row"><div class="setting-copy"><div class="setting-name">Documentation files only</div><div class="setting-description">Show documentation-focused content in workspace navigation.</div></div><button class="switch" data-docs-only role="switch" aria-label="Documentation files only" aria-checked="false"></button></div><div class="prototype-note">Illustrative only. Persistence, filtering, and scope are intentionally undefined.</div></div>
+            </div>
+            <div class="settings-group"><div class="settings-group-title">Presentation capacity</div>
+              <div class="settings-row"><div class="setting-copy"><div class="setting-name">Color theme</div><div class="setting-description">Follow the current system appearance.</div></div><div class="setting-value">System</div></div>
+              <div class="settings-row"><div class="setting-copy"><div class="setting-name">Default preview layout</div><div class="setting-description">Choose how rendered documents use available space.</div></div><div class="setting-value">Split</div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="watermark">Visual spike · non-production</div>
+
+  <script>
+    (() => {
+      const state = {
+        visible: new Set(["files", "preview"]),
+        active: "preview",
+        follow: true,
+        panel: null,
+        filesView: "files",
+        worktree: "main",
+        switcher: false,
+        compareTargets: { main: "base", "navbar-study": "base", "docs-refresh": "base" },
+        docsOnly: false,
+      };
+      const surfaceNames = ["files", "preview", "chat", "terminal"];
+      const worktrees = {
+        main: {
+          branch: "main",
+          path: "docs/workspace-navigation.md",
+          kicker: "Workspace shell · draft",
+          title: "Navigation should explain the workspace",
+          lead: "A durable launcher separates what is visible from what has attention, while leaving the document at the center of the desktop experience.",
+          file: "tab-bar.ts",
+          commitHash: "a41dc8e",
+          commit: "feat(shell): preserve active surface across navigation",
+        },
+        "navbar-study": {
+          branch: "navbar-study",
+          path: "openspec/changes/navbar-visual-spike/design.md",
+          kicker: "Visual spike · worktree context",
+          title: "A workspace can hold more than one line of work",
+          lead: "This fixture context keeps the navigation study open alongside main without defining how production worktree sessions are hosted.",
+          file: "design.md",
+          commitHash: "d091c72",
+          commit: "spike(nav): compare workspace context navigation",
+        },
+        "docs-refresh": {
+          branch: "docs-refresh",
+          path: "docs/getting-started.md",
+          kicker: "Documentation · refresh",
+          title: "Start with the document, keep context nearby",
+          lead: "A clean fixture worktree demonstrates that open sessions can carry distinct document and repository identities.",
+          file: "getting-started.md",
+          commitHash: "e72b194",
+          commit: "docs: refresh the getting started guide",
+        },
+      };
+
+      function render() {
+        const workspace = document.querySelector(".workspace");
+        workspace.dataset.files = String(state.visible.has("files"));
+
+        for (const name of surfaceNames) {
+          const control = document.querySelector(`[data-control="${name}"]`);
+          const selected = state.visible.has(name);
+          control.dataset.selected = String(selected);
+          control.dataset.active = String(state.active === name);
+          control.setAttribute("aria-pressed", String(selected));
+          document.querySelector(`[data-surface="${name}"]`).hidden = !selected;
+        }
+
+        const follow = document.querySelector('[data-control="follow"]');
+        follow.dataset.selected = String(state.follow);
+        follow.setAttribute("aria-pressed", String(state.follow));
+
+        const settingsOpen = state.panel === "settings";
+        document.querySelector('[data-control="settings"]').setAttribute("aria-expanded", String(settingsOpen));
+        document.querySelector('[data-panel="settings"]').hidden = !settingsOpen;
+
+        for (const view of ["files", "search", "changes", "history"]) {
+          document.querySelector(`[data-files-view="${view}"]`).setAttribute("aria-selected", String(state.filesView === view));
+          document.querySelector(`[data-files-content="${view}"]`).hidden = state.filesView !== view;
+        }
+
+        const context = worktrees[state.worktree];
+        document.querySelectorAll("[data-workspace-branch]").forEach(element => { element.textContent = context.branch; });
+        document.querySelector("[data-preview-path]").textContent = context.path;
+        document.querySelector("[data-preview-kicker]").textContent = context.kicker;
+        document.querySelector("[data-preview-title]").textContent = context.title;
+        document.querySelector("[data-preview-lead]").textContent = context.lead;
+        document.querySelector("[data-tree-active-file]").textContent = context.file;
+        document.querySelector("[data-history-primary]").textContent = context.commit;
+        document.querySelector("[data-overview-commit]").textContent = context.commitHash || "a41dc8e";
+        const compareTarget = state.compareTargets[state.worktree];
+        document.querySelector("[data-changes-anchor]").textContent = compareTarget === "base" ? "vs main" : "vs HEAD";
+        document.querySelectorAll("[data-compare-target]").forEach(button => {
+          button.setAttribute("aria-pressed", String(button.dataset.compareTarget === compareTarget));
+        });
+        const switcher = document.querySelector("[data-workspace-switcher]");
+        switcher.hidden = !state.switcher;
+        document.querySelector("[data-workspace-switcher-toggle]").setAttribute("aria-expanded", String(state.switcher));
+        document.querySelectorAll("[data-worktree]").forEach(option => {
+          option.setAttribute("aria-selected", String(option.dataset.worktree === state.worktree));
+        });
+
+        const docsOnly = document.querySelector("[data-docs-only]");
+        docsOnly.setAttribute("aria-checked", String(state.docsOnly));
+
+        const visibleWork = ["preview", "chat"].filter(name => state.visible.has(name));
+        const surfaceRow = document.querySelector(".surface-row");
+        surfaceRow.dataset.count = String(visibleWork.length);
+        const hasPrimary = surfaceNames.some(name => state.visible.has(name));
+        document.querySelector("[data-empty-launcher]").hidden = hasPrimary;
+        surfaceRow.hidden = visibleWork.length === 0;
+      }
+
+      for (const name of surfaceNames) {
+        document.querySelector(`[data-control="${name}"]`).addEventListener("click", () => {
+          if (state.visible.has(name)) {
+            state.visible.delete(name);
+            if (state.active === name) state.active = surfaceNames.find(candidate => state.visible.has(candidate)) || null;
+          } else {
+            state.visible.add(name);
+            state.active = name;
+          }
+          state.panel = null;
+          state.switcher = false;
+          render();
+        });
+      }
+
+      document.querySelector('[data-control="follow"]').addEventListener("click", () => {
+        state.follow = !state.follow;
+        state.panel = null;
+        state.switcher = false;
+        render();
+      });
+
+      document.querySelector('[data-control="settings"]').addEventListener("click", () => {
+        state.panel = state.panel === "settings" ? null : "settings";
+        state.switcher = false;
+        render();
+      });
+
+      for (const view of ["files", "search", "changes", "history"]) {
+        document.querySelector(`[data-files-view="${view}"]`).addEventListener("click", () => {
+          state.filesView = view;
+          state.switcher = false;
+          render();
+        });
+      }
+
+      document.querySelector("[data-workspace-switcher-toggle]").addEventListener("click", () => {
+        state.switcher = !state.switcher;
+        state.panel = null;
+        render();
+      });
+
+      document.querySelectorAll("[data-worktree]").forEach(option => {
+        option.addEventListener("click", () => {
+          state.worktree = option.dataset.worktree;
+          state.switcher = false;
+          render();
+        });
+      });
+
+      document.querySelectorAll("[data-compare-target]").forEach(button => {
+        button.addEventListener("click", () => {
+          state.compareTargets[state.worktree] = button.dataset.compareTarget;
+          render();
+        });
+      });
+
+      document.querySelector("[data-docs-only]").addEventListener("click", () => {
+        state.docsOnly = !state.docsOnly;
+        render();
+      });
+
+      document.querySelector("[data-settings-close]").addEventListener("click", () => {
+        state.panel = null;
+        render();
+      });
+
+      render();
+    })();
+  </script>
+</body>
+</html>
