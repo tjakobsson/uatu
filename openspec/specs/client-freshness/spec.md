@@ -1,7 +1,7 @@
 # client-freshness Specification
 
 ## Purpose
-TBD - created by archiving change cache-discipline. Update Purpose after archive.
+Ensure web clients load current, compatible assets through immutable content-hashed bundles, non-cached HTML entry points, and build-identity verification with bounded reload recovery.
 ## Requirements
 ### Requirement: Bundle assets are content-hashed and immutable
 The server SHALL serve every SPA bundle asset (bundler-emitted JavaScript, CSS, and font files) under a URL containing a content hash, with `Cache-Control: public, max-age=31536000, immutable`. The HTML shell SHALL reference bundle assets only through such hashed URLs, so that a new build's shell can never resolve to a previous build's cached asset. Fixed-name auxiliary assets (icons, the web-app manifest) MAY keep moderate cache lifetimes since their content is not build-coupled.

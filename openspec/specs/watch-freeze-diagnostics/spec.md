@@ -1,7 +1,7 @@
 # watch-freeze-diagnostics Specification
 
 ## Purpose
-TBD - created by archiving change add-watch-freeze-diagnostics. Update Purpose after archive.
+Detect and recover from wedged watch processes through suspend-safe heartbeat monitoring, bounded forensic capture, diagnostic counters, force termination, and self-pruning XDG cache storage.
 ## Requirements
 ### Requirement: Watchdog subprocess detects and recovers from a wedged uatu watch
 A `uatu watch` process SHALL spawn a sibling watchdog subprocess at startup. The main process MUST refresh a heartbeat file mtime at least once per second. The watchdog MUST stat the heartbeat file at least once per second and MUST treat the heartbeat as stale only when its mtime has not advanced across a number of consecutive watchdog ticks equivalent to the configured staleness threshold (default 30 seconds of observed ticks). Staleness MUST NOT be derived from comparing the heartbeat mtime against wall-clock time: ticks accumulate only while the watchdog itself is running, so a system suspend/resume cycle — during which both processes are frozen and wall-clock time advances — MUST NOT count toward staleness. When the heartbeat goes stale, the watchdog MUST capture a forensic dump bundle (see "Forensic dump bundle" below) and then SHALL force-terminate the main process with `SIGKILL`. The watchdog MUST exit cleanly when the main process is no longer reachable, regardless of cause. The watchdog MUST be a single re-execution of the same uatu binary (no separate executable, no new runtime dependency).
@@ -166,4 +166,3 @@ The `cause.json` file in the forensic dump bundle SHALL include, alongside the e
 #### Scenario: Cause file distinguishes hang from clock jump
 - **WHEN** the watchdog kills the main process after a genuine hang
 - **THEN** `cause.json` reports `reason: "stale-heartbeat"`, the heartbeat age, and a stale-tick count consistent with the configured threshold
-

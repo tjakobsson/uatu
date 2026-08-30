@@ -1,7 +1,7 @@
 # system-theme Specification
 
 ## Purpose
-TBD - created by archiving change add-system-theme. Update Purpose after archive.
+Make the application follow live system light and dark preferences across UI, document, Mermaid, tree, browser-chrome, and native-host surfaces while keeping the terminal dark.
 ## Requirements
 ### Requirement: The app follows the system color scheme
 The application SHALL render in a light or dark theme matching the operating
@@ -72,4 +72,3 @@ SHALL be the dark chrome background.
 - **THEN** the document's effective `theme-color` changes to the dark chrome
   background value
 - **AND** changing back restores the brand navy light value
-

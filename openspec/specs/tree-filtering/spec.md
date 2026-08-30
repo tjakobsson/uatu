@@ -1,7 +1,7 @@
 # tree-filtering Specification
 
 ## Purpose
-TBD - created by syncing change replace-tree-with-pierre. Update Purpose after archive.
+Apply built-in, `.gitignore`, and validated `.uatu.json` exclusion rules consistently across indexing, follow mode, and static serving while surfacing configuration warnings.
 ## Requirements
 ### Requirement: Apply built-in defaults that hide common build/dependency directories
 The system SHALL maintain a built-in set of default exclude patterns that are applied to every watched root regardless of project configuration. The defaults MUST cover at minimum the directory names `node_modules`, `.git`, `dist`, `build`, `.next`, `.turbo`, `.cache`, `coverage`, and `.DS_Store`. The defaults SHALL apply at any depth (matching the gitignore-compatible directory semantics). The defaults MUST NOT be silently extensible at runtime; changes to the default list are an intentional uatu decision and MUST be encoded in source. User patterns from `.uatu.json ignore.exclude` are additive on top of the defaults — i.e. user patterns can hide additional files, but the defaults always apply.
@@ -127,4 +127,3 @@ the file.
 #### Scenario: One problem is reported once
 - **WHEN** the watch root's `.uatu.json` is malformed JSON
 - **THEN** the session's config warnings contain exactly one parse warning for it, even though both the warning collector and the ignore engine read the file
-

@@ -1,7 +1,7 @@
 # document-tree Specification
 
 ## Purpose
-TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
+Provide a library-backed document tree with selection and reveal behavior, filtered path sets, file counts and icons, and repository-status annotations.
 ## Requirements
 ### Requirement: Preserve manual directory open/closed state in the document tree
 Directories in the sidebar tree SHALL render collapsed (closed) by default, matching the conventions of common file trees (VS Code, Finder, GitHub). When a user expands or collapses a directory, that explicit choice SHALL persist across document selections and across sidebar re-renders triggered by file changes — including filesystem-driven `resetPaths` calls into the library. When the active document changes (initial default, follow-mode auto-switch, or user click), the system SHALL reveal the path to that document by expanding every ancestor directory between the watched root and the document, then marking that document's row as selected. The reveal MUST be purely additive — it opens ancestors but never closes any directory the user has opened. The session-level expansion state MAY reset on page reload.
@@ -191,4 +191,3 @@ When the watched repository is git-backed AND the repository change data for tha
 - **WHEN** the watched root is git-backed AND uatu's tree displays a file that matches git's standard ignore rules (e.g. excluded by `core.excludesFile` or by `.gitignore` while gitignore-respect is disabled)
 - **THEN** that file's tree row shows the `ignored` annotation
 - **AND** the row is visually distinguishable from a clean tracked file (which has no annotation) and from an untracked file (which has the `untracked` annotation)
-

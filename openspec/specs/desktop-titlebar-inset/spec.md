@@ -1,7 +1,7 @@
 # desktop-titlebar-inset Specification
 
 ## Purpose
-TBD - created by archiving change add-desktop-glass-titlebar. Update Purpose after archive.
+Coordinate the desktop wrapper's native titlebar inset with SPA layout and selective glass effects so interactive chrome remains visible while eligible scrolling content frosts beneath it.
 ## Requirements
 ### Requirement: The wrapper announces a titlebar inset to the SPA
 The desktop wrapper SHALL announce to the hosted page that native chrome
