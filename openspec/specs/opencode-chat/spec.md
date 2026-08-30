@@ -330,7 +330,7 @@ A history snapshot SHALL identify a stream cursor; reconnecting from a retained 
 - **THEN** the timeline reflects the revert rather than continuing to present the reverted work as though it still applies
 
 ### Requirement: Chat presents turns as readable conversation with inspectable activity
-The web Chat surface SHALL render user prompts and streamed assistant Markdown as the primary conversation, with safe code rendering consistent with UatuCode's existing rendering posture. Reasoning, tool calls, command execution, file changes, and tool results SHALL be represented as subordinate, inspectable activity with running, completed, failed, and cancelled states rather than flattened into assistant prose. While a tool runs, its output SHALL be shown as it streams rather than only on completion, so a long-running tool shows progress. A finished tool's output SHALL be bounded — presented as a summary and a bounded preview with a way to see the rest — rather than shown whole or hidden whole. Untrusted Markdown, tool output, filenames, and errors MUST NOT create active markup or script execution.
+The web Chat surface SHALL render user prompts and streamed assistant Markdown as the primary conversation, with safe code rendering consistent with UatuCode's existing rendering posture. Reasoning, tool calls, command execution, file changes, and tool results SHALL be represented as subordinate, inspectable activity with running, completed, failed, and cancelled states rather than flattened into assistant prose. While a tool or command runs, its output SHALL be shown as it streams rather than only on completion, so long-running activity shows progress. A finished tool or command's output SHALL be bounded - presented as a summary and a bounded preview with a way to see the rest - rather than shown whole or hidden whole. A command that completes before the surface renders a running update MUST still retain inspectable output and its provider-reported completion or failure state. Untrusted Markdown, tool output, filenames, and errors MUST NOT create active markup or script execution.
 
 #### Scenario: Assistant answer remains visually primary
 - **WHEN** a turn contains assistant text interleaved with multiple tool calls
@@ -346,11 +346,26 @@ The web Chat surface SHALL render user prompts and streamed assistant Markdown a
 - **THEN** the surface shows that output as it arrives
 - **AND** it updates the tool's existing entry in place
 
+#### Scenario: A running shell command shows its output as it streams
+- **WHEN** the agent reports rolling output for a running shell command
+- **THEN** the command entry shows the latest output without waiting for completion
+- **AND** later output updates the same command entry
+
+#### Scenario: A fast command retains its completed output
+- **WHEN** a shell command completes before the client observes a running update
+- **THEN** its completed output remains inspectable from the command entry
+- **AND** the entry reports the provider's completed or failed outcome
+
 #### Scenario: A finished tool's output is bounded with a way to see the rest
 - **WHEN** a completed tool produced more output than the bounded preview shows
 - **THEN** the entry shows a summary and a bounded preview
 - **AND** offers a way to see the full output
 - **AND** does not render the whole output by default
+
+#### Scenario: A finished command's output is bounded with a way to see the rest
+- **WHEN** a completed shell command produced more output than the bounded preview shows
+- **THEN** the command entry shows a bounded preview
+- **AND** offers a way to see the full output
 
 #### Scenario: Hostile content remains inert
 - **WHEN** assistant Markdown or tool output contains script-capable markup or a JavaScript URL
@@ -360,6 +375,8 @@ The web Chat surface SHALL render user prompts and streamed assistant Markdown a
 An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the approval and rejection choices OpenCode supports for it: approving the single occurrence, approving persistently, and rejecting. Where a permission would change a file, the request SHALL show what it would change — the pending diff — where the choice is made, so the user sees the change before allowing it. A permission with nothing to show a diff for is unaffected. A structured OpenCode question SHALL render its prompt, options, multi-selection behavior, and free-form response when supported. A resolved request SHALL become non-interactive and record its outcome. A resolved request SHALL also recede: its outcome stays legible where the request was raised, but it MUST NOT keep the footprint it held while it needed an answer, and what it named SHALL stay reachable from the receded form. Submitting a response more than once MUST NOT produce multiple provider replies.
 
 A request raised by a subagent SHALL additionally appear in the conversation that launched that subagent, and SHALL be answerable there. The subagent's own conversation remains the single owner of the request: an answer given from the launching conversation SHALL be directed to the owning conversation, so exactly one response reaches OpenCode however many places the request was shown. Resolving it SHALL resolve it everywhere it appears.
+
+When a subagent-owned request appears outside its owning transcript, the request SHALL identify the specific launching subagent from the best available structured attribution and SHALL offer direct navigation to the owning transcript. If the specific attribution has not arrived or cannot be resolved, the request MUST use a truthful generic subagent label rather than inventing an identity, while retaining transcript navigation whenever the agent supports subagent transcripts. The origin and transcript control SHALL remain available after resolution so the decision can be audited. A conversation's own requests MUST NOT be labeled as coming from a subagent.
 
 Only the active unresolved request of a given conversation MAY accept a response. Where requests from more than one conversation are shown together, they SHALL each be governed by the conversation that owns them, so a request awaiting a user in one conversation does not block answering a request owned by another.
 
@@ -395,6 +412,25 @@ A pending request SHALL remain discoverable and answerable even when the server 
 - **WHEN** a subagent raises a permission request while its parent conversation is open
 - **THEN** the request appears in the parent conversation
 - **AND** it is answerable there without first opening the subagent's transcript
+
+#### Scenario: A surfaced request identifies its subagent and opens its transcript
+- **WHEN** a subagent-owned permission or question appears in its launching conversation and structured attribution is available
+- **THEN** the request identifies that subagent
+- **AND** offers a direct control that opens the owning transcript without changing the selected parent conversation
+
+#### Scenario: Missing attribution uses a truthful fallback
+- **WHEN** a subagent-owned request appears before its specific attribution can be resolved
+- **THEN** the request states that it came from a subagent without inventing a name or description
+- **AND** still offers transcript navigation when subagent transcripts are supported
+
+#### Scenario: Request provenance remains auditable after resolution
+- **WHEN** a surfaced subagent request has been answered
+- **THEN** its receded form retains the subagent origin and transcript control
+
+#### Scenario: A conversation's own request has no foreign origin
+- **WHEN** a permission or question belongs to the conversation currently being shown
+- **THEN** it is not labeled as a subagent request
+- **AND** no redundant transcript control is added to it
 
 #### Scenario: Answering a subagent's request from the parent replies once
 - **WHEN** the user answers a subagent's request from the parent conversation
@@ -453,6 +489,133 @@ A pending request SHALL remain discoverable and answerable even when the server 
 #### Scenario: Reconciliation failure preserves what is already shown
 - **WHEN** the server cannot read OpenCode's pending set while loading a conversation
 - **THEN** requests already known to the conversation remain visible and answerable
+
+### Requirement: Chat supports reversible conversation undo and redo
+When the connected agent declares reversible-history support, Chat SHALL offer local `/undo` and `/redo` commands that operate on the selected conversation and MUST NOT send those command strings as ordinary prompts or provider-defined slash commands. Each visible user turn in the main transcript SHALL also offer a direct Revert message action. Undo SHALL stage the previous visible user turn as the conversation's revert boundary; direct Revert SHALL stage the selected visible user turn in one boundary mutation rather than repeated Undo mutations. Both SHALL hide the boundary turn and all later work from the current transcript and restore affected workspace files through the agent's revert operation. The invoking client SHALL receive the boundary turn's non-synthetic prompt text and any still-available attachments as an editable composer draft; other clients' private drafts MUST NOT be overwritten.
+
+If work is running, Undo SHALL interrupt it before changing the boundary. Messages queued behind that work MUST NOT be admitted between interruption and the completed revert. Existing queued messages SHALL remain visible and removable but paused while a revert is staged; they SHALL resume only after Redo clears the revert or after the user submits a replacement prompt, with that replacement admitted before the older queue resumes.
+
+Repeated Undo SHALL move the boundary backward one visible user turn at a time. While a boundary is staged, Chat SHALL list the hidden user turns from the boundary onward and offer a Restore message action for each. Redo SHALL move forward one hidden user turn at a time. Restoring a selected hidden turn SHALL make history current through that turn in one mutation by staging the following hidden user turn, or SHALL clear the boundary when the selected turn is newest. The invoking client's composer SHALL receive the next boundary turn when one remains and SHALL clear when the original transcript is fully restored. Submitting a replacement prompt while a revert is staged SHALL commit the reverted history before starting the replacement turn, after which the hidden turns can no longer be restored by Redo or Restore.
+
+Every successful boundary change SHALL reconcile the authoritative conversation so all connected clients agree on visible history and workspace state. Mutation retries MUST be idempotent. If interruption or the requested boundary change fails, Chat SHALL report the failure and MUST NOT claim that history or files changed.
+
+#### Scenario: Undo and redo are offered only when supported
+- **WHEN** the connected agent declares reversible-history support
+- **THEN** Chat offers `/undo` and `/redo` as local commands
+- **AND** invoking them does not send their text as an ordinary prompt or provider-defined command
+
+#### Scenario: Unsupported agents do not expose reversible history
+- **WHEN** the connected agent does not declare reversible-history support
+- **THEN** Chat does not offer Undo or Redo controls
+- **AND** a direct request to mutate the revert boundary is refused without changing the conversation
+
+#### Scenario: Undo restores the latest user turn for editing
+- **WHEN** the user invokes Undo with no revert currently staged
+- **THEN** the latest visible user turn and all later work disappear from the visible transcript
+- **AND** affected workspace files return to their state before that turn
+- **AND** the invoking client's composer receives the turn's non-synthetic text and available attachments
+
+#### Scenario: A selected visible message becomes the boundary directly
+- **WHEN** the user invokes Revert message on an earlier visible user turn
+- **THEN** that selected turn and every later turn disappear from the visible transcript
+- **AND** the agent receives one revert operation naming the selected turn
+- **AND** the invoking client's composer receives the selected turn for editing
+
+#### Scenario: Undo interrupts active work before reverting
+- **WHEN** the user invokes Undo while the selected conversation is running
+- **THEN** the active turn is interrupted before the revert boundary changes
+- **AND** no queued message is admitted during that transition
+
+#### Scenario: Queued messages pause behind a staged revert
+- **WHEN** Undo succeeds while messages are queued
+- **THEN** the queued messages remain visible and removable
+- **AND** none is delivered while the revert remains staged
+
+#### Scenario: Repeated Undo walks backward by user turn
+- **WHEN** a revert is staged and the user invokes Undo again
+- **THEN** the boundary moves to the preceding visible user turn
+- **AND** the invoking client's composer receives that earlier turn for editing
+
+#### Scenario: Redo walks forward through hidden turns
+- **WHEN** more than one user turn is hidden behind a staged revert and the user invokes Redo
+- **THEN** the boundary advances to the next hidden user turn
+- **AND** that turn becomes the invoking client's editable composer draft
+
+#### Scenario: Redo clears the newest boundary
+- **WHEN** the boundary is at the newest hidden user turn and the user invokes Redo
+- **THEN** the staged revert is cleared
+- **AND** the original transcript and workspace state become current again
+- **AND** paused queued messages may resume
+
+#### Scenario: Reverted messages remain visible in a restore dock
+- **WHEN** a revert boundary is staged
+- **THEN** Chat lists every hidden user turn from the boundary onward outside the active transcript
+- **AND** each listed turn offers a Restore message action
+- **AND** every connected client sees the same list without losing its private composer draft
+
+#### Scenario: Restore advances through the selected hidden message
+- **WHEN** the user restores a hidden user turn that has later hidden turns
+- **THEN** the boundary advances to the following hidden user turn in one mutation
+- **AND** the selected turn and its prior history return to the active transcript
+- **AND** the invoking client's composer receives the following boundary turn
+
+#### Scenario: Restoring the newest hidden message clears the boundary
+- **WHEN** the user restores the newest hidden user turn
+- **THEN** the staged revert is cleared
+- **AND** the original transcript and workspace state become current again
+- **AND** the invoking client's restored composer draft is cleared
+
+#### Scenario: A replacement prompt commits the reverted branch
+- **WHEN** the user edits the restored draft and submits it while a revert is staged
+- **THEN** the hidden history is committed as reverted before the replacement turn starts
+- **AND** the replacement is admitted before previously queued messages resume
+- **AND** Redo no longer restores the discarded branch
+
+#### Scenario: Other clients reconcile without losing private drafts
+- **WHEN** one client successfully changes the revert boundary
+- **THEN** every connected client reconciles to the same visible conversation and workspace state
+- **AND** only the invoking client's composer draft is replaced
+
+#### Scenario: Retried undo does not move twice
+- **WHEN** a client retries the same Undo mutation after losing its response
+- **THEN** the conversation boundary changes at most once for that request
+
+#### Scenario: Failed undo preserves current state
+- **WHEN** interruption or the agent's revert operation fails
+- **THEN** Chat reports the failure
+- **AND** does not claim that the transcript, composer, queue, or workspace files were reverted
+
+#### Scenario: Undo at the oldest boundary is harmless
+- **WHEN** no earlier visible user turn exists and the user invokes Undo
+- **THEN** Chat reports that there is nothing more to undo
+- **AND** the current revert boundary and workspace state do not change
+
+#### Scenario: Redo without a staged revert is harmless
+- **WHEN** no revert is staged and the user invokes Redo
+- **THEN** Chat reports that there is nothing to redo
+- **AND** the conversation and workspace state do not change
+
+### Requirement: Chat discovers commands by meaningful name fragments
+Slash-command suggestions SHALL match command names case-insensitively by exact name, whole-name prefix, segment prefix, contiguous substring, and ordered subsequence, in that priority order. Matching SHALL affect discovery only; Chat MUST still insert and submit the command's actual complete name. Equal-quality suggestions SHALL have deterministic ordering.
+
+#### Scenario: A command is found by a later name segment
+- **WHEN** the user enters `/archive`
+- **AND** the agent offers `/openspec-archive-change`
+- **THEN** that command appears in the suggestion list
+- **AND** choosing it inserts `/openspec-archive-change` rather than the query text
+
+#### Scenario: Stronger command matches rank first
+- **WHEN** exact, prefix, segment, substring, and subsequence matches exist for a query
+- **THEN** they appear in that order
+- **AND** unrelated commands are omitted
+
+### Requirement: Chat separates identity from conversation controls
+The Chat header SHALL place workspace and agent identity on its own row above the conversation selector and actions in desktop and touch layouts. Conversation controls SHALL remain usable without competing with identity text at the minimum supported panel width.
+
+#### Scenario: Desktop Chat uses an uncrowded two-row header
+- **WHEN** Chat is open in the desktop side panel
+- **THEN** workspace and agent identity occupy a row above the conversation controls
+- **AND** the conversation selector and actions remain within the header width
 
 ### Requirement: Structured questions follow OpenCode custom-answer semantics
 For every structured question, Chat SHALL support a custom answer unless OpenCode explicitly reports `custom === false`. An omitted `custom` value MUST enable custom answers for both live question announcements and pending questions recovered from OpenCode. An explicit false value MUST suppress the custom-answer choice.
