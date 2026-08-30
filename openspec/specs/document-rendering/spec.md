@@ -1,7 +1,7 @@
 # document-rendering Specification
 
 ## Purpose
-TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
+Render Markdown, AsciiDoc, and text files safely with GitHub-style presentation, syntax highlighting, code affordances, metadata extraction, and sticky-header-safe anchor navigation.
 ## Requirements
 ### Requirement: Preserve document rendering behavior while benchmarking
 Document render benchmarks SHALL measure existing rendering behavior without changing the rendered HTML, metadata extraction, source-view behavior, or safety guarantees defined by document rendering requirements.
@@ -254,4 +254,3 @@ The preview stylesheet MUST reserve a top inset sufficient to clear the sticky p
 - **WHEN** a reader clicks an inter-document cross-reference into a sibling document at a fragment whose id sits on a non-heading block nested in a deep section (e.g. `xref:other.adoc#block-id[…]`) and the in-app document load completes
 - **THEN** after the post-load scroll the resolved target block's top edge is at or below the bottom edge of the sticky preview header (plus a sub-pixel tolerance)
 - **AND** the target block's leading content is fully readable, not obscured by the frosted-glass band
-

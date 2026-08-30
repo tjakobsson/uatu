@@ -1,7 +1,7 @@
 # mermaid-rendering Specification
 
 ## Purpose
-TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
+Lazily render themed Mermaid blocks from Markdown and AsciiDoc with isolated error handling, cached SVG reuse, responsive inline sizing, and an accessible fullscreen pan-and-zoom viewer.
 ## Requirements
 ### Requirement: Render Mermaid diagrams from fenced code blocks
 The preview pane SHALL detect Markdown fenced code blocks whose info string is `mermaid` and AsciiDoc listings declared with either the `[source,mermaid]` style or the bare `[mermaid]` block style, and SHALL render those blocks as Mermaid diagrams in the browser instead of leaving them as plain code blocks. Rendering MAY be deferred until a block approaches the viewport (per the lazy-rendering requirement); once rendered, the result SHALL be identical to an eagerly rendered diagram. The bare `[mermaid]` block style SHALL be recognized on `listing` (`----`), `literal` (`....`), and `open` (`--`) block contexts, matching the surface of the upstream Asciidoctor Diagram extension. Each rendered diagram SHALL render at the size Mermaid emits (the library's diagram-specific intended display width, exposed via the SVG's inline `style="max-width: <Wpx>"`), capped at the available preview content width so the diagram does not overflow horizontally. The SVG SHALL be horizontally centered within the preview column. Detailed inspection (zoom, pan, full-canvas viewing) is provided by the fullscreen viewer modal — the inline preview honors Mermaid's library-chosen sizing rather than imposing uniform slot dimensions.

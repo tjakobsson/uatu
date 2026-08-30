@@ -1,7 +1,7 @@
 # document-metadata-card Specification
 
 ## Purpose
-TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
+Present sanitized, consistently normalized Markdown and AsciiDoc metadata above the document body while preserving unknown fields and omitting the card when metadata is absent.
 ## Requirements
 ### Requirement: Surface document metadata above the body
 The preview pane SHALL render extracted document-level metadata as a single, format-agnostic metadata card placed above the body of the rendered document. The card SHALL surface a curated set of fields — title, author(s), date, revision/version, description, tags/keywords, status — when those fields are present in the source. Format-specific keys MUST be normalized so that the card looks consistent regardless of whether the source was Markdown YAML/TOML frontmatter or AsciiDoc header attributes (for example, AsciiDoc `:keywords:` MUST surface in the same `tags` row that Markdown `tags` populates; AsciiDoc `:revnumber:` MUST surface in the same `revision` row that Markdown `version` populates). Fields that are not part of the curated set MUST still render — visually subdued — as a generic key/value list so that the curated fields stand out. Every metadata value reaching the DOM MUST be HTML-escaped or passed through the same GitHub-modeled sanitize allowlist used for body HTML, so a metadata value containing `<script>`, `<iframe>`, an inline event handler, or a `javascript:` URL MUST NOT execute. The card MUST be omitted entirely when no metadata is present so documents without frontmatter or AsciiDoc header metadata render unchanged. The card MUST be available regardless of source format: a Markdown document with YAML frontmatter and an AsciiDoc document with equivalent header attributes MUST produce the same card shape.
@@ -30,4 +30,3 @@ The preview pane SHALL render extracted document-level metadata as a single, for
 - **WHEN** a metadata value contains `<script>alert(1)</script>`, an `onerror=` attribute, an `<iframe>`, or a `javascript:` URL
 - **THEN** no executable script or active-content element is added to the preview DOM
 - **AND** the offending content is rendered as escaped text or stripped, matching the body-HTML sanitize posture
-

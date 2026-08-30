@@ -1,7 +1,7 @@
 # personal-workspace-state Specification
 
 ## Purpose
-TBD - define durable semantic workspace state shared across a user's clients while preserving independent open-client behavior.
+Persist validated semantic workspace state per user while keeping open clients independently navigable, request scope explicit, and physical presentation local to each client.
 
 ## Requirements
 

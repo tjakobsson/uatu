@@ -1,7 +1,7 @@
 # sidebar-shell Specification
 
 ## Purpose
-TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
+Provide a persistent, resizable sidebar shell whose independently scrolling panes expose files, search, repository context, commit history, connection status, and application controls without disrupting focus or preview navigation.
 
 Throughout this spec, "phone-class viewport" means a viewport that is BOTH
 coarse-pointer (`pointer: coarse`) AND narrower than the 900-pixel stacked-layout
@@ -342,4 +342,3 @@ The browser UI SHALL render repository and change-context data in the `Change Ov
 - **WHEN** the changed-files list received by the browser contains no entries with the untracked status
 - **THEN** the `Change Overview` pane does NOT render the untracked categorical indicator
 - **AND** the pane shows no placeholder, empty row, or "0 untracked" affordance for that category
-

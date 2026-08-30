@@ -1,7 +1,7 @@
 # touch-navigation Specification
 
 ## Purpose
-TBD - created by syncing change touch-tab-navigation. Update Purpose after archive.
+Provide a persistent per-device touch layout with full-screen Files, Preview, Chat, and Terminal tabs, live desktop-mode switching, and intent-driven surface navigation without disrupting background state.
 
 Throughout this spec, "touch mode" and "desktop mode" are the two values of the
 per-device UI mode; "wide viewport" means at or above the 900-pixel breakpoint that

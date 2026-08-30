@@ -1,7 +1,7 @@
 # document-watch-index Specification
 
 ## Purpose
-TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
+Securely index, classify, serve, and continuously refresh allowed files under watched roots while supporting live previews, follow mode, binary handling, and configurable ignore rules.
 ## Requirements
 ### Requirement: Browse supported documents from watched roots
 The browser UI SHALL display a sidebar tree grouped by watched root. The tree SHALL list every file accepted by the ignore and exposure filters under each root, recursively. Files classified as Markdown, AsciiDoc, or as viewable text SHALL render as clickable entries that can become the active preview. Files classified as binary SHALL render as clickable entries: clicking a binary entry MUST route the preview to the existing "preview unavailable" view rather than rendering binary contents. Files matching the hardcoded directory denylist, default-denied secret patterns, hardcoded ignored names, `.uatu.json ignore.exclude` patterns, or active `.gitignore` rules MUST NOT appear in the sidebar. The preview pane SHALL render the currently selected non-binary file: Markdown files through the Markdown pipeline, AsciiDoc files through the AsciiDoc pipeline, other text files through the syntax-highlighted code render path.

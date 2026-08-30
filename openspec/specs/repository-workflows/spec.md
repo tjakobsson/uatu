@@ -1,7 +1,7 @@
 # repository-workflows Specification
 
 ## Purpose
-TBD - created by archiving change add-github-ci-and-readme. Update Purpose after archive.
+Define documented, reproducible, secure repository workflows for contribution, validation, dependency maintenance, testing, and releases without adding test tooling to the shipped runtime.
 ## Requirements
 ### Requirement: Repository README documents project usage and validation
 The repository SHALL provide a root `README.md` that explains what `uatu` is, how users install and run the application, and where contributors can find the canonical contribution guide. Detailed branch, OpenSpec, validation, and release procedures MUST live in `CONTRIBUTING.md` and `docs/RELEASING.md` rather than expanding the user-facing README.
