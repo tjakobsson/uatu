@@ -1134,7 +1134,7 @@ export class ClaudeProvider implements ChatProvider {
           kind: "command" as const,
         }];
       });
-      if (commands.length > 0) this.commands = commands;
+      this.commands = commands;
     } catch {
       // Init's bare names (captureCommands) remain the fallback.
     }
@@ -1161,7 +1161,9 @@ export class ClaudeProvider implements ChatProvider {
           kind: "command" as const,
         }];
       });
-      if (commands.length > 0) this.commands = commands;
+      // An empty replacement is a valid inventory — the last workspace
+      // command may just have been removed.
+      this.commands = commands;
       return;
     }
     if (record.subtype !== "init" || !Array.isArray(record.slash_commands)) return;

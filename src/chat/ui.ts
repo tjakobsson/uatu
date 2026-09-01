@@ -1685,6 +1685,10 @@ export function initChat(api = new ChatApiClient()): void {
       const snapshot = await api.snapshot(id);
       if (token !== selectionGeneration) return false;
       installConversationSnapshot(snapshot, acceptedDrafts, token);
+      // The selection is settled; a ready agent stops polling, so this is
+      // the moment mid-session command discoveries reach the completion
+      // menu (background, after the chooser is done).
+      refreshBankedCommands(conversationAgentId(id));
       return true;
     } catch (error) {
       if (token === selectionGeneration) announce(messageOf(error), true);
@@ -3046,6 +3050,24 @@ export function initChat(api = new ChatApiClient()): void {
    * Gated on an actual selection so an untouched idle agent is never polled.
    */
   let statusRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  // The banked command inventory is the one catalog that changes
+  // mid-session (agents discover skills; Claude pushes commands_changed).
+  // Refreshed in the background from the idle poll and after a conversation
+  // selection settles — never inside the selection or creation path itself,
+  // where an in-flight read has raced the chooser before.
+  const refreshBankedCommands = (agentId: string | undefined) => {
+    if (!agentId) return;
+    const banked = agentCatalogs.get(agentId);
+    if (!banked) return;
+    if (!(agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history"))) return;
+    void api.commands(agentId).then(list => {
+      if (agentCatalogs.get(agentId) !== banked) return;
+      banked.commands = list;
+      banked.commandInventoryAvailable = true;
+      if (contextAgentId === agentId) commands = list;
+    }).catch(() => undefined);
+  };
+
   const refreshIdleAgentContext = () => {
     if (statusRefreshTimer !== null) return;
     statusRefreshTimer = setTimeout(async () => {
@@ -3059,19 +3081,7 @@ export function initChat(api = new ChatApiClient()): void {
       }
       if (contextAgentId !== watching) return;
       await applyAgentContext(watching);
-      // The banked command inventory is the one catalog that changes
-      // mid-session (agents discover skills; Claude pushes
-      // commands_changed). The idle poll is the refresh point — off the
-      // critical path of creation and selection.
-      const banked = agentCatalogs.get(watching);
-      if (banked && (agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history"))) {
-        void api.commands(watching).then(list => {
-          if (agentCatalogs.get(watching) !== banked) return;
-          banked.commands = list;
-          banked.commandInventoryAvailable = true;
-          if (contextAgentId === watching) commands = list;
-        }).catch(() => undefined);
-      }
+      refreshBankedCommands(watching);
       const state = agentStatusFor(watching)?.availability.state;
       if (state === "idle" || state === "starting") refreshIdleAgentContext();
     }, 1_500);
