@@ -739,10 +739,10 @@ export class ClaudeProvider implements ChatProvider {
     this.live.set(sessionId, session);
     // Fire-and-forget: the catalog answers when the session is up, and a
     // failure just leaves the manifest fallback in place until the next one.
-    if (this.liveModels === null) void this.captureModels(query);
-    // Commands can change mid-session (skills discovered as the agent
-    // works); every session start re-reads the latest list.
-    else void this.captureSlashCommands(query);
+    // Catalogs change under a running workspace — a CLI update ships new
+    // models, skills appear mid-session — so every session start re-reads
+    // both (captureModels also refreshes the command inventory).
+    void this.captureModels(query);
     return session;
   }
 
@@ -1302,6 +1302,7 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
       ...(variants && variants.length > 0 ? { variants } : {}),
       ...(typeof info.description === "string" && info.description ? { detail: info.description } : {}),
       ...(isDefault ? { default: true } : {}),
+      ...(resolvedModel && resolvedModel !== info.value ? { resolvesTo: { providerId: "anthropic", modelId: resolvedModel } } : {}),
       // No ModelInfo field carries the window; derive it from the ids
       // unless the CLI starts reporting one.
       contextLimit: typeof info.contextWindow === "number" && info.contextWindow > 0

@@ -3059,13 +3059,26 @@ export function initChat(api = new ChatApiClient()): void {
     if (!agentId) return;
     const banked = agentCatalogs.get(agentId);
     if (!banked) return;
-    if (!(agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history"))) return;
-    void api.commands(agentId).then(list => {
-      if (agentCatalogs.get(agentId) !== banked) return;
-      banked.commands = list;
-      banked.commandInventoryAvailable = true;
-      if (contextAgentId === agentId) commands = list;
-    }).catch(() => undefined);
+    if (agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history")) {
+      void api.commands(agentId).then(list => {
+        if (agentCatalogs.get(agentId) !== banked) return;
+        banked.commands = list;
+        banked.commandInventoryAvailable = true;
+        if (contextAgentId === agentId) commands = list;
+      }).catch(() => undefined);
+    }
+    // Models change under a running page too — a Claude Code update ships
+    // new entries — so the banked model list refreshes on the same cadence.
+    if (agent?.capabilities.includes("models")) {
+      void api.models(agentId).then(list => {
+        if (agentCatalogs.get(agentId) !== banked || list.length === 0) return;
+        banked.models = list;
+        if (contextAgentId === agentId) {
+          models = list;
+          renderConfiguration();
+        }
+      }).catch(() => undefined);
+    }
   };
 
   const refreshIdleAgentContext = () => {

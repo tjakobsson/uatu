@@ -236,6 +236,7 @@ export function createChatConfigurationPicker(
     selected: boolean,
     disabled: boolean,
     onSelect?: () => void,
+    title?: string,
   ): HTMLButtonElement => {
     const button = elements.dialog.ownerDocument.createElement("button");
     button.type = "button";
@@ -258,6 +259,8 @@ export function createChatConfigurationPicker(
       button.append(marker);
     }
     button.setAttribute("aria-label", [primary, secondary, selected ? "selected" : ""].filter(Boolean).join(", "));
+    if (title) button.title = title;
+    if (title) button.title = title;
     if (onSelect) button.addEventListener("click", onSelect);
     return button;
   };
@@ -387,6 +390,7 @@ export function createChatConfigurationPicker(
             if (hadVariant) callbacks.onVariant(undefined);
             renderModels();
           },
+          model.resolvesTo ? `${model.selection.providerId}/${model.selection.modelId} → ${model.resolvesTo.modelId}` : `${model.selection.providerId}/${model.selection.modelId}`,
         ));
       }
       elements.models.append(section);
