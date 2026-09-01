@@ -540,7 +540,7 @@ export class ClaudeProvider implements ChatProvider {
       // The failed prompt's model/mode selection was never accepted: the
       // configuration (and a surviving session's live controls) return to
       // what the conversation actually ran.
-      if (input.model || input.mode !== undefined) {
+      if (input.model || input.mode !== undefined || input.variant !== undefined) {
         if (configurationBefore === undefined) this.configurations.delete(sessionId);
         else this.configurations.set(sessionId, configurationBefore);
         if (modeBeforePlanBefore === undefined) this.modeBeforePlan.delete(sessionId);
@@ -549,7 +549,13 @@ export class ClaudeProvider implements ChatProvider {
         if (survivor) {
           const priorModel = configurationBefore?.model?.modelId;
           if (input.model) await survivor.query.setModel?.(priorModel === undefined || priorModel === "default" ? undefined : priorModel).catch(() => undefined);
-          if (input.mode !== undefined && configurationBefore?.mode) await survivor.query.setPermissionMode?.(configurationBefore.mode).catch(() => undefined);
+          // Unset resolves to the declared default (auto) — the mode the
+          // session actually runs — not "leave whatever the failed request
+          // applied".
+          if (input.mode !== undefined) await survivor.query.setPermissionMode?.(configurationBefore?.mode ?? "auto").catch(() => undefined);
+          if (input.variant !== undefined || input.model) {
+            await survivor.query.applyFlagSettings?.({ effortLevel: configurationBefore?.variant ?? null }).catch(() => undefined);
+          }
         }
         this.persistDurableState();
       }
@@ -996,10 +1002,23 @@ export class ClaudeProvider implements ChatProvider {
     const replacement = lastVisible
       ? (await this.forkSession(previousNative, { upToMessageId: lastVisible.uuid, dir: this.workspacePath })).sessionId
       : randomUUID();
+    const nativeBefore = this.activeNative.get(sessionId);
+    const hadHidden = this.hiddenNative.has(replacement);
     this.activeNative.set(sessionId, replacement);
     this.hiddenNative.add(replacement);
     this.staged.delete(sessionId);
-    this.persistDurableState();
+    try {
+      // The redirect must be durable before the replacement is accepted —
+      // a lost record would reattach the public id to its pre-fork history
+      // while the continuation lands invisibly on the fork.
+      await this.queuePersist(this.durableSnapshot());
+    } catch (error) {
+      if (nativeBefore === undefined) this.activeNative.delete(sessionId);
+      else this.activeNative.set(sessionId, nativeBefore);
+      if (!hadHidden) this.hiddenNative.delete(replacement);
+      this.staged.set(sessionId, stagedState);
+      throw new ReversibleHistoryTargetError(`the revert could not be recorded (${error instanceof Error ? error.message : "write failed"}); the staged state was kept`);
+    }
     // The live session is bound to the pre-fork history; the next prompt
     // resumes the fork instead.
     const live = this.live.get(sessionId);

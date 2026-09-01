@@ -790,6 +790,52 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a commit whose record cannot be written keeps the staged state and refuses the prompt", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const marker = path.join(workspace, "marker.txt");
+    writeFileSync(marker, "tip");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"));
+    // Persistence works during the stage, then the state file's path is
+    // blocked before the commit.
+    const stateFile = path.join(workspace, "state-dir", "state.json");
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile,
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (_uuid, options) => {
+          if (!options?.dryRun) writeFileSync(marker, "rewound");
+          return { canRewind: true, filesChanged: [marker] };
+        };
+        return query;
+      },
+      forkSession: async () => ({ sessionId: forkId }),
+    });
+    await provider.undo!(storedId);
+    rmSync(path.join(workspace, "state-dir"), { recursive: true, force: true });
+    writeFileSync(path.join(workspace, "state-dir"), "not a directory");
+    await expect(provider.prompt(storedId, { id: "r2", text: "replacement", delivery: "queue" })).rejects.toThrow("could not be recorded");
+    // The staged revert survives: redo is still possible.
+    const state = await provider.getReversibleHistoryState!(storedId);
+    expect(state.staged).toBe(true);
+    expect(state.canRedo).toBe(true);
+    await provider.dispose();
+  });
+
   test("a failed prompt rolls its model and mode selection back", async () => {
     const { provider, queries } = fixture();
     const session = await provider.createSession("x");
@@ -803,7 +849,15 @@ describe("ClaudeProvider sessions", () => {
     })).rejects.toThrow();
     // Nothing the failed prompt selected sticks.
     expect(await provider.getConversationConfiguration(session.id)).toEqual(before);
-    void queries;
+    // The surviving session's live effort returned to the prior value too.
+    const applied: unknown[] = [];
+    queries[0]!.applyFlagSettings = async settings => { applied.push(settings); };
+    await expect(provider.prompt(session.id, {
+      id: "r3", text: "again", delivery: "queue",
+      model: { providerId: "anthropic", modelId: "claude-sonnet-5" }, variant: "max",
+      attachments: [{ id: "gone", name: "gone.png", mimeType: "image/png", absolutePath: "/nonexistent/gone.png" }],
+    })).rejects.toThrow();
+    expect(applied.at(-1)).toEqual({ effortLevel: null });
     await provider.dispose();
   });
 
