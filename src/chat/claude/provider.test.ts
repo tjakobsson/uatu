@@ -20,6 +20,7 @@ class FakeQuery implements ClaudeQueryHandle {
   rewindFiles?: (userMessageId: string, options?: { dryRun?: boolean }) => Promise<{ canRewind: boolean; error?: string; filesChanged?: string[] }>;
   supportedModels?: () => Promise<unknown>;
   supportedCommands?: () => Promise<unknown>;
+  applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
 
   constructor(readonly input: ClaudeQueryInput) {}
 
@@ -807,6 +808,76 @@ describe("ClaudeProvider sessions", () => {
       ],
     }));
     expect(page.items.some(item => item.type === "tool")).toBe(false);
+    await provider.dispose();
+  });
+
+  test("a deeper undo grows the tip snapshot: terminal redo restores every affected file", async () => {
+    const { queries, configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const fileA = path.join(workspace, "a.txt");
+    const fileB = path.join(workspace, "b.txt");
+    writeFileSync(fileA, "a-tip");
+    writeFileSync(fileB, "b-tip");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first prompt"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second prompt"),
+    ].join("\n"));
+
+    // Turn 1 changed A, turn 2 changed B: rewinding to u2 reverts B only,
+    // rewinding to u1 reverts both.
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (uuid, options) => {
+          const changed = uuid === "u2" ? [fileB] : [fileA, fileB];
+          if (!options?.dryRun) {
+            if (uuid === "u2") writeFileSync(fileB, "b-before-2");
+            else { writeFileSync(fileA, "a-before-1"); writeFileSync(fileB, "b-before-1"); }
+          }
+          return { canRewind: true, filesChanged: changed };
+        };
+        queries.push(query);
+        return query;
+      },
+    });
+
+    await provider.undo!(storedId);
+    expect(readFileSync(fileB, "utf8")).toBe("b-before-2");
+    // The deeper undo touches A for the first time — its tip bytes must be
+    // captured now, while the shallower rewind has left them alone.
+    await provider.undo!(storedId);
+    expect(readFileSync(fileA, "utf8")).toBe("a-before-1");
+    // Terminal redo: every turn returns and BOTH files carry tip bytes.
+    await provider.redo!(storedId);
+    const terminal = await provider.redo!(storedId);
+    expect(terminal.state.staged).toBe(false);
+    expect(readFileSync(fileA, "utf8")).toBe("a-tip");
+    expect(readFileSync(fileB, "utf8")).toBe("b-tip");
+    await provider.dispose();
+  });
+
+  test("an effort switch reaches the live session through the flag-settings control", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const applied: unknown[] = [];
+    queries[0]!.applyFlagSettings = async settings => { applied.push(settings); };
+    await provider.switchModel(session.id, { providerId: "anthropic", modelId: "claude-opus-5" }, "max");
+    expect(applied).toEqual([{ effortLevel: "max" }]);
+    // Clearing the variant clears the flag layer.
+    await provider.switchModel(session.id, { providerId: "anthropic", modelId: "claude-opus-5" });
+    expect(applied).toEqual([{ effortLevel: "max" }, { effortLevel: null }]);
+    // An unchanged effort is not re-sent.
+    await provider.switchModel(session.id, { providerId: "anthropic", modelId: "claude-sonnet-5" });
+    expect(applied).toHaveLength(2);
     await provider.dispose();
   });
 

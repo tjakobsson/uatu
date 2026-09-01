@@ -34,6 +34,7 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   interrupt(): Promise<unknown>;
   setPermissionMode?(mode: string): Promise<void>;
   setModel?(model?: string): Promise<void>;
+  applyFlagSettings?(settings: Record<string, unknown>): Promise<void>;
   supportedModels?(): Promise<unknown>;
   supportedCommands?(): Promise<unknown>;
   rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
@@ -280,9 +281,18 @@ export class ClaudeProvider implements ChatProvider {
     const configuration = { ...previous, model: selection, ...(variant ? { variant } : {}) };
     if (!variant) delete configuration.variant;
     this.configurations.set(sessionId, configuration);
+    const live = this.live.get(sessionId);
+    if (!live) return;
     // The "default" sentinel is the CLI's own pick on the live path too:
     // reset instead of sending an id session start deliberately omits.
-    await this.live.get(sessionId)?.query.setModel?.(selection.modelId === "default" ? undefined : selection.modelId);
+    await live.query.setModel?.(selection.modelId === "default" ? undefined : selection.modelId);
+    // Effort applies to the live session as well — `effort` at spawn only
+    // covers a fresh one. Clearing the variant clears the flag layer so
+    // lower-precedence settings resume. Best-effort: a CLI without the
+    // control keeps the documented next-session behavior.
+    if (variant !== previous?.variant) {
+      await live.query.applyFlagSettings?.({ effortLevel: variant ?? null }).catch(() => undefined);
+    }
   }
 
   async listSessions(): Promise<ProviderSession[]> {
@@ -742,11 +752,19 @@ export class ClaudeProvider implements ChatProvider {
     const session = await this.ensureLive(sessionId);
     if (!session.query.rewindFiles) throw new ReversibleHistoryTargetError();
     const existing = this.staged.get(sessionId);
-    let tipSnapshot = existing?.tipSnapshot;
-    if (!tipSnapshot) {
-      const preview = await session.query.rewindFiles(target.uuid, { dryRun: true });
-      if (!preview.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(preview.error));
-      tipSnapshot = await this.snapshotFiles(preview.filesChanged ?? []);
+    const preview = await session.query.rewindFiles(target.uuid, { dryRun: true });
+    if (!preview.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(preview.error));
+    // The snapshot grows as the boundary moves: a file enters it at the
+    // shallowest boundary that touches it — the moment its bytes are still
+    // the tip's, before any rewind reaches it. A deeper undo therefore
+    // adds files the earlier boundary never affected; files already
+    // captured keep their first (tip) bytes, so a later shallower preview
+    // cannot poison the snapshot with rewound content.
+    const tipSnapshot = existing?.tipSnapshot ?? new Map<string, string | null>();
+    for (const filePath of preview.filesChanged ?? []) {
+      const absolute = path.isAbsolute(filePath) ? filePath : path.join(this.workspacePath, filePath);
+      if (tipSnapshot.has(absolute)) continue;
+      tipSnapshot.set(absolute, await fs.readFile(absolute, "base64").catch(() => null));
     }
     const result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     if (!result.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
@@ -763,16 +781,6 @@ export class ClaudeProvider implements ChatProvider {
     await this.restoreSnapshot(stagedState.tipSnapshot);
     this.staged.delete(sessionId);
     return { outcome: "changed", state: reversibleState(context.turns, undefined) };
-  }
-
-  private async snapshotFiles(paths: string[]): Promise<Map<string, string | null>> {
-    const snapshot = new Map<string, string | null>();
-    for (const filePath of paths) {
-      const absolute = path.isAbsolute(filePath) ? filePath : path.join(this.workspacePath, filePath);
-      const content = await fs.readFile(absolute, "base64").catch(() => null);
-      snapshot.set(absolute, content);
-    }
-    return snapshot;
   }
 
   private async restoreSnapshot(snapshot: Map<string, string | null>): Promise<void> {
