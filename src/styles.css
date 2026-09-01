@@ -2383,6 +2383,12 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   left: calc(100% - 0.85rem - 0.15rem);
 }
 
+.icon-button[hidden] {
+  /* The capability gate hides via the attribute; the flex display below
+     must not override the UA's none. */
+  display: none;
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;

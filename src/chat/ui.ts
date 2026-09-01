@@ -330,11 +330,28 @@ export function initChat(api = new ChatApiClient()): void {
 
   // One status-line contract for every surface that has one; the parent's
   // state element and the drill-down's differ only in which element speaks.
-  const announcerFor = (target: HTMLElement | null) => (message: string, error = false) => {
-    if (!target) return;
-    target.textContent = message;
-    target.classList.toggle("is-error", error);
-    target.hidden = !message;
+  const announcerFor = (target: HTMLElement | null) => {
+    // The message lives in its own leading text node: an announcement must
+    // not level appended children (the takeover renders one diagnosis panel
+    // per failed agent into this element, and each panel's announce would
+    // otherwise destroy the previous panels). The announcement still owns
+    // every text node — text set through other paths is replaced, exactly
+    // as the textContent variant did — but element children survive; they
+    // are removed explicitly where that is meant.
+    let node: Text | null = null;
+    return (message: string, error = false) => {
+      if (!target) return;
+      if (!node || node.parentNode !== target) {
+        node = target.ownerDocument.createTextNode("");
+        target.prepend(node);
+      }
+      for (const child of [...target.childNodes]) {
+        if (child !== node && child.nodeType === 3) child.remove();
+      }
+      node.textContent = message;
+      target.classList.toggle("is-error", error);
+      target.hidden = !message && target.childElementCount === 0;
+    };
   };
   const announce = announcerFor(state);
   const announceChild = announcerFor(drilldownState);
