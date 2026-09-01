@@ -3097,6 +3097,30 @@ describe("pending permission recovery", () => {
     } as never);
     expect(adapter.projectionForTests("local").items()).toEqual([]);
   });
+
+  test("a plan approval's resource-less card is published, not suppressed", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // A plan approval legitimately names no resources — the plan is the
+    // content — and must reach the timeline with its intent choices.
+    adapter.projectionForTests("local").apply({ kind: "upsert", item: {
+      id: "permission:plan-1",
+      type: "permission",
+      createdAt: 20,
+      requestId: "plan-1",
+      action: "Review the plan",
+      resources: [],
+      status: "pending",
+      plan: "## Plan\n1. Do the thing",
+      choices: [{ id: "implement", label: "Approve and implement" }],
+    } });
+    const items = adapter.projectionForTests("local").items();
+    expect(items.map(item => item.id)).toContain("permission:plan-1");
+    const card = items.find(item => item.id === "permission:plan-1") as { plan?: string; choices?: unknown[] };
+    expect(card.plan).toContain("Do the thing");
+    expect(card.choices).toHaveLength(1);
+  });
 });
 
 describe("a subagent's request reaches the conversation that launched it", () => {

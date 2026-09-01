@@ -2108,8 +2108,11 @@ export class ConversationProjection {
     if (merged.type === "question" && merged.questions.length === 0) return undefined;
     // Same for a permission resolution whose ask was never projected: the
     // classic `permission.replied` event carries no action or resources, and
-    // an empty resources array fails client validation the same way.
-    if (merged.type === "permission" && merged.resources.length === 0) return undefined;
+    // an empty resources array fails client validation the same way. A plan
+    // approval is the exception on both sides: it legitimately names no
+    // resources — the plan itself is the content — and client validation
+    // accepts empty resources exactly when a plan is present.
+    if (merged.type === "permission" && merged.resources.length === 0 && merged.plan === undefined) return undefined;
     this.timeline.set(item.id, merged);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);
