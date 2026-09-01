@@ -491,6 +491,7 @@ export class ClaudeProvider implements ChatProvider {
     const nativeBefore = this.activeNative.get(sessionId);
     if (stagedBefore) await this.commitStagedRevert(sessionId);
     let session: LiveSession;
+    let started: LiveSession | undefined;
     const content: Array<Record<string, unknown>> = [];
     // Everything before the queue push can fail; the rollback must cover it
     // all — an attachment that vanished after admission is as much a
@@ -498,6 +499,7 @@ export class ClaudeProvider implements ChatProvider {
     try {
       const alreadyLive = this.live.get(sessionId);
       session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
+      if (!alreadyLive) started = session;
       if (input.model) await this.switchModel(sessionId, input.model, input.variant);
       if (input.mode !== undefined) {
         const previousMode = this.configurations.get(sessionId)?.mode;
@@ -526,6 +528,13 @@ export class ClaudeProvider implements ChatProvider {
         });
       }
     } catch (error) {
+      // A session this failed prompt started holds no accepted turn — and
+      // after a rollback it is bound to the fork the routing just left.
+      // Retire it: keeping it would send the next prompt into the wrong
+      // transcript and park an idle process.
+      if (started && this.live.get(sessionId) === started && started.pendingTurns === 0) {
+        await this.retireSession(started);
+      }
       if (stagedBefore) {
         // The fork stays hidden and unused; the conversation returns to
         // its pre-commit identity with the boundary and tip bytes intact.
@@ -892,7 +901,11 @@ export class ClaudeProvider implements ChatProvider {
     // adds files the earlier boundary never affected; files already
     // captured keep their first (tip) bytes, so a later shallower preview
     // cannot poison the snapshot with rewound content.
-    const tipSnapshot = existing?.tipSnapshot ?? new Map<string, SnapshotEntry>();
+    // A clone on purpose: the stored snapshot must not gain entries until
+    // the rewind has actually succeeded — a capture failure or a refused
+    // non-dry rewind would otherwise leave the staged state polluted with
+    // bytes captured from the intermediate workspace.
+    const tipSnapshot = new Map<string, SnapshotEntry>(existing?.tipSnapshot ?? []);
     for (const filePath of preview.filesChanged ?? []) {
       const absolute = path.isAbsolute(filePath) ? filePath : path.join(this.workspacePath, filePath);
       if (tipSnapshot.has(absolute)) continue;

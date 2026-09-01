@@ -658,6 +658,100 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a failed replacement retires the fork-bound session it started", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"));
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
+        queries.push(query);
+        return query;
+      },
+      forkSession: async () => ({ sessionId: forkId }),
+    });
+    await provider.undo!(storedId);
+    // The replacement's fork session starts, then the attachment read fails.
+    await expect(provider.prompt(storedId, {
+      id: "r2", text: "replacement", delivery: "queue",
+      attachments: [{ id: "gone", name: "gone.png", mimeType: "image/png", absolutePath: path.join(workspace, "missing.png") }],
+    })).rejects.toThrow();
+    // The fork-bound session is retired with the rollback...
+    const forkBound = queries.at(-1)!;
+    expect(forkBound.input.options.resume).toBe(forkId);
+    expect(forkBound.returned).toBe(true);
+    // ...so the NEXT prompt starts fresh against the rolled-back identity.
+    await provider.prompt(storedId, { id: "r3", text: "try again", delivery: "queue" });
+    expect(queries.at(-1)!.input.options.resume).toBe(forkId);
+    await provider.dispose();
+  });
+
+  test("a refused rewind leaves the staged snapshot unpolluted", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const fileA = path.join(workspace, "a.txt");
+    const fileB = path.join(workspace, "b.txt");
+    writeFileSync(fileA, "a-tip");
+    writeFileSync(fileB, "b-tip");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    let refuseNonDry = false;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (uuid, options) => {
+          const changed = uuid === "u2" ? [fileB] : [fileA, fileB];
+          if (options?.dryRun) return { canRewind: true, filesChanged: changed };
+          if (refuseNonDry) return { canRewind: false, error: "checkpoint gone" };
+          if (uuid === "u2") writeFileSync(fileB, "b-rewound");
+          else { writeFileSync(fileA, "a-rewound"); writeFileSync(fileB, "b-rewound-deeper"); }
+          return { canRewind: true, filesChanged: changed };
+        };
+        return query;
+      },
+    });
+    await provider.undo!(storedId);
+    // The deeper undo's non-dry rewind refuses AFTER the preview captured
+    // fileA: the stored snapshot must not have gained that entry.
+    refuseNonDry = true;
+    await expect(provider.undo!(storedId)).rejects.toThrow("checkpoint gone");
+    refuseNonDry = false;
+    // Terminal redo restores exactly what the first boundary displaced.
+    await provider.redo!(storedId);
+    expect(readFileSync(fileB, "utf8")).toBe("b-tip");
+    // fileA was never rewound and never captured; it is untouched.
+    expect(readFileSync(fileA, "utf8")).toBe("a-tip");
+    await provider.dispose();
+  });
+
   test("a rejected interrupt leaves the turn's real outcome intact", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);

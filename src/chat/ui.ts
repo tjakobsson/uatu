@@ -1663,7 +1663,13 @@ export function initChat(api = new ChatApiClient()): void {
     // conversation's owning agent (spec: the identity row follows the
     // conversation). Remember the choice as the next creation's default.
     const owningAgentId = conversationAgentId(id);
-    if (owningAgentId && owningAgentId !== contextAgentId) await applyAgentContext(owningAgentId);
+    if (owningAgentId && owningAgentId !== contextAgentId) {
+      await applyAgentContext(owningAgentId);
+      // A newer selection may have completed while the catalog loaded; this
+      // stale call must not null its projection, restore its draft, or
+      // overwrite the agent preference on the way to the late token check.
+      if (token !== selectionGeneration) return false;
+    }
     if (owningAgentId) {
       presentation.lastAgentId = owningAgentId;
       const state = agentStatusFor(owningAgentId)?.availability.state;
