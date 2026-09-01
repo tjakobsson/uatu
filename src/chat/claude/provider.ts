@@ -529,6 +529,12 @@ export class ClaudeProvider implements ChatProvider {
           source: { type: "base64", media_type: attachment.mimeType, data: bytes.toString("base64") },
         });
       }
+      // The stream can die during any of the awaits above; accepting into
+      // a dead session's queue would strand the turn with no reader left
+      // to end it. Everything after this check is synchronous.
+      if (this.live.get(sessionId) !== session) {
+        throw new Error("Claude Code session ended before the prompt was accepted");
+      }
     } catch (error) {
       // A session this failed prompt started holds no accepted turn — and
       // after a rollback it is bound to the fork the routing just left.

@@ -861,6 +861,23 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a session dying mid-admission refuses the prompt through the rollback", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "start", delivery: "queue" });
+    const before = await provider.getConversationConfiguration(session.id);
+    // The live mode switch kills the stream mid-admission.
+    queries[0]!.setPermissionMode = async () => {
+      queries[0]!.fail(new Error("stream died"));
+      await Bun.sleep(10);
+    };
+    await expect(provider.prompt(session.id, { id: "r2", text: "more", delivery: "queue", mode: "plan" }))
+      .rejects.toThrow("ended before the prompt was accepted");
+    // Nothing the refused prompt staged sticks.
+    expect(await provider.getConversationConfiguration(session.id)).toEqual(before);
+    await provider.dispose();
+  });
+
   test("a rejected interrupt leaves the turn's real outcome intact", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);
