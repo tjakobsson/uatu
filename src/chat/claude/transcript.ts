@@ -210,8 +210,12 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
         skippedFiles += 1;
         continue;
       }
+      // The entries' recorded cwd is the confinement authority; the
+      // directory encoding is collision-prone ("/tmp/a-b" and "/tmp/a/b"
+      // encode alike), so a transcript that records no directory at all is
+      // unverifiable and is not offered.
       const recordedCwd = mainline.find(entry => entry.cwd)?.cwd;
-      if (recordedCwd && canonicalize(recordedCwd) !== canonicalWorkspace) {
+      if (!recordedCwd || canonicalize(recordedCwd) !== canonicalWorkspace) {
         skippedFiles += 1;
         continue;
       }

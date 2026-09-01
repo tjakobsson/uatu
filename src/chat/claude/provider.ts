@@ -441,10 +441,18 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async *events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent> {
-    const stop = () => this.events_.close();
+    // Abort ends this subscription only: the supervised pump restarts with
+    // a fresh events() over the same queue, so closing it here would leave
+    // every later emit discarded and live updates silent. Only dispose
+    // closes the shared queue.
+    const stop = () => this.events_.detachWaiters();
     signal.addEventListener("abort", stop, { once: true });
     try {
-      yield* this.events_;
+      while (!signal.aborted) {
+        const next = await this.events_.take();
+        if (next.done) return;
+        yield next.value;
+      }
     } finally {
       signal.removeEventListener("abort", stop);
     }
@@ -1412,6 +1420,18 @@ class PushQueue<T> implements AsyncIterable<T> {
     if (this.closed) return;
     this.closed = true;
     for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
+  }
+
+  /**
+   * Ends every outstanding read without closing: banked values stay for
+   * the next consumer. What an aborted subscriber's replacement needs.
+   */
+  detachWaiters(): void {
+    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
+  }
+
+  take(): Promise<IteratorResult<T>> {
+    return this[Symbol.asyncIterator]().next();
   }
 
 

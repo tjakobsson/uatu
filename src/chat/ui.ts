@@ -3214,10 +3214,12 @@ export function initChat(api = new ChatApiClient()): void {
       // the user just created — outranks this snapshot: the fetch began
       // before that creation, so its list cannot know it.
       const selectionAtStart = selectionGeneration;
-      const [, nextConversations] = await Promise.all([
-        applyAgentContext(preferred.agent.id),
-        api.conversations(),
-      ]);
+      // The merged inventory is bounded per agent; the preferred agent's
+      // context load is not (a cold catalog probe can take seconds). The
+      // chooser must not wait on the latter — healthy conversations render
+      // as soon as the inventory answers.
+      const contextReady = applyAgentContext(preferred.agent.id);
+      const nextConversations = await api.conversations();
       conversations = dedupeConversationInventory([...conversations, ...nextConversations]);
       // Bootstrap is the silent page-local baseline. The stream starts only
       // after this point, so its mandatory initial frame reconciles rather
@@ -3227,19 +3229,29 @@ export function initChat(api = new ChatApiClient()): void {
       form.hidden = false;
       select.disabled = false;
       newButton.disabled = false;
-      renderConfiguration();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
       // A selection made mid-bootstrap is the user's; the initial chooser
       // pass must not replace it with this snapshot's newest entry.
       if (selectionGeneration === selectionAtStart) installInitialChooser();
       else patchChooser(presentation.selectedId ?? null);
+      await contextReady;
+      renderConfiguration();
       bootstrapped = true;
       // The enumeration above probed every agent; the pre-probe snapshot
       // may still call a failed one usable, and the creation menu would
       // offer it with only a generic error behind it. Refresh in the
       // background so availability becomes the probe's verdict without
-      // holding bootstrap's selection work open.
-      void api.status().then(next => { agentStatuses = next; }).catch(() => undefined);
+      // holding bootstrap's selection work open — and if the verdict is
+      // that every agent is down after all, the takeover renders now
+      // rather than after a reload.
+      void api.status().then(next => {
+        agentStatuses = next;
+        if (next.length > 0 && next.every(status => status.availability.state === "unavailable")) {
+          for (const status of next) {
+            if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: true });
+          }
+        }
+      }).catch(() => undefined);
       startInventoryStream();
     } catch (error) { announce(messageOf(error), true); }
     finally { bootstrapping = false; }
