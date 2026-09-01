@@ -143,8 +143,8 @@ describe("catalog hydration probe", () => {
   // alias values, resolved ids that sessions then report stripped of the
   // variant marker.
   const realCatalog = [
-    { value: "default", resolvedModel: "claude-opus-5[1m]", displayName: "Default (recommended)", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
-    { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]", displayName: "Opus (1M context)", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "default", resolvedModel: "claude-opus-5[1m]", displayName: "Default (recommended)", description: "Opus 5 with 1M context · Best for everyday, complex tasks", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]", displayName: "Opus (1M context)", description: "Opus 5 with 1M context · Best for everyday, complex tasks", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
     { value: "claude-fable-5[1m]", resolvedModel: "claude-fable-5", displayName: "Fable", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
     { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet", supportedEffortLevels: ["low", "medium", "high"] },
     { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku" },
@@ -181,8 +181,14 @@ describe("catalog hydration probe", () => {
     expect(queries[0]!.input.options.cwd).toContain("uatu-claude-catalog-");
     expect(queries[0]!.input.options.enableFileCheckpointing).toBe(false);
     expect(queries[0]!.returned).toBe(true);
-    // Live entries with derived windows; the pseudo-entry stays out.
-    expect(models.map(model => model.selection.modelId)).toEqual(["opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"]);
+    // Live entries with derived windows; the CLI's recommended default is
+    // first-class and flagged, exactly as Claude Code presents it.
+    expect(models.map(model => model.selection.modelId)).toEqual(["default", "opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"]);
+    const defaultEntry = models.find(model => model.selection.modelId === "default")!;
+    expect(defaultEntry.default).toBe(true);
+    expect(defaultEntry.name).toBe("Default (recommended)");
+    expect(defaultEntry.detail).toBe("Opus 5 with 1M context · Best for everyday, complex tasks");
+    expect(defaultEntry.contextLimit).toBe(1_000_000);
     expect(models.find(model => model.selection.modelId === "opus[1m]")?.contextLimit).toBe(1_000_000);
     expect(models.find(model => model.selection.modelId === "claude-fable-5[1m]")?.contextLimit).toBe(1_000_000);
     expect(models.find(model => model.selection.modelId === "sonnet")?.contextLimit).toBe(200_000);
@@ -502,9 +508,9 @@ describe("ClaudeProvider sessions", () => {
       name: "Opus 5 (1M context)",
       contextLimit: 1_000_000,
     }));
-    // The CLI's let-me-pick pseudo-entry stays out: Chat already offers
-    // "Let Claude Code choose" as the unset state.
-    expect(models.some(model => model.selection.modelId === "default")).toBe(false);
+    // The CLI's recommended default rides along as a flagged first-class
+    // entry rather than being filtered.
+    expect(models.find(model => model.selection.modelId === "default")?.default).toBe(true);
     // Variant validation follows the live catalog.
     await provider2.switchModel(created.id, { providerId: "anthropic", modelId: "claude-opus-5[1m]" }, "max");
     await provider2.dispose();
@@ -558,7 +564,9 @@ describe("ClaudeProvider sessions", () => {
     await expect(provider.switchModel(session.id, { providerId: "anthropic", modelId: "claude-haiku-4-5-20251001" }, "xhigh"))
       .rejects.toThrow("does not offer effort level");
     await provider.switchModel(session.id, { providerId: "anthropic", modelId: "claude-opus-5" }, "xhigh");
+    // "auto" is the house default mode a fresh conversation starts with.
     expect(await provider.getConversationConfiguration(session.id)).toEqual({
+      mode: "auto",
       model: { providerId: "anthropic", modelId: "claude-opus-5" },
       variant: "xhigh",
     });

@@ -41,7 +41,7 @@ export function groupChatModels(models: ChatModel[]): ModelGroup[] {
 }
 
 export function modelIdentityLabel(model: ChatModel): string {
-  return `${model.provider} · ${model.selection.providerId}/${model.selection.modelId}`;
+  return model.detail ?? `${model.provider} · ${model.selection.providerId}/${model.selection.modelId}`;
 }
 
 export function agentControlledModelLabel(agentName?: string): string {
@@ -265,7 +265,8 @@ export function createChatConfigurationPicker(
     if (elements.modeSelect) {
       elements.modeSelect.replaceChildren();
       if (modeAvailable) {
-        if (!state.configuration.mode) addOption(elements.modeSelect, `Let ${state.agent?.name || "the agent"} choose`, "");
+        const defaultMode = state.modes.find(mode => mode.default);
+        if (!state.configuration.mode && !defaultMode) addOption(elements.modeSelect, `Let ${state.agent?.name || "the agent"} choose`, "");
         for (const mode of state.modes) {
           const option = addOption(elements.modeSelect, configurationOptionLabel(mode.name), mode.name);
           if (mode.description) option.title = mode.description;
@@ -274,7 +275,7 @@ export function createChatConfigurationPicker(
         if (selectedMode && !state.modes.some(mode => mode.name === selectedMode)) {
           addOption(elements.modeSelect, `${configurationOptionLabel(selectedMode)} (current, unavailable)`, selectedMode, true);
         }
-        selectOption(elements.modeSelect, selectedMode ?? "");
+        selectOption(elements.modeSelect, selectedMode ?? defaultMode?.name ?? "");
       }
     }
 
@@ -308,14 +309,30 @@ export function createChatConfigurationPicker(
     }
 
     const selected = state.configuration.model;
-    if (!selected && !elements.search.value.trim()) {
-      elements.models.append(makeModelRow(
-        agentControlledModelLabel(state.agent?.name),
-        "Agent-controlled model",
-        "",
-        true,
-        false,
-      ));
+    const defaultModel = state.models.find(model => model.default);
+    if (!elements.search.value.trim()) {
+      if (defaultModel) {
+        elements.models.append(makeModelRow(
+          defaultModel.name,
+          modelIdentityLabel(defaultModel),
+          `${defaultModel.selection.providerId}/${defaultModel.selection.modelId}`,
+          !selected || sameModel(defaultModel.selection, selected),
+          false,
+          () => {
+            state = { ...state, configuration: { ...state.configuration, model: defaultModel.selection } };
+            callbacks.onModel(defaultModel.selection);
+            renderModels();
+          },
+        ));
+      } else if (!selected) {
+        elements.models.append(makeModelRow(
+          agentControlledModelLabel(state.agent?.name),
+          "Agent-controlled model",
+          "",
+          true,
+          false,
+        ));
+      }
     }
 
     const selectedAvailable = !selected || state.models.some(model => sameModel(model.selection, selected));
@@ -329,7 +346,7 @@ export function createChatConfigurationPicker(
       ));
     }
 
-    const filtered = filterChatModels(state.models, elements.search.value);
+    const filtered = filterChatModels(state.models.filter(model => !model.default), elements.search.value);
     for (const group of groupChatModels(filtered)) {
       const section = elements.dialog.ownerDocument.createElement("section");
       section.className = "chat-configuration-provider";

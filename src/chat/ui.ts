@@ -1432,27 +1432,32 @@ export function initChat(api = new ChatApiClient()): void {
 
   const renderConfiguration = () => {
     const configuration = displayedConfiguration();
+    // An agent may declare its own recommended defaults; while nothing is
+    // chosen they ARE the active choice, exactly as the agent presents it.
+    const defaultModel = models.find(model => model.default);
+    const defaultMode = modes.find(mode => mode.default);
     const displayedModel = configuration.model
       ? models.find(model => sameModel(model.selection, configuration.model!))
-      : undefined;
+      : defaultModel;
     configurationSummary.textContent = declares("models")
       ? displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
       : "Chat settings";
     const offersMode = declares("modes") && modes.length > 0;
     const offersReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
-    // The chip states only what was chosen: an unset mode or effort is the
-    // agent's own choice, said once in the dialog ("Let ... choose") — not
-    // echoed here where two "Auto" fallbacks would read as one doubled one.
-    const showMode = offersMode && Boolean(configuration.mode);
+    // The chip states only what is in force: a chosen value, or a default
+    // the agent itself declares. A delegation without a declared default is
+    // said once in the dialog ("Let ... choose"), not echoed here.
+    const displayedMode = configuration.mode ?? defaultMode?.name;
+    const showMode = offersMode && Boolean(displayedMode);
     const showReasoning = offersReasoning && Boolean(configuration.variant);
     configurationModeSummary.hidden = !showMode;
-    configurationModeSummary.textContent = showMode ? configurationOptionLabel(configuration.mode!) : "";
+    configurationModeSummary.textContent = showMode ? configurationOptionLabel(displayedMode!) : "";
     configurationVariantSummary.hidden = !showReasoning;
     configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant!) : "";
     configurationDetails.hidden = !showMode && !showReasoning;
     const accessibleValues = [
       declares("models") ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`)}` : "",
-      offersMode ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      offersMode ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
       offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
     configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
@@ -1462,9 +1467,12 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const newConversationAnnouncement = (configuration: ConversationConfiguration): string => {
+    // Declared defaults ARE the active choice for an unset value, same
+    // story renderConfiguration tells.
     const displayedModel = configuration.model
       ? models.find(model => sameModel(model.selection, configuration.model!))
-      : undefined;
+      : models.find(model => model.default);
+    const displayedMode = configuration.mode ?? modes.find(mode => mode.default)?.name;
     const chooser = agent?.name ?? "the agent";
     return [
       `Started new conversation${agent ? ` with ${agent.name}` : ""}.`,
@@ -1472,7 +1480,7 @@ export function initChat(api = new ChatApiClient()): void {
         ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `chosen by ${chooser}`)}.`
         : "",
       declares("modes") && modes.length > 0
-        ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${chooser}`}.`
+        ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${chooser}`}.`
         : "",
     ].filter(Boolean).join(" ");
   };

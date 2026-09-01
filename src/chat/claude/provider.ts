@@ -240,7 +240,7 @@ export class ClaudeProvider implements ChatProvider {
   async listModes(): Promise<ChatMode[]> {
     // Claude Code's own presentation vocabulary; names are the wire values.
     return [
-      { name: "auto", description: "Claude handles permission decisions" },
+      { name: "auto", description: "Claude handles permission decisions", default: true },
       { name: "default", description: "Always ask before making changes" },
       { name: "acceptEdits", description: "Automatically accept all file edits" },
       { name: "plan", description: "Create a plan before making changes" },
@@ -290,7 +290,9 @@ export class ClaudeProvider implements ChatProvider {
     const created = this.now();
     const session: ProviderSession = { id, title: DEFAULT_TITLE, directory: this.workspacePath, createdAt: created, updatedAt: created };
     this.pending.set(id, session);
-    this.configurations.set(id, configuration);
+    // Claude Code's own default: a fresh conversation runs in Auto unless
+    // the creator chose otherwise.
+    this.configurations.set(id, { mode: "auto", ...configuration });
     this.events_.push({
       conversationId: id,
       updates: [],
@@ -401,7 +403,7 @@ export class ClaudeProvider implements ChatProvider {
     if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     if (input.mode !== undefined) {
       const previousMode = this.configurations.get(sessionId)?.mode;
-      if (input.mode === "plan" && previousMode !== "plan") this.modeBeforePlan.set(sessionId, previousMode ?? "default");
+      if (input.mode === "plan" && previousMode !== "plan") this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
       const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
       this.configurations.set(sessionId, configuration);
       // A session that already existed switches live; a fresh one was
@@ -578,7 +580,10 @@ export class ClaudeProvider implements ChatProvider {
         pathToClaudeCodeExecutable: this.executable,
         enableFileCheckpointing: true,
         ...((mode ?? configuration.mode) ? { permissionMode: (mode ?? configuration.mode)! } : {}),
-        ...((model ?? configuration.model) ? { model: (model ?? configuration.model)!.modelId } : {}),
+        // Choosing "default" IS choosing the CLI's own pick: omit the
+        // option and let it resolve, same as an unset model.
+        ...((model ?? configuration.model) && (model ?? configuration.model)!.modelId !== "default"
+          ? { model: (model ?? configuration.model)!.modelId } : {}),
         // Effort is applied when the session starts; a variant staged while
         // the session is live takes effect on the next session start.
         ...((variant ?? configuration.variant) ? { effort: (variant ?? configuration.variant)! } : {}),
@@ -857,7 +862,7 @@ export class ClaudeProvider implements ChatProvider {
    */
   private async approvePlan(sessionId: string, pending: PendingInteraction, choiceId?: string): Promise<void> {
     const returnMode = choiceId === "implement-and-restore"
-      ? this.modeBeforePlan.get(sessionId) ?? "default"
+      ? this.modeBeforePlan.get(sessionId) ?? "auto"
       : "default";
     pending.settle({ behavior: "allow", updatedInput: pending.input });
     this.modeBeforePlan.delete(sessionId);
@@ -952,14 +957,15 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
     if (!value || typeof value !== "object") continue;
     const info = value as Record<string, unknown>;
     if (typeof info.value !== "string" || !info.value) continue;
-    // "default" is the CLI's let-me-pick pseudo-entry; Chat already offers
-    // that as the unset state ("Let Claude Code choose").
-    if (info.value === "default") continue;
+    // "default" is the CLI's own recommended pick — offered first-class,
+    // exactly as Claude Code itself presents it. It never joins the alias
+    // map: session-reported ids belong to the concrete entries.
+    const isDefault = info.value === "default";
     // The session reports resolved ids ("claude-sonnet-5") while the
     // catalog keys by alias ("sonnet", "opus[1m]"); the join is what lets
     // the context gauge find the window actually in effect.
     const resolvedModel = typeof info.resolvedModel === "string" && info.resolvedModel ? info.resolvedModel : undefined;
-    if (resolvedModel && resolvedModel !== info.value) {
+    if (!isDefault && resolvedModel && resolvedModel !== info.value) {
       if (!aliases.has(resolvedModel)) aliases.set(resolvedModel, info.value);
       // Assistant messages report the resolved id without the variant
       // marker ("claude-opus-5" while running "opus[1m]"); join that
@@ -976,6 +982,8 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
       provider: "Anthropic",
       name,
       ...(variants && variants.length > 0 ? { variants } : {}),
+      ...(typeof info.description === "string" && info.description ? { detail: info.description } : {}),
+      ...(isDefault ? { default: true } : {}),
       // No ModelInfo field carries the window; derive it from the ids
       // unless the CLI starts reporting one.
       contextLimit: typeof info.contextWindow === "number" && info.contextWindow > 0

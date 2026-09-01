@@ -119,7 +119,8 @@ specs, and in the route table.
   conversation names its owning agent, and conversation ids are
   agent-qualified on the wire.
 - **mode** — how an agent is asked to work: OpenCode's Build and Plan,
-  Claude Code's permission modes (`default`, `acceptEdits`, `plan`).
+  Claude Code's permission modes (`auto`, `default`, `acceptEdits`,
+  `plan`; `auto` is the declared default a fresh conversation starts in).
   Listed per agent at `/api/chat/modes?agent=...`. OpenCode calls these
   agents on its own wire; uatu does not, because the word is taken.
 - **subagent** — an agent the agent spawned inside a turn. What the

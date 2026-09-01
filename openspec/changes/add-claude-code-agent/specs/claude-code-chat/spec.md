@@ -128,9 +128,12 @@ turn.
 ### Requirement: Permission modes are offered as chat modes
 The Claude Code agent SHALL offer its permission modes as the
 conversation's ways of working, and a mode selected for a conversation
-SHALL govern its subsequent prompts. Modes that bypass permission
-prompting entirely MUST NOT be offered unless the workspace operator
-explicitly enabled them for the workspace.
+SHALL govern its subsequent prompts. The agent SHALL declare its
+recommended mode as the default, a fresh conversation SHALL start in it,
+and it SHALL be presented as the active choice rather than a generic
+delegation entry. Modes that bypass permission prompting entirely MUST
+NOT be offered unless the workspace operator explicitly enabled them for
+the workspace.
 
 #### Scenario: Plan mode governs the next prompt
 - **WHEN** a user selects the planning mode and sends a prompt
@@ -141,13 +144,22 @@ explicitly enabled them for the workspace.
 - **WHEN** a workspace without the operator opt-in lists the Claude Code agent's modes
 - **THEN** no offered mode disables permission prompting
 
+#### Scenario: A fresh conversation runs the recommended mode
+- **WHEN** a Claude Code conversation is created without choosing a mode
+- **THEN** it runs in the agent's own recommended mode
+- **AND** that mode is presented as the conversation's active choice
+
 ### Requirement: Models and effort levels follow Claude Code's catalog
 The Claude Code agent SHALL list the models Claude Code offers and SHALL
 offer each model's supported effort levels as that model's reasoning
-variants. A model or variant selection SHALL apply to the conversation's
-subsequent prompts, an effort level not supported by the selected model
-MUST NOT be selectable with it, and the model's context-window size SHALL
-be reported when known so context usage can be presented.
+variants. Claude Code's own recommended default SHALL be offered as a
+first-class entry presented as the active choice while no model has been
+chosen — in place of a generic delegation row — and choosing it SHALL
+leave the model resolution to Claude Code. A model or variant selection
+SHALL apply to the conversation's subsequent prompts, an effort level not
+supported by the selected model MUST NOT be selectable with it, and the
+model's context-window size SHALL be reported when known so context usage
+can be presented.
 
 #### Scenario: Effort qualifies the selected model
 - **WHEN** a user selects a model and one of its effort levels

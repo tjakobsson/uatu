@@ -132,6 +132,13 @@ export type ChatModel = {
   // Drives the attach control's inactive state; absent means not reported,
   // which the surface treats as no.
   imageInput?: boolean;
+  // The agent's own words about this model, shown as the row's secondary
+  // line in place of the provider/id identity when present.
+  detail?: string;
+  // The agent's own recommended default. When a catalog declares one, the
+  // picker offers it in place of the generic "Let the agent choose" row and
+  // an unset conversation displays it as the active choice.
+  default?: boolean;
 };
 
 export type ChatCommand = {
@@ -170,6 +177,10 @@ export type ReversibleHistoryResult = {
 export type ChatMode = {
   name: string;
   description: string;
+  // The agent's own recommended default: presented as the active choice
+  // when the conversation has not set a mode, in place of the generic
+  // "Let the agent choose" entry.
+  default?: boolean;
 };
 
 export type ConversationSummary = {

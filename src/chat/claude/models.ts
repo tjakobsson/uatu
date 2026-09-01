@@ -12,6 +12,7 @@ const FULL_EFFORT = ["low", "medium", "high", "xhigh", "max"] as const;
 const STANDARD_EFFORT = ["low", "medium", "high"] as const;
 
 export const CLAUDE_MODELS: ChatModel[] = [
+  { selection: claudeModelSelection("default"), provider: "Anthropic", name: "Default (recommended)", default: true, detail: "Claude Code's own model choice", variants: [...FULL_EFFORT], contextLimit: 200_000, imageInput: true },
   { selection: claudeModelSelection("claude-fable-5"), provider: "Anthropic", name: "Fable 5", variants: [...FULL_EFFORT], contextLimit: 200_000, imageInput: true },
   { selection: claudeModelSelection("claude-opus-5"), provider: "Anthropic", name: "Opus 5", variants: [...FULL_EFFORT], contextLimit: 200_000, imageInput: true },
   { selection: claudeModelSelection("claude-sonnet-5"), provider: "Anthropic", name: "Sonnet 5", variants: [...FULL_EFFORT], contextLimit: 200_000, imageInput: true },

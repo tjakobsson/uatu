@@ -107,13 +107,15 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
-  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput"], "chat model");
+  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput", "detail", "default"], "chat model");
   expectModelSelection(record.selection);
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
   if (record.variants !== undefined) expectStringArray(record.variants, "model variants", true);
   if (record.contextLimit !== undefined && (typeof record.contextLimit !== "number" || record.contextLimit < 1)) throw new Error("model contextLimit must be a positive number");
   if (record.imageInput !== undefined && typeof record.imageInput !== "boolean") throw new Error("model imageInput must be a boolean");
+  if (record.detail !== undefined) expectNonEmptyString(record.detail, "model detail");
+  if (record.default !== undefined && typeof record.default !== "boolean") throw new Error("model default must be a boolean");
   return value as ChatModel;
 }
 
@@ -164,9 +166,10 @@ export function parseChatAgent(value: unknown): ChatAgent {
 
 export function parseChatMode(value: unknown): ChatMode {
   const record = expectRecord(value, "chat mode");
-  expectKeys(record, ["name", "description"], "chat mode");
+  expectKeys(record, ["name", "description", "default"], "chat mode");
   expectIdentity(record.name, "mode name");
   expectString(record.description, "mode description");
+  if (record.default !== undefined && typeof record.default !== "boolean") throw new Error("mode default must be a boolean");
   return value as ChatMode;
 }
 
