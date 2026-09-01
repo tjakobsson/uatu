@@ -26,10 +26,15 @@ export type ClaudeNormalizationSource = "live" | "stored";
 export type ClaudeEventMemory = {
   tools: Map<string, { name: string; input?: string; createdAt: number }>;
   lastModel?: string;
+  // TodoWrite tool uses render as the task-progress surface, not as tool
+  // rows; their ids are remembered so the later tool_result is suppressed
+  // too. The task list's first-seen time keeps the presentation anchored.
+  todoTools: Set<string>;
+  taskListCreatedAt?: number;
 };
 
 export function createClaudeEventMemory(): ClaudeEventMemory {
-  return { tools: new Map() };
+  return { tools: new Map(), todoTools: new Set() };
 }
 
 const MEMORY_LIMIT = 2_048;
@@ -85,6 +90,9 @@ export function normalizeClaudeMessage(
   value: unknown,
   memory: ClaudeEventMemory,
   source: ClaudeNormalizationSource,
+  // The owning native session, when known: what a Task completion's child
+  // conversation id is derived from (`sub:<parent>:<agentId>`).
+  parentSessionId?: string,
 ): Omit<NormalizedProviderEvent, "conversationId"> {
   const record = asRecord(value);
   const type = typeof record.type === "string" ? record.type : "";
@@ -126,7 +134,11 @@ export function normalizeClaudeMessage(
     const blocks = contentBlocks(message.content);
     const results = blocks.filter(block => block.type === "tool_result");
     if (results.length > 0) {
-      return { ...base, outcome: "handled", updates: results.map(block => toolResultUpdate(block, envelope, memory)) };
+      const toolOutcome = asRecord(record.toolUseResult ?? record.tool_use_result);
+      const updates = results
+        .map(block => toolResultUpdate(block, envelope, memory, toolOutcome, parentSessionId))
+        .filter((update): update is NormalizedProviderUpdate => update !== null);
+      return { ...base, outcome: updates.length > 0 ? "handled" : "ignored", updates };
     }
     if (source === "live") {
       // The provider minted this user message when it accepted the prompt.
@@ -195,7 +207,7 @@ export function normalizeClaudeMessage(
 }
 
 /** Stored transcript entries → timeline items, in entry order. */
-export function normalizeTranscriptEntries(entries: TranscriptEntry[]): {
+export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSessionId?: string): {
   items: ConversationItem[];
   accounting: Array<{ messageId: string; createdAt: number; usage?: TokenUsage; model?: string }>;
 } {
@@ -204,9 +216,10 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[]): {
   const accounting: Array<{ messageId: string; createdAt: number; usage?: TokenUsage; model?: string }> = [];
   for (const entry of entries) {
     const normalized = normalizeClaudeMessage(
-      { type: entry.kind, uuid: entry.uuid, timestamp: entry.timestamp, message: entry.message },
+      { type: entry.kind, uuid: entry.uuid, timestamp: entry.timestamp, message: entry.message, ...(entry.toolUseResult ? { toolUseResult: entry.toolUseResult } : {}) },
       memory,
       "stored",
+      parentSessionId,
     );
     for (const update of normalized.updates) {
       if (update.kind !== "upsert") continue;
@@ -277,6 +290,23 @@ function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: Cla
     }
     if (block.type === "tool_use" && typeof block.id === "string") {
       const name = typeof block.name === "string" ? block.name : "tool";
+      // The agent's own todo tracking is the task-progress surface (D9):
+      // one item updated in place, never a tool row per write.
+      if (name === "TodoWrite") {
+        memory.todoTools.add(block.id);
+        if (memory.todoTools.size > MEMORY_LIMIT) memory.todoTools.clear();
+        const entries = todoEntries(asRecord(block.input));
+        if (entries) {
+          memory.taskListCreatedAt ??= envelope.createdAt;
+          updates.push({ kind: "upsert", item: {
+            id: "task-progress",
+            type: "task_progress",
+            createdAt: memory.taskListCreatedAt,
+            entries,
+          } });
+        }
+        continue;
+      }
       const input = block.input === undefined ? undefined : stringify(block.input);
       boundedSet(memory.tools, block.id, { name, ...(input === undefined ? {} : { input }), createdAt: envelope.createdAt }, MEMORY_LIMIT);
       updates.push({ kind: "upsert", item: {
@@ -301,11 +331,38 @@ function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: Cla
   return updates;
 }
 
-function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventMemory): NormalizedProviderUpdate {
+function todoEntries(input: RecordValue): ConversationItem extends never ? never : Array<{ text: string; status: "pending" | "in_progress" | "completed"; activeText?: string }> | null {
+  if (!Array.isArray(input.todos)) return null;
+  const entries: Array<{ text: string; status: "pending" | "in_progress" | "completed"; activeText?: string }> = [];
+  for (const value of input.todos) {
+    if (!value || typeof value !== "object") return null;
+    const todo = value as RecordValue;
+    if (typeof todo.content !== "string" || !todo.content) return null;
+    const status = todo.status === "in_progress" || todo.status === "completed" ? todo.status : "pending";
+    entries.push({
+      text: todo.content,
+      status,
+      ...(typeof todo.activeForm === "string" && todo.activeForm ? { activeText: todo.activeForm } : {}),
+    });
+  }
+  return entries;
+}
+
+function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventMemory, toolOutcome: RecordValue = {}, parentSessionId?: string): NormalizedProviderUpdate | null {
   const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+  // A TodoWrite result confirms a surface the task-progress item already
+  // shows; a row for it would be exactly the per-update spam D9 forbids.
+  if (memory.todoTools.has(toolUseId)) return null;
   const known = memory.tools.get(toolUseId);
   const failed = block.is_error === true;
   const output = block.content === undefined ? undefined : stringify(block.content);
+  // A Task completion names its subagent run: the child transcript becomes
+  // an openable drill-down, and the store's own accounting lands as the
+  // launching row's attribution (spec: the row states model and tokens).
+  const agentId = typeof toolOutcome.agentId === "string" && toolOutcome.agentId ? toolOutcome.agentId : undefined;
+  const childConversationId = agentId && parentSessionId ? `sub:${parentSessionId}:${agentId}` : undefined;
+  const attributedModel = typeof toolOutcome.resolvedModel === "string" && toolOutcome.resolvedModel ? toolOutcome.resolvedModel : undefined;
+  const attributedUsage = tokensToUsage(toolOutcome.usage);
   return { kind: "upsert", item: {
     id: `tool:${toolUseId}`,
     type: "tool",
@@ -316,6 +373,9 @@ function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventM
     status: failed ? "failed" : "completed",
     ...(known?.input === undefined ? {} : { input: known.input }),
     ...(output === undefined ? {} : failed ? { error: output } : { output }),
+    ...(childConversationId ? { childConversationId } : {}),
+    ...(attributedModel ? { model: attributedModel } : {}),
+    ...(attributedUsage ? { usage: attributedUsage } : {}),
   } };
 }
 

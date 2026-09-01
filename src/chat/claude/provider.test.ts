@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -17,6 +17,7 @@ class FakeQuery implements ClaudeQueryHandle {
   returned = false;
   failure: Error | null = null;
   setPermissionMode?: (mode: string) => Promise<void>;
+  rewindFiles?: (userMessageId: string, options?: { dryRun?: boolean }) => Promise<{ canRewind: boolean; error?: string; filesChanged?: string[] }>;
 
   constructor(readonly input: ClaudeQueryInput) {}
 
@@ -491,6 +492,248 @@ describe("ClaudeProvider sessions", () => {
       // Unrecoverable reference: name and mime survive, the id does not.
       attachments: [{ name: "attachment-1.webp", mimeType: "image/webp" }],
     }));
+    await provider.dispose();
+  });
+
+  test("a completed plan asks with intents; each intent sets the follow-on mode", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    // Entering plan from acceptEdits remembers where to return to.
+    await provider.prompt(session.id, { id: "r0", text: "start", delivery: "queue", mode: "acceptEdits" });
+    const query = queries[0]!;
+    const modeCalls: string[] = [];
+    query.setPermissionMode = async mode => { modeCalls.push(mode); };
+    await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+
+    const decision = query.input.options.canUseTool!("ExitPlanMode", { plan: "## Plan\n1. Do the thing" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    const card = events.find(event => event.eventType === "interaction.requested")!.updates[0]! as { item: { plan?: string; choices?: Array<{ id: string }> ; action: string } };
+    expect(card.item.action).toBe("Review the plan");
+    expect(card.item.plan).toContain("Do the thing");
+    expect(card.item.choices?.map(choice => choice.id)).toEqual(["implement", "implement-and-restore"]);
+
+    await provider.replyPermission(session.id, "p1", "once", "implement-and-restore");
+    expect(await decision).toEqual({ behavior: "allow", updatedInput: { plan: "## Plan\n1. Do the thing" } });
+    // The restore intent returns to the pre-plan mode, live and in config.
+    expect(modeCalls).toEqual(["plan", "acceptEdits"]);
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("acceptEdits");
+    await waitFor(() => events.some(event => event.eventType === "plan.approved" && event.configuration?.mode === "acceptEdits"));
+    stop();
+    await provider.dispose();
+  });
+
+  test("the implement intent leaves planning for the default mode", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    const query = queries[0]!;
+    const decision = query.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await Bun.sleep(5);
+    await provider.replyPermission(session.id, "p1", "once", "implement");
+    await decision;
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("default");
+    await provider.dispose();
+  });
+
+  test("rejecting a plan keeps the conversation planning", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    const decision = queries[0]!.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await Bun.sleep(5);
+    await provider.replyPermission(session.id, "p1", "reject");
+    expect(await decision).toEqual({ behavior: "deny", message: "The user did not approve this plan. Keep planning and present a revised plan." });
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("plan");
+    await provider.dispose();
+  });
+
+  test("TodoWrite becomes the task-progress surface, live and on replay, without tool rows", async () => {
+    const { provider, configDir, workspace } = fixture();
+    const storedId = "55555555-6666-4777-8888-999999999999";
+    const todoUse = (uuid: string, timestamp: string, todos: unknown[]) => JSON.stringify({
+      type: "assistant", uuid, parentUuid: null, isSidechain: false, timestamp,
+      message: { role: "assistant", model: "claude-opus-5", content: [{ type: "tool_use", id: `todo-${uuid}`, name: "TodoWrite", input: { todos } }] },
+    });
+    const todoResult = (uuid: string, timestamp: string, toolId: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolId, content: "Todos updated" }] },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      todoUse("t1", "2026-08-30T10:00:00.000Z", [
+        { content: "Read the code", status: "in_progress", activeForm: "Reading the code" },
+        { content: "Fix it", status: "pending" },
+      ]),
+      todoResult("t1r", "2026-08-30T10:00:01.000Z", "todo-t1"),
+      todoUse("t2", "2026-08-30T10:05:00.000Z", [
+        { content: "Read the code", status: "completed" },
+        { content: "Fix it", status: "completed" },
+      ]),
+    ].join("\n"));
+
+    const page = await provider.listMessages(storedId, { limit: 10 });
+    // One presentation, final state, no TodoWrite tool rows or results.
+    const taskItems = page.items.filter(item => item.type === "task_progress");
+    expect(taskItems).toHaveLength(1);
+    expect(taskItems[0]).toEqual(expect.objectContaining({
+      id: "task-progress",
+      createdAt: Date.parse("2026-08-30T10:00:00.000Z"),
+      entries: [
+        { text: "Read the code", status: "completed" },
+        { text: "Fix it", status: "completed" },
+      ],
+    }));
+    expect(page.items.some(item => item.type === "tool")).toBe(false);
+    await provider.dispose();
+  });
+
+  test("undo rewinds files, hides the turn, returns the draft; failing rewind claims nothing", async () => {
+    const { queries, configDir, workspace } = fixture();
+    const storedId = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+    const marker = path.join(workspace, "marker.txt");
+    writeFileSync(marker, "after-turn-2");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first prompt"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second prompt"),
+    ].join("\n"));
+
+    // A rewind the checkpoint store refuses changes nothing. The hook rides
+    // the factory: the control session is spawned lazily by the undo itself.
+    let allowRewind = false;
+    const rewinds: Array<{ uuid: string; dryRun: boolean }> = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      executable: "/bin/claude",
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (uuid, options) => {
+          rewinds.push({ uuid, dryRun: options?.dryRun === true });
+          if (!allowRewind) return { canRewind: false, error: "no checkpoint" };
+          if (!options?.dryRun) writeFileSync(marker, "before-turn-2");
+          return { canRewind: true, filesChanged: [marker] };
+        };
+        queries.push(query);
+        return query;
+      },
+    });
+
+    const before = await provider.getReversibleHistoryState!(storedId);
+    expect(before).toEqual({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] });
+
+    await expect(provider.undo!(storedId)).rejects.toThrow("no longer available");
+    expect((await provider.getReversibleHistoryState!(storedId)).staged).toBe(false);
+    expect(readFileSync(marker, "utf8")).toBe("after-turn-2");
+
+    allowRewind = true;
+    const undone = await provider.undo!(storedId);
+    expect(undone.outcome).toBe("changed");
+    expect(undone.restoredDraft).toEqual({ text: "second prompt" });
+    expect(undone.state).toEqual({ staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:u2", text: "second prompt" }] });
+    expect(readFileSync(marker, "utf8")).toBe("before-turn-2");
+    // The staged boundary hides the turn from history.
+    expect((await provider.listMessages(storedId, { limit: 10 })).items.map(item => item.id)).toEqual(["message:u1"]);
+
+    // Terminal redo restores the tip bytes from the snapshot.
+    const redone = await provider.redo!(storedId);
+    expect(redone.outcome).toBe("changed");
+    expect(redone.state.staged).toBe(false);
+    expect(readFileSync(marker, "utf8")).toBe("after-turn-2");
+    expect((await provider.listMessages(storedId, { limit: 10 })).items.map(item => item.id)).toEqual(["message:u1", "message:u2"]);
+    await provider.dispose();
+  });
+
+  test("a replacement prompt commits the revert by forking the native session", async () => {
+    const { provider, queries, configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "revert this"),
+    ].join("\n"));
+    // The fork exists on disk like the real store would have it.
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"));
+
+    const forks: Array<{ sessionId: string; upToMessageId: string }> = [];
+    const root2 = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-fork-")));
+    void root2;
+    const forking = new ClaudeProvider({
+      workspacePath: workspace,
+      executable: "/bin/claude",
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
+        queries.push(query);
+        return query;
+      },
+      forkSession: async (sessionId, options) => {
+        forks.push({ sessionId, upToMessageId: options.upToMessageId });
+        return { sessionId: forkId };
+      },
+    });
+
+    await forking.undo!(storedId);
+    await forking.prompt(storedId, { id: "r-new", text: "a different direction", delivery: "queue" });
+    expect(forks).toEqual([{ sessionId: storedId, upToMessageId: "u1" }]);
+    // The prompt's session resumed the fork, and the fork stays out of the picker.
+    const promptQuery = queries.at(-1)!;
+    expect(promptQuery.input.options.resume).toBe(forkId);
+    expect((await forking.listSessions()).map(session => session.id)).not.toContain(forkId);
+    expect((await forking.getReversibleHistoryState!(storedId)).staged).toBe(false);
+    await forking.dispose();
+  });
+
+  test("a completed Task links its subagent transcript and carries the store's attribution", async () => {
+    const { provider, configDir, workspace } = fixture();
+    const parentId = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+    const agentId = "af5234142f8645688";
+    const parentLines = [
+      { type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-08-30T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "fan out a reviewer" } },
+      { type: "assistant", uuid: "a1", parentUuid: "u1", isSidechain: false, timestamp: "2026-08-30T10:00:01.000Z", message: { role: "assistant", model: "claude-opus-5", content: [{ type: "tool_use", id: "toolu_task1", name: "Task", input: { description: "Review the diff", subagent_type: "reviewer", prompt: "go" } }] } },
+      { type: "user", uuid: "u2", parentUuid: "a1", isSidechain: false, timestamp: "2026-08-30T10:05:00.000Z",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_task1", content: "Both findings fixed." }] },
+        toolUseResult: { status: "completed", agentId, agentType: "reviewer", resolvedModel: "claude-sonnet-5", totalTokens: 4321, usage: { input_tokens: 4000, output_tokens: 321 } } },
+    ].map(value => JSON.stringify(value)).join("\n");
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${parentId}.jsonl`), `${parentLines}\n`);
+    const subagentDir = path.join(claudeProjectDir(workspace, configDir), parentId, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeFileSync(path.join(subagentDir, `agent-${agentId}.jsonl`), [
+      { type: "user", uuid: "s1", parentUuid: null, isSidechain: true, timestamp: "2026-08-30T10:00:02.000Z", message: { role: "user", content: "Review the diff carefully." } },
+      { type: "assistant", uuid: "s2", parentUuid: "s1", isSidechain: true, timestamp: "2026-08-30T10:04:00.000Z", message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Two findings, both fixed." }] } },
+    ].map(value => JSON.stringify(value)).join("\n"));
+
+    // The parent's row links the child and carries model + tokens.
+    const parentPage = await provider.listMessages(parentId, { limit: 10 });
+    const taskRow = parentPage.items.find(item => item.type === "tool")!;
+    expect(taskRow).toEqual(expect.objectContaining({
+      id: "tool:toolu_task1",
+      status: "completed",
+      childConversationId: `sub:${parentId}:${agentId}`,
+      model: "claude-sonnet-5",
+      usage: expect.objectContaining({ input: 4000, output: 321 }),
+    }));
+
+    // The child opens as its own read-only transcript with a parent.
+    const childId = `sub:${parentId}:${agentId}`;
+    const childSession = await provider.getSession(childId);
+    expect(childSession).toEqual(expect.objectContaining({ id: childId, parentId }));
+    const childPage = await provider.listMessages(childId, { limit: 10 });
+    expect(childPage.items.map(item => item.type)).toEqual(["user_message", "assistant_message"]);
+    expect(childPage.items[1]).toEqual(expect.objectContaining({ markdown: "Two findings, both fixed." }));
+    await expect(provider.prompt(childId, { id: "r1", text: "no", delivery: "queue" })).rejects.toThrow("read-only");
+
+    // Children never enter the inventory.
+    expect((await provider.listSessions()).map(session => session.id)).not.toContain(childId);
     await provider.dispose();
   });
 

@@ -6016,6 +6016,75 @@ body.is-resizing-chat .chat-resizer {
   text-align: right;
 }
 
+/* The agent's live task list: one block, updated in place (D9). */
+.chat-task-progress {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.7rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-raised);
+}
+
+.chat-task-progress-header {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.chat-task-progress-count {
+  font-weight: 400;
+}
+
+.chat-task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.chat-task {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.chat-task-marker::before {
+  content: "○";
+  color: var(--text-muted);
+}
+
+.chat-task.is-in_progress .chat-task-marker::before {
+  content: "◐";
+  color: var(--accent, #3b82f6);
+}
+
+.chat-task.is-completed .chat-task-marker::before {
+  content: "●";
+  color: var(--ok, #16a34a);
+}
+
+.chat-task.is-completed .chat-task-text {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.chat-task.is-in_progress .chat-task-text {
+  font-weight: 600;
+}
+
+/* The plan a Claude Code approval would put into effect. */
+.chat-request-plan {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  max-height: 20rem;
+  overflow-y: auto;
+  background: var(--surface-raised);
+}
+
 /* Agent choice at conversation creation: anchored under the New button,
    one row per offered agent, unavailable agents explained inline. */
 .chat-agent-menu {

@@ -161,7 +161,7 @@ export interface ChatProvider {
   prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;
-  replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void>;
+  replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void>;
   /**
    * Every pending permission request the server holds, each naming the session
    * that owns it. Unfiltered on purpose: a permission is otherwise knowable

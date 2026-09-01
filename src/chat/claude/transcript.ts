@@ -62,6 +62,10 @@ export type TranscriptEntry = {
   // The API-shaped message payload: { role, content } with content either a
   // string or an array of typed blocks. Interpreted by the normalizer, not here.
   message: Record<string, unknown>;
+  // The store's own record of a tool's outcome, when present. A Task
+  // completion carries the subagent linkage here: agentId, resolvedModel,
+  // usage.
+  toolUseResult?: Record<string, unknown>;
 };
 
 export type TranscriptReadResult = {
@@ -111,7 +115,19 @@ function validateEntry(value: unknown): TranscriptEntry | null {
       : typeof record.parentToolUseId === "string" ? record.parentToolUseId : null,
     ...(typeof record.cwd === "string" ? { cwd: record.cwd } : {}),
     message: message as Record<string, unknown>,
+    ...(record.toolUseResult && typeof record.toolUseResult === "object" && !Array.isArray(record.toolUseResult)
+      ? { toolUseResult: record.toolUseResult as Record<string, unknown> }
+      : {}),
   };
+}
+
+/**
+ * A subagent run's own transcript: the store keeps each run beside its
+ * parent at `<projectDir>/<parentSessionId>/subagents/agent-<agentId>.jsonl`.
+ */
+export function subagentTranscriptPath(workspacePath: string, parentSessionId: string, agentId: string, configDir: string = claudeConfigDir()): string {
+  if (!/^[A-Za-z0-9-]+$/.test(parentSessionId) || !/^[A-Za-z0-9-]+$/.test(agentId)) throw new Error("invalid session id");
+  return path.join(claudeProjectDir(workspacePath, configDir), parentSessionId, "subagents", `agent-${agentId}.jsonl`);
 }
 
 export type TranscriptSessionSummary = {

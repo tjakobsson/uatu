@@ -98,32 +98,32 @@
       manifest, replay maps recoverable references and renders labeled
       placeholders otherwise; verify with unit tests including an
       unrecoverable-reference fixture
-- [ ] 4.7 Plan approvals: classify `ExitPlanMode` as a plan approval,
+- [x] 4.7 Plan approvals: classify `ExitPlanMode` as a plan approval,
       add the additive approval-choice extension to `PermissionRequest`
       (wire + card), map implement / implement-and-restore intents to
       mode restoration and rejection to continued planning; verify with
       unit tests for both intents and rejection, update
       `api/openapi.yaml` + `bun run test:api` for the extension, and
       demo the plan card on the scripted harness
-- [ ] 4.8 Task progress: add the `task_progress` timeline item kind
+- [x] 4.8 Task progress: add the `task_progress` timeline item kind
       (types, wire contract, shared renderer with in-place upsert),
       emit it from the Claude provider live and on replay; verify with
       renderer unit tests (single presentation across many updates), a
       replay fixture showing final state, and a scripted-harness demo
       of the surface updating live
-- [ ] 4.9 Reversible history: implement provider-level undo, redo,
+- [x] 4.9 Reversible history: implement provider-level undo, redo,
       revert, and restore over the SDK's rewind (conversation boundary
       + file restoration, draft text returned, failures reported
       without claiming change); declare the capability; verify with
       unit tests over rewind fixtures including a failing rewind
-- [ ] 4.10 Subagents: sidechain tracker folding live SDK/hook
+- [x] 4.10 Subagents: sidechain tracker folding live SDK/hook
       observations and transcript replay into per-run child
       transcripts served read-only under synthetic child conversation
       ids wired to `childConversationId`, with model/usage attribution
       on the launching row and children excluded from inventory; verify
       with fixture tests for live tracking, replay reconstruction, and
       inventory exclusion
-- [ ] 4.11 Register the Claude agent in `cli.ts` server assembly behind
+- [x] 4.11 Register the Claude agent in `cli.ts` server assembly behind
       the registry; verify a manual `bun run dev` session can create,
       prompt, interrupt, and resume a Claude conversation end-to-end
 

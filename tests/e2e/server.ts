@@ -271,6 +271,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
     return value;
   };
   if (typeof body.conversationId === "string") {
+    // The qualified id names the owning agent; remember it before stripping
+    // so conversation-scoped controls reach the right fake without every
+    // spec spelling `agent:` explicitly.
+    if (body.agent === undefined && body.conversationId.startsWith("claude:")) body.agent = "claude";
     body.conversationId = body.conversationId.replace(/^(?:opencode|claude):/, "");
   }
   if (body.items) body.items = stripQualifier(body.items) as typeof body.items;
@@ -286,36 +290,36 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "externalCreate":
       return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }), body.agent ?? "opencode");
     case "externalRename":
-      if (body.conversationId) return controlJson(fakeChatAgent.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
+      if (body.conversationId) return controlJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
       break;
     case "externalDelete":
-      if (body.conversationId) return controlJson(fakeChatAgent.externalDelete(body.conversationId, body.invalidate !== false));
+      if (body.conversationId) return controlJson(targetFake.externalDelete(body.conversationId, body.invalidate !== false));
       break;
     case "externalSetChild":
       if (body.conversationId && typeof body.child === "boolean") {
-        return controlJson(fakeChatAgent.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
+        return controlJson(targetFake.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
       }
       break;
     case "item":
-      if (body.conversationId && body.item) return controlJson(fakeChatAgent.publishItem(body.conversationId, body.item));
+      if (body.conversationId && body.item) return controlJson(targetFake.publishItem(body.conversationId, body.item));
       break;
     case "delta":
       if (body.conversationId && body.itemId && typeof body.delta === "string") {
-        return controlJson(fakeChatAgent.publishDelta(body.conversationId, body.itemId, body.delta));
+        return controlJson(targetFake.publishDelta(body.conversationId, body.itemId, body.delta));
       }
       break;
     case "status":
       if (body.conversationId && body.status) {
-        fakeChatAgent.publishStatus(body.conversationId, body.status, body.message);
+        targetFake.publishStatus(body.conversationId, body.status, body.message);
         return Response.json({ ok: true });
       }
       break;
     case "configuration":
-      if (body.conversationId && body.configuration) return controlJson(fakeChatAgent.publishConfiguration(body.conversationId, body.configuration));
+      if (body.conversationId && body.configuration) return controlJson(targetFake.publishConfiguration(body.conversationId, body.configuration));
       break;
     case "reversibleFiles":
       if (body.conversationId) {
-        fakeChatAgent.configureReversibleFiles(body.conversationId, body.reversibleFiles ?? []);
+        targetFake.configureReversibleFiles(body.conversationId, body.reversibleFiles ?? []);
         return Response.json({ ok: true });
       }
       break;
@@ -346,28 +350,28 @@ async function handleE2EChat(request: Request): Promise<Response> {
       fakeChatAgent.releaseInventoryList();
       return Response.json({ ok: true });
     case "failPrompt":
-      fakeChatAgent.failPrompt();
+      targetFake.failPrompt();
       return Response.json({ ok: true });
     case "failUndo":
-      fakeChatAgent.failReversible("undo");
+      targetFake.failReversible("undo");
       return Response.json({ ok: true });
     case "failRedo":
-      fakeChatAgent.failReversible("redo");
+      targetFake.failReversible("redo");
       return Response.json({ ok: true });
     case "failHistory":
-      fakeChatAgent.failHistory(false);
+      targetFake.failHistory(false);
       return Response.json({ ok: true });
     case "failOlderHistory":
-      fakeChatAgent.failHistory(true);
+      targetFake.failHistory(true);
       return Response.json({ ok: true });
     case "failStartup":
       targetFake.failStartup();
       return Response.json({ ok: true });
     case "declareOnly":
-      fakeChatAgent.declareOnly(body.capabilities ?? []);
+      targetFake.declareOnly(body.capabilities ?? []);
       return Response.json({ ok: true });
     case "models":
-      fakeChatAgent.setModels(body.models ?? []);
+      targetFake.setModels(body.models ?? []);
       return Response.json({ ok: true });
     case "resync":
       fakeChatAgent.rotateGeneration();

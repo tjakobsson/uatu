@@ -1300,7 +1300,7 @@ export class ChatAdapter {
     return [...new Map(items.map(item => [item.id, item])).values()];
   }
 
-  respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }> {
+  respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }> {
     return this.receipts.run(`permission:${conversationId}:${requestId}:${clientRequestId}`, async () => {
       const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
@@ -1311,9 +1311,9 @@ export class ChatAdapter {
       if (!projection.has(`permission:${requestId}`)) await this.seedPendingPermissions(conversationId);
       projection.requirePending(requestId, "permission");
       const reply: ProviderPermissionReply = outcome === "approved-once" ? "once" : outcome === "approved-session" ? "always" : "reject";
-      await this.provider.replyPermission(conversationId, requestId, reply);
-      projection.resolvePermission(requestId, outcome);
-      this.resolveMirroredCopy(session.parentId, `permission:${requestId}`, parent => parent.resolvePermission(requestId, outcome));
+      await this.provider.replyPermission(conversationId, requestId, reply, choiceId);
+      projection.resolvePermission(requestId, outcome, choiceId);
+      this.resolveMirroredCopy(session.parentId, `permission:${requestId}`, parent => parent.resolvePermission(requestId, outcome, choiceId));
       return { outcome };
     });
   }
@@ -2153,10 +2153,10 @@ export class ConversationProjection {
     }
   }
 
-  resolvePermission(requestId: string, outcome: PermissionOutcome): void {
+  resolvePermission(requestId: string, outcome: PermissionOutcome, choiceId?: string): void {
     const item = this.timeline.get(`permission:${requestId}`);
     if (!item || item.type !== "permission") throw new InteractionConflictError();
-    this.upsert({ ...item, status: "resolved", outcome });
+    this.upsert({ ...item, status: "resolved", outcome, ...(choiceId ? { choiceId } : {}) });
   }
 
   resolveQuestion(requestId: string, outcome: QuestionOutcome): void {

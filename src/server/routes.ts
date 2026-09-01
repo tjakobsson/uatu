@@ -799,14 +799,15 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       }),
     },
     [p("/api/chat/conversations/:conversationId/permissions/:interactionId")]: {
-      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome", "choiceId"], async (id, body) => {
         const interactionId = routeIdentity(request, "interactionId");
         const requestId = bodyIdentity(body, "requestId");
         if (interactionId instanceof Response) return interactionId;
         if (requestId instanceof Response) return requestId;
         const outcomes = new Set<PermissionOutcome>(["approved-once", "approved-session", "rejected"]);
         if (typeof body.outcome !== "string" || !outcomes.has(body.outcome as PermissionOutcome)) return chatError(400, "invalid permission outcome");
-        return run(() => deps.chatService.respondPermission(id, interactionId, requestId, body.outcome as PermissionOutcome));
+        if (body.choiceId !== undefined && (typeof body.choiceId !== "string" || !body.choiceId || Buffer.byteLength(body.choiceId) > 128)) return chatError(400, "invalid permission choice");
+        return run(() => deps.chatService.respondPermission(id, interactionId, requestId, body.outcome as PermissionOutcome, body.choiceId as string | undefined));
       }),
     },
     [p("/api/chat/conversations/:conversationId/questions/:interactionId")]: {

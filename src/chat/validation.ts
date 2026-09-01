@@ -242,14 +242,15 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome", "diff"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome", "diff", "plan", "choices", "choiceId"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
   expectTimelineBase(record, "permission");
   expectIdentity(record.requestId, "permission request id");
   expectNonEmptyString(record.action, "permission action");
-  expectStringArray(record.resources, "permission resources", true);
+  // Empty is legitimate: a plan approval affects no named resource.
+  expectStringArray(record.resources, "permission resources", record.plan === undefined);
   expectOneOf(record.status, ["pending", "resolved"], "permission status");
   if (record.status === "pending" && record.outcome !== undefined) {
     throw new Error("pending permission must not have an outcome");
@@ -258,6 +259,18 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
     expectOneOf(record.outcome, ["approved-once", "approved-session", "rejected"], "permission outcome");
   }
   if (record.diff !== undefined) expectString(record.diff, "permission diff");
+  if (record.plan !== undefined) expectString(record.plan, "permission plan");
+  if (record.choices !== undefined) {
+    if (!Array.isArray(record.choices) || record.choices.length === 0) throw new Error("permission choices must be a non-empty array");
+    for (const choice of record.choices) {
+      const entry = expectRecord(choice, "permission choice");
+      expectKeys(entry, ["id", "label", "description"], "permission choice");
+      expectIdentity(entry.id, "permission choice id");
+      expectNonEmptyString(entry.label, "permission choice label");
+      expectOptionalString(entry.description, "permission choice description");
+    }
+  }
+  if (record.choiceId !== undefined) expectIdentity(record.choiceId, "permission choice id");
   return value as PermissionRequest;
 }
 
@@ -346,6 +359,18 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalCount(record.additions, "additions");
       expectOptionalCount(record.deletions, "deletions");
       break;
+    case "task_progress": {
+      expectKeys(record, ["id", "type", "createdAt", "entries"], type);
+      if (!Array.isArray(record.entries)) throw new Error("task entries must be an array");
+      for (const entry of record.entries) {
+        const task = expectRecord(entry, "task entry");
+        expectKeys(task, ["text", "status", "activeText"], "task entry");
+        expectNonEmptyString(task.text, "task text");
+        expectOneOf(task.status, ["pending", "in_progress", "completed"], "task status");
+        expectOptionalString(task.activeText, "task active text");
+      }
+      break;
+    }
     case "turn_status":
       expectKeys(record, ["id", "type", "createdAt", "status", "message"], type);
       parseConversationStatus(record.status);

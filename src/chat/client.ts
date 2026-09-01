@@ -222,8 +222,8 @@ export class ChatApiClient {
     );
   }
 
-  permission(conversationId: string, interactionId: string, requestId: string, outcome: PermissionOutcome): Promise<unknown> {
-    return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/permissions/${encodeURIComponent(interactionId)}`), { requestId, outcome }, value => value);
+  permission(conversationId: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<unknown> {
+    return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/permissions/${encodeURIComponent(interactionId)}`), { requestId, outcome, ...(choiceId ? { choiceId } : {}) }, value => value);
   }
 
   question(conversationId: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<unknown> {

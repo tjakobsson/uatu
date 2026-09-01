@@ -2038,14 +2038,14 @@ export function initChat(api = new ChatApiClient()): void {
   const announceFailureFor = (source: ChatProjection) =>
     child && source.conversationId === child.conversationId ? announceChild : announce;
 
-  const resolvePermission = async (source: ChatProjection, itemId: string, outcome: PermissionOutcome) => {
+  const resolvePermission = async (source: ChatProjection, itemId: string, outcome: PermissionOutcome, choiceId?: string) => {
     const item = source.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "permission" || item.status !== "pending") return;
     disableCard(itemId, true);
     // Addressed to the conversation that owns the request, not the one on
     // screen: a subagent's request shown in its parent must be answered for the
     // subagent, so the child's requirePending guard and receipt key govern it.
-    try { await api.permission(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); }
+    try { await api.permission(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome, choiceId); }
     catch (error) { announceFailureFor(source)(messageOf(error), true); disableCard(itemId, false); }
   };
 
@@ -2067,7 +2067,7 @@ export function initChat(api = new ChatApiClient()): void {
    */
   const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null) => {
     container.addEventListener("click", event => {
-      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
+      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-permission-choice], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
       if (!target) return;
       if (target instanceof HTMLButtonElement && target.dataset.chatCopy) {
         const text = target.closest("pre")?.querySelector(":scope > code")?.textContent;
@@ -2097,7 +2097,10 @@ export function initChat(api = new ChatApiClient()): void {
           .finally(() => { if (button.isConnected) button.disabled = false; });
         return;
       }
-      if (item.type === "permission" && target.dataset.permissionOutcome) {
+      if (item.type === "permission" && target.dataset.permissionChoice) {
+        // A chosen intent is an approval; the id tells the agent which one.
+        void resolvePermission(source, item.id, "approved-once", target.dataset.permissionChoice);
+      } else if (item.type === "permission" && target.dataset.permissionOutcome) {
         void resolvePermission(source, item.id, target.dataset.permissionOutcome as PermissionOutcome);
       } else if (item.type === "question" && target.dataset.questionReject !== undefined) {
         void resolveQuestion(source, item.id, { kind: "rejected" });

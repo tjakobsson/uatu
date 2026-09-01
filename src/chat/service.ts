@@ -51,7 +51,7 @@ export interface WorkspaceChatService {
   redo(id: string, requestId: string): Promise<ReversibleHistoryResult>;
   revert(id: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult>;
   restore(id: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult>;
-  respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }>;
+  respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   dispose(): Promise<void>;
 }
@@ -220,8 +220,8 @@ export class LazyChatService implements WorkspaceChatService {
   async revert(id: string, messageId: string, requestId: string) { return (await this.requireAdapter()).revert(id, messageId, requestId); }
   async restore(id: string, messageId: string, requestId: string) { return (await this.requireAdapter()).restore(id, messageId, requestId); }
   async renameConversation(id: string, requestId: string, title: string) { return (await this.requireAdapter()).renameConversation(id, requestId, title); }
-  async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
-    return (await this.requireAdapter()).respondPermission(id, interactionId, requestId, outcome);
+  async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string) {
+    return (await this.requireAdapter()).respondPermission(id, interactionId, requestId, outcome, choiceId);
   }
   async respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome) {
     return (await this.requireAdapter()).respondQuestion(id, interactionId, requestId, outcome);

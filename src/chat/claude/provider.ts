@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import path from "node:path";
 
 import type {
   ChatProvider,
@@ -11,21 +12,28 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, QuestionRequest, StructuredQuestion } from "../types";
-import { UnsupportedVariantSelectionError } from "../provider";
+import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "../types";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, findClaudeModel } from "./models";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./normalization";
-import { listTranscriptSessions, readSessionTranscript, sessionTranscriptPath, claudeConfigDir } from "./transcript";
+import { listTranscriptSessions, readSessionTranscript, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
 /**
  * The slice of an SDK `Query` this provider drives. Narrow on purpose: tests
  * stage sessions with fakes, and the compiled binary talks to the user's own
  * `claude` through exactly these calls.
  */
+export type ClaudeRewindFilesResult = {
+  canRewind: boolean;
+  error?: string;
+  filesChanged?: string[];
+};
+
 export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   interrupt(): Promise<unknown>;
   setPermissionMode?(mode: string): Promise<void>;
   setModel?(model?: string): Promise<void>;
+  rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
 };
 
@@ -76,6 +84,8 @@ export type ClaudeProviderOptions = {
    */
   offerBypassPermissions?: boolean;
   queryFactory?: (input: ClaudeQueryInput) => ClaudeQueryHandle;
+  /** Conversation rewind: fork the native session up to a boundary (D8). */
+  forkSession?: (sessionId: string, options: { upToMessageId: string; dir: string }) => Promise<{ sessionId: string }>;
   now?: () => number;
 };
 
@@ -87,6 +97,9 @@ type LiveSession = {
   queue: PushQueue<ClaudeUserEnvelope>;
   query: ClaudeQueryHandle;
   reader: Promise<void>;
+  // Set by interrupt(): the turn's terminal result reports the user's
+  // cancellation, not a failure of its own.
+  interrupted?: boolean;
 };
 
 /**
@@ -116,6 +129,19 @@ export class ClaudeProvider implements ChatProvider {
   // OpenCode's server-held list — D5). Keyed by request id; each remembers
   // how to settle its callback and the card it published.
   private readonly interactions = new Map<string, PendingInteraction>();
+  // The mode a conversation ran before entering plan, for the
+  // "implement and return to the previous mode" intent (D5).
+  private readonly modeBeforePlan = new Map<string, string>();
+  // Reversible history (D8). A staged revert hides turns and has already
+  // rewound files to the boundary checkpoint; the tip snapshot holds the
+  // bytes the first undo displaced, so a terminal redo can put the newest
+  // state back truthfully. A committed revert forks the native session:
+  // `activeNative` redirects the conversation to its fork, and the fork
+  // itself stays out of the inventory.
+  private readonly staged = new Map<string, { boundaryIndex: number; tipSnapshot: Map<string, string | null> }>();
+  private readonly activeNative = new Map<string, string>();
+  private readonly hiddenNative = new Set<string>();
+  private readonly forkSession: NonNullable<ClaudeProviderOptions["forkSession"]>;
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private disposed = false;
 
@@ -125,12 +151,13 @@ export class ClaudeProvider implements ChatProvider {
     this.configDir = options.configDir ?? claudeConfigDir();
     this.queryFactory = options.queryFactory ?? defaultQueryFactory;
     this.offerBypassPermissions = options.offerBypassPermissions === true;
+    this.forkSession = options.forkSession ?? defaultForkSession;
     this.now = options.now ?? (() => Date.now());
   }
 
   describe(): ChatAgent {
     // Extended one capability at a time by the task that implements it.
-    return { id: "claude", name: "Claude Code", capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments"] };
+    return { id: "claude", name: "Claude Code", capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents"] };
   }
 
   async listCommands(): Promise<ChatCommand[]> { return this.commands; }
@@ -167,7 +194,7 @@ export class ClaudeProvider implements ChatProvider {
 
   async listSessions(): Promise<ProviderSession[]> {
     const { sessions } = await listTranscriptSessions(this.workspacePath, this.configDir);
-    const stored = sessions.map(session => ({
+    const stored = sessions.filter(session => !this.hiddenNative.has(session.id)).map(session => ({
       id: session.id,
       title: deriveTitle(session.firstPrompt),
       directory: this.workspacePath,
@@ -202,6 +229,27 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async getSession(id: string): Promise<ProviderSession | null> {
+    const child = parseSubagentId(id);
+    if (child) {
+      // Synthetic and read-only: a subagent run is reached from its parent's
+      // row, never started or listed on its own. `parentId` is what keeps it
+      // out of the picker and routes its interactions to the parent.
+      let entries;
+      try {
+        entries = (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, child.parentSessionId, child.agentId, this.configDir))).entries;
+      } catch {
+        return null;
+      }
+      if (entries.length === 0) return null;
+      return {
+        id,
+        title: "Subagent",
+        directory: this.workspacePath,
+        createdAt: entries[0]!.timestamp,
+        updatedAt: entries[entries.length - 1]!.timestamp,
+        parentId: child.parentSessionId,
+      };
+    }
     const fresh = this.pending.get(id);
     if (fresh) return fresh;
     return (await this.listSessions()).find(session => session.id === id) ?? null;
@@ -212,15 +260,28 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
+    const child = parseSubagentId(sessionId);
     let entries: Awaited<ReturnType<typeof readSessionTranscript>>["entries"] = [];
     try {
-      entries = (await readSessionTranscript(sessionTranscriptPath(this.workspacePath, sessionId, this.configDir))).entries;
+      entries = child
+        ? (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, child.parentSessionId, child.agentId, this.configDir))).entries
+        : (await readSessionTranscript(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))).entries;
     } catch {
-      // No transcript yet: a fresh conversation's history is empty.
+      // No transcript yet: a fresh conversation's history is empty. A child
+      // whose file is gone has nothing to show and no fallback.
+      if (child) throw new Error(`unknown Claude subagent transcript: ${sessionId}`);
       if (!this.pending.has(sessionId) && !this.live.has(sessionId)) throw new Error(`unknown Claude conversation: ${sessionId}`);
     }
-    const mainline = entries.filter(entry => !entry.isSidechain);
-    const { items, accounting } = normalizeTranscriptEntries(mainline);
+    // A child transcript IS the sidechain; a parent's history excludes it.
+    let mainline = child ? entries : entries.filter(entry => !entry.isSidechain);
+    // A staged revert hides the boundary turn and everything after it.
+    const stagedState = this.staged.get(sessionId);
+    if (stagedState) {
+      const turns = reversibleTurns(mainline);
+      const boundary = turns[stagedState.boundaryIndex];
+      if (boundary) mainline = mainline.slice(0, boundary.entryIndex);
+    }
+    const { items, accounting } = normalizeTranscriptEntries(mainline, child ? undefined : this.nativeId(sessionId));
     // Local paging over the fully read transcript, same shape as the
     // OpenCode provider: cursor is the exclusive end index.
     const end = clampIndex(options.cursor, items.length);
@@ -246,16 +307,24 @@ export class ClaudeProvider implements ChatProvider {
 
   async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     if (this.disposed) throw new Error("Claude provider is disposed");
+    if (parseSubagentId(sessionId)) throw new Error("a subagent transcript is read-only");
     if (input.mode !== undefined) {
       const modes = await this.listModes();
       if (!modes.some(candidate => candidate.name === input.mode)) {
         throw new Error(`Claude Code does not offer the mode ${input.mode}`);
       }
     }
+    // A replacement prompt while a revert is staged commits the reverted
+    // history first: the native session forks at the boundary and the
+    // conversation continues on the fork (D8). The hidden turns can no
+    // longer be restored after this.
+    if (this.staged.has(sessionId)) await this.commitStagedRevert(sessionId);
     const alreadyLive = this.live.get(sessionId);
     const session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
     if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     if (input.mode !== undefined) {
+      const previousMode = this.configurations.get(sessionId)?.mode;
+      if (input.mode === "plan" && previousMode !== "plan") this.modeBeforePlan.set(sessionId, previousMode ?? "default");
       const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
       this.configurations.set(sessionId, configuration);
       // A session that already existed switches live; a fresh one was
@@ -312,6 +381,7 @@ export class ClaudeProvider implements ChatProvider {
   async interrupt(sessionId: string): Promise<void> {
     const session = this.live.get(sessionId);
     if (!session) return;
+    session.interrupted = true;
     await session.query.interrupt();
     this.emit(sessionId, {
       updates: [{ kind: "status", status: "interrupted" }],
@@ -320,10 +390,18 @@ export class ClaudeProvider implements ChatProvider {
     });
   }
 
-  async replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void> {
+  async replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void> {
     const pending = this.requireInteraction(sessionId, requestId, "permission");
     if (reply === "reject") {
-      pending.settle({ behavior: "deny", message: "The user denied this action." });
+      // Rejecting a plan keeps the conversation planning (spec): the deny
+      // returns to the turn, which continues refining under plan mode.
+      pending.settle({ behavior: "deny", message: (pending.item as PermissionRequest).plan !== undefined
+        ? "The user did not approve this plan. Keep planning and present a revised plan."
+        : "The user denied this action." });
+      return;
+    }
+    if ((pending.item as PermissionRequest).plan !== undefined) {
+      await this.approvePlan(sessionId, pending, choiceId);
       return;
     }
     // "Always" returns the SDK's own suggestions, but only those scoped to
@@ -408,16 +486,18 @@ export class ClaudeProvider implements ChatProvider {
     if (existing) return existing;
     const known = this.pending.has(sessionId) || await this.getSession(sessionId);
     if (!known) throw new Error(`unknown Claude conversation: ${sessionId}`);
-    const hasTranscript = await fs.access(sessionTranscriptPath(this.workspacePath, sessionId, this.configDir)).then(() => true, () => false);
+    const nativeId = this.nativeId(sessionId);
+    const hasTranscript = await fs.access(sessionTranscriptPath(this.workspacePath, nativeId, this.configDir)).then(() => true, () => false);
     const queue = new PushQueue<ClaudeUserEnvelope>();
     const configuration = this.configurations.get(sessionId) ?? {};
     const query = this.queryFactory({
       prompt: queue,
       options: {
         cwd: this.workspacePath,
-        // Resume continues the native session; a never-prompted conversation
-        // instead claims its pre-minted id so the transcript lands under it.
-        ...(hasTranscript ? { resume: sessionId } : { sessionId }),
+        // Resume continues the native session (or its committed fork); a
+        // never-prompted conversation claims its pre-minted id instead so
+        // the transcript lands under it.
+        ...(hasTranscript ? { resume: nativeId } : { sessionId: nativeId }),
         pathToClaudeCodeExecutable: this.executable,
         enableFileCheckpointing: true,
         ...((mode ?? configuration.mode) ? { permissionMode: (mode ?? configuration.mode)! } : {}),
@@ -439,7 +519,14 @@ export class ClaudeProvider implements ChatProvider {
     try {
       for await (const message of session.query) {
         this.captureCommands(message);
-        const normalized = normalizeClaudeMessage(message, memory, "live");
+        const normalized = normalizeClaudeMessage(message, memory, "live", session.id);
+        // A result that lands after the user cancelled is the cancellation's
+        // own echo: report interrupted, not a turn failure.
+        if (session.interrupted && normalized.eventType === "result") {
+          session.interrupted = false;
+          normalized.updates = normalized.updates.map(update =>
+            update.kind === "status" ? { kind: "status", status: "interrupted" } : update);
+        }
         this.emit(session.id, normalized);
       }
       // The stream ended without dispose: the session's process is gone.
@@ -462,6 +549,147 @@ export class ClaudeProvider implements ChatProvider {
     }
   }
 
+  async getReversibleHistoryState(sessionId: string): Promise<ReversibleHistoryState> {
+    return (await this.reversibleContext(sessionId)).state;
+  }
+
+  async undo(sessionId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleContext(sessionId);
+    const index = (this.staged.get(sessionId)?.boundaryIndex ?? context.turns.length) - 1;
+    if (index < 0 || !context.turns[index]) return { outcome: "nothing-to-undo", state: context.state };
+    return this.stageBoundary(sessionId, context, index);
+  }
+
+  async redo(sessionId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleContext(sessionId);
+    const stagedState = this.staged.get(sessionId);
+    if (!stagedState) return { outcome: "nothing-to-redo", state: context.state };
+    const next = stagedState.boundaryIndex + 1;
+    if (next >= context.turns.length) return this.clearBoundary(sessionId, context, stagedState);
+    return this.stageBoundary(sessionId, context, next);
+  }
+
+  async revert(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleContext(sessionId);
+    const index = context.turns.findIndex(turn => `message:${turn.uuid}` === messageId);
+    if (index < 0) throw new ReversibleHistoryTargetError();
+    return this.stageBoundary(sessionId, context, index);
+  }
+
+  async restore(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    const context = await this.reversibleContext(sessionId);
+    const stagedState = this.staged.get(sessionId);
+    if (!stagedState) return { outcome: "nothing-to-redo", state: context.state };
+    const index = context.turns.findIndex(turn => `message:${turn.uuid}` === messageId);
+    if (index < 0) throw new ReversibleHistoryTargetError();
+    const next = index + 1;
+    if (next >= context.turns.length) return this.clearBoundary(sessionId, context, stagedState);
+    return this.stageBoundary(sessionId, context, next);
+  }
+
+  private async reversibleContext(sessionId: string): Promise<{ turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }> {
+    let turns: ReversibleClaudeTurn[] = [];
+    try {
+      const { entries } = await readSessionTranscript(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir));
+      turns = reversibleTurns(entries.filter(entry => !entry.isSidechain));
+    } catch {
+      // No transcript: nothing to revert.
+    }
+    const boundaryIndex = this.staged.get(sessionId)?.boundaryIndex;
+    return { turns, state: reversibleState(turns, boundaryIndex) };
+  }
+
+  /**
+   * Moves the revert boundary to `index`: files rewind to that turn's
+   * checkpoint through the live session's control channel, and the tip's
+   * displaced bytes are snapshotted on the first staging so a terminal redo
+   * can put the newest state back without inventing a forward checkpoint.
+   * A rewind the checkpoint store refuses changes nothing (spec: report,
+   * never claim).
+   */
+  private async stageBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, index: number): Promise<ReversibleHistoryResult> {
+    const target = context.turns[index]!;
+    const session = await this.ensureLive(sessionId);
+    if (!session.query.rewindFiles) throw new ReversibleHistoryTargetError();
+    const existing = this.staged.get(sessionId);
+    let tipSnapshot = existing?.tipSnapshot;
+    if (!tipSnapshot) {
+      const preview = await session.query.rewindFiles(target.uuid, { dryRun: true });
+      if (!preview.canRewind) throw new ReversibleHistoryTargetError();
+      tipSnapshot = await this.snapshotFiles(preview.filesChanged ?? []);
+    }
+    const result = await session.query.rewindFiles(target.uuid, { dryRun: false });
+    if (!result.canRewind) throw new ReversibleHistoryTargetError();
+    this.staged.set(sessionId, { boundaryIndex: index, tipSnapshot });
+    return {
+      outcome: "changed",
+      state: reversibleState(context.turns, index),
+      restoredDraft: { text: target.text },
+    };
+  }
+
+  /** Terminal redo: every hidden turn returns and the tip's bytes come back. */
+  private async clearBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, stagedState: { tipSnapshot: Map<string, string | null> }): Promise<ReversibleHistoryResult> {
+    await this.restoreSnapshot(stagedState.tipSnapshot);
+    this.staged.delete(sessionId);
+    return { outcome: "changed", state: reversibleState(context.turns, undefined) };
+  }
+
+  private async snapshotFiles(paths: string[]): Promise<Map<string, string | null>> {
+    const snapshot = new Map<string, string | null>();
+    for (const filePath of paths) {
+      const absolute = path.isAbsolute(filePath) ? filePath : path.join(this.workspacePath, filePath);
+      const content = await fs.readFile(absolute, "base64").catch(() => null);
+      snapshot.set(absolute, content);
+    }
+    return snapshot;
+  }
+
+  private async restoreSnapshot(snapshot: Map<string, string | null>): Promise<void> {
+    for (const [absolute, content] of snapshot) {
+      if (content === null) {
+        await fs.rm(absolute, { force: true });
+        continue;
+      }
+      await fs.mkdir(path.dirname(absolute), { recursive: true });
+      await fs.writeFile(absolute, Buffer.from(content, "base64"));
+    }
+  }
+
+  /**
+   * Commit: the conversation's native session forks at the last visible
+   * turn and the conversation continues on the fork; the original keeps
+   * every turn but no longer serves this conversation. A boundary at the
+   * very first turn starts a fresh native session instead — there is no
+   * "empty fork".
+   */
+  private async commitStagedRevert(sessionId: string): Promise<void> {
+    const stagedState = this.staged.get(sessionId);
+    if (!stagedState) return;
+    const context = await this.reversibleContext(sessionId);
+    const lastVisible = context.turns[stagedState.boundaryIndex - 1];
+    const previousNative = this.nativeId(sessionId);
+    const replacement = lastVisible
+      ? (await this.forkSession(previousNative, { upToMessageId: lastVisible.uuid, dir: this.workspacePath })).sessionId
+      : randomUUID();
+    this.activeNative.set(sessionId, replacement);
+    this.hiddenNative.add(replacement);
+    this.staged.delete(sessionId);
+    // The live session is bound to the pre-fork history; the next prompt
+    // resumes the fork instead.
+    const live = this.live.get(sessionId);
+    if (live) {
+      this.live.delete(sessionId);
+      await live.query.interrupt().catch(() => undefined);
+      live.queue.close();
+      await live.query.return?.().catch(() => undefined);
+    }
+  }
+
+  private nativeId(sessionId: string): string {
+    return this.activeNative.get(sessionId) ?? sessionId;
+  }
+
   /**
    * The SDK's tool-approval callback, classified (D5): `AskUserQuestion`
    * becomes a structured question card; everything else a permission card.
@@ -473,17 +701,38 @@ export class ClaudeProvider implements ChatProvider {
     const createdAt = this.now();
     return new Promise<ClaudePermissionResult>(resolve => {
       const questions = toolName === "AskUserQuestion" ? normalizeAskUserQuestions(input) : null;
+      // A completed plan asks for its own kind of approval: the card carries
+      // the plan and intents rather than the generic allow pair (D5).
+      const plan = toolName === "ExitPlanMode" && typeof input.plan === "string" ? input.plan : null;
+      const returnMode = this.modeBeforePlan.get(sessionId);
       const item: PermissionRequest | QuestionRequest = questions
         ? { id: `question:${requestId}`, type: "question", createdAt, requestId, questions, status: "pending" }
-        : {
-          id: `permission:${requestId}`,
-          type: "permission",
-          createdAt,
-          requestId,
-          action: options.title ?? options.displayName ?? toolName,
-          resources: permissionResources(input, options),
-          status: "pending",
-        };
+        : plan !== null
+          ? {
+            id: `permission:${requestId}`,
+            type: "permission",
+            createdAt,
+            requestId,
+            action: "Review the plan",
+            resources: [],
+            status: "pending",
+            plan,
+            choices: [
+              { id: "implement", label: "Approve and implement" },
+              ...(returnMode && returnMode !== "plan"
+                ? [{ id: "implement-and-restore", label: `Approve, then return to ${returnMode}`, description: "Implement the plan, then go back to the mode this conversation used before planning." }]
+                : []),
+            ],
+          }
+          : {
+            id: `permission:${requestId}`,
+            type: "permission",
+            createdAt,
+            requestId,
+            action: options.title ?? options.displayName ?? toolName,
+            resources: permissionResources(input, options),
+            status: "pending",
+          };
       const settle = (result: ClaudePermissionResult, resolution?: "answered") => {
         if (!this.interactions.has(requestId)) return;
         this.interactions.delete(requestId);
@@ -515,6 +764,30 @@ export class ClaudeProvider implements ChatProvider {
         abandon: reason => settle({ behavior: "deny", message: reason }),
       });
       this.emit(sessionId, { updates: [{ kind: "upsert", item }], outcome: "handled", eventType: "interaction.requested" });
+    });
+  }
+
+  /**
+   * Plan approval: allow the ExitPlanMode call, then set the conversation's
+   * next mode by the chosen intent — the default intent leaves planning for
+   * the agent's normal implementing mode, the restore intent returns to the
+   * mode used before planning. Either way the picker learns the new mode
+   * through a configuration event, without a separate user mode change.
+   */
+  private async approvePlan(sessionId: string, pending: PendingInteraction, choiceId?: string): Promise<void> {
+    const returnMode = choiceId === "implement-and-restore"
+      ? this.modeBeforePlan.get(sessionId) ?? "default"
+      : "default";
+    pending.settle({ behavior: "allow", updatedInput: pending.input });
+    this.modeBeforePlan.delete(sessionId);
+    const configuration = { ...this.configurations.get(sessionId), mode: returnMode };
+    this.configurations.set(sessionId, configuration);
+    await this.live.get(sessionId)?.query.setPermissionMode?.(returnMode);
+    this.emit(sessionId, {
+      updates: [],
+      outcome: "handled",
+      eventType: "plan.approved",
+      configuration: { mode: returnMode },
     });
   }
 
@@ -573,6 +846,47 @@ function clampIndex(cursor: string | undefined, length: number): number {
   const parsed = Number.parseInt(cursor, 10);
   if (Number.isNaN(parsed)) throw new Error("invalid history cursor");
   return Math.max(0, Math.min(parsed, length));
+}
+
+function parseSubagentId(id: string): { parentSessionId: string; agentId: string } | null {
+  const match = id.match(/^sub:([A-Za-z0-9-]+):([A-Za-z0-9-]+)$/);
+  return match ? { parentSessionId: match[1]!, agentId: match[2]! } : null;
+}
+
+type ReversibleClaudeTurn = { uuid: string; text: string; entryIndex: number };
+
+/** Visible user turns, in order, with their transcript positions. */
+function reversibleTurns(entries: Array<{ kind: string; uuid: string; message: Record<string, unknown> }>): ReversibleClaudeTurn[] {
+  const turns: ReversibleClaudeTurn[] = [];
+  entries.forEach((entry, index) => {
+    if (entry.kind !== "user") return;
+    const content = entry.message.content;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content) && !content.some(block => (block as { type?: string })?.type === "tool_result")
+        ? content.filter(block => (block as { type?: string })?.type === "text").map(block => (block as { text?: string }).text ?? "").join("\n")
+        : "";
+    if (text.trim()) turns.push({ uuid: entry.uuid, text, entryIndex: index });
+  });
+  return turns;
+}
+
+function reversibleState(turns: ReversibleClaudeTurn[], boundaryIndex: number | undefined): ReversibleHistoryState {
+  const staged = boundaryIndex !== undefined;
+  return {
+    staged,
+    canUndo: (boundaryIndex ?? turns.length) > 0,
+    canRedo: staged,
+    revertedMessages: staged
+      ? turns.slice(boundaryIndex).map(turn => ({ id: `message:${turn.uuid}`, text: turn.text }))
+      : [],
+  };
+}
+
+function defaultForkSession(sessionId: string, options: { upToMessageId: string; dir: string }): Promise<{ sessionId: string }> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { forkSession } = require("@anthropic-ai/claude-agent-sdk") as typeof import("@anthropic-ai/claude-agent-sdk");
+  return forkSession(sessionId, { upToMessageId: options.upToMessageId, dir: options.dir });
 }
 
 type PendingInteraction = {

@@ -272,6 +272,16 @@ export type FileChangeItem = TimelineItemBase & {
 
 export type PermissionOutcome = "approved-once" | "approved-session" | "rejected";
 
+// An agent-provided approval intent on a permission (a plan approval's
+// "implement" vs "implement and return to the previous mode"). When a
+// request carries choices, they replace the generic approve pair; rejecting
+// stays universal. Additive: absent means the generic pair.
+export type PermissionChoice = {
+  id: string;
+  label: string;
+  description?: string;
+};
+
 export type PermissionRequest = TimelineItemBase & {
   type: "permission";
   requestId: string;
@@ -288,6 +298,13 @@ export type PermissionRequest = TimelineItemBase & {
   // agent attaches one (OpenCode puts it on the permission's `metadata.diff`).
   // Absent for a permission with nothing to show — a command, a fetch.
   diff?: string;
+  // The plan this approval would put into effect, as markdown (a Claude Code
+  // plan approval). Rendered in the card while the request is open.
+  plan?: string;
+  // Agent-provided approval intents; see PermissionChoice.
+  choices?: PermissionChoice[];
+  // On resolution: which choice approved it, when choices were offered.
+  choiceId?: string;
 };
 
 export type QuestionOption = {
@@ -317,6 +334,26 @@ export type QuestionRequest = TimelineItemBase & {
   outcome?: QuestionOutcome;
 };
 
+// One task's standing in the agent's own running task list.
+export type TaskProgressEntry = {
+  text: string;
+  status: "pending" | "in_progress" | "completed";
+  // Present-continuous label shown while in progress, when the agent
+  // provides one ("Running tests" for "Run tests").
+  activeText?: string;
+};
+
+/**
+ * The agent's live task list (D9): one presentation per conversation,
+ * upserted in place as items are added, started, and completed — never a
+ * new timeline entry per update. Emitted today only by agents that keep a
+ * task list; a conversation without one simply never contains this item.
+ */
+export type TaskProgressItem = TimelineItemBase & {
+  type: "task_progress";
+  entries: TaskProgressEntry[];
+};
+
 export type TurnStatusItem = TimelineItemBase & {
   type: "turn_status";
   status: ConversationStatus;
@@ -338,6 +375,7 @@ export type ConversationItem =
   | FileChangeItem
   | PermissionRequest
   | QuestionRequest
+  | TaskProgressItem
   | TurnStatusItem
   | NoticeItem;
 
