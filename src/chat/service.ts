@@ -247,6 +247,9 @@ export class LazyChatService implements WorkspaceChatService {
   }
 
   private ensureAdapter(): Promise<ChatAdapter> {
+    // A continuation that raced shutdown past dispose's join point must not
+    // create a fresh provider (and its catalog process) on a dead service.
+    if (this.disposed) throw new ChatUnavailableError();
     const pending = this.adapterPromise ??= (async () => {
       const provider = this.runtime.createProvider();
       if (!provider) throw new ChatUnavailableError();
@@ -260,6 +263,12 @@ export class LazyChatService implements WorkspaceChatService {
         resolveAttachment: id => this.attachmentStore.resolve(id),
         metrics: this.metrics,
       });
+      // Shutdown may have started while the probe ran; a just-built
+      // adapter on a disposed service retires immediately.
+      if (this.disposed) {
+        await adapter.dispose().catch(() => undefined);
+        throw new ChatUnavailableError();
+      }
       this.adapter = adapter;
       this.superviseEventPump(adapter);
       return adapter;

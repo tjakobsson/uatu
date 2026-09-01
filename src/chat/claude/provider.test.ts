@@ -854,6 +854,18 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("an already-aborted permission signal settles immediately, never stranding a card", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "work", delivery: "queue" });
+    const aborted = new AbortController();
+    aborted.abort();
+    const decision = await queries[0]!.input.options.canUseTool!("Write", { file_path: "/a" }, { signal: aborted.signal, toolUseID: "t1" });
+    expect(decision).toEqual({ behavior: "deny", message: "The turn was interrupted before the user answered." });
+    expect(await provider.listPermissions()).toEqual([]);
+    await provider.dispose();
+  });
+
   test("a slash command dispatches as a turn through the session", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);

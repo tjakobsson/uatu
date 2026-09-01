@@ -1107,7 +1107,10 @@ export class ClaudeProvider implements ChatProvider {
         resolve(result);
       };
       const onAbort = () => settle({ behavior: "deny", message: "The turn was interrupted before the user answered." });
-      options.signal.addEventListener("abort", onAbort, { once: true });
+      // Registration precedes abort observation: settle() is a no-op until
+      // the map holds this request, so an abort firing between the two
+      // would strand a permanently pending card while Claude waits on the
+      // callback. An already-aborted signal settles immediately.
       this.interactions.set(requestId, {
         requestId,
         conversationId: sessionId,
@@ -1119,6 +1122,11 @@ export class ClaudeProvider implements ChatProvider {
         settle: result => settle(result, "answered"),
         abandon: reason => settle({ behavior: "deny", message: reason }),
       });
+      if (options.signal.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal.addEventListener("abort", onAbort, { once: true });
       this.emit(sessionId, { updates: [{ kind: "upsert", item }], outcome: "handled", eventType: "interaction.requested" });
     });
   }
