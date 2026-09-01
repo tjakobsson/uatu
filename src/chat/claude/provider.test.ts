@@ -643,6 +643,18 @@ describe("ClaudeProvider sessions", () => {
     expect(state.canRedo).toBe(true);
     await provider.redo!(storedId);
     expect(readFileSync(marker, "utf8")).toBe("tip");
+    // The same protection covers an attachment that vanished after
+    // admission — the last fallible step before acceptance.
+    await provider.undo!(storedId);
+    await expect(provider.prompt(storedId, {
+      id: "r3", text: "with image", delivery: "queue",
+      attachments: [{ id: "gone", name: "gone.png", mimeType: "image/png", absolutePath: path.join(workspace, "missing.png") }],
+    })).rejects.toThrow();
+    const after = await provider.getReversibleHistoryState!(storedId);
+    expect(after.staged).toBe(true);
+    expect(after.canRedo).toBe(true);
+    await provider.redo!(storedId);
+    expect(readFileSync(marker, "utf8")).toBe("tip");
     await provider.dispose();
   });
 

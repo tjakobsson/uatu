@@ -487,11 +487,40 @@ export class ClaudeProvider implements ChatProvider {
     const nativeBefore = this.activeNative.get(sessionId);
     if (stagedBefore) await this.commitStagedRevert(sessionId);
     let session: LiveSession;
-    let alreadyLive: LiveSession | undefined;
+    const content: Array<Record<string, unknown>> = [];
+    // Everything before the queue push can fail; the rollback must cover it
+    // all — an attachment that vanished after admission is as much a
+    // pre-acceptance failure as a spawn that never came up.
     try {
-      alreadyLive = this.live.get(sessionId);
+      const alreadyLive = this.live.get(sessionId);
       session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
       if (input.model) await this.switchModel(sessionId, input.model, input.variant);
+      if (input.mode !== undefined) {
+        const previousMode = this.configurations.get(sessionId)?.mode;
+        if (input.mode === "plan" && previousMode !== "plan") {
+          this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
+          this.persistDurableState();
+        }
+        const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
+        this.configurations.set(sessionId, configuration);
+        this.persistDurableState();
+        // A session that already existed switches live; a fresh one was
+        // created with the mode in its options. An install that rejects
+        // the mode value (an older CLI) keeps the turn alive; the
+        // configuration event still reflects the request and the session
+        // keeps its previous mode.
+        if (alreadyLive) await alreadyLive.query.setPermissionMode?.(input.mode).catch(() => undefined);
+      }
+      // Images ride the prompt as base64 blocks read from the workspace's
+      // attachment store; the store, bounds, and upload routes are shared
+      // across agents (D5) — only this delivery is Claude-shaped.
+      for (const attachment of input.attachments ?? []) {
+        const bytes = await fs.readFile(attachment.absolutePath);
+        content.push({
+          type: "image",
+          source: { type: "base64", media_type: attachment.mimeType, data: bytes.toString("base64") },
+        });
+      }
     } catch (error) {
       if (stagedBefore) {
         // The fork stays hidden and unused; the conversation returns to
@@ -502,35 +531,6 @@ export class ClaudeProvider implements ChatProvider {
         this.persistDurableState();
       }
       throw error;
-    }
-    if (input.mode !== undefined) {
-      const previousMode = this.configurations.get(sessionId)?.mode;
-      if (input.mode === "plan" && previousMode !== "plan") {
-        this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
-        this.persistDurableState();
-      }
-      const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
-      this.configurations.set(sessionId, configuration);
-      this.persistDurableState();
-      // A session that already existed switches live; a fresh one was
-      // created with the mode in its options.
-      if (alreadyLive) {
-        // An install that rejects the mode value (an older CLI) keeps the
-        // turn alive; the configuration event still reflects the request
-        // and the session keeps its previous mode.
-        await alreadyLive.query.setPermissionMode?.(input.mode).catch(() => undefined);
-      }
-    }
-    // Images ride the prompt as base64 blocks read from the workspace's
-    // attachment store; the store, bounds, and upload routes are shared
-    // across agents (D5) — only this delivery is Claude-shaped.
-    const content: Array<Record<string, unknown>> = [];
-    for (const attachment of input.attachments ?? []) {
-      const bytes = await fs.readFile(attachment.absolutePath);
-      content.push({
-        type: "image",
-        source: { type: "base64", media_type: attachment.mimeType, data: bytes.toString("base64") },
-      });
     }
     if (input.text) content.push({ type: "text", text: input.text });
     if (content.length === 0) content.push({ type: "text", text: "" });
