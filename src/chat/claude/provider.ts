@@ -952,28 +952,39 @@ export class ClaudeProvider implements ChatProvider {
     // leaves a staged claim over tip-state files — a redo then restores
     // tip over tip, idempotently — whereas rewinding first risked changed
     // files with no recoverable record.
-    const stagedRollback = () => {
+    // The corrective record is awaited like the write-ahead itself: a
+    // refusal whose rollback never lands would leave the sidecar hiding
+    // turns and advertising a redo this operation said did not happen.
+    const stagedRollback = async () => {
       if (existing) this.staged.set(sessionId, existing);
       else this.staged.delete(sessionId);
+      await this.queuePersist(this.durableSnapshot());
     };
     this.staged.set(sessionId, { boundaryIndex: index, tipSnapshot });
     try {
       await this.queuePersist(this.durableSnapshot());
     } catch (error) {
-      stagedRollback();
+      if (existing) this.staged.set(sessionId, existing);
+      else this.staged.delete(sessionId);
       throw new ReversibleHistoryTargetError(`the rewind could not be recorded (${error instanceof Error ? error.message : "write failed"}); nothing was changed`);
     }
     let result;
     try {
       result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     } catch (error) {
-      stagedRollback();
-      this.persistDurableState();
+      try {
+        await stagedRollback();
+      } catch (persistError) {
+        throw new ReversibleHistoryTargetError(`${error instanceof Error ? error.message : "rewind failed"}; additionally the rollback could not be recorded: ${persistError instanceof Error ? persistError.message : "write failed"}`);
+      }
       throw error;
     }
     if (!result.canRewind) {
-      stagedRollback();
-      this.persistDurableState();
+      try {
+        await stagedRollback();
+      } catch (persistError) {
+        throw new ReversibleHistoryTargetError(`${rewindRefusal(result.error)}; additionally the rollback could not be recorded: ${persistError instanceof Error ? persistError.message : "write failed"}`);
+      }
       throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
     }
     return {
