@@ -158,6 +158,12 @@ export interface ChatProvider {
   revert?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
   restore?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
   events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent>;
+  /**
+   * Retire the provider's own resources — live agent sessions, pending
+   * tool callbacks, background probes. The adapter awaits this as part of
+   * its own disposal, so a retired adapter leaves no agent process behind.
+   */
+  dispose?(): Promise<void>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;

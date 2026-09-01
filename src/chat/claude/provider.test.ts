@@ -599,6 +599,23 @@ describe("ClaudeProvider sessions", () => {
     await optedIn.dispose();
   });
 
+  test("a terminal result retires the query; the next prompt resumes fresh", async () => {
+    const { provider, queries, configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`),
+      JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-08-30T10:00:00.000Z", cwd: workspace, message: { role: "user", content: "first" } }));
+    await provider.prompt(storedId, { id: "r1", text: "work", delivery: "queue" });
+    expect(queries).toHaveLength(1);
+    queries[0]!.push({ type: "result", uuid: "res-1", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
+    // The turn's end releases the process: an idle conversation holds none.
+    await waitFor(() => queries[0]!.returned);
+    // The next prompt starts a fresh session resuming the same native id.
+    await provider.prompt(storedId, { id: "r2", text: "more", delivery: "queue" });
+    expect(queries).toHaveLength(2);
+    expect(queries[1]!.input.options.resume).toBe(storedId);
+    await provider.dispose();
+  });
+
   test("a slash command dispatches as a turn through the session", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);

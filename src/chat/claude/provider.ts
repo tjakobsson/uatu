@@ -115,6 +115,10 @@ type LiveSession = {
   queue: PushQueue<ClaudeUserEnvelope>;
   query: ClaudeQueryHandle;
   reader: Promise<void>;
+  // Turns accepted but not yet terminally reported. The queue cannot be
+  // peeked for this — the SDK consumes envelopes eagerly — so the provider
+  // counts what it accepted and what results retired.
+  pendingTurns: number;
   // Set by interrupt(): the turn's terminal result reports the user's
   // cancellation, not a failure of its own.
   interrupted?: boolean;
@@ -516,6 +520,7 @@ export class ClaudeProvider implements ChatProvider {
       eventType: "prompt.accepted",
     });
     this.retitleFromFirstPrompt(sessionId, input.text);
+    session.pendingTurns += 1;
     session.queue.push({
       type: "user",
       message: { role: "user", content },
@@ -687,7 +692,7 @@ export class ClaudeProvider implements ChatProvider {
         canUseTool: (toolName, input, options) => this.brokerToolUse(sessionId, toolName, input, options),
       },
     });
-    const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve() };
+    const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0 };
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
     // Fire-and-forget: the catalog answers when the session is up, and a
@@ -714,6 +719,18 @@ export class ClaudeProvider implements ChatProvider {
             update.kind === "status" ? { kind: "status", status: "interrupted" } : update);
         }
         this.emit(session.id, normalized);
+        // A terminal result ends the turn; an idle conversation holds no
+        // process (spec). Unless another accepted prompt is still pending
+        // for this very session, retire the query — the next prompt
+        // resumes fresh.
+        if (normalized.eventType === "result") session.pendingTurns = Math.max(0, session.pendingTurns - 1);
+        if (normalized.eventType === "result" && session.pendingTurns === 0 && this.live.get(session.id) === session) {
+          this.live.delete(session.id);
+          this.abandonInteractions(session.id, "The turn ended before the user answered.");
+          session.queue.close();
+          await session.query.return?.().catch(() => undefined);
+          return;
+        }
       }
       // The stream ended without dispose: the session's process is gone.
       if (!this.disposed && this.live.get(session.id) === session) {
@@ -1038,7 +1055,11 @@ export class ClaudeProvider implements ChatProvider {
     const configuration = { ...this.configurations.get(sessionId), mode: returnMode };
     this.configurations.set(sessionId, configuration);
     this.persistDurableState();
-    await this.live.get(sessionId)?.query.setPermissionMode?.(returnMode);
+    // The plan is already approved and the interaction settled; a CLI that
+    // rejects the return-mode switch must not turn that success into a
+    // failed permission response (same degradation as the ordinary live
+    // mode-switch path — the mode applies at the next session start).
+    await this.live.get(sessionId)?.query.setPermissionMode?.(returnMode).catch(() => undefined);
     this.emit(sessionId, {
       updates: [],
       outcome: "handled",
@@ -1108,11 +1129,34 @@ export class ClaudeProvider implements ChatProvider {
     }
   }
 
-  /** The init message names the session's slash commands; keep the latest. */
+  /**
+   * The init message names the session's slash commands (bare names), and a
+   * mid-session `commands_changed` push carries the full replacement list —
+   * the CLI's own instruction is to replace the cached inventory with it.
+   */
   private captureCommands(message: unknown): void {
     if (!message || typeof message !== "object") return;
     const record = message as Record<string, unknown>;
-    if (record.type !== "system" || record.subtype !== "init" || !Array.isArray(record.slash_commands)) return;
+    if (record.type !== "system") return;
+    if (record.subtype === "commands_changed" && Array.isArray(record.commands)) {
+      const commands = record.commands.flatMap((value): ChatCommand[] => {
+        if (!value || typeof value !== "object") return [];
+        const info = value as Record<string, unknown>;
+        if (typeof info.name !== "string" || !info.name) return [];
+        return [{
+          name: info.name.startsWith("/") ? info.name.slice(1) : info.name,
+          description: typeof info.description === "string" ? info.description : "",
+          argumentHint: typeof info.argumentHint === "string" ? info.argumentHint : "",
+          kind: "command" as const,
+        }];
+      });
+      if (commands.length > 0) this.commands = commands;
+      return;
+    }
+    if (record.subtype !== "init" || !Array.isArray(record.slash_commands)) return;
+    // Bare names only fill an empty inventory; they never downgrade the
+    // control channel's described list.
+    if (this.commands.length > 0) return;
     this.commands = record.slash_commands
       .filter((name): name is string => typeof name === "string" && name.length > 0)
       .map(name => ({ name, description: "", argumentHint: "", kind: "command" as const }));
@@ -1334,6 +1378,7 @@ class PushQueue<T> implements AsyncIterable<T> {
     this.closed = true;
     for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as never, done: true });
   }
+
 
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {

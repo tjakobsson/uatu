@@ -307,24 +307,39 @@ export function initChat(api = new ChatApiClient()): void {
    * count and the subagent track stay gated in lockstep with them rather than
    * half-gated here.
    */
+  // An absent capability presents no control — absent from the DOM, as the
+  // capability rule and its tests mean it — but capabilities change with the
+  // selected conversation's agent now, so removal must be reversible: a
+  // stable anchor remembers the spot and the control returns through it.
+  const capabilityControl = (element: HTMLElement | null) => {
+    if (!element || !element.parentNode) return (_present: boolean) => {};
+    const anchor = element.ownerDocument.createComment("capability-slot");
+    element.parentNode.insertBefore(anchor, element);
+    return (present: boolean) => {
+      if (present) {
+        if (!element.isConnected) anchor.parentNode?.insertBefore(element, anchor.nextSibling);
+        // Markup may ship the control hidden until an agent declares it.
+        element.hidden = false;
+      } else if (element.isConnected) element.remove();
+    };
+  };
+  const presentRename = capabilityControl(renameButton);
+  const presentAttach = capabilityControl(attachButton);
+
   const applyCapabilities = () => {
     if (!agent) return;
     configurationTrigger.hidden = !declares("models") && !declares("modes") && !declares("variants");
-    // Hidden, never removed: capabilities change with the selected
-    // conversation's agent now, so a control another agent declares must be
-    // able to come back. An absent capability still presents no control —
-    // the rule is about presentation, and hidden satisfies it reversibly.
     if (contextUsage && !declares("context")) {
       // The meter's own renderer re-shows it when a context agent's usage
       // paints; here only the takeaway happens.
       contextUsage.hidden = true;
       contextUsage.open = false;
     }
-    if (renameButton) renameButton.hidden = !declares("conversation-rename");
+    presentRename(declares("conversation-rename"));
     // The model-level attachment gate is different — see syncAttachControl:
     // a model choice flips often, so there the control stays visible and
-    // goes inactive instead.
-    if (attachButton) attachButton.hidden = !declares("attachments");
+    // goes inactive instead. The capability gate governs presence.
+    presentAttach(declares("attachments"));
   };
   nameAgent();
 
@@ -2993,6 +3008,22 @@ export function initChat(api = new ChatApiClient()): void {
       return;
     }
     let catalogs = agentCatalogs.get(status.agent.id);
+    if (catalogs) {
+      // Banked models and modes are stable; the command inventory is not —
+      // agents discover skills mid-session (Claude pushes commands_changed).
+      // Refresh it in the background on every context application so
+      // completion tracks the agent's current list.
+      const banked = catalogs;
+      const chatAgent = agent;
+      if (chatAgent?.capabilities.includes("commands") || chatAgent?.capabilities.includes("reversible-history")) {
+        void api.commands(status.agent.id).then(list => {
+          if (agentCatalogs.get(status.agent.id) !== banked) return;
+          banked.commands = list;
+          banked.commandInventoryAvailable = true;
+          if (contextAgentId === status.agent.id) commands = list;
+        }).catch(() => undefined);
+      }
+    }
     if (!catalogs) {
       const chatAgent = agent;
       const has = (capability: ChatCapability) => chatAgent?.capabilities.includes(capability) ?? true;

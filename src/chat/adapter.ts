@@ -599,7 +599,11 @@ export class ChatAdapter {
     }
     this.revertReconciliations.clear();
     this.inventory.dispose();
-    return this.disposalPromise = this.stopEventPump();
+    // The provider's own resources retire with the adapter: live agent
+    // sessions must not keep working with no event consumer left.
+    return this.disposalPromise = this.stopEventPump()
+      .then(() => this.provider.dispose?.())
+      .then(() => undefined, () => undefined);
   }
 
   async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
