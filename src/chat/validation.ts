@@ -107,7 +107,7 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
-  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput", "detail", "default"], "chat model");
+  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput", "detail", "default", "resolvesTo"], "chat model");
   expectModelSelection(record.selection);
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
@@ -116,6 +116,7 @@ export function parseChatModel(value: unknown): ChatModel {
   if (record.imageInput !== undefined && typeof record.imageInput !== "boolean") throw new Error("model imageInput must be a boolean");
   if (record.detail !== undefined) expectNonEmptyString(record.detail, "model detail");
   if (record.default !== undefined && typeof record.default !== "boolean") throw new Error("model default must be a boolean");
+  if (record.resolvesTo !== undefined) expectModelSelection(record.resolvesTo);
   return value as ChatModel;
 }
 

@@ -952,6 +952,7 @@ function clampIndex(cursor: string | undefined, length: number): number {
 function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<string, string> } {
   const models: ChatModel[] = [];
   const aliases = new Map<string, string>();
+  const resolvedByIndex = new Map<number, string>();
   if (!Array.isArray(raw)) return { models, aliases };
   for (const value of raw) {
     if (!value || typeof value !== "object") continue;
@@ -977,6 +978,7 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
     const variants = Array.isArray(info.supportedEffortLevels)
       ? info.supportedEffortLevels.filter((level): level is string => typeof level === "string")
       : undefined;
+    if (resolvedModel) resolvedByIndex.set(models.length, resolvedModel);
     models.push({
       selection: { providerId: "anthropic", modelId: info.value },
       provider: "Anthropic",
@@ -991,6 +993,14 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
         : claudeContextWindow(info.value, resolvedModel),
       imageInput: true,
     });
+  }
+  // Name the default's resolution: the concrete entry sharing its resolved
+  // model is what the agent would actually run.
+  const defaultIndex = models.findIndex(model => model.default);
+  if (defaultIndex >= 0) {
+    const resolved = resolvedByIndex.get(defaultIndex);
+    const concreteIndex = models.findIndex((model, index) => index !== defaultIndex && !model.default && resolvedByIndex.get(index) === resolved);
+    if (resolved && concreteIndex >= 0) models[defaultIndex] = { ...models[defaultIndex]!, resolvesTo: models[concreteIndex]!.selection };
   }
   return { models, aliases };
 }

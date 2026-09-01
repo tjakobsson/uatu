@@ -189,6 +189,9 @@ describe("catalog hydration probe", () => {
     expect(defaultEntry.name).toBe("Default (recommended)");
     expect(defaultEntry.detail).toBe("Opus 5 with 1M context · Best for everyday, complex tasks");
     expect(defaultEntry.contextLimit).toBe(1_000_000);
+    // The default names what it runs: the concrete entry sharing its
+    // resolved model.
+    expect(defaultEntry.resolvesTo).toEqual({ providerId: "anthropic", modelId: "opus[1m]" });
     expect(models.find(model => model.selection.modelId === "opus[1m]")?.contextLimit).toBe(1_000_000);
     expect(models.find(model => model.selection.modelId === "claude-fable-5[1m]")?.contextLimit).toBe(1_000_000);
     expect(models.find(model => model.selection.modelId === "sonnet")?.contextLimit).toBe(200_000);

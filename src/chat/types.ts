@@ -139,6 +139,10 @@ export type ChatModel = {
   // picker offers it in place of the generic "Let the agent choose" row and
   // an unset conversation displays it as the active choice.
   default?: boolean;
+  // What a default entry currently resolves to: the catalog entry the agent
+  // would actually run. Surfaces name the resolution ("Default · Opus")
+  // rather than leaving "Default" opaque.
+  resolvesTo?: ModelSelection;
 };
 
 export type ChatCommand = {

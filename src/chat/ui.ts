@@ -1430,6 +1430,16 @@ export function initChat(api = new ChatApiClient()): void {
     else stagedConfigurations.delete(conversationId);
   };
 
+  // A default entry is named by what it runs: "Default · Opus (1M context)"
+  // rather than an opaque "Default (recommended)".
+  const modelChipName = (model: ChatModel): string => {
+    if (model.default && model.resolvesTo) {
+      const resolved = models.find(candidate => sameModel(candidate.selection, model.resolvesTo!));
+      if (resolved) return `Default · ${resolved.name}`;
+    }
+    return model.name;
+  };
+
   const renderConfiguration = () => {
     const configuration = displayedConfiguration();
     // An agent may declare its own recommended defaults; while nothing is
@@ -1440,7 +1450,7 @@ export function initChat(api = new ChatApiClient()): void {
       ? models.find(model => sameModel(model.selection, configuration.model!))
       : defaultModel;
     configurationSummary.textContent = declares("models")
-      ? displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
+      ? (displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
       : "Chat settings";
     const offersMode = declares("modes") && modes.length > 0;
     const offersReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
@@ -1456,7 +1466,7 @@ export function initChat(api = new ChatApiClient()): void {
     configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant!) : "";
     configurationDetails.hidden = !showMode && !showReasoning;
     const accessibleValues = [
-      declares("models") ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`)}` : "",
+      declares("models") ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`}` : "",
       offersMode ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
       offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
@@ -1477,7 +1487,7 @@ export function initChat(api = new ChatApiClient()): void {
     return [
       `Started new conversation${agent ? ` with ${agent.name}` : ""}.`,
       declares("models")
-        ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `chosen by ${chooser}`)}.`
+        ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `chosen by ${chooser}`}.`
         : "",
       declares("modes") && modes.length > 0
         ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${chooser}`}.`
