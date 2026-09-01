@@ -36,8 +36,12 @@ hub session identifiers, not agent or model-provider secrets.
 
 ## Lifecycle And Workspace
 
-The two agents run differently, and Chat starts neither until a
-conversation actually needs it — opening Chat only reports availability.
+The two agents run differently. Opening Chat reports availability and
+lists every agent's existing conversations merged into one chooser — for
+OpenCode that enumeration needs its service, which is started then; for
+Claude Code it is a read of native session storage that starts nothing.
+Beyond what enumeration itself needs, no agent runs until a conversation
+actually needs it.
 
 **OpenCode** runs as one password-protected server bound to an ephemeral
 `127.0.0.1` port inside the uatu workspace process, started when an

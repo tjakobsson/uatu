@@ -966,6 +966,52 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a staged revert survives a restart: the tip bytes remain restorable", async () => {
+    const { configDir, workspace } = fixture();
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const marker = path.join(workspace, "marker.txt");
+    writeFileSync(marker, "tip-bytes");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    const build = () => new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile,
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (_uuid, options) => {
+          if (!options?.dryRun) writeFileSync(marker, "rewound-bytes");
+          return { canRewind: true, filesChanged: [marker] };
+        };
+        return query;
+      },
+    });
+
+    const first = build();
+    await first.undo!(storedId);
+    expect(readFileSync(marker, "utf8")).toBe("rewound-bytes");
+    await first.dispose();
+
+    // The restarted provider still knows the boundary and holds the
+    // displaced tip bytes; terminal redo puts them back.
+    const second = build();
+    const state = await second.getReversibleHistoryState!(storedId);
+    expect(state.staged).toBe(true);
+    expect(state.canRedo).toBe(true);
+    await second.redo!(storedId);
+    expect(readFileSync(marker, "utf8")).toBe("tip-bytes");
+    await second.dispose();
+  });
+
   test("modes and fork redirections survive a provider restart", async () => {
     const { configDir, workspace } = fixture();
     const stateFile = path.join(workspace, ".uatu-test-state.json");

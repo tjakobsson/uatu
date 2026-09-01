@@ -3062,6 +3062,12 @@ export function initChat(api = new ChatApiClient()): void {
 
     const panel = document.createElement("div");
     panel.className = "chat-unavailable";
+    // The panel names its own agent: a takeover renders one panel per
+    // failed agent, and two bare Retry buttons would be indistinguishable.
+    const heading = document.createElement("p");
+    heading.className = "chat-unavailable__heading";
+    heading.textContent = `${agentName}: ${availability.message}`;
+    panel.append(heading);
 
     if (availability.diagnostics) {
       const details = document.createElement("details");
@@ -3136,8 +3142,11 @@ export function initChat(api = new ChatApiClient()): void {
       // agent to converse with, the surface's job is the diagnosis + retry.
       const anyUsable = agentStatuses.some(status => status.availability.state !== "unavailable");
       if (!anyUsable) {
-        const worst = agentStatuses[0]!;
-        if (worst.availability.state === "unavailable") showUnavailable(worst.agent.id, worst.availability, { takeover: true });
+        // Every agent gets its own diagnosis and Retry: repairing the
+        // second agent must be recoverable from this page too.
+        for (const status of agentStatuses) {
+          if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: true });
+        }
         return;
       }
       // Named before anything is fetched: every later render reads the agent,

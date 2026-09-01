@@ -590,12 +590,19 @@ export class ClaudeProvider implements ChatProvider {
   async listPermissions(): Promise<PendingPermission[]> {
     return [...this.interactions.values()]
       .filter(pending => pending.kind === "permission")
-      .map(pending => ({
-        requestId: pending.requestId,
-        conversationId: pending.conversationId,
-        action: (pending.item as PermissionRequest).action,
-        resources: (pending.item as PermissionRequest).resources,
-      }));
+      .map(pending => {
+        const item = pending.item as PermissionRequest;
+        return {
+          requestId: pending.requestId,
+          conversationId: pending.conversationId,
+          action: item.action,
+          resources: item.resources,
+          // A recovered plan card must still show the plan and its intent
+          // choices — the reader this path exists for missed the live one.
+          ...(item.plan === undefined ? {} : { plan: item.plan }),
+          ...(item.choices === undefined ? {} : { choices: item.choices }),
+        };
+      });
   }
 
   async listQuestions(): Promise<PendingQuestion[]> {
@@ -802,6 +809,7 @@ export class ClaudeProvider implements ChatProvider {
     const result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     if (!result.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
     this.staged.set(sessionId, { boundaryIndex: index, tipSnapshot });
+    this.persistDurableState();
     return {
       outcome: "changed",
       state: reversibleState(context.turns, index),
@@ -813,6 +821,7 @@ export class ClaudeProvider implements ChatProvider {
   private async clearBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, stagedState: { tipSnapshot: Map<string, string | null> }): Promise<ReversibleHistoryResult> {
     await this.restoreSnapshot(stagedState.tipSnapshot);
     this.staged.delete(sessionId);
+    this.persistDurableState();
     return { outcome: "changed", state: reversibleState(context.turns, undefined) };
   }
 
@@ -845,8 +854,8 @@ export class ClaudeProvider implements ChatProvider {
       : randomUUID();
     this.activeNative.set(sessionId, replacement);
     this.hiddenNative.add(replacement);
-    this.persistDurableState();
     this.staged.delete(sessionId);
+    this.persistDurableState();
     // The live session is bound to the pre-fork history; the next prompt
     // resumes the fork instead.
     const live = this.live.get(sessionId);
@@ -876,6 +885,7 @@ export class ClaudeProvider implements ChatProvider {
           configurations?: Record<string, ConversationConfiguration>;
           activeNative?: Record<string, string>;
           hiddenNative?: string[];
+          staged?: Record<string, { boundaryIndex: number; tipSnapshot: Record<string, string | null> }>;
         };
         for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
           if (!this.configurations.has(id)) this.configurations.set(id, configuration);
@@ -884,6 +894,13 @@ export class ClaudeProvider implements ChatProvider {
           if (!this.activeNative.has(id)) this.activeNative.set(id, native);
         }
         for (const native of stored.hiddenNative ?? []) this.hiddenNative.add(native);
+        // A staged revert holds the displaced tip bytes; losing it across a
+        // restart would strand the files rewound with no way back.
+        for (const [id, staged] of Object.entries(stored.staged ?? {})) {
+          if (!this.staged.has(id)) {
+            this.staged.set(id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: new Map(Object.entries(staged.tipSnapshot)) });
+          }
+        }
       } catch {
         // A corrupt sidecar is dropped; the next persist rewrites it.
       }
@@ -897,6 +914,8 @@ export class ClaudeProvider implements ChatProvider {
       configurations: Object.fromEntries(this.configurations),
       activeNative: Object.fromEntries(this.activeNative),
       hiddenNative: [...this.hiddenNative],
+      staged: Object.fromEntries([...this.staged].map(([id, staged]) =>
+        [id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: Object.fromEntries(staged.tipSnapshot) }])),
     });
     this.persistChain = this.persistChain.then(async () => {
       await fs.mkdir(path.dirname(this.stateFile), { recursive: true, mode: 0o700 });

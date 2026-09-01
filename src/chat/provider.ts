@@ -1,4 +1,4 @@
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion, TokenUsage } from "./types";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion, TokenUsage } from "./types";
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -7,7 +7,7 @@ export type PendingQuestion = { requestId: string; conversationId: string; quest
 // `diff` is the change a file-edit permission would apply (OpenCode's
 // `metadata.diff`), carried through recovery so a card rebuilt after a missed
 // event shows the same change the live announcement would have.
-export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[]; diff?: string };
+export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[]; diff?: string; plan?: string; choices?: PermissionChoice[] };
 
 export type ProviderSession = {
   id: string;
