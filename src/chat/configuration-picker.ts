@@ -54,6 +54,9 @@ export function modelResultCountLabel(count: number): string {
 
 export function configurationOptionLabel(value: string): string {
   if (!value) return value;
+  // "xhigh" is Claude's abbreviation for the effort tier above high; no
+  // casing rule can recover the words, so it is named here.
+  if (value === "xhigh") return "Extra high";
   // Wire values arrive as lowercase words ("build") or camelCase
   // ("acceptEdits"); both read as sentence case ("Build", "Accept edits").
   const spaced = value.replace(/([a-z0-9])([A-Z])/g, (_match, before: string, after: string) => `${before} ${after.toLocaleLowerCase()}`);
@@ -279,7 +282,11 @@ export function createChatConfigurationPicker(
       }
     }
 
-    const displayedModel = state.models.find(model => sameModel(model.selection, state.configuration.model));
+    // While no model is chosen, the declared default IS the active model:
+    // its effort levels are the ones a prompt would actually run under.
+    const displayedModel = state.configuration.model
+      ? state.models.find(model => sameModel(model.selection, state.configuration.model))
+      : state.models.find(model => model.default);
     const variants = displayedModel?.variants ?? [];
     const variantAvailable = declares(state, "variants") && variants.length > 0;
     setSectionVisible(elements.variantSection, variantAvailable);
@@ -497,7 +504,9 @@ export function createChatConfigurationPicker(
   };
   const onVariant = (): void => {
     const variant = selectedValue(elements.variantSelect);
-    const model = state.models.find(candidate => sameModel(candidate.selection, state.configuration.model));
+    const model = state.configuration.model
+      ? state.models.find(candidate => sameModel(candidate.selection, state.configuration.model))
+      : state.models.find(candidate => candidate.default);
     if (variant && !model?.variants?.includes(variant)) return;
     state = { ...state, configuration: { ...state.configuration, variant } };
     callbacks.onVariant(variant);
