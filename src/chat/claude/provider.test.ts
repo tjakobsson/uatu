@@ -1548,6 +1548,26 @@ describe("ClaudeProvider sessions", () => {
     await second.dispose();
   });
 
+  test("a created-but-unprompted conversation survives a restart", async () => {
+    const { configDir, workspace } = fixture();
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const build = () => new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile,
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => new FakeQuery(input),
+    });
+    const first = build();
+    const created = await first.createSession("x");
+    await first.dispose();
+    const second = build();
+    expect((await second.listSessions()).map(session => session.id)).toContain(created.id);
+    expect(await second.getSession(created.id)).not.toBeNull();
+    await second.dispose();
+  });
+
   test("modes and fork redirections survive a provider restart", async () => {
     const { configDir, workspace } = fixture();
     const stateFile = path.join(workspace, ".uatu-test-state.json");

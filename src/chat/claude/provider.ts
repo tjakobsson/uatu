@@ -170,7 +170,7 @@ export class ClaudeProvider implements ChatProvider {
   // state back truthfully. A committed revert forks the native session:
   // `activeNative` redirects the conversation to its fork, and the fork
   // itself stays out of the inventory.
-  private readonly staged = new Map<string, { boundaryIndex: number; tipSnapshot: Map<string, SnapshotEntry> }>();
+  private readonly staged = new Map<string, { boundaryIndex: number; tipSnapshot: Map<string, SnapshotEntry>; commit?: { fork: string; prior?: string } }>();
   private readonly activeNative = new Map<string, string>();
   private readonly hiddenNative = new Set<string>();
   // Restart durability: modes/models/variants and fork redirections must
@@ -511,7 +511,9 @@ export class ClaudeProvider implements ChatProvider {
         }
         const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
         this.configurations.set(sessionId, configuration);
-        this.persistDurableState();
+        // Awaited: an accepted turn must not run under a mode the restarted
+        // provider would deny ever was selected.
+        await this.queuePersist(this.durableSnapshot());
         // A session that already existed switches live; a fresh one was
         // created with the mode in its options. An install that rejects
         // the mode value (an older CLI) keeps the turn alive; the
@@ -569,6 +571,7 @@ export class ClaudeProvider implements ChatProvider {
         // its pre-commit identity with the boundary and tip bytes intact.
         if (nativeBefore === undefined) this.activeNative.delete(sessionId);
         else this.activeNative.set(sessionId, nativeBefore);
+        delete stagedBefore.commit;
         this.staged.set(sessionId, stagedBefore);
       }
       // The rollback is only real once recorded: the commit's redirect may
@@ -604,6 +607,13 @@ export class ClaudeProvider implements ChatProvider {
       eventType: "prompt.accepted",
     });
     this.retitleFromFirstPrompt(sessionId, input.text);
+    // Acceptance finalizes a committed revert: the staged record and its
+    // commit marker are dropped; a lost write here is healed by the
+    // un-commit recovery on the next start.
+    if (stagedBefore && this.staged.get(sessionId) === stagedBefore) {
+      this.staged.delete(sessionId);
+      this.persistDurableState();
+    }
     session.pendingTurns += 1;
     session.queue.push({
       type: "user",
@@ -1052,7 +1062,10 @@ export class ClaudeProvider implements ChatProvider {
     const hadHidden = this.hiddenNative.has(replacement);
     this.activeNative.set(sessionId, replacement);
     this.hiddenNative.add(replacement);
-    this.staged.delete(sessionId);
+    // Two-phase: the staged record survives, stamped with the commit, and
+    // is deleted only once the replacement prompt is actually accepted. A
+    // restart in between un-commits and keeps Redo real.
+    stagedState.commit = { fork: replacement, ...(nativeBefore !== undefined ? { prior: nativeBefore } : {}) };
     try {
       // The redirect must be durable before the replacement is accepted —
       // a lost record would reattach the public id to its pre-fork history
@@ -1062,7 +1075,7 @@ export class ClaudeProvider implements ChatProvider {
       if (nativeBefore === undefined) this.activeNative.delete(sessionId);
       else this.activeNative.set(sessionId, nativeBefore);
       if (!hadHidden) this.hiddenNative.delete(replacement);
-      this.staged.set(sessionId, stagedState);
+      delete stagedState.commit;
       throw new ReversibleHistoryTargetError(`the revert could not be recorded (${error instanceof Error ? error.message : "write failed"}); the staged state was kept`);
     }
     // The live session is bound to the pre-fork history; the next prompt
@@ -1094,8 +1107,9 @@ export class ClaudeProvider implements ChatProvider {
           configurations?: Record<string, ConversationConfiguration>;
           activeNative?: Record<string, string>;
           hiddenNative?: string[];
-          staged?: Record<string, { boundaryIndex: number; tipSnapshot: Record<string, SnapshotEntry> }>;
+          staged?: Record<string, { boundaryIndex: number; tipSnapshot: Record<string, SnapshotEntry>; commit?: { fork: string; prior?: string } }>;
           modeBeforePlan?: Record<string, string>;
+          pending?: Record<string, { title: string; createdAt: number; updatedAt: number }>;
         };
         for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
           if (!this.configurations.has(id)) this.configurations.set(id, configuration);
@@ -1108,13 +1122,32 @@ export class ClaudeProvider implements ChatProvider {
         // restart would strand the files rewound with no way back.
         for (const [id, staged] of Object.entries(stored.staged ?? {})) {
           if (!this.staged.has(id)) {
-            this.staged.set(id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: new Map(Object.entries(staged.tipSnapshot)) });
+            this.staged.set(id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: new Map(Object.entries(staged.tipSnapshot)), ...(staged.commit ? { commit: staged.commit } : {}) });
           }
+        }
+        // Two-phase commit recovery: a staged entry still carrying its
+        // commit marker means the replacement prompt was never accepted —
+        // un-commit by restoring the pre-fork routing (the fork stays
+        // hidden and unused) so the boundary and Redo remain real.
+        for (const [id, staged] of this.staged) {
+          if (!staged.commit) continue;
+          if (this.activeNative.get(id) === staged.commit.fork) {
+            if (staged.commit.prior === undefined) this.activeNative.delete(id);
+            else this.activeNative.set(id, staged.commit.prior);
+          }
+          delete staged.commit;
         }
         // Without it, a restart mid-plan loses the "implement and return
         // to <mode>" intent the conversation still deserves.
         for (const [id, mode] of Object.entries(stored.modeBeforePlan ?? {})) {
           if (!this.modeBeforePlan.has(id)) this.modeBeforePlan.set(id, mode);
+        }
+        // A created-but-unprompted conversation has no native transcript
+        // yet; without this its successful creation vanishes on restart.
+        for (const [id, summary] of Object.entries(stored.pending ?? {})) {
+          if (!this.pending.has(id)) {
+            this.pending.set(id, { id, title: summary.title, directory: this.workspacePath, createdAt: summary.createdAt, updatedAt: summary.updatedAt });
+          }
         }
       } catch {
         // A corrupt sidecar is dropped; the next persist rewrites it.
@@ -1145,8 +1178,10 @@ export class ClaudeProvider implements ChatProvider {
       activeNative: Object.fromEntries(this.activeNative),
       hiddenNative: [...this.hiddenNative],
       staged: Object.fromEntries([...this.staged].map(([id, staged]) =>
-        [id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: Object.fromEntries(staged.tipSnapshot) }])),
+        [id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: Object.fromEntries(staged.tipSnapshot), ...(staged.commit ? { commit: staged.commit } : {}) }])),
       modeBeforePlan: Object.fromEntries(this.modeBeforePlan),
+      pending: Object.fromEntries([...this.pending.values()].map(session =>
+        [session.id, { title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt }])),
     });
   }
 

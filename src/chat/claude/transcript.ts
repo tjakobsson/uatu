@@ -156,11 +156,15 @@ export type TranscriptSessionList = {
 // grows to tens of megabytes, and inventory listing runs often — a full
 // parse per file per listing stalls the whole single-threaded server.
 const SUMMARY_HEAD_BYTES = 256 * 1024;
-// The most a summary scan will read hunting the first mainline entry: big
-// enough for an image-bearing first prompt (attachments cap well below
-// this), small enough that a pathological transcript cannot stall the
-// inventory or balloon memory.
-const SUMMARY_SCAN_LIMIT_BYTES = 32 * 1024 * 1024;
+// Two bounds, two failure modes. Parsed-line budget: a file yielding no
+// mainline entry across this much COMPLETE-line content (sidechain-only,
+// corrupt) is skipped without reading it whole. Single-record budget: one
+// unbroken line may run to the largest admitted prompt (eight 10 MiB
+// images as base64, plus text) — a legitimate image-first transcript must
+// not be dropped at an arbitrary cap, and memory peaks at one such line
+// only when the file actually contains one.
+const SUMMARY_PARSED_LIMIT_BYTES = 32 * 1024 * 1024;
+const SUMMARY_RECORD_LIMIT_BYTES = 128 * 1024 * 1024;
 
 export async function listTranscriptSessions(workspacePath: string, configDir: string = claudeConfigDir()): Promise<TranscriptSessionList> {
   const directory = claudeProjectDir(workspacePath, configDir);
@@ -194,11 +198,16 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
         try {
           let residual = Buffer.alloc(0);
           let offset = 0;
+          let parsedBytes = 0;
           let stopped = false;
           const identityComplete = () =>
             mainline.length > 0 && mainline.some(entry => entry.cwd)
             && mainline.some(entry => entry.kind === "user" && promptText(entry) !== null);
-          while (offset < info.size && offset < SUMMARY_SCAN_LIMIT_BYTES && !stopped) {
+          while (
+            offset < info.size && !stopped
+            && (mainline.length > 0 || parsedBytes < SUMMARY_PARSED_LIMIT_BYTES)
+            && residual.length < SUMMARY_RECORD_LIMIT_BYTES
+          ) {
             const length = Math.min(SUMMARY_HEAD_BYTES, info.size - offset);
             const chunk = Buffer.alloc(length);
             await handle.read(chunk, 0, length, offset);
@@ -213,6 +222,7 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
             } else {
               residual = Buffer.alloc(0);
             }
+            parsedBytes += combined.length;
             for (const line of combined.toString("utf8").split("\n")) {
               if (!line.trim()) continue;
               try {
