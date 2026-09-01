@@ -599,6 +599,75 @@ describe("ClaudeProvider sessions", () => {
     await optedIn.dispose();
   });
 
+  test("a stream ending mid-turn reports the interruption instead of a stuck running state", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "work", delivery: "queue" });
+    // The CLI exits cleanly without a result while the turn is running.
+    await queries[0]!.return();
+    await waitFor(() => events.some(event =>
+      event.updates.some(update => update.kind === "status" && (update as { status: string }).status === "failed")));
+    stop();
+    await provider.dispose();
+  });
+
+  test("an undo on an idle conversation leaves no control session behind", async () => {
+    const { queries, configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const marker = path.join(workspace, "marker.txt");
+    writeFileSync(marker, "tip");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (_uuid, options) => {
+          if (!options?.dryRun) writeFileSync(marker, "rewound");
+          return { canRewind: true, filesChanged: [marker] };
+        };
+        queries.push(query);
+        return query;
+      },
+    });
+    await provider.undo!(storedId);
+    // The control session existed only for the rewind: it retires with it.
+    expect(queries).toHaveLength(1);
+    expect(queries[0]!.returned).toBe(true);
+    await provider.dispose();
+  });
+
+  test("a crafted subagent id under a foreign parent is refused", async () => {
+    const { provider, configDir, workspace } = fixture();
+    const foreignId = "99999999-0000-4111-8222-333333333333";
+    const agentId = "abc123def4567890";
+    const turn = JSON.stringify({
+      type: "user", uuid: "u1", parentUuid: null, isSidechain: false,
+      timestamp: "2026-08-30T10:00:00.000Z", cwd: "/somewhere/else",
+      message: { role: "user", content: "foreign work" },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${foreignId}.jsonl`), turn);
+    const subagentDir = path.join(claudeProjectDir(workspace, configDir), foreignId, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeFileSync(path.join(subagentDir, `agent-${agentId}.jsonl`), turn);
+    // The parent fails workspace confinement, so its child is unreachable
+    // through the synthetic id too.
+    expect(await provider.getSession(`sub:${foreignId}:${agentId}`)).toBeNull();
+    await expect(provider.listMessages(`sub:${foreignId}:${agentId}`, { limit: 10 })).rejects.toThrow("unknown Claude subagent");
+    await provider.dispose();
+  });
+
   test("a terminal result retires the query; the next prompt resumes fresh", async () => {
     const { provider, queries, configDir, workspace } = fixture();
     const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";

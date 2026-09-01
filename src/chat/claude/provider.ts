@@ -372,7 +372,11 @@ export class ClaudeProvider implements ChatProvider {
     if (child) {
       // Synthetic and read-only: a subagent run is reached from its parent's
       // row, never started or listed on its own. `parentId` is what keeps it
-      // out of the picker and routes its interactions to the parent.
+      // out of the picker and routes its interactions to the parent. The
+      // parent must itself be an accepted session — the encoded project
+      // directory collides across paths, and a foreign parent excluded by
+      // its recorded cwd must not leak its children through a crafted id.
+      if (!(await this.getSession(child.parentSessionId))) return null;
       let entries;
       try {
         entries = (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, this.nativeId(child.parentSessionId), child.agentId, this.configDir))).entries;
@@ -406,6 +410,10 @@ export class ClaudeProvider implements ChatProvider {
     // the catalog is live).
     await this.hydrateCatalog();
     const child = parseSubagentId(sessionId);
+    // Same confinement as getSession: no accepted parent, no child read.
+    if (child && !(await this.getSession(child.parentSessionId))) {
+      throw new Error(`unknown Claude subagent transcript: ${sessionId}`);
+    }
     let entries: Awaited<ReturnType<typeof readSessionTranscript>>["entries"] = [];
     try {
       entries = child
@@ -733,10 +741,7 @@ export class ClaudeProvider implements ChatProvider {
         // resumes fresh.
         if (normalized.eventType === "result") session.pendingTurns = Math.max(0, session.pendingTurns - 1);
         if (normalized.eventType === "result" && session.pendingTurns === 0 && this.live.get(session.id) === session) {
-          this.live.delete(session.id);
-          this.abandonInteractions(session.id, "The turn ended before the user answered.");
-          session.queue.close();
-          await session.query.return?.().catch(() => undefined);
+          await this.retireSession(session);
           return;
         }
       }
@@ -744,6 +749,16 @@ export class ClaudeProvider implements ChatProvider {
       if (!this.disposed && this.live.get(session.id) === session) {
         this.live.delete(session.id);
         this.abandonInteractions(session.id, "The session ended before the user answered.");
+        // A clean CLI exit mid-turn still ends the turn: without a terminal
+        // status the adapter keeps the conversation running, prompts stay
+        // held, and cancellation finds nothing to interrupt.
+        if (session.pendingTurns > 0) {
+          this.emit(session.id, {
+            updates: [{ kind: "status", status: session.interrupted ? "interrupted" : "failed", message: "Claude Code session ended before finishing the turn" }],
+            outcome: "handled",
+            eventType: "result",
+          });
+        }
       }
     } catch (error) {
       if (this.disposed || this.live.get(session.id) !== session) return;
@@ -826,6 +841,17 @@ export class ClaudeProvider implements ChatProvider {
   private async stageBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, index: number): Promise<ReversibleHistoryResult> {
     const target = context.turns[index]!;
     const session = await this.ensureLive(sessionId);
+    if (!session.query.rewindFiles) throw new ReversibleHistoryTargetError();
+    try {
+      return await this.stageBoundaryOn(session, sessionId, context, target, index);
+    } finally {
+      // A session started only for this control call holds no turn; an idle
+      // conversation keeps no process behind after a rewind, refused or not.
+      if (session.pendingTurns === 0) await this.retireSession(session);
+    }
+  }
+
+  private async stageBoundaryOn(session: LiveSession, sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, target: ReversibleClaudeTurn, index: number): Promise<ReversibleHistoryResult> {
     if (!session.query.rewindFiles) throw new ReversibleHistoryTargetError();
     const existing = this.staged.get(sessionId);
     const preview = await session.query.rewindFiles(target.uuid, { dryRun: true });
@@ -1093,6 +1119,15 @@ export class ClaudeProvider implements ChatProvider {
       throw new Error(`no pending ${kind} ${requestId} for this conversation`);
     }
     return pending;
+  }
+
+  /** An idle session holds no process: retire its query and its cards. */
+  private async retireSession(session: LiveSession): Promise<void> {
+    if (this.live.get(session.id) !== session) return;
+    this.live.delete(session.id);
+    this.abandonInteractions(session.id, "The turn ended before the user answered.");
+    session.queue.close();
+    await session.query.return?.().catch(() => undefined);
   }
 
   /** A session that ends cannot answer: its pending cards resolve visibly. */
