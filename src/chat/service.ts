@@ -179,9 +179,14 @@ export class LazyChatService implements WorkspaceChatService {
 
   private async performRetry(): Promise<ChatAvailability> {
     const previous = this.adapter;
+    // An adapter still being constructed is joined like shutdown joins it:
+    // dropping the reference would let the abandoned build publish an
+    // adapter bound to the pre-retry runtime and leak its provider.
+    const pendingBuild = this.adapterPromise;
     this.adapterPromise = null;
     this.adapter = null;
     await previous?.dispose().catch(() => undefined);
+    if (pendingBuild) await pendingBuild.then(adapter => adapter.dispose()).catch(() => undefined);
     // A full restart, not a bare runtime retry: an adapter-level failure
     // (compatibility probe, startup race) leaves the runtime "ready", and
     // re-probing the same process can never pick up a replaced binary.
@@ -250,7 +255,12 @@ export class LazyChatService implements WorkspaceChatService {
     // A continuation that raced shutdown past dispose's join point must not
     // create a fresh provider (and its catalog process) on a dead service.
     if (this.disposed) throw new ChatUnavailableError();
-    const pending = this.adapterPromise ??= (async () => {
+    if (this.adapterPromise) return this.adapterPromise;
+    // Definite assignment: the closure only reads it after its first await,
+    // by which point the assignment below has run.
+    let pending!: Promise<ChatAdapter>;
+    // eslint-disable-next-line prefer-const
+    pending = (async () => {
       const provider = this.runtime.createProvider();
       if (!provider) throw new ChatUnavailableError();
       // A passing health check says nothing about SDK compatibility, and event
@@ -263,9 +273,9 @@ export class LazyChatService implements WorkspaceChatService {
         resolveAttachment: id => this.attachmentStore.resolve(id),
         metrics: this.metrics,
       });
-      // Shutdown may have started while the probe ran; a just-built
-      // adapter on a disposed service retires immediately.
-      if (this.disposed) {
+      // Shutdown or a retry may have superseded this build while the probe
+      // ran; a stale build retires itself instead of publishing.
+      if (this.disposed || this.adapterPromise !== pending) {
         await adapter.dispose().catch(() => undefined);
         throw new ChatUnavailableError();
       }
@@ -273,6 +283,7 @@ export class LazyChatService implements WorkspaceChatService {
       this.superviseEventPump(adapter);
       return adapter;
     })();
+    this.adapterPromise = pending;
     pending.catch(() => { if (this.adapterPromise === pending) this.adapterPromise = null; });
     return pending;
   }

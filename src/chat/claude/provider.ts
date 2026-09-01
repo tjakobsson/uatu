@@ -557,7 +557,6 @@ export class ClaudeProvider implements ChatProvider {
             await survivor.query.applyFlagSettings?.({ effortLevel: configurationBefore?.variant ?? null }).catch(() => undefined);
           }
         }
-        this.persistDurableState();
       }
       if (stagedBefore) {
         // The fork stays hidden and unused; the conversation returns to
@@ -565,7 +564,14 @@ export class ClaudeProvider implements ChatProvider {
         if (nativeBefore === undefined) this.activeNative.delete(sessionId);
         else this.activeNative.set(sessionId, nativeBefore);
         this.staged.set(sessionId, stagedBefore);
-        this.persistDurableState();
+      }
+      // The rollback is only real once recorded: the commit's redirect may
+      // already be durable, and a lost corrective write would hand the next
+      // process the unused fork with Redo gone.
+      try {
+        await this.queuePersist(this.durableSnapshot());
+      } catch (persistError) {
+        throw new Error(`${error instanceof Error ? error.message : "prompt failed"}; additionally the rollback could not be recorded: ${persistError instanceof Error ? persistError.message : "write failed"}`);
       }
       throw error;
     }
@@ -957,10 +963,18 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   /** Terminal redo: every hidden turn returns and the tip's bytes come back. */
-  private async clearBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, stagedState: { tipSnapshot: Map<string, SnapshotEntry> }): Promise<ReversibleHistoryResult> {
+  private async clearBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, stagedState: { boundaryIndex: number; tipSnapshot: Map<string, SnapshotEntry> }): Promise<ReversibleHistoryResult> {
     await this.restoreSnapshot(stagedState.tipSnapshot);
     this.staged.delete(sessionId);
-    this.persistDurableState();
+    try {
+      await this.queuePersist(this.durableSnapshot());
+    } catch (error) {
+      // The sidecar still claims the boundary; keep memory consistent with
+      // it and refuse — the files are at tip and a retried redo restores
+      // them idempotently once the record can be written.
+      this.staged.set(sessionId, stagedState);
+      throw new ReversibleHistoryTargetError(`the restore could not be recorded (${error instanceof Error ? error.message : "write failed"}); retry redo`);
+    }
     return { outcome: "changed", state: reversibleState(context.turns, undefined) };
   }
 
