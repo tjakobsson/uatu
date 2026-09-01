@@ -2383,6 +2383,12 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   left: calc(100% - 0.85rem - 0.15rem);
 }
 
+.icon-button[hidden] {
+  /* The capability gate hides via the attribute; the flex display below
+     must not override the UA's none. */
+  display: none;
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;
@@ -5194,6 +5200,8 @@ body.is-resizing-chat .chat-resizer {
 }
 
 .chat-unavailable__copy,
+.chat-unavailable__heading { margin: 0 0 0.5rem; font-size: 0.8rem; font-weight: 600; color: var(--text-strong, inherit); }
+
 .chat-unavailable__retry {
   padding: 0.35rem 0.8rem;
   color: inherit;
@@ -6014,6 +6022,127 @@ body.is-resizing-chat .chat-resizer {
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+/* The agent's live task list: one block, updated in place (D9). */
+.chat-task-progress {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.7rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-raised);
+}
+
+.chat-task-progress-header {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.chat-task-progress-count {
+  font-weight: 400;
+}
+
+.chat-task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.chat-task {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.chat-task-marker::before {
+  content: "○";
+  color: var(--text-muted);
+}
+
+.chat-task.is-in_progress .chat-task-marker::before {
+  content: "◐";
+  color: var(--accent, #3b82f6);
+}
+
+.chat-task.is-completed .chat-task-marker::before {
+  content: "●";
+  color: var(--ok, #16a34a);
+}
+
+.chat-task.is-completed .chat-task-text {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.chat-task.is-in_progress .chat-task-text {
+  font-weight: 600;
+}
+
+/* The plan a Claude Code approval would put into effect. */
+.chat-request-plan {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  max-height: 20rem;
+  overflow-y: auto;
+  background: var(--surface-raised);
+}
+
+/* Agent choice at conversation creation: anchored under the New button,
+   one row per offered agent, unavailable agents explained inline. */
+.chat-agent-menu {
+  position: absolute;
+  z-index: 6;
+  margin-top: 0.25rem;
+  min-width: 14rem;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.7rem;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow, 0 8px 24px rgb(0 0 0 / 18%));
+  overflow: hidden;
+}
+
+.chat-agent-menu__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.5rem 0.75rem;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-agent-menu__item:hover,
+.chat-agent-menu__item:focus-visible {
+  background: var(--surface-hover, rgb(127 127 127 / 12%));
+}
+
+.chat-agent-menu__item.is-default::after {
+  content: "default";
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.chat-agent-menu__item.is-unavailable {
+  cursor: default;
+  color: var(--text-muted);
+}
+
+.chat-agent-menu__note {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  max-width: 18rem;
 }
 
 .chat-command-menu {

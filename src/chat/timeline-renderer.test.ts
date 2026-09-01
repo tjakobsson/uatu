@@ -570,6 +570,77 @@ describe("subagent entries", () => {
   });
 });
 
+describe("task progress renders one presentation updated in place", () => {
+  const list = (entries: Array<{ text: string; status: "pending" | "in_progress" | "completed"; activeText?: string }>): ConversationItem => ({
+    id: "task-progress",
+    type: "task_progress",
+    createdAt: 5,
+    entries,
+  });
+
+  test("many updates keep a single element reflecting current states", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([list([
+      { text: "Read the code", status: "completed" },
+      { text: "Fix the bug", status: "in_progress", activeText: "Fixing the bug" },
+      { text: "Run tests", status: "pending" },
+    ])]), new Set());
+    expect(host.querySelectorAll(".chat-task-progress")).toHaveLength(1);
+    expect(host.querySelector(".chat-task-progress-count")?.textContent).toBe("1/3");
+    // In-progress rows show their active label.
+    expect(host.textContent).toContain("Fixing the bug");
+    expect(host.textContent).not.toContain("Fix the bug");
+
+    renderer.render(host, projectionWith([list([
+      { text: "Read the code", status: "completed" },
+      { text: "Fix the bug", status: "completed" },
+      { text: "Run tests", status: "in_progress" },
+    ])]), new Set());
+    expect(host.querySelectorAll(".chat-task-progress")).toHaveLength(1);
+    expect(host.querySelector(".chat-task-progress-count")?.textContent).toBe("2/3");
+    expect(host.querySelectorAll(".chat-task.is-completed")).toHaveLength(2);
+  });
+});
+
+describe("plan approvals carry the plan and agent-provided intents", () => {
+  const plan: ConversationItem = {
+    id: "permission:plan1",
+    type: "permission",
+    createdAt: 3,
+    requestId: "plan1",
+    action: "Review the plan",
+    resources: [],
+    status: "pending",
+    plan: "## Plan\n\n1. Do the **thing**",
+    choices: [
+      { id: "implement", label: "Approve and implement" },
+      { id: "implement-and-restore", label: "Approve, then return to acceptEdits", description: "Go back afterwards" },
+    ],
+  };
+
+  test("renders the plan as markdown with one button per intent plus Reject", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([plan]), new Set());
+    expect(host.querySelector(".chat-request-plan")?.innerHTML).toContain("<strong>thing</strong>");
+    const choiceButtons = [...host.querySelectorAll("[data-permission-choice]")];
+    expect(choiceButtons.map(button => button.getAttribute("data-permission-choice"))).toEqual(["implement", "implement-and-restore"]);
+    // The generic approve pair is replaced; rejecting stays universal.
+    const outcomes = [...host.querySelectorAll("[data-permission-outcome]")].map(button => button.getAttribute("data-permission-outcome"));
+    expect(outcomes).toEqual(["rejected"]);
+    expect(host.textContent).not.toContain("Allow always");
+  });
+
+  test("a resolved choice card recedes to the chosen intent's label", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ ...plan, status: "resolved", outcome: "approved-once", choiceId: "implement-and-restore" } as ConversationItem]), new Set());
+    expect(host.querySelector(".chat-request-trace")?.textContent).toBe("Approve, then return to acceptEdits");
+    expect(host.querySelector(".chat-request-plan")).toBeNull();
+  });
+});
+
 describe("permission choices state the authority they grant", () => {
   const permission: ConversationItem = {
     id: "permission:p1",

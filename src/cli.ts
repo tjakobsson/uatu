@@ -16,7 +16,10 @@ import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { 
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/parse";
-import { LazyOpenCodeChatService } from "./chat/service";
+import { LazyChatService } from "./chat/service";
+import { MultiAgentChatService } from "./chat/agents";
+import { ClaudeProvider } from "./chat/claude/provider";
+import { ClaudeRuntime } from "./chat/claude/runtime";
 import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
 import { runStoredGitCredentialHelper } from "./hub/git-credential-helper";
@@ -169,7 +172,7 @@ async function runWatch(options: WatchOptions) {
   let watchSession: ReturnType<typeof createWatchSession> | null = null;
   let server: ReturnType<typeof Bun.serve> | null = null;
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
-  let chatService: LazyOpenCodeChatService | null = null;
+  let chatService: MultiAgentChatService | null = null;
 
   // Resolve the actual port to bind. When the user passed `--port`, honor it
   // strictly (no roll). When they didn't, pre-flight probe for a free port
@@ -189,7 +192,38 @@ async function runWatch(options: WatchOptions) {
   const chatRoot = await selectCanonicalChatRoot(rootEntries);
 
   try {
-    chatService = new LazyOpenCodeChatService({ workspacePath: chatRoot, metrics });
+    // Two agents, each with its own runtime nature (D4): OpenCode as a
+    // spawned loopback server, Claude Code as probe-only with
+    // per-conversation SDK sessions. Registration order is the picker
+    // order and the server default.
+    const claudeRuntime = new ClaudeRuntime({ workspacePath: chatRoot });
+    chatService = new MultiAgentChatService({
+      workspacePath: chatRoot,
+      agents: [
+        {
+          descriptor: { id: "opencode", name: "OpenCode" },
+          service: new LazyChatService({ workspacePath: chatRoot, metrics }),
+        },
+        {
+          descriptor: { id: "claude", name: "Claude Code" },
+          service: new LazyChatService({
+            workspacePath: chatRoot,
+            metrics,
+            agentRuntime: {
+              status: () => Promise.resolve(claudeRuntime.peekStatus()),
+              ensure: () => claudeRuntime.ensure(),
+              restart: () => claudeRuntime.restart(),
+              dispose: async () => claudeRuntime.dispose(),
+              createProvider: () => {
+                const executable = claudeRuntime.executablePath();
+                if (!executable) return null;
+                return new ClaudeProvider({ workspacePath: chatRoot, executable });
+              },
+            },
+          }),
+        },
+      ],
+    });
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,
       terminalEnabled,

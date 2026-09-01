@@ -23,6 +23,16 @@ src/
 │                   app, served at /assets/fonts/, with siblings for
 │                   the upstream license texts)
 │
+├── chat/           the agent chat surface — shared seam + machinery at
+│                   the root (provider/types/adapter/agents/replay/
+│                   receipts/client/validation/timeline-renderer/ui);
+│                   agent-specific stacks below the seam in
+│                   chat/opencode/ (server runtime + SDK v2 provider +
+│                   normalization) and chat/claude/ (probe runtime,
+│                   per-conversation SDK sessions, transcript reader,
+│                   model catalog, normalization). One conversation is
+│                   owned by one agent for life; ids are agent-qualified
+│                   on the wire (`<agentId>:<providerId>`)
 ├── find/           ⌘F — active-surface tracking (which surface the user is
 │                   working in, tracked from interaction, NOT from DOM focus),
 │                   the shared find bar and its pluggable engines (preview and

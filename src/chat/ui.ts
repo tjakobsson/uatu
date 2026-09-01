@@ -22,7 +22,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type TokenUsage } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -44,6 +44,9 @@ type Presentation = {
   // Dismissed finished-subagent entry ids, per conversation — dismissal is a
   // user statement that must survive reload.
   dismissedSubagents: Record<string, string[]>;
+  // The agent the user last conversed with; the default for the next
+  // creation (spec: last used, then the server default).
+  lastAgentId?: string;
 };
 
 const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, dismissedSubagents: {} };
@@ -130,6 +133,13 @@ export function initChat(api = new ChatApiClient()): void {
     : null;
   let presentation = readPresentation();
   let conversations: ConversationSummary[] = [];
+  // Every offered agent with its availability, in server presentation order.
+  let agentStatuses: AgentChatStatus[] = [];
+  // Catalogs are per agent; the bare lists below are the selected-agent view,
+  // swapped whenever the conversation's owning agent changes.
+  type AgentCatalogs = { models: ChatModel[]; modes: ChatMode[]; commands: ChatCommand[]; commandInventoryAvailable: boolean };
+  const agentCatalogs = new Map<string, AgentCatalogs>();
+  let contextAgentId: string | undefined;
   let models: ChatModel[] = [];
   let modes: ChatMode[] = [];
   let commands: ChatCommand[] = [];
@@ -244,21 +254,42 @@ export function initChat(api = new ChatApiClient()): void {
   let agent: ChatAgent | undefined;
   // Before the agent reports itself there is nothing truthful to name, so the
   // copy stays neutral rather than guessing.
+  // The name to show for the current context: the agent's own declaration
+  // once its runtime has spoken, its registry identity before that. Identity
+  // is known from the status list even while availability is still idle —
+  // a conversation created under a cold agent is not anonymous.
+  const displayAgentName = (): string | undefined => agent?.name ?? agentStatusFor(contextAgentId)?.agent.name;
   const nameAgent = () => {
+    const name = displayAgentName();
     // Both, not one or the other: the workspace label answers "where am I"
     // and the agent name answers "who am I talking to". A nullish chain would
     // have hidden the agent on every workspace that has a root — which is all
     // of them — leaving the composer as the only place it was named.
-    if (chatContext) chatContext.textContent = [appState.roots[0]?.label, agent?.name].filter(Boolean).join(" · ") || "Chat";
-    if (inputLabel) inputLabel.textContent = agent ? `Message ${agent.name}` : "Send a message";
-    if (input) input.placeholder = agent ? `Ask ${agent.name}…` : "Send a message…";
+    if (chatContext) chatContext.textContent = [appState.roots[0]?.label, name].filter(Boolean).join(" · ") || "Chat";
+    if (inputLabel) inputLabel.textContent = name ? `Message ${name}` : "Send a message";
+    if (input) input.placeholder = name ? `Ask ${name}…` : "Send a message…";
   };
-  const chatHeading = () => (agent ? `${agent.name} Chat` : "Chat");
+  const chatHeading = () => {
+    const name = displayAgentName();
+    return name ? `${name} Chat` : "Chat";
+  };
   // An agent that declared itself is believed exactly: a capability it did not
   // list is one it does not have. When no agent has been reported at all — an
   // older workspace, or the moment before the adapter exists — nothing is
   // known, so nothing is withheld.
   const declares = (capability: ChatCapability) => agent?.capabilities.includes(capability) ?? true;
+  const agentStatusFor = (agentId: string | undefined): AgentChatStatus | undefined =>
+    agentStatuses.find(status => status.agent.id === agentId);
+  // A conversation names its agent on its summary; a child conversation the
+  // inventory never lists still carries the owner as its id prefix.
+  const conversationAgentId = (conversationId: string | null | undefined): string | undefined => {
+    if (!conversationId) return undefined;
+    const listed = conversations.find(conversation => conversation.id === conversationId)?.agent?.id;
+    if (listed) return listed;
+    const boundary = conversationId.indexOf(":");
+    const prefix = boundary > 0 ? conversationId.slice(0, boundary) : undefined;
+    return agentStatusFor(prefix)?.agent.id;
+  };
   /**
    * A control the agent has no capability for is taken out of the surface, not
    * left disabled. A disabled control still claims the feature exists and is
@@ -276,28 +307,67 @@ export function initChat(api = new ChatApiClient()): void {
    * count and the subagent track stay gated in lockstep with them rather than
    * half-gated here.
    */
+  // An absent capability presents no control — absent from the DOM, as the
+  // capability rule and its tests mean it — but capabilities change with the
+  // selected conversation's agent now, so removal must be reversible: a
+  // stable anchor remembers the spot and the control returns through it.
+  const capabilityControl = (element: HTMLElement | null, unhide = true) => {
+    if (!element || !element.parentNode) return (_present: boolean) => {};
+    const anchor = element.ownerDocument.createComment("capability-slot");
+    element.parentNode.insertBefore(anchor, element);
+    return (present: boolean) => {
+      if (present) {
+        if (!element.isConnected) anchor.parentNode?.insertBefore(element, anchor.nextSibling);
+        // Markup may ship the control hidden until an agent declares it;
+        // a control whose own renderer governs hidden opts out.
+        if (unhide) element.hidden = false;
+      } else if (element.isConnected) element.remove();
+    };
+  };
+  const presentRename = capabilityControl(renameButton);
+  const presentAttach = capabilityControl(attachButton);
+  const presentContext = capabilityControl(contextUsage, false);
+
   const applyCapabilities = () => {
     if (!agent) return;
     configurationTrigger.hidden = !declares("models") && !declares("modes") && !declares("variants");
-    // An agent that does not report token usage has no context readout to
-    // show, and a permanently empty meter would claim otherwise.
-    if (!declares("context")) contextUsage?.remove();
-    if (!declares("conversation-rename")) renameButton?.remove();
-    else if (renameButton) renameButton.hidden = false;
-    // Removed, not disabled, per the capability rule above. The model-level
-    // gate is different — see syncAttachControl: a model choice flips often,
-    // so there the control stays visible and goes inactive instead.
-    if (!declares("attachments")) attachButton?.remove();
+    // An agent that does not report usage leaves no readout behind — the
+    // meter comes out of the DOM and returns with a declaring agent; its
+    // own renderer governs hidden/open while present.
+    if (contextUsage && !declares("context")) contextUsage.open = false;
+    presentContext(declares("context"));
+    presentRename(declares("conversation-rename"));
+    // The model-level attachment gate is different — see syncAttachControl:
+    // a model choice flips often, so there the control stays visible and
+    // goes inactive instead. The capability gate governs presence.
+    presentAttach(declares("attachments"));
   };
   nameAgent();
 
   // One status-line contract for every surface that has one; the parent's
   // state element and the drill-down's differ only in which element speaks.
-  const announcerFor = (target: HTMLElement | null) => (message: string, error = false) => {
-    if (!target) return;
-    target.textContent = message;
-    target.classList.toggle("is-error", error);
-    target.hidden = !message;
+  const announcerFor = (target: HTMLElement | null) => {
+    // The message lives in its own leading text node: an announcement must
+    // not level appended children (the takeover renders one diagnosis panel
+    // per failed agent into this element, and each panel's announce would
+    // otherwise destroy the previous panels). The announcement still owns
+    // every text node — text set through other paths is replaced, exactly
+    // as the textContent variant did — but element children survive; they
+    // are removed explicitly where that is meant.
+    let node: Text | null = null;
+    return (message: string, error = false) => {
+      if (!target) return;
+      if (!node || node.parentNode !== target) {
+        node = target.ownerDocument.createTextNode("");
+        target.prepend(node);
+      }
+      for (const child of [...target.childNodes]) {
+        if (child !== node && child.nodeType === 3) child.remove();
+      }
+      node.textContent = message;
+      target.classList.toggle("is-error", error);
+      target.hidden = !message && target.childElementCount === 0;
+    };
   };
   const announce = announcerFor(state);
   const announceChild = announcerFor(drilldownState);
@@ -620,7 +690,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (usage === paintedUsage && reportingModel === paintedUsageModel) return;
     paintedUsage = usage;
     paintedUsageModel = reportingModel;
-    if (!usage) {
+    if (!usage || !declares("context")) {
       contextUsage.hidden = true;
       contextUsage.open = false;
       return;
@@ -1399,25 +1469,45 @@ export function initChat(api = new ChatApiClient()): void {
     else stagedConfigurations.delete(conversationId);
   };
 
+  // A default entry is named by what it runs: "Default · Opus (1M context)"
+  // rather than an opaque "Default (recommended)".
+  const modelChipName = (model: ChatModel): string => {
+    if (model.default && model.resolvesTo) {
+      const resolved = models.find(candidate => sameModel(candidate.selection, model.resolvesTo!));
+      if (resolved) return `Default · ${resolved.name}`;
+    }
+    return model.name;
+  };
+
   const renderConfiguration = () => {
     const configuration = displayedConfiguration();
+    // An agent may declare its own recommended defaults; while nothing is
+    // chosen they ARE the active choice, exactly as the agent presents it.
+    const defaultModel = models.find(model => model.default);
+    const defaultMode = modes.find(mode => mode.default);
     const displayedModel = configuration.model
       ? models.find(model => sameModel(model.selection, configuration.model!))
-      : undefined;
+      : defaultModel;
     configurationSummary.textContent = declares("models")
-      ? displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
+      ? (displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
       : "Chat settings";
-    const showMode = declares("modes") && modes.length > 0;
-    const showReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
+    const offersMode = declares("modes") && modes.length > 0;
+    const offersReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
+    // The chip states only what is in force: a chosen value, or a default
+    // the agent itself declares. A delegation without a declared default is
+    // said once in the dialog ("Let ... choose"), not echoed here.
+    const displayedMode = configuration.mode ?? defaultMode?.name;
+    const showMode = offersMode && Boolean(displayedMode);
+    const showReasoning = offersReasoning && Boolean(configuration.variant);
     configurationModeSummary.hidden = !showMode;
-    configurationModeSummary.textContent = showMode ? configurationOptionLabel(configuration.mode ?? "auto") : "";
+    configurationModeSummary.textContent = showMode ? configurationOptionLabel(displayedMode!) : "";
     configurationVariantSummary.hidden = !showReasoning;
-    configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant ?? "auto") : "";
+    configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant!) : "";
     configurationDetails.hidden = !showMode && !showReasoning;
     const accessibleValues = [
-      declares("models") ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`)}` : "",
-      showMode ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
-      showReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      declares("models") ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      offersMode ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
     configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
     configurationPicker?.update({ agent, models, modes, configuration });
@@ -1426,17 +1516,20 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const newConversationAnnouncement = (configuration: ConversationConfiguration): string => {
+    // Declared defaults ARE the active choice for an unset value, same
+    // story renderConfiguration tells.
     const displayedModel = configuration.model
       ? models.find(model => sameModel(model.selection, configuration.model!))
-      : undefined;
+      : models.find(model => model.default);
+    const displayedMode = configuration.mode ?? modes.find(mode => mode.default)?.name;
     const chooser = agent?.name ?? "the agent";
     return [
       `Started new conversation${agent ? ` with ${agent.name}` : ""}.`,
       declares("models")
-        ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `chosen by ${chooser}`)}.`
+        ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `chosen by ${chooser}`}.`
         : "",
       declares("modes") && modes.length > 0
-        ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${chooser}`}.`
+        ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${chooser}`}.`
         : "",
     ].filter(Boolean).join(" ");
   };
@@ -1566,6 +1659,22 @@ export function initChat(api = new ChatApiClient()): void {
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : chatHeading();
     form.hidden = false;
+    // The identity row, capabilities, and catalogs follow the selected
+    // conversation's owning agent (spec: the identity row follows the
+    // conversation). Remember the choice as the next creation's default.
+    const owningAgentId = conversationAgentId(id);
+    if (owningAgentId && owningAgentId !== contextAgentId) {
+      await applyAgentContext(owningAgentId);
+      // A newer selection may have completed while the catalog loaded; this
+      // stale call must not null its projection, restore its draft, or
+      // overwrite the agent preference on the way to the late token check.
+      if (token !== selectionGeneration) return false;
+    }
+    if (owningAgentId) {
+      presentation.lastAgentId = owningAgentId;
+      const state = agentStatusFor(owningAgentId)?.availability.state;
+      if (state === "idle" || state === "starting") refreshIdleAgentContext();
+    }
     save();
     projection = null;
     // Not a clear: the incoming conversation may hold a refusal that landed
@@ -1582,6 +1691,10 @@ export function initChat(api = new ChatApiClient()): void {
       const snapshot = await api.snapshot(id);
       if (token !== selectionGeneration) return false;
       installConversationSnapshot(snapshot, acceptedDrafts, token);
+      // The selection is settled; a ready agent stops polling, so this is
+      // the moment mid-session command discoveries reach the completion
+      // menu (background, after the chooser is done).
+      refreshBankedCommands(conversationAgentId(id));
       return true;
     } catch (error) {
       if (token === selectionGeneration) announce(messageOf(error), true);
@@ -1591,7 +1704,10 @@ export function initChat(api = new ChatApiClient()): void {
 
   const patchChooser = (selectedId: string | null, deleted = false) => {
     renderSelectedConversationDeleted(document, deleted);
-    patchConversationOptions(select, conversations, displayConversationTitle);
+    patchConversationOptions(select, conversations, conversation =>
+      agentStatuses.length > 1 && conversation.agent
+        ? `${displayConversationTitle(conversation)} · ${conversation.agent.name}`
+        : displayConversationTitle(conversation));
     const genericPlaceholder = select.querySelector<HTMLOptionElement>("option[data-chat-inventory-placeholder]");
     if (deleted || selectedId) {
       genericPlaceholder?.remove();
@@ -1699,9 +1815,14 @@ export function initChat(api = new ChatApiClient()): void {
   const stageModel = (selection: ModelSelection | undefined) => {
     if (!projection) return;
     const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    const effective = (model: ModelSelection | undefined) => model ?? models.find(candidate => candidate.default)?.selection;
+    const before = effective(staged.model ?? projection.configuration?.model);
     if (!selection || (projection.configuration?.model && sameModel(selection, projection.configuration.model))) delete staged.model;
     else staged.model = selection;
-    delete staged.variant;
+    const after = effective(staged.model ?? projection.configuration?.model);
+    // A staged effort survives a selection that lands on the same effective
+    // model (re-clicking the active Default row); a real switch clears it.
+    if (!(before && after && sameModel(before, after))) delete staged.variant;
     setStagedConfiguration(projection.conversationId, staged);
     renderConfiguration();
     syncContextIndicator();
@@ -1709,6 +1830,13 @@ export function initChat(api = new ChatApiClient()): void {
   const stageVariant = (name: string | undefined) => {
     if (!projection) return;
     const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    // The wire requires a model with a variant. With nothing chosen the
+    // declared default IS the model in force: stage its selection
+    // alongside, exactly what clicking the Default row commits.
+    if (name && staged.model === undefined && projection.configuration?.model === undefined) {
+      const defaultModel = models.find(model => model.default);
+      if (defaultModel) staged.model = defaultModel.selection;
+    }
     const displayedModel = staged.model ?? projection.configuration?.model;
     const effectiveModel = projection.configuration?.model;
     const effectiveModelApplies = displayedModel === undefined
@@ -1750,11 +1878,86 @@ export function initChat(api = new ChatApiClient()): void {
   });
   configurationTrigger.addEventListener("click", () => configurationPicker?.open());
   renderConfiguration();
+  // With one agent there is no choice to offer; with more, creation asks.
+  // The menu shows every offered agent with its availability, so an
+  // unavailable agent is explained rather than hidden; choosing it does not
+  // create a conversation (spec: an unavailable agent is explained at
+  // creation).
+  const chooseAgentForCreation = (): Promise<string | undefined | null> => {
+    if (agentStatuses.length <= 1) return Promise.resolve(agentStatuses[0]?.agent.id);
+    return new Promise(resolve => {
+      document.querySelector("#chat-agent-menu")?.remove();
+      const menu = document.createElement("div");
+      menu.id = "chat-agent-menu";
+      menu.className = "chat-agent-menu";
+      menu.setAttribute("role", "menu");
+      const defaultId = agentStatusFor(presentation.lastAgentId)?.agent.id ?? agentStatuses[0]!.agent.id;
+      const finish = (value: string | null) => {
+        menu.remove();
+        document.removeEventListener("pointerdown", onOutside, true);
+        document.removeEventListener("keydown", onKey, true);
+        resolve(value);
+      };
+      const onOutside = (event: Event) => {
+        if (!menu.contains(event.target as Node)) finish(null);
+      };
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === "Escape") finish(null);
+      };
+      for (const status of agentStatuses) {
+        const unavailable = status.availability.state === "unavailable";
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "chat-agent-menu__item";
+        item.setAttribute("role", "menuitem");
+        item.dataset.agentId = status.agent.id;
+        if (status.agent.id === defaultId) item.classList.add("is-default");
+        if (unavailable) item.classList.add("is-unavailable");
+        const name = document.createElement("span");
+        name.textContent = status.agent.name;
+        item.append(name);
+        if (unavailable) {
+          const note = document.createElement("span");
+          note.className = "chat-agent-menu__note";
+          note.textContent = status.availability.state === "unavailable" ? status.availability.message : "";
+          item.append(note);
+          item.setAttribute("aria-disabled", "true");
+        }
+        item.addEventListener("click", () => {
+          if (unavailable) {
+            // The menu entry may be the only access to an agent with no
+            // conversations; choosing it presents the diagnosis and Retry
+            // (spec: an unavailable agent is explained at creation, and
+            // every failed agent is repairable from the page). The menu
+            // stays open — the healthy agent remains one click away.
+            if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: false });
+            return;
+          }
+          finish(status.agent.id);
+        });
+        menu.append(item);
+      }
+      // Fixed positioning against the button: the header row is not a
+      // positioning context, and the menu must not disturb its layout.
+      const anchor = newButton.getBoundingClientRect();
+      menu.style.position = "fixed";
+      menu.style.top = `${Math.round(anchor.bottom + 4)}px`;
+      menu.style.right = `${Math.round(Math.max(8, window.innerWidth - anchor.right))}px`;
+      newButton.insertAdjacentElement("afterend", menu);
+      menu.querySelector<HTMLButtonElement>(".chat-agent-menu__item.is-default")?.focus();
+      document.addEventListener("pointerdown", onOutside, true);
+      document.addEventListener("keydown", onKey, true);
+    });
+  };
+
   newButton.addEventListener("click", async () => {
+    const chosenAgent = await chooseAgentForCreation();
+    if (chosenAgent === null) return;
     newButton.disabled = true;
     announce("Creating conversation...");
     try {
-      const snapshot = await api.createConversation();
+      const snapshot = await api.createConversation(chosenAgent);
+      if (chosenAgent) presentation.lastAgentId = chosenAgent;
       if (projection) presentation.drafts[projection.conversationId] = input.value;
       // Record local identity before the provider's invalidation can reconcile
       // it back, so this page never announces its own selected creation.
@@ -1940,14 +2143,14 @@ export function initChat(api = new ChatApiClient()): void {
   const announceFailureFor = (source: ChatProjection) =>
     child && source.conversationId === child.conversationId ? announceChild : announce;
 
-  const resolvePermission = async (source: ChatProjection, itemId: string, outcome: PermissionOutcome) => {
+  const resolvePermission = async (source: ChatProjection, itemId: string, outcome: PermissionOutcome, choiceId?: string) => {
     const item = source.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "permission" || item.status !== "pending") return;
     disableCard(itemId, true);
     // Addressed to the conversation that owns the request, not the one on
     // screen: a subagent's request shown in its parent must be answered for the
     // subagent, so the child's requirePending guard and receipt key govern it.
-    try { await api.permission(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); }
+    try { await api.permission(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome, choiceId); }
     catch (error) { announceFailureFor(source)(messageOf(error), true); disableCard(itemId, false); }
   };
 
@@ -1969,7 +2172,7 @@ export function initChat(api = new ChatApiClient()): void {
    */
   const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null) => {
     container.addEventListener("click", event => {
-      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
+      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-permission-choice], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
       if (!target) return;
       if (target instanceof HTMLButtonElement && target.dataset.chatCopy) {
         const text = target.closest("pre")?.querySelector(":scope > code")?.textContent;
@@ -1999,7 +2202,10 @@ export function initChat(api = new ChatApiClient()): void {
           .finally(() => { if (button.isConnected) button.disabled = false; });
         return;
       }
-      if (item.type === "permission" && target.dataset.permissionOutcome) {
+      if (item.type === "permission" && target.dataset.permissionChoice) {
+        // A chosen intent is an approval; the id tells the agent which one.
+        void resolvePermission(source, item.id, "approved-once", target.dataset.permissionChoice);
+      } else if (item.type === "permission" && target.dataset.permissionOutcome) {
         void resolvePermission(source, item.id, target.dataset.permissionOutcome as PermissionOutcome);
       } else if (item.type === "question" && target.dataset.questionReject !== undefined) {
         void resolveQuestion(source, item.id, { kind: "rejected" });
@@ -2524,7 +2730,18 @@ export function initChat(api = new ChatApiClient()): void {
         submitting = true;
         noteComposer("Reloading commands...");
         syncControls();
-        const loaded = await loadCommandInventory();
+        const loaded = await (async () => {
+          if (!contextAgentId) return false;
+          try {
+            commands = await api.commands(contextAgentId);
+            commandInventoryAvailable = true;
+            const cached = agentCatalogs.get(contextAgentId);
+            if (cached) agentCatalogs.set(contextAgentId, { ...cached, commands, commandInventoryAvailable: true });
+            return true;
+          } catch {
+            return false;
+          }
+        })();
         submitting = false;
         if (!loaded) {
           const message = `Chat commands could not be loaded. Submit /${operation} again to retry; the command and attachments were kept.`;
@@ -2792,17 +3009,110 @@ export function initChat(api = new ChatApiClient()): void {
   let bootstrapped = false;
   let bootstrapping = false;
 
-  async function loadCommandInventory(): Promise<boolean> {
-    try {
-      commands = await api.commands();
-      commandInventoryAvailable = true;
-      return true;
-    } catch {
-      commands = [];
-      commandInventoryAvailable = false;
-      return false;
+  /**
+   * Loads (or reuses) one agent's catalogs and installs them as the
+   * selected-agent view. Capability-gated per agent: an undeclared catalog
+   * is an empty list, never a request.
+   */
+  const applyAgentContext = async (agentId: string | undefined): Promise<void> => {
+    const status = agentStatusFor(agentId) ?? agentStatuses[0];
+    contextAgentId = status?.agent.id;
+    agent = status?.availability.state === "ready" ? status.availability.agent : undefined;
+    nameAgent();
+    applyCapabilities();
+    document.querySelectorAll(".chat-unavailable").forEach(panel => panel.remove());
+    if (!status) return;
+    if (status.availability.state === "unavailable") {
+      showUnavailable(status.agent.id, status.availability, { takeover: false });
+      return;
     }
-  }
+    let catalogs = agentCatalogs.get(status.agent.id);
+    if (!catalogs) {
+      const chatAgent = agent;
+      const has = (capability: ChatCapability) => chatAgent?.capabilities.includes(capability) ?? true;
+      const wantsCommands = has("commands") || has("reversible-history");
+      const [nextModels, nextCommands, nextModes] = await Promise.all([
+        has("models") ? api.models(status.agent.id).catch(() => [] as ChatModel[]) : Promise.resolve([] as ChatModel[]),
+        wantsCommands ? api.commands(status.agent.id).then(list => ({ list, ok: true })).catch(() => ({ list: [] as ChatCommand[], ok: false })) : Promise.resolve({ list: [] as ChatCommand[], ok: true }),
+        has("modes") ? api.modes(status.agent.id).catch(() => [] as ChatMode[]) : Promise.resolve([] as ChatMode[]),
+      ]);
+      // The awaited fetch may resolve after the user moved to another
+      // agent's conversation; installing these lists then would dress that
+      // conversation in this agent's catalog (a Claude "Default" chip on an
+      // OpenCode conversation).
+      if (contextAgentId !== status.agent.id) return;
+      catalogs = { models: nextModels, modes: nextModes, commands: nextCommands.list, commandInventoryAvailable: nextCommands.ok };
+      // A failed command read is not banked: the next context switch
+      // retries. Neither is an empty list from an agent that declares the
+      // capability — its inventory may simply not have hydrated yet, and
+      // banking would hide every command for the rest of the page's life.
+      if (nextCommands.ok && (nextCommands.list.length > 0 || !has("commands"))) agentCatalogs.set(status.agent.id, catalogs);
+    }
+    models = catalogs.models;
+    modes = catalogs.modes;
+    commands = catalogs.commands;
+    commandInventoryAvailable = catalogs.commandInventoryAvailable;
+    form.hidden = false;
+    renderConfiguration();
+  };
+
+  /**
+   * A selected conversation whose agent has not reported ready yet: the
+   * selection itself makes the server start that agent, so poll status
+   * until it lands as ready or unavailable — that is what upgrades the
+   * identity row from registry name to declaration and loads the catalogs.
+   * Gated on an actual selection so an untouched idle agent is never polled.
+   */
+  let statusRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  // The banked command inventory is the one catalog that changes
+  // mid-session (agents discover skills; Claude pushes commands_changed).
+  // Refreshed in the background from the idle poll and after a conversation
+  // selection settles — never inside the selection or creation path itself,
+  // where an in-flight read has raced the chooser before.
+  const refreshBankedCommands = (agentId: string | undefined) => {
+    if (!agentId) return;
+    const banked = agentCatalogs.get(agentId);
+    if (!banked) return;
+    if (agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history")) {
+      void api.commands(agentId).then(list => {
+        if (agentCatalogs.get(agentId) !== banked) return;
+        banked.commands = list;
+        banked.commandInventoryAvailable = true;
+        if (contextAgentId === agentId) commands = list;
+      }).catch(() => undefined);
+    }
+    // Models change under a running page too — a Claude Code update ships
+    // new entries — so the banked model list refreshes on the same cadence.
+    if (agent?.capabilities.includes("models")) {
+      void api.models(agentId).then(list => {
+        if (agentCatalogs.get(agentId) !== banked || list.length === 0) return;
+        banked.models = list;
+        if (contextAgentId === agentId) {
+          models = list;
+          renderConfiguration();
+        }
+      }).catch(() => undefined);
+    }
+  };
+
+  const refreshIdleAgentContext = () => {
+    if (statusRefreshTimer !== null) return;
+    statusRefreshTimer = setTimeout(async () => {
+      statusRefreshTimer = null;
+      const watching = contextAgentId;
+      if (!watching || conversationAgentId(presentation.selectedId) !== watching) return;
+      try {
+        agentStatuses = await api.status();
+      } catch {
+        return;
+      }
+      if (contextAgentId !== watching) return;
+      await applyAgentContext(watching);
+      refreshBankedCommands(watching);
+      const state = agentStatusFor(watching)?.availability.state;
+      if (state === "idle" || state === "starting") refreshIdleAgentContext();
+    }, 1_500);
+  };
 
   const startInventoryStream = () => {
     if (inventoryStream) return;
@@ -2820,14 +3130,27 @@ export function initChat(api = new ChatApiClient()): void {
   // not start: it has to carry enough evidence to diagnose the failure from a
   // pasted bug report, and offer the retry that makes a fixed environment
   // recoverable without restarting the workspace.
-  const showUnavailable = (availability: Extract<ChatAvailability, { state: "unavailable" }>) => {
+  const showUnavailable = (agentId: string, availability: Extract<ChatAvailability, { state: "unavailable" }>, options: { takeover: boolean }) => {
     form.hidden = true;
-    select.disabled = true;
-    newButton.disabled = true;
-    announce(availability.message, true);
+    // A takeover means no agent can serve at all. One agent being down must
+    // not block conversations with another, so the chooser and creation stay
+    // usable outside the takeover case (spec: one agent's outage does not
+    // block another).
+    if (options.takeover) {
+      select.disabled = true;
+      newButton.disabled = true;
+    }
+    const agentName = agentStatusFor(agentId)?.agent.name ?? agentId;
+    announce(`${agentName}: ${availability.message}`, true);
 
     const panel = document.createElement("div");
     panel.className = "chat-unavailable";
+    // The panel names its own agent: a takeover renders one panel per
+    // failed agent, and two bare Retry buttons would be indistinguishable.
+    const heading = document.createElement("p");
+    heading.className = "chat-unavailable__heading";
+    heading.textContent = `${agentName}: ${availability.message}`;
+    panel.append(heading);
 
     if (availability.diagnostics) {
       const details = document.createElement("details");
@@ -2863,20 +3186,29 @@ export function initChat(api = new ChatApiClient()): void {
       retry.disabled = true;
       retry.textContent = "Retrying…";
       panel.remove();
-      announce(agent ? `Starting ${agent.name}…` : "Starting the agent…");
+      announce(`Starting ${agentName}…`);
       try {
-        const next = await api.retry();
-        if (next.state === "unavailable") {
-          showUnavailable(next);
+        const next = await api.retry(agentId);
+        agentStatuses = agentStatuses.map(status => status.agent.id === agentId ? next : status);
+        if (next.availability.state === "unavailable") {
+          showUnavailable(agentId, next.availability, options);
           return;
         }
-        bootstrapped = false;
-        await bootstrap();
+        if (options.takeover) {
+          bootstrapped = false;
+          await bootstrap();
+          return;
+        }
+        // Only this agent was down: rebuild its context and reload whatever
+        // conversation is selected under it.
+        await applyAgentContext(agentId);
+        const selectedId = presentation.selectedId;
+        if (selectedId && conversationAgentId(selectedId) === agentId) void selectConversation(selectedId);
       } catch (error) {
         // The retry POST itself failed (network, proxy, credential refresh) —
         // announce() alone would wipe the panel and leave the surface with no
         // Retry control at all, so rebuild it around the transport error.
-        showUnavailable({ ...availability, message: `Retry failed: ${messageOf(error)}` });
+        showUnavailable(agentId, { ...availability, message: `Retry failed: ${messageOf(error)}` }, options);
       }
     });
     panel.append(retry);
@@ -2888,33 +3220,34 @@ export function initChat(api = new ChatApiClient()): void {
     if (bootstrapped || bootstrapping) return;
     bootstrapping = true;
     try {
-      const availability = await api.status();
-      if (availability.state === "unavailable") {
-        showUnavailable(availability);
+      agentStatuses = await api.status();
+      // Every offered agent down at once is the only full takeover: with no
+      // agent to converse with, the surface's job is the diagnosis + retry.
+      const anyUsable = agentStatuses.some(status => status.availability.state !== "unavailable");
+      if (!anyUsable) {
+        // Every agent gets its own diagnosis and Retry: repairing the
+        // second agent must be recoverable from this page too.
+        for (const status of agentStatuses) {
+          if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: true });
+        }
         return;
       }
       // Named before anything is fetched: every later render reads the agent,
       // and a control that appeared unnamed and then renamed itself would be
-      // the pop-in this seam exists to avoid.
-      if (availability.state === "ready") agent = availability.agent;
-      nameAgent();
-      applyCapabilities();
-      // A capability the agent does not declare is not fetched at all. The
-      // mode list stays fault-tolerant on top of that: a declared list that
-      // fails to load hides the picker rather than blocking chat.
-      if (!declares("commands") && !declares("reversible-history")) {
-        commands = [];
-        commandInventoryAvailable = true;
-      }
-      const [nextModels, nextConversations, , nextModes] = await Promise.all([
-        declares("models") ? api.models() : Promise.resolve([] as ChatModel[]),
-        api.conversations(),
-        declares("commands") || declares("reversible-history") ? loadCommandInventory() : Promise.resolve(true),
-        declares("modes") ? api.modes().catch(() => [] as ChatMode[]) : Promise.resolve([] as ChatMode[]),
-      ]);
-      models = nextModels;
-      conversations = dedupeConversationInventory(nextConversations);
-      modes = nextModes;
+      // the pop-in this seam exists to avoid. The starting context is the
+      // last-used agent, then the server default (first entry).
+      const preferred = agentStatusFor(presentation.lastAgentId) ?? agentStatuses[0]!;
+      // Anything selected while these fetches are in flight — a conversation
+      // the user just created — outranks this snapshot: the fetch began
+      // before that creation, so its list cannot know it.
+      const selectionAtStart = selectionGeneration;
+      // The merged inventory is bounded per agent; the preferred agent's
+      // context load is not (a cold catalog probe can take seconds). The
+      // chooser must not wait on the latter — healthy conversations render
+      // as soon as the inventory answers.
+      const contextReady = applyAgentContext(preferred.agent.id);
+      const nextConversations = await api.conversations();
+      conversations = dedupeConversationInventory([...conversations, ...nextConversations]);
       // Bootstrap is the silent page-local baseline. The stream starts only
       // after this point, so its mandatory initial frame reconciles rather
       // than turning every existing id into an unseen one.
@@ -2923,10 +3256,42 @@ export function initChat(api = new ChatApiClient()): void {
       form.hidden = false;
       select.disabled = false;
       newButton.disabled = false;
-      renderConfiguration();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
-      installInitialChooser();
+      // A selection made mid-bootstrap is the user's; the initial chooser
+      // pass must not replace it with this snapshot's newest entry.
+      if (selectionGeneration === selectionAtStart) installInitialChooser();
+      else patchChooser(presentation.selectedId ?? null);
+      await contextReady;
+      renderConfiguration();
       bootstrapped = true;
+      // The enumeration above probed every agent; the pre-probe snapshot
+      // may still call a failed one usable, and the creation menu would
+      // offer it with only a generic error behind it. Refresh in the
+      // background so availability becomes the probe's verdict without
+      // holding bootstrap's selection work open — and if the verdict is
+      // that every agent is down after all, the takeover renders now
+      // rather than after a reload.
+      void api.status().then(next => {
+        agentStatuses = next;
+        if (next.length > 0 && next.every(status => status.availability.state === "unavailable")) {
+          for (const status of next) {
+            if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: true });
+          }
+          return;
+        }
+        // The bootstrap context may have applied against an idle snapshot,
+        // leaving no declared agent; once the probe's verdict says ready,
+        // re-apply so capabilities and catalogs come from the real agent —
+        // otherwise the first conversation on a fresh workspace never gets
+        // its capability controls until a reload or an agent switch.
+        const current = next.find(status => status.agent.id === contextAgentId);
+        // Ready-but-undeclared re-applies; so does a context agent the
+        // probes found dead — applyAgentContext renders its diagnosis and
+        // Retry instead of leaving a stale composer enabled.
+        if ((current?.availability.state === "ready" && !agent) || current?.availability.state === "unavailable") {
+          void applyAgentContext(contextAgentId);
+        }
+      }).catch(() => undefined);
       startInventoryStream();
     } catch (error) { announce(messageOf(error), true); }
     finally { bootstrapping = false; }
@@ -2987,6 +3352,7 @@ function readPresentation(): Presentation {
     const value = JSON.parse(raw) as Partial<Presentation>;
     return {
       selectedId: typeof value.selectedId === "string" ? value.selectedId : undefined,
+      lastAgentId: typeof value.lastAgentId === "string" ? value.lastAgentId : undefined,
       drafts: value.drafts && typeof value.drafts === "object" ? value.drafts : {},
       expanded: Array.isArray(value.expanded) ? value.expanded.filter(item => typeof item === "string") : [],
       anchors: value.anchors && typeof value.anchors === "object" ? value.anchors : {},

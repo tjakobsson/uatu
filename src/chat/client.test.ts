@@ -16,9 +16,9 @@ describe("chat API client", () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
       requests.push({ url: String(url), init });
-      if (String(url).endsWith("status")) return Response.json({ state: "ready", version: "test" });
-      if (String(url).endsWith("models")) return Response.json({ models: [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }] });
-      if (String(url).endsWith("commands")) return Response.json({ commands: [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" }] });
+      if (String(url).endsWith("status")) return Response.json({ agents: [{ agent: { id: "opencode", name: "OpenCode" }, availability: { state: "ready", version: "test" } }] });
+      if (String(url).includes("models")) return Response.json({ models: [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }] });
+      if (String(url).includes("commands")) return Response.json({ commands: [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" }] });
       if (String(url).endsWith("conversations")) return init?.method === "POST"
         ? Response.json(snapshot(), { status: 201 })
         : Response.json({ conversations: [snapshot().conversation] });
@@ -27,9 +27,10 @@ describe("chat API client", () => {
       return Response.json(snapshot());
     }) as typeof fetch;
     const client = new ChatApiClient(fetcher);
-    await client.status();
-    expect(await client.models()).toEqual([expect.objectContaining({ name: "Claude" })]);
-    expect(await client.commands()).toEqual([expect.objectContaining({ name: "review" })]);
+    expect((await client.status())[0]!.agent.id).toBe("opencode");
+    expect(await client.models("opencode")).toEqual([expect.objectContaining({ name: "Claude" })]);
+    expect(await client.commands("opencode")).toEqual([expect.objectContaining({ name: "review" })]);
+    expect(requests[1]!.url).toContain("agent=opencode");
     await client.conversations();
     await client.snapshot("c/1");
     await client.prompt("c/1", "r1", "hello", { providerId: "anthropic", modelId: "claude" });
@@ -331,7 +332,7 @@ function eventSourceClient(sources: FakeEventSource[], timers: FakeTimers): Chat
 
 function snapshot() {
   return {
-    conversation: { id: "c/1", title: "Chat", createdAt: 1, updatedAt: 1, status: "idle" },
+    conversation: { id: "c/1", title: "Chat", createdAt: 1, updatedAt: 1, status: "idle", agent: { id: "opencode", name: "OpenCode" } },
     configuration: {},
     generation: "g",
     cursor: "cursor",

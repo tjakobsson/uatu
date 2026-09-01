@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ProviderUpdateCoalescer } from "./coalescer";
-import type { NormalizedProviderUpdate } from "./normalization";
+import type { NormalizedProviderUpdate } from "./provider";
 
 function textUpdate(itemId: string, text: string, mode: "cumulative" | "incremental" = "incremental"): NormalizedProviderUpdate {
   return { kind: "text", itemId, identity: itemId.replace(/^part:/, ""), mode, text };

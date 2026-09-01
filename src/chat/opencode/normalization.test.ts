@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage } from "./normalization";
-import { ConversationReplay } from "./replay";
-import { ProviderTextReconciler } from "./text-reconciler";
-import { ConversationProjection } from "./adapter";
+import { ConversationReplay } from "../replay";
+import { ProviderTextReconciler } from "../text-reconciler";
+import { ConversationProjection } from "../adapter";
 
 describe("OpenCode classic message store", () => {
   test("normalizes { info, parts } messages that the v2 store returns empty", () => {

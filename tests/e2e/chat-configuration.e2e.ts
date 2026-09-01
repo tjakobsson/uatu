@@ -45,7 +45,7 @@ test.describe("conversation configuration and rename", () => {
       await page.locator("#chat-configuration-mode").selectOption("build");
       await page.locator("#chat-configuration-variant").selectOption("xhigh");
       await page.locator("#chat-configuration-done").click();
-      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Xhigh/);
+      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Extra high/);
       await page.locator("#chat-input").fill("share this configuration");
       const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
       await page.locator("#chat-send").click();
@@ -53,10 +53,10 @@ test.describe("conversation configuration and rename", () => {
         model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "xhigh",
       });
 
-      await expect(second.page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Xhigh/);
+      await expect(second.page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Extra high/);
 
       await page.getByRole("button", { name: "New conversation", exact: true }).click();
-      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Xhigh/);
+      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Extra high/);
     } finally {
       await second.context.close();
     }
@@ -110,7 +110,7 @@ test.describe("conversation configuration and rename", () => {
       configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "xhigh" },
     });
     await boot(page, await token(request));
-    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Reasoning: Xhigh/);
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Reasoning: Extra high/);
 
     await control(request, {
       action: "nextConversationConfiguration",

@@ -41,7 +41,7 @@ export function groupChatModels(models: ChatModel[]): ModelGroup[] {
 }
 
 export function modelIdentityLabel(model: ChatModel): string {
-  return `${model.provider} · ${model.selection.providerId}/${model.selection.modelId}`;
+  return model.detail ?? `${model.provider} · ${model.selection.providerId}/${model.selection.modelId}`;
 }
 
 export function agentControlledModelLabel(agentName?: string): string {
@@ -53,7 +53,14 @@ export function modelResultCountLabel(count: number): string {
 }
 
 export function configurationOptionLabel(value: string): string {
-  return value ? value.charAt(0).toLocaleUpperCase() + value.slice(1) : value;
+  if (!value) return value;
+  // "xhigh" is Claude's abbreviation for the effort tier above high; no
+  // casing rule can recover the words, so it is named here.
+  if (value === "xhigh") return "Extra high";
+  // Wire values arrive as lowercase words ("build") or camelCase
+  // ("acceptEdits"); both read as sentence case ("Build", "Accept edits").
+  const spaced = value.replace(/([a-z0-9])([A-Z])/g, (_match, before: string, after: string) => `${before} ${after.toLocaleLowerCase()}`);
+  return spaced.charAt(0).toLocaleUpperCase() + spaced.slice(1);
 }
 
 type Rect = Pick<DOMRect, "top" | "right" | "bottom" | "left" | "width" | "height">;
@@ -171,12 +178,13 @@ function setSectionVisible(section: HTMLElement | undefined, visible: boolean): 
   if (section) section.hidden = !visible;
 }
 
-function addOption(select: HTMLSelectElement, label: string, value: string, disabled = false): void {
+function addOption(select: HTMLSelectElement, label: string, value: string, disabled = false): HTMLOptionElement {
   const option = select.ownerDocument.createElement("option");
   option.textContent = label;
   option.value = value;
   option.disabled = disabled;
   select.append(option);
+  return option;
 }
 
 function selectOption(select: HTMLSelectElement, value: string): void {
@@ -228,6 +236,7 @@ export function createChatConfigurationPicker(
     selected: boolean,
     disabled: boolean,
     onSelect?: () => void,
+    title?: string,
   ): HTMLButtonElement => {
     const button = elements.dialog.ownerDocument.createElement("button");
     button.type = "button";
@@ -250,6 +259,8 @@ export function createChatConfigurationPicker(
       button.append(marker);
     }
     button.setAttribute("aria-label", [primary, secondary, selected ? "selected" : ""].filter(Boolean).join(", "));
+    if (title) button.title = title;
+    if (title) button.title = title;
     if (onSelect) button.addEventListener("click", onSelect);
     return button;
   };
@@ -260,17 +271,25 @@ export function createChatConfigurationPicker(
     if (elements.modeSelect) {
       elements.modeSelect.replaceChildren();
       if (modeAvailable) {
-        if (!state.configuration.mode) addOption(elements.modeSelect, `Let ${state.agent?.name || "the agent"} choose`, "");
-        for (const mode of state.modes) addOption(elements.modeSelect, configurationOptionLabel(mode.name), mode.name);
+        const defaultMode = state.modes.find(mode => mode.default);
+        if (!state.configuration.mode && !defaultMode) addOption(elements.modeSelect, `Let ${state.agent?.name || "the agent"} choose`, "");
+        for (const mode of state.modes) {
+          const option = addOption(elements.modeSelect, configurationOptionLabel(mode.name), mode.name);
+          if (mode.description) option.title = mode.description;
+        }
         const selectedMode = state.configuration.mode;
         if (selectedMode && !state.modes.some(mode => mode.name === selectedMode)) {
           addOption(elements.modeSelect, `${configurationOptionLabel(selectedMode)} (current, unavailable)`, selectedMode, true);
         }
-        selectOption(elements.modeSelect, selectedMode ?? "");
+        selectOption(elements.modeSelect, selectedMode ?? defaultMode?.name ?? "");
       }
     }
 
-    const displayedModel = state.models.find(model => sameModel(model.selection, state.configuration.model));
+    // While no model is chosen, the declared default IS the active model:
+    // its effort levels are the ones a prompt would actually run under.
+    const displayedModel = state.configuration.model
+      ? state.models.find(model => sameModel(model.selection, state.configuration.model))
+      : state.models.find(model => model.default);
     const variants = displayedModel?.variants ?? [];
     const variantAvailable = declares(state, "variants") && variants.length > 0;
     setSectionVisible(elements.variantSection, variantAvailable);
@@ -300,14 +319,34 @@ export function createChatConfigurationPicker(
     }
 
     const selected = state.configuration.model;
-    if (!selected && !elements.search.value.trim()) {
-      elements.models.append(makeModelRow(
-        agentControlledModelLabel(state.agent?.name),
-        "Agent-controlled model",
-        "",
-        true,
-        false,
-      ));
+    const defaultModel = state.models.find(model => model.default);
+    // The default entry is searchable like any other; it renders pinned
+    // above the provider groups whenever the search does not exclude it.
+    const filtered = filterChatModels(state.models, elements.search.value);
+    const defaultVisible = defaultModel !== undefined && filtered.includes(defaultModel);
+    if (defaultVisible || !elements.search.value.trim()) {
+      if (defaultModel) {
+        elements.models.append(makeModelRow(
+          defaultModel.name,
+          modelIdentityLabel(defaultModel),
+          `${defaultModel.selection.providerId}/${defaultModel.selection.modelId}`,
+          !selected || sameModel(defaultModel.selection, selected),
+          false,
+          () => {
+            state = { ...state, configuration: { ...state.configuration, model: defaultModel.selection } };
+            callbacks.onModel(defaultModel.selection);
+            renderModels();
+          },
+        ));
+      } else if (!selected) {
+        elements.models.append(makeModelRow(
+          agentControlledModelLabel(state.agent?.name),
+          "Agent-controlled model",
+          "",
+          true,
+          false,
+        ));
+      }
     }
 
     const selectedAvailable = !selected || state.models.some(model => sameModel(model.selection, selected));
@@ -321,8 +360,7 @@ export function createChatConfigurationPicker(
       ));
     }
 
-    const filtered = filterChatModels(state.models, elements.search.value);
-    for (const group of groupChatModels(filtered)) {
+    for (const group of groupChatModels(filtered.filter(model => !model.default))) {
       const section = elements.dialog.ownerDocument.createElement("section");
       section.className = "chat-configuration-provider";
       section.dataset.providerId = group.providerId;
@@ -352,6 +390,7 @@ export function createChatConfigurationPicker(
             if (hadVariant) callbacks.onVariant(undefined);
             renderModels();
           },
+          model.resolvesTo ? `${model.selection.providerId}/${model.selection.modelId} → ${model.resolvesTo.modelId}` : `${model.selection.providerId}/${model.selection.modelId}`,
         ));
       }
       elements.models.append(section);
@@ -472,7 +511,9 @@ export function createChatConfigurationPicker(
   };
   const onVariant = (): void => {
     const variant = selectedValue(elements.variantSelect);
-    const model = state.models.find(candidate => sameModel(candidate.selection, state.configuration.model));
+    const model = state.configuration.model
+      ? state.models.find(candidate => sameModel(candidate.selection, state.configuration.model))
+      : state.models.find(candidate => candidate.default);
     if (variant && !model?.variants?.includes(variant)) return;
     state = { ...state, configuration: { ...state.configuration, variant } };
     callbacks.onVariant(variant);

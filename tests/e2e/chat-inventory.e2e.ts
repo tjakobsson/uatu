@@ -117,7 +117,9 @@ test.describe("live conversation inventory", () => {
     await bootChat(page, credential);
     const second = await bootSecondClient(browser, credential);
     try {
-      await waitForInventoryIdle(request, 2);
+      // One agent-level subscription regardless of client count: the
+      // router's inventory hub multiplexes every connected client over it.
+      await waitForInventoryIdle(request, 1);
       const chooser = page.locator("#chat-conversation-select");
       await expect(chooser).toHaveValue(primary.conversation.id);
 
@@ -185,7 +187,9 @@ test.describe("live conversation inventory", () => {
       const draft = page.locator("#chat-input");
       await draft.fill("Unselected mutations keep this draft");
       await draft.focus();
-      await waitForInventoryIdle(request, 2);
+      // One agent-level subscription regardless of client count: the
+      // router's inventory hub multiplexes every connected client over it.
+      await waitForInventoryIdle(request, 1);
 
       await second.page.getByRole("button", { name: "Rename conversation" }).click();
       await second.page.locator("#chat-rename-title").fill("Renamed from client two");

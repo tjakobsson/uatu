@@ -35,9 +35,15 @@ export type ReversibleFileFixture = {
 
 type FakeE2EChatServiceOptions = {
   restoreFile?: (relativePath: string, contents: string | null) => Promise<void>;
+  // The identity this fake declares; distinct per registered agent so the
+  // surface's declaration-driven naming is observable in multi-agent specs.
+  agentName?: string;
+  agentId?: string;
 };
 
 export class FakeE2EChatService implements WorkspaceChatService {
+  private readonly agentName: string;
+  private readonly agentId: string;
   private generation = "e2e-chat-1";
   private nextId = 1;
   private readonly conversations = new Map<string, ConversationSummary>();
@@ -104,7 +110,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
     root: mkdtempSync(path.join(os.tmpdir(), "uatu-e2e-attachments-")),
   });
 
-  constructor(private readonly options: FakeE2EChatServiceOptions = {}) {}
+  constructor(private readonly options: FakeE2EChatServiceOptions = {}) {
+    this.agentName = options.agentName ?? "Fixture Agent";
+    this.agentId = options.agentId ?? "e2e";
+  }
 
   private static defaultModels(): ChatModel[] {
     return [
@@ -118,7 +127,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.unavailable ?? {
       state: "ready",
       version: "e2e",
-      agent: { id: "e2e", name: "Fixture Agent", capabilities: this.capabilities },
+      agent: { id: this.agentId, name: this.agentName, capabilities: this.capabilities },
     };
   }
 
@@ -455,17 +464,21 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.reversibleHistoryMutation(id, requestId, "restore", messageId);
   }
 
-  async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
+  async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string) {
     this.require(id);
     const key = `permission:${id}:${interactionId}:${requestId}`;
     const existing = this.receipts.get(key) as { outcome: PermissionOutcome } | undefined;
     if (existing) return existing;
     const result = { outcome };
+    this.permissionChoices.push({ interactionId, ...(choiceId ? { choiceId } : {}) });
     const item = this.items.get(id)!.get(`permission:${interactionId}`);
-    if (item?.type === "permission") this.publishItem(id, { ...item, status: "resolved", outcome });
+    if (item?.type === "permission") this.publishItem(id, { ...item, status: "resolved", outcome, ...(choiceId ? { choiceId } : {}) });
     this.receipts.set(key, result);
     return result;
   }
+
+  // What each permission reply carried, for spec assertions.
+  readonly permissionChoices: Array<{ interactionId: string; choiceId?: string }> = [];
 
   async respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome) {
     this.require(id);

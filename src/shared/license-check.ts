@@ -73,8 +73,26 @@ export function validateLicenseRecords(records: LicenseRecord[], productionDepen
   return records.filter(record =>
     !isBuildOnlySiteTool(record, productionDependencies)
     && !isUnusedAstroImageBinary(record, productionDependencies)
+    && !isReviewedClaudeAgentSdk(record)
     && !isAllowedLicenseExpression(record.license)
   );
+}
+
+// The Claude Agent SDK is proprietary (© Anthropic PBC), published on npm for
+// embedding in applications; its terms are the Claude legal agreements
+// (https://code.claude.com/docs/en/legal-and-compliance). Reviewed and
+// accepted 2026-09-01 for the Chat Claude Code agent: uatu bundles the SDK's
+// JavaScript into dist/uatu, so unlike the carve-outs above this one covers a
+// production dependency on purpose. The per-platform sidecar packages vendor
+// a `claude` CLI that uatu never bundles or executes — the SDK is always
+// pointed at the user's own installed `claude` — but they install alongside
+// the SDK, so the audit must recognize them too. Scoped to the exact package
+// names and the license marker observed at review time: a renamed or
+// relicensed release fails the audit again and forces a fresh review.
+function isReviewedClaudeAgentSdk(record: LicenseRecord): boolean {
+  const isSdkPackage = record.name === "@anthropic-ai/claude-agent-sdk"
+    || record.name.startsWith("@anthropic-ai/claude-agent-sdk-");
+  return isSdkPackage && /^SEE LICENSE IN (?:README|LICENSE)\.md$/i.test(record.license);
 }
 
 // Both carve-outs below rest on the same assumption: the package never ships
@@ -188,7 +206,7 @@ async function main() {
 
   if (forbidden.length > 0) {
     const details = forbidden.map(record => `${record.name}@${record.version}: ${record.license}`).join("\n");
-    throw new Error(`copyleft licenses detected:\n${details}`);
+    throw new Error(`disallowed licenses detected:\n${details}`);
   }
 
   console.log(`audited ${records.length} installed packages`);

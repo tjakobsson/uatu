@@ -10,6 +10,7 @@ import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
 import { ReversibleHistoryTargetError } from "../chat/provider";
 import { buildRoutes } from "./routes";
+import { MultiAgentChatService } from "../chat/agents";
 
 const TOKEN = "chat-test-token";
 
@@ -144,6 +145,21 @@ class FakeChatService implements WorkspaceChatService {
 
 function routes(chatService = new FakeChatService(), basePath = "/") {
   const repo = path.resolve(import.meta.dir, "..", "..");
+  // The real router over the single-agent fake: route tests exercise the
+  // qualifying seam exactly as production does. The fake keeps owning the
+  // attachment behavior through the store adapter.
+  const routed = new MultiAgentChatService({
+    workspacePath: repo,
+    agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: chatService }],
+    attachmentStore: {
+      directory: '/dev/null',
+      save: async bytes => {
+        const stored = await chatService.saveAttachment(bytes);
+        return { ...stored, name: stored.id, absolutePath: "/dev/null" } as StoredAttachment;
+      },
+      resolve: id => chatService.resolveAttachment(id),
+    },
+  });
   return buildRoutes({
     mode: "prod",
     basePath,
@@ -161,7 +177,7 @@ function routes(chatService = new FakeChatService(), basePath = "/") {
       },
     },
     getSession: (() => { throw new Error("unused"); }) as never,
-    chatService,
+    chatService: routed,
     getWorkspaceCredential: () => TOKEN,
     debug: false,
     getMetricsSnapshot: () => ({}),
@@ -195,19 +211,21 @@ describe("workspace chat routes", () => {
     const table = routes(new FakeChatService(), "/s/project/");
     expect(Object.keys(table).filter(key => key.includes("/api/chat/")).every(key => key.startsWith("/s/project/"))).toBe(true);
     const status = table["/s/project/api/chat/status"] as { GET(request: Request): Promise<Response> };
-    expect(await (await status.GET(request("/s/project/api/chat/status"))).json()).toEqual({ state: "ready", version: "test" });
+    expect(await (await status.GET(request("/s/project/api/chat/status"))).json()).toEqual({
+      agents: [{ agent: { id: "opencode", name: "OpenCode" }, availability: { state: "ready", version: "test" } }],
+    });
     const models = table["/s/project/api/chat/models"] as { GET(request: Request): Promise<Response> };
-    expect(await (await models.GET(request("/s/project/api/chat/models"))).json()).toEqual({ models: [expect.objectContaining({ name: "Claude" })] });
+    expect(await (await models.GET(request("/s/project/api/chat/models?agent=opencode"))).json()).toEqual({ models: [expect.objectContaining({ name: "Claude" })] });
     const commands = table["/s/project/api/chat/commands"] as { GET(request: Request): Promise<Response> };
-    expect(await (await commands.GET(request("/s/project/api/chat/commands"))).json()).toEqual({ commands: [expect.objectContaining({ name: "review" })] });
+    expect(await (await commands.GET(request("/s/project/api/chat/commands?agent=opencode"))).json()).toEqual({ commands: [expect.objectContaining({ name: "review" })] });
     const inventory = table["/s/project/api/chat/conversations"] as { GET(request: Request): Promise<Response>; POST(request: Request): Promise<Response> };
-    expect(await (await inventory.GET(request("/s/project/api/chat/conversations"))).json()).toEqual({ conversations: [expect.objectContaining({ id: "local" })] });
+    expect(await (await inventory.GET(request("/s/project/api/chat/conversations"))).json()).toEqual({ conversations: [expect.objectContaining({ id: "opencode:local", agent: { id: "opencode", name: "OpenCode" } })] });
     const created = await inventory.POST(request("/s/project/api/chat/conversations", {
       method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: "{}",
     }));
     expect(created.status).toBe(201);
     const snapshot = table["/s/project/api/chat/conversations/:conversationId"] as { GET(request: Request & { params: Record<string, string> }): Promise<Response> };
-    expect((await (await snapshot.GET(request("/s/project/api/chat/conversations/local?limit=50", {}, { conversationId: "local" }) as never)).json() as { conversation: { id: string } }).conversation.id).toBe("local");
+    expect((await (await snapshot.GET(request("/s/project/api/chat/conversations/opencode:local?limit=50", {}, { conversationId: "opencode:local" }) as never)).json() as { conversation: { id: string } }).conversation.id).toBe("opencode:local");
   });
 
   test("streams the normalized initial inventory signal under a relocated base path", async () => {
@@ -276,9 +294,9 @@ describe("workspace chat routes", () => {
   test("rejects foreign origins and malformed bodies before mutation, and joins retried prompts", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
-    const send = (body: unknown, origin = "http://127.0.0.1:4711") => handler.POST(request("/api/chat/conversations/local/prompts", {
+    const send = (body: unknown, origin = "http://127.0.0.1:4711") => handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
       method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
     expect((await send({ requestId: "r1", text: "hello" }, "https://attacker.example")).status).toBe(403);
     expect((await send({ requestId: "r1", text: "hello", directory: "/tmp/foreign" })).status).toBe(400);
     const first = await send({ requestId: "r1", text: "hello" });
@@ -296,11 +314,11 @@ describe("workspace chat routes", () => {
     const redo = table["/api/chat/conversations/:conversationId/redo"] as Handler;
     const revert = table["/api/chat/conversations/:conversationId/revert"] as Handler;
     const restore = table["/api/chat/conversations/:conversationId/restore"] as Handler;
-    const send = (handler: Handler, requestId: string, body: Record<string, unknown> = { requestId }, origin = "http://127.0.0.1:4711") => handler.POST(request("/api/chat/conversations/local/history", {
+    const send = (handler: Handler, requestId: string, body: Record<string, unknown> = { requestId }, origin = "http://127.0.0.1:4711") => handler.POST(request("/api/chat/conversations/opencode:local/history", {
       method: "POST",
       headers: { origin, "content-type": "application/json" },
       body: JSON.stringify(body),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
 
     expect((await send(undo, "undo-1", { requestId: "undo-1" }, "https://attacker.example")).status).toBe(403);
     expect((await send(undo, "undo-1", { requestId: "undo-1", direction: "back" })).status).toBe(400);
@@ -358,11 +376,11 @@ describe("workspace chat routes", () => {
     const table = routes(service);
     type Handler = { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
     const undo = table["/api/chat/conversations/:conversationId/undo"] as Handler;
-    const send = () => undo.POST(request("/api/chat/conversations/local/undo", {
+    const send = () => undo.POST(request("/api/chat/conversations/opencode:local/undo", {
       method: "POST",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
       body: JSON.stringify({ requestId: crypto.randomUUID() }),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
 
     const unsupported = new ReversibleHistoryUnsupportedError();
     service.undo = async () => { throw unsupported; };
@@ -377,11 +395,11 @@ describe("workspace chat routes", () => {
 
     service.revert = async () => { throw new ReversibleHistoryTargetError(); };
     const revert = table["/api/chat/conversations/:conversationId/revert"] as Handler;
-    const stale = await revert.POST(request("/api/chat/conversations/local/revert", {
+    const stale = await revert.POST(request("/api/chat/conversations/opencode:local/revert", {
       method: "POST",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
       body: JSON.stringify({ requestId: crypto.randomUUID(), messageId: "message:stale" }),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
     expect(stale.status).toBe(409);
     expect(await stale.json()).toEqual({ error: "reversible-history message is no longer available" });
   });
@@ -389,9 +407,9 @@ describe("workspace chat routes", () => {
   test("removes a held message, guards the origin, and maps a delivered message to conflict", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/chat/conversations/:conversationId/queue/:messageId"] as { DELETE(request: Request & { params: Record<string, string> }): Promise<Response> };
-    const send = (messageId: string, body: unknown = { requestId: "remove-1" }, origin = "http://127.0.0.1:4711") => handler.DELETE(request(`/api/chat/conversations/local/queue/${messageId}`, {
+    const send = (messageId: string, body: unknown = { requestId: "remove-1" }, origin = "http://127.0.0.1:4711") => handler.DELETE(request(`/api/chat/conversations/opencode:local/queue/${messageId}`, {
       method: "DELETE", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body),
-    }, { conversationId: "local", messageId }) as never);
+    }, { conversationId: "opencode:local", messageId }) as never);
 
     expect((await send("held-1", { requestId: "remove-1" }, "https://attacker.example")).status).toBe(403);
     expect((await send("held-1", { messageId: "held-1" })).status).toBe(400);
@@ -415,11 +433,11 @@ describe("workspace chat routes", () => {
   test("accepts only a strict model selection and forwards it to the service", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
-    const send = (model: unknown) => handler.POST(request("/api/chat/conversations/local/prompts", {
+    const send = (model: unknown) => handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
       method: "POST",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
       body: JSON.stringify({ requestId: crypto.randomUUID(), text: "hello", model }),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
     expect((await send({ providerId: "anthropic", modelId: "claude", variant: "fast" })).status).toBe(400);
     expect((await send({ providerId: "anthropic", modelId: "claude" })).status).toBe(202);
     expect(service.selectedModel).toEqual({ providerId: "anthropic", modelId: "claude" });
@@ -429,15 +447,15 @@ describe("workspace chat routes", () => {
     const service = new FakeChatService();
     const table = routes(service);
     const modes = table["/api/chat/modes"] as { GET(request: Request): Promise<Response> };
-    expect(await (await modes.GET(request("/api/chat/modes"))).json()).toEqual({
+    expect(await (await modes.GET(request("/api/chat/modes?agent=opencode"))).json()).toEqual({
       modes: [expect.objectContaining({ name: "build" }), expect.objectContaining({ name: "plan" })],
     });
     const handler = table["/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
-    const send = (mode: unknown) => handler.POST(request("/api/chat/conversations/local/prompts", {
+    const send = (mode: unknown) => handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
       method: "POST",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
       body: JSON.stringify({ requestId: crypto.randomUUID(), text: "hello", mode }),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
     expect((await send(42)).status).toBe(400);
     expect((await send("")).status).toBe(400);
     expect((await send("build")).status).toBe(202);
@@ -458,11 +476,11 @@ describe("workspace chat routes", () => {
     const handler = routes(service)["/api/chat/conversations/:conversationId"] as {
       PATCH(request: Request & { params: Record<string, string> }): Promise<Response>;
     };
-    const send = (body: unknown, origin = "http://127.0.0.1:4711") => handler.PATCH(request("/api/chat/conversations/local", {
+    const send = (body: unknown, origin = "http://127.0.0.1:4711") => handler.PATCH(request("/api/chat/conversations/opencode:local", {
       method: "PATCH",
       headers: { origin, "content-type": "application/json" },
       body: JSON.stringify(body),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
 
     expect((await send({ requestId: "r1", title: "Renamed" }, "https://attacker.example")).status).toBe(403);
     expect((await send({ requestId: "r1", title: "Renamed", directory: "/tmp" })).status).toBe(400);
@@ -471,15 +489,15 @@ describe("workspace chat routes", () => {
     expect((await send({ title: "Missing receipt" })).status).toBe(400);
     const renamed = await send({ requestId: "r1", title: "  Renamed  " });
     expect(renamed.status).toBe(200);
-    expect(await renamed.json()).toEqual({ conversation: expect.objectContaining({ id: "local", title: "Renamed" }) });
+    expect(await renamed.json()).toEqual({ conversation: expect.objectContaining({ id: "opencode:local", title: "Renamed" }) });
     expect(service.renames).toBe(1);
 
-    const unauthenticated = new Request("http://127.0.0.1:4711/api/chat/conversations/local", {
+    const unauthenticated = new Request("http://127.0.0.1:4711/api/chat/conversations/opencode:local", {
       method: "PATCH",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
       body: JSON.stringify({ requestId: "r2", title: "No" }),
     }) as Request & { params: Record<string, string> };
-    unauthenticated.params = { conversationId: "local" };
+    unauthenticated.params = { conversationId: "opencode:local" };
     expect((await handler.PATCH(unauthenticated)).status).toBe(401);
   });
 
@@ -488,11 +506,11 @@ describe("workspace chat routes", () => {
     const handler = routes(service)["/api/chat/conversations/:conversationId"] as {
       PATCH(request: Request & { params: Record<string, string> }): Promise<Response>;
     };
-    const send = () => handler.PATCH(request("/api/chat/conversations/local", {
+    const send = () => handler.PATCH(request("/api/chat/conversations/opencode:local", {
       method: "PATCH",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
       body: JSON.stringify({ requestId: crypto.randomUUID(), title: "Title" }),
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
 
     service.renameConversation = async () => { throw new ConversationRenameUnsupportedError(); };
     expect((await send()).status).toBe(409);
@@ -505,11 +523,11 @@ describe("workspace chat routes", () => {
     const handler = routes(service)["/api/chat/conversations/:conversationId/questions/:interactionId"] as {
       POST(request: Request & { params: Record<string, string> }): Promise<Response>;
     };
-    const send = (answers: string[][]) => handler.POST(request("/api/chat/conversations/local/questions/question-1", {
+    const send = (answers: string[][]) => handler.POST(request("/api/chat/conversations/opencode:local/questions/question-1", {
       method: "POST",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
       body: JSON.stringify({ requestId: crypto.randomUUID(), outcome: { kind: "answered", answers } }),
-    }, { conversationId: "local", interactionId: "question-1" }) as never);
+    }, { conversationId: "opencode:local", interactionId: "question-1" }) as never);
 
     expect((await send([[]])).status).toBe(400);
     expect((await send([["   "]])).status).toBe(400);
@@ -521,9 +539,9 @@ describe("workspace chat routes", () => {
     const cursor = encodeReplayCursor({ generation: "generation", sequence: 0 });
     service.replay.publish({ type: "conversation.status", status: "running" });
     const handler = routes(service)["/api/chat/conversations/:conversationId/events"] as { GET(request: Request & { params: Record<string, string> }): Promise<Response> };
-    const response = await handler.GET(request("/api/chat/conversations/local/events", {
+    const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", {
       headers: { "last-event-id": cursor },
-    }, { conversationId: "local" }) as never);
+    }, { conversationId: "opencode:local" }) as never);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(response.headers.get("cache-control")).toBe("no-cache, no-transform");
     expect(response.headers.get("x-accel-buffering")).toBe("no");
@@ -547,11 +565,11 @@ describe("chat attachment routes", () => {
   type GetHandler = { GET(request: Request & { params?: Record<string, string> }): Promise<Response> };
 
   function uploadRequest(body: FormData | string, headers: Record<string, string> = {}) {
-    return request("/api/chat/conversations/local/attachments", {
+    return request("/api/chat/conversations/opencode:local/attachments", {
       method: "POST",
       headers: { ...ORIGIN, ...headers },
       body,
-    }, { conversationId: "local" });
+    }, { conversationId: "opencode:local" });
   }
 
   test("stores a supported multipart upload and reports the sniffed type", async () => {
@@ -590,13 +608,13 @@ describe("chat attachment routes", () => {
     expect(json.status).toBe(415);
     const form = new FormData();
     form.append("file", new File([PNG], "shot.png", { type: "image/png" }));
-    const foreign = await handler.POST(request("/api/chat/conversations/local/attachments", {
+    const foreign = await handler.POST(request("/api/chat/conversations/opencode:local/attachments", {
       method: "POST", headers: { origin: "https://evil.example" }, body: form,
-    }, { conversationId: "local" }));
+    }, { conversationId: "opencode:local" }));
     expect(foreign.status).toBe(403);
     const anonymous = await handler.POST(Object.assign(
-      new Request("http://127.0.0.1:4711/api/chat/conversations/local/attachments", { method: "POST", headers: ORIGIN, body: form }),
-      { params: { conversationId: "local" } },
+      new Request("http://127.0.0.1:4711/api/chat/conversations/opencode:local/attachments", { method: "POST", headers: ORIGIN, body: form }),
+      { params: { conversationId: "opencode:local" } },
     ));
     expect(anonymous.status).toBe(401);
   });
@@ -630,11 +648,11 @@ describe("chat attachment routes", () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as Handler;
     const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
-    const response = await handler.POST(request("/api/chat/conversations/local/prompts", {
+    const response = await handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
       method: "POST",
       headers: { ...ORIGIN, "content-type": "application/json" },
       body: JSON.stringify({ requestId: "r-1", text: "look at this", attachments }),
-    }, { conversationId: "local" }));
+    }, { conversationId: "opencode:local" }));
     expect(response.status).toBe(202);
     expect(service.promptAttachments).toEqual(attachments);
   });
@@ -642,11 +660,11 @@ describe("chat attachment routes", () => {
   test("refuses malformed prompt attachment references", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as Handler;
-    const send = (attachments: unknown) => handler.POST(request("/api/chat/conversations/local/prompts", {
+    const send = (attachments: unknown) => handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
       method: "POST",
       headers: { ...ORIGIN, "content-type": "application/json" },
       body: JSON.stringify({ requestId: "r-1", text: "hello", attachments }),
-    }, { conversationId: "local" }));
+    }, { conversationId: "opencode:local" }));
     expect((await send("nope")).status).toBe(400);
     expect((await send([{ id: "a", name: "n.png", mimeType: "image/tiff" }])).status).toBe(400);
     expect((await send([{ id: "a", name: "n.png", mimeType: "image/png", url: "data:x" }])).status).toBe(400);
@@ -659,11 +677,11 @@ describe("chat attachment routes", () => {
 describe("image-only prompts", () => {
   const ORIGIN = { origin: "http://127.0.0.1:4711" };
   type Handler = { POST(request: Request & { params?: Record<string, string> }): Promise<Response> };
-  const send = (handler: Handler, body: Record<string, unknown>) => handler.POST(request("/api/chat/conversations/local/prompts", {
+  const send = (handler: Handler, body: Record<string, unknown>) => handler.POST(request("/api/chat/conversations/opencode:local/prompts", {
     method: "POST",
     headers: { ...ORIGIN, "content-type": "application/json" },
     body: JSON.stringify(body),
-  }, { conversationId: "local" }));
+  }, { conversationId: "opencode:local" }));
 
   test("empty text with attachments is accepted; without them it is still refused", async () => {
     const service = new FakeChatService();
@@ -684,11 +702,11 @@ describe("upload body streaming limit", () => {
     // 11 MiB body, no declared length: the streaming gate must refuse it
     // before parsing, regardless of what the client claims.
     const oversized = new Uint8Array(11 * 1024 * 1024);
-    const request_ = Object.assign(new Request(`http://127.0.0.1:4711/api/chat/conversations/local/attachments?t=${TOKEN}`, {
+    const request_ = Object.assign(new Request(`http://127.0.0.1:4711/api/chat/conversations/opencode:local/attachments?t=${TOKEN}`, {
       method: "POST",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "multipart/form-data; boundary=x" },
       body: oversized,
-    }), { params: { conversationId: "local" } });
+    }), { params: { conversationId: "opencode:local" } });
     const response = await handler.POST(request_);
     expect(response.status).toBe(413);
     expect(service.uploads).toBe(0);

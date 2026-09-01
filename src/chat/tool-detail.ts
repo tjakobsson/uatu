@@ -77,8 +77,10 @@ export function describeToolDetail(item: Pick<ToolItem, "name" | "input" | "outp
       return { kind: "fetch", label, url };
     }
     // A subagent row said only "Agent task running" — the one thing worth
-    // knowing is which agent, doing what. Both are in the input.
-    case "task": {
+    // knowing is which agent, doing what. Both are in the input. OpenCode
+    // names this tool `task`; Claude Code names it `Agent` — same shape.
+    case "task":
+    case "agent": {
       const description = optionalText(input.description);
       if (description === undefined) break;
       const result = taskResultText(item.output);

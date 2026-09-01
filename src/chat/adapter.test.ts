@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "./adapter";
-import { normalizeProviderEvent } from "./normalization";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "./adapter";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type ProviderEvent, type ProviderMessage } from "./opencode/normalization";
 import type { ChatAgent } from "./types";
 import type {
-  OpenCodeProvider,
-  ProviderEvent,
-  ProviderMessage,
-  ProviderPage,
+  NormalizedProviderEvent,
+  ChatProvider,
+  ProviderHistoryPage,
   ProviderPermissionReply,
   ProviderSession,
+  StoredMessageAccounting,
 } from "./provider";
 import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
 import type { ChatEvent, ChatModel, ConversationItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
@@ -45,7 +45,7 @@ class EventQueue implements AsyncIterable<ProviderEvent> {
   }
 }
 
-class FakeProvider implements OpenCodeProvider {
+class FakeProvider implements ChatProvider {
   // A fake declares less than OpenCode on purpose: it is the only thing in
   // the suite that can exercise a surface whose agent is missing a capability.
   agent: ChatAgent = { id: "fake", name: "Fake Agent", capabilities: ["models", "commands", "permissions"] };
@@ -56,7 +56,7 @@ class FakeProvider implements OpenCodeProvider {
   ];
   models: ChatModel[] = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }];
   sessions: ProviderSession[] = [];
-  pages = new Map<string, ProviderPage<ProviderMessage>>();
+  pages = new Map<string, RawPage>();
   eventQueue = new EventQueue();
   prompts: Array<{ sessionId: string; id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }> = [];
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; model?: ModelSelection }> = [];
@@ -64,15 +64,15 @@ class FakeProvider implements OpenCodeProvider {
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
   interrupts: string[] = [];
   modelSwitches: Array<{ sessionId: string; selection: ModelSelection }> = [];
-  renameSession?: OpenCodeProvider["renameSession"];
-  listPermissions?: OpenCodeProvider["listPermissions"];
-  listQuestions?: OpenCodeProvider["listQuestions"];
-  listModes?: OpenCodeProvider["listModes"];
-  getReversibleHistoryState?: OpenCodeProvider["getReversibleHistoryState"];
-  undo?: OpenCodeProvider["undo"];
-  redo?: OpenCodeProvider["redo"];
-  revert?: OpenCodeProvider["revert"];
-  restore?: OpenCodeProvider["restore"];
+  renameSession?: ChatProvider["renameSession"];
+  listPermissions?: ChatProvider["listPermissions"];
+  listQuestions?: ChatProvider["listQuestions"];
+  listModes?: ChatProvider["listModes"];
+  getReversibleHistoryState?: ChatProvider["getReversibleHistoryState"];
+  undo?: ChatProvider["undo"];
+  redo?: ChatProvider["redo"];
+  revert?: ChatProvider["revert"];
+  restore?: ChatProvider["restore"];
   configurations = new Map<string, import("./types").ConversationConfiguration>();
   newConfiguration: import("./types").ConversationConfiguration = {};
 
@@ -89,13 +89,26 @@ class FakeProvider implements OpenCodeProvider {
     return session;
   }
   async getSession(id: string) { return this.sessions.find(session => session.id === id) ?? null; }
-  async getConversationConfiguration(id: string, _completeMessages?: ProviderMessage[]) { return this.configurations.get(id) ?? {}; }
-  async listMessages(_sessionId: string, options: { cursor?: string; limit: number }) {
+  async getConversationConfiguration(id: string) { return this.configurations.get(id) ?? {}; }
+  // Tests author raw OpenCode payloads; the stub normalizes them at the seam
+  // boundary exactly as the real provider does. Override readMessages, not
+  // listMessages, to keep raw fixtures.
+  readMessages = async (_sessionId: string, options: { cursor?: string; limit: number }): Promise<RawPage> => {
     return this.pages.get(options.cursor ?? "first") ?? { items: [] };
+  };
+  async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
+    return normalizeRawPage(await this.readMessages(sessionId, options));
   }
-  events(signal: AbortSignal): AsyncIterable<ProviderEvent> {
+  async *events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent> {
     signal.addEventListener("abort", () => this.eventQueue.close(), { once: true });
-    return this.eventQueue;
+    const memory = createProviderEventMemory();
+    for await (const event of this.eventQueue) {
+      try {
+        yield normalizeProviderEvent(event, memory);
+      } catch {
+        yield { updates: [], outcome: "unparseable", eventType: "" };
+      }
+    }
   }
   async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }) {
     this.prompts.push({ sessionId, ...input });
@@ -117,6 +130,22 @@ class FakeProvider implements OpenCodeProvider {
   }
 }
 
+type RawPage = { items: ProviderMessage[]; nextCursor?: string; configurationItems?: ProviderMessage[] };
+
+function normalizeRawPage(page: RawPage): ProviderHistoryPage {
+  const accounting: StoredMessageAccounting[] = [];
+  for (const message of page.items) {
+    const reported = storedMessageUsage(message);
+    if (reported) accounting.push(reported);
+  }
+  return {
+    items: page.items.flatMap(message => normalizeProviderMessage(message)),
+    accounting,
+    ...(page.configurationItems ? { completeItems: page.configurationItems.flatMap(message => normalizeProviderMessage(message)) } : {}),
+    ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
+  };
+}
+
 function fixtureSession(id: string, directory = process.cwd(), updatedAt = 1): ProviderSession {
   return { id, title: `Conversation ${id}`, directory, createdAt: updatedAt, updatedAt };
 }
@@ -125,7 +154,7 @@ function sumInput(item: ConversationItem | undefined): number | undefined {
   return item?.type === "tool" ? item.usage?.input : undefined;
 }
 
-function applyEvent(adapter: OpenCodeChatAdapter, conversationId: string, event: ProviderEvent): void {
+function applyEvent(adapter: ChatAdapter, conversationId: string, event: ProviderEvent): void {
   for (const update of normalizeProviderEvent(event).updates) adapter.projectionForTests(conversationId).apply(update);
 }
 
@@ -156,7 +185,7 @@ describe("OpenCode conversation inventory and history", () => {
       provider.sessions[0] = renamed;
       return renamed;
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
 
@@ -176,7 +205,7 @@ describe("OpenCode conversation inventory and history", () => {
       provider.sessions[0] = renamed;
       return renamed;
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
 
@@ -192,7 +221,7 @@ describe("OpenCode conversation inventory and history", () => {
       fixtureSession("parent", process.cwd(), 2),
       { ...fixtureSession("child", process.cwd(), 3), parentId: "parent" },
     ];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
 
     const conversations = await adapter.listConversations();
     expect(conversations.map(conversation => conversation.id)).toEqual(["parent"]);
@@ -210,7 +239,7 @@ describe("OpenCode conversation inventory and history", () => {
         { id: "prt_a", type: "text", text: "answer" },
       ],
     }] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
 
     const snapshot = await adapter.history("session");
     // Alphabetical ids and later part-level times would both reorder this;
@@ -221,12 +250,12 @@ describe("OpenCode conversation inventory and history", () => {
   test("an event landing during the history read is replayable from the snapshot cursor", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
     // The pump publishes while listMessages is in flight — the torn-snapshot
     // window: the update reaches the replay log but not the items history()
     // is assembling.
-    provider.listMessages = async () => {
+    provider.readMessages = async () => {
       provider.eventQueue.push({ id: "during", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "missed" } });
       await Bun.sleep(10);
       return { items: [] };
@@ -260,7 +289,7 @@ describe("OpenCode conversation inventory and history", () => {
       conversationId: "session",
       questions: [{ prompt: "Proceed?", header: "Next", options: [{ label: "Yes", description: "" }], multiple: false, allowFreeForm: false }],
     }];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
 
     const snapshot = await adapter.history("session");
     expect(snapshot.items).toEqual([expect.objectContaining({
@@ -279,8 +308,8 @@ describe("OpenCode conversation inventory and history", () => {
       fixtureSession("newer-a", process.cwd(), 4),
       fixtureSession("foreign", `${process.cwd()}-foreign`, 10),
     ];
-    const first = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "first" });
-    const restarted = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "second" });
+    const first = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "first" });
+    const restarted = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "second" });
 
     expect((await first.listConversations()).map(item => item.id)).toEqual(["newer-a", "newer-z", "older"]);
     expect((await restarted.listConversations()).map(item => item.id)).toEqual(["newer-a", "newer-z", "older"]);
@@ -290,7 +319,7 @@ describe("OpenCode conversation inventory and history", () => {
   test("creates and looks up an empty workspace conversation", async () => {
     const provider = new FakeProvider();
     provider.newConfiguration = { model: { providerId: "recent", modelId: "model" }, mode: "build" };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "created" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "created" });
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
     const created = await adapter.createConversation();
@@ -319,7 +348,7 @@ describe("OpenCode conversation inventory and history", () => {
         { id: "p3", type: "reasoning", text: "thinking", time: { start: 10 } },
       ],
     } as never] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const items = (await adapter.history("local")).items;
     expect(items).toEqual([
@@ -336,7 +365,7 @@ describe("OpenCode conversation inventory and history", () => {
       info: { id: "m1", role: "assistant", time: { created: 10 } },
       parts: [{ id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } }],
     } as never] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     adapter.projectionForTests("local").statusUpdate("running");
 
     const items = (await adapter.history("local")).items;
@@ -350,7 +379,7 @@ describe("OpenCode conversation inventory and history", () => {
       info: { id: "m1", role: "assistant", time: { created: 10 } },
       parts: [{ id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } }],
     } as never] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 1 });
     adapter.projectionForTests("local").statusUpdate("running");
     // Touching another conversation evicts "local"; its projection comes back
     // fresh ("idle") while the turn still runs. Liveness must survive that.
@@ -373,13 +402,13 @@ describe("OpenCode conversation inventory and history", () => {
     provider.pages.set("provider-boundary-a1", {
       items: [{ id: "u1", type: "user", time: { created: 1 }, text: "First" }],
     });
-    const firstAdapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g1" });
+    const firstAdapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g1" });
     const first = await firstAdapter.history("session", { limit: 2 });
     expect(first.items.map(item => item.id)).toEqual(["part:p1", "message:u2"]);
     expect(first.olderCursor).toBeDefined();
     expect(first.olderCursor).not.toContain("provider-boundary");
 
-    const restarted = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
+    const restarted = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
     const older = await restarted.history("session", { cursor: first.olderCursor });
     expect(older.items.map(item => item.id)).toEqual(["message:u1"]);
     expect(new Set([...first.items, ...older.items].map(item => item.id)).size).toBe(3);
@@ -391,7 +420,7 @@ describe("filtered provider event pump", () => {
     const provider = new FakeProvider();
     const external = fixtureSession("external");
     provider.sessions = [external];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     expect((await adapter.listConversations()).map(conversation => conversation.id)).toEqual(["external"]);
     const inventory = adapter.subscribeInventory();
@@ -412,7 +441,7 @@ describe("filtered provider event pump", () => {
     const child = { ...fixtureSession("child"), parentId: "local" };
     const foreign = fixtureSession("foreign", `${process.cwd()}-foreign`);
     provider.sessions = [local, child, foreign];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     await adapter.listConversations();
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
@@ -474,7 +503,7 @@ describe("filtered provider event pump", () => {
     const provider = new FakeProvider();
     let lookups = 0;
     provider.getSession = async () => { lookups += 1; return null; };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
     const pump = adapter.startEventPump();
@@ -497,7 +526,7 @@ describe("filtered provider event pump", () => {
         while (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
       },
     });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
 
@@ -522,7 +551,7 @@ describe("filtered provider event pump", () => {
   test("validates the current session directory before every publication", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local"), fixtureSession("foreign", `${process.cwd()}-foreign`)];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ id: "foreign-event", type: "session.next.text.delta", data: { sessionID: "foreign", partID: "x", delta: "secret" } });
     provider.eventQueue.push({ id: "local-event", type: "session.next.text.delta", data: { sessionID: "local", partID: "x", delta: "safe" } });
@@ -549,7 +578,7 @@ describe("filtered provider event pump", () => {
         },
       };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     await expect(adapter.startEventPump()).rejects.toThrow("stream died");
     expect(observed?.aborted).toBe(true);
@@ -559,7 +588,7 @@ describe("filtered provider event pump", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     provider.pages.set("first", { items: [{ id: "msg_history", type: "user", time: { created: 1 }, text: "hello from history" }] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     await adapter.history("local");
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ id: "echo", type: "message.updated", data: { info: { id: "msg_history", role: "user", sessionID: "local", time: { created: 1 } } } });
@@ -573,7 +602,7 @@ describe("filtered provider event pump", () => {
   test("coalesces streamed deltas into a single published event per window", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 5 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 5 });
     const pump = adapter.startEventPump();
     const { events } = await adapter.subscribe("local");
     const received: ChatEvent[] = [];
@@ -596,7 +625,7 @@ describe("filtered provider event pump", () => {
   test("evicts the least recently used idle conversation and keeps subscribed ones", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("a"), fixtureSession("b"), fixtureSession("c")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 2 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 2 });
     const { events } = await adapter.subscribe("a");
     await adapter.subscribe("b").then(result => result.events.cancel());
     const before = adapter.projectionForTests("a");
@@ -623,7 +652,7 @@ describe("reversible history coordination", () => {
     provider.getReversibleHistoryState = async () => state;
     provider.revert = async () => ({ outcome: "changed", state });
     provider.restore = async () => ({ outcome: "changed", state });
-    provider.listMessages = async () => ({ items: visible });
+    provider.readMessages = async () => ({ items: visible });
     return {
       provider,
       state: () => state,
@@ -636,7 +665,7 @@ describe("reversible history coordination", () => {
     const incomplete = new FakeProvider();
     incomplete.sessions = [fixtureSession("session")];
     incomplete.agent.capabilities.push("reversible-history");
-    const unsupported = new OpenCodeChatAdapter({ provider: incomplete, workspacePath: process.cwd() });
+    const unsupported = new ChatAdapter({ provider: incomplete, workspacePath: process.cwd() });
     await expect(unsupported.undo("session", "u1")).rejects.toBeInstanceOf(ReversibleHistoryUnsupportedError);
 
     const fixture = enabled({ staged: false, canUndo: false, canRedo: false });
@@ -646,7 +675,7 @@ describe("reversible history coordination", () => {
       return { outcome: "nothing-to-undo", state: fixture.state() };
     };
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
     adapter.projectionForTests("session").statusUpdate("running");
 
     await expect(adapter.undo("session", "u2")).resolves.toEqual({
@@ -681,7 +710,7 @@ describe("reversible history coordination", () => {
     };
     fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
     await adapter.history("session");
     adapter.projectionForTests("session").statusUpdate("running");
 
@@ -728,7 +757,7 @@ describe("reversible history coordination", () => {
     };
     fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
     await adapter.history("session");
     adapter.projectionForTests("session").statusUpdate("running");
     const held = await adapter.prompt("session", "held", "keep queued");
@@ -764,7 +793,7 @@ describe("reversible history coordination", () => {
       };
     };
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({
+    const adapter = new ChatAdapter({
       provider: fixture.provider,
       workspacePath: process.cwd(),
       generation: "g",
@@ -831,7 +860,7 @@ describe("reversible history coordination", () => {
       return { outcome: "changed", state: fixture.state(), restoredDraft: { text: "discard me" } };
     };
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 40 });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 40 });
     await adapter.history("session");
     const subscription = await adapter.subscribe("session");
     const iterator = subscription.events[Symbol.asyncIterator]();
@@ -857,7 +886,7 @@ describe("reversible history coordination", () => {
     const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [original]);
     fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
     await adapter.history("session");
     const subscription = await adapter.subscribe("session");
     const iterator = subscription.events[Symbol.asyncIterator]();
@@ -893,7 +922,7 @@ describe("reversible history coordination", () => {
     const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [original]);
     fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: "g" });
     await adapter.history("session");
     adapter.projectionForTests("session").statusUpdate("running");
     const held = await adapter.prompt("session", "held", "wait until the revert settles");
@@ -902,7 +931,7 @@ describe("reversible history coordination", () => {
 
     let historyReads = 0;
     let recovered = false;
-    fixture.provider.listMessages = async () => {
+    fixture.provider.readMessages = async () => {
       historyReads += 1;
       if (!recovered) throw new Error("provider restarting");
       return { items: [] };
@@ -948,7 +977,7 @@ describe("reversible history coordination", () => {
       const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
       fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
       fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-      const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: `g-${lifecycle}` });
+      const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), generation: `g-${lifecycle}` });
       adapter.projectionForTests("session").statusUpdate("running");
       const held = await adapter.prompt("session", `held-${lifecycle}`, `resume after ${lifecycle}`);
       fixture.setState({ staged: true, canUndo: false, canRedo: true });
@@ -996,10 +1025,10 @@ describe("reversible history coordination", () => {
     const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
     fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
     await adapter.history("session");
     let reads = 0;
-    fixture.provider.listMessages = async () => {
+    fixture.provider.readMessages = async () => {
       reads += 1;
       throw new Error("provider unavailable");
     };
@@ -1017,10 +1046,10 @@ describe("reversible history coordination", () => {
     const fixture = enabled({ staged: false, canUndo: true, canRedo: false });
     fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
     await adapter.history("session");
     let reads = 0;
-    fixture.provider.listMessages = async () => {
+    fixture.provider.readMessages = async () => {
       reads += 1;
       throw new Error("provider unavailable");
     };
@@ -1048,7 +1077,7 @@ describe("reversible history coordination", () => {
     const fixture = enabled({ staged: false, canUndo: true, canRedo: false }, [original]);
     fixture.provider.undo = async () => ({ outcome: "nothing-to-undo", state: fixture.state() });
     fixture.provider.redo = async () => ({ outcome: "nothing-to-redo", state: fixture.state() });
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
     await adapter.history("session");
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
@@ -1061,7 +1090,7 @@ describe("reversible history coordination", () => {
     let reads = 0;
     let releaseRead!: () => void;
     const readStarted = new Promise<void>(resolve => {
-      fixture.provider.listMessages = async () => {
+      fixture.provider.readMessages = async () => {
         reads += 1;
         if (reads === 1) {
           resolve();
@@ -1106,7 +1135,7 @@ describe("reversible history coordination", () => {
       return { messageId: input.id };
     };
     let id = 0;
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), id: () => `id-${++id}` });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd(), id: () => `id-${++id}` });
     adapter.projectionForTests("session").statusUpdate("running");
     const older = await adapter.prompt("session", "older", "older queued");
     fixture.setState({ staged: true, canUndo: false, canRedo: true });
@@ -1131,7 +1160,7 @@ describe("reversible history coordination", () => {
       fixture.setState({ staged: false, canUndo: true, canRedo: false });
       return { outcome: "changed", state: fixture.state() };
     };
-    const adapter = new OpenCodeChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider: fixture.provider, workspacePath: process.cwd() });
     adapter.projectionForTests("session").statusUpdate("running");
     const held = await adapter.prompt("session", "held", "held while staged");
     fixture.setState({ staged: true, canUndo: false, canRedo: true });
@@ -1161,7 +1190,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     let reads = 0;
     const recover = provider.getConversationConfiguration.bind(provider);
     provider.getConversationConfiguration = async id => { reads += 1; return recover(id); };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
 
     expect((await adapter.history("a")).configuration).toEqual(provider.configurations.get("a")!);
     expect((await adapter.history("a")).configuration).toEqual(provider.configurations.get("a")!);
@@ -1171,17 +1200,19 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(reads).toBe(3);
   });
 
-  test("configuration recovery uses the complete provider source rather than the visible page", async () => {
+  test("configuration recovery is delegated to the provider by id alone", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     const user = { info: { id: "user", role: "user", variant: "high" }, parts: [] };
     const assistant = { info: { id: "assistant", role: "assistant" }, parts: [] };
     provider.pages.set("first", { items: [assistant], configurationItems: [user, assistant] });
-    provider.getConversationConfiguration = async (_id, messages) => {
-      expect(messages).toEqual([user, assistant]);
+    // The provider owns recovery over its complete source; the adapter hands
+    // it nothing page-shaped to second-guess with.
+    provider.getConversationConfiguration = async id => {
+      expect(id).toBe("session");
       return { model: { providerId: "openai", modelId: "gpt" }, mode: "build", variant: "high" };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
 
     expect((await adapter.history("session", { limit: 1 })).configuration.variant).toBe("high");
   });
@@ -1203,7 +1234,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       }
       return stale;
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const events = adapter.projectionForTests("session").replay.handoff(() => null).subscription;
     const iterator = events[Symbol.asyncIterator]();
     const pump = adapter.startEventPump();
@@ -1234,7 +1265,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.configurations.set("session", { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" });
     provider.models[0] = { ...provider.models[0]!, variants: ["high"] };
     provider.listModes = async () => [{ name: "plan", description: "" }, { name: "build", description: "" }];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
     const first = await adapter.subscribe("session");
     const second = await adapter.subscribe("session");
     const cursor = first.snapshot.cursor;
@@ -1266,7 +1297,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.models.push({ selection: { providerId: "openai", modelId: "gpt" }, provider: "OpenAI", name: "GPT" });
     provider.listModes = async () => [{ name: "build", description: "" }, { name: "plan", description: "" }];
     let nextId = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
     const selected = { model: { providerId: "openai", modelId: "gpt" }, mode: "plan" };
 
     expect((await adapter.prompt("existing", "request", "go", selected.model, selected.mode)).configuration).toEqual(selected);
@@ -1279,7 +1310,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.sessions = [fixtureSession("existing")];
     provider.newConfiguration = { model: { providerId: "anthropic", modelId: "claude" }, mode: "build" };
     let nextId = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
 
     expect((await adapter.prompt("existing", "request", "go")).configuration).toEqual({});
     expect((await adapter.createConversation()).configuration).toEqual(provider.newConfiguration);
@@ -1289,7 +1320,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     provider.configurations.set("session", { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan", variant: "old" });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const { events } = await adapter.subscribe("session");
     const iterator = events[Symbol.asyncIterator]();
     const pump = adapter.startEventPump();
@@ -1322,7 +1353,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       await promptGate;
       return { messageId: input.id };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
     const subscription = await adapter.subscribe("session");
     const iterator = subscription.events[Symbol.asyncIterator]();
     const pump = adapter.startEventPump();
@@ -1369,7 +1400,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       return { messageId: input.id };
     };
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++message}` });
 
     const first = adapter.prompt("session", "request-1", "use GPT", openai);
     await firstEntered;
@@ -1405,7 +1436,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       provider.sessions[0] = renamed;
       return renamed;
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
     const subscriber = await adapter.subscribe("session");
@@ -1447,12 +1478,12 @@ describe("prompt, abort, permission, and question mutations", () => {
     const validating = new Promise<void>(resolve => { validationStarted = resolve; });
     let releaseValidation!: () => void;
     const validationGate = new Promise<void>(resolve => { releaseValidation = resolve; });
-    provider.listMessages = async () => {
+    provider.readMessages = async () => {
       validationStarted();
       await validationGate;
       return { items: [] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
 
     const pending = adapter.prompt("session", "prompt-1", "Automatic title candidate");
     await validating;
@@ -1467,14 +1498,14 @@ describe("prompt, abort, permission, and question mutations", () => {
   test("rename rejects unsupported and foreign-workspace provider outcomes", async () => {
     const unsupported = new FakeProvider();
     unsupported.sessions = [fixtureSession("session")];
-    await expect(new OpenCodeChatAdapter({ provider: unsupported, workspacePath: process.cwd() })
+    await expect(new ChatAdapter({ provider: unsupported, workspacePath: process.cwd() })
       .renameConversation("session", "r1", "Title")).rejects.toBeInstanceOf(ConversationRenameUnsupportedError);
 
     const foreign = new FakeProvider();
     foreign.agent.capabilities.push("conversation-rename");
     foreign.sessions = [fixtureSession("session")];
     foreign.renameSession = async (id, title) => ({ ...fixtureSession(id, "/foreign"), title });
-    await expect(new OpenCodeChatAdapter({ provider: foreign, workspacePath: process.cwd() })
+    await expect(new ChatAdapter({ provider: foreign, workspacePath: process.cwd() })
       .renameConversation("session", "r2", "Title")).rejects.toBeInstanceOf(ConversationNotFoundError);
   });
 
@@ -1489,7 +1520,7 @@ describe("prompt, abort, permission, and question mutations", () => {
   test("dispatches recognized slash commands without changing the prompt contract", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
     const model = { providerId: "anthropic", modelId: "claude" };
 
     const accepted = await adapter.prompt("session", "request", "/review   API compatibility", model);
@@ -1517,7 +1548,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       provider.sessions[0] = renamed;
       return renamed;
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
     const inventory = adapter.subscribeInventory();
     await expectInventorySignal(inventory);
     const selection = { providerId: "anthropic", modelId: "claude" };
@@ -1537,7 +1568,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     provider.listModes = async () => [{ name: "build", description: "" }, { name: "plan", description: "" }];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     await adapter.prompt("session", "r1", "switch me", undefined, "build");
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ mode: "build" }));
@@ -1552,7 +1583,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     let modelLists = 0;
     const listModels = provider.listModels.bind(provider);
     provider.listModels = async () => { modelLists += 1; return listModels(); };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     await adapter.prompt("session", "r1", "think hard", model, undefined, "high");
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ variant: "high" }));
@@ -1576,7 +1607,7 @@ describe("prompt, abort, permission, and question mutations", () => {
 
     // A conversation whose model this adapter never learned has nothing to
     // check the variant against, and nothing for it to ride — refused.
-    const fresh = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
+    const fresh = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
     await expect(fresh.prompt("session", "r5", "nope", undefined, undefined, "high")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
   });
 
@@ -1585,7 +1616,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.sessions = [fixtureSession("session")];
     provider.models = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude", variants: ["high"] }];
     provider.command = async () => { throw new UnsupportedVariantSelectionError("reasoning variants are not supported for compatibility compaction"); };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const error = adapter.prompt("session", "r1", "/compact", { providerId: "anthropic", modelId: "claude" }, undefined, "high");
     await expect(error).rejects.toBeInstanceOf(InvalidVariantSelectionError);
@@ -1596,7 +1627,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
     const until = async (predicate: () => boolean) => {
       for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
       expect(predicate()).toBe(true);
@@ -1640,7 +1671,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
     await adapter.prompt("session", "r2", "second");
@@ -1693,7 +1724,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       provider.sessions[0] = renamed;
       return renamed;
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
 
     const pending = adapter.prompt("session", "r1", "fast turn");
     await enteredRename;
@@ -1712,7 +1743,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     // The classic command route resolves only when the whole turn finishes,
     // so the turn's genuine completion can reach the pump before the
@@ -1740,7 +1771,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
     await adapter.prompt("session", "r2", "second");
@@ -1776,7 +1807,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
@@ -1804,7 +1835,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
@@ -1835,7 +1866,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("a"), fixtureSession("b"), fixtureSession("c")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 2, id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 2, id: () => `id-${++message}` });
 
     expect((await adapter.prompt("a", "r1", "first")).held).toBe(false);
     const held = await adapter.prompt("a", "r2", "second");
@@ -1891,7 +1922,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.configurations.set("session", { model: modelA });
     provider.models.push({ selection: modelB, provider: "OpenAI", name: "GPT" });
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
     const until = async (predicate: () => boolean) => {
       for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
       expect(predicate()).toBe(true);
@@ -1916,7 +1947,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     expect((await adapter.prompt("session", "r0", "start")).held).toBe(false);
     for (let index = 1; index <= 20; index += 1) {
@@ -1926,7 +1957,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).queued).toHaveLength(20);
 
     // The byte bound trips before the count bound for oversized prompts.
-    const bytes = new OpenCodeChatAdapter({ provider: (() => {
+    const bytes = new ChatAdapter({ provider: (() => {
       const fresh = new FakeProvider();
       fresh.sessions = [fixtureSession("session")];
       return fresh;
@@ -1943,7 +1974,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
@@ -1978,7 +2009,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
     expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
@@ -2007,7 +2038,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
     const until = async (predicate: () => boolean) => {
       for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
       expect(predicate()).toBe(true);
@@ -2045,7 +2076,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let nextId = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++nextId}` });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++nextId}` });
     const projection = adapter.projectionForTests("session");
     projection.upsert({ id: "part:answer", type: "assistant_message", createdAt: 1, markdown: "Completed content" });
 
@@ -2078,7 +2109,7 @@ describe("prompt, abort, permission, and question mutations", () => {
   test("maps completed and failed provider transitions", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const pump = adapter.startEventPump();
     provider.eventQueue.push({ id: "idle", type: "session.idle", data: { sessionID: "session" } });
     provider.eventQueue.push({ id: "error", type: "session.error", data: { sessionID: "session", error: { type: "unknown", message: "failed" } } });
@@ -2094,7 +2125,7 @@ describe("prompt, abort, permission, and question mutations", () => {
   test("supports permission outcomes exactly once and refuses stale duplicates", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     for (const [requestId, outcome] of [["once", "approved-once"], ["always", "approved-session"], ["reject", "rejected"]] as const) {
       applyEvent(adapter, "session", { id: requestId, type: "permission.v2.asked", data: { id: requestId, sessionID: "session", action: "shell", resources: ["bun test"], timestamp: Date.now() } });
       const first = adapter.respondPermission("session", requestId, `client-${requestId}`, outcome);
@@ -2108,7 +2139,7 @@ describe("prompt, abort, permission, and question mutations", () => {
   test("a late ask alias does not reopen a resolved interaction", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     applyEvent(adapter, "session", { id: "ask", type: "permission.v2.asked", data: { id: "perm_1", sessionID: "session", action: "shell", resources: ["ls"], timestamp: 10 } });
     await adapter.respondPermission("session", "perm_1", "c1", "approved-once");
     // The classic stream's alias of the same ask, delivered after the reply:
@@ -2139,7 +2170,7 @@ describe("prompt, abort, permission, and question mutations", () => {
   test("supports option, multi-option, free-form, and rejection answers and refuses invalid or stale responses", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const ask = (id: string, multiple: boolean, custom: boolean) => applyEvent(adapter, "session", {
       id,
       type: "question.v2.asked",
@@ -2171,7 +2202,7 @@ describe("prompt, abort, permission, and question mutations", () => {
   test("invalid question answers neither reach the provider nor resolve the request", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const invalid = [
       { id: "empty", multiple: true, custom: true, answers: [] },
       { id: "whitespace", multiple: true, custom: true, answers: ["   "] },
@@ -2213,7 +2244,7 @@ describe("discarded event accounting", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     const metrics = counters();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     provider.eventQueue.push({ id: "u1", type: "totally.unknown.event", data: { sessionID: "local" } } as never);
@@ -2231,7 +2262,7 @@ describe("discarded event accounting", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     const metrics = counters();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     // `permission.v2.asked` requires an id; without one its accessor throws.
@@ -2249,7 +2280,7 @@ describe("discarded event accounting", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     const metrics = counters();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     provider.eventQueue.push({ id: "hb", type: "server.heartbeat", data: {} } as never);
@@ -2266,7 +2297,7 @@ describe("discarded event accounting", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     const metrics = counters();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     for (let index = 0; index < 70; index += 1) {
@@ -2290,7 +2321,7 @@ describe("discarded event accounting", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     const registry = new MetricsRegistry();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics: registry, coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics: registry, coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     provider.eventQueue.push({ id: "u1", type: "question.asked.someday", data: { sessionID: "local" } } as never);
@@ -2306,7 +2337,7 @@ describe("discarded event accounting", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     const metrics = counters();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     provider.eventQueue.push({
@@ -2331,7 +2362,7 @@ describe("pending permission recovery", () => {
     // The diff rides along — recovery exists for the reader who missed the
     // live announcement, who must not approve an edit without seeing it.
     provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], diff: "@@ -1 +1 @@\n-a\n+b" }];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("local");
     expect(snapshot.items).toEqual([expect.objectContaining({
@@ -2351,7 +2382,7 @@ describe("pending permission recovery", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"] }];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     await adapter.history("local");
     applyEvent(adapter, "local", {
@@ -2370,7 +2401,7 @@ describe("pending permission recovery", () => {
     // Answered through another client while its reply event was missed: the
     // successful pending list no longer carries it.
     provider.listPermissions = async () => [];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     applyEvent(adapter, "local", {
       id: "live",
       type: "permission.v2.asked",
@@ -2386,7 +2417,7 @@ describe("pending permission recovery", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     provider.listPermissions = async () => { throw new Error("provider unreachable"); };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     applyEvent(adapter, "local", {
       id: "live",
@@ -2406,7 +2437,7 @@ describe("pending permission recovery", () => {
     // permission read then fails and must not vouch for it anyway.
     provider.listQuestions = async () => [];
     provider.listPermissions = async () => { throw new Error("provider unreachable"); };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     applyEvent(adapter, "local", {
       id: "q", type: "question.v2.asked",
       data: { id: "que_stale", sessionID: "local", timestamp: 10, questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "A" }], multiple: false, custom: false }] },
@@ -2433,7 +2464,7 @@ describe("pending permission recovery", () => {
     let pending = [childQuestion];
     provider.listQuestions = async () => pending;
     provider.listPermissions = async () => { throw new Error("provider unreachable"); };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     // Present in the read: the child's question asked while the pump was down
     // surfaces on parent load, owned by the child.
@@ -2457,7 +2488,7 @@ describe("pending permission recovery", () => {
       questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
     }];
     provider.listQuestions = async () => pending;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     // Recovered through the parent's snapshot — the child transcript is
     // never opened, so only this bookkeeping can seed the removal path.
     await adapter.history("parent");
@@ -2489,7 +2520,7 @@ describe("pending permission recovery", () => {
         status: "running", input: { description: "Review renderer", subagent_type: "explore" }, metadata: { sessionId: "child" },
       } }],
     }] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     await adapter.history("parent");
     const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
     expect(row()).toEqual(expect.objectContaining({ id: "tool:prt_task", childConversationId: "child" }));
@@ -2563,7 +2594,7 @@ describe("pending permission recovery", () => {
         status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
       } }],
     }] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     await adapter.history("parent");
     const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
     const pump = adapter.startEventPump();
@@ -2599,8 +2630,8 @@ describe("pending permission recovery", () => {
       { id: "msg_old", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 100 } },
       { id: "msg_new", type: "assistant", modelID: "gpt-5", time: { created: 3 }, tokens: { reasoning: 50 } },
     ];
-    provider.listMessages = async (sessionId) => ({ items: (sessionId === "child" ? childMessages : parentMessages) as never[] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    provider.readMessages = async (sessionId) => ({ items: (sessionId === "child" ? childMessages : parentMessages) as never[] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
 
     await adapter.history("parent");
@@ -2626,7 +2657,7 @@ describe("pending permission recovery", () => {
         status: "running", input: { description: "Audit styles" }, metadata: { sessionId: "child" },
       } }],
     }] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     await adapter.history("parent");
     const pump = adapter.startEventPump();
     // An assistant message with no tokens at all: nothing to attribute, and a
@@ -2666,13 +2697,13 @@ describe("pending permission recovery", () => {
       { id: "msg_b", type: "assistant", modelID: "claude-sonnet-4-5", time: { created: 3 }, tokens: { input: 600, output: 10, cache: { read: 0, write: 0 } } },
     ];
     let childReads = 0;
-    const listMessages = provider.listMessages.bind(provider);
-    provider.listMessages = async (sessionId, options) => {
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       childReads += 1;
       return { items: childMessages as never[] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("parent");
     expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
@@ -2695,7 +2726,7 @@ describe("pending permission recovery", () => {
         status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
       } }],
     }] });
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     await adapter.history("parent");
     const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
     const pump = adapter.startEventPump();
@@ -2728,15 +2759,15 @@ describe("pending permission recovery", () => {
     // snapshot it eventually returns is older than what the child reports
     // live while it is pending.
     let release: () => void = () => {};
-    const listMessages = provider.listMessages.bind(provider);
-    provider.listMessages = async (sessionId, options) => {
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       await new Promise<void>(resolve => { release = resolve; });
       return { items: [
         { id: "msg_a", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 500, output: 5, cache: { read: 0, write: 0 } } },
       ] as never[] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     const opening = adapter.history("parent");
@@ -2774,8 +2805,8 @@ describe("pending permission recovery", () => {
     }] });
     let childReads = 0;
     let release: () => void = () => {};
-    const listMessages = provider.listMessages.bind(provider);
-    provider.listMessages = async (sessionId, options) => {
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       childReads += 1;
       const items = childReads === 1
@@ -2784,7 +2815,7 @@ describe("pending permission recovery", () => {
       if (childReads === 1) await new Promise<void>(resolve => { release = resolve; });
       return { items: items as never[] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
 
     const first = adapter.history("parent");
@@ -2817,14 +2848,14 @@ describe("pending permission recovery", () => {
     let childStore = [{ id: "msg_old", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }];
     let childReads = 0;
     let release: () => void = () => {};
-    provider.listMessages = async (sessionId) => {
+    provider.readMessages = async (sessionId) => {
       if (sessionId !== "child") return { items: parentMessages as never[] };
       childReads += 1;
       const snapshot = childStore;
       if (childReads === 1) await new Promise<void>(resolve => { release = resolve; });
       return { items: snapshot as never[] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
     const pump = adapter.startEventPump();
 
     const opening = adapter.history("parent");
@@ -2867,13 +2898,13 @@ describe("pending permission recovery", () => {
       ] as never[] }],
     ]);
     let childReads = 0;
-    const listMessages = provider.listMessages.bind(provider);
-    provider.listMessages = async (sessionId, options) => {
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       childReads += 1;
       return childPages.get(options.cursor ?? "latest") ?? { items: [] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("parent");
     // The tally covers the whole transcript, and the model is the child's
@@ -2899,13 +2930,13 @@ describe("pending permission recovery", () => {
       } }],
     }] });
     let childReads = 0;
-    const listMessages = provider.listMessages.bind(provider);
-    provider.listMessages = async (sessionId, options) => {
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       childReads += 1;
       return { items: [] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("parent");
     // Still a readable row asserting no figure — and an empty answer is an
@@ -2925,13 +2956,13 @@ describe("pending permission recovery", () => {
       } }],
     }] });
     let fail = true;
-    const listMessages = provider.listMessages.bind(provider);
-    provider.listMessages = async (sessionId, options) => {
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       if (fail) throw new Error("provider unreachable");
       return { items: [{ id: "msg_a", type: "assistant", modelID: "gpt-5", time: { created: 2 }, tokens: { input: 500 } }] as never[] };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     // The error degrades the row rather than the snapshot, and banks nothing —
     // caching it as "no usage" would hide the cost permanently.
@@ -2946,7 +2977,7 @@ describe("pending permission recovery", () => {
   test("a subagent that starts and reports inside one coalescer window still lands on its row", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 25 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 25 });
     await adapter.history("parent");
     const pump = adapter.startEventPump();
     // The task row and the child's whole report enter one buffer window: when
@@ -2983,12 +3014,12 @@ describe("pending permission recovery", () => {
     // The child's store holds what was reported before the eviction; the
     // stored figure for msg_a is deliberately staler than what arrived live.
     let childStore: never[] = [];
-    const listMessages = provider.listMessages.bind(provider);
-    provider.listMessages = async (sessionId, options) => {
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       return { items: childStore };
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
     await adapter.history("parent");
     const pump = adapter.startEventPump();
     const report = (suffix: string, input: number) => {
@@ -3037,7 +3068,7 @@ describe("pending permission recovery", () => {
       conversationId: "child",
       questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
     }];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     // The parent shows the card; the child's transcript was never opened, so
     // its projection is empty when the answer arrives.
     await adapter.history("parent");
@@ -3048,14 +3079,14 @@ describe("pending permission recovery", () => {
   test("a provider without the list simply never recovers, and does not throw", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     expect((await adapter.history("local")).items).toEqual([]);
   });
 
   test("a resolution whose ask was never projected is suppressed, not published invalid", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     // The classic replied event carries no action or resources; without the
     // ask to merge into, publishing it would fail client validation and force
     // a resync on every snapshot that repeats the item.
@@ -3065,6 +3096,30 @@ describe("pending permission recovery", () => {
       data: { sessionID: "local", requestID: "perm_ghost", reply: "once", timestamp: 10 },
     } as never);
     expect(adapter.projectionForTests("local").items()).toEqual([]);
+  });
+
+  test("a plan approval's resource-less card is published, not suppressed", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // A plan approval legitimately names no resources — the plan is the
+    // content — and must reach the timeline with its intent choices.
+    adapter.projectionForTests("local").apply({ kind: "upsert", item: {
+      id: "permission:plan-1",
+      type: "permission",
+      createdAt: 20,
+      requestId: "plan-1",
+      action: "Review the plan",
+      resources: [],
+      status: "pending",
+      plan: "## Plan\n1. Do the thing",
+      choices: [{ id: "implement", label: "Approve and implement" }],
+    } });
+    const items = adapter.projectionForTests("local").items();
+    expect(items.map(item => item.id)).toContain("permission:plan-1");
+    const card = items.find(item => item.id === "permission:plan-1") as { plan?: string; choices?: unknown[] };
+    expect(card.plan).toContain("Do the thing");
+    expect(card.choices).toHaveLength(1);
   });
 });
 
@@ -3084,7 +3139,7 @@ describe("a subagent's request reaches the conversation that launched it", () =>
 
   test("appears in the parent, owned by the child, and is answerable there", async () => {
     const provider = withChild();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
     provider.eventQueue.push(asked("perm-1") as never);
     while (adapter.projectionForTests("parent").items().length === 0) await Bun.sleep(1);
@@ -3110,7 +3165,7 @@ describe("a subagent's request reaches the conversation that launched it", () =>
 
   test("resolving in the child clears the parent's copy", async () => {
     const provider = withChild();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
     provider.eventQueue.push(asked("perm-2") as never);
     while (adapter.projectionForTests("parent").items().length === 0) await Bun.sleep(1);
@@ -3141,7 +3196,7 @@ describe("a subagent's request reaches the conversation that launched it", () =>
       questions: [{ prompt: "Pick one", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
     }];
     provider.listQuestions = async () => pending;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
     // The question tool part is the only live signal a question exists; the
     // asked event never fires, so this fallback is the parent's only chance.
@@ -3170,7 +3225,7 @@ describe("a subagent's request reaches the conversation that launched it", () =>
 
   test("a newer subagent request does not block answering the parent's own", async () => {
     const provider = withChild();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
     provider.eventQueue.push({
       id: "own", type: "permission.v2.asked",
@@ -3197,7 +3252,7 @@ describe("a subagent's request reaches the conversation that launched it", () =>
   test("a request from a parentless conversation is not mirrored anywhere", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("solo")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
     provider.eventQueue.push({
       id: "perm-3", type: "permission.v2.asked",
@@ -3227,7 +3282,7 @@ describe("a subagent's pending request is reconciled into its parent", () => {
 
   test("appears in the parent on load, owned by the child", async () => {
     const provider = withPendingChildRequest();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const snapshot = await adapter.history("parent");
     expect(snapshot.items).toEqual([expect.objectContaining({
       id: "permission:perm-child",
@@ -3240,7 +3295,7 @@ describe("a subagent's pending request is reconciled into its parent", () => {
 
   test("answering it from the parent replies once, for the child", async () => {
     const provider = withPendingChildRequest();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     await adapter.history("parent");
     // The client addresses the owner, which is what the item carries.
     await adapter.respondPermission("child", "perm-child", "client-1", "approved-once");
@@ -3249,7 +3304,7 @@ describe("a subagent's pending request is reconciled into its parent", () => {
 
   test("answering also resolves the parent's mirrored copy, not just the child's", async () => {
     const provider = withPendingChildRequest();
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     await adapter.history("parent");
     await adapter.respondPermission("child", "perm-child", "client-1", "approved-once");
     // A recovered request may never produce a replied event for the pump to
@@ -3268,7 +3323,7 @@ describe("a subagent's pending request is reconciled into its parent", () => {
       if (failing && id === "child") throw new Error("provider unreachable");
       return lookup(id);
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     // Degraded while the provider errors — unknown, not empty…
     expect((await adapter.history("parent")).items).toEqual([]);
     failing = false;
@@ -3284,7 +3339,7 @@ describe("a subagent's pending request is reconciled into its parent", () => {
     provider.listPermissions = async () => [
       { requestId: "perm-other", conversationId: "stranger", action: "bash", resources: ["ls"] },
     ];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     expect((await adapter.history("parent")).items).toEqual([]);
   });
 });
@@ -3300,7 +3355,7 @@ describe("prompt attachments", () => {
   test("locates stored bytes at dispatch and hands the provider neutral refs with the sniffed type", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     // The client claims image/png; the store sniffed webp. The store wins on
     // both the provider hand-off and the projected reference.
     const accepted = await adapter.prompt("session", "r1", "look at this", undefined, undefined, undefined, [ref("22222222-2222-4333-8444-555555555555", "actually.webp")]);
@@ -3321,12 +3376,12 @@ describe("prompt attachments", () => {
   test("refuses unknown references at admission, before anything reaches the provider", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     await expect(adapter.prompt("session", "r1", "go", undefined, undefined, undefined, [ref("99999999-0000-4000-8000-000000000000")]))
       .rejects.toBeInstanceOf(UnknownAttachmentError);
     expect(provider.prompts).toHaveLength(0);
     // A harness without a store refuses every reference the same way.
-    const bare = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const bare = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     await expect(bare.prompt("session", "r2", "go", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]))
       .rejects.toBeInstanceOf(UnknownAttachmentError);
   });
@@ -3334,7 +3389,7 @@ describe("prompt attachments", () => {
   test("refuses attachments on a slash command at admission", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     await expect(adapter.prompt("session", "r1", "/review focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]))
       .rejects.toBeInstanceOf(CommandAttachmentsError);
     expect(provider.prompts).toHaveLength(0);
@@ -3344,7 +3399,7 @@ describe("prompt attachments", () => {
   test("admits slash-leading prose with attachments when no listed command matches", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     // "/unknown" is not in the command list, so dispatch would send it as an
     // ordinary prompt — admission must classify the same way and keep the
     // images rather than refusing on shape alone.
@@ -3365,7 +3420,7 @@ describe("prompt attachments", () => {
       await listing;
       return provider.commands;
     };
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     // Classification happens inside the per-conversation admission lane, so an
     // ordinary prompt submitted afterwards cannot be admitted — and dispatched,
     // committing its configuration — while the attachment-bearing one is still
@@ -3384,7 +3439,7 @@ describe("prompt attachments", () => {
   test("a retry of an accepted slash-prose prompt replays the receipt after the command list changes", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     const accepted = await adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
     // The list gains the name after acceptance. A lost-response retry must
     // replay the receipt, never reclassify: refusing now would restore a
@@ -3400,7 +3455,7 @@ describe("prompt attachments", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let nextId = 0;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++nextId}`, resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++nextId}`, resolveAttachment });
     const pump = adapter.startEventPump();
 
     await adapter.prompt("session", "r1", "first");
@@ -3428,7 +3483,7 @@ describe("prompt attachments", () => {
   test("removing a held message discards its references", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     await adapter.prompt("session", "r1", "first");
     const held = await adapter.prompt("session", "r2", "queued", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
     await expect(adapter.removeQueued("session", held.messageId, "rm-1")).resolves.toEqual({ removed: true });
@@ -3441,7 +3496,7 @@ describe("sparse user-message updates preserve attachments", () => {
   test("an attachment-less upsert for the same message keeps the thumbnails", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     const projection = adapter.projectionForTests("session");
     const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
     projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "look", requestId: "r1", attachments });
@@ -3468,7 +3523,7 @@ describe("image-only prompts reach the provider", () => {
     const resolveAttachment = async (id: string) => id === "11111111-2222-4333-8444-555555555555"
       ? { id, mimeType: "image/png", absolutePath: "/state/a.png" }
       : null;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     const accepted = await adapter.prompt("session", "r1", "", undefined, undefined, undefined, [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }]);
     expect(accepted.held).toBe(false);
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ text: "", attachments: [expect.objectContaining({ id: "11111111-2222-4333-8444-555555555555" })] }));

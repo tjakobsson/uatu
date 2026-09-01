@@ -3,9 +3,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate, type NormalizedSessionLifecycle } from "./normalization";
+import type { NormalizedProviderUpdate, NormalizedSessionLifecycle } from "./provider";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderAttachment, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
@@ -51,6 +51,13 @@ export class InteractionConflictError extends Error {
   constructor(message = "interaction request is stale or already resolved") {
     super(message);
     this.name = "InteractionConflictError";
+  }
+}
+
+export class InvalidPermissionChoiceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidPermissionChoiceError";
   }
 }
 
@@ -170,7 +177,7 @@ export type ChatEventMetrics = { inc(name: string, delta?: number): void };
 const MAX_COUNTED_EVENT_TYPES = 64;
 
 export type ChatAdapterOptions = {
-  provider: OpenCodeProvider;
+  provider: ChatProvider;
   workspacePath: string;
   // Resolves a workspace-issued attachment id to its stored bytes' location
   // and sniffed type. Absent (a harness without a store) means every
@@ -190,9 +197,9 @@ export type ChatAdapterOptions = {
   id?: () => string;
 };
 
-export class OpenCodeChatAdapter {
+export class ChatAdapter {
   readonly generation: string;
-  private readonly provider: OpenCodeProvider;
+  private readonly provider: ChatProvider;
   private readonly workspacePath: string;
   private readonly resolveAttachment: ChatAdapterOptions["resolveAttachment"];
   private readonly replayBytes: number;
@@ -264,7 +271,6 @@ export class OpenCodeChatAdapter {
   // Only a successful stored read (merged with whatever landed live) earns the
   // mark, and only the mark lets history() skip the read.
   private readonly completeAttributions = new Set<string>();
-  private readonly providerEventMemory = createProviderEventMemory();
   private eventCoalescer: ProviderUpdateCoalescer | null = null;
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
@@ -302,14 +308,13 @@ export class OpenCodeChatAdapter {
       if (this.provider.renameSession && isDefaultConversationTitle(session.title)) {
         try {
           let page = await this.provider.listMessages(session.id, { limit: 100 });
-          let messages = [...(page.configurationItems ?? page.items)];
-          while (!page.configurationItems && page.nextCursor) {
+          let items = [...(page.completeItems ?? page.items)];
+          while (!page.completeItems && page.nextCursor) {
             page = await this.provider.listMessages(session.id, { cursor: page.nextCursor, limit: 100 });
-            if (page.configurationItems) messages = [...page.configurationItems];
-            else messages.push(...page.items);
+            if (page.completeItems) items = [...page.completeItems];
+            else items.push(...page.items);
           }
-          const firstUserMessage = messages
-            .flatMap(message => normalizeProviderMessage(message))
+          const firstUserMessage = items
             .filter(item => item.type === "user_message" && item.text.trim())
             .sort((left, right) => left.createdAt - right.createdAt)[0];
           if (firstUserMessage?.type === "user_message") {
@@ -386,8 +391,8 @@ export class OpenCodeChatAdapter {
     const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
     // Some providers page locally after loading the complete transcript. Reuse
     // that complete source for recovery, never the bounded visible page.
-    const configuration = await this.configuration(id, page.configurationItems);
-    const items = page.items.flatMap(message => normalizeProviderMessage(message));
+    const configuration = await this.configuration(id);
+    const items = [...page.items];
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
     // order (the order `flatMap` already produced). Comparing ids instead
@@ -601,7 +606,11 @@ export class OpenCodeChatAdapter {
     }
     this.revertReconciliations.clear();
     this.inventory.dispose();
-    return this.disposalPromise = this.stopEventPump();
+    // The provider's own resources retire with the adapter: live agent
+    // sessions must not keep working with no event consumer left.
+    return this.disposalPromise = this.stopEventPump()
+      .then(() => this.provider.dispose?.())
+      .then(() => undefined, () => undefined);
   }
 
   async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
@@ -1142,7 +1151,7 @@ export class OpenCodeChatAdapter {
       }));
   }
 
-  private requireReversibleHistoryProvider(): Required<Pick<OpenCodeProvider, "getReversibleHistoryState" | "undo" | "redo" | "revert" | "restore">> {
+  private requireReversibleHistoryProvider(): Required<Pick<ChatProvider, "getReversibleHistoryState" | "undo" | "redo" | "revert" | "restore">> {
     if (!this.provider.describe().capabilities.includes("reversible-history")
       || !this.provider.getReversibleHistoryState || !this.provider.undo || !this.provider.redo
       || !this.provider.revert || !this.provider.restore) {
@@ -1282,15 +1291,14 @@ export class OpenCodeChatAdapter {
   }
 
   private async authoritativeVisibleHistory(conversationId: string, isCurrent?: () => boolean): Promise<ConversationItem[]> {
-    const messages: ProviderMessage[] = [];
+    const items: ConversationItem[] = [];
     let cursor: string | undefined;
     do {
       if (isCurrent && !isCurrent()) throw new Error("reversible history reconciliation was cancelled");
       const page = await this.provider.listMessages(conversationId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
-      messages.push(...page.items);
+      items.push(...page.items);
       cursor = page.nextCursor;
     } while (cursor !== undefined);
-    const items = messages.flatMap(message => normalizeProviderMessage(message));
     if (!this.liveTurns.has(conversationId)) {
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index]!;
@@ -1303,7 +1311,7 @@ export class OpenCodeChatAdapter {
     return [...new Map(items.map(item => [item.id, item])).values()];
   }
 
-  respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }> {
+  respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }> {
     return this.receipts.run(`permission:${conversationId}:${requestId}:${clientRequestId}`, async () => {
       const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
@@ -1313,10 +1321,26 @@ export class OpenCodeChatAdapter {
       // request stale — otherwise the card is visible, answerable, and refused.
       if (!projection.has(`permission:${requestId}`)) await this.seedPendingPermissions(conversationId);
       projection.requirePending(requestId, "permission");
+      // An approval intent is only meaningful against what the card
+      // offered: a rejection carries none, an offered set requires one of
+      // its own ids, and a generic permission accepts none — otherwise a
+      // Claude plan silently maps an unknown intent to implement, or a
+      // rejection renders as though a choice was approved.
+      const pendingItem = projection.items().find(item => item.id === `permission:${requestId}`);
+      const offered = (pendingItem?.type === "permission" ? pendingItem.choices ?? [] : []).map(choice => choice.id);
+      if (outcome === "rejected") {
+        if (choiceId !== undefined) throw new InvalidPermissionChoiceError("a rejection does not carry an approval intent");
+      } else if (offered.length > 0) {
+        if (choiceId === undefined || !offered.includes(choiceId)) {
+          throw new InvalidPermissionChoiceError(`the approval must name one of the offered intents: ${offered.join(", ")}`);
+        }
+      } else if (choiceId !== undefined) {
+        throw new InvalidPermissionChoiceError("this permission offers no approval intents");
+      }
       const reply: ProviderPermissionReply = outcome === "approved-once" ? "once" : outcome === "approved-session" ? "always" : "reject";
-      await this.provider.replyPermission(conversationId, requestId, reply);
-      projection.resolvePermission(requestId, outcome);
-      this.resolveMirroredCopy(session.parentId, `permission:${requestId}`, parent => parent.resolvePermission(requestId, outcome));
+      await this.provider.replyPermission(conversationId, requestId, reply, choiceId);
+      projection.resolvePermission(requestId, outcome, choiceId);
+      this.resolveMirroredCopy(session.parentId, `permission:${requestId}`, parent => parent.resolvePermission(requestId, outcome, choiceId));
       return { outcome };
     });
   }
@@ -1445,9 +1469,7 @@ export class OpenCodeChatAdapter {
       let cursor: string | undefined;
       do {
         const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
-        for (const message of page.items) {
-          const reported = storedMessageUsage(message);
-          if (!reported) continue;
+        for (const reported of page.accounting) {
           if (reported.usage) byMessage.set(reported.messageId, reported.usage);
           if (reported.model) byModel.set(reported.messageId, { model: reported.model, createdAt: reported.createdAt });
         }
@@ -1635,18 +1657,8 @@ export class OpenCodeChatAdapter {
     });
     this.eventCoalescer = coalescer;
     try {
-      for await (const event of this.provider.events(signal)) {
+      for await (const normalized of this.provider.events(signal)) {
         if (signal.aborted) break;
-        // Inside the loop, never above it: normalization resolves every failure
-        // to an outcome, and anything that still escapes must cost one event
-        // rather than ending the pump and losing the whole restart gap.
-        let normalized;
-        try {
-          normalized = normalizeProviderEvent(event, this.providerEventMemory);
-        } catch {
-          this.countDiscard("unparseable", "");
-          continue;
-        }
         if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
           this.countDiscard(normalized.outcome, normalized.eventType);
         }
@@ -1752,9 +1764,11 @@ export class OpenCodeChatAdapter {
         action: request.action,
         resources: request.resources,
         status: "pending" as const,
-        // The recovered card must show the change the live one would have —
+        // The recovered card must show what the live one would have —
         // this path exists for the reader who missed that event.
         ...(request.diff === undefined ? {} : { diff: request.diff }),
+        ...(request.plan === undefined ? {} : { plan: request.plan }),
+        ...(request.choices === undefined ? {} : { choices: request.choices }),
       });
     }
     return items;
@@ -1902,12 +1916,12 @@ export class OpenCodeChatAdapter {
     if (relevantDeletion) this.inventory.invalidate();
   }
 
-  private async configuration(id: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration> {
+  private async configuration(id: string): Promise<ConversationConfiguration> {
     const cached = this.configurations.get(id);
     if (cached) return cached;
     const existing = this.configurationReads.get(id);
     if (existing) return existing;
-    const read = this.provider.getConversationConfiguration(id, messages).then(configuration => {
+    const read = this.provider.getConversationConfiguration(id).then(configuration => {
       // Prompt acceptance may have populated the cache while the provider read
       // was in flight. That newer value wins over the earlier recovered state.
       const current = this.configurations.get(id);
@@ -2117,8 +2131,11 @@ export class ConversationProjection {
     if (merged.type === "question" && merged.questions.length === 0) return undefined;
     // Same for a permission resolution whose ask was never projected: the
     // classic `permission.replied` event carries no action or resources, and
-    // an empty resources array fails client validation the same way.
-    if (merged.type === "permission" && merged.resources.length === 0) return undefined;
+    // an empty resources array fails client validation the same way. A plan
+    // approval is the exception on both sides: it legitimately names no
+    // resources — the plan itself is the content — and client validation
+    // accepts empty resources exactly when a plan is present.
+    if (merged.type === "permission" && merged.resources.length === 0 && merged.plan === undefined) return undefined;
     this.timeline.set(item.id, merged);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);
@@ -2168,10 +2185,10 @@ export class ConversationProjection {
     }
   }
 
-  resolvePermission(requestId: string, outcome: PermissionOutcome): void {
+  resolvePermission(requestId: string, outcome: PermissionOutcome, choiceId?: string): void {
     const item = this.timeline.get(`permission:${requestId}`);
     if (!item || item.type !== "permission") throw new InteractionConflictError();
-    this.upsert({ ...item, status: "resolved", outcome });
+    this.upsert({ ...item, status: "resolved", outcome, ...(choiceId ? { choiceId } : {}) });
   }
 
   resolveQuestion(requestId: string, outcome: QuestionOutcome): void {

@@ -62,11 +62,14 @@ describe("chat reversible-history composer", () => {
       { name: "redo", description: "Redo", argumentHint: "", kind: "local-operation" },
     ];
     const api = {
-      status: async () => ({
-        state: "ready",
-        version: "test",
-        agent: { id: "test", name: "Test", capabilities: ["reversible-history", "attachments"] },
-      }),
+      status: async () => ([{
+        agent: { id: "test", name: "Test" },
+        availability: {
+          state: "ready",
+          version: "test",
+          agent: { id: "test", name: "Test", capabilities: ["reversible-history", "attachments"] },
+        },
+      }]),
       conversations: async () => [conversation("one"), conversation("two")],
       commands: async () => await (commandResults.shift() ?? (async () => localCommands))(),
       snapshot: async (id: string) => {
@@ -388,7 +391,7 @@ function installDomGlobals(document: Document, window: Window): void {
 }
 
 function conversation(id: string) {
-  return { id, title: id, createdAt: 1, updatedAt: 1, status: "idle" as const };
+  return { id, title: id, createdAt: 1, updatedAt: 1, status: "idle" as const, agent: { id: "test", name: "Test" } };
 }
 
 function snapshot(id: string): ConversationSnapshot {

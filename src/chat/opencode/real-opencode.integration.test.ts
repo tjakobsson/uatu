@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { OpenCodeService } from "./opencode-service";
-import { LazyOpenCodeChatService } from "./service";
+import { LazyChatService } from "../service";
 
 const enabled = process.env.UATU_REAL_OPENCODE === "1";
 const temporaryRoots: string[] = [];
@@ -36,7 +36,7 @@ describe.skipIf(!enabled)("real OpenCode integration", () => {
         OPENCODE_CONFIG_DIR: configDirectory,
       },
     });
-    const service = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
+    const service = new LazyChatService({ workspacePath: workspace, runtime });
     let endpoint = "";
     try {
       const status = await service.status();
@@ -84,8 +84,8 @@ describe.skipIf(!enabled)("real OpenCode integration", () => {
         OPENCODE_CONFIG_DIR: configDirectory,
       },
     });
-    const writer = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
-    let reader: LazyOpenCodeChatService | undefined;
+    const writer = new LazyChatService({ workspacePath: workspace, runtime });
+    let reader: LazyChatService | undefined;
     try {
       expect((await writer.status()).state).toBe("ready");
       const [models, modes] = await Promise.all([writer.models(), writer.modes()]);
@@ -114,7 +114,7 @@ describe.skipIf(!enabled)("real OpenCode integration", () => {
       // This service constructs another provider and adapter against the same
       // running server. The first adapter's accepted-configuration cache is
       // unreachable, so the snapshot must recover from OpenCode's records.
-      reader = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
+      reader = new LazyChatService({ workspacePath: workspace, runtime });
       expect((await reader.status()).state).toBe("ready");
       const deadline = Date.now() + 15_000;
       let recovered = (await reader.history(created.conversation.id)).configuration;
@@ -161,7 +161,7 @@ describe.skipIf(!enabled)("real OpenCode integration", () => {
         OPENCODE_CONFIG_DIR: configDirectory,
       },
     });
-    const service = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
+    const service = new LazyChatService({ workspacePath: workspace, runtime });
     try {
       expect((await service.status()).state).toBe("ready");
       const created = await service.createConversation();

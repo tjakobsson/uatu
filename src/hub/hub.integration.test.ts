@@ -2915,12 +2915,17 @@ describe("hub end to end", () => {
     // chat mutations — a cookie alone must not be enough for a foreign page.
     const csrf = await fetch(`${origin}/s/myproject/api/chat/retry`, {
       method: "POST",
-      headers: { cookie, origin: "https://attacker.example" },
+      headers: { cookie, origin: "https://attacker.example", "content-type": "application/json" },
+      body: JSON.stringify({ agentId: "opencode" }),
     });
     expect(csrf.status).toBe(403);
     await assertContract("POST", "/s/{workspaceId}/api/chat/retry", csrf);
 
-    const response = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST", headers: { cookie } });
+    const response = await fetch(`${origin}/s/myproject/api/chat/retry`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ agentId: "opencode" }),
+    });
     expect(response.status).toBe(200);
     await assertContract("POST", "/s/{workspaceId}/api/chat/retry", response);
     const text = await response.text();

@@ -143,7 +143,7 @@ test.describe("desktop OpenCode chat", () => {
     // explicitly reveals its high/xhigh variants; GPT-5 advertises none.
     await chooseChatModel(page, "Claude Sonnet");
     await expect(variantSelect).toBeVisible();
-    await expect(variantSelect.locator("option")).toHaveText(["Let Fixture Agent choose reasoning", "High", "Xhigh"]);
+    await expect(variantSelect.locator("option")).toHaveText(["Let Fixture Agent choose reasoning", "High", "Extra high"]);
     await page.locator(".chat-configuration-model", { hasText: "GPT-5" }).click();
     await expect(variantSelect).toBeHidden();
     await page.locator(".chat-configuration-model", { hasText: "Claude Sonnet" }).click();
@@ -483,7 +483,7 @@ test.describe("desktop OpenCode chat", () => {
 
     let snapshots = 0;
     page.on("response", response => {
-      if (new URL(response.url()).pathname.endsWith(`/api/chat/conversations/${id}`)) snapshots += 1;
+      if (decodeURIComponent(new URL(response.url()).pathname).endsWith(`/api/chat/conversations/${id}`)) snapshots += 1;
     });
     await control(request, { action: "resync" });
     await expect.poll(() => snapshots, { timeout: 10_000 }).toBeGreaterThan(0);

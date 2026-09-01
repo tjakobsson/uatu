@@ -1,5 +1,7 @@
 import { TOKEN_USAGE_COMPONENTS } from "./usage";
 import type {
+  AgentChatStatus,
+  ChatAgentDescriptor,
   ActivityStatus,
   ChatAgent,
   ChatMode,
@@ -105,13 +107,16 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
-  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput"], "chat model");
+  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput", "detail", "default", "resolvesTo"], "chat model");
   expectModelSelection(record.selection);
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
   if (record.variants !== undefined) expectStringArray(record.variants, "model variants", true);
   if (record.contextLimit !== undefined && (typeof record.contextLimit !== "number" || record.contextLimit < 1)) throw new Error("model contextLimit must be a positive number");
   if (record.imageInput !== undefined && typeof record.imageInput !== "boolean") throw new Error("model imageInput must be a boolean");
+  if (record.detail !== undefined) expectNonEmptyString(record.detail, "model detail");
+  if (record.default !== undefined && typeof record.default !== "boolean") throw new Error("model default must be a boolean");
+  if (record.resolvesTo !== undefined) expectModelSelection(record.resolvesTo);
   return value as ChatModel;
 }
 
@@ -162,9 +167,10 @@ export function parseChatAgent(value: unknown): ChatAgent {
 
 export function parseChatMode(value: unknown): ChatMode {
   const record = expectRecord(value, "chat mode");
-  expectKeys(record, ["name", "description"], "chat mode");
+  expectKeys(record, ["name", "description", "default"], "chat mode");
   expectIdentity(record.name, "mode name");
   expectString(record.description, "mode description");
+  if (record.default !== undefined && typeof record.default !== "boolean") throw new Error("mode default must be a boolean");
   return value as ChatMode;
 }
 
@@ -193,14 +199,39 @@ export function parseActivityStatus(value: unknown): ActivityStatus {
   return value as ActivityStatus;
 }
 
+export function parseChatAgentDescriptor(value: unknown): ChatAgentDescriptor {
+  const record = expectRecord(value, "chat agent");
+  expectKeys(record, ["id", "name"], "chat agent");
+  expectIdentity(record.id, "agent id");
+  expectString(record.name, "agent name");
+  return value as ChatAgentDescriptor;
+}
+
+export function parseAgentChatStatuses(value: unknown): AgentChatStatus[] {
+  const record = expectRecord(value, "chat status");
+  if (!Array.isArray(record.agents) || record.agents.length === 0) {
+    throw new Error("chat status must list at least one agent");
+  }
+  return record.agents.map(entry => {
+    const status = expectRecord(entry, "agent status");
+    expectKeys(status, ["agent", "availability"], "agent status");
+    return {
+      agent: parseChatAgentDescriptor(status.agent),
+      availability: parseChatAvailability(status.availability),
+    };
+  });
+}
+
 export function parseConversationSummary(value: unknown): ConversationSummary {
   const record = expectRecord(value, "conversation summary");
-  expectKeys(record, ["id", "title", "createdAt", "updatedAt", "status"], "conversation summary");
+  expectKeys(record, ["id", "title", "createdAt", "updatedAt", "status", "agent"], "conversation summary");
   expectIdentity(record.id, "conversation id");
   expectString(record.title, "conversation title");
   expectTimestamp(record.createdAt, "createdAt");
   expectTimestamp(record.updatedAt, "updatedAt");
   parseConversationStatus(record.status);
+  // Required on the wire: every conversation names its owner.
+  parseChatAgentDescriptor(record.agent);
   return value as ConversationSummary;
 }
 
@@ -215,14 +246,15 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome", "diff"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome", "diff", "plan", "choices", "choiceId"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
   expectTimelineBase(record, "permission");
   expectIdentity(record.requestId, "permission request id");
   expectNonEmptyString(record.action, "permission action");
-  expectStringArray(record.resources, "permission resources", true);
+  // Empty is legitimate: a plan approval affects no named resource.
+  expectStringArray(record.resources, "permission resources", record.plan === undefined);
   expectOneOf(record.status, ["pending", "resolved"], "permission status");
   if (record.status === "pending" && record.outcome !== undefined) {
     throw new Error("pending permission must not have an outcome");
@@ -231,6 +263,18 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
     expectOneOf(record.outcome, ["approved-once", "approved-session", "rejected"], "permission outcome");
   }
   if (record.diff !== undefined) expectString(record.diff, "permission diff");
+  if (record.plan !== undefined) expectString(record.plan, "permission plan");
+  if (record.choices !== undefined) {
+    if (!Array.isArray(record.choices) || record.choices.length === 0) throw new Error("permission choices must be a non-empty array");
+    for (const choice of record.choices) {
+      const entry = expectRecord(choice, "permission choice");
+      expectKeys(entry, ["id", "label", "description"], "permission choice");
+      expectIdentity(entry.id, "permission choice id");
+      expectNonEmptyString(entry.label, "permission choice label");
+      expectOptionalString(entry.description, "permission choice description");
+    }
+  }
+  if (record.choiceId !== undefined) expectIdentity(record.choiceId, "permission choice id");
   return value as PermissionRequest;
 }
 
@@ -319,6 +363,18 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalCount(record.additions, "additions");
       expectOptionalCount(record.deletions, "deletions");
       break;
+    case "task_progress": {
+      expectKeys(record, ["id", "type", "createdAt", "entries"], type);
+      if (!Array.isArray(record.entries)) throw new Error("task entries must be an array");
+      for (const entry of record.entries) {
+        const task = expectRecord(entry, "task entry");
+        expectKeys(task, ["text", "status", "activeText"], "task entry");
+        expectNonEmptyString(task.text, "task text");
+        expectOneOf(task.status, ["pending", "in_progress", "completed"], "task status");
+        expectOptionalString(task.activeText, "task active text");
+      }
+      break;
+    }
     case "turn_status":
       expectKeys(record, ["id", "type", "createdAt", "status", "message"], type);
       parseConversationStatus(record.status);

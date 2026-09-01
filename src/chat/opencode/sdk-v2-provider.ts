@@ -5,21 +5,21 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { boundedSet } from "../shared/bounded-map";
-import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
+import { boundedSet } from "../../shared/bounded-map";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import type {
-  OpenCodeProvider,
+  NormalizedProviderEvent,
+  ChatProvider,
   PendingPermission,
   PendingQuestion,
   ProviderAttachment,
-  ProviderEvent,
-  ProviderMessage,
-  ProviderPage,
+  ProviderHistoryPage,
   ProviderPermissionReply,
   ProviderSession,
-} from "./provider";
-import { normalizeProviderMessage, normalizeQuestion, permissionDiff } from "./normalization";
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
+  StoredMessageAccounting,
+} from "../provider";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, permissionDiff, storedMessageUsage, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../types";
 
 type Result<T> = { data?: T; error?: unknown };
 type ReversibleTurn = { id: string; providerId: string; draft: RestoredDraft; summary: string };
@@ -35,7 +35,7 @@ export function createSdkV2Provider(options: {
   password: string;
   directory: string;
   fetch?: typeof globalThis.fetch;
-}): OpenCodeProvider {
+}): ChatProvider {
   const authorization = `Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}`;
   const client = createOpencodeClient({
     baseUrl: options.endpoint,
@@ -46,7 +46,7 @@ export function createSdkV2Provider(options: {
   return new SdkV2Provider(client, options.directory);
 }
 
-export class SdkV2Provider implements OpenCodeProvider {
+export class SdkV2Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
 
   constructor(
@@ -228,7 +228,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     return session;
   }
 
-  async getConversationConfiguration(sessionId: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration> {
+  async getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration> {
     const sessions: unknown[] = [];
     const classic = await this.client.session.get({ sessionID: sessionId, directory: this.directory }) as Result<unknown>;
     if (classic.data) {
@@ -242,7 +242,7 @@ export class SdkV2Provider implements OpenCodeProvider {
       const response = native.data as { data?: unknown };
       sessions.unshift(response.data ?? response);
     }
-    return normalizePersistedConversationConfiguration(sessions, messages ?? await this.allMessages(sessionId));
+    return normalizePersistedConversationConfiguration(sessions, await this.allMessages(sessionId));
   }
 
   /**
@@ -268,7 +268,7 @@ export class SdkV2Provider implements OpenCodeProvider {
    * one shows an empty transcript for half the user's conversations, so both
    * are merged, deduplicated by message id, and paged locally.
   */
-  async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>> {
+  async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
     const complete = await this.allMessages(sessionId);
     const session = await this.lookupSession(sessionId);
     const boundaryId = stringValue(asRecord(asRecord(session?.raw).revert).messageID);
@@ -279,10 +279,19 @@ export class SdkV2Provider implements OpenCodeProvider {
     const visible = boundaryIndex >= 0 ? complete.slice(0, boundaryIndex) : complete;
     const end = clampIndex(options.cursor, visible.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
+    const page = visible.slice(start, end);
+    const accounting: StoredMessageAccounting[] = [];
+    for (const message of page) {
+      const reported = storedMessageUsage(message);
+      if (reported) accounting.push(reported);
+    }
     return {
-      items: visible.slice(start, end),
+      items: page.flatMap(message => normalizeProviderMessage(message)),
+      accounting,
+      // Paged locally over a fully refetched merge (see allMessages), so the
+      // complete transcript is free here — walkers use it instead of paging.
+      completeItems: visible.flatMap(message => normalizeProviderMessage(message)),
       nextCursor: start > 0 ? String(start) : undefined,
-      configurationItems: visible,
     };
   }
 
@@ -449,12 +458,23 @@ export class SdkV2Provider implements OpenCodeProvider {
     return { raw: response.data ?? native.data, compatibility: false };
   }
 
-  async *events(signal: AbortSignal): AsyncIterable<ProviderEvent> {
+  async *events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent> {
     const [native, classic] = await Promise.all([
       this.client.v2.event.subscribe({ signal }),
       this.client.event.subscribe({ directory: this.directory }, { signal }),
     ]);
-    yield* mergeProviderEvents([native.stream, classic.stream], signal);
+    // Memory scoped to the subscription, matching its previous adapter-side
+    // lifetime: one pump, one memory.
+    const memory: ProviderEventMemory = createProviderEventMemory();
+    for await (const event of mergeProviderEvents([native.stream, classic.stream], signal)) {
+      // Normalization resolves every failure to an outcome, and anything that
+      // still escapes must cost one event rather than ending the stream.
+      try {
+        yield normalizeProviderEvent(event, memory);
+      } catch {
+        yield { updates: [], outcome: "unparseable", eventType: "" };
+      }
+    }
   }
 
   async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {

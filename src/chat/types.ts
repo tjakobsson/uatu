@@ -71,14 +71,24 @@ export type MessageAttachment = {
   mimeType: string;
 };
 
-// What Chat is talking to. One agent per workspace today, but the surface
-// takes its name and its controls from this record rather than from fixed
-// copy, so a second agent changes what is reported and not what is written.
+// One of the agents Chat can talk to. The surface takes its name and its
+// controls from this record rather than from fixed copy, so agents differ in
+// what is reported, never in what is written.
 export type ChatAgent = {
   id: string;
   name: string;
   capabilities: ChatCapability[];
 };
+
+// The agent identity a conversation or status entry names on the wire.
+// Deliberately just identity: capabilities ride the agent's availability
+// (`ChatAvailability.agent`), which only exists once its runtime has spoken.
+export type ChatAgentDescriptor = { id: string; name: string };
+
+// One offered agent with its independently reported availability. The
+// workspace's chat status is a list of these, in presentation order; the
+// first entry is the server-default agent for new conversations.
+export type AgentChatStatus = { agent: ChatAgentDescriptor; availability: ChatAvailability };
 
 export type ChatAvailability =
   | { state: "idle" }
@@ -122,6 +132,17 @@ export type ChatModel = {
   // Drives the attach control's inactive state; absent means not reported,
   // which the surface treats as no.
   imageInput?: boolean;
+  // The agent's own words about this model, shown as the row's secondary
+  // line in place of the provider/id identity when present.
+  detail?: string;
+  // The agent's own recommended default. When a catalog declares one, the
+  // picker offers it in place of the generic "Let the agent choose" row and
+  // an unset conversation displays it as the active choice.
+  default?: boolean;
+  // What a default entry currently resolves to: the catalog entry the agent
+  // would actually run. Surfaces name the resolution ("Default · Opus")
+  // rather than leaving "Default" opaque.
+  resolvesTo?: ModelSelection;
 };
 
 export type ChatCommand = {
@@ -160,6 +181,10 @@ export type ReversibleHistoryResult = {
 export type ChatMode = {
   name: string;
   description: string;
+  // The agent's own recommended default: presented as the active choice
+  // when the conversation has not set a mode, in place of the generic
+  // "Let the agent choose" entry.
+  default?: boolean;
 };
 
 export type ConversationSummary = {
@@ -168,6 +193,10 @@ export type ConversationSummary = {
   createdAt: number;
   updatedAt: number;
   status: ConversationStatus;
+  // The owning agent, fixed at creation. Always present on the wire (the
+  // router stamps it); optional in the type because per-agent stacks below
+  // the router produce summaries without knowing who they belong to.
+  agent?: ChatAgentDescriptor;
 };
 
 type TimelineItemBase = {
@@ -258,6 +287,16 @@ export type FileChangeItem = TimelineItemBase & {
 
 export type PermissionOutcome = "approved-once" | "approved-session" | "rejected";
 
+// An agent-provided approval intent on a permission (a plan approval's
+// "implement" vs "implement and return to the previous mode"). When a
+// request carries choices, they replace the generic approve pair; rejecting
+// stays universal. Additive: absent means the generic pair.
+export type PermissionChoice = {
+  id: string;
+  label: string;
+  description?: string;
+};
+
 export type PermissionRequest = TimelineItemBase & {
   type: "permission";
   requestId: string;
@@ -274,6 +313,13 @@ export type PermissionRequest = TimelineItemBase & {
   // agent attaches one (OpenCode puts it on the permission's `metadata.diff`).
   // Absent for a permission with nothing to show — a command, a fetch.
   diff?: string;
+  // The plan this approval would put into effect, as markdown (a Claude Code
+  // plan approval). Rendered in the card while the request is open.
+  plan?: string;
+  // Agent-provided approval intents; see PermissionChoice.
+  choices?: PermissionChoice[];
+  // On resolution: which choice approved it, when choices were offered.
+  choiceId?: string;
 };
 
 export type QuestionOption = {
@@ -303,6 +349,26 @@ export type QuestionRequest = TimelineItemBase & {
   outcome?: QuestionOutcome;
 };
 
+// One task's standing in the agent's own running task list.
+export type TaskProgressEntry = {
+  text: string;
+  status: "pending" | "in_progress" | "completed";
+  // Present-continuous label shown while in progress, when the agent
+  // provides one ("Running tests" for "Run tests").
+  activeText?: string;
+};
+
+/**
+ * The agent's live task list (D9): one presentation per conversation,
+ * upserted in place as items are added, started, and completed — never a
+ * new timeline entry per update. Emitted today only by agents that keep a
+ * task list; a conversation without one simply never contains this item.
+ */
+export type TaskProgressItem = TimelineItemBase & {
+  type: "task_progress";
+  entries: TaskProgressEntry[];
+};
+
 export type TurnStatusItem = TimelineItemBase & {
   type: "turn_status";
   status: ConversationStatus;
@@ -324,6 +390,7 @@ export type ConversationItem =
   | FileChangeItem
   | PermissionRequest
   | QuestionRequest
+  | TaskProgressItem
   | TurnStatusItem
   | NoticeItem;
 

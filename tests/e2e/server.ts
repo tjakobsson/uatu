@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { MultiAgentChatService } from "../../src/chat/agents";
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "../../src/assets/uatu-logo.svg" with { type: "file" };
 import icon192Asset from "../../src/assets/icon-192.png" with { type: "file" };
@@ -53,7 +54,8 @@ let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
 let personalState: Record<string, unknown> = { version: 1 };
-const chatService = new FakeE2EChatService({
+const fakeChatAgent = new FakeE2EChatService({
+  agentName: process.env.UATU_E2E_PRIMARY_AGENT_NAME ?? undefined,
   restoreFile: async (relativePath, contents) => {
     const target = path.resolve(activeWorkspaceRoot, relativePath);
     const relative = path.relative(activeWorkspaceRoot, target);
@@ -64,6 +66,72 @@ const chatService = new FakeE2EChatService({
     }
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, contents, "utf8");
+  },
+});
+const E2E_AGENT_NAMES: Record<string, string> = { opencode: "OpenCode", claude: "Claude Code" };
+function qualifyControlValue<T>(value: T, agentId = "opencode"): T {
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === "object") {
+      const record = node as Record<string, unknown>;
+      const next: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(record)) {
+        if ((key === "conversationId" || key === "childConversationId") && typeof entry === "string" && !entry.includes(":")) {
+          next[key] = `${agentId}:${entry}`;
+          continue;
+        }
+        next[key] = walk(entry);
+      }
+      // A conversation summary is recognizable by its shape; stamp the wire form.
+      if (typeof next.id === "string" && "title" in next && "updatedAt" in next && "status" in next && !(next.id as string).includes(":")) {
+        next.id = `${agentId}:${next.id as string}`;
+        next.agent = { id: agentId, name: E2E_AGENT_NAMES[agentId] ?? agentId };
+      }
+      return next;
+    }
+    return node;
+  };
+  return walk(value) as T;
+}
+const controlJson = (value: unknown, agentId = "opencode") => Response.json(qualifyControlValue(value, agentId));
+
+// A second stub agent, offered only when a spec opts in: most chat specs
+// exercise single-agent behavior (creation without a choice), and the agent
+// set is fixed per router — so the harness swaps routers behind a delegating
+// proxy instead of mutating one.
+const fakeSecondAgent = new FakeE2EChatService({ restoreFile: async () => undefined, agentName: "Claude Code", agentId: "claude-fixture" });
+// The fake owns attachment persistence (its prompt path validates ids
+// against its own store), so the routers delegate rather than keeping a
+// second store the fake would never see.
+const fakeAttachmentStore = {
+  directory: E2E_WORKSPACE_ROOT,
+  async save(bytes: Uint8Array) {
+    const saved = await fakeChatAgent.saveAttachment(bytes);
+    const stored = await fakeChatAgent.resolveAttachment(saved.id);
+    if (!stored) throw new Error("e2e attachment store lost a just-saved attachment");
+    return stored;
+  },
+  resolve: (id: string) => fakeChatAgent.resolveAttachment(id),
+};
+
+const singleAgentRouter = new MultiAgentChatService({
+  workspacePath: E2E_WORKSPACE_ROOT,
+  agents: [{ descriptor: { id: "opencode", name: "OpenCode" }, service: fakeChatAgent }],
+  attachmentStore: fakeAttachmentStore,
+});
+const dualAgentRouter = new MultiAgentChatService({
+  workspacePath: E2E_WORKSPACE_ROOT,
+  agents: [
+    { descriptor: { id: "opencode", name: "OpenCode" }, service: fakeChatAgent },
+    { descriptor: { id: "claude", name: "Claude Code" }, service: fakeSecondAgent },
+  ],
+  attachmentStore: fakeAttachmentStore,
+});
+let activeChatRouter: MultiAgentChatService = singleAgentRouter;
+const chatService = new Proxy({} as MultiAgentChatService, {
+  get(_target, property) {
+    const value = (activeChatRouter as unknown as Record<string | symbol, unknown>)[property];
+    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(activeChatRouter) : value;
   },
 });
 const terminalEnabled = await terminalBackendAvailable();
@@ -93,7 +161,9 @@ async function handleE2EReset(request: Request): Promise<Response> {
   }
 
   terminalSessionsDelay = null;
-  chatService.reset();
+  fakeChatAgent.reset();
+  fakeSecondAgent.reset();
+  activeChatRouter = singleAgentRouter;
 
   // Kill every PTY session so tests are hermetic: with persistent sessions
   // and the session picker, a shell leaked from a previous test would
@@ -180,101 +250,134 @@ async function handleE2EChat(request: Request): Promise<Response> {
     invalidate?: boolean;
     configuration?: ConversationConfiguration;
     reversibleFiles?: ReversibleFileFixture[];
+    agent?: "opencode" | "claude";
+    count?: number;
   };
+  // The chat wire is agent-qualified ("opencode:<id>") while the fake works
+  // in bare provider ids. The control boundary translates both directions so
+  // specs keep using the ids they see in the UI.
+  const stripQualifier = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(stripQualifier);
+    if (value && typeof value === "object") {
+      const record = { ...(value as Record<string, unknown>) };
+      for (const key of ["conversationId", "childConversationId"]) {
+        if (typeof record[key] === "string") record[key] = (record[key] as string).replace(/^(?:opencode|claude):/, "");
+      }
+      for (const [key, entry] of Object.entries(record)) {
+        if (key !== "conversationId" && key !== "childConversationId") record[key] = stripQualifier(entry);
+      }
+      return record;
+    }
+    return value;
+  };
+  if (typeof body.conversationId === "string") {
+    // The qualified id names the owning agent; remember it before stripping
+    // so conversation-scoped controls reach the right fake without every
+    // spec spelling `agent:` explicitly.
+    if (body.agent === undefined && body.conversationId.startsWith("claude:")) body.agent = "claude";
+    body.conversationId = body.conversationId.replace(/^(?:opencode|claude):/, "");
+  }
+  if (body.items) body.items = stripQualifier(body.items) as typeof body.items;
+  if (body.older) body.older = stripQualifier(body.older) as typeof body.older;
+  if (body.item) body.item = stripQualifier(body.item) as typeof body.item;
+  const targetFake = body.agent === "claude" ? fakeSecondAgent : fakeChatAgent;
   switch (body.action) {
+    case "agents":
+      activeChatRouter = body.count === 2 ? dualAgentRouter : singleAgentRouter;
+      return Response.json({ agents: body.count === 2 ? 2 : 1 });
     case "seed":
-      return Response.json(chatService.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration));
+      return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration), body.agent ?? "opencode");
     case "externalCreate":
-      return Response.json(chatService.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }));
+      return controlJson(targetFake.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }), body.agent ?? "opencode");
     case "externalRename":
-      if (body.conversationId) return Response.json(chatService.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
+      if (body.conversationId) return controlJson(targetFake.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
       break;
     case "externalDelete":
-      if (body.conversationId) return Response.json(chatService.externalDelete(body.conversationId, body.invalidate !== false));
+      if (body.conversationId) return controlJson(targetFake.externalDelete(body.conversationId, body.invalidate !== false));
       break;
     case "externalSetChild":
       if (body.conversationId && typeof body.child === "boolean") {
-        return Response.json(chatService.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
+        return controlJson(targetFake.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
       }
       break;
     case "item":
-      if (body.conversationId && body.item) return Response.json(chatService.publishItem(body.conversationId, body.item));
+      if (body.conversationId && body.item) return controlJson(targetFake.publishItem(body.conversationId, body.item));
       break;
     case "delta":
       if (body.conversationId && body.itemId && typeof body.delta === "string") {
-        return Response.json(chatService.publishDelta(body.conversationId, body.itemId, body.delta));
+        return controlJson(targetFake.publishDelta(body.conversationId, body.itemId, body.delta));
       }
       break;
     case "status":
       if (body.conversationId && body.status) {
-        chatService.publishStatus(body.conversationId, body.status, body.message);
+        targetFake.publishStatus(body.conversationId, body.status, body.message);
         return Response.json({ ok: true });
       }
       break;
     case "configuration":
-      if (body.conversationId && body.configuration) return Response.json(chatService.publishConfiguration(body.conversationId, body.configuration));
+      if (body.conversationId && body.configuration) return controlJson(targetFake.publishConfiguration(body.conversationId, body.configuration));
       break;
     case "reversibleFiles":
       if (body.conversationId) {
-        chatService.configureReversibleFiles(body.conversationId, body.reversibleFiles ?? []);
+        targetFake.configureReversibleFiles(body.conversationId, body.reversibleFiles ?? []);
         return Response.json({ ok: true });
       }
       break;
     case "nextConversationConfiguration":
-      chatService.configureNextConversation(body.configuration ?? {});
+      fakeChatAgent.configureNextConversation(body.configuration ?? {});
       return Response.json({ ok: true });
     case "disconnect":
-      chatService.disconnect();
+      fakeChatAgent.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants, promptConfigurations: chatService.promptConfigurations, reversibleAttempts: chatService.reversibleAttempts, ...chatService.inventoryStats() });
+      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, ...fakeChatAgent.inventoryStats() });
     case "inventoryInvalidate":
-      chatService.invalidateInventory();
+      fakeChatAgent.invalidateInventory();
       return Response.json({ ok: true });
     case "inventoryInterrupt":
-      chatService.interruptInventoryTransport();
+      fakeChatAgent.interruptInventoryTransport();
       return Response.json({ ok: true });
     case "inventoryResume":
-      chatService.resumeInventoryTransport();
+      fakeChatAgent.resumeInventoryTransport();
       return Response.json({ ok: true });
     case "providerPumpRestart":
-      chatService.restartProviderPump();
+      fakeChatAgent.restartProviderPump();
       return Response.json({ ok: true });
     case "delayNextInventoryList":
-      chatService.delayNextInventoryList();
+      fakeChatAgent.delayNextInventoryList();
       return Response.json({ ok: true });
     case "releaseInventoryList":
-      chatService.releaseInventoryList();
+      fakeChatAgent.releaseInventoryList();
       return Response.json({ ok: true });
     case "failPrompt":
-      chatService.failPrompt();
+      targetFake.failPrompt();
       return Response.json({ ok: true });
     case "failUndo":
-      chatService.failReversible("undo");
+      targetFake.failReversible("undo");
       return Response.json({ ok: true });
     case "failRedo":
-      chatService.failReversible("redo");
+      targetFake.failReversible("redo");
       return Response.json({ ok: true });
     case "failHistory":
-      chatService.failHistory(false);
+      targetFake.failHistory(false);
       return Response.json({ ok: true });
     case "failOlderHistory":
-      chatService.failHistory(true);
+      targetFake.failHistory(true);
       return Response.json({ ok: true });
     case "failStartup":
-      chatService.failStartup();
+      targetFake.failStartup();
       return Response.json({ ok: true });
     case "declareOnly":
-      chatService.declareOnly(body.capabilities ?? []);
+      targetFake.declareOnly(body.capabilities ?? []);
       return Response.json({ ok: true });
     case "models":
-      chatService.setModels(body.models ?? []);
+      targetFake.setModels(body.models ?? []);
       return Response.json({ ok: true });
     case "resync":
-      chatService.rotateGeneration();
+      fakeChatAgent.rotateGeneration();
       return Response.json({ ok: true });
     case "restart":
-      chatService.restart();
+      fakeChatAgent.restart();
       return Response.json({ ok: true });
   }
   return Response.json({ error: "invalid chat control" }, { status: 400 });
@@ -379,7 +482,8 @@ const fetchFallback = buildFetchFallback({
 console.log(`http://127.0.0.1:${server.port}`);
 
 const shutdown = async () => {
-  await chatService.dispose();
+  await singleAgentRouter.dispose();
+  await dualAgentRouter.dispose().catch(() => undefined);
   await watchSession.stop();
   await server.stop(true);
   process.exit(0);

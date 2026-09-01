@@ -613,6 +613,16 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   if (item.type === "file_change") {
     return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(item.operation)}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
   }
+  if (item.type === "task_progress") {
+    // One presentation, updated in place: the same item id re-renders this
+    // element rather than appending an entry per update (D9).
+    const done = item.entries.filter(entry => entry.status === "completed").length;
+    const rows = item.entries.map(entry => {
+      const label = entry.status === "in_progress" && entry.activeText ? entry.activeText : entry.text;
+      return `<li class="chat-task is-${entry.status}"><span class="chat-task-marker" aria-hidden="true"></span><span class="chat-task-text">${escapeHtml(label)}</span></li>`;
+    }).join("");
+    return `<section class="chat-item chat-task-progress" data-chat-item-id="${id}"${stamp} aria-label="Task progress"><header class="chat-task-progress-header">Tasks <span class="chat-task-progress-count">${done}/${item.entries.length}</span></header><ol class="chat-task-list">${rows}</ol></section>`;
+  }
   if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, origin, allowSubagents);
   if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents);
@@ -858,20 +868,31 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // legible at a glance, the choices and their scope note fall away, and the
   // resources it named stay in the collapsed body for a user auditing what was
   // granted. Only a pending request keeps its full footprint.
+  // Agent-provided approval intents replace the generic pair: each choice is
+  // one approve button carrying its id, and Reject stays universal. The
+  // always/session scope note applies only to the generic pair.
+  const actions = item.choices?.length
+    ? `<div class="chat-request-actions">${item.choices.map(choice => `<button type="button" data-permission-choice="${escapeHtmlAttribute(choice.id)}"${choice.description ? ` title="${escapeHtmlAttribute(choice.description)}"` : ""}>${escapeHtml(choice.label)}</button>`).join("")}<button type="button" data-permission-outcome="rejected">Reject</button></div>`
+    : `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`;
   const body = pending && active
-    ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`
+    ? actions
     : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : "";
   const state = requestState(item.status, active);
-  const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${escapeHtml(permissionOutcomeLabel(item.outcome))}</span>` : requestBadge(state);
+  const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${escapeHtml(permissionOutcomeLabel(item.outcome, item))}</span>` : requestBadge(state);
   // What "Allow" would apply, shown where the choice is made. Only while the
   // request is still open — a receded, resolved card does not re-show the diff.
   const changePreview = pending && item.diff ? `<div class="chat-request-change">${chatDiffMarkup(patchDiffLines(item.diff))}</div>` : "";
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${changePreview}${body}</details>`;
+  // The plan the approval would put into effect, rendered while the request
+  // is open — the user approves what they can read, not a summary line.
+  const planPreview = pending && item.plan ? `<div class="chat-request-plan">${renderChatMarkdown(item.plan)}</div>` : "";
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${planPreview}${changePreview}${body}</details>`;
 }
 
 // The receded form's label — what was decided, in words, since the summary no
 // longer sits beside the choices that produced it.
-function permissionOutcomeLabel(outcome: PermissionOutcome | undefined): string {
+function permissionOutcomeLabel(outcome: PermissionOutcome | undefined, item?: Extract<ConversationItem, { type: "permission" }>): string {
+  const chosen = item?.choiceId ? item.choices?.find(choice => choice.id === item.choiceId) : undefined;
+  if (chosen) return chosen.label;
   if (outcome === "approved-once") return "Allowed once";
   if (outcome === "approved-session") return "Allowed always";
   if (outcome === "rejected") return "Rejected";

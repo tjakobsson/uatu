@@ -11,11 +11,12 @@
 
 import type { Serve } from "bun";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
-import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
+import { ChatUnavailableError } from "../chat/service";
+import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { getDocumentDiff } from "../document/diff";
@@ -77,7 +78,7 @@ type BaseDeps = {
   getSession: () => WatchSession;
   // Mandatory injection keeps production and E2E on the same public route
   // table while allowing the test harness to use a deterministic provider.
-  chatService: WorkspaceChatService;
+  chatService: MultiAgentWorkspaceChatService;
   getWorkspaceCredential: () => string;
   // Normalized base-path prefix (leading + trailing "/"). Every static
   // route key is served under it; "/" (the default) is the identity.
@@ -419,6 +420,13 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       ? null
       : chatError(403, "cross-origin request rejected");
   };
+  // Catalog reads describe one agent; an unscoped read has no answer that is
+  // not a guess, so the parameter is required rather than defaulted.
+  const withAgentScope = (request: Request, operation: (agentId: string) => Promise<Response>): Promise<Response> | Response => {
+    const agentId = new URL(request.url).searchParams.get("agent");
+    if (!agentId) return chatError(400, "agent query parameter is required");
+    return operation(agentId);
+  };
   const run = async (operation: () => Promise<unknown>, status = 200): Promise<Response> => {
     try {
       return Response.json(await operation(), { status, headers: { "cache-control": "no-store" } });
@@ -429,29 +437,38 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
 
   return {
     [p("/api/chat/status")]: {
-      GET: async (request: Request) => authenticated(request) ?? run(() => deps.chatService.status()),
+      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
+        agents: await deps.chatService.status(),
+      })),
     },
     // POST, not a query on /status: retry spawns a process, so it must not sit
     // behind a safe method — and it takes the mutation gate, because a
     // same-site page riding the workspace cookie must not be able to spawn
     // OpenCode either.
     [p("/api/chat/retry")]: {
-      POST: async (request: Request) => mutationGate(request) ?? run(() => deps.chatService.retry()),
+      POST: async (request: Request) => {
+        const rejected = mutationGate(request);
+        if (rejected) return rejected;
+        const body = await parseJsonObject(request, ["agentId"]);
+        if (body instanceof Response) return body;
+        if (typeof body.agentId !== "string" || !body.agentId) return chatError(400, "agentId must be a non-empty string");
+        return run(() => deps.chatService.retry(body.agentId as string));
+      },
     },
     [p("/api/chat/models")]: {
-      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
-        models: await deps.chatService.models(),
-      })),
+      GET: async (request: Request) => authenticated(request) ?? withAgentScope(request, agentId => run(async () => ({
+        models: await deps.chatService.models(agentId),
+      }))),
     },
     [p("/api/chat/modes")]: {
-      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
-        modes: await deps.chatService.modes(),
-      })),
+      GET: async (request: Request) => authenticated(request) ?? withAgentScope(request, agentId => run(async () => ({
+        modes: await deps.chatService.modes(agentId),
+      }))),
     },
     [p("/api/chat/commands")]: {
-      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
-        commands: await deps.chatService.commands(),
-      })),
+      GET: async (request: Request) => authenticated(request) ?? withAgentScope(request, agentId => run(async () => ({
+        commands: await deps.chatService.commands(agentId),
+      }))),
     },
     [p("/api/chat/conversations")]: {
       GET: async (request: Request) => authenticated(request) ?? run(async () => ({
@@ -460,9 +477,12 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       POST: async (request: Request) => {
         const rejected = mutationGate(request);
         if (rejected) return rejected;
-        const body = await parseJsonObject(request, []);
+        const body = await parseJsonObject(request, ["agentId"]);
         if (body instanceof Response) return body;
-        return run(() => deps.chatService.createConversation(), 201);
+        if (body.agentId !== undefined && (typeof body.agentId !== "string" || !body.agentId)) {
+          return chatError(400, "agentId must be a non-empty string");
+        }
+        return run(() => deps.chatService.createConversation(body.agentId as string | undefined), 201);
       },
     },
     // Static route must precede the conversation identity route so "events"
@@ -779,14 +799,15 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       }),
     },
     [p("/api/chat/conversations/:conversationId/permissions/:interactionId")]: {
-      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome", "choiceId"], async (id, body) => {
         const interactionId = routeIdentity(request, "interactionId");
         const requestId = bodyIdentity(body, "requestId");
         if (interactionId instanceof Response) return interactionId;
         if (requestId instanceof Response) return requestId;
         const outcomes = new Set<PermissionOutcome>(["approved-once", "approved-session", "rejected"]);
         if (typeof body.outcome !== "string" || !outcomes.has(body.outcome as PermissionOutcome)) return chatError(400, "invalid permission outcome");
-        return run(() => deps.chatService.respondPermission(id, interactionId, requestId, body.outcome as PermissionOutcome));
+        if (body.choiceId !== undefined && (typeof body.choiceId !== "string" || !body.choiceId || Buffer.byteLength(body.choiceId) > 128)) return chatError(400, "invalid permission choice");
+        return run(() => deps.chatService.respondPermission(id, interactionId, requestId, body.outcome as PermissionOutcome, body.choiceId as string | undefined));
       }),
     },
     [p("/api/chat/conversations/:conversationId/questions/:interactionId")]: {
@@ -930,6 +951,7 @@ function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | 
 
 function normalizedChatError(error: unknown): Response {
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
+  if (error instanceof UnknownAgentError) return chatError(404, error.message);
   if (error instanceof QueuedMessageNotHeldError) return chatError(409, error.message);
   if (error instanceof ChatQueueFullError) return chatError(429, error.message);
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
@@ -939,6 +961,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);
+  if (error instanceof InvalidPermissionChoiceError) return chatError(400, error.message);
   if (error instanceof InvalidVariantSelectionError) return chatError(400, error.message);
   if (error instanceof ChatUnavailableError) return chatError(503, "chat is unavailable");
   if (error instanceof AttachmentStoreError) {

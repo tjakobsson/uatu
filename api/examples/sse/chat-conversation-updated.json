@@ -7,11 +7,15 @@
     "conversationId": "conversation-1",
     "type": "conversation.updated",
     "conversation": {
-      "id": "conversation-1",
+      "id": "opencode:conversation-1",
       "title": "API contract follow-up",
       "createdAt": 1724100000000,
       "updatedAt": 1724100300000,
-      "status": "idle"
+      "status": "idle",
+      "agent": {
+        "id": "opencode",
+        "name": "OpenCode"
+      }
     }
   }
 }
