@@ -196,7 +196,8 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
       {
         const handle = await fs.open(file, "r");
         try {
-          let residual = Buffer.alloc(0);
+          let residualParts: Buffer[] = [];
+          let residualBytes = 0;
           let offset = 0;
           let parsedBytes = 0;
           let stopped = false;
@@ -205,22 +206,29 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
             && mainline.some(entry => entry.kind === "user" && promptText(entry) !== null);
           while (
             offset < info.size && !stopped
-            && (mainline.length > 0 || parsedBytes < SUMMARY_PARSED_LIMIT_BYTES)
-            && residual.length < SUMMARY_RECORD_LIMIT_BYTES
+            && parsedBytes < SUMMARY_PARSED_LIMIT_BYTES
+            && residualBytes < SUMMARY_RECORD_LIMIT_BYTES
           ) {
             const length = Math.min(SUMMARY_HEAD_BYTES, info.size - offset);
             const chunk = Buffer.alloc(length);
             await handle.read(chunk, 0, length, offset);
             offset += length;
             const atEnd = offset >= info.size;
-            let combined = Buffer.concat([residual, chunk]);
+            // A record spanning many chunks accumulates without recopying:
+            // the concat happens once, when a delimiter finally arrives.
+            if (!atEnd && chunk.indexOf(0x0a) < 0) {
+              residualParts.push(chunk);
+              residualBytes += chunk.length;
+              continue;
+            }
+            let combined = Buffer.concat([...residualParts, chunk]);
+            residualParts = [];
+            residualBytes = 0;
             if (!atEnd) {
               const lastNewline = combined.lastIndexOf(0x0a);
-              if (lastNewline < 0) { residual = combined; continue; }
-              residual = combined.subarray(lastNewline + 1);
+              residualParts = [combined.subarray(lastNewline + 1)];
+              residualBytes = residualParts[0]!.length;
               combined = combined.subarray(0, lastNewline + 1);
-            } else {
-              residual = Buffer.alloc(0);
             }
             parsedBytes += combined.length;
             for (const line of combined.toString("utf8").split("\n")) {

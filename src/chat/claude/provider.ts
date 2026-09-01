@@ -612,7 +612,7 @@ export class ClaudeProvider implements ChatProvider {
     // un-commit recovery on the next start.
     if (stagedBefore && this.staged.get(sessionId) === stagedBefore) {
       this.staged.delete(sessionId);
-      this.persistDurableState();
+      await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
     }
     session.pendingTurns += 1;
     session.queue.push({
@@ -1131,6 +1131,18 @@ export class ClaudeProvider implements ChatProvider {
         // hidden and unused) so the boundary and Redo remain real.
         for (const [id, staged] of this.staged) {
           if (!staged.commit) continue;
+          let accepted = false;
+          try {
+            const { entries } = await readSessionTranscript(sessionTranscriptPath(this.workspacePath, staged.commit.fork, this.configDir));
+            accepted = reversibleTurns(entries.filter(entry => !entry.isSidechain)).length > staged.boundaryIndex;
+          } catch {
+            // No fork transcript: nothing was accepted.
+          }
+          if (accepted) {
+            // The continuation happened; the lost finalization is replayed.
+            this.staged.delete(id);
+            continue;
+          }
           if (this.activeNative.get(id) === staged.commit.fork) {
             if (staged.commit.prior === undefined) this.activeNative.delete(id);
             else this.activeNative.set(id, staged.commit.prior);
