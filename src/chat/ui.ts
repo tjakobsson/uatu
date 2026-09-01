@@ -1924,7 +1924,15 @@ export function initChat(api = new ChatApiClient()): void {
           item.setAttribute("aria-disabled", "true");
         }
         item.addEventListener("click", () => {
-          if (unavailable) return;
+          if (unavailable) {
+            // The menu entry may be the only access to an agent with no
+            // conversations; choosing it presents the diagnosis and Retry
+            // (spec: an unavailable agent is explained at creation, and
+            // every failed agent is repairable from the page).
+            finish(null);
+            if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: false });
+            return;
+          }
           finish(status.agent.id);
         });
         menu.append(item);
