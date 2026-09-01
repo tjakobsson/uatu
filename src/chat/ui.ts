@@ -1928,8 +1928,8 @@ export function initChat(api = new ChatApiClient()): void {
             // The menu entry may be the only access to an agent with no
             // conversations; choosing it presents the diagnosis and Retry
             // (spec: an unavailable agent is explained at creation, and
-            // every failed agent is repairable from the page).
-            finish(null);
+            // every failed agent is repairable from the page). The menu
+            // stays open — the healthy agent remains one click away.
             if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: false });
             return;
           }
