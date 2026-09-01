@@ -4,6 +4,7 @@ import {
   parseChatAvailability,
   parseChatCommand,
   parseChatEvent,
+  parseChatMode,
   parseChatModel,
   parseConversationInventoryEvent,
   parseConversationItem,
@@ -79,6 +80,24 @@ describe("chat domain validation", () => {
       provider: "Anthropic",
       name: "Claude Sonnet",
     })).toThrow();
+  });
+
+  test("declared-default model and mode metadata round-trips; malformed values are rejected", () => {
+    const base = { selection: { providerId: "anthropic", modelId: "default" }, provider: "Anthropic", name: "Default (recommended)" };
+    expect(parseChatModel({
+      ...base,
+      detail: "Opus 5 with 1M context",
+      default: true,
+      resolvesTo: { providerId: "anthropic", modelId: "opus[1m]" },
+    })).toBeDefined();
+    // Absent fields stay legal: an older server omits them.
+    expect(parseChatModel(base)).toBeDefined();
+    expect(() => parseChatModel({ ...base, detail: "" })).toThrow();
+    expect(() => parseChatModel({ ...base, default: "yes" })).toThrow();
+    expect(() => parseChatModel({ ...base, resolvesTo: { providerId: "anthropic" } })).toThrow();
+    expect(parseChatMode({ name: "auto", description: "Claude handles permission decisions", default: true })).toBeDefined();
+    expect(parseChatMode({ name: "build", description: "" })).toBeDefined();
+    expect(() => parseChatMode({ name: "auto", description: "", default: 1 })).toThrow();
   });
 
   test("accepts representative status, summary, snapshot, and timeline fixtures", () => {

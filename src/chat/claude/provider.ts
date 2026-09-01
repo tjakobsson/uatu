@@ -35,6 +35,7 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   setPermissionMode?(mode: string): Promise<void>;
   setModel?(model?: string): Promise<void>;
   supportedModels?(): Promise<unknown>;
+  supportedCommands?(): Promise<unknown>;
   rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
 };
@@ -99,6 +100,7 @@ export type ClaudeProviderOptions = {
 
 const DEFAULT_TITLE = "New conversation";
 const CATALOG_PROBE_TIMEOUT_MS = 20_000;
+const CATALOG_PROBE_COOLDOWN_MS = 60_000;
 const TITLE_LIMIT = 80;
 
 type LiveSession = {
@@ -136,6 +138,8 @@ export class ClaudeProvider implements ChatProvider {
   private modelAliases = new Map<string, string>();
   private readonly catalogProbe: boolean;
   private hydration: Promise<void> | null = null;
+  private probeFailedAt: number | null = null;
+  private probeQuery: ClaudeQueryHandle | null = null;
 
   private readonly live = new Map<string, LiveSession>();
   // Sessions created but never prompted: they exist only here until the SDK
@@ -178,7 +182,12 @@ export class ClaudeProvider implements ChatProvider {
     return { id: "claude", name: "Claude Code", capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents"] };
   }
 
-  async listCommands(): Promise<ChatCommand[]> { return this.commands; }
+  async listCommands(): Promise<ChatCommand[]> {
+    // The command inventory lives on the control channel too: hydrate so a
+    // cold read serves the real list rather than banking an empty one.
+    await this.hydrateCatalog();
+    return this.commands;
+  }
   async listModels(): Promise<ChatModel[]> {
     await this.hydrateCatalog();
     return this.liveModels ?? CLAUDE_MODELS;
@@ -186,50 +195,59 @@ export class ClaudeProvider implements ChatProvider {
 
   /**
    * The catalog only exists inside a running session (D5), so the first
-   * picker read hydrates it from a promptless probe session in a scratch
-   * directory: the picker is live before any conversation has run, and the
-   * manifest is only the failure fallback. Single-flight; a failed probe
-   * retries on the next read.
+   * picker read hydrates it from a promptless probe session: the picker is
+   * live before any conversation has run, and the manifest is only the
+   * failure fallback. Single-flight; a failed probe latches for a cooldown
+   * so a broken install cannot be re-probed on every read.
    */
   private async hydrateCatalog(): Promise<void> {
-    if (this.liveModels !== null || !this.catalogProbe) return;
+    if (this.liveModels !== null || !this.catalogProbe || this.disposed) return;
+    if (this.probeFailedAt !== null && this.now() - this.probeFailedAt < CATALOG_PROBE_COOLDOWN_MS) return;
     this.hydration ??= this.runCatalogProbe()
-      .catch(() => undefined)
+      .then(() => { this.probeFailedAt = null; })
+      .catch(() => { this.probeFailedAt = this.now(); })
       .finally(() => { this.hydration = null; });
     await this.hydration;
   }
 
   private async runCatalogProbe(): Promise<void> {
     const queue = new PushQueue<ClaudeUserEnvelope>();
-    // Scratch cwd: the probe session must not land in the workspace's own
-    // native storage, where enumeration would list it as a conversation.
-    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "uatu-claude-catalog-"));
-    const query = this.queryFactory({
-      prompt: queue,
-      options: {
-        cwd: scratch,
-        pathToClaudeCodeExecutable: this.executable,
-        enableFileCheckpointing: false,
-      },
-    });
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      // The control channel answers before any turn starts; a promptless
-      // stream never emits init, so the catalog is requested immediately
-      // while the message stream is merely drained to keep the pump alive.
-      const drain = (async () => { for await (const message of query) this.captureCommands(message); })();
-      drain.catch(() => undefined);
-      await Promise.race([
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("catalog probe timed out")), CATALOG_PROBE_TIMEOUT_MS);
-        }),
-        this.captureModels(query),
-      ]);
+      // The workspace cwd on purpose: a promptless probe writes no
+      // transcript (nothing to enumerate), and the command inventory must
+      // include the workspace's own project commands.
+      const query = this.queryFactory({
+        prompt: queue,
+        options: {
+          cwd: this.workspacePath,
+          pathToClaudeCodeExecutable: this.executable,
+          enableFileCheckpointing: false,
+        },
+      });
+      this.probeQuery = query;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // The control channel answers before any turn starts; a promptless
+        // stream never emits init, so the catalog is requested immediately
+        // while the message stream is merely drained to keep the pump alive.
+        const drain = (async () => { for await (const message of query) this.captureCommands(message); })();
+        drain.catch(() => undefined);
+        await Promise.race([
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("catalog probe timed out")), CATALOG_PROBE_TIMEOUT_MS);
+          }),
+          this.captureModels(query),
+        ]);
+        // captureModels swallows its own failure; an empty catalog after a
+        // "successful" probe is still a failed probe for latching purposes.
+        if (this.liveModels === null) throw new Error("catalog probe answered nothing");
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        await query.return?.().catch(() => undefined);
+      }
     } finally {
-      if (timer !== undefined) clearTimeout(timer);
+      this.probeQuery = null;
       queue.close();
-      await query.return?.().catch(() => undefined);
-      await fs.rm(scratch, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -262,7 +280,9 @@ export class ClaudeProvider implements ChatProvider {
     const configuration = { ...previous, model: selection, ...(variant ? { variant } : {}) };
     if (!variant) delete configuration.variant;
     this.configurations.set(sessionId, configuration);
-    await this.live.get(sessionId)?.query.setModel?.(selection.modelId);
+    // The "default" sentinel is the CLI's own pick on the live path too:
+    // reset instead of sending an id session start deliberately omits.
+    await this.live.get(sessionId)?.query.setModel?.(selection.modelId === "default" ? undefined : selection.modelId);
   }
 
   async listSessions(): Promise<ProviderSession[]> {
@@ -408,7 +428,12 @@ export class ClaudeProvider implements ChatProvider {
       this.configurations.set(sessionId, configuration);
       // A session that already existed switches live; a fresh one was
       // created with the mode in its options.
-      if (alreadyLive) await alreadyLive.query.setPermissionMode?.(input.mode);
+      if (alreadyLive) {
+        // An install that rejects the mode value (an older CLI) keeps the
+        // turn alive; the configuration event still reflects the request
+        // and the session keeps its previous mode.
+        await alreadyLive.query.setPermissionMode?.(input.mode).catch(() => undefined);
+      }
     }
     // Images ride the prompt as base64 blocks read from the workspace's
     // attachment store; the store, bounds, and upload routes are shared
@@ -453,8 +478,20 @@ export class ClaudeProvider implements ChatProvider {
     return { messageId: input.id };
   }
 
-  async command(): Promise<{ messageId: string }> {
-    throw new Error("Claude Code slash commands are not supported yet");
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+    // A slash command is a turn: the CLI parses "/name args" from the user
+    // message and runs the command inside the session, so dispatch rides the
+    // ordinary prompt path with everything that entails (mode/model staging,
+    // the minted user item, the running status).
+    const text = input.arguments ? `/${input.name} ${input.arguments}` : `/${input.name}`;
+    return this.prompt(sessionId, {
+      id: input.id,
+      text,
+      delivery: "queue",
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.mode !== undefined ? { mode: input.mode } : {}),
+      ...(input.variant !== undefined ? { variant: input.variant } : {}),
+    });
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -543,6 +580,8 @@ export class ClaudeProvider implements ChatProvider {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
+    await this.probeQuery?.return?.().catch(() => undefined);
+    await this.hydration?.catch(() => undefined);
     const sessions = [...this.live.values()];
     this.live.clear();
     for (const session of sessions) this.abandonInteractions(session.id, "The workspace shut down before the user answered.");
@@ -579,7 +618,9 @@ export class ClaudeProvider implements ChatProvider {
         ...(hasTranscript ? { resume: nativeId } : { sessionId: nativeId }),
         pathToClaudeCodeExecutable: this.executable,
         enableFileCheckpointing: true,
-        ...((mode ?? configuration.mode) ? { permissionMode: (mode ?? configuration.mode)! } : {}),
+        // Unset resolves to the declared default (auto) so the session
+        // actually runs the mode the picker presents as active.
+        permissionMode: mode ?? configuration.mode ?? "auto",
         // Choosing "default" IS choosing the CLI's own pick: omit the
         // option and let it resolve, same as an unset model.
         ...((model ?? configuration.model) && (model ?? configuration.model)!.modelId !== "default"
@@ -596,6 +637,9 @@ export class ClaudeProvider implements ChatProvider {
     // Fire-and-forget: the catalog answers when the session is up, and a
     // failure just leaves the manifest fallback in place until the next one.
     if (this.liveModels === null) void this.captureModels(query);
+    // Commands can change mid-session (skills discovered as the agent
+    // works); every session start re-reads the latest list.
+    else void this.captureSlashCommands(query);
     return session;
   }
 
@@ -861,9 +905,12 @@ export class ClaudeProvider implements ChatProvider {
    * through a configuration event, without a separate user mode change.
    */
   private async approvePlan(sessionId: string, pending: PendingInteraction, choiceId?: string): Promise<void> {
+    // Plain approval lands in the declared default mode (auto) — the same
+    // mode a fresh conversation runs — while the restore intent returns to
+    // whatever the conversation used before planning.
     const returnMode = choiceId === "implement-and-restore"
       ? this.modeBeforePlan.get(sessionId) ?? "auto"
-      : "default";
+      : "auto";
     pending.settle({ behavior: "allow", updatedInput: pending.input });
     this.modeBeforePlan.delete(sessionId);
     const configuration = { ...this.configurations.get(sessionId), mode: returnMode };
@@ -907,6 +954,34 @@ export class ClaudeProvider implements ChatProvider {
       }
     } catch {
       // The manifest fallback stands; the next session retries.
+    }
+    await this.captureSlashCommands(query);
+  }
+
+  /**
+   * The control channel's command list carries descriptions and argument
+   * hints (init's `slash_commands` is bare names), and it tracks the CLI's
+   * own mid-session pushes — a re-fetch returns the latest list.
+   */
+  private async captureSlashCommands(query: ClaudeQueryHandle): Promise<void> {
+    if (!query.supportedCommands) return;
+    try {
+      const raw = await query.supportedCommands();
+      if (!Array.isArray(raw)) return;
+      const commands = raw.flatMap((value): ChatCommand[] => {
+        if (!value || typeof value !== "object") return [];
+        const info = value as Record<string, unknown>;
+        if (typeof info.name !== "string" || !info.name) return [];
+        return [{
+          name: info.name.startsWith("/") ? info.name.slice(1) : info.name,
+          description: typeof info.description === "string" ? info.description : "",
+          argumentHint: typeof info.argumentHint === "string" ? info.argumentHint : "",
+          kind: "command" as const,
+        }];
+      });
+      if (commands.length > 0) this.commands = commands;
+    } catch {
+      // Init's bare names (captureCommands) remain the fallback.
     }
   }
 
@@ -966,14 +1041,6 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
     // catalog keys by alias ("sonnet", "opus[1m]"); the join is what lets
     // the context gauge find the window actually in effect.
     const resolvedModel = typeof info.resolvedModel === "string" && info.resolvedModel ? info.resolvedModel : undefined;
-    if (!isDefault && resolvedModel && resolvedModel !== info.value) {
-      if (!aliases.has(resolvedModel)) aliases.set(resolvedModel, info.value);
-      // Assistant messages report the resolved id without the variant
-      // marker ("claude-opus-5" while running "opus[1m]"); join that
-      // spelling too.
-      const stripped = resolvedModel.replace(/\[[^\]]*\]$/, "");
-      if (stripped !== resolvedModel && stripped !== info.value && !aliases.has(stripped)) aliases.set(stripped, info.value);
-    }
     const name = typeof info.displayName === "string" && info.displayName ? info.displayName : info.value;
     const variants = Array.isArray(info.supportedEffortLevels)
       ? info.supportedEffortLevels.filter((level): level is string => typeof level === "string")
@@ -993,6 +1060,22 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
         : claudeContextWindow(info.value, resolvedModel),
       imageInput: true,
     });
+  }
+  // The alias join in two passes: exact resolved-id joins first, then the
+  // stripped spelling (assistant messages report "claude-opus-5" while
+  // running "opus[1m]") only into vacant keys — a stripped heuristic from
+  // one entry must never shadow another entry's exact join.
+  for (const [index, model] of models.entries()) {
+    if (model.default) continue;
+    const resolved = resolvedByIndex.get(index);
+    if (resolved && resolved !== model.selection.modelId && !aliases.has(resolved)) aliases.set(resolved, model.selection.modelId);
+  }
+  for (const [index, model] of models.entries()) {
+    if (model.default) continue;
+    const resolved = resolvedByIndex.get(index);
+    if (!resolved) continue;
+    const stripped = resolved.replace(/\[[^\]]*\]$/, "");
+    if (stripped !== resolved && stripped !== model.selection.modelId && !aliases.has(stripped)) aliases.set(stripped, model.selection.modelId);
   }
   // Name the default's resolution: the concrete entry sharing its resolved
   // model is what the agent would actually run.

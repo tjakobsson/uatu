@@ -144,16 +144,29 @@ killed on dispose.
   classified as a `QuestionRequest` instead (options, descriptions,
   multi-select preserved; answers returned in the tool's expected
   shape). One callback, two card kinds — the field-proven mapping.
-- **Modes**: permission modes (`default`, `plan`, `acceptEdits`, …) are
-  the agent's `ChatMode` list; switching uses the SDK's in-session
-  `setPermissionMode` plus per-prompt options. `bypassPermissions` is
-  offered only behind an explicit serve-level operator opt-in, matching
-  the security posture spec's stance on agent authority.
-- **Models/effort**: a static per-model manifest (model id, name,
-  context window, supported effort levels) published as `ChatModel`s
-  with effort levels as `variants`. The existing "variant qualifies a
-  model" semantics fit as-is; no type change. Manifest updates are a
-  maintenance cost accepted over probing (no catalog API exists).
+- **Modes**: permission modes (`auto`, `default`, `acceptEdits`, `plan`)
+  are the agent's `ChatMode` list, in Claude Code's own vocabulary and
+  order; `auto` is declared the default and a fresh conversation runs it
+  explicitly. Switching uses the SDK's in-session `setPermissionMode`
+  plus per-prompt options. `bypassPermissions` is offered only behind an
+  explicit serve-level operator opt-in, matching the security posture
+  spec's stance on agent authority; `dontAsk` is deliberately not
+  offered — it removes the permission surface Chat is built around
+  without the operator gate bypass has.
+- **Models/effort** (amended during apply): the CLI's own catalog is the
+  authority — `supportedModels()`/`supportedCommands()` answer over the
+  SDK's control channel before any turn, so the first picker read
+  hydrates from a short-lived promptless probe session in the workspace
+  (which writes no transcript); a static manifest remains only as the
+  probe-failure fallback. The catalog's `default` entry is offered
+  first-class (`ChatModel.default`, its resolution named via
+  `resolvesTo`, the CLI's descriptions as `detail`), effort levels ride
+  as `variants`, and context windows are derived from the `[1m]` variant
+  marker because no ModelInfo field carries one. Session-reported model
+  ids join back to catalog ids through a two-pass alias map (exact
+  resolved ids first, marker-stripped spellings into vacant keys) so
+  usage attribution and the context gauge always land on a catalog
+  entry.
 - **Usage/context**: `result`/assistant usage maps onto the existing
   `TokenUsage` carrier semantics unchanged.
 - **Attachments**: `ProviderAttachment` already carries `absolutePath`;

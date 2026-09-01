@@ -317,7 +317,11 @@ export function createChatConfigurationPicker(
 
     const selected = state.configuration.model;
     const defaultModel = state.models.find(model => model.default);
-    if (!elements.search.value.trim()) {
+    // The default entry is searchable like any other; it renders pinned
+    // above the provider groups whenever the search does not exclude it.
+    const filtered = filterChatModels(state.models, elements.search.value);
+    const defaultVisible = defaultModel !== undefined && filtered.includes(defaultModel);
+    if (defaultVisible || !elements.search.value.trim()) {
       if (defaultModel) {
         elements.models.append(makeModelRow(
           defaultModel.name,
@@ -353,8 +357,7 @@ export function createChatConfigurationPicker(
       ));
     }
 
-    const filtered = filterChatModels(state.models.filter(model => !model.default), elements.search.value);
-    for (const group of groupChatModels(filtered)) {
+    for (const group of groupChatModels(filtered.filter(model => !model.default))) {
       const section = elements.dialog.ownerDocument.createElement("section");
       section.className = "chat-configuration-provider";
       section.dataset.providerId = group.providerId;

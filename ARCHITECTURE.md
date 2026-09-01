@@ -70,7 +70,7 @@ src/
 │                         provider, wire normalization) and chat/claude/
 │                         (probe-only runtime, per-conversation Claude
 │                         Agent SDK sessions, native-transcript reader,
-│                         model manifest, its own normalization)
+│                         model catalog (control-channel probe, manifest fallback), its own normalization)
 ├── shell/                App-wide chrome and the appState singleton: boot,
 │                         SSE event handling, URL/history, follow-mode
 │                         capability, connection chip, PWA registration

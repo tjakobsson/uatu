@@ -868,7 +868,29 @@ paths:
       parameters: [{ $ref: '#/components/parameters/ChatAgentId' }]
       summary: List one agent's enabled native models
       responses:
-        '200': { description: Available chat models, content: { application/json: { schema: { $ref: '#/components/schemas/ChatModelList' } } } }
+        '200':
+          description: Available chat models
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatModelList' }
+              example:
+                models:
+                  - selection: { providerId: anthropic, modelId: default }
+                    provider: Anthropic
+                    name: Default (recommended)
+                    detail: Opus 5 with 1M context · Best for everyday, complex tasks
+                    default: true
+                    resolvesTo: { providerId: anthropic, modelId: "opus[1m]" }
+                    variants: [low, medium, high, xhigh, max]
+                    contextLimit: 1000000
+                    imageInput: true
+                  - selection: { providerId: anthropic, modelId: "opus[1m]" }
+                    provider: Anthropic
+                    name: Opus (1M context)
+                    detail: Opus 5 with 1M context · Best for everyday, complex tasks
+                    variants: [low, medium, high, xhigh, max]
+                    contextLimit: 1000000
+                    imageInput: true
         '400': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
@@ -1950,10 +1972,10 @@ components:
       additionalProperties: false
     ConversationStatus: { enum: [idle, sending, running, completed, interrupted, failed] }
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, variants: { type: array, items: { type: string, minLength: 1 }, description: "Reasoning variants the model advertises (e.g. high, xhigh). Absent when it offers none." }, contextLimit: { type: integer, minimum: 1, description: "The model's context-window size in tokens, when reported." }, imageInput: { type: boolean, description: "Whether this model can see image attachments, as the agent reports it. Absent means not reported, which clients treat as no." }, detail: { type: string, minLength: 1, description: "The agent's own words about this model, shown as the row's secondary line in place of the provider/id identity." }, default: { type: boolean, description: "The agent's own recommended default. When a catalog declares one, clients offer it in place of a generic delegation row and present it as the active choice while the conversation has not chosen a model." }, resolvesTo: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "What a default entry currently resolves to: the catalog entry the agent would actually run. Clients name the resolution rather than presenting an opaque Default." } }, additionalProperties: false }
+    ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, variants: { type: array, items: { type: string, minLength: 1 }, description: "Reasoning variants the model advertises (e.g. high, xhigh). Absent when it offers none." }, contextLimit: { type: integer, minimum: 1, description: "The model's context-window size in tokens, when reported." }, imageInput: { type: boolean, description: "Whether this model can see image attachments, as the agent reports it. Absent means not reported, which clients treat as no." }, detail: { type: string, minLength: 1, description: "The agent's own words about this model, shown as the row's secondary line in place of the provider/id identity." }, default: { type: boolean, description: "The agent's own recommended default. When a catalog declares one, clients offer it in place of a generic delegation row and present it as the active choice while the conversation has not chosen a model. At most one entry should carry it; clients honor the first." }, resolvesTo: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "What a default entry currently resolves to: the catalog entry the agent would actually run. Clients name the resolution rather than presenting an opaque Default." } }, additionalProperties: false }
     ChatModelList: { type: object, required: [models], properties: { models: { type: array, items: { $ref: '#/components/schemas/ChatModel' } } }, additionalProperties: false }
     ChatAgent: { type: object, required: [id, name, capabilities], description: "The agent Chat is talking to. Capabilities are declared positively: a capability is listed or the agent does not have it. `conversation-rename` means the conversation title can be persisted through the rename operation. `attachments` means prompts accept image attachments; whether a selected model can see them is per-model (`ChatModel.imageInput`). `reversible-history` enables the dedicated Undo and Redo operations.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 512 }, capabilities: { type: array, items: { type: string, minLength: 1, description: "Recognized today: modes, models, commands, questions, permissions, subagents, variants, context, conversation-rename, attachments, reversible-history. Open on purpose: a later revision adds capabilities without a breaking change, and a client MUST ignore a name it does not recognize rather than reject the agent." } } }, additionalProperties: false }
-    ChatMode: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string }, default: { type: boolean, description: "The agent's own recommended default: presented as the active choice while the conversation has not set a mode, in place of a generic delegation entry." } }, additionalProperties: false }
+    ChatMode: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string }, default: { type: boolean, description: "The agent's own recommended default: presented as the active choice while the conversation has not set a mode, in place of a generic delegation entry. At most one mode should carry it; clients honor the first." } }, additionalProperties: false }
     ChatModeList: { type: object, required: [modes], properties: { modes: { type: array, items: { $ref: '#/components/schemas/ChatMode' } } }, additionalProperties: false }
     ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill, local-operation] } }, additionalProperties: false }
     ChatCommandList: { type: object, required: [commands], properties: { commands: { type: array, items: { $ref: '#/components/schemas/ChatCommand' } } }, additionalProperties: false }

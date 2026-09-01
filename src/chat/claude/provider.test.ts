@@ -19,6 +19,7 @@ class FakeQuery implements ClaudeQueryHandle {
   setPermissionMode?: (mode: string) => Promise<void>;
   rewindFiles?: (userMessageId: string, options?: { dryRun?: boolean }) => Promise<{ canRewind: boolean; error?: string; filesChanged?: string[] }>;
   supportedModels?: () => Promise<unknown>;
+  supportedCommands?: () => Promise<unknown>;
 
   constructor(readonly input: ClaudeQueryInput) {}
 
@@ -150,7 +151,7 @@ describe("catalog hydration probe", () => {
     { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku" },
   ];
 
-  function probeFixture(): { provider: ClaudeProvider; queries: FakeQuery[] } {
+  function probeFixture(): { provider: ClaudeProvider; queries: FakeQuery[]; workspace: string } {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-probe-")));
     const workspace = path.join(root, "workspace");
     mkdirSync(workspace, { recursive: true });
@@ -164,21 +165,26 @@ describe("catalog hydration probe", () => {
       queryFactory: input => {
         const query = new FakeQuery(input);
         query.supportedModels = async () => realCatalog;
+        query.supportedCommands = async () => [
+          { name: "compact", description: "Clear conversation history but keep a summary in context", argumentHint: "<instructions>" },
+        ];
         queries.push(query);
         // The probe session reports init like any session start.
         queueMicrotask(() => query.push({ type: "system", subtype: "init", slash_commands: ["/compact"] }));
         return query;
       },
     });
-    return { provider, queries };
+    return { provider, queries, workspace };
   }
 
   test("the first picker read hydrates the live catalog without a prompt", async () => {
-    const { provider, queries } = probeFixture();
+    const { provider, queries, workspace } = probeFixture();
     const models = await provider.listModels();
-    // One probe session, promptless, in a scratch directory outside the workspace.
+    // One probe session, promptless, in the workspace itself: a promptless
+    // probe writes no transcript, and the command inventory must include
+    // the workspace's own project commands.
     expect(queries).toHaveLength(1);
-    expect(queries[0]!.input.options.cwd).toContain("uatu-claude-catalog-");
+    expect(queries[0]!.input.options.cwd).toBe(workspace);
     expect(queries[0]!.input.options.enableFileCheckpointing).toBe(false);
     expect(queries[0]!.returned).toBe(true);
     // Live entries with derived windows; the CLI's recommended default is
@@ -195,9 +201,58 @@ describe("catalog hydration probe", () => {
     expect(models.find(model => model.selection.modelId === "opus[1m]")?.contextLimit).toBe(1_000_000);
     expect(models.find(model => model.selection.modelId === "claude-fable-5[1m]")?.contextLimit).toBe(1_000_000);
     expect(models.find(model => model.selection.modelId === "sonnet")?.contextLimit).toBe(200_000);
+    // The control channel's command list rode the same probe, with
+    // descriptions init's bare names cannot carry.
+    expect(await provider.listCommands()).toEqual([
+      { name: "compact", description: "Clear conversation history but keep a summary in context", argumentHint: "<instructions>", kind: "command" },
+    ]);
     // A second read reuses the hydrated catalog: still one query.
     await provider.listModels();
     expect(queries).toHaveLength(1);
+    await provider.dispose();
+  });
+
+  test("an exact resolved-id join beats another entry's stripped heuristic regardless of order", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-order-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const queries: FakeQuery[] = [];
+    // The [1m] row first: its stripped spelling ("claude-sonnet-5") must
+    // not shadow the base row's exact join.
+    const orderedCatalog = [
+      { value: "sonnet[1m]", resolvedModel: "claude-sonnet-5[1m]" },
+      { value: "sonnet", resolvedModel: "claude-sonnet-5" },
+    ];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      executable: "/usr/local/bin/claude",
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.supportedModels = async () => orderedCatalog;
+        queries.push(query);
+        return query;
+      },
+    });
+    await provider.listModels();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+    const live = queries[1]!;
+    live.push({ type: "assistant", uuid: "a1", timestamp: "2026-09-01T10:00:00.000Z",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 3, output_tokens: 1 } } });
+    live.push({ type: "result", uuid: "r1-result", subtype: "success", timestamp: "2026-09-01T10:00:01.000Z",
+      usage: { input_tokens: 3, output_tokens: 1 } });
+    const carriers = () => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert")
+      .map(update => (update as { item: { type: string; usage?: unknown; model?: { modelId: string } } }).item)
+      .filter(item => item.type === "assistant_message" && item.usage !== undefined);
+    await waitFor(() => carriers().length > 0);
+    // The base session attributes to the base entry, not the 1M variant.
+    expect(carriers().at(-1)!.model?.modelId).toBe("sonnet");
+    stop();
     await provider.dispose();
   });
 
@@ -539,6 +594,24 @@ describe("ClaudeProvider sessions", () => {
     await optedIn.dispose();
   });
 
+  test("a slash command dispatches as a turn through the session", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.command(session.id, { id: "cmd-1", name: "compact", arguments: "focus on the tests" });
+    expect(queries).toHaveLength(1);
+    // The CLI parses "/name args" from the user message and runs it.
+    const envelope = await new Promise<{ message: { content: Array<{ type: string; text?: string }> } }>(resolve => {
+      void (async () => {
+        for await (const value of queries[0]!.input.prompt) { resolve(value as never); break; }
+      })();
+    });
+    expect(envelope.message.content).toEqual([{ type: "text", text: "/compact focus on the tests" }]);
+    await waitFor(() => events.some(event => event.eventType === "prompt.accepted"));
+    stop();
+    await provider.dispose();
+  });
+
   test("a mode not offered is refused; an offered one applies at start and live", async () => {
     const { provider, queries } = fixture();
     const session = await provider.createSession("x");
@@ -673,7 +746,7 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
-  test("the implement intent leaves planning for the default mode", async () => {
+  test("the implement intent leaves planning for the declared default mode", async () => {
     const { provider, queries } = fixture();
     const session = await provider.createSession("x");
     await provider.prompt(session.id, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
@@ -682,7 +755,7 @@ describe("ClaudeProvider sessions", () => {
     await Bun.sleep(5);
     await provider.replyPermission(session.id, "p1", "once", "implement");
     await decision;
-    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("default");
+    expect((await provider.getConversationConfiguration(session.id)).mode).toBe("auto");
     await provider.dispose();
   });
 

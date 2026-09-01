@@ -1766,9 +1766,14 @@ export function initChat(api = new ChatApiClient()): void {
   const stageModel = (selection: ModelSelection | undefined) => {
     if (!projection) return;
     const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    const effective = (model: ModelSelection | undefined) => model ?? models.find(candidate => candidate.default)?.selection;
+    const before = effective(staged.model ?? projection.configuration?.model);
     if (!selection || (projection.configuration?.model && sameModel(selection, projection.configuration.model))) delete staged.model;
     else staged.model = selection;
-    delete staged.variant;
+    const after = effective(staged.model ?? projection.configuration?.model);
+    // A staged effort survives a selection that lands on the same effective
+    // model (re-clicking the active Default row); a real switch clears it.
+    if (!(before && after && sameModel(before, after))) delete staged.variant;
     setStagedConfiguration(projection.conversationId, staged);
     renderConfiguration();
     syncContextIndicator();
@@ -1776,6 +1781,13 @@ export function initChat(api = new ChatApiClient()): void {
   const stageVariant = (name: string | undefined) => {
     if (!projection) return;
     const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    // The wire requires a model with a variant. With nothing chosen the
+    // declared default IS the model in force: stage its selection
+    // alongside, exactly what clicking the Default row commits.
+    if (name && staged.model === undefined && projection.configuration?.model === undefined) {
+      const defaultModel = models.find(model => model.default);
+      if (defaultModel) staged.model = defaultModel.selection;
+    }
     const displayedModel = staged.model ?? projection.configuration?.model;
     const effectiveModel = projection.configuration?.model;
     const effectiveModelApplies = displayedModel === undefined
@@ -2967,9 +2979,17 @@ export function initChat(api = new ChatApiClient()): void {
         wantsCommands ? api.commands(status.agent.id).then(list => ({ list, ok: true })).catch(() => ({ list: [] as ChatCommand[], ok: false })) : Promise.resolve({ list: [] as ChatCommand[], ok: true }),
         has("modes") ? api.modes(status.agent.id).catch(() => [] as ChatMode[]) : Promise.resolve([] as ChatMode[]),
       ]);
+      // The awaited fetch may resolve after the user moved to another
+      // agent's conversation; installing these lists then would dress that
+      // conversation in this agent's catalog (a Claude "Default" chip on an
+      // OpenCode conversation).
+      if (contextAgentId !== status.agent.id) return;
       catalogs = { models: nextModels, modes: nextModes, commands: nextCommands.list, commandInventoryAvailable: nextCommands.ok };
-      // A failed command read is not banked: the next context switch retries.
-      if (nextCommands.ok) agentCatalogs.set(status.agent.id, catalogs);
+      // A failed command read is not banked: the next context switch
+      // retries. Neither is an empty list from an agent that declares the
+      // capability — its inventory may simply not have hydrated yet, and
+      // banking would hide every command for the rest of the page's life.
+      if (nextCommands.ok && (nextCommands.list.length > 0 || !has("commands"))) agentCatalogs.set(status.agent.id, catalogs);
     }
     models = catalogs.models;
     modes = catalogs.modes;

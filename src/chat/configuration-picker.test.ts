@@ -172,6 +172,69 @@ function setSelectValue(select: HTMLSelectElement, value: string): void {
   }
 }
 
+describe("declared defaults", () => {
+  const defaultCatalog: ChatModel[] = [
+    { selection: { providerId: "anthropic", modelId: "default" }, provider: "Anthropic", name: "Default (recommended)", detail: "Opus 5 with 1M context", default: true, resolvesTo: { providerId: "anthropic", modelId: "opus[1m]" }, variants: ["low", "high"], contextLimit: 1_000_000 },
+    { selection: { providerId: "anthropic", modelId: "opus[1m]" }, provider: "Anthropic", name: "Opus (1M context)", detail: "Opus 5 with 1M context", variants: ["low", "high"], contextLimit: 1_000_000 },
+    { selection: { providerId: "anthropic", modelId: "sonnet" }, provider: "Anthropic", name: "Sonnet", variants: ["low", "high"], contextLimit: 200_000 },
+  ];
+  const defaultState = (): ChatConfigurationPickerState => ({
+    agent: { name: "Claude Code", capabilities: ["models", "modes", "variants"] },
+    models: defaultCatalog,
+    modes: [
+      { name: "auto", description: "Claude handles permission decisions", default: true },
+      { name: "plan", description: "Create a plan before making changes" },
+    ],
+    configuration: {},
+  });
+
+  it("replaces the delegation rows: default entry pinned and selected, default mode preselected", () => {
+    const { elements, controller } = fixture();
+    controller.update(defaultState());
+    controller.open();
+    const rows = [...elements.models.querySelectorAll("button")];
+    // No generic "Let ... choose" row; the flagged entry leads, marked selected.
+    expect(rows.some(row => row.textContent!.includes("Let Claude Code choose"))).toBe(false);
+    expect(rows[0]!.textContent).toContain("Default (recommended)");
+    expect(rows[0]!.textContent).toContain("Selected");
+    // The identity line carries the agent's own words.
+    expect(rows[0]!.textContent).toContain("Opus 5 with 1M context");
+    // The mode select offers no unset entry and lands on the declared default.
+    const modeValues = [...elements.modeSelect!.options].map(option => option.value);
+    // No unset entry at all is the preselection proof linkedom can carry:
+    // with only real modes offered, the first (the declared default) leads.
+    expect(modeValues).toEqual(["auto", "plan"]);
+    // The effort select follows the default entry's variants while unset.
+    expect(elements.variantSection!.hasAttribute("hidden")).toBe(false);
+    expect([...elements.variantSelect!.options].map(option => option.value)).toEqual(["", "low", "high"]);
+    controller.close();
+  });
+
+  it("keeps the default entry searchable and counted", () => {
+    const { elements, controller, window } = fixture();
+    controller.update(defaultState());
+    controller.open();
+    expect(elements.resultStatus.textContent).toBe("3 models");
+    elements.search.value = "recommended";
+    elements.search.dispatchEvent(new window.Event("input", { bubbles: true }));
+    const rows = [...elements.models.querySelectorAll("button")];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.textContent).toContain("Default (recommended)");
+    expect(elements.resultStatus.textContent).toBe("1 model");
+    controller.close();
+  });
+
+  it("choosing the default entry commits its sentinel selection", () => {
+    const { elements, controller, calls, window } = fixture();
+    controller.update(defaultState());
+    controller.open();
+    const row = [...elements.models.querySelectorAll("button")][0]!;
+    row.dispatchEvent(new window.Event("click", { bubbles: true }));
+    expect(calls.models).toEqual([{ providerId: "anthropic", modelId: "default" }]);
+    controller.close();
+  });
+});
+
 describe("configuration picker controller", () => {
   it("renders grouped, selected, unavailable, filtered, and capability-gated content", () => {
     const fixtureValue = fixture();

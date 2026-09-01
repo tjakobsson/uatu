@@ -158,7 +158,11 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
 
   async retry(agentId: string): Promise<AgentChatStatus> {
     const agent = this.requireAgent(agentId);
-    return { agent: agent.descriptor, availability: await agent.service.retry() };
+    const availability = await agent.service.retry();
+    // The merged inventory may have dropped this agent at connect time;
+    // a repaired agent's conversations must re-enter the chooser.
+    if (availability.state === "ready") this.inventoryHub.refresh();
+    return { agent: agent.descriptor, availability };
   }
 
   async models(agentId: string): Promise<ChatModel[]> { return this.requireAgent(agentId).service.models(); }
@@ -466,7 +470,11 @@ class MergedInventoryHub {
    */
   private handlePumpEnd(source: ConversationInventorySubscription): void {
     const index = this.sources.indexOf(source);
-    if (index >= 0) this.sources.splice(index, 1);
+    // A source no longer tracked was cancelled deliberately (a reconnect or
+    // refresh spliced it out first); scheduling on its end would cancel the
+    // replacements and churn the merge forever.
+    if (index < 0) return;
+    this.sources.splice(index, 1);
     if (this.disposed || this.broadcaster.subscriberCount() === 0 || this.reconnectTimer !== null) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -475,6 +483,19 @@ class MergedInventoryHub {
       void this.ensureSources().then(() => this.broadcaster.invalidate());
     }, 250);
     (this.reconnectTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * A repaired agent re-enters the merge. The initial connect drops an agent
+   * whose subscription fails, and no pump exists to notice it healed — so a
+   * successful retry reconnects every source and ticks once, the same
+   * recovery a pump death gets.
+   */
+  refresh(): void {
+    if (this.disposed || this.broadcaster.subscriberCount() === 0) return;
+    if (this.reconnectTimer !== null) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    for (const stale of this.sources.splice(0)) stale.cancel();
+    void this.ensureSources().then(() => this.broadcaster.invalidate());
   }
 
   private releaseIfIdle(): void {

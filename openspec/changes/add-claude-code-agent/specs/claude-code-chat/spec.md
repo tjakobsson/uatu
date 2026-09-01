@@ -159,7 +159,26 @@ leave the model resolution to Claude Code. A model or variant selection
 SHALL apply to the conversation's subsequent prompts, an effort level not
 supported by the selected model MUST NOT be selectable with it, and the
 model's context-window size SHALL be reported when known so context usage
-can be presented.
+can be presented. The catalog SHALL be read from Claude Code itself
+before the first conversation runs when the install permits it, with a
+static fallback only for an install that cannot answer, and model ids
+reported by a running session SHALL be attributed to catalog entries so
+context usage joins the window actually in effect.
+
+#### Scenario: The recommended default is the active choice and names its resolution
+- **WHEN** a Claude Code conversation has not chosen a model
+- **THEN** the catalog's recommended default is presented as the active choice
+- **AND** surfaces that state the choice name the model it currently resolves to
+
+#### Scenario: An effort chosen while the default is active travels with the prompt
+- **WHEN** a user selects an effort level without first choosing a model
+- **THEN** the prompt runs under that effort against the default entry's model
+- **AND** the presented effort is the effort actually sent
+
+#### Scenario: The catalog is live before any turn
+- **WHEN** the model picker is first read on a workspace whose Claude Code install is healthy
+- **THEN** it lists Claude Code's own catalog with its recommended default
+- **AND** an install that cannot answer yields the static fallback instead of an error
 
 #### Scenario: Effort qualifies the selected model
 - **WHEN** a user selects a model and one of its effort levels

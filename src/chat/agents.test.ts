@@ -210,6 +210,57 @@ describe("inventory", () => {
     expect(a.inventory.subscriberCount()).toBe(0);
     expect(b.inventory.subscriberCount()).toBe(0);
   });
+
+  test("an agent dropped at connect re-enters the merge after a successful retry", async () => {
+    const { service, a, b } = fixture();
+    // b's inventory subscription fails while the merged subscription is
+    // first established: its source is dropped, no pump exists to heal it.
+    const healthySubscribe = b.subscribeInventory.bind(b);
+    let broken = true;
+    b.subscribeInventory = async (options: { signal?: AbortSignal } = {}) => {
+      if (broken) throw new Error("agent down");
+      return healthySubscribe(options);
+    };
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    expect(b.inventory.subscriberCount()).toBe(0);
+
+    // The agent heals and the user retries it: the merge reconnects and
+    // b's ticks reach the subscriber again.
+    broken = false;
+    await service.retry("claude");
+    for (let attempt = 0; attempt < 100 && b.inventory.subscriberCount() === 0; attempt += 1) await Bun.sleep(5);
+    expect(b.inventory.subscriberCount()).toBe(1);
+    const tick = subscription.next();
+    b.inventory.invalidate();
+    expect(await tick).toEqual({ value: undefined, done: false });
+    subscription.cancel();
+    void a;
+  });
+
+  test("a reconnect settles: deliberately cancelled sources do not churn the merge", async () => {
+    const { service, a, b } = fixture();
+    let subscribes = 0;
+    const countingSubscribe = a.subscribeInventory.bind(a);
+    a.subscribeInventory = async (options: { signal?: AbortSignal } = {}) => {
+      subscribes += 1;
+      return countingSubscribe(options);
+    };
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    expect(subscribes).toBe(1);
+    // One genuine pump death: b's broadcaster dies and is replaced (its
+    // adapter restarted).
+    const dead = b.inventory;
+    b.inventory = new ConversationInventoryBroadcaster();
+    dead.dispose();
+    // The reconnect fires once and settles; without the tracked-source
+    // guard, each reconnect's own cancellations schedule the next one and
+    // the merge reconnects every 250ms forever.
+    await Bun.sleep(700);
+    expect(subscribes).toBe(2);
+    subscription.cancel();
+  });
 });
 
 describe("qualification of snapshots and events", () => {

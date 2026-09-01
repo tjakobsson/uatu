@@ -30,7 +30,7 @@ src/
 │                   chat/opencode/ (server runtime + SDK v2 provider +
 │                   normalization) and chat/claude/ (probe runtime,
 │                   per-conversation SDK sessions, transcript reader,
-│                   model manifest, normalization). One conversation is
+│                   model catalog, normalization). One conversation is
 │                   owned by one agent for life; ids are agent-qualified
 │                   on the wire (`<agentId>:<providerId>`)
 ├── find/           ⌘F — active-surface tracking (which surface the user is
