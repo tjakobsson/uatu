@@ -3333,6 +3333,7 @@ function readPresentation(): Presentation {
     const value = JSON.parse(raw) as Partial<Presentation>;
     return {
       selectedId: typeof value.selectedId === "string" ? value.selectedId : undefined,
+      lastAgentId: typeof value.lastAgentId === "string" ? value.lastAgentId : undefined,
       drafts: value.drafts && typeof value.drafts === "object" ? value.drafts : {},
       expanded: Array.isArray(value.expanded) ? value.expanded.filter(item => typeof item === "string") : [],
       anchors: value.anchors && typeof value.anchors === "object" ? value.anchors : {},

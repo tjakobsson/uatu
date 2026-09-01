@@ -124,9 +124,31 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   private readonly order: RegisteredChatAgent[];
   private readonly attachmentStore: AttachmentStore;
   private readonly inventoryHub = new MergedInventoryHub(async () =>
-    (await Promise.all(this.order.map(agent =>
-      agent.service.subscribeInventory().catch(() => null),
-    ))).filter((source): source is ConversationInventorySubscription => source !== null));
+    (await Promise.all(this.order.map(agent => {
+      const subscribe = agent.service.subscribeInventory().catch(() => null);
+      // Same bound as the REST inventory path: one agent's stalled startup
+      // must not hold the merged SSE subscription (and its abort cleanup)
+      // hostage. A late subscription is cancelled and the hub refreshed so
+      // the healed agent re-enters the merge.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        subscribe,
+        new Promise<null>(resolve => {
+          timer = setTimeout(() => resolve(null), this.inventoryContributionTimeoutMs);
+          (timer as unknown as { unref?: () => void }).unref?.();
+        }),
+      ]).then(source => {
+        if (timer !== undefined) clearTimeout(timer);
+        if (source === null) {
+          void subscribe.then(late => {
+            if (!late) return;
+            late.cancel();
+            this.inventoryHub.refresh();
+          });
+        }
+        return source;
+      });
+    }))).filter((source): source is ConversationInventorySubscription => source !== null));
 
   constructor(options: MultiAgentChatServiceOptions) {
     if (options.agents.length === 0) throw new Error("at least one chat agent is required");

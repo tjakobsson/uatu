@@ -220,6 +220,36 @@ describe("inventory", () => {
     subscription.cancel();
   });
 
+  test("a stalled subscription does not hold the merged SSE fan-in; the late agent re-enters", async () => {
+    const a = new StubAgentService();
+    const b = new StubAgentService();
+    let releaseB: () => void = () => undefined;
+    const healthySubscribe = b.subscribeInventory.bind(b);
+    b.subscribeInventory = (options: { signal?: AbortSignal } = {}) =>
+      new Promise(resolve => { releaseB = () => resolve(healthySubscribe(options)); });
+    const service = new MultiAgentChatService({
+      workspacePath: process.cwd(),
+      inventoryContributionTimeoutMs: 25,
+      agents: [
+        { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
+        { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+      ],
+    });
+    // The merged subscription answers within the bound on a alone.
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    expect(a.inventory.subscriberCount()).toBe(1);
+    const tick = subscription.next();
+    a.inventory.invalidate();
+    expect(await tick).toEqual({ value: undefined, done: false });
+    // The straggler resolves late: its stray subscription is cancelled and
+    // the refreshed merge picks it up.
+    releaseB();
+    for (let attempt = 0; attempt < 200 && b.inventory.subscriberCount() === 0; attempt += 1) await Bun.sleep(5);
+    expect(b.inventory.subscriberCount()).toBe(1);
+    subscription.cancel();
+  });
+
   test("a failing agent does not empty the chooser", async () => {
     const { service, a, b } = fixture();
     a.conversations = [summary("kept", 3)];

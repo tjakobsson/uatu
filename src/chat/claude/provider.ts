@@ -434,7 +434,11 @@ export class ClaudeProvider implements ChatProvider {
       const boundary = turns[stagedState.boundaryIndex];
       if (boundary) mainline = mainline.slice(0, boundary.entryIndex);
     }
-    const { items, accounting } = normalizeTranscriptEntries(mainline, child ? undefined : this.nativeId(sessionId), id => this.modelAliases.get(id) ?? id);
+    // The normalizer stamps child links with this parent identity; it must
+    // be the PUBLIC id — the fork is deliberately hidden and would refuse
+    // as a parent, while the child transcript lookup already redirects the
+    // public id to the fork's directory.
+    const { items, accounting } = normalizeTranscriptEntries(mainline, child ? undefined : sessionId, id => this.modelAliases.get(id) ?? id);
     // Local paging over the fully read transcript, same shape as the
     // OpenCode provider: cursor is the exclusive end index.
     const end = clampIndex(options.cursor, items.length);

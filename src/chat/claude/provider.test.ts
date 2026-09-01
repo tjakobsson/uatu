@@ -1468,6 +1468,56 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a redirected conversation's Task links carry the public parent id", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const agentId = "a1b2c3d4e5f60718";
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "revert this"),
+    ].join("\n"));
+    // The fork's history includes a completed Task.
+    const forkLines = [
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+      JSON.stringify({ type: "assistant", uuid: "a1", parentUuid: "u1", isSidechain: false, timestamp: "2026-08-30T10:10:00.000Z",
+        message: { role: "assistant", model: "claude-opus-5", content: [{ type: "tool_use", id: "toolu_t1", name: "Task", input: { description: "review", prompt: "go" } }] } }),
+      JSON.stringify({ type: "user", uuid: "u3", parentUuid: "a1", isSidechain: false, timestamp: "2026-08-30T10:11:00.000Z",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_t1", content: "done" }] },
+        toolUseResult: { status: "completed", agentId, agentType: "reviewer" } }),
+    ].join("\n");
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`), forkLines);
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
+        return query;
+      },
+      forkSession: async () => ({ sessionId: forkId }),
+    });
+    await provider.undo!(storedId);
+    await provider.prompt(storedId, { id: "r2", text: "new direction", delivery: "queue" });
+    const page = await provider.listMessages(storedId, { limit: 20 });
+    const task = page.items.find(item => item.type === "tool") as { childConversationId?: string };
+    // Public id, not the hidden fork's — the link must survive resolution.
+    expect(task?.childConversationId).toBe(`sub:${storedId}:${agentId}`);
+    // And the link actually resolves through the redirect.
+    const subagentDir = path.join(claudeProjectDir(workspace, configDir), forkId, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeFileSync(path.join(subagentDir, `agent-${agentId}.jsonl`), turn("s1", "2026-08-30T10:12:00.000Z", "child work"));
+    expect(await provider.getSession(`sub:${storedId}:${agentId}`)).not.toBeNull();
+    await provider.dispose();
+  });
+
   test("a completed Task links its subagent transcript and carries the store's attribution", async () => {
     const { provider, configDir, workspace } = fixture();
     const parentId = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
