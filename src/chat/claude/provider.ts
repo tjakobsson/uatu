@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -96,6 +96,12 @@ export type ClaudeProviderOptions = {
   catalogProbe?: boolean;
   /** Conversation rewind: fork the native session up to a boundary (D8). */
   forkSession?: (sessionId: string, options: { upToMessageId: string; dir: string }) => Promise<{ sessionId: string }>;
+  /**
+   * Durable per-workspace state (conversation configurations, fork
+   * redirections) — uatu's own XDG state home by default; never Claude
+   * Code's storage.
+   */
+  stateFile?: string;
   now?: () => number;
 };
 
@@ -163,6 +169,12 @@ export class ClaudeProvider implements ChatProvider {
   private readonly staged = new Map<string, { boundaryIndex: number; tipSnapshot: Map<string, string | null> }>();
   private readonly activeNative = new Map<string, string>();
   private readonly hiddenNative = new Set<string>();
+  // Restart durability: modes/models/variants and fork redirections must
+  // survive the workspace process, or a resumed conversation silently runs
+  // the wrong mode and a committed revert resurrects its discarded turns.
+  private readonly stateFile: string;
+  private durableRestore: Promise<void> | null = null;
+  private persistChain: Promise<void> = Promise.resolve();
   private readonly forkSession: NonNullable<ClaudeProviderOptions["forkSession"]>;
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private disposed = false;
@@ -175,6 +187,7 @@ export class ClaudeProvider implements ChatProvider {
     this.offerBypassPermissions = options.offerBypassPermissions === true;
     this.catalogProbe = options.catalogProbe !== false;
     this.forkSession = options.forkSession ?? defaultForkSession;
+    this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -270,6 +283,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
+    await this.restoreDurableState();
     if (variant !== undefined) {
       const model = (this.liveModels ?? CLAUDE_MODELS).find(candidate => candidate.selection.modelId === selection.modelId)
         ?? findClaudeModel(selection.modelId);
@@ -281,6 +295,7 @@ export class ClaudeProvider implements ChatProvider {
     const configuration = { ...previous, model: selection, ...(variant ? { variant } : {}) };
     if (!variant) delete configuration.variant;
     this.configurations.set(sessionId, configuration);
+    this.persistDurableState();
     const live = this.live.get(sessionId);
     if (!live) return;
     // The "default" sentinel is the CLI's own pick on the live path too:
@@ -296,6 +311,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async listSessions(): Promise<ProviderSession[]> {
+    await this.restoreDurableState();
     const { sessions } = await listTranscriptSessions(this.workspacePath, this.configDir);
     const stored = sessions.filter(session => !this.hiddenNative.has(session.id)).map(session => ({
       id: session.id,
@@ -314,6 +330,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async createSession(_id: string, configuration: ConversationConfiguration = {}): Promise<ProviderSession> {
+    await this.restoreDurableState();
     // The SDK requires a UUID session id; the adapter's suggestion is not
     // one, so the provider mints its own (same as the OpenCode provider).
     const id = randomUUID();
@@ -323,6 +340,7 @@ export class ClaudeProvider implements ChatProvider {
     // Claude Code's own default: a fresh conversation runs in Auto unless
     // the creator chose otherwise.
     this.configurations.set(id, { mode: "auto", ...configuration });
+    this.persistDurableState();
     this.events_.push({
       conversationId: id,
       updates: [],
@@ -334,6 +352,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async getSession(id: string): Promise<ProviderSession | null> {
+    await this.restoreDurableState();
     const child = parseSubagentId(id);
     if (child) {
       // Synthetic and read-only: a subagent run is reached from its parent's
@@ -361,10 +380,12 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration> {
+    await this.restoreDurableState();
     return this.configurations.get(sessionId) ?? {};
   }
 
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
+    await this.restoreDurableState();
     // History joins model ids on the catalog aliases; hydrate them first so
     // a cold read does not serve raw ids the gauge cannot match (no-op once
     // the catalog is live).
@@ -415,6 +436,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+    await this.restoreDurableState();
     if (this.disposed) throw new Error("Claude provider is disposed");
     if (parseSubagentId(sessionId)) throw new Error("a subagent transcript is read-only");
     if (input.mode !== undefined) {
@@ -436,6 +458,7 @@ export class ClaudeProvider implements ChatProvider {
       if (input.mode === "plan" && previousMode !== "plan") this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
       const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
       this.configurations.set(sessionId, configuration);
+      this.persistDurableState();
       // A session that already existed switches live; a fresh one was
       // created with the mode in its options.
       if (alreadyLive) {
@@ -590,6 +613,8 @@ export class ClaudeProvider implements ChatProvider {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
+    // Nothing durable may still be in flight when the workspace stops.
+    await this.persistChain.catch(() => undefined);
     await this.probeQuery?.return?.().catch(() => undefined);
     await this.hydration?.catch(() => undefined);
     const sessions = [...this.live.values()];
@@ -690,10 +715,12 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async getReversibleHistoryState(sessionId: string): Promise<ReversibleHistoryState> {
+    await this.restoreDurableState();
     return (await this.reversibleContext(sessionId)).state;
   }
 
   async undo(sessionId: string): Promise<ReversibleHistoryResult> {
+    await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const index = (this.staged.get(sessionId)?.boundaryIndex ?? context.turns.length) - 1;
     if (index < 0 || !context.turns[index]) return { outcome: "nothing-to-undo", state: context.state };
@@ -701,6 +728,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async redo(sessionId: string): Promise<ReversibleHistoryResult> {
+    await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const stagedState = this.staged.get(sessionId);
     if (!stagedState) return { outcome: "nothing-to-redo", state: context.state };
@@ -710,6 +738,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async revert(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const index = context.turns.findIndex(turn => `message:${turn.uuid}` === messageId);
     if (index < 0) throw new ReversibleHistoryTargetError();
@@ -717,6 +746,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async restore(sessionId: string, messageId: string): Promise<ReversibleHistoryResult> {
+    await this.restoreDurableState();
     const context = await this.reversibleContext(sessionId);
     const stagedState = this.staged.get(sessionId);
     if (!stagedState) return { outcome: "nothing-to-redo", state: context.state };
@@ -812,6 +842,7 @@ export class ClaudeProvider implements ChatProvider {
       : randomUUID();
     this.activeNative.set(sessionId, replacement);
     this.hiddenNative.add(replacement);
+    this.persistDurableState();
     this.staged.delete(sessionId);
     // The live session is bound to the pre-fork history; the next prompt
     // resumes the fork instead.
@@ -826,6 +857,48 @@ export class ClaudeProvider implements ChatProvider {
 
   private nativeId(sessionId: string): string {
     return this.activeNative.get(sessionId) ?? sessionId;
+  }
+
+  /** One lazy read per provider; in-memory state is newer and wins. */
+  private restoreDurableState(): Promise<void> {
+    this.durableRestore ??= (async () => {
+      let raw: string;
+      try {
+        raw = await fs.readFile(this.stateFile, "utf8");
+      } catch {
+        return;
+      }
+      try {
+        const stored = JSON.parse(raw) as {
+          configurations?: Record<string, ConversationConfiguration>;
+          activeNative?: Record<string, string>;
+          hiddenNative?: string[];
+        };
+        for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
+          if (!this.configurations.has(id)) this.configurations.set(id, configuration);
+        }
+        for (const [id, native] of Object.entries(stored.activeNative ?? {})) {
+          if (!this.activeNative.has(id)) this.activeNative.set(id, native);
+        }
+        for (const native of stored.hiddenNative ?? []) this.hiddenNative.add(native);
+      } catch {
+        // A corrupt sidecar is dropped; the next persist rewrites it.
+      }
+    })();
+    return this.durableRestore;
+  }
+
+  /** Serialized write-behind; the last snapshot wins. */
+  private persistDurableState(): void {
+    const snapshot = JSON.stringify({
+      configurations: Object.fromEntries(this.configurations),
+      activeNative: Object.fromEntries(this.activeNative),
+      hiddenNative: [...this.hiddenNative],
+    });
+    this.persistChain = this.persistChain.then(async () => {
+      await fs.mkdir(path.dirname(this.stateFile), { recursive: true, mode: 0o700 });
+      await fs.writeFile(this.stateFile, snapshot);
+    }).catch(() => undefined);
   }
 
   /**
@@ -923,6 +996,7 @@ export class ClaudeProvider implements ChatProvider {
     this.modeBeforePlan.delete(sessionId);
     const configuration = { ...this.configurations.get(sessionId), mode: returnMode };
     this.configurations.set(sessionId, configuration);
+    this.persistDurableState();
     await this.live.get(sessionId)?.query.setPermissionMode?.(returnMode);
     this.emit(sessionId, {
       updates: [],
@@ -1234,6 +1308,15 @@ class PushQueue<T> implements AsyncIterable<T> {
       },
     };
   }
+}
+
+/** Mirrors the attachment store's home: uatu's state, keyed by workspace. */
+function defaultStateFile(workspacePath: string): string {
+  const stateHome = process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.trim() !== ""
+    ? process.env.XDG_STATE_HOME
+    : path.join(os.homedir(), ".local", "state");
+  const workspaceKey = createHash("sha256").update(path.resolve(workspacePath)).digest("hex").slice(0, 16);
+  return path.join(stateHome, "uatu", "chat-claude", `${workspaceKey}.json`);
 }
 
 function defaultQueryFactory(input: ClaudeQueryInput): ClaudeQueryHandle {

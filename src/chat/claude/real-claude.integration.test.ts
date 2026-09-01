@@ -32,7 +32,7 @@ describe.skipIf(!enabled)("real Claude Code integration", () => {
     const executable = runtime.executablePath();
     expect(executable).toBeTruthy();
 
-    const provider = new ClaudeProvider({ workspacePath: workspace, executable: executable! });
+    const provider = new ClaudeProvider({ workspacePath: workspace, executable: executable!, stateFile: path.join(root, "uatu-state.json") });
     const events: NormalizedProviderEvent[] = [];
     const abort = new AbortController();
     void (async () => {
@@ -60,7 +60,7 @@ describe.skipIf(!enabled)("real Claude Code integration", () => {
 
       // Native storage now serves the same history without a live turn.
       await provider.dispose();
-      const reread = new ClaudeProvider({ workspacePath: workspace, executable: executable! });
+      const reread = new ClaudeProvider({ workspacePath: workspace, executable: executable!, stateFile: path.join(root, "uatu-state.json") });
       const sessions = await reread.listSessions();
       expect(sessions.map(entry => entry.id)).toContain(session.id);
       const page = await reread.listMessages(session.id, { limit: 50 });

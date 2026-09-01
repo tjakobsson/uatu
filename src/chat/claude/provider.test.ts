@@ -69,6 +69,7 @@ function fixture(): { provider: ClaudeProvider; queries: FakeQuery[]; configDir:
   const queries: FakeQuery[] = [];
   const provider = new ClaudeProvider({
     workspacePath: workspace,
+    stateFile: path.join(workspace, ".uatu-test-state.json"),
     executable: "/usr/local/bin/claude",
     configDir,
     catalogProbe: false,
@@ -161,6 +162,7 @@ describe("catalog hydration probe", () => {
     const queries: FakeQuery[] = [];
     const provider = new ClaudeProvider({
       workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
       executable: "/usr/local/bin/claude",
       configDir,
       queryFactory: input => {
@@ -228,6 +230,7 @@ describe("catalog hydration probe", () => {
     ];
     const provider = new ClaudeProvider({
       workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
       executable: "/usr/local/bin/claude",
       configDir,
       queryFactory: input => {
@@ -585,6 +588,7 @@ describe("ClaudeProvider sessions", () => {
     mkdirSync(path.join(root, "ws"), { recursive: true });
     const optedIn = new ClaudeProvider({
       workspacePath: path.join(root, "ws"),
+      stateFile: path.join(path.join(root, "ws"), ".uatu-test-state.json"),
       executable: "/bin/claude",
       catalogProbe: false,
       configDir: path.join(root, "cfg"),
@@ -831,6 +835,7 @@ describe("ClaudeProvider sessions", () => {
     // rewinding to u1 reverts both.
     const provider = new ClaudeProvider({
       workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
       executable: "/bin/claude",
       catalogProbe: false,
       configDir,
@@ -901,6 +906,7 @@ describe("ClaudeProvider sessions", () => {
     const rewinds: Array<{ uuid: string; dryRun: boolean }> = [];
     const provider = new ClaudeProvider({
       workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
       executable: "/bin/claude",
       catalogProbe: false,
       configDir,
@@ -960,6 +966,60 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("modes and fork redirections survive a provider restart", async () => {
+    const { configDir, workspace } = fixture();
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "revert this"),
+    ].join("\n"));
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"));
+
+    const build = (queries: FakeQuery[]) => new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile,
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
+        queries.push(query);
+        return query;
+      },
+      forkSession: async () => ({ sessionId: forkId }),
+    });
+
+    // First life: the user parks the conversation in plan mode, then a
+    // replacement prompt commits a revert onto the fork.
+    const firstQueries: FakeQuery[] = [];
+    const first = build(firstQueries);
+    await first.prompt(storedId, { id: "r1", text: "think first", delivery: "queue", mode: "plan" });
+    await first.undo!(storedId);
+    await first.prompt(storedId, { id: "r2", text: "a different direction", delivery: "queue" });
+    await first.dispose();
+
+    // Second life: the sidecar restores what memory lost.
+    const secondQueries: FakeQuery[] = [];
+    const second = build(secondQueries);
+    // The parked mode survives — and governs the resumed session.
+    expect((await second.getConversationConfiguration(storedId)).mode).toBe("plan");
+    await second.prompt(storedId, { id: "r3", text: "continue", delivery: "queue" });
+    expect(secondQueries.at(-1)!.input.options.permissionMode).toBe("plan");
+    // The fork redirect survives: the original id resumes the fork, and the
+    // fork does not reappear as a second conversation.
+    expect(secondQueries.at(-1)!.input.options.resume).toBe(forkId);
+    expect((await second.listSessions()).map(session => session.id)).not.toContain(forkId);
+    await second.dispose();
+  });
+
   test("a replacement prompt commits the revert by forking the native session", async () => {
     const { provider, queries, configDir, workspace } = fixture();
     const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
@@ -981,6 +1041,7 @@ describe("ClaudeProvider sessions", () => {
     void root2;
     const forking = new ClaudeProvider({
       workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
       executable: "/bin/claude",
       catalogProbe: false,
       configDir,
