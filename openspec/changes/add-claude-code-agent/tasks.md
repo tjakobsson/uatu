@@ -129,23 +129,23 @@
 
 ## 5. Integration, docs, release
 
-- [ ] 5.1 E2E: Claude provider double wired through
+- [x] 5.1 E2E: Claude provider double wired through
       `tests/e2e/server.ts`; scenarios for agent choice at creation,
       cross-agent chooser, permission card round trip, question form,
       attachment round trip, plan approval intents, task-progress
       in-place updates, undo round trip, subagent drill-down and
       return, and OpenCode-unaffected-by-Claude-outage; verify
       `bun test:e2e` passes
-- [ ] 5.2 Opt-in real-binary integration test mirroring
+- [x] 5.2 Opt-in real-binary integration test mirroring
       `real-opencode.integration.test.ts` for the Claude provider
       (guarded by env var); verify it passes locally with a real
       `claude` install
-- [ ] 5.3 Docs: reorganize `docs/OPENCODE-CHAT.md` into an
+- [x] 5.3 Docs: reorganize `docs/OPENCODE-CHAT.md` into an
       agent-neutral chat doc with per-agent prerequisite sections;
       update `ARCHITECTURE.md` and `CLAUDE.md` folder maps for
       `src/chat/opencode/` and `src/chat/claude/`; verify doc links
       and folder references match the tree
-- [ ] 5.4 Full gate: `bun run typecheck`, `bun test`,
+- [x] 5.4 Full gate: `bun run typecheck`, `bun test`,
       `bun run api:validate`, `bun test:e2e`, `bun run build` +
       `bun run smoke`, `bun run check:licenses` all pass; walk the
       running UI end-to-end — agent choice, a real Claude

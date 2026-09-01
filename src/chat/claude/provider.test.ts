@@ -625,7 +625,7 @@ describe("ClaudeProvider sessions", () => {
     const before = await provider.getReversibleHistoryState!(storedId);
     expect(before).toEqual({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] });
 
-    await expect(provider.undo!(storedId)).rejects.toThrow("no longer available");
+    await expect(provider.undo!(storedId)).rejects.toThrow("the checkpoint store refused the rewind: no checkpoint");
     expect((await provider.getReversibleHistoryState!(storedId)).staged).toBe(false);
     expect(readFileSync(marker, "utf8")).toBe("after-turn-2");
 
@@ -644,6 +644,24 @@ describe("ClaudeProvider sessions", () => {
     expect(redone.state.staged).toBe(false);
     expect(readFileSync(marker, "utf8")).toBe("after-turn-2");
     expect((await provider.listMessages(storedId, { limit: 10 })).items.map(item => item.id)).toEqual(["message:u1", "message:u2"]);
+    await provider.dispose();
+  });
+
+  test("interrupt markers are not undoable turns", async () => {
+    const { provider, configDir, workspace } = fixture();
+    const storedId = "aaaaaaaa-1111-4222-8333-444444444444";
+    const line = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      line("u1", "2026-08-30T10:00:00.000Z", "real prompt"),
+      line("u2", "2026-08-30T10:01:00.000Z", "[Request interrupted by user]"),
+    ].join("\n"));
+    const state = await provider.getReversibleHistoryState!(storedId);
+    // One real turn; the marker neither counts nor becomes a boundary target.
+    expect(state.canUndo).toBe(true);
+    await expect(provider.revert!(storedId, "message:u2")).rejects.toThrow();
     await provider.dispose();
   });
 

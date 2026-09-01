@@ -94,4 +94,106 @@ test.describe("multi-agent chat", () => {
     await page.locator('#chat-agent-menu .chat-agent-menu__item[data-agent-id="opencode"]').click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
   });
+
+  test("a plan approval offers its intents and resolves to the chosen one", async ({ page, request }) => {
+    await bootDualAgentChat(page, request);
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Plan flow",
+      items: [{ id: "message:u1", type: "user_message", createdAt: 1, text: "plan the fix" }],
+    }) as { conversation: { id: string } };
+    await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+    await expect(page.locator("#chat-items")).toContainText("plan the fix");
+
+    await control(request, { action: "item", conversationId: seeded.conversation.id, item: {
+      id: "permission:plan1", type: "permission", createdAt: 2, requestId: "plan1",
+      action: "Review the plan", resources: [], status: "pending",
+      plan: "## The plan\n\n1. Fix the **bug**",
+      choices: [
+        { id: "implement", label: "Approve and implement" },
+        { id: "implement-and-restore", label: "Approve, then return to acceptEdits" },
+      ],
+    } });
+    // The plan renders as markdown; the generic approve pair is absent.
+    await expect(page.locator(".chat-request-plan strong")).toHaveText("bug");
+    await expect(page.locator("[data-permission-outcome=approved-once]")).toHaveCount(0);
+
+    await page.locator('[data-permission-choice="implement-and-restore"]').click();
+    // The reply carried the chosen intent and the card receded to its label.
+    await expect(page.locator(".chat-request-trace")).toHaveText("Approve, then return to acceptEdits");
+  });
+
+  test("task progress stays one block across updates and a reopen shows the final state", async ({ page, request }) => {
+    await bootDualAgentChat(page, request);
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Task flow",
+      items: [{ id: "message:u1", type: "user_message", createdAt: 1, text: "do the work" }],
+    }) as { conversation: { id: string } };
+    const id = seeded.conversation.id;
+    await page.locator("#chat-conversation-select").selectOption(id);
+    await expect(page.locator("#chat-items")).toContainText("do the work");
+
+    await control(request, { action: "item", conversationId: id, item: {
+      id: "task-progress", type: "task_progress", createdAt: 2, entries: [
+        { text: "Read the code", status: "in_progress", activeText: "Reading the code" },
+        { text: "Fix it", status: "pending" },
+      ],
+    } });
+    await expect(page.locator(".chat-task-progress-count")).toHaveText("0/2");
+    await expect(page.locator(".chat-task-progress")).toContainText("Reading the code");
+
+    await control(request, { action: "item", conversationId: id, item: {
+      id: "task-progress", type: "task_progress", createdAt: 2, entries: [
+        { text: "Read the code", status: "completed" },
+        { text: "Fix it", status: "in_progress" },
+      ],
+    } });
+    await expect(page.locator(".chat-task-progress")).toHaveCount(1);
+    await expect(page.locator(".chat-task-progress-count")).toHaveText("1/2");
+
+    // A reload rebuilds the surface from the authoritative snapshot.
+    await page.reload();
+    await openChatPanel(page);
+    await expect(page.locator(".chat-task-progress")).toHaveCount(1);
+    await expect(page.locator(".chat-task-progress-count")).toHaveText("1/2");
+  });
+
+  test("a claude conversation answers interactions and drills into its subagent", async ({ page, request }) => {
+    await bootDualAgentChat(page, request);
+    const child = await control(request, {
+      action: "seed", agent: "claude", title: "Child", child: true,
+      items: [{ id: "part:c1", type: "assistant_message", createdAt: 3, markdown: "child findings" }],
+    }) as { conversation: { id: string } };
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Interactions",
+      items: [
+        { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Inspect", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
+      ],
+    }) as { conversation: { id: string } };
+    const id = seeded.conversation.id;
+    await page.locator("#chat-conversation-select").selectOption(id);
+
+    // Permission round trip on the claude-owned conversation.
+    await control(request, { action: "item", conversationId: id, item: {
+      id: "permission:p1", type: "permission", createdAt: 4, requestId: "p1",
+      action: "Write marker.txt", resources: ["marker.txt"], status: "pending",
+    } });
+    await page.locator("[data-permission-outcome=approved-once]").click();
+    await expect(page.locator(".chat-request-trace")).toHaveText("Allowed once");
+
+    // Question rejection keeps the surface usable.
+    await control(request, { action: "item", conversationId: id, item: {
+      id: "question:q1", type: "question", createdAt: 5, requestId: "q1", status: "pending",
+      questions: [{ prompt: "Proceed?", header: "Next", options: [{ label: "Yes", description: "" }], multiple: false, allowFreeForm: false }],
+    } });
+    await page.locator("[data-question-reject]").click();
+    await expect(page.locator("#chat-items details.chat-request").last()).toContainText("Rejected");
+
+    // The subagent opens as a drill-down and returns.
+    await page.locator("#chat-subagents summary").click();
+    await page.getByRole("button", { name: "explore · Inspect" }).click();
+    await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(id);
+    await page.locator("#chat-drilldown-back").click();
+    await expect(page.locator("#chat-items")).toContainText("Inspect");
+  });
 });

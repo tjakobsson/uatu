@@ -58,6 +58,19 @@ src/
 ├── cli/                  CLI domain — argument parsing + usage text
 │                         (parse.ts) and TTY startup output (output.ts);
 │                         side-effect-free so the unit suite can import them
+├── chat/                 The agent chat surface, shared across agents:
+│                         seam types (provider.ts, types.ts), the adapter
+│                         (queue/replay/receipts/recovery), the multi-agent
+│                         registry + router (agents.ts — qualified
+│                         conversation ids, per-agent status, merged
+│                         inventory), client transport + validation, the
+│                         timeline renderer, and the whole browser UI.
+│                         Agent-specific code lives below the seam:
+│                         chat/opencode/ (loopback server runtime, SDK v2
+│                         provider, wire normalization) and chat/claude/
+│                         (probe-only runtime, per-conversation Claude
+│                         Agent SDK sessions, native-transcript reader,
+│                         model manifest, its own normalization)
 ├── shell/                App-wide chrome and the appState singleton: boot,
 │                         SSE event handling, URL/history, follow-mode
 │                         capability, connection chip, PWA registration

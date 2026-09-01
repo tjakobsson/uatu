@@ -464,17 +464,21 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.reversibleHistoryMutation(id, requestId, "restore", messageId);
   }
 
-  async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
+  async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string) {
     this.require(id);
     const key = `permission:${id}:${interactionId}:${requestId}`;
     const existing = this.receipts.get(key) as { outcome: PermissionOutcome } | undefined;
     if (existing) return existing;
     const result = { outcome };
+    this.permissionChoices.push({ interactionId, ...(choiceId ? { choiceId } : {}) });
     const item = this.items.get(id)!.get(`permission:${interactionId}`);
-    if (item?.type === "permission") this.publishItem(id, { ...item, status: "resolved", outcome });
+    if (item?.type === "permission") this.publishItem(id, { ...item, status: "resolved", outcome, ...(choiceId ? { choiceId } : {}) });
     this.receipts.set(key, result);
     return result;
   }
+
+  // What each permission reply carried, for spec assertions.
+  readonly permissionChoices: Array<{ interactionId: string; choiceId?: string }> = [];
 
   async respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome) {
     this.require(id);

@@ -254,16 +254,25 @@ export function initChat(api = new ChatApiClient()): void {
   let agent: ChatAgent | undefined;
   // Before the agent reports itself there is nothing truthful to name, so the
   // copy stays neutral rather than guessing.
+  // The name to show for the current context: the agent's own declaration
+  // once its runtime has spoken, its registry identity before that. Identity
+  // is known from the status list even while availability is still idle —
+  // a conversation created under a cold agent is not anonymous.
+  const displayAgentName = (): string | undefined => agent?.name ?? agentStatusFor(contextAgentId)?.agent.name;
   const nameAgent = () => {
+    const name = displayAgentName();
     // Both, not one or the other: the workspace label answers "where am I"
     // and the agent name answers "who am I talking to". A nullish chain would
     // have hidden the agent on every workspace that has a root — which is all
     // of them — leaving the composer as the only place it was named.
-    if (chatContext) chatContext.textContent = [appState.roots[0]?.label, agent?.name].filter(Boolean).join(" · ") || "Chat";
-    if (inputLabel) inputLabel.textContent = agent ? `Message ${agent.name}` : "Send a message";
-    if (input) input.placeholder = agent ? `Ask ${agent.name}…` : "Send a message…";
+    if (chatContext) chatContext.textContent = [appState.roots[0]?.label, name].filter(Boolean).join(" · ") || "Chat";
+    if (inputLabel) inputLabel.textContent = name ? `Message ${name}` : "Send a message";
+    if (input) input.placeholder = name ? `Ask ${name}…` : "Send a message…";
   };
-  const chatHeading = () => (agent ? `${agent.name} Chat` : "Chat");
+  const chatHeading = () => {
+    const name = displayAgentName();
+    return name ? `${name} Chat` : "Chat";
+  };
   // An agent that declared itself is believed exactly: a capability it did not
   // list is one it does not have. When no agent has been reported at all — an
   // older workspace, or the moment before the adapter exists — nothing is
@@ -1593,7 +1602,11 @@ export function initChat(api = new ChatApiClient()): void {
     // conversation). Remember the choice as the next creation's default.
     const owningAgentId = conversationAgentId(id);
     if (owningAgentId && owningAgentId !== contextAgentId) await applyAgentContext(owningAgentId);
-    if (owningAgentId) presentation.lastAgentId = owningAgentId;
+    if (owningAgentId) {
+      presentation.lastAgentId = owningAgentId;
+      const state = agentStatusFor(owningAgentId)?.availability.state;
+      if (state === "idle" || state === "starting") refreshIdleAgentContext();
+    }
     save();
     projection = null;
     // Not a clear: the incoming conversation may hold a refusal that landed
@@ -2943,6 +2956,32 @@ export function initChat(api = new ChatApiClient()): void {
     renderConfiguration();
   };
 
+  /**
+   * A selected conversation whose agent has not reported ready yet: the
+   * selection itself makes the server start that agent, so poll status
+   * until it lands as ready or unavailable — that is what upgrades the
+   * identity row from registry name to declaration and loads the catalogs.
+   * Gated on an actual selection so an untouched idle agent is never polled.
+   */
+  let statusRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  const refreshIdleAgentContext = () => {
+    if (statusRefreshTimer !== null) return;
+    statusRefreshTimer = setTimeout(async () => {
+      statusRefreshTimer = null;
+      const watching = contextAgentId;
+      if (!watching || conversationAgentId(presentation.selectedId) !== watching) return;
+      try {
+        agentStatuses = await api.status();
+      } catch {
+        return;
+      }
+      if (contextAgentId !== watching) return;
+      await applyAgentContext(watching);
+      const state = agentStatusFor(watching)?.availability.state;
+      if (state === "idle" || state === "starting") refreshIdleAgentContext();
+    }, 1_500);
+  };
+
   const startInventoryStream = () => {
     if (inventoryStream) return;
     try {
@@ -3057,11 +3096,15 @@ export function initChat(api = new ChatApiClient()): void {
       // the pop-in this seam exists to avoid. The starting context is the
       // last-used agent, then the server default (first entry).
       const preferred = agentStatusFor(presentation.lastAgentId) ?? agentStatuses[0]!;
+      // Anything selected while these fetches are in flight — a conversation
+      // the user just created — outranks this snapshot: the fetch began
+      // before that creation, so its list cannot know it.
+      const selectionAtStart = selectionGeneration;
       const [, nextConversations] = await Promise.all([
         applyAgentContext(preferred.agent.id),
         api.conversations(),
       ]);
-      conversations = dedupeConversationInventory(nextConversations);
+      conversations = dedupeConversationInventory([...conversations, ...nextConversations]);
       // Bootstrap is the silent page-local baseline. The stream starts only
       // after this point, so its mandatory initial frame reconciles rather
       // than turning every existing id into an unseen one.
@@ -3072,7 +3115,10 @@ export function initChat(api = new ChatApiClient()): void {
       newButton.disabled = false;
       renderConfiguration();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
-      installInitialChooser();
+      // A selection made mid-bootstrap is the user's; the initial chooser
+      // pass must not replace it with this snapshot's newest entry.
+      if (selectionGeneration === selectionAtStart) installInitialChooser();
+      else patchChooser(presentation.selectedId ?? null);
       bootstrapped = true;
       startInventoryStream();
     } catch (error) { announce(messageOf(error), true); }

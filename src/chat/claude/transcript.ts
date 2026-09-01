@@ -151,6 +151,12 @@ export type TranscriptSessionList = {
  * and moved directories exist — the entries' own recorded `cwd` is the
  * confinement authority (spec: a foreign directory's session is not offered).
  */
+// Enumeration reads only this much of each file: enough for the identity
+// facts (first prompt, recorded cwd, creation time). A long-running session
+// grows to tens of megabytes, and inventory listing runs often — a full
+// parse per file per listing stalls the whole single-threaded server.
+const SUMMARY_HEAD_BYTES = 256 * 1024;
+
 export async function listTranscriptSessions(workspacePath: string, configDir: string = claudeConfigDir()): Promise<TranscriptSessionList> {
   const directory = claudeProjectDir(workspacePath, configDir);
   const canonicalWorkspace = canonicalize(workspacePath);
@@ -164,7 +170,32 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
   let skippedFiles = 0;
   for (const name of names) {
     try {
-      const { entries } = await readSessionTranscript(path.join(directory, name));
+      const file = path.join(directory, name);
+      const info = await fs.stat(file);
+      const wholeFileRead = info.size <= SUMMARY_HEAD_BYTES;
+      const handle = await fs.open(file, "r");
+      let head: string;
+      try {
+        const buffer = Buffer.alloc(Math.min(info.size, SUMMARY_HEAD_BYTES));
+        await handle.read(buffer, 0, buffer.length, 0);
+        head = buffer.toString("utf8");
+      } finally {
+        await handle.close();
+      }
+      const lines = head.split("\n");
+      // The head can end mid-line; a partial trailing line is not evidence.
+      if (!wholeFileRead) lines.pop();
+      const entries: TranscriptEntry[] = [];
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const entry = validateEntry(JSON.parse(line));
+          if (entry) entries.push(entry);
+        } catch {
+          // Unparseable lines are skip-and-count territory for full reads;
+          // for a summary they simply contribute nothing.
+        }
+      }
       const mainline = entries.filter(entry => !entry.isSidechain);
       if (mainline.length === 0) {
         skippedFiles += 1;
@@ -180,7 +211,10 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
         id: path.basename(name, ".jsonl"),
         firstPrompt: firstUser ? promptText(firstUser) : null,
         createdAt: mainline[0]!.timestamp,
-        updatedAt: mainline[mainline.length - 1]!.timestamp,
+        // Deterministic from entries when the head covered the whole file;
+        // a file too large for that uses its mtime — recency is what the
+        // ordering needs, and reading the tail would defeat the bound.
+        updatedAt: wholeFileRead ? mainline[mainline.length - 1]!.timestamp : Math.round(info.mtimeMs),
       });
     } catch {
       skippedFiles += 1;

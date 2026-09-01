@@ -615,11 +615,11 @@ export class ClaudeProvider implements ChatProvider {
     let tipSnapshot = existing?.tipSnapshot;
     if (!tipSnapshot) {
       const preview = await session.query.rewindFiles(target.uuid, { dryRun: true });
-      if (!preview.canRewind) throw new ReversibleHistoryTargetError();
+      if (!preview.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(preview.error));
       tipSnapshot = await this.snapshotFiles(preview.filesChanged ?? []);
     }
     const result = await session.query.rewindFiles(target.uuid, { dryRun: false });
-    if (!result.canRewind) throw new ReversibleHistoryTargetError();
+    if (!result.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
     this.staged.set(sessionId, { boundaryIndex: index, tipSnapshot });
     return {
       outcome: "changed",
@@ -848,6 +848,10 @@ function clampIndex(cursor: string | undefined, length: number): number {
   return Math.max(0, Math.min(parsed, length));
 }
 
+function rewindRefusal(error: string | undefined): string {
+  return error ? `the checkpoint store refused the rewind: ${error}` : "reversible-history message is no longer available";
+}
+
 function parseSubagentId(id: string): { parentSessionId: string; agentId: string } | null {
   const match = id.match(/^sub:([A-Za-z0-9-]+):([A-Za-z0-9-]+)$/);
   return match ? { parentSessionId: match[1]!, agentId: match[2]! } : null;
@@ -866,7 +870,9 @@ function reversibleTurns(entries: Array<{ kind: string; uuid: string; message: R
       : Array.isArray(content) && !content.some(block => (block as { type?: string })?.type === "tool_result")
         ? content.filter(block => (block as { type?: string })?.type === "text").map(block => (block as { text?: string }).text ?? "").join("\n")
         : "";
-    if (text.trim()) turns.push({ uuid: entry.uuid, text, entryIndex: index });
+    // Interrupt markers are recorded as user entries but are not prompts:
+    // no checkpoint is keyed to them and no draft is worth restoring.
+    if (text.trim() && !/^\[Request interrupted/.test(text.trim())) turns.push({ uuid: entry.uuid, text, entryIndex: index });
   });
   return turns;
 }

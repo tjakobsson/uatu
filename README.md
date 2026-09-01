@@ -45,7 +45,7 @@ cognitive debt.
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
 - Git preflight by default (`--force` to bypass for non-git folders); single-file or multi-root scope
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
-- Workspace-scoped [OpenCode Chat](./docs/OPENCODE-CHAT.md) with resumable history, streamed Markdown and tool activity, permissions, questions, cancellation, and safe file navigation
+- Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
 - Installable as a PWA so TUI editor shortcuts (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach the embedded terminal
 
 ## Install
