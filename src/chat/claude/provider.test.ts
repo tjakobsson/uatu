@@ -878,6 +878,58 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a custom tool's arbitrary input still yields an approval resource", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    void queries[0]!.input.options.canUseTool!("mcp__linear__create_issue", { query: "fix the bug", project: "uatu" }, { signal: new AbortController().signal, toolUseID: "t1" });
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    const card = events.find(event => event.eventType === "interaction.requested")!.updates[0]! as { item: { resources: string[] } };
+    // No conventional keys — the compact input is the resource, so the card
+    // survives projection and the callback stays answerable.
+    expect(card.item.resources).toHaveLength(1);
+    expect(card.item.resources[0]).toContain("fix the bug");
+    stop();
+    await provider.dispose();
+  });
+
+  test("an unreadable existing file aborts the rewind instead of snapshotting as absent", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const locked = path.join(workspace, "locked.txt");
+    writeFileSync(locked, "secret", { mode: 0o000 });
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    let realRewinds = 0;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (_uuid, options) => {
+          if (!options?.dryRun) realRewinds += 1;
+          return { canRewind: true, filesChanged: [locked] };
+        };
+        return query;
+      },
+    });
+    // The capture failure aborts before the destructive rewind runs.
+    await expect(provider.undo!(storedId)).rejects.toThrow("cannot snapshot");
+    expect(realRewinds).toBe(0);
+    expect(statSync(locked).size).toBeGreaterThan(0);
+    await provider.dispose();
+  });
+
   test("redo restores file modes and symlinks, not only bytes", async () => {
     const { queries, configDir, workspace } = fixture();
     const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";

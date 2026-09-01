@@ -3250,7 +3250,15 @@ export function initChat(api = new ChatApiClient()): void {
           for (const status of next) {
             if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: true });
           }
+          return;
         }
+        // The bootstrap context may have applied against an idle snapshot,
+        // leaving no declared agent; once the probe's verdict says ready,
+        // re-apply so capabilities and catalogs come from the real agent —
+        // otherwise the first conversation on a fresh workspace never gets
+        // its capability controls until a reload or an agent switch.
+        const current = next.find(status => status.agent.id === contextAgentId);
+        if (current?.availability.state === "ready" && !agent) void applyAgentContext(contextAgentId);
       }).catch(() => undefined);
       startInventoryStream();
     } catch (error) { announce(messageOf(error), true); }

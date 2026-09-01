@@ -1297,8 +1297,13 @@ async function captureFileState(absolute: string): Promise<SnapshotEntry> {
     const stats = await fs.lstat(absolute);
     if (stats.isSymbolicLink()) return { kind: "symlink", target: await fs.readlink(absolute) };
     return { kind: "file", mode: stats.mode & 0o777, base64: await fs.readFile(absolute, "base64") };
-  } catch {
-    return null;
+  } catch (error) {
+    // Only nonexistence means "restore by deleting". Any other failure
+    // (unreadable mode, I/O error) must abort the rewind before it runs —
+    // recording null here would make a later redo delete a file that
+    // exists.
+    if ((error as { code?: string }).code === "ENOENT") return null;
+    throw new ReversibleHistoryTargetError(`cannot snapshot ${absolute} before rewinding: ${error instanceof Error ? error.message : "read failed"}`);
   }
 }
 
@@ -1399,6 +1404,14 @@ function permissionResources(input: Record<string, unknown>, options: ClaudeCanU
   if (typeof options.blockedPath === "string") resources.push(options.blockedPath);
   for (const key of ["file_path", "path", "notebook_path", "url", "command"]) {
     if (typeof input[key] === "string" && input[key]) resources.push(input[key] as string);
+  }
+  // An MCP or custom tool's input rarely uses the conventional keys; a
+  // resource-less non-plan card would be suppressed by the projection and
+  // leave the SDK's callback waiting unanswerable. Describe the input
+  // compactly instead — the arguments ARE the resource.
+  if (resources.length === 0) {
+    const compact = JSON.stringify(input);
+    resources.push(compact && compact !== "{}" ? (compact.length > 200 ? `${compact.slice(0, 199)}…` : compact) : "(no arguments)");
   }
   return [...new Set(resources)];
 }
