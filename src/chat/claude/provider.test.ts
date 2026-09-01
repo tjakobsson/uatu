@@ -752,6 +752,61 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a rewind whose record cannot be written restores the tip instead of acknowledging", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const marker = path.join(workspace, "marker.txt");
+    writeFileSync(marker, "tip");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    // The state file's parent is a FILE: every persist fails.
+    const blocked = path.join(workspace, "blocked");
+    writeFileSync(blocked, "not a directory");
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(blocked, "state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (_uuid, options) => {
+          if (!options?.dryRun) writeFileSync(marker, "rewound");
+          return { canRewind: true, filesChanged: [marker] };
+        };
+        return query;
+      },
+    });
+    await expect(provider.undo!(storedId)).rejects.toThrow("could not be recorded");
+    // The workspace is back at tip and nothing claims to be staged.
+    expect(readFileSync(marker, "utf8")).toBe("tip");
+    expect((await provider.getReversibleHistoryState!(storedId)).staged).toBe(false);
+    await provider.dispose();
+  });
+
+  test("a failed prompt rolls its model and mode selection back", async () => {
+    const { provider, queries } = fixture();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "start", delivery: "queue" });
+    const before = await provider.getConversationConfiguration(session.id);
+    // The prompt stages a new model and mode, then the attachment read fails.
+    await expect(provider.prompt(session.id, {
+      id: "r2", text: "switch", delivery: "queue",
+      model: { providerId: "anthropic", modelId: "claude-sonnet-5" }, mode: "acceptEdits",
+      attachments: [{ id: "gone", name: "gone.png", mimeType: "image/png", absolutePath: "/nonexistent/gone.png" }],
+    })).rejects.toThrow();
+    // Nothing the failed prompt selected sticks.
+    expect(await provider.getConversationConfiguration(session.id)).toEqual(before);
+    void queries;
+    await provider.dispose();
+  });
+
   test("a rejected interrupt leaves the turn's real outcome intact", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);

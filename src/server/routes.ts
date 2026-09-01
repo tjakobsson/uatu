@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
@@ -961,6 +961,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);
+  if (error instanceof InvalidPermissionChoiceError) return chatError(400, error.message);
   if (error instanceof InvalidVariantSelectionError) return chatError(400, error.message);
   if (error instanceof ChatUnavailableError) return chatError(503, "chat is unavailable");
   if (error instanceof AttachmentStoreError) {

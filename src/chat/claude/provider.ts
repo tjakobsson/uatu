@@ -489,6 +489,8 @@ export class ClaudeProvider implements ChatProvider {
     // leave the workspace rewound with Redo already forfeited.
     const stagedBefore = this.staged.get(sessionId);
     const nativeBefore = this.activeNative.get(sessionId);
+    const configurationBefore = this.configurations.get(sessionId);
+    const modeBeforePlanBefore = this.modeBeforePlan.get(sessionId);
     if (stagedBefore) await this.commitStagedRevert(sessionId);
     let session: LiveSession;
     let started: LiveSession | undefined;
@@ -534,6 +536,22 @@ export class ClaudeProvider implements ChatProvider {
       // transcript and park an idle process.
       if (started && this.live.get(sessionId) === started && started.pendingTurns === 0) {
         await this.retireSession(started);
+      }
+      // The failed prompt's model/mode selection was never accepted: the
+      // configuration (and a surviving session's live controls) return to
+      // what the conversation actually ran.
+      if (input.model || input.mode !== undefined) {
+        if (configurationBefore === undefined) this.configurations.delete(sessionId);
+        else this.configurations.set(sessionId, configurationBefore);
+        if (modeBeforePlanBefore === undefined) this.modeBeforePlan.delete(sessionId);
+        else this.modeBeforePlan.set(sessionId, modeBeforePlanBefore);
+        const survivor = this.live.get(sessionId);
+        if (survivor) {
+          const priorModel = configurationBefore?.model?.modelId;
+          if (input.model) await survivor.query.setModel?.(priorModel === undefined || priorModel === "default" ? undefined : priorModel).catch(() => undefined);
+          if (input.mode !== undefined && configurationBefore?.mode) await survivor.query.setPermissionMode?.(configurationBefore.mode).catch(() => undefined);
+        }
+        this.persistDurableState();
       }
       if (stagedBefore) {
         // The fork stays hidden and unused; the conversation returns to
@@ -914,7 +932,17 @@ export class ClaudeProvider implements ChatProvider {
     const result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     if (!result.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
     this.staged.set(sessionId, { boundaryIndex: index, tipSnapshot });
-    this.persistDurableState();
+    try {
+      // The files are already rewound; acknowledging on a lost record
+      // would strand them unrestorable. A record that cannot be written
+      // puts the workspace back at tip instead.
+      await this.queuePersist(this.durableSnapshot());
+    } catch (error) {
+      await this.restoreSnapshot(tipSnapshot).catch(() => undefined);
+      this.staged.delete(sessionId);
+      this.persistDurableState();
+      throw new ReversibleHistoryTargetError(`the rewind could not be recorded (${error instanceof Error ? error.message : "write failed"}); the workspace was restored to the tip`);
+    }
     return {
       outcome: "changed",
       state: reversibleState(context.turns, index),
@@ -1030,9 +1058,24 @@ export class ClaudeProvider implements ChatProvider {
     return this.durableRestore;
   }
 
-  /** Serialized write-behind; the last snapshot wins. */
-  private persistDurableState(): void {
-    const snapshot = JSON.stringify({
+  /**
+   * The serialized, atomic write behind every persist. Returned so a
+   * critical mutation (a rewind that already changed files) can await the
+   * record instead of acknowledging on a swallowed failure.
+   */
+  private queuePersist(snapshot: string): Promise<void> {
+    const write = this.persistChain.then(async () => {
+      await fs.mkdir(path.dirname(this.stateFile), { recursive: true, mode: 0o700 });
+      const temporary = `${this.stateFile}.tmp`;
+      await fs.writeFile(temporary, snapshot);
+      await fs.rename(temporary, this.stateFile);
+    });
+    this.persistChain = write.catch(() => undefined);
+    return write;
+  }
+
+  private durableSnapshot(): string {
+    return JSON.stringify({
       configurations: Object.fromEntries(this.configurations),
       activeNative: Object.fromEntries(this.activeNative),
       hiddenNative: [...this.hiddenNative],
@@ -1040,10 +1083,11 @@ export class ClaudeProvider implements ChatProvider {
         [id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: Object.fromEntries(staged.tipSnapshot) }])),
       modeBeforePlan: Object.fromEntries(this.modeBeforePlan),
     });
-    this.persistChain = this.persistChain.then(async () => {
-      await fs.mkdir(path.dirname(this.stateFile), { recursive: true, mode: 0o700 });
-      await fs.writeFile(this.stateFile, snapshot);
-    }).catch(() => undefined);
+  }
+
+  /** Serialized write-behind; the last snapshot wins. */
+  private persistDurableState(): void {
+    this.queuePersist(this.durableSnapshot()).catch(() => undefined);
   }
 
   /**

@@ -54,6 +54,13 @@ export class InteractionConflictError extends Error {
   }
 }
 
+export class InvalidPermissionChoiceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidPermissionChoiceError";
+  }
+}
+
 export class InvalidModelSelectionError extends Error {
   constructor() {
     super("selected model is not available");
@@ -1314,6 +1321,22 @@ export class ChatAdapter {
       // request stale — otherwise the card is visible, answerable, and refused.
       if (!projection.has(`permission:${requestId}`)) await this.seedPendingPermissions(conversationId);
       projection.requirePending(requestId, "permission");
+      // An approval intent is only meaningful against what the card
+      // offered: a rejection carries none, an offered set requires one of
+      // its own ids, and a generic permission accepts none — otherwise a
+      // Claude plan silently maps an unknown intent to implement, or a
+      // rejection renders as though a choice was approved.
+      const pendingItem = projection.items().find(item => item.id === `permission:${requestId}`);
+      const offered = (pendingItem?.type === "permission" ? pendingItem.choices ?? [] : []).map(choice => choice.id);
+      if (outcome === "rejected") {
+        if (choiceId !== undefined) throw new InvalidPermissionChoiceError("a rejection does not carry an approval intent");
+      } else if (offered.length > 0) {
+        if (choiceId === undefined || !offered.includes(choiceId)) {
+          throw new InvalidPermissionChoiceError(`the approval must name one of the offered intents: ${offered.join(", ")}`);
+        }
+      } else if (choiceId !== undefined) {
+        throw new InvalidPermissionChoiceError("this permission offers no approval intents");
+      }
       const reply: ProviderPermissionReply = outcome === "approved-once" ? "once" : outcome === "approved-session" ? "always" : "reject";
       await this.provider.replyPermission(conversationId, requestId, reply, choiceId);
       projection.resolvePermission(requestId, outcome, choiceId);

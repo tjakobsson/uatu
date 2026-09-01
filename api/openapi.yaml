@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 5.10.0-experimental
+  version: 5.11.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 5 and workspace revision 10
+  summary: Hub revision 5 and workspace revision 11
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
