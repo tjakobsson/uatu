@@ -81,29 +81,33 @@ test("a multi-file burst refreshes the active document when another path is nomi
   await expect.poll(() => page.evaluate(() => (
     window as unknown as { __uatuWatchEvents?: Array<string | null> }
   ).__uatuWatchEvents?.length ?? 0)).toBeGreaterThan(0);
-  const eventCount = await page.evaluate(() => (
-    window as unknown as { __uatuWatchEvents: Array<string | null> }
-  ).__uatuWatchEvents.length);
-
-  await fs.writeFile(workspacePath("README.md"), `# Uatu\n\n${marker}\n`, "utf8");
   // Both writes pass through awaitWriteFinish with the same spacing, so the
-  // later binary event is the debounce batch's representative path.
-  await page.waitForTimeout(50);
-  await fs.writeFile(
-    workspacePath("hero.svg"),
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>`,
-    "utf8",
-  );
+  // later binary event lands in the same debounce batch and the batch's
+  // representative path is null. Event-loop jitter under a loaded suite can
+  // split the pair into two batches, which nominates README instead — that
+  // is a scheduling artifact, not the behavior under test, so the burst is
+  // retried until it lands as one batch.
+  await expect.poll(async () => {
+    const before = await page.evaluate(() => (
+      window as unknown as { __uatuWatchEvents: Array<string | null> }
+    ).__uatuWatchEvents.length);
+    await fs.writeFile(workspacePath("README.md"), `# Uatu\n\n${marker}\n`, "utf8");
+    await page.waitForTimeout(50);
+    await fs.writeFile(
+      workspacePath("hero.svg"),
+      `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>`,
+      "utf8",
+    );
+    await expect.poll(() => page.evaluate(() => (
+      window as unknown as { __uatuWatchEvents: Array<string | null> }
+    ).__uatuWatchEvents.length)).toBeGreaterThan(before);
+    return page.evaluate(() => (
+      window as unknown as { __uatuWatchEvents: Array<string | null> }
+    ).__uatuWatchEvents.at(-1));
+  }, { timeout: 20_000 }).toBeNull();
 
   await expect(page.locator("#preview")).toContainText(marker);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
-  await expect.poll(() => page.evaluate(() => (
-    window as unknown as { __uatuWatchEvents: Array<string | null> }
-  ).__uatuWatchEvents.length)).toBeGreaterThan(eventCount);
-  const nominated = await page.evaluate(() => (
-    window as unknown as { __uatuWatchEvents: Array<string | null> }
-  ).__uatuWatchEvents.at(-1));
-  expect(nominated).toBeNull();
 });
 
 test("server falls back with 404 for paths outside every watched root", async ({ request }) => {

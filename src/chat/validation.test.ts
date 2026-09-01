@@ -16,11 +16,12 @@ import {
 } from "./validation";
 
 const summary = {
-  id: "session-1",
+  id: "opencode:session-1",
   title: "Implement chat",
   createdAt: 1,
   updatedAt: 2,
   status: "running",
+  agent: { id: "opencode", name: "OpenCode" },
 } as const;
 
 const items = [
@@ -119,7 +120,7 @@ describe("chat domain validation", () => {
   });
 
   test("accepts every ordered event fixture", () => {
-    const base = { generation: "generation-1", conversationId: "session-1" };
+    const base = { generation: "generation-1", conversationId: "opencode:session-1" };
     const events = [
       { ...base, sequence: 1, type: "item.upsert", item: items[0] },
       { ...base, sequence: 2, type: "item.remove", itemId: "notice-1" },

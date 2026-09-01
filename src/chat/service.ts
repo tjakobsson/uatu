@@ -69,7 +69,14 @@ export class ChatUnavailableError extends Error {
  * per-conversation runtime) implements the same surface from probes alone.
  */
 export interface AgentRuntime {
+  /**
+   * The runtime's state as it stands. MUST NOT start anything: reporting
+   * availability is how the surface decides what to offer, and merely
+   * looking at an agent must not spawn its process (3.3).
+   */
   status(): Promise<ChatAvailability>;
+  /** Start (or join a start of) the runtime and report the outcome. */
+  ensure(): Promise<ChatAvailability>;
   restart(): Promise<ChatAvailability>;
   dispose(): Promise<void>;
   /**
@@ -117,6 +124,21 @@ export class LazyChatService implements WorkspaceChatService {
   async status(): Promise<ChatAvailability> {
     const availability = await this.runtime.status();
     if (availability.state !== "ready") return availability;
+    return this.describeReady(availability);
+  }
+
+  /**
+   * The start-demanding path: conversation-scoped work (listing, creating,
+   * prompting) is what makes the agent runtime needed. Reads that merely
+   * describe the agent go through status() and never start it.
+   */
+  private async ensureReady(): Promise<ChatAvailability> {
+    const availability = await this.runtime.ensure();
+    if (availability.state !== "ready") return availability;
+    return this.describeReady(availability);
+  }
+
+  private async describeReady(availability: ChatAvailability & { state: "ready" }): Promise<ChatAvailability> {
     try {
       // The agent is attached here rather than in the runtime: the runtime
       // knows a process is up, and only the adapter's provider knows who it
@@ -174,7 +196,7 @@ export class LazyChatService implements WorkspaceChatService {
     this.adapterPromise = null;
     this.adapter = null;
     await stray?.dispose().catch(() => undefined);
-    return this.status();
+    return this.ensureReady();
   }
 
   async listConversations() { return (await this.requireAdapter()).listConversations(); }
@@ -213,7 +235,7 @@ export class LazyChatService implements WorkspaceChatService {
   }
 
   private async requireAdapter(): Promise<ChatAdapter> {
-    const availability = await this.status();
+    const availability = await this.ensureReady();
     if (availability.state !== "ready") throw new ChatUnavailableError();
     return this.ensureAdapter();
   }
@@ -278,7 +300,8 @@ export function openCodeAgentRuntime(options: LazyChatServiceOptions): AgentRunt
   const runtime = options.runtime ?? new OpenCodeService(options);
   const createProvider = options.createProvider ?? createSdkV2Provider;
   return {
-    status: () => runtime.status(),
+    status: () => Promise.resolve(runtime.peekStatus()),
+    ensure: () => runtime.status(),
     restart: () => runtime.restart(),
     dispose: () => runtime.dispose(),
     createProvider: () => {

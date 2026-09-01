@@ -1,5 +1,7 @@
 import { TOKEN_USAGE_COMPONENTS } from "./usage";
 import type {
+  AgentChatStatus,
+  ChatAgentDescriptor,
   ActivityStatus,
   ChatAgent,
   ChatMode,
@@ -193,14 +195,39 @@ export function parseActivityStatus(value: unknown): ActivityStatus {
   return value as ActivityStatus;
 }
 
+export function parseChatAgentDescriptor(value: unknown): ChatAgentDescriptor {
+  const record = expectRecord(value, "chat agent");
+  expectKeys(record, ["id", "name"], "chat agent");
+  expectIdentity(record.id, "agent id");
+  expectString(record.name, "agent name");
+  return value as ChatAgentDescriptor;
+}
+
+export function parseAgentChatStatuses(value: unknown): AgentChatStatus[] {
+  const record = expectRecord(value, "chat status");
+  if (!Array.isArray(record.agents) || record.agents.length === 0) {
+    throw new Error("chat status must list at least one agent");
+  }
+  return record.agents.map(entry => {
+    const status = expectRecord(entry, "agent status");
+    expectKeys(status, ["agent", "availability"], "agent status");
+    return {
+      agent: parseChatAgentDescriptor(status.agent),
+      availability: parseChatAvailability(status.availability),
+    };
+  });
+}
+
 export function parseConversationSummary(value: unknown): ConversationSummary {
   const record = expectRecord(value, "conversation summary");
-  expectKeys(record, ["id", "title", "createdAt", "updatedAt", "status"], "conversation summary");
+  expectKeys(record, ["id", "title", "createdAt", "updatedAt", "status", "agent"], "conversation summary");
   expectIdentity(record.id, "conversation id");
   expectString(record.title, "conversation title");
   expectTimestamp(record.createdAt, "createdAt");
   expectTimestamp(record.updatedAt, "updatedAt");
   parseConversationStatus(record.status);
+  // Required on the wire: every conversation names its owner.
+  parseChatAgentDescriptor(record.agent);
   return value as ConversationSummary;
 }
 

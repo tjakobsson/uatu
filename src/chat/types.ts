@@ -71,14 +71,24 @@ export type MessageAttachment = {
   mimeType: string;
 };
 
-// What Chat is talking to. One agent per workspace today, but the surface
-// takes its name and its controls from this record rather than from fixed
-// copy, so a second agent changes what is reported and not what is written.
+// One of the agents Chat can talk to. The surface takes its name and its
+// controls from this record rather than from fixed copy, so agents differ in
+// what is reported, never in what is written.
 export type ChatAgent = {
   id: string;
   name: string;
   capabilities: ChatCapability[];
 };
+
+// The agent identity a conversation or status entry names on the wire.
+// Deliberately just identity: capabilities ride the agent's availability
+// (`ChatAvailability.agent`), which only exists once its runtime has spoken.
+export type ChatAgentDescriptor = { id: string; name: string };
+
+// One offered agent with its independently reported availability. The
+// workspace's chat status is a list of these, in presentation order; the
+// first entry is the server-default agent for new conversations.
+export type AgentChatStatus = { agent: ChatAgentDescriptor; availability: ChatAvailability };
 
 export type ChatAvailability =
   | { state: "idle" }
@@ -168,6 +178,10 @@ export type ConversationSummary = {
   createdAt: number;
   updatedAt: number;
   status: ConversationStatus;
+  // The owning agent, fixed at creation. Always present on the wire (the
+  // router stamps it); optional in the type because per-agent stacks below
+  // the router produce summaries without knowing who they belong to.
+  agent?: ChatAgentDescriptor;
 };
 
 type TimelineItemBase = {

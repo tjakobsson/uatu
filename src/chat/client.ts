@@ -1,7 +1,7 @@
 import { appUrl } from "../shared/app-url";
 import type {
+  AgentChatStatus,
   ChatMode,
-  ChatAvailability,
   ChatCommand,
   ChatEvent,
   ChatModel,
@@ -16,8 +16,8 @@ import type {
   ReversibleHistoryResult,
 } from "./types";
 import {
+  parseAgentChatStatuses,
   parseChatMode,
-  parseChatAvailability,
   parseChatCommand,
   parseChatEvent,
   parseChatModel,
@@ -73,14 +73,16 @@ export class ChatApiClient {
     private readonly timers: ChatClientTimers = defaultTimers,
   ) {}
 
-  status(): Promise<ChatAvailability> {
-    return this.get(appUrl("/api/chat/status"), parseChatAvailability);
+  status(): Promise<AgentChatStatus[]> {
+    return this.get(appUrl("/api/chat/status"), parseAgentChatStatuses);
   }
 
-  // POST with no body: retry spawns a process, so it must not sit behind a safe
-  // method, and the contract declares no request media types for it.
-  retry(): Promise<ChatAvailability> {
-    return this.request(appUrl("/api/chat/retry"), { method: "POST" }, parseChatAvailability);
+  // POST, not a safe method: retry spawns the named agent's process.
+  retry(agentId: string): Promise<AgentChatStatus> {
+    return this.mutate(appUrl("/api/chat/retry"), { agentId }, value => {
+      const record = value as { agent?: unknown; availability?: unknown };
+      return parseAgentChatStatuses({ agents: [record] })[0]!;
+    });
   }
 
   async conversations(): Promise<ConversationSummary[]> {
@@ -89,26 +91,26 @@ export class ChatApiClient {
     return value.conversations.map(parseConversationSummary);
   }
 
-  async models(): Promise<ChatModel[]> {
-    const value = await this.get(appUrl("/api/chat/models"), value => value as { models?: unknown });
+  async models(agentId: string): Promise<ChatModel[]> {
+    const value = await this.get(appUrl(`/api/chat/models?agent=${encodeURIComponent(agentId)}`), value => value as { models?: unknown });
     if (!Array.isArray(value.models)) throw new ChatTransportError("Chat returned an invalid model list");
     return value.models.map(parseChatModel);
   }
 
-  async commands(): Promise<ChatCommand[]> {
-    const value = await this.get(appUrl("/api/chat/commands"), value => value as { commands?: unknown });
+  async commands(agentId: string): Promise<ChatCommand[]> {
+    const value = await this.get(appUrl(`/api/chat/commands?agent=${encodeURIComponent(agentId)}`), value => value as { commands?: unknown });
     if (!Array.isArray(value.commands)) throw new ChatTransportError("Chat returned an invalid command list");
     return value.commands.map(parseChatCommand);
   }
 
-  async modes(): Promise<ChatMode[]> {
-    const value = await this.get(appUrl("/api/chat/modes"), value => value as { modes?: unknown });
+  async modes(agentId: string): Promise<ChatMode[]> {
+    const value = await this.get(appUrl(`/api/chat/modes?agent=${encodeURIComponent(agentId)}`), value => value as { modes?: unknown });
     if (!Array.isArray(value.modes)) throw new ChatTransportError("Chat returned an invalid mode list");
     return value.modes.map(parseChatMode);
   }
 
-  createConversation(): Promise<ConversationSnapshot> {
-    return this.mutate(appUrl("/api/chat/conversations"), {}, parseConversationSnapshot);
+  createConversation(agentId?: string): Promise<ConversationSnapshot> {
+    return this.mutate(appUrl("/api/chat/conversations"), agentId ? { agentId } : {}, parseConversationSnapshot);
   }
 
   snapshot(conversationId: string, cursor?: string): Promise<ConversationSnapshot> {

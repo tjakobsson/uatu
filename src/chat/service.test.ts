@@ -58,6 +58,47 @@ function fixtureRuntime(): OpenCodeService {
 }
 
 describe("LazyChatService", () => {
+  test("status never spawns OpenCode; listing a conversation does", async () => {
+    let spawns = 0;
+    const exits: Array<(code: number) => void> = [];
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverCandidates: async () => ["/bin/opencode"],
+      allocatePort: async () => 43210,
+      spawn: (): SpawnedOpenCode => {
+        spawns += 1;
+        let resolveExit!: (code: number) => void;
+        const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+        exits.push(resolveExit);
+        return {
+          pid: 42,
+          exited,
+          stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+          kill() { resolveExit(143); },
+        };
+      },
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => { for (const resolve of exits) resolve(143); },
+    });
+    const service = new LazyChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: () => provider(),
+    });
+
+    // Opening Chat asks for status — that must not start the agent (3.3).
+    expect(await service.status()).toEqual({ state: "idle" });
+    expect(await service.status()).toEqual({ state: "idle" });
+    expect(spawns).toBe(0);
+
+    // Conversation-scoped need is what starts it.
+    await service.listConversations();
+    expect(spawns).toBe(1);
+    expect(await service.status()).toEqual(expect.objectContaining({ state: "ready" }));
+
+    await service.dispose();
+  });
+
   test("creates the SDK provider and adapter only after the runtime is ready", async () => {
     let providerCalls = 0;
     let adapterCalls = 0;
@@ -78,6 +119,11 @@ describe("LazyChatService", () => {
 
     expect(providerCalls).toBe(0);
     expect(adapterCalls).toBe(0);
+    // Status is passive now (3.3): it starts nothing and builds nothing.
+    expect(await service.status()).toEqual({ state: "idle" });
+    expect(providerCalls).toBe(0);
+    // Conversation-scoped need starts the runtime and builds the stack.
+    await service.listConversations();
     expect(await service.status()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     expect(providerCalls).toBe(1);
     expect(adapterCalls).toBe(1);
@@ -172,11 +218,10 @@ describe("LazyChatService", () => {
       createAdapter: options => new ChatAdapter({ ...options, generation: "test" }),
     });
 
-    expect(await service.status()).toEqual({
-      state: "unavailable",
-      reason: "unsupported",
-      message: "The installed OpenCode version is not compatible with chat.",
-    });
+    // The first conversation-scoped demand starts the runtime and hits the
+    // transient probe failure.
+    await expect(service.models()).rejects.toThrow("chat is unavailable");
+    // Passive status against the now-running runtime re-probes and recovers.
     expect(await service.status()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     expect(probes).toBe(2);
     expect(await service.models()).toEqual([]);
@@ -195,6 +240,7 @@ describe("LazyChatService", () => {
       createAdapter: options => new ChatAdapter({ ...options, generation: "test" }),
     });
 
+    await expect(service.models()).rejects.toThrow("chat is unavailable");
     const first = await service.status();
     expect(first.state).toBe("unavailable");
     const second = await service.status();
@@ -221,7 +267,7 @@ describe("LazyChatService", () => {
       createAdapter: options => new ChatAdapter({ ...options, generation: "test" }),
     });
 
-    await service.status();
+    await service.commands();
     await Bun.sleep(1);
     expect(pumpStarts).toBe(1);
 
@@ -275,11 +321,8 @@ describe("LazyChatService", () => {
       createAdapter: options => new ChatAdapter({ ...options, generation: "test" }),
     });
 
-    expect(await service.status()).toEqual({
-      state: "unavailable",
-      reason: "unsupported",
-      message: "The installed OpenCode version is not compatible with chat.",
-    });
+    // The first demand starts the incompatible install and fails its probe.
+    await expect(service.models()).rejects.toThrow("chat is unavailable");
     expect(spawns).toBe(1);
     expect(await service.retry()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     // The incompatible process was replaced, not merely re-probed.
@@ -317,7 +360,7 @@ describe("LazyChatService", () => {
       createAdapter: options => new ChatAdapter({ ...options, generation: "test" }),
     });
 
-    await service.status();
+    await service.commands();
     expect(spawns).toBe(1);
     // Runtime-level joining cannot help two retries that reach it at
     // different times — the first can stall on pump shutdown and then
@@ -372,7 +415,7 @@ describe("LazyChatService", () => {
       },
     });
 
-    await service.status();
+    await service.commands();
     const retrying = service.retry();
     while (!releasePump) await Bun.sleep(1);
     // Another client asks while the retry is tearing down: this builds an
@@ -408,7 +451,7 @@ describe("LazyChatService", () => {
       createAdapter: options => new ChatAdapter({ ...options, generation: "test" }),
     });
 
-    await service.status();
+    await service.commands();
     await Bun.sleep(1);
     expect(pumpStarts[0]).toBeGreaterThanOrEqual(1);
 

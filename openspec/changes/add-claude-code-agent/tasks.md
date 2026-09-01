@@ -38,27 +38,27 @@
 
 ## 3. Agent registry and the breaking API revision
 
-- [ ] 3.1 Implement the agent registry and routed multi-agent chat
+- [x] 3.1 Implement the agent registry and routed multi-agent chat
       service (qualified conversation ids, per-agent status fan-out,
       merged inventory, wrong-agent requests rejected); verify with
       unit tests using two stub agents covering routing, id collision,
       and one-agent-down inventory
-- [ ] 3.2 Revise the chat wire contract: `agent` field on summaries,
+- [x] 3.2 Revise the chat wire contract: `agent` field on summaries,
       snapshots, and inventory announcements; per-agent availability in
       status; agent parameter on conversation creation; agent-scoped
       catalog reads; update `api/openapi.yaml` and verify
       `bun run api:validate` and `bun run test:api` pass
-- [ ] 3.3 Make OpenCode startup lazy per-conversation-need (opening
+- [x] 3.3 Make OpenCode startup lazy per-conversation-need (opening
       Chat or another agent's conversation must not spawn `opencode`);
       verify with a service test asserting no spawn until an OpenCode
       conversation is created or listed
-- [ ] 3.4 Client: per-conversation agent identity in state, header
+- [x] 3.4 Client: per-conversation agent identity in state, header
       identity row follows the selected conversation, agent choice with
       availability at conversation creation (default = last used, then
       server default), merged chooser with agent attribution; verify
       with `src/chat/ui` unit tests and a two-stub-agent e2e covering
       creation choice, chooser attribution, and header follow
-- [ ] 3.5 Scripted-agent dev harness: wire a scripted agent double into
+- [x] 3.5 Scripted-agent dev harness: wire a scripted agent double into
       a dev serve mode so the agent-choice, chooser, and every later
       Claude surface can be exercised in the browser without a real
       agent; verify by demoing the agent-choice and chooser UX live for
@@ -66,34 +66,34 @@
 
 ## 4. Claude Code agent
 
-- [ ] 4.1 Claude runtime: executable discovery + bounded version/auth
+- [x] 4.1 Claude runtime: executable discovery + bounded version/auth
       probe producing `ChatAvailability` with reused
       `ChatStartupDiagnostics`; retry support; verify with unit tests
       for not-installed, probe-timeout, and ready paths
-- [ ] 4.2 Transcript reader in `src/chat/claude/`: cwd encoding,
+- [x] 4.2 Transcript reader in `src/chat/claude/`: cwd encoding,
       per-line shape validation with skip-and-count, session
       enumeration and history paging from
       `~/.claude/projects/<encoded-cwd>`; verify with fixture-based
       tests including a foreign-directory and a corrupt-line fixture
-- [ ] 4.3 Claude provider core loop: per-conversation `query()`
+- [x] 4.3 Claude provider core loop: per-conversation `query()`
       sessions with resume, prompt, streamed normalization into shared
       timeline items (text, reasoning, tools, status, usage),
       interrupt, session supervision and dispose-kills-process; verify
       with unit tests over recorded SDK message fixtures and a
       leak test asserting no process outlives dispose
-- [ ] 4.4 Permissions and questions: `canUseTool` → pending
+- [x] 4.4 Permissions and questions: `canUseTool` → pending
       `PermissionRequest` with once/always/reject mapping and
       session-end resolution; `AskUserQuestion` → `QuestionRequest`
       preserving options/multi-select and answering in tool shape;
       verify with unit tests for approve, always-suppresses-repeat,
       reject, dead-session resolution, and a multi-question form
-- [ ] 4.5 Modes, models, effort, commands: permission modes as
+- [x] 4.5 Modes, models, effort, commands: permission modes as
       `ChatMode`s with `bypassPermissions` behind a serve-level
       operator opt-in; per-model manifest with effort levels as
       variants and context windows; slash-command listing; truthful
       capability declaration; verify with unit tests including
       bypass-absent-by-default and effort-invalid-for-model
-- [ ] 4.6 Attachments: provider sends stored image bytes as image
+- [x] 4.6 Attachments: provider sends stored image bytes as image
       blocks with the prompt, `imageInput` reported from the model
       manifest, replay maps recoverable references and renders labeled
       placeholders otherwise; verify with unit tests including an

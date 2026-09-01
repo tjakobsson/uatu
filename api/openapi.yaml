@@ -838,9 +838,10 @@ paths:
     get:
       operationId: workspaceGetChatStatus
       tags: [Chat]
-      summary: Start chat lazily and report OpenCode availability
+      summary: Report every chat agent's availability
+      description: Identifies each agent the workspace offers and reports its availability independently. One agent being unavailable never hides another.
       responses:
-        '200': { description: Chat availability, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAvailability' } } } }
+        '200': { description: Per-agent chat availability, content: { application/json: { schema: { $ref: '#/components/schemas/ChatStatusList' } } } }
         '401': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
@@ -849,11 +850,14 @@ paths:
     post:
       operationId: workspaceRetryChat
       tags: [Chat]
-      summary: Discard a cached Chat startup failure and start OpenCode again
+      summary: Discard one agent's cached startup failure and start it again
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatRetryRequest' }, example: { agentId: opencode } } } }
       responses:
-        '200': { description: Chat availability after the retry, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAvailability' } } } }
+        '200': { description: The named agent's availability after the retry, content: { application/json: { schema: { $ref: '#/components/schemas/AgentChatStatus' } } } }
+        '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/chat/models:
@@ -861,9 +865,12 @@ paths:
     get:
       operationId: workspaceListChatModels
       tags: [Chat]
-      summary: List enabled native models available to Chat
+      parameters: [{ $ref: '#/components/parameters/ChatAgentId' }]
+      summary: List one agent's enabled native models
       responses:
         '200': { description: Available chat models, content: { application/json: { schema: { $ref: '#/components/schemas/ChatModelList' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
@@ -873,9 +880,12 @@ paths:
     get:
       operationId: workspaceListChatModes
       tags: [Chat]
-      summary: List the modes a prompt can run under
+      parameters: [{ $ref: '#/components/parameters/ChatAgentId' }]
+      summary: List the modes one agent's prompts can run under
       responses:
         '200': { description: Available chat modes, content: { application/json: { schema: { $ref: '#/components/schemas/ChatModeList' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
@@ -885,9 +895,12 @@ paths:
     get:
       operationId: workspaceListChatCommands
       tags: [Chat]
-      summary: List slash commands available to Chat
+      parameters: [{ $ref: '#/components/parameters/ChatAgentId' }]
+      summary: List one agent's slash commands
       responses:
         '200': { description: Available slash commands, content: { application/json: { schema: { $ref: '#/components/schemas/ChatCommandList' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
@@ -908,10 +921,12 @@ paths:
       operationId: workspaceCreateChatConversation
       tags: [Chat]
       summary: Create an empty workspace conversation
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' }, example: {} } } }
+      description: The conversation is owned for life by the chosen agent; omitting `agentId` selects the server's default agent.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateChatConversationRequest' }, example: {} } } }
       responses:
         '201': { description: Created conversation snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/ConversationSnapshot' } } } }
         '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
@@ -970,7 +985,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ConversationRenameResult' }
-              example: { conversation: { id: conversation-1, title: API contract follow-up, createdAt: 1724100000000, updatedAt: 1724100300000, status: idle } }
+              example: { conversation: { id: "opencode:conversation-1", title: API contract follow-up, createdAt: 1724100000000, updatedAt: 1724100300000, status: idle, agent: { id: opencode, name: OpenCode } } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -1351,7 +1366,8 @@ components:
     Scope: { name: scope, in: query, schema: { type: string, enum: [folder, file] }, description: "Optional watched-tree scope. scope=file requires the companion documentId parameter." }
     DocumentId: { name: documentId, in: query, schema: { type: string }, description: "Watched-document identifier selecting the file to scope to. Required when scope=file; scope=file without documentId is rejected with 400." }
     CompareTarget: { name: compareTarget, in: query, schema: { type: string, enum: [base, last-commit] } }
-    ConversationId: { name: conversationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
+    ConversationId: { name: conversationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 }, description: "Agent-qualified conversation id (<agentId>:<providerConversationId>)." }
+    ChatAgentId: { name: agent, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 }, description: "The agent this catalog read describes. Required: an unscoped read has no answer that is not a guess." }
     InteractionId: { name: interactionId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
     QueuedMessageId: { name: messageId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
   responses:
@@ -1911,6 +1927,11 @@ components:
       properties: { status: { enum: [cancelled, terminal] } }
       additionalProperties: false
     EmptyObject: { type: object, additionalProperties: false }
+    ChatAgentDescriptor: { type: object, required: [id, name], description: "The identity of one offered agent. Capabilities ride the agent's availability, which only exists once its runtime has spoken.", properties: { id: { type: string, minLength: 1, maxLength: 64, pattern: '^[^:]+$' }, name: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
+    AgentChatStatus: { type: object, required: [agent, availability], properties: { agent: { $ref: '#/components/schemas/ChatAgentDescriptor' }, availability: { $ref: '#/components/schemas/ChatAvailability' } }, additionalProperties: false }
+    ChatStatusList: { type: object, required: [agents], description: "Every offered agent with its availability, in the server's presentation order; the first entry is the server-default agent for new conversations.", properties: { agents: { type: array, minItems: 1, items: { $ref: '#/components/schemas/AgentChatStatus' } } }, additionalProperties: false }
+    ChatRetryRequest: { type: object, required: [agentId], properties: { agentId: { type: string, minLength: 1, maxLength: 64 } }, additionalProperties: false }
+    CreateChatConversationRequest: { type: object, properties: { agentId: { type: string, minLength: 1, maxLength: 64, description: "The agent that will own the conversation for life. Absent selects the server's default agent." } }, additionalProperties: false }
     ChatAvailability:
       oneOf:
         - { type: object, required: [state], properties: { state: { enum: [idle, starting] } }, additionalProperties: false }
@@ -1938,8 +1959,9 @@ components:
     ChatCommandList: { type: object, required: [commands], properties: { commands: { type: array, items: { $ref: '#/components/schemas/ChatCommand' } } }, additionalProperties: false }
     ConversationSummary:
       type: object
-      required: [id, title, createdAt, updatedAt, status]
-      properties: { id: { type: string, minLength: 1, maxLength: 512 }, title: { type: string }, createdAt: { type: number, minimum: 0 }, updatedAt: { type: number, minimum: 0 }, status: { $ref: '#/components/schemas/ConversationStatus' } }
+      required: [id, title, createdAt, updatedAt, status, agent]
+      description: "`id` is agent-qualified (`<agentId>:<providerConversationId>`); ids from different agents never collide. `agent` names the owner, fixed at creation for the conversation's lifetime."
+      properties: { id: { type: string, minLength: 1, maxLength: 512 }, title: { type: string }, createdAt: { type: number, minimum: 0 }, updatedAt: { type: number, minimum: 0 }, status: { $ref: '#/components/schemas/ConversationStatus' }, agent: { $ref: '#/components/schemas/ChatAgentDescriptor' } }
       additionalProperties: false
     ConversationList: { type: object, required: [conversations], properties: { conversations: { type: array, items: { $ref: '#/components/schemas/ConversationSummary' } } }, additionalProperties: false }
     ConversationInventoryEvent: { type: object, required: [type], properties: { type: { const: conversation.inventory } }, additionalProperties: false }

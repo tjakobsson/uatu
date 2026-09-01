@@ -483,7 +483,7 @@ test.describe("desktop OpenCode chat", () => {
 
     let snapshots = 0;
     page.on("response", response => {
-      if (new URL(response.url()).pathname.endsWith(`/api/chat/conversations/${id}`)) snapshots += 1;
+      if (decodeURIComponent(new URL(response.url()).pathname).endsWith(`/api/chat/conversations/${id}`)) snapshots += 1;
     });
     await control(request, { action: "resync" });
     await expect.poll(() => snapshots, { timeout: 10_000 }).toBeGreaterThan(0);

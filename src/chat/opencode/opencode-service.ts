@@ -117,6 +117,14 @@ export class OpenCodeService {
     this.bindAttempts = options.bindAttempts ?? BIND_ATTEMPTS;
   }
 
+  /**
+   * The runtime's state as it stands, never starting anything (3.3: opening
+   * Chat must not spawn `opencode`). An unstarted runtime reports idle.
+   */
+  peekStatus(): ChatAvailability {
+    return this.availability;
+  }
+
   status(): Promise<ChatAvailability> {
     if (this.closed) return Promise.resolve(this.availability);
     if (this.availability.state === "ready" || this.availability.state === "unavailable") {
