@@ -170,7 +170,7 @@ export class ClaudeProvider implements ChatProvider {
   // state back truthfully. A committed revert forks the native session:
   // `activeNative` redirects the conversation to its fork, and the fork
   // itself stays out of the inventory.
-  private readonly staged = new Map<string, { boundaryIndex: number; tipSnapshot: Map<string, string | null> }>();
+  private readonly staged = new Map<string, { boundaryIndex: number; tipSnapshot: Map<string, SnapshotEntry> }>();
   private readonly activeNative = new Map<string, string>();
   private readonly hiddenNative = new Set<string>();
   // Restart durability: modes/models/variants and fork redirections must
@@ -828,11 +828,11 @@ export class ClaudeProvider implements ChatProvider {
     // adds files the earlier boundary never affected; files already
     // captured keep their first (tip) bytes, so a later shallower preview
     // cannot poison the snapshot with rewound content.
-    const tipSnapshot = existing?.tipSnapshot ?? new Map<string, string | null>();
+    const tipSnapshot = existing?.tipSnapshot ?? new Map<string, SnapshotEntry>();
     for (const filePath of preview.filesChanged ?? []) {
       const absolute = path.isAbsolute(filePath) ? filePath : path.join(this.workspacePath, filePath);
       if (tipSnapshot.has(absolute)) continue;
-      tipSnapshot.set(absolute, await fs.readFile(absolute, "base64").catch(() => null));
+      tipSnapshot.set(absolute, await captureFileState(absolute));
     }
     const result = await session.query.rewindFiles(target.uuid, { dryRun: false });
     if (!result.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
@@ -846,21 +846,32 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   /** Terminal redo: every hidden turn returns and the tip's bytes come back. */
-  private async clearBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, stagedState: { tipSnapshot: Map<string, string | null> }): Promise<ReversibleHistoryResult> {
+  private async clearBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, stagedState: { tipSnapshot: Map<string, SnapshotEntry> }): Promise<ReversibleHistoryResult> {
     await this.restoreSnapshot(stagedState.tipSnapshot);
     this.staged.delete(sessionId);
     this.persistDurableState();
     return { outcome: "changed", state: reversibleState(context.turns, undefined) };
   }
 
-  private async restoreSnapshot(snapshot: Map<string, string | null>): Promise<void> {
-    for (const [absolute, content] of snapshot) {
-      if (content === null) {
+  private async restoreSnapshot(snapshot: Map<string, SnapshotEntry>): Promise<void> {
+    for (const [absolute, entry] of snapshot) {
+      if (entry === null) {
         await fs.rm(absolute, { force: true });
         continue;
       }
       await fs.mkdir(path.dirname(absolute), { recursive: true });
-      await fs.writeFile(absolute, Buffer.from(content, "base64"));
+      // A legacy sidecar holds bare base64: bytes with the default mode.
+      if (typeof entry === "string") {
+        await fs.writeFile(absolute, Buffer.from(entry, "base64"));
+        continue;
+      }
+      if (entry.kind === "symlink") {
+        await fs.rm(absolute, { force: true });
+        await fs.symlink(entry.target, absolute);
+        continue;
+      }
+      await fs.rm(absolute, { force: true });
+      await fs.writeFile(absolute, Buffer.from(entry.base64, "base64"), { mode: entry.mode });
     }
   }
 
@@ -913,7 +924,7 @@ export class ClaudeProvider implements ChatProvider {
           configurations?: Record<string, ConversationConfiguration>;
           activeNative?: Record<string, string>;
           hiddenNative?: string[];
-          staged?: Record<string, { boundaryIndex: number; tipSnapshot: Record<string, string | null> }>;
+          staged?: Record<string, { boundaryIndex: number; tipSnapshot: Record<string, SnapshotEntry> }>;
           modeBeforePlan?: Record<string, string>;
         };
         for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
@@ -1257,6 +1268,28 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
 
 function rewindRefusal(error: string | undefined): string {
   return error ? `the checkpoint store refused the rewind: ${error}` : "reversible-history message is no longer available";
+}
+
+/**
+ * What a rewind snapshot remembers about one path: enough to put back the
+ * file type, mode, and symlink target — not only the bytes. A bare base64
+ * string is the legacy sidecar form (bytes, default mode); null records
+ * that the path did not exist at the tip.
+ */
+type SnapshotEntry =
+  | { kind: "file"; mode: number; base64: string }
+  | { kind: "symlink"; target: string }
+  | string
+  | null;
+
+async function captureFileState(absolute: string): Promise<SnapshotEntry> {
+  try {
+    const stats = await fs.lstat(absolute);
+    if (stats.isSymbolicLink()) return { kind: "symlink", target: await fs.readlink(absolute) };
+    return { kind: "file", mode: stats.mode & 0o777, base64: await fs.readFile(absolute, "base64") };
+  } catch {
+    return null;
+  }
 }
 
 function parseSubagentId(id: string): { parentSessionId: string; agentId: string } | null {

@@ -65,6 +65,10 @@ export type MultiAgentChatServiceOptions = {
   // Presentation order; the first entry is the server's default agent.
   agents: RegisteredChatAgent[];
   attachmentStore?: AttachmentStore;
+  // How long one agent's enumeration may hold up the merged list before
+  // the others are served without it (its late arrival ticks the
+  // inventory so clients re-fetch). Tests shorten it.
+  inventoryContributionTimeoutMs?: number;
 };
 
 /**
@@ -135,7 +139,10 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // The store is workspace state shared across agents — same backing
     // directory the per-agent stacks resolve, one authority for routes.
     this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
+    this.inventoryContributionTimeoutMs = options.inventoryContributionTimeoutMs ?? 4_000;
   }
+
+  private readonly inventoryContributionTimeoutMs: number;
 
   agents(): ChatAgentDescriptor[] {
     return this.order.map(agent => agent.descriptor);
@@ -176,12 +183,27 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
    */
   async listConversations(): Promise<AgentConversationSummary[]> {
     const lists = await Promise.all(this.order.map(async agent => {
-      try {
+      const read = (async () => {
         const conversations = await agent.service.listConversations();
         return conversations.map(summary => this.qualifySummary(agent.descriptor, summary));
-      } catch {
-        return [];
-      }
+      })();
+      read.catch(() => undefined);
+      // One agent's stalled startup (a cold probe can run to its timeout)
+      // must not withhold another agent's already-answered list: the
+      // straggler is bounded, and its late arrival ticks the inventory so
+      // clients re-fetch and see it.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bounded = await Promise.race([
+        read.catch(() => [] as AgentConversationSummary[]),
+        new Promise<null>(resolve => {
+          timer = setTimeout(() => resolve(null), this.inventoryContributionTimeoutMs);
+          (timer as unknown as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (bounded !== null) return bounded;
+      void read.then(late => { if (late.length > 0) this.inventoryHub.tick(); }, () => undefined);
+      return [] as AgentConversationSummary[];
     }));
     return lists.flat().sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
   }
@@ -491,6 +513,11 @@ class MergedInventoryHub {
    * successful retry reconnects every source and ticks once, the same
    * recovery a pump death gets.
    */
+  /** One tick toward every subscriber: reconcile now. */
+  tick(): void {
+    this.broadcaster.invalidate();
+  }
+
   refresh(): void {
     if (this.disposed || this.broadcaster.subscriberCount() === 0) return;
     if (this.reconnectTimer !== null) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }

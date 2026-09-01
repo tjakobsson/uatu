@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -875,6 +875,51 @@ describe("ClaudeProvider sessions", () => {
       ],
     }));
     expect(page.items.some(item => item.type === "tool")).toBe(false);
+    await provider.dispose();
+  });
+
+  test("redo restores file modes and symlinks, not only bytes", async () => {
+    const { queries, configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const script = path.join(workspace, "run.sh");
+    const link = path.join(workspace, "latest");
+    writeFileSync(script, "#!/bin/sh\necho tip\n", { mode: 0o755 });
+    symlinkSync("run.sh", link);
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (_uuid, options) => {
+          if (!options?.dryRun) {
+            // The rewind removes what the tip created.
+            rmSync(script, { force: true });
+            rmSync(link, { force: true });
+          }
+          return { canRewind: true, filesChanged: [script, link] };
+        };
+        queries.push(query);
+        return query;
+      },
+    });
+    await provider.undo!(storedId);
+    expect(existsSync(script)).toBe(false);
+    await provider.redo!(storedId);
+    // The executable bit and the symlink both came back.
+    expect(statSync(script).mode & 0o111).not.toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(script, "utf8")).toContain("echo tip");
     await provider.dispose();
   });
 

@@ -311,30 +311,31 @@ export function initChat(api = new ChatApiClient()): void {
   // capability rule and its tests mean it — but capabilities change with the
   // selected conversation's agent now, so removal must be reversible: a
   // stable anchor remembers the spot and the control returns through it.
-  const capabilityControl = (element: HTMLElement | null) => {
+  const capabilityControl = (element: HTMLElement | null, unhide = true) => {
     if (!element || !element.parentNode) return (_present: boolean) => {};
     const anchor = element.ownerDocument.createComment("capability-slot");
     element.parentNode.insertBefore(anchor, element);
     return (present: boolean) => {
       if (present) {
         if (!element.isConnected) anchor.parentNode?.insertBefore(element, anchor.nextSibling);
-        // Markup may ship the control hidden until an agent declares it.
-        element.hidden = false;
+        // Markup may ship the control hidden until an agent declares it;
+        // a control whose own renderer governs hidden opts out.
+        if (unhide) element.hidden = false;
       } else if (element.isConnected) element.remove();
     };
   };
   const presentRename = capabilityControl(renameButton);
   const presentAttach = capabilityControl(attachButton);
+  const presentContext = capabilityControl(contextUsage, false);
 
   const applyCapabilities = () => {
     if (!agent) return;
     configurationTrigger.hidden = !declares("models") && !declares("modes") && !declares("variants");
-    if (contextUsage && !declares("context")) {
-      // The meter's own renderer re-shows it when a context agent's usage
-      // paints; here only the takeaway happens.
-      contextUsage.hidden = true;
-      contextUsage.open = false;
-    }
+    // An agent that does not report usage leaves no readout behind — the
+    // meter comes out of the DOM and returns with a declaring agent; its
+    // own renderer governs hidden/open while present.
+    if (contextUsage && !declares("context")) contextUsage.open = false;
+    presentContext(declares("context"));
     presentRename(declares("conversation-rename"));
     // The model-level attachment gate is different — see syncAttachControl:
     // a model choice flips often, so there the control stays visible and
@@ -3008,22 +3009,6 @@ export function initChat(api = new ChatApiClient()): void {
       return;
     }
     let catalogs = agentCatalogs.get(status.agent.id);
-    if (catalogs) {
-      // Banked models and modes are stable; the command inventory is not —
-      // agents discover skills mid-session (Claude pushes commands_changed).
-      // Refresh it in the background on every context application so
-      // completion tracks the agent's current list.
-      const banked = catalogs;
-      const chatAgent = agent;
-      if (chatAgent?.capabilities.includes("commands") || chatAgent?.capabilities.includes("reversible-history")) {
-        void api.commands(status.agent.id).then(list => {
-          if (agentCatalogs.get(status.agent.id) !== banked) return;
-          banked.commands = list;
-          banked.commandInventoryAvailable = true;
-          if (contextAgentId === status.agent.id) commands = list;
-        }).catch(() => undefined);
-      }
-    }
     if (!catalogs) {
       const chatAgent = agent;
       const has = (capability: ChatCapability) => chatAgent?.capabilities.includes(capability) ?? true;
@@ -3074,6 +3059,19 @@ export function initChat(api = new ChatApiClient()): void {
       }
       if (contextAgentId !== watching) return;
       await applyAgentContext(watching);
+      // The banked command inventory is the one catalog that changes
+      // mid-session (agents discover skills; Claude pushes
+      // commands_changed). The idle poll is the refresh point — off the
+      // critical path of creation and selection.
+      const banked = agentCatalogs.get(watching);
+      if (banked && (agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history"))) {
+        void api.commands(watching).then(list => {
+          if (agentCatalogs.get(watching) !== banked) return;
+          banked.commands = list;
+          banked.commandInventoryAvailable = true;
+          if (contextAgentId === watching) commands = list;
+        }).catch(() => undefined);
+      }
       const state = agentStatusFor(watching)?.availability.state;
       if (state === "idle" || state === "starting") refreshIdleAgentContext();
     }, 1_500);
@@ -3226,6 +3224,12 @@ export function initChat(api = new ChatApiClient()): void {
       if (selectionGeneration === selectionAtStart) installInitialChooser();
       else patchChooser(presentation.selectedId ?? null);
       bootstrapped = true;
+      // The enumeration above probed every agent; the pre-probe snapshot
+      // may still call a failed one usable, and the creation menu would
+      // offer it with only a generic error behind it. Refresh in the
+      // background so availability becomes the probe's verdict without
+      // holding bootstrap's selection work open.
+      void api.status().then(next => { agentStatuses = next; }).catch(() => undefined);
       startInventoryStream();
     } catch (error) { announce(messageOf(error), true); }
     finally { bootstrapping = false; }

@@ -188,6 +188,38 @@ describe("inventory", () => {
     expect(ids).toEqual(["opencode:same", "claude:same"]);
   });
 
+  test("a stalled agent does not withhold the healthy agent's list; its late arrival ticks", async () => {
+    const a = new StubAgentService();
+    const b = new StubAgentService();
+    a.conversations = [summary("ready", 5)];
+    let released: ConversationSummary[] | null = null;
+    let releaseB: (value: ConversationSummary[]) => void = () => undefined;
+    b.listConversations = () => released
+      ? Promise.resolve(released)
+      : new Promise(resolve => { releaseB = value => { released = value; resolve(value); }; });
+    const service = new MultiAgentChatService({
+      workspacePath: process.cwd(),
+      inventoryContributionTimeoutMs: 25,
+      agents: [
+        { descriptor: { id: "opencode", name: "OpenCode" }, service: a },
+        { descriptor: { id: "claude", name: "Claude Code" }, service: b },
+      ],
+    });
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    // The healthy agent answers within the bound; the straggler contributes
+    // nothing yet.
+    const listed = await service.listConversations();
+    expect(listed.map(conversation => conversation.id)).toEqual(["opencode:ready"]);
+    // The straggler's late arrival ticks the merged inventory so clients
+    // re-fetch and see it.
+    const tick = subscription.next();
+    releaseB([summary("late", 9)]);
+    expect(await tick).toEqual({ value: undefined, done: false });
+    expect((await service.listConversations()).map(conversation => conversation.id)).toEqual(["claude:late", "opencode:ready"]);
+    subscription.cancel();
+  });
+
   test("a failing agent does not empty the chooser", async () => {
     const { service, a, b } = fixture();
     a.conversations = [summary("kept", 3)];
