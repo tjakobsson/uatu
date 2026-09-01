@@ -230,7 +230,13 @@ export class LazyChatService implements WorkspaceChatService {
   async dispose(): Promise<void> {
     this.disposed = true;
     const runtimeDisposal = this.runtime.dispose();
+    // Shutdown can race the first ensureAdapter: the promise may own a
+    // provider mid-probe while this.adapter is still null. Join it and
+    // dispose whatever it produces — an adapter published after shutdown
+    // would otherwise keep an orphaned agent process.
+    const pending = this.adapterPromise;
     await this.adapter?.dispose().catch(() => undefined);
+    if (pending) await pending.then(adapter => adapter.dispose()).catch(() => undefined);
     await runtimeDisposal;
   }
 

@@ -599,6 +599,69 @@ describe("ClaudeProvider sessions", () => {
     await optedIn.dispose();
   });
 
+  test("a replacement prompt that fails before acceptance keeps redo possible", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const marker = path.join(workspace, "marker.txt");
+    writeFileSync(marker, "tip");
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "second"),
+    ].join("\n"));
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"));
+    let failNextSpawn = false;
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        if (failNextSpawn) { failNextSpawn = false; throw new Error("spawn failed"); }
+        const query = new FakeQuery(input);
+        query.rewindFiles = async (_uuid, options) => {
+          if (!options?.dryRun) writeFileSync(marker, "rewound");
+          return { canRewind: true, filesChanged: [marker] };
+        };
+        return query;
+      },
+      forkSession: async () => ({ sessionId: forkId }),
+    });
+    await provider.undo!(storedId);
+    // The replacement's session fails to start: the commit rolls back and
+    // the staged revert (with its redo) survives.
+    failNextSpawn = true;
+    await expect(provider.prompt(storedId, { id: "r2", text: "replacement", delivery: "queue" })).rejects.toThrow("spawn failed");
+    const state = await provider.getReversibleHistoryState!(storedId);
+    expect(state.staged).toBe(true);
+    expect(state.canRedo).toBe(true);
+    await provider.redo!(storedId);
+    expect(readFileSync(marker, "utf8")).toBe("tip");
+    await provider.dispose();
+  });
+
+  test("a rejected interrupt leaves the turn's real outcome intact", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "work", delivery: "queue" });
+    queries[0]!.interrupt = async () => { throw new Error("control channel down"); };
+    await expect(provider.interrupt(session.id)).rejects.toThrow("control channel down");
+    // The turn finishes on its own: the result reports completed, not a
+    // cancellation that never took.
+    queries[0]!.push({ type: "result", uuid: "res-1", subtype: "success", timestamp: "2026-08-30T10:01:00.000Z", usage: { input_tokens: 1, output_tokens: 1 } });
+    await waitFor(() => events.some(event =>
+      event.updates.some(update => update.kind === "status" && (update as { status: string }).status === "completed")));
+    stop();
+    await provider.dispose();
+  });
+
   test("a stream ending mid-turn reports the interruption instead of a stuck running state", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);

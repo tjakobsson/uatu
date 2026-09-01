@@ -480,10 +480,29 @@ export class ClaudeProvider implements ChatProvider {
     // history first: the native session forks at the boundary and the
     // conversation continues on the fork (D8). The hidden turns can no
     // longer be restored after this.
-    if (this.staged.has(sessionId)) await this.commitStagedRevert(sessionId);
-    const alreadyLive = this.live.get(sessionId);
-    const session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
-    if (input.model) await this.switchModel(sessionId, input.model, input.variant);
+    // The commit's bookkeeping is reversible until the replacement is
+    // actually accepted: a failure between fork and queue would otherwise
+    // leave the workspace rewound with Redo already forfeited.
+    const stagedBefore = this.staged.get(sessionId);
+    const nativeBefore = this.activeNative.get(sessionId);
+    if (stagedBefore) await this.commitStagedRevert(sessionId);
+    let session: LiveSession;
+    let alreadyLive: LiveSession | undefined;
+    try {
+      alreadyLive = this.live.get(sessionId);
+      session = await this.ensureLive(sessionId, input.model, input.mode, input.variant);
+      if (input.model) await this.switchModel(sessionId, input.model, input.variant);
+    } catch (error) {
+      if (stagedBefore) {
+        // The fork stays hidden and unused; the conversation returns to
+        // its pre-commit identity with the boundary and tip bytes intact.
+        if (nativeBefore === undefined) this.activeNative.delete(sessionId);
+        else this.activeNative.set(sessionId, nativeBefore);
+        this.staged.set(sessionId, stagedBefore);
+        this.persistDurableState();
+      }
+      throw error;
+    }
     if (input.mode !== undefined) {
       const previousMode = this.configurations.get(sessionId)?.mode;
       if (input.mode === "plan" && previousMode !== "plan") {
@@ -566,7 +585,14 @@ export class ClaudeProvider implements ChatProvider {
     const session = this.live.get(sessionId);
     if (!session) return;
     session.interrupted = true;
-    await session.query.interrupt();
+    try {
+      await session.query.interrupt();
+    } catch (error) {
+      // The turn continues; its eventual result must report its real
+      // outcome, not a cancellation that never took.
+      session.interrupted = false;
+      throw error;
+    }
     this.emit(sessionId, {
       updates: [{ kind: "status", status: "interrupted" }],
       outcome: "handled",
