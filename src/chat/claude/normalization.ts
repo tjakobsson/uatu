@@ -114,7 +114,14 @@ export function normalizeClaudeMessage(
     const envelope = envelopeIdentity(record);
     if (!envelope) return { ...base, outcome: "unparseable" };
     const message = asRecord(record.message);
-    const model = typeof message.model === "string" ? message.model : undefined;
+    const reported = typeof message.model === "string" ? message.model : undefined;
+    // The init message names the session's model in its full variant form
+    // ("...[1m]"); assistant messages report the resolved base id. Keep the
+    // variant id — it is what the catalog keys context windows by, so the
+    // usage gauge measures against the window actually in effect.
+    const model = reported !== undefined && memory.lastModel?.startsWith(`${reported}[`)
+      ? memory.lastModel
+      : reported;
     if (model) memory.lastModel = model;
     const updates = contentBlockUpdates(asArray(message.content), envelope, memory);
     const usage = tokensToUsage(message.usage);

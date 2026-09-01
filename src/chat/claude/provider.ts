@@ -33,6 +33,7 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   interrupt(): Promise<unknown>;
   setPermissionMode?(mode: string): Promise<void>;
   setModel?(model?: string): Promise<void>;
+  supportedModels?(): Promise<unknown>;
   rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
 };
@@ -119,6 +120,11 @@ export class ClaudeProvider implements ChatProvider {
   // Slash commands as the last session's init message reported them; empty
   // until a session has run — a normal declared-but-empty state.
   private commands: ChatCommand[] = [];
+  // The CLI's own model catalog, captured from the first live session. It is
+  // the authority on context windows (including the [1m] variants) and
+  // per-model effort levels; the static manifest only covers the moment
+  // before any session has run.
+  private liveModels: ChatModel[] | null = null;
 
   private readonly live = new Map<string, LiveSession>();
   // Sessions created but never prompted: they exist only here until the SDK
@@ -161,7 +167,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async listCommands(): Promise<ChatCommand[]> { return this.commands; }
-  async listModels(): Promise<ChatModel[]> { return CLAUDE_MODELS; }
+  async listModels(): Promise<ChatModel[]> { return this.liveModels ?? CLAUDE_MODELS; }
 
   /**
    * Permission modes are the ways of working (D5). `bypassPermissions` is
@@ -180,7 +186,8 @@ export class ClaudeProvider implements ChatProvider {
 
   async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
     if (variant !== undefined) {
-      const model = findClaudeModel(selection.modelId);
+      const model = (this.liveModels ?? CLAUDE_MODELS).find(candidate => candidate.selection.modelId === selection.modelId)
+        ?? findClaudeModel(selection.modelId);
       if (!model?.variants?.includes(variant)) {
         throw new UnsupportedVariantSelectionError(`model ${selection.modelId} does not offer effort level ${variant}`);
       }
@@ -511,6 +518,9 @@ export class ClaudeProvider implements ChatProvider {
     const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve() };
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
+    // Fire-and-forget: the catalog answers when the session is up, and a
+    // failure just leaves the manifest fallback in place until the next one.
+    if (this.liveModels === null) void this.captureModels(query);
     return session;
   }
 
@@ -810,6 +820,17 @@ export class ClaudeProvider implements ChatProvider {
     this.events_.push({ ...normalized, conversationId });
   }
 
+  private async captureModels(query: ClaudeQueryHandle): Promise<void> {
+    if (!query.supportedModels) return;
+    try {
+      const raw = await query.supportedModels();
+      const models = modelsFromCatalog(raw);
+      if (models.length > 0) this.liveModels = models;
+    } catch {
+      // The manifest fallback stands; the next session retries.
+    }
+  }
+
   /** The init message names the session's slash commands; keep the latest. */
   private captureCommands(message: unknown): void {
     if (!message || typeof message !== "object") return;
@@ -846,6 +867,30 @@ function clampIndex(cursor: string | undefined, length: number): number {
   const parsed = Number.parseInt(cursor, 10);
   if (Number.isNaN(parsed)) throw new Error("invalid history cursor");
   return Math.max(0, Math.min(parsed, length));
+}
+
+/** The CLI's ModelInfo list → the shared model shape. */
+function modelsFromCatalog(raw: unknown): ChatModel[] {
+  if (!Array.isArray(raw)) return [];
+  const models: ChatModel[] = [];
+  for (const value of raw) {
+    if (!value || typeof value !== "object") continue;
+    const info = value as Record<string, unknown>;
+    if (typeof info.value !== "string" || !info.value) continue;
+    const name = typeof info.displayName === "string" && info.displayName ? info.displayName : info.value;
+    const variants = Array.isArray(info.supportedEffortLevels)
+      ? info.supportedEffortLevels.filter((level): level is string => typeof level === "string")
+      : undefined;
+    models.push({
+      selection: { providerId: "anthropic", modelId: info.value },
+      provider: "Anthropic",
+      name,
+      ...(variants && variants.length > 0 ? { variants } : {}),
+      ...(typeof info.contextWindow === "number" && info.contextWindow > 0 ? { contextLimit: info.contextWindow } : {}),
+      imageInput: true,
+    });
+  }
+  return models;
 }
 
 function rewindRefusal(error: string | undefined): string {

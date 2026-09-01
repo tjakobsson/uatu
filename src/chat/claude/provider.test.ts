@@ -18,6 +18,7 @@ class FakeQuery implements ClaudeQueryHandle {
   failure: Error | null = null;
   setPermissionMode?: (mode: string) => Promise<void>;
   rewindFiles?: (userMessageId: string, options?: { dryRun?: boolean }) => Promise<{ canRewind: boolean; error?: string; filesChanged?: string[] }>;
+  supportedModels?: () => Promise<unknown>;
 
   constructor(readonly input: ClaudeQueryInput) {}
 
@@ -370,6 +371,45 @@ describe("ClaudeProvider sessions", () => {
     expect(await decision).toEqual({ behavior: "deny", message: "The turn was interrupted before the user answered." });
     await waitFor(() => events.some(event => event.eventType === "interaction.abandoned"));
     stop();
+    await provider.dispose();
+  });
+
+  test("the live catalog replaces the manifest with real windows and effort levels", async () => {
+    const { provider, queries } = fixture();
+    // Cold: the static fallback answers.
+    expect((await provider.listModels()).find(model => model.selection.modelId === "claude-opus-5")?.contextLimit).toBe(200_000);
+
+    const session = await provider.createSession("x");
+    const catalog = [
+      { value: "claude-opus-5[1m]", displayName: "Opus 5 (1M context)", contextWindow: 1_000_000, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+      { value: "claude-opus-5", displayName: "Opus 5", contextWindow: 200_000, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    ];
+    // The hook must exist before the session spawns.
+    const provider2 = new ClaudeProvider({
+      workspacePath: queries.length ? (queries[0]!.input.options.cwd) : process.cwd(),
+      executable: "/bin/claude",
+      configDir: undefined as never,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.supportedModels = async () => catalog;
+        return query;
+      },
+    });
+    void session;
+    const created = await provider2.createSession("y");
+    await provider2.prompt(created.id, { id: "r1", text: "hi", delivery: "queue" });
+    let models = await provider2.listModels();
+    for (let attempt = 0; attempt < 200 && !models.some(model => model.contextLimit === 1_000_000); attempt += 1) {
+      await Bun.sleep(5);
+      models = await provider2.listModels();
+    }
+    expect(models.find(model => model.selection.modelId === "claude-opus-5[1m]")).toEqual(expect.objectContaining({
+      name: "Opus 5 (1M context)",
+      contextLimit: 1_000_000,
+    }));
+    // Variant validation follows the live catalog.
+    await provider2.switchModel(created.id, { providerId: "anthropic", modelId: "claude-opus-5[1m]" }, "max");
+    await provider2.dispose();
     await provider.dispose();
   });
 
