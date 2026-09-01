@@ -941,19 +941,34 @@ export class ClaudeProvider implements ChatProvider {
       if (tipSnapshot.has(absolute)) continue;
       tipSnapshot.set(absolute, await captureFileState(absolute));
     }
-    const result = await session.query.rewindFiles(target.uuid, { dryRun: false });
-    if (!result.canRewind) throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
+    // Write-ahead: the boundary and its tip bytes are durable BEFORE the
+    // destructive rewind runs. A process killed between record and rewind
+    // leaves a staged claim over tip-state files — a redo then restores
+    // tip over tip, idempotently — whereas rewinding first risked changed
+    // files with no recoverable record.
+    const stagedRollback = () => {
+      if (existing) this.staged.set(sessionId, existing);
+      else this.staged.delete(sessionId);
+    };
     this.staged.set(sessionId, { boundaryIndex: index, tipSnapshot });
     try {
-      // The files are already rewound; acknowledging on a lost record
-      // would strand them unrestorable. A record that cannot be written
-      // puts the workspace back at tip instead.
       await this.queuePersist(this.durableSnapshot());
     } catch (error) {
-      await this.restoreSnapshot(tipSnapshot).catch(() => undefined);
-      this.staged.delete(sessionId);
+      stagedRollback();
+      throw new ReversibleHistoryTargetError(`the rewind could not be recorded (${error instanceof Error ? error.message : "write failed"}); nothing was changed`);
+    }
+    let result;
+    try {
+      result = await session.query.rewindFiles(target.uuid, { dryRun: false });
+    } catch (error) {
+      stagedRollback();
       this.persistDurableState();
-      throw new ReversibleHistoryTargetError(`the rewind could not be recorded (${error instanceof Error ? error.message : "write failed"}); the workspace was restored to the tip`);
+      throw error;
+    }
+    if (!result.canRewind) {
+      stagedRollback();
+      this.persistDurableState();
+      throw new ReversibleHistoryTargetError(rewindRefusal(result.error));
     }
     return {
       outcome: "changed",
