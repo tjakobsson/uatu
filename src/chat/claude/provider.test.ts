@@ -1068,6 +1068,49 @@ describe("ClaudeProvider sessions", () => {
     await forking.dispose();
   });
 
+  test("a fork-committed conversation's subagents resolve under the fork's directory", async () => {
+    const { configDir, workspace } = fixture();
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const forkId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const agentId = "a1b2c3d4e5f60718";
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+      turn("u2", "2026-08-30T10:05:00.000Z", "revert this"),
+    ].join("\n"));
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"));
+    // The replacement turn's subagent lives under the FORK's directory.
+    const subagentDir = path.join(claudeProjectDir(workspace, configDir), forkId, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeFileSync(path.join(subagentDir, `agent-${agentId}.jsonl`),
+      turn("s1", "2026-08-30T10:10:00.000Z", "count the files"));
+
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.rewindFiles = async () => ({ canRewind: true, filesChanged: [] });
+        return query;
+      },
+      forkSession: async () => ({ sessionId: forkId }),
+    });
+    await provider.undo!(storedId);
+    await provider.prompt(storedId, { id: "r2", text: "new direction", delivery: "queue" });
+    // The public link keeps the original parent id; resolution follows the
+    // active native id to the fork.
+    const page = await provider.listMessages(`sub:${storedId}:${agentId}`, { limit: 10 });
+    expect(page.items.some(item => item.type === "user_message")).toBe(true);
+    await provider.dispose();
+  });
+
   test("a completed Task links its subagent transcript and carries the store's attribution", async () => {
     const { provider, configDir, workspace } = fixture();
     const parentId = "99999999-aaaa-4bbb-8ccc-dddddddddddd";

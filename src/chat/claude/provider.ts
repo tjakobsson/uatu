@@ -353,6 +353,9 @@ export class ClaudeProvider implements ChatProvider {
 
   async getSession(id: string): Promise<ProviderSession | null> {
     await this.restoreDurableState();
+    // Subagent links carry the public parent id; resolution goes through the
+    // active native id so a fork-committed conversation's subagents load
+    // from where Claude actually stored them.
     const child = parseSubagentId(id);
     if (child) {
       // Synthetic and read-only: a subagent run is reached from its parent's
@@ -360,7 +363,7 @@ export class ClaudeProvider implements ChatProvider {
       // out of the picker and routes its interactions to the parent.
       let entries;
       try {
-        entries = (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, child.parentSessionId, child.agentId, this.configDir))).entries;
+        entries = (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, this.nativeId(child.parentSessionId), child.agentId, this.configDir))).entries;
       } catch {
         return null;
       }
@@ -394,7 +397,7 @@ export class ClaudeProvider implements ChatProvider {
     let entries: Awaited<ReturnType<typeof readSessionTranscript>>["entries"] = [];
     try {
       entries = child
-        ? (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, child.parentSessionId, child.agentId, this.configDir))).entries
+        ? (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, this.nativeId(child.parentSessionId), child.agentId, this.configDir))).entries
         : (await readSessionTranscript(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))).entries;
     } catch {
       // No transcript yet: a fresh conversation's history is empty. A child

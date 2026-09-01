@@ -172,31 +172,40 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
     try {
       const file = path.join(directory, name);
       const info = await fs.stat(file);
-      const wholeFileRead = info.size <= SUMMARY_HEAD_BYTES;
-      const handle = await fs.open(file, "r");
-      let head: string;
-      try {
-        const buffer = Buffer.alloc(Math.min(info.size, SUMMARY_HEAD_BYTES));
-        await handle.read(buffer, 0, buffer.length, 0);
-        head = buffer.toString("utf8");
-      } finally {
-        await handle.close();
-      }
-      const lines = head.split("\n");
-      // The head can end mid-line; a partial trailing line is not evidence.
-      if (!wholeFileRead) lines.pop();
-      const entries: TranscriptEntry[] = [];
-      for (const line of lines) {
-        if (!line.trim()) continue;
+      // The head can be defeated by a single oversized first line — an
+      // image prompt's base64 easily exceeds it — and a session must not
+      // vanish from the chooser for that. Grow the window until at least
+      // one mainline entry parses (or the whole file has been read).
+      let wholeFileRead = false;
+      let mainline: TranscriptEntry[] = [];
+      for (let headBytes = SUMMARY_HEAD_BYTES; ; headBytes *= 16) {
+        wholeFileRead = info.size <= headBytes;
+        const handle = await fs.open(file, "r");
+        let head: string;
         try {
-          const entry = validateEntry(JSON.parse(line));
-          if (entry) entries.push(entry);
-        } catch {
-          // Unparseable lines are skip-and-count territory for full reads;
-          // for a summary they simply contribute nothing.
+          const buffer = Buffer.alloc(Math.min(info.size, headBytes));
+          await handle.read(buffer, 0, buffer.length, 0);
+          head = buffer.toString("utf8");
+        } finally {
+          await handle.close();
         }
+        const lines = head.split("\n");
+        // The head can end mid-line; a partial trailing line is not evidence.
+        if (!wholeFileRead) lines.pop();
+        const entries: TranscriptEntry[] = [];
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const entry = validateEntry(JSON.parse(line));
+            if (entry) entries.push(entry);
+          } catch {
+            // Unparseable lines are skip-and-count territory for full reads;
+            // for a summary they simply contribute nothing.
+          }
+        }
+        mainline = entries.filter(entry => !entry.isSidechain);
+        if (mainline.length > 0 || wholeFileRead) break;
       }
-      const mainline = entries.filter(entry => !entry.isSidechain);
       if (mainline.length === 0) {
         skippedFiles += 1;
         continue;

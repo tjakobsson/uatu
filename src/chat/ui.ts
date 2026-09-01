@@ -310,15 +310,21 @@ export function initChat(api = new ChatApiClient()): void {
   const applyCapabilities = () => {
     if (!agent) return;
     configurationTrigger.hidden = !declares("models") && !declares("modes") && !declares("variants");
-    // An agent that does not report token usage has no context readout to
-    // show, and a permanently empty meter would claim otherwise.
-    if (!declares("context")) contextUsage?.remove();
-    if (!declares("conversation-rename")) renameButton?.remove();
-    else if (renameButton) renameButton.hidden = false;
-    // Removed, not disabled, per the capability rule above. The model-level
-    // gate is different — see syncAttachControl: a model choice flips often,
-    // so there the control stays visible and goes inactive instead.
-    if (!declares("attachments")) attachButton?.remove();
+    // Hidden, never removed: capabilities change with the selected
+    // conversation's agent now, so a control another agent declares must be
+    // able to come back. An absent capability still presents no control —
+    // the rule is about presentation, and hidden satisfies it reversibly.
+    if (contextUsage && !declares("context")) {
+      // The meter's own renderer re-shows it when a context agent's usage
+      // paints; here only the takeaway happens.
+      contextUsage.hidden = true;
+      contextUsage.open = false;
+    }
+    if (renameButton) renameButton.hidden = !declares("conversation-rename");
+    // The model-level attachment gate is different — see syncAttachControl:
+    // a model choice flips often, so there the control stays visible and
+    // goes inactive instead.
+    if (attachButton) attachButton.hidden = !declares("attachments");
   };
   nameAgent();
 
@@ -651,7 +657,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (usage === paintedUsage && reportingModel === paintedUsageModel) return;
     paintedUsage = usage;
     paintedUsageModel = reportingModel;
-    if (!usage) {
+    if (!usage || !declares("context")) {
       contextUsage.hidden = true;
       contextUsage.open = false;
       return;

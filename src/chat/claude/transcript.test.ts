@@ -124,6 +124,26 @@ describe("enumerating a workspace's sessions", () => {
     expect(skippedFiles).toBe(1);
   });
 
+  test("an oversized first line (an image prompt) does not hide the session", async () => {
+    const { workspace, configDir, projectDir } = fixture();
+    // The first line alone exceeds the summary head window, the way a
+    // base64 image block does.
+    const hugeImage = JSON.stringify({
+      type: "user", uuid: "u1", parentUuid: null, isSidechain: false,
+      timestamp: "2026-08-22T10:00:00.000Z", cwd: workspace,
+      message: { role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(600 * 1024) } },
+        { type: "text", text: "what is in this picture?" },
+      ] },
+    });
+    writeFileSync(path.join(projectDir, "pictured.jsonl"), `${hugeImage}\n${userLine("u2", "follow-up", "2026-08-22T10:05:00.000Z", { cwd: workspace })}`);
+
+    const { sessions, skippedFiles } = await listTranscriptSessions(workspace, configDir);
+    expect(skippedFiles).toBe(0);
+    expect(sessions.map(session => session.id)).toEqual(["pictured"]);
+    expect(sessions[0]!.firstPrompt).toBe("what is in this picture?");
+  });
+
   test("a corrupt file degrades to a skip, never a failed enumeration", async () => {
     const { workspace, configDir, projectDir } = fixture();
     writeFileSync(path.join(projectDir, "corrupt.jsonl"), "not json\nstill not json\n");
