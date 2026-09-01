@@ -313,13 +313,21 @@ export class ClaudeProvider implements ChatProvider {
   async listSessions(): Promise<ProviderSession[]> {
     await this.restoreDurableState();
     const { sessions } = await listTranscriptSessions(this.workspacePath, this.configDir);
-    const stored = sessions.filter(session => !this.hiddenNative.has(session.id)).map(session => ({
-      id: session.id,
-      title: deriveTitle(session.firstPrompt),
-      directory: this.workspacePath,
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
-    }));
+    // A redirected conversation keeps its public id but lives on its fork:
+    // the summary (title, timestamps) must describe the fork's transcript,
+    // or later turns never update the chooser and a reverted first prompt
+    // stays on as the title.
+    const byNative = new Map(sessions.map(session => [session.id, session]));
+    const stored = sessions.filter(session => !this.hiddenNative.has(session.id)).map(session => {
+      const summary = byNative.get(this.nativeId(session.id)) ?? session;
+      return {
+        id: session.id,
+        title: deriveTitle(summary.firstPrompt),
+        directory: this.workspacePath,
+        createdAt: summary.createdAt,
+        updatedAt: summary.updatedAt,
+      };
+    });
     const onDisk = new Set(stored.map(session => session.id));
     const fresh = [...this.pending.values()].filter(session => !onDisk.has(session.id));
     return [...fresh, ...stored];
@@ -458,7 +466,10 @@ export class ClaudeProvider implements ChatProvider {
     if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     if (input.mode !== undefined) {
       const previousMode = this.configurations.get(sessionId)?.mode;
-      if (input.mode === "plan" && previousMode !== "plan") this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
+      if (input.mode === "plan" && previousMode !== "plan") {
+        this.modeBeforePlan.set(sessionId, previousMode ?? "auto");
+        this.persistDurableState();
+      }
       const configuration = { ...this.configurations.get(sessionId), mode: input.mode };
       this.configurations.set(sessionId, configuration);
       this.persistDurableState();
@@ -886,6 +897,7 @@ export class ClaudeProvider implements ChatProvider {
           activeNative?: Record<string, string>;
           hiddenNative?: string[];
           staged?: Record<string, { boundaryIndex: number; tipSnapshot: Record<string, string | null> }>;
+          modeBeforePlan?: Record<string, string>;
         };
         for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
           if (!this.configurations.has(id)) this.configurations.set(id, configuration);
@@ -900,6 +912,11 @@ export class ClaudeProvider implements ChatProvider {
           if (!this.staged.has(id)) {
             this.staged.set(id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: new Map(Object.entries(staged.tipSnapshot)) });
           }
+        }
+        // Without it, a restart mid-plan loses the "implement and return
+        // to <mode>" intent the conversation still deserves.
+        for (const [id, mode] of Object.entries(stored.modeBeforePlan ?? {})) {
+          if (!this.modeBeforePlan.has(id)) this.modeBeforePlan.set(id, mode);
         }
       } catch {
         // A corrupt sidecar is dropped; the next persist rewrites it.
@@ -916,6 +933,7 @@ export class ClaudeProvider implements ChatProvider {
       hiddenNative: [...this.hiddenNative],
       staged: Object.fromEntries([...this.staged].map(([id, staged]) =>
         [id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: Object.fromEntries(staged.tipSnapshot) }])),
+      modeBeforePlan: Object.fromEntries(this.modeBeforePlan),
     });
     this.persistChain = this.persistChain.then(async () => {
       await fs.mkdir(path.dirname(this.stateFile), { recursive: true, mode: 0o700 });
@@ -1016,6 +1034,7 @@ export class ClaudeProvider implements ChatProvider {
       : "auto";
     pending.settle({ behavior: "allow", updatedInput: pending.input });
     this.modeBeforePlan.delete(sessionId);
+    this.persistDurableState();
     const configuration = { ...this.configurations.get(sessionId), mode: returnMode };
     this.configurations.set(sessionId, configuration);
     this.persistDurableState();

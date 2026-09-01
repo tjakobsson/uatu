@@ -723,6 +723,52 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("the pre-plan mode survives a restart: the restore intent still returns to it", async () => {
+    const { configDir, workspace } = fixture();
+    const stateFile = path.join(workspace, ".uatu-test-state.json");
+    const storedId = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+    const turn = (uuid: string, timestamp: string, text: string) => JSON.stringify({
+      type: "user", uuid, parentUuid: null, isSidechain: false, timestamp, cwd: workspace,
+      message: { role: "user", content: text },
+    });
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${storedId}.jsonl`),
+      turn("u1", "2026-08-30T10:00:00.000Z", "first"));
+    const build = (queries: FakeQuery[]) => new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile,
+      executable: "/bin/claude",
+      catalogProbe: false,
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        queries.push(query);
+        return query;
+      },
+    });
+
+    const firstQueries: FakeQuery[] = [];
+    const first = build(firstQueries);
+    await first.prompt(storedId, { id: "r0", text: "work", delivery: "queue", mode: "acceptEdits" });
+    await first.prompt(storedId, { id: "r1", text: "plan it", delivery: "queue", mode: "plan" });
+    await first.dispose();
+
+    const secondQueries: FakeQuery[] = [];
+    const second = build(secondQueries);
+    const { events, stop } = collect(second);
+    await second.prompt(storedId, { id: "r2", text: "still planning", delivery: "queue" });
+    const decision = secondQueries.at(-1)!.input.options.canUseTool!("ExitPlanMode", { plan: "steps" }, { signal: new AbortController().signal, toolUseID: "p1" });
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    const card = events.find(event => event.eventType === "interaction.requested")!.updates[0]! as { item: { choices?: Array<{ id: string; label: string }> } };
+    // The restore intent survives the restart and still names acceptEdits.
+    expect(card.item.choices?.map(choice => choice.id)).toEqual(["implement", "implement-and-restore"]);
+    expect(card.item.choices?.at(-1)?.label).toContain("acceptEdits");
+    await second.replyPermission(storedId, "p1", "once", "implement-and-restore");
+    await decision;
+    expect((await second.getConversationConfiguration(storedId)).mode).toBe("acceptEdits");
+    stop();
+    await second.dispose();
+  });
+
   test("a completed plan asks with intents; each intent sets the follow-on mode", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);
@@ -1025,8 +1071,10 @@ describe("ClaudeProvider sessions", () => {
       turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
       turn("u2", "2026-08-30T10:05:00.000Z", "revert this"),
     ].join("\n"));
-    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`),
-      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"));
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${forkId}.jsonl`), [
+      turn("u1", "2026-08-30T10:00:00.000Z", "keep this"),
+      turn("u3", "2026-08-30T10:10:00.000Z", "the fork way"),
+    ].join("\n"));
 
     const build = (queries: FakeQuery[]) => new ClaudeProvider({
       workspacePath: workspace,
@@ -1062,7 +1110,12 @@ describe("ClaudeProvider sessions", () => {
     // The fork redirect survives: the original id resumes the fork, and the
     // fork does not reappear as a second conversation.
     expect(secondQueries.at(-1)!.input.options.resume).toBe(forkId);
-    expect((await second.listSessions()).map(session => session.id)).not.toContain(forkId);
+    const listed = await second.listSessions();
+    expect(listed.map(session => session.id)).not.toContain(forkId);
+    // The public summary describes the fork's transcript (its timestamps),
+    // not the pre-fork history the conversation no longer shows.
+    const summary = listed.find(session => session.id === storedId)!;
+    expect(summary.updatedAt).toBe(Date.parse("2026-08-30T10:10:00.000Z"));
     await second.dispose();
   });
 
