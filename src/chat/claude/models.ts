@@ -21,3 +21,13 @@ export const CLAUDE_MODELS: ChatModel[] = [
 export function findClaudeModel(modelId: string): ChatModel | undefined {
   return CLAUDE_MODELS.find(model => model.selection.modelId === modelId);
 }
+
+/**
+ * The live ModelInfo carries no context-window field: the only wire signal
+ * for the enlarged window is the "[1m]" variant marker somewhere in the
+ * model id, and the published 200k standard is the base for everything
+ * else.
+ */
+export function claudeContextWindow(...ids: Array<string | undefined>): number {
+  return ids.some(id => id?.includes("[1m]")) ? 1_000_000 : 200_000;
+}

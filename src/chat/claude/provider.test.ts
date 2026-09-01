@@ -69,6 +69,7 @@ function fixture(): { provider: ClaudeProvider; queries: FakeQuery[]; configDir:
     workspacePath: workspace,
     executable: "/usr/local/bin/claude",
     configDir,
+    catalogProbe: false,
     queryFactory: input => {
       const query = new FakeQuery(input);
       queries.push(query);
@@ -134,6 +135,84 @@ describe("model alias resolution", () => {
     // The gauge joins on the alias — the id the catalog keys windows by.
     expect(normalized.assistantModel?.model).toBe("sonnet");
     expect(memory.lastModel).toBe("sonnet");
+  });
+});
+
+describe("catalog hydration probe", () => {
+  // The catalog as the CLI actually reports it: no contextWindow field,
+  // alias values, resolved ids that sessions then report stripped of the
+  // variant marker.
+  const realCatalog = [
+    { value: "default", resolvedModel: "claude-opus-5[1m]", displayName: "Default (recommended)", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]", displayName: "Opus (1M context)", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "claude-fable-5[1m]", resolvedModel: "claude-fable-5", displayName: "Fable", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet", supportedEffortLevels: ["low", "medium", "high"] },
+    { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku" },
+  ];
+
+  function probeFixture(): { provider: ClaudeProvider; queries: FakeQuery[] } {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-probe-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      executable: "/usr/local/bin/claude",
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input);
+        query.supportedModels = async () => realCatalog;
+        queries.push(query);
+        // The probe session reports init like any session start.
+        queueMicrotask(() => query.push({ type: "system", subtype: "init", slash_commands: ["/compact"] }));
+        return query;
+      },
+    });
+    return { provider, queries };
+  }
+
+  test("the first picker read hydrates the live catalog without a prompt", async () => {
+    const { provider, queries } = probeFixture();
+    const models = await provider.listModels();
+    // One probe session, promptless, in a scratch directory outside the workspace.
+    expect(queries).toHaveLength(1);
+    expect(queries[0]!.input.options.cwd).toContain("uatu-claude-catalog-");
+    expect(queries[0]!.input.options.enableFileCheckpointing).toBe(false);
+    expect(queries[0]!.returned).toBe(true);
+    // Live entries with derived windows; the pseudo-entry stays out.
+    expect(models.map(model => model.selection.modelId)).toEqual(["opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"]);
+    expect(models.find(model => model.selection.modelId === "opus[1m]")?.contextLimit).toBe(1_000_000);
+    expect(models.find(model => model.selection.modelId === "claude-fable-5[1m]")?.contextLimit).toBe(1_000_000);
+    expect(models.find(model => model.selection.modelId === "sonnet")?.contextLimit).toBe(200_000);
+    // A second read reuses the hydrated catalog: still one query.
+    await provider.listModels();
+    expect(queries).toHaveLength(1);
+    await provider.dispose();
+  });
+
+  test("the join covers resolved ids with and without the variant marker", async () => {
+    const { provider, queries } = probeFixture();
+    await provider.listModels();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+    const live = queries[1]!;
+    // The assistant reports the resolved id stripped of the marker.
+    live.push({ type: "assistant", uuid: "a1", timestamp: "2026-09-01T10:00:00.000Z",
+      message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 3, output_tokens: 1 } } });
+    live.push({ type: "result", uuid: "r1-result", subtype: "success", timestamp: "2026-09-01T10:00:01.000Z",
+      usage: { input_tokens: 3, output_tokens: 1 } });
+    const carriers = () => events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert")
+      .map(update => (update as { item: { id: string; type: string; usage?: unknown; model?: { modelId: string } } }).item)
+      .filter(item => item.type === "assistant_message" && item.usage !== undefined);
+    await waitFor(() => carriers().length > 0);
+    // Attribution lands on the catalog id, where the gauge finds the window.
+    expect(carriers().at(-1)!.model?.modelId).toBe("opus[1m]");
+    stop();
+    await provider.dispose();
   });
 });
 
@@ -404,6 +483,7 @@ describe("ClaudeProvider sessions", () => {
       workspacePath: queries.length ? (queries[0]!.input.options.cwd) : process.cwd(),
       executable: "/bin/claude",
       configDir: undefined as never,
+      catalogProbe: false,
       queryFactory: input => {
         const query = new FakeQuery(input);
         query.supportedModels = async () => catalog;
@@ -441,6 +521,7 @@ describe("ClaudeProvider sessions", () => {
     const optedIn = new ClaudeProvider({
       workspacePath: path.join(root, "ws"),
       executable: "/bin/claude",
+      catalogProbe: false,
       configDir: path.join(root, "cfg"),
       offerBypassPermissions: true,
       queryFactory: input => new FakeQuery(input),
@@ -666,6 +747,7 @@ describe("ClaudeProvider sessions", () => {
     const provider = new ClaudeProvider({
       workspacePath: workspace,
       executable: "/bin/claude",
+      catalogProbe: false,
       configDir,
       queryFactory: input => {
         const query = new FakeQuery(input);
@@ -745,6 +827,7 @@ describe("ClaudeProvider sessions", () => {
     const forking = new ClaudeProvider({
       workspacePath: workspace,
       executable: "/bin/claude",
+      catalogProbe: false,
       configDir,
       queryFactory: input => {
         const query = new FakeQuery(input);

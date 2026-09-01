@@ -1438,17 +1438,22 @@ export function initChat(api = new ChatApiClient()): void {
     configurationSummary.textContent = declares("models")
       ? displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
       : "Chat settings";
-    const showMode = declares("modes") && modes.length > 0;
-    const showReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
+    const offersMode = declares("modes") && modes.length > 0;
+    const offersReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
+    // The chip states only what was chosen: an unset mode or effort is the
+    // agent's own choice, said once in the dialog ("Let ... choose") — not
+    // echoed here where two "Auto" fallbacks would read as one doubled one.
+    const showMode = offersMode && Boolean(configuration.mode);
+    const showReasoning = offersReasoning && Boolean(configuration.variant);
     configurationModeSummary.hidden = !showMode;
-    configurationModeSummary.textContent = showMode ? configurationOptionLabel(configuration.mode ?? "auto") : "";
+    configurationModeSummary.textContent = showMode ? configurationOptionLabel(configuration.mode!) : "";
     configurationVariantSummary.hidden = !showReasoning;
-    configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant ?? "auto") : "";
+    configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant!) : "";
     configurationDetails.hidden = !showMode && !showReasoning;
     const accessibleValues = [
       declares("models") ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`)}` : "",
-      showMode ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
-      showReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      offersMode ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
     configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
     configurationPicker?.update({ agent, models, modes, configuration });

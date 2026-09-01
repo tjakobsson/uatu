@@ -219,11 +219,15 @@ export function normalizeClaudeMessage(
 }
 
 /** Stored transcript entries → timeline items, in entry order. */
-export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSessionId?: string): {
+export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSessionId?: string, resolveModel?: (id: string) => string): {
   items: ConversationItem[];
   accounting: Array<{ messageId: string; createdAt: number; usage?: TokenUsage; model?: string }>;
 } {
   const memory = createClaudeEventMemory();
+  // Stored history joins on the same catalog aliases as the live stream —
+  // otherwise a resync would swap a translated model id for the raw one and
+  // detach the context gauge from its window.
+  if (resolveModel) memory.resolveModel = resolveModel;
   const items: ConversationItem[] = [];
   const accounting: Array<{ messageId: string; createdAt: number; usage?: TokenUsage; model?: string }> = [];
   for (const entry of entries) {

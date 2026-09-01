@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type {
@@ -14,7 +15,7 @@ import type {
 } from "../provider";
 import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "../types";
 import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
-import { CLAUDE_MODELS, findClaudeModel } from "./models";
+import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel } from "./models";
 import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./normalization";
 import { listTranscriptSessions, readSessionTranscript, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
@@ -85,12 +86,19 @@ export type ClaudeProviderOptions = {
    */
   offerBypassPermissions?: boolean;
   queryFactory?: (input: ClaudeQueryInput) => ClaudeQueryHandle;
+  /**
+   * Hydrate the model catalog from a short-lived promptless probe session
+   * on the first picker read (on by default; tests stage catalogs
+   * explicitly instead).
+   */
+  catalogProbe?: boolean;
   /** Conversation rewind: fork the native session up to a boundary (D8). */
   forkSession?: (sessionId: string, options: { upToMessageId: string; dir: string }) => Promise<{ sessionId: string }>;
   now?: () => number;
 };
 
 const DEFAULT_TITLE = "New conversation";
+const CATALOG_PROBE_TIMEOUT_MS = 20_000;
 const TITLE_LIMIT = 80;
 
 type LiveSession = {
@@ -126,6 +134,8 @@ export class ClaudeProvider implements ChatProvider {
   // before any session has run.
   private liveModels: ChatModel[] | null = null;
   private modelAliases = new Map<string, string>();
+  private readonly catalogProbe: boolean;
+  private hydration: Promise<void> | null = null;
 
   private readonly live = new Map<string, LiveSession>();
   // Sessions created but never prompted: they exist only here until the SDK
@@ -158,6 +168,7 @@ export class ClaudeProvider implements ChatProvider {
     this.configDir = options.configDir ?? claudeConfigDir();
     this.queryFactory = options.queryFactory ?? defaultQueryFactory;
     this.offerBypassPermissions = options.offerBypassPermissions === true;
+    this.catalogProbe = options.catalogProbe !== false;
     this.forkSession = options.forkSession ?? defaultForkSession;
     this.now = options.now ?? (() => Date.now());
   }
@@ -168,7 +179,59 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async listCommands(): Promise<ChatCommand[]> { return this.commands; }
-  async listModels(): Promise<ChatModel[]> { return this.liveModels ?? CLAUDE_MODELS; }
+  async listModels(): Promise<ChatModel[]> {
+    await this.hydrateCatalog();
+    return this.liveModels ?? CLAUDE_MODELS;
+  }
+
+  /**
+   * The catalog only exists inside a running session (D5), so the first
+   * picker read hydrates it from a promptless probe session in a scratch
+   * directory: the picker is live before any conversation has run, and the
+   * manifest is only the failure fallback. Single-flight; a failed probe
+   * retries on the next read.
+   */
+  private async hydrateCatalog(): Promise<void> {
+    if (this.liveModels !== null || !this.catalogProbe) return;
+    this.hydration ??= this.runCatalogProbe()
+      .catch(() => undefined)
+      .finally(() => { this.hydration = null; });
+    await this.hydration;
+  }
+
+  private async runCatalogProbe(): Promise<void> {
+    const queue = new PushQueue<ClaudeUserEnvelope>();
+    // Scratch cwd: the probe session must not land in the workspace's own
+    // native storage, where enumeration would list it as a conversation.
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "uatu-claude-catalog-"));
+    const query = this.queryFactory({
+      prompt: queue,
+      options: {
+        cwd: scratch,
+        pathToClaudeCodeExecutable: this.executable,
+        enableFileCheckpointing: false,
+      },
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // The control channel answers before any turn starts; a promptless
+      // stream never emits init, so the catalog is requested immediately
+      // while the message stream is merely drained to keep the pump alive.
+      const drain = (async () => { for await (const message of query) this.captureCommands(message); })();
+      drain.catch(() => undefined);
+      await Promise.race([
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("catalog probe timed out")), CATALOG_PROBE_TIMEOUT_MS);
+        }),
+        this.captureModels(query),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      queue.close();
+      await query.return?.().catch(() => undefined);
+      await fs.rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
 
   /**
    * Permission modes are the ways of working (D5). `bypassPermissions` is
@@ -270,6 +333,10 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
+    // History joins model ids on the catalog aliases; hydrate them first so
+    // a cold read does not serve raw ids the gauge cannot match (no-op once
+    // the catalog is live).
+    await this.hydrateCatalog();
     const child = parseSubagentId(sessionId);
     let entries: Awaited<ReturnType<typeof readSessionTranscript>>["entries"] = [];
     try {
@@ -291,7 +358,7 @@ export class ClaudeProvider implements ChatProvider {
       const boundary = turns[stagedState.boundaryIndex];
       if (boundary) mainline = mainline.slice(0, boundary.entryIndex);
     }
-    const { items, accounting } = normalizeTranscriptEntries(mainline, child ? undefined : this.nativeId(sessionId));
+    const { items, accounting } = normalizeTranscriptEntries(mainline, child ? undefined : this.nativeId(sessionId), id => this.modelAliases.get(id) ?? id);
     // Local paging over the fully read transcript, same shape as the
     // OpenCode provider: cursor is the exclusive end index.
     const end = clampIndex(options.cursor, items.length);
@@ -891,8 +958,14 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
     // The session reports resolved ids ("claude-sonnet-5") while the
     // catalog keys by alias ("sonnet", "opus[1m]"); the join is what lets
     // the context gauge find the window actually in effect.
-    if (typeof info.resolvedModel === "string" && info.resolvedModel && info.resolvedModel !== info.value) {
-      if (!aliases.has(info.resolvedModel)) aliases.set(info.resolvedModel, info.value);
+    const resolvedModel = typeof info.resolvedModel === "string" && info.resolvedModel ? info.resolvedModel : undefined;
+    if (resolvedModel && resolvedModel !== info.value) {
+      if (!aliases.has(resolvedModel)) aliases.set(resolvedModel, info.value);
+      // Assistant messages report the resolved id without the variant
+      // marker ("claude-opus-5" while running "opus[1m]"); join that
+      // spelling too.
+      const stripped = resolvedModel.replace(/\[[^\]]*\]$/, "");
+      if (stripped !== resolvedModel && stripped !== info.value && !aliases.has(stripped)) aliases.set(stripped, info.value);
     }
     const name = typeof info.displayName === "string" && info.displayName ? info.displayName : info.value;
     const variants = Array.isArray(info.supportedEffortLevels)
@@ -903,7 +976,11 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
       provider: "Anthropic",
       name,
       ...(variants && variants.length > 0 ? { variants } : {}),
-      ...(typeof info.contextWindow === "number" && info.contextWindow > 0 ? { contextLimit: info.contextWindow } : {}),
+      // No ModelInfo field carries the window; derive it from the ids
+      // unless the CLI starts reporting one.
+      contextLimit: typeof info.contextWindow === "number" && info.contextWindow > 0
+        ? info.contextWindow
+        : claudeContextWindow(info.value, resolvedModel),
       imageInput: true,
     });
   }
