@@ -16,7 +16,7 @@ import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { 
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/parse";
-import { LazyOpenCodeChatService } from "./chat/service";
+import { LazyChatService } from "./chat/service";
 import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
 import { runStoredGitCredentialHelper } from "./hub/git-credential-helper";
@@ -169,7 +169,7 @@ async function runWatch(options: WatchOptions) {
   let watchSession: ReturnType<typeof createWatchSession> | null = null;
   let server: ReturnType<typeof Bun.serve> | null = null;
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
-  let chatService: LazyOpenCodeChatService | null = null;
+  let chatService: LazyChatService | null = null;
 
   // Resolve the actual port to bind. When the user passed `--port`, honor it
   // strictly (no roll). When they didn't, pre-flight probe for a free port
@@ -189,7 +189,7 @@ async function runWatch(options: WatchOptions) {
   const chatRoot = await selectCanonicalChatRoot(rootEntries);
 
   try {
-    chatService = new LazyOpenCodeChatService({ workspacePath: chatRoot, metrics });
+    chatService = new LazyChatService({ workspacePath: chatRoot, metrics });
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,
       terminalEnabled,

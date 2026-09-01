@@ -77,11 +77,3 @@ export async function discoverExecutable(
 ): Promise<string | null> {
   return (await discoverExecutableCandidates(name, env, platform))[0] ?? null;
 }
-
-export function discoverOpenCodeExecutable(env?: NodeJS.ProcessEnv): Promise<string | null> {
-  return discoverExecutable("opencode", env);
-}
-
-export function discoverOpenCodeCandidates(env?: NodeJS.ProcessEnv): Promise<string[]> {
-  return discoverExecutableCandidates("opencode", env);
-}

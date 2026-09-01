@@ -3,9 +3,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate, type NormalizedSessionLifecycle } from "./normalization";
+import type { NormalizedProviderUpdate, NormalizedSessionLifecycle } from "./provider";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderAttachment, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
@@ -170,7 +170,7 @@ export type ChatEventMetrics = { inc(name: string, delta?: number): void };
 const MAX_COUNTED_EVENT_TYPES = 64;
 
 export type ChatAdapterOptions = {
-  provider: OpenCodeProvider;
+  provider: ChatProvider;
   workspacePath: string;
   // Resolves a workspace-issued attachment id to its stored bytes' location
   // and sniffed type. Absent (a harness without a store) means every
@@ -190,9 +190,9 @@ export type ChatAdapterOptions = {
   id?: () => string;
 };
 
-export class OpenCodeChatAdapter {
+export class ChatAdapter {
   readonly generation: string;
-  private readonly provider: OpenCodeProvider;
+  private readonly provider: ChatProvider;
   private readonly workspacePath: string;
   private readonly resolveAttachment: ChatAdapterOptions["resolveAttachment"];
   private readonly replayBytes: number;
@@ -264,7 +264,6 @@ export class OpenCodeChatAdapter {
   // Only a successful stored read (merged with whatever landed live) earns the
   // mark, and only the mark lets history() skip the read.
   private readonly completeAttributions = new Set<string>();
-  private readonly providerEventMemory = createProviderEventMemory();
   private eventCoalescer: ProviderUpdateCoalescer | null = null;
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
@@ -302,14 +301,13 @@ export class OpenCodeChatAdapter {
       if (this.provider.renameSession && isDefaultConversationTitle(session.title)) {
         try {
           let page = await this.provider.listMessages(session.id, { limit: 100 });
-          let messages = [...(page.configurationItems ?? page.items)];
-          while (!page.configurationItems && page.nextCursor) {
+          let items = [...(page.completeItems ?? page.items)];
+          while (!page.completeItems && page.nextCursor) {
             page = await this.provider.listMessages(session.id, { cursor: page.nextCursor, limit: 100 });
-            if (page.configurationItems) messages = [...page.configurationItems];
-            else messages.push(...page.items);
+            if (page.completeItems) items = [...page.completeItems];
+            else items.push(...page.items);
           }
-          const firstUserMessage = messages
-            .flatMap(message => normalizeProviderMessage(message))
+          const firstUserMessage = items
             .filter(item => item.type === "user_message" && item.text.trim())
             .sort((left, right) => left.createdAt - right.createdAt)[0];
           if (firstUserMessage?.type === "user_message") {
@@ -386,8 +384,8 @@ export class OpenCodeChatAdapter {
     const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
     // Some providers page locally after loading the complete transcript. Reuse
     // that complete source for recovery, never the bounded visible page.
-    const configuration = await this.configuration(id, page.configurationItems);
-    const items = page.items.flatMap(message => normalizeProviderMessage(message));
+    const configuration = await this.configuration(id);
+    const items = [...page.items];
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
     // order (the order `flatMap` already produced). Comparing ids instead
@@ -1142,7 +1140,7 @@ export class OpenCodeChatAdapter {
       }));
   }
 
-  private requireReversibleHistoryProvider(): Required<Pick<OpenCodeProvider, "getReversibleHistoryState" | "undo" | "redo" | "revert" | "restore">> {
+  private requireReversibleHistoryProvider(): Required<Pick<ChatProvider, "getReversibleHistoryState" | "undo" | "redo" | "revert" | "restore">> {
     if (!this.provider.describe().capabilities.includes("reversible-history")
       || !this.provider.getReversibleHistoryState || !this.provider.undo || !this.provider.redo
       || !this.provider.revert || !this.provider.restore) {
@@ -1282,15 +1280,14 @@ export class OpenCodeChatAdapter {
   }
 
   private async authoritativeVisibleHistory(conversationId: string, isCurrent?: () => boolean): Promise<ConversationItem[]> {
-    const messages: ProviderMessage[] = [];
+    const items: ConversationItem[] = [];
     let cursor: string | undefined;
     do {
       if (isCurrent && !isCurrent()) throw new Error("reversible history reconciliation was cancelled");
       const page = await this.provider.listMessages(conversationId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
-      messages.push(...page.items);
+      items.push(...page.items);
       cursor = page.nextCursor;
     } while (cursor !== undefined);
-    const items = messages.flatMap(message => normalizeProviderMessage(message));
     if (!this.liveTurns.has(conversationId)) {
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index]!;
@@ -1445,9 +1442,7 @@ export class OpenCodeChatAdapter {
       let cursor: string | undefined;
       do {
         const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
-        for (const message of page.items) {
-          const reported = storedMessageUsage(message);
-          if (!reported) continue;
+        for (const reported of page.accounting) {
           if (reported.usage) byMessage.set(reported.messageId, reported.usage);
           if (reported.model) byModel.set(reported.messageId, { model: reported.model, createdAt: reported.createdAt });
         }
@@ -1635,18 +1630,8 @@ export class OpenCodeChatAdapter {
     });
     this.eventCoalescer = coalescer;
     try {
-      for await (const event of this.provider.events(signal)) {
+      for await (const normalized of this.provider.events(signal)) {
         if (signal.aborted) break;
-        // Inside the loop, never above it: normalization resolves every failure
-        // to an outcome, and anything that still escapes must cost one event
-        // rather than ending the pump and losing the whole restart gap.
-        let normalized;
-        try {
-          normalized = normalizeProviderEvent(event, this.providerEventMemory);
-        } catch {
-          this.countDiscard("unparseable", "");
-          continue;
-        }
         if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
           this.countDiscard(normalized.outcome, normalized.eventType);
         }
@@ -1902,12 +1887,12 @@ export class OpenCodeChatAdapter {
     if (relevantDeletion) this.inventory.invalidate();
   }
 
-  private async configuration(id: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration> {
+  private async configuration(id: string): Promise<ConversationConfiguration> {
     const cached = this.configurations.get(id);
     if (cached) return cached;
     const existing = this.configurationReads.get(id);
     if (existing) return existing;
-    const read = this.provider.getConversationConfiguration(id, messages).then(configuration => {
+    const read = this.provider.getConversationConfiguration(id).then(configuration => {
       // Prompt acceptance may have populated the cache while the provider read
       // was in flight. That newer value wins over the earlier recovered state.
       const current = this.configurations.get(id);

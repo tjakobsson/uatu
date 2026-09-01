@@ -1,9 +1,9 @@
-import { OpenCodeChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
+import { ChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
-import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode-service";
+import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode/opencode-service";
 import type { ConversationInventorySubscription } from "./inventory-broadcaster";
-import { createSdkV2Provider } from "./sdk-v2-provider";
-import type { OpenCodeProvider } from "./provider";
+import { createSdkV2Provider } from "./opencode/sdk-v2-provider";
+import type { ChatProvider } from "./provider";
 import type { ReplaySubscription } from "./replay";
 import type {
   ChatMode,
@@ -63,10 +63,30 @@ export class ChatUnavailableError extends Error {
   }
 }
 
-export type LazyOpenCodeChatServiceOptions = OpenCodeServiceOptions & {
+/**
+ * The lifecycle every agent runtime shares (D4). OpenCode implements it with
+ * a spawned loopback server; an agent with no long-lived idle process (a
+ * per-conversation runtime) implements the same surface from probes alone.
+ */
+export interface AgentRuntime {
+  status(): Promise<ChatAvailability>;
+  restart(): Promise<ChatAvailability>;
+  dispose(): Promise<void>;
+  /**
+   * A provider for the runtime's current state, or null while the runtime
+   * has nothing to connect to. Called only after status() reports ready, but
+   * must tolerate the race where the runtime died in between.
+   */
+  createProvider(): ChatProvider | null;
+}
+
+export type LazyChatServiceOptions = OpenCodeServiceOptions & {
+  // A complete agent stack. When present it owns lifecycle and provider
+  // construction, and the OpenCode-specific options below are unused.
+  agentRuntime?: AgentRuntime;
   runtime?: OpenCodeService;
-  createProvider?: (options: { endpoint: string; password: string; directory: string }) => OpenCodeProvider;
-  createAdapter?: (options: ChatAdapterOptions) => OpenCodeChatAdapter;
+  createProvider?: (options: { endpoint: string; password: string; directory: string }) => ChatProvider;
+  createAdapter?: (options: ChatAdapterOptions) => ChatAdapter;
   // Overrides the XDG-resolved store; the e2e harness points this at a
   // temporary directory.
   attachmentStore?: AttachmentStore;
@@ -75,23 +95,21 @@ export type LazyOpenCodeChatServiceOptions = OpenCodeServiceOptions & {
   metrics?: ChatEventMetrics;
 };
 
-export class LazyOpenCodeChatService implements WorkspaceChatService {
-  private readonly runtime: OpenCodeService;
+export class LazyChatService implements WorkspaceChatService {
+  private readonly runtime: AgentRuntime;
   private readonly workspacePath: string;
-  private readonly createProvider: NonNullable<LazyOpenCodeChatServiceOptions["createProvider"]>;
-  private readonly createAdapter: NonNullable<LazyOpenCodeChatServiceOptions["createAdapter"]>;
+  private readonly createAdapter: NonNullable<LazyChatServiceOptions["createAdapter"]>;
   private readonly attachmentStore: AttachmentStore;
   private readonly metrics: ChatEventMetrics | undefined;
-  private adapterPromise: Promise<OpenCodeChatAdapter> | null = null;
-  private adapter: OpenCodeChatAdapter | null = null;
+  private adapterPromise: Promise<ChatAdapter> | null = null;
+  private adapter: ChatAdapter | null = null;
   private retryPromise: Promise<ChatAvailability> | null = null;
   private disposed = false;
 
-  constructor(options: LazyOpenCodeChatServiceOptions) {
+  constructor(options: LazyChatServiceOptions) {
     this.workspacePath = options.workspacePath;
-    this.runtime = options.runtime ?? new OpenCodeService(options);
-    this.createProvider = options.createProvider ?? createSdkV2Provider;
-    this.createAdapter = options.createAdapter ?? (adapterOptions => new OpenCodeChatAdapter(adapterOptions));
+    this.runtime = options.agentRuntime ?? openCodeAgentRuntime(options);
+    this.createAdapter = options.createAdapter ?? (adapterOptions => new ChatAdapter(adapterOptions));
     this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
     this.metrics = options.metrics;
   }
@@ -152,7 +170,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     // ready on a connection that no longer exists.
     // Not narrowed to null by the assignment above: ensureAdapter can have
     // repopulated the reference while the awaits yielded.
-    const stray = this.adapter as OpenCodeChatAdapter | null;
+    const stray = this.adapter as ChatAdapter | null;
     this.adapterPromise = null;
     this.adapter = null;
     await stray?.dispose().catch(() => undefined);
@@ -194,21 +212,16 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     await runtimeDisposal;
   }
 
-  private async requireAdapter(): Promise<OpenCodeChatAdapter> {
+  private async requireAdapter(): Promise<ChatAdapter> {
     const availability = await this.status();
     if (availability.state !== "ready") throw new ChatUnavailableError();
     return this.ensureAdapter();
   }
 
-  private ensureAdapter(): Promise<OpenCodeChatAdapter> {
+  private ensureAdapter(): Promise<ChatAdapter> {
     const pending = this.adapterPromise ??= (async () => {
-      const connection = this.runtime.currentConnection();
-      if (!connection) throw new ChatUnavailableError();
-      const provider = this.createProvider({
-        endpoint: connection.endpoint,
-        password: connection.password,
-        directory: this.workspacePath,
-      });
+      const provider = this.runtime.createProvider();
+      if (!provider) throw new ChatUnavailableError();
       // A passing health check says nothing about SDK compatibility, and event
       // pump failures are swallowed by the supervisor — without a probe an
       // incompatible server reports "ready" and then fails every operation.
@@ -233,7 +246,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
    * working and SSE keepalives keep flowing while agent events never arrive
    * again. Restart with capped backoff until the service is disposed.
    */
-  private superviseEventPump(adapter: OpenCodeChatAdapter): void {
+  private superviseEventPump(adapter: ChatAdapter): void {
     void (async () => {
       let failures = 0;
       // `this.adapter === adapter` retires the loop when retry() replaces the
@@ -254,4 +267,28 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
       }
     })();
   }
+}
+
+/**
+ * The OpenCode agent stack: one spawned loopback server whose connection
+ * (endpoint + password) feeds the SDK provider. The connection details stay
+ * below this seam — the service never sees them.
+ */
+export function openCodeAgentRuntime(options: LazyChatServiceOptions): AgentRuntime {
+  const runtime = options.runtime ?? new OpenCodeService(options);
+  const createProvider = options.createProvider ?? createSdkV2Provider;
+  return {
+    status: () => runtime.status(),
+    restart: () => runtime.restart(),
+    dispose: () => runtime.dispose(),
+    createProvider: () => {
+      const connection = runtime.currentConnection();
+      if (!connection) return null;
+      return createProvider({
+        endpoint: connection.endpoint,
+        password: connection.password,
+        directory: options.workspacePath,
+      });
+    },
+  };
 }

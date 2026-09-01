@@ -1,4 +1,4 @@
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "./types";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion, TokenUsage } from "./types";
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -20,16 +20,85 @@ export type ProviderSession = {
   parentId?: string;
 };
 
-export type ProviderPage<T> = {
-  items: T[];
-  nextCursor?: string;
-  // Providers that already loaded the complete backing collection can expose
-  // it for configuration recovery without making the visible page unbounded.
-  configurationItems?: T[];
+/**
+ * The seam speaks the shared timeline model, never an agent's wire format.
+ * Each provider owns its normalization; what crosses here is what the
+ * adapter can apply directly. (D2: normalization lives below this seam.)
+ */
+export type NormalizedProviderUpdate =
+  | { kind: "upsert"; item: ConversationItem }
+  | { kind: "text"; itemId: string; identity: string; mode: "cumulative" | "incremental"; text: string; item?: ConversationItem }
+  | { kind: "remove"; itemId: string }
+  | { kind: "status"; status: ConversationStatus; message?: string };
+
+export type NormalizedSessionLifecycle = {
+  kind: "created" | "updated" | "deleted";
+  id: string;
+  directory: string;
+  title: string;
+  parentId?: string;
 };
 
-export type ProviderMessage = Record<string, unknown>;
-export type ProviderEvent = Record<string, unknown>;
+// Why an event produced no updates. Without this an unrecognized event and one
+// we deliberately ignore are the same empty value to the caller, so a counter
+// over them would either miss real drops or inflate on expected ones.
+export type NormalizedEventOutcome =
+  | "handled"
+  // Recognized, and correctly produced nothing (a status we already hold, a
+  // streaming frame whose start and end are enough).
+  | "ignored"
+  // No case matched: the provider does not know this event type at all.
+  | "unrecognized"
+  // A case matched but the payload did not carry what that case requires.
+  | "unparseable";
+
+export type NormalizedProviderEvent = {
+  conversationId?: string;
+  updates: NormalizedProviderUpdate[];
+  outcome: NormalizedEventOutcome;
+  // The event's own type, so a caller can count drops per type. Never a
+  // payload — a payload can carry file contents.
+  eventType: string;
+  // The model the assistant message ran, when the event states it. Reported on
+  // the envelope rather than on an item: it belongs to the message, and the
+  // one thing that needs it — attributing a subagent on its parent's row —
+  // reads it from the child's event stream, not from the child's timeline.
+  assistantModel?: { messageId: string; model: string; createdAt: number };
+  // The tokens a message reported, with the message's own id. A message can
+  // produce several parts, so aggregation keys on this id rather than counting
+  // the dedicated usage carrier as though it were another content part.
+  assistantUsage?: { messageId: string; usage: TokenUsage };
+  // A deleted assistant message must also leave any aggregate keyed by its
+  // provider id; timeline removes alone cannot reach the adapter's tally.
+  removedMessageId?: string;
+  configuration?: ConversationConfiguration;
+  // A model switch without a variant explicitly clears the previous variant.
+  replaceModel?: boolean;
+  // Inventory identity deliberately excludes provider timestamps. They change
+  // during ordinary session activity without changing picker membership.
+  sessionLifecycle?: NormalizedSessionLifecycle;
+  // Revert lifecycle events invalidate the visible transcript. The adapter
+  // fetches provider history rather than presenting these events as notices.
+  revertLifecycle?: "staged" | "committed" | "cleared";
+};
+
+// What one stored message reported about cost and model, keyed by the
+// message's own provider id — the aggregation input for subagent attribution,
+// which the timeline's usage carriers cannot serve (they are items, not
+// per-message records).
+export type StoredMessageAccounting = { messageId: string; createdAt: number; usage?: TokenUsage; model?: string };
+
+export type ProviderHistoryPage = {
+  // Normalized timeline items for this page, in the provider's part order.
+  items: ConversationItem[];
+  // Accounting for the stored messages underlying this page's items.
+  accounting: StoredMessageAccounting[];
+  // Providers that page locally over a fully loaded transcript can expose the
+  // complete normalized items, so a walker that needs the whole conversation
+  // (title derivation) avoids refetching the transcript once per page.
+  completeItems?: ConversationItem[];
+  nextCursor?: string;
+};
 
 export class UnsupportedVariantSelectionError extends Error {
   constructor(message: string) {
@@ -59,7 +128,7 @@ export type ProviderAttachment = {
   absolutePath: string;
 };
 
-export interface OpenCodeProvider {
+export interface ChatProvider {
   /**
    * Who this provider is and what it offers, for the surface to name and to
    * gate its controls on. The provider declares its own capabilities because
@@ -81,14 +150,14 @@ export interface OpenCodeProvider {
   newConversationConfiguration(): Promise<ConversationConfiguration>;
   createSession(id: string, configuration?: ConversationConfiguration): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
-  getConversationConfiguration(sessionId: string, completeMessages?: ProviderMessage[]): Promise<ConversationConfiguration>;
-  listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
+  getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration>;
+  listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage>;
   getReversibleHistoryState?(sessionId: string): Promise<ReversibleHistoryState>;
   undo?(sessionId: string): Promise<ReversibleHistoryResult>;
   redo?(sessionId: string): Promise<ReversibleHistoryResult>;
   revert?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
   restore?(sessionId: string, messageId: string): Promise<ReversibleHistoryResult>;
-  events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
+  events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;

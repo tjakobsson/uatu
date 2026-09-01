@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import type { OpenCodeProvider } from "./provider";
+import type { ChatProvider } from "./provider";
 import type { ChatCommand } from "./types";
-import { OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
+import { ChatAdapter, parseSlashCommand } from "./adapter";
 import { insertCommand, localHistoryOperation, matchingCommands, slashCommandQuery } from "./slash-commands";
 
 const commands: ChatCommand[] = [
@@ -97,8 +97,8 @@ describe("slash command completion", () => {
       revert: async () => ({ outcome: "changed", state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:user", text: "prompt" }] } }),
       restore: async () => ({ outcome: "changed", state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] } }),
       command: async () => { providerCommandCalls += 1; return { messageId: "unexpected" }; },
-    } as unknown as OpenCodeProvider;
-    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+    } as unknown as ChatProvider;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
     const listed = await adapter.commands();
 
     expect(listed.map(command => [command.name, command.kind])).toEqual([
@@ -112,8 +112,8 @@ describe("slash command completion", () => {
     expect(parseSlashCommand("/redo", listed)).toBeUndefined();
     expect(providerCommandCalls).toBe(0);
 
-    const incomplete = { ...provider, redo: undefined } as unknown as OpenCodeProvider;
-    const gated = new OpenCodeChatAdapter({ provider: incomplete, workspacePath: process.cwd() });
+    const incomplete = { ...provider, redo: undefined } as unknown as ChatProvider;
+    const gated = new ChatAdapter({ provider: incomplete, workspacePath: process.cwd() });
     expect(gated.agent().capabilities).not.toContain("reversible-history");
     expect((await gated.commands()).map(command => command.name)).toEqual(commands.map(command => command.name));
   });

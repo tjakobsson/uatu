@@ -1,4 +1,4 @@
-import type { NormalizedProviderUpdate } from "./normalization";
+import type { NormalizedProviderUpdate } from "./provider";
 
 export type CoalescerOptions = {
   windowMs?: number;

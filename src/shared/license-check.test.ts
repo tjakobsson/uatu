@@ -52,6 +52,24 @@ describe("validateLicenseRecords", () => {
       .toEqual(["@img/sharp-libvips-darwin-arm64"]);
   });
 
+  test("accepts the reviewed Claude Agent SDK and its platform sidecars", () => {
+    expect(validateLicenseRecords([
+      { name: "@anthropic-ai/claude-agent-sdk", version: "0.3.252", license: "SEE LICENSE IN README.md" },
+      { name: "@anthropic-ai/claude-agent-sdk-darwin-arm64", version: "0.3.252", license: "SEE LICENSE IN LICENSE.md" },
+    ], new Set(["@anthropic-ai/claude-agent-sdk"]))).toEqual([]);
+  });
+
+  test("a renamed or relicensed Claude Agent SDK release fails the audit again", () => {
+    // A different license marker means the terms changed since review.
+    expect(validateLicenseRecords([
+      { name: "@anthropic-ai/claude-agent-sdk", version: "9.9.9", license: "SEE LICENSE IN TERMS.txt" },
+    ])).toHaveLength(1);
+    // The review covers exactly the SDK and its sidecars, not the scope.
+    expect(validateLicenseRecords([
+      { name: "@anthropic-ai/other-package", version: "1.0.0", license: "SEE LICENSE IN README.md" },
+    ])).toHaveLength(1);
+  });
+
   test("accepts permissive alternatives in OR expressions", () => {
     expect(isAllowedLicenseExpression("(MPL-2.0 OR Apache-2.0)")).toBe(true);
   });

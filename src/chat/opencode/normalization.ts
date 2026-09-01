@@ -1,45 +1,16 @@
-import { boundedSet } from "../shared/bounded-map";
-import { attachmentIdFromFileUri, attachmentIdFromText } from "./attachment-store";
-import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "./types";
+import { boundedSet } from "../../shared/bounded-map";
+import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-store";
+import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
+import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
+
+// Raw OpenCode payload shapes, private to this normalizer.
+export type ProviderMessage = Record<string, unknown>;
+export type ProviderEvent = Record<string, unknown>;
+
+export type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle };
 
 type RecordValue = Record<string, unknown>;
 
-export type NormalizedProviderUpdate =
-  | { kind: "upsert"; item: ConversationItem }
-  | { kind: "text"; itemId: string; identity: string; mode: "cumulative" | "incremental"; text: string; item?: ConversationItem }
-  | { kind: "remove"; itemId: string }
-  | { kind: "status"; status: ConversationStatus; message?: string };
-
-export type NormalizedSessionLifecycle = {
-  kind: "created" | "updated" | "deleted";
-  id: string;
-  directory: string;
-  title: string;
-  parentId?: string;
-};
-
-// Why an event produced no updates. Without this an unrecognized event and one
-// we deliberately ignore are the same empty value to the caller, so a counter
-// over them would either miss real drops or inflate on expected ones.
-export type NormalizedEventOutcome =
-  | "handled"
-  // Recognized, and correctly produced nothing (a status we already hold, a
-  // streaming frame whose start and end are enough).
-  | "ignored"
-  // No case matched: the workspace does not know this event type at all.
-  | "unrecognized"
-  // A case matched but the payload did not carry what that case requires.
-  | "unparseable";
-
-/**
- * What normalizing one event needs to remember from earlier ones. Bounded: a
- * long session must not grow it without limit.
- *
- * - `roles` — a part's sender, which only `message.updated` states.
- *
- * Token usage needs nothing here: it rides an item keyed by the message that
- * reported it, so no event has to recall which part came last.
- */
 export type ProviderEventMemory = {
   roles: Map<string, string>;
 };
@@ -115,36 +86,6 @@ function messageModelSelection(info: RecordValue): { providerId: string; modelId
   const modelId = messageModel(info);
   return providerId && modelId ? { providerId, modelId } : undefined;
 }
-
-export type NormalizedProviderEvent = {
-  conversationId?: string;
-  updates: NormalizedProviderUpdate[];
-  outcome: NormalizedEventOutcome;
-  // The event's own type, so a caller can count drops per type. Never a
-  // payload — a payload can carry file contents.
-  eventType: string;
-  // The model the assistant message ran, when the event states it. Reported on
-  // the envelope rather than on an item: it belongs to the message, and the
-  // one thing that needs it — attributing a subagent on its parent's row —
-  // reads it from the child's event stream, not from the child's timeline.
-  assistantModel?: { messageId: string; model: string; createdAt: number };
-  // The tokens a message reported, with the message's own id. A message can
-  // produce several parts, so aggregation keys on this id rather than counting
-  // the dedicated usage carrier as though it were another content part.
-  assistantUsage?: { messageId: string; usage: TokenUsage };
-  // A deleted assistant message must also leave any aggregate keyed by its
-  // provider id; timeline removes alone cannot reach the adapter's tally.
-  removedMessageId?: string;
-  configuration?: ConversationConfiguration;
-  // A model switch without a variant explicitly clears the previous variant.
-  replaceModel?: boolean;
-  // Inventory identity deliberately excludes provider timestamps. They change
-  // during ordinary session activity without changing picker membership.
-  sessionLifecycle?: NormalizedSessionLifecycle;
-  // Revert lifecycle events invalidate the visible transcript. The adapter
-  // fetches provider history rather than presenting these events as notices.
-  revertLifecycle?: "staged" | "committed" | "cleared";
-};
 
 // Event types recognized as deliberately carrying nothing for the timeline.
 // Listed rather than lumped with `unrecognized` so the drop counter stays

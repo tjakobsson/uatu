@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 
-import type { ChatAvailability, ChatProbeOutcome, ChatStartupDiagnostics } from "./types";
-import { discoverOpenCodeCandidates } from "./executable";
-import { describeProbe } from "./diagnostics";
+import type { ChatAvailability, ChatProbeOutcome, ChatStartupDiagnostics } from "../types";
+import { discoverExecutableCandidates } from "../executable";
+import { describeProbe } from "../diagnostics";
 
 const HOSTNAME = "127.0.0.1";
 // Generous by design. Too long only means Chat appears a moment late behind the
@@ -96,7 +96,7 @@ export class OpenCodeService {
   constructor(options: OpenCodeServiceOptions) {
     this.workspacePath = options.workspacePath;
     this.env = options.env ?? process.env;
-    this.discover = options.discoverCandidates ?? discoverOpenCodeCandidates;
+    this.discover = options.discoverCandidates ?? (env => discoverExecutableCandidates("opencode", env));
     this.probeVersion = options.probeVersion ?? probeOpenCodeVersion;
     this.allocatePort = options.allocatePort ?? allocateLoopbackPort;
     this.spawn = options.spawn ?? ((argv, spawnOptions) => Bun.spawn(argv, spawnOptions) as SpawnedOpenCode);

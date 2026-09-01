@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
 import { normalizePersistedConversationConfiguration, resolveNewConversationConfiguration, SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
-import { ReversibleHistoryTargetError } from "./provider";
+import { ReversibleHistoryTargetError } from "../provider";
 
 describe("OpenCode v2 identity policy", () => {
   test("declares durable conversation rename support", () => {
@@ -71,21 +71,8 @@ describe("OpenCode v2 identity policy", () => {
     });
   });
 
-  test("configuration recovery reuses messages already loaded for history", async () => {
+  test("configuration recovery reads the session's own stored messages", async () => {
     let messageReads = 0;
-    const client = {
-      session: {
-        get: async () => ({ data: { ...session("ses_reuse"), metadata: { "uatu.transport": "compatibility" } } }),
-        messages: async () => { messageReads += 1; return { data: [] }; },
-      },
-      v2: {
-        session: {
-          get: async () => ({ error: { message: "missing" }, response: { status: 404 } }),
-          messages: async () => { messageReads += 1; return { data: { data: [], cursor: { next: null } } }; },
-        },
-      },
-    } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
     const messages = [{
       info: {
         id: "msg_user",
@@ -96,12 +83,27 @@ describe("OpenCode v2 identity policy", () => {
       },
       parts: [],
     }];
+    const client = {
+      session: {
+        get: async () => ({ data: { ...session("ses_reuse"), metadata: { "uatu.transport": "compatibility" } } }),
+        messages: async () => { messageReads += 1; return { data: messages }; },
+      },
+      v2: {
+        session: {
+          get: async () => ({ error: { message: "missing" }, response: { status: 404 } }),
+          messages: async () => { messageReads += 1; return { data: { data: [], cursor: { next: null } } }; },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
 
-    expect(await provider.getConversationConfiguration("ses_reuse", messages)).toEqual({
+    expect(await provider.getConversationConfiguration("ses_reuse")).toEqual({
       model: { providerId: "openai", modelId: "gpt" },
       mode: "plan",
     });
-    expect(messageReads).toBe(0);
+    // Recovery is provider-internal now: it fetches, rather than being handed
+    // a page the caller loaded.
+    expect(messageReads).toBeGreaterThan(0);
   });
 
   test("resolves new conversations with OpenCode's durable cold-TUI policy", () => {
@@ -340,9 +342,9 @@ describe("OpenCode v2 identity policy", () => {
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(client, "/workspace");
 
-    const events = [];
-    for await (const event of provider.events(new AbortController().signal)) events.push(event.id);
-    expect(events.sort()).toEqual(["classic", "native", "shared"]);
+    const events: string[] = [];
+    for await (const event of provider.events(new AbortController().signal)) events.push(event.eventType);
+    expect(events.sort()).toEqual(["message.updated", "session.idle", "session.next.prompted"]);
   });
 
   test("repeated identical id-less events from one stream all pass while cross-stream copies dedupe", async () => {
@@ -388,7 +390,7 @@ describe("OpenCode v2 identity policy", () => {
 
     const events: unknown[] = [];
     const consume = async () => {
-      for await (const event of provider.events(new AbortController().signal)) events.push(event.id);
+      for await (const event of provider.events(new AbortController().signal)) events.push(event.eventType);
     };
     await expect(consume()).rejects.toThrow("stream died");
   });
@@ -682,7 +684,7 @@ describe("history across both OpenCode message stores", () => {
   test("reads the classic store when the v2 store is empty for a session", async () => {
     const provider = new SdkV2Provider(client([{ data: [] }], [classic("msg_b", 2), classic("msg_a", 1)]), "/workspace");
     const page = await provider.listMessages("ses_legacy", { limit: 50 });
-    expect(page.items.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_a", "msg_b"]);
+    expect(page.items.map(messageId)).toEqual(["msg_a", "msg_b"]);
     expect(page.nextCursor).toBeUndefined();
   });
 
@@ -690,22 +692,19 @@ describe("history across both OpenCode message stores", () => {
     const provider = new SdkV2Provider(client([{ data: [modern("msg_new", 3)] }], [classic("msg_old", 1), classic("msg_new", 3)]), "/workspace");
     const page = await provider.listMessages("ses_mixed", { limit: 50 });
     expect(page.items).toHaveLength(2);
-    expect(page.items.map(item => {
-      const value = item as { id?: string; info?: { id: string } };
-      return value.id ?? value.info!.id;
-    })).toEqual(["msg_old", "msg_new"]);
+    expect(page.items.map(messageId)).toEqual(["msg_old", "msg_new"]);
   });
 
   test("pages locally from the newest message backwards", async () => {
     const legacy = [classic("msg_1", 1), classic("msg_2", 2), classic("msg_3", 3)];
     const provider = new SdkV2Provider(client([{ data: [] }], legacy), "/workspace");
     const newest = await provider.listMessages("ses_legacy", { limit: 2 });
-    expect(newest.items.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_2", "msg_3"]);
-    expect(newest.configurationItems?.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_1", "msg_2", "msg_3"]);
+    expect(newest.items.map(messageId)).toEqual(["msg_2", "msg_3"]);
+    expect(newest.completeItems?.map(messageId)).toEqual(["msg_1", "msg_2", "msg_3"]);
     expect(newest.nextCursor).toBe("1");
 
     const older = await provider.listMessages("ses_legacy", { limit: 2, cursor: newest.nextCursor });
-    expect(older.items.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_1"]);
+    expect(older.items.map(messageId)).toEqual(["msg_1"]);
     expect(older.nextCursor).toBeUndefined();
   });
 
@@ -884,9 +883,15 @@ describe("reversible history across both OpenCode stores", () => {
       const provider = new SdkV2Provider(fixture.client, "/workspace");
 
       const newest = await provider.listMessages(`ses_${store}`, { limit: 1 });
-      expect(newest.items.map(messageId)).toEqual(["msg_y"]);
-      expect(newest.configurationItems?.map(messageId)).toEqual(["msg_z", "msg_y"]);
-      expect(await provider.getConversationConfiguration(`ses_${store}`, newest.configurationItems)).toEqual({
+      // Pagination walks stored messages; the newest is an assistant skeleton
+      // with no renderable parts, so it yields no timeline items — but the
+      // page boundary and cursor still advance past it.
+      expect(newest.items.map(messageId)).toEqual([]);
+      // The reverted suffix (msg_a and beyond) is filtered before
+      // normalization: only the visible user turn survives into the
+      // complete items.
+      expect(newest.completeItems?.map(messageId)).toEqual(["msg_z"]);
+      expect(await provider.getConversationConfiguration(`ses_${store}`)).toEqual({
         model: { providerId: "openai", modelId: "visible" },
         mode: "build",
       });
@@ -1066,8 +1071,10 @@ describe("reversible history across both OpenCode stores", () => {
 });
 
 function messageId(value: unknown): string {
-  const message = value as { id?: string; info?: { id?: string } };
-  return message.id ?? message.info?.id ?? "";
+  // Normalized timeline items carry `message:<raw id>`; tests keep asserting
+  // the raw ids the fixtures were authored with.
+  const item = value as { id?: string };
+  return (item.id ?? "").replace(/^message:/, "");
 }
 
 function session(id: string) {
