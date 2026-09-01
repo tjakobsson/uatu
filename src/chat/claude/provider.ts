@@ -125,6 +125,7 @@ export class ClaudeProvider implements ChatProvider {
   // per-model effort levels; the static manifest only covers the moment
   // before any session has run.
   private liveModels: ChatModel[] | null = null;
+  private modelAliases = new Map<string, string>();
 
   private readonly live = new Map<string, LiveSession>();
   // Sessions created but never prompted: they exist only here until the SDK
@@ -174,10 +175,12 @@ export class ClaudeProvider implements ChatProvider {
    * offered only behind the serve-level operator opt-in.
    */
   async listModes(): Promise<ChatMode[]> {
+    // Claude Code's own presentation vocabulary; names are the wire values.
     return [
-      { name: "default", description: "Ask before running tools that need permission" },
-      { name: "acceptEdits", description: "Apply file edits without asking; other tools still prompt" },
-      { name: "plan", description: "Read-only planning; present a plan before making changes" },
+      { name: "auto", description: "Claude handles permission decisions" },
+      { name: "default", description: "Always ask before making changes" },
+      { name: "acceptEdits", description: "Automatically accept all file edits" },
+      { name: "plan", description: "Create a plan before making changes" },
       ...(this.offerBypassPermissions
         ? [{ name: "bypassPermissions", description: "Run every tool without permission prompts (operator-enabled)" }]
         : []),
@@ -526,6 +529,7 @@ export class ClaudeProvider implements ChatProvider {
 
   private async readSession(session: LiveSession): Promise<void> {
     const memory = createClaudeEventMemory();
+    memory.resolveModel = id => this.modelAliases.get(id) ?? id;
     try {
       for await (const message of session.query) {
         this.captureCommands(message);
@@ -824,8 +828,11 @@ export class ClaudeProvider implements ChatProvider {
     if (!query.supportedModels) return;
     try {
       const raw = await query.supportedModels();
-      const models = modelsFromCatalog(raw);
-      if (models.length > 0) this.liveModels = models;
+      const { models, aliases } = modelsFromCatalog(raw);
+      if (models.length > 0) {
+        this.liveModels = models;
+        this.modelAliases = aliases;
+      }
     } catch {
       // The manifest fallback stands; the next session retries.
     }
@@ -869,14 +876,24 @@ function clampIndex(cursor: string | undefined, length: number): number {
   return Math.max(0, Math.min(parsed, length));
 }
 
-/** The CLI's ModelInfo list → the shared model shape. */
-function modelsFromCatalog(raw: unknown): ChatModel[] {
-  if (!Array.isArray(raw)) return [];
+/** The CLI's ModelInfo list → the shared model shape + resolved-id joins. */
+function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<string, string> } {
   const models: ChatModel[] = [];
+  const aliases = new Map<string, string>();
+  if (!Array.isArray(raw)) return { models, aliases };
   for (const value of raw) {
     if (!value || typeof value !== "object") continue;
     const info = value as Record<string, unknown>;
     if (typeof info.value !== "string" || !info.value) continue;
+    // "default" is the CLI's let-me-pick pseudo-entry; Chat already offers
+    // that as the unset state ("Let Claude Code choose").
+    if (info.value === "default") continue;
+    // The session reports resolved ids ("claude-sonnet-5") while the
+    // catalog keys by alias ("sonnet", "opus[1m]"); the join is what lets
+    // the context gauge find the window actually in effect.
+    if (typeof info.resolvedModel === "string" && info.resolvedModel && info.resolvedModel !== info.value) {
+      if (!aliases.has(info.resolvedModel)) aliases.set(info.resolvedModel, info.value);
+    }
     const name = typeof info.displayName === "string" && info.displayName ? info.displayName : info.value;
     const variants = Array.isArray(info.supportedEffortLevels)
       ? info.supportedEffortLevels.filter((level): level is string => typeof level === "string")
@@ -890,7 +907,7 @@ function modelsFromCatalog(raw: unknown): ChatModel[] {
       imageInput: true,
     });
   }
-  return models;
+  return { models, aliases };
 }
 
 function rewindRefusal(error: string | undefined): string {

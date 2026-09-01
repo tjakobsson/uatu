@@ -53,7 +53,11 @@ export function modelResultCountLabel(count: number): string {
 }
 
 export function configurationOptionLabel(value: string): string {
-  return value ? value.charAt(0).toLocaleUpperCase() + value.slice(1) : value;
+  if (!value) return value;
+  // Wire values arrive as lowercase words ("build") or camelCase
+  // ("acceptEdits"); both read as sentence case ("Build", "Accept edits").
+  const spaced = value.replace(/([a-z0-9])([A-Z])/g, (_match, before: string, after: string) => `${before} ${after.toLocaleLowerCase()}`);
+  return spaced.charAt(0).toLocaleUpperCase() + spaced.slice(1);
 }
 
 type Rect = Pick<DOMRect, "top" | "right" | "bottom" | "left" | "width" | "height">;
@@ -171,12 +175,13 @@ function setSectionVisible(section: HTMLElement | undefined, visible: boolean): 
   if (section) section.hidden = !visible;
 }
 
-function addOption(select: HTMLSelectElement, label: string, value: string, disabled = false): void {
+function addOption(select: HTMLSelectElement, label: string, value: string, disabled = false): HTMLOptionElement {
   const option = select.ownerDocument.createElement("option");
   option.textContent = label;
   option.value = value;
   option.disabled = disabled;
   select.append(option);
+  return option;
 }
 
 function selectOption(select: HTMLSelectElement, value: string): void {
@@ -261,7 +266,10 @@ export function createChatConfigurationPicker(
       elements.modeSelect.replaceChildren();
       if (modeAvailable) {
         if (!state.configuration.mode) addOption(elements.modeSelect, `Let ${state.agent?.name || "the agent"} choose`, "");
-        for (const mode of state.modes) addOption(elements.modeSelect, configurationOptionLabel(mode.name), mode.name);
+        for (const mode of state.modes) {
+          const option = addOption(elements.modeSelect, configurationOptionLabel(mode.name), mode.name);
+          if (mode.description) option.title = mode.description;
+        }
         const selectedMode = state.configuration.mode;
         if (selectedMode && !state.modes.some(mode => mode.name === selectedMode)) {
           addOption(elements.modeSelect, `${configurationOptionLabel(selectedMode)} (current, unavailable)`, selectedMode, true);

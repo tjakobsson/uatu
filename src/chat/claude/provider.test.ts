@@ -123,6 +123,20 @@ describe("normalization against the recorded SDK traffic", () => {
   });
 });
 
+describe("model alias resolution", () => {
+  test("session-reported resolved ids translate to the catalog's alias ids", () => {
+    const memory = createClaudeEventMemory();
+    memory.resolveModel = id => ({ "claude-sonnet-5": "sonnet" } as Record<string, string>)[id] ?? id;
+    const normalized = normalizeClaudeMessage({
+      type: "assistant", uuid: "a1", timestamp: "2026-09-01T10:00:00.000Z",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 3, output_tokens: 1 } },
+    }, memory, "live");
+    // The gauge joins on the alias — the id the catalog keys windows by.
+    expect(normalized.assistantModel?.model).toBe("sonnet");
+    expect(memory.lastModel).toBe("sonnet");
+  });
+});
+
 describe("ClaudeProvider sessions", () => {
   test("creation mints a UUID session, announces it, and lists it as pending", async () => {
     const { provider } = fixture();
@@ -381,8 +395,9 @@ describe("ClaudeProvider sessions", () => {
 
     const session = await provider.createSession("x");
     const catalog = [
+      { value: "default", displayName: "Default (recommended)", contextWindow: 200_000 },
       { value: "claude-opus-5[1m]", displayName: "Opus 5 (1M context)", contextWindow: 1_000_000, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
-      { value: "claude-opus-5", displayName: "Opus 5", contextWindow: 200_000, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+      { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet", contextWindow: 200_000, supportedEffortLevels: ["low", "medium", "high"] },
     ];
     // The hook must exist before the session spawns.
     const provider2 = new ClaudeProvider({
@@ -407,6 +422,9 @@ describe("ClaudeProvider sessions", () => {
       name: "Opus 5 (1M context)",
       contextLimit: 1_000_000,
     }));
+    // The CLI's let-me-pick pseudo-entry stays out: Chat already offers
+    // "Let Claude Code choose" as the unset state.
+    expect(models.some(model => model.selection.modelId === "default")).toBe(false);
     // Variant validation follows the live catalog.
     await provider2.switchModel(created.id, { providerId: "anthropic", modelId: "claude-opus-5[1m]" }, "max");
     await provider2.dispose();
@@ -415,7 +433,7 @@ describe("ClaudeProvider sessions", () => {
 
   test("modes exclude bypass without the operator opt-in and include it with it", async () => {
     const { provider } = fixture();
-    expect((await provider.listModes()).map(mode => mode.name)).toEqual(["default", "acceptEdits", "plan"]);
+    expect((await provider.listModes()).map(mode => mode.name)).toEqual(["auto", "default", "acceptEdits", "plan"]);
     await provider.dispose();
 
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-bypass-")));

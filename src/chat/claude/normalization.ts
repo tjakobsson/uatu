@@ -26,6 +26,9 @@ export type ClaudeNormalizationSource = "live" | "stored";
 export type ClaudeEventMemory = {
   tools: Map<string, { name: string; input?: string; createdAt: number }>;
   lastModel?: string;
+  // Translates a session-reported resolved model id to the catalog's alias
+  // id, once the provider has captured the catalog. Identity until then.
+  resolveModel?: (id: string) => string;
   // TodoWrite tool uses render as the task-progress surface, not as tool
   // rows; their ids are remembered so the later tool_result is suppressed
   // too. The task list's first-seen time keeps the presentation anchored.
@@ -102,7 +105,8 @@ export function normalizeClaudeMessage(
   if (type === "system") {
     // The init message names the session's model; remember it for usage
     // attribution and report it as the conversation's configuration.
-    const model = typeof record.model === "string" ? record.model : undefined;
+    const reportedInit = typeof record.model === "string" ? record.model : undefined;
+    const model = reportedInit !== undefined ? (memory.resolveModel?.(reportedInit) ?? reportedInit) : undefined;
     if (record.subtype === "init" && model) {
       memory.lastModel = model;
       return { ...base, outcome: "handled", configuration: { model: claudeModelSelection(model) } };
@@ -114,7 +118,8 @@ export function normalizeClaudeMessage(
     const envelope = envelopeIdentity(record);
     if (!envelope) return { ...base, outcome: "unparseable" };
     const message = asRecord(record.message);
-    const reported = typeof message.model === "string" ? message.model : undefined;
+    const raw = typeof message.model === "string" ? message.model : undefined;
+    const reported = raw !== undefined ? (memory.resolveModel?.(raw) ?? raw) : undefined;
     // The init message names the session's model in its full variant form
     // ("...[1m]"); assistant messages report the resolved base id. Keep the
     // variant id — it is what the catalog keys context windows by, so the
