@@ -2,6 +2,22 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 11 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Chat became multi-agent. `workspaceChatStatus` now answers per-agent availability (`{ agents: [{ agent, availability }] }`), `workspaceRetryChat` takes a required body naming the agent and answers that agent's status, and the models, modes, and commands reads take a required `agent` query parameter.
+- `ConversationSummary` gained required `agent`; conversation ids are agent-qualified (`<agentId>:<providerConversationId>`) on every operation and event.
+- The timeline gained the `task_progress` item; permissions gained optional `plan`, `choices`, and `choiceId` (agent-provided approval intents); questions and commands are unchanged.
+- `ChatModel` gained optional `detail`, `default`, and `resolvesTo`; `ChatMode` gained optional `default` — an agent may declare its recommended defaults, presented as the active choice while the conversation has not chosen.
+- The `workspaceChat` streaming channel's event union reflects the same item and summary shapes.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 11. Read availability from the `agents` array (a single-agent deployment still answers one entry), send the owning agent on retry and on catalog reads, treat conversation ids as opaque qualified strings, and accept the new closed-object fields on models, modes, permissions, and summaries. Clients that ignore declared defaults keep working; the delegation presentation simply remains.
+
 ## Hub 5 / Workspace 10 - Unreleased
 
 Compatibility: breaking (workspace)

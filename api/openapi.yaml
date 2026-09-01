@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 5
-    workspaceApiRevision: 10
+    workspaceApiRevision: 11
 servers:
   - url: https://{hubHost}
     variables:
