@@ -118,6 +118,18 @@ describe("folding slash-command markup", () => {
       .toBe("/x y\nbefore\nafter");
   });
 
+  test("keeps tag-shaped text quoted inside the arguments", () => {
+    // The person typed a command whose argument quotes the markup itself;
+    // the store wraps that verbatim, so the outer envelope is the argument.
+    const typed = "/review explain <command-args>foo</command-args>";
+    expect(foldCommandMarkup("<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>explain <command-args>foo</command-args></command-args>"))
+      .toBe(typed);
+    expect(foldCommandMarkup("<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>explain <command-name>/foo</command-name> and <command-message>bar</command-message></command-args>"))
+      .toBe("/review explain <command-name>/foo</command-name> and <command-message>bar</command-message>");
+    expect(foldCommandMarkup("<command-name>/x</command-name>\n<command-args>a <command-args>b</command-args>\nc</command-args>\nafter"))
+      .toBe("/x a <command-args>b</command-args>\nc\nafter");
+  });
+
   test("leaves text without a command-name tag unchanged", () => {
     expect(foldCommandMarkup("plain question")).toBe("plain question");
     expect(foldCommandMarkup("<command-message>orphan</command-message> only")).toBe("<command-message>orphan</command-message> only");

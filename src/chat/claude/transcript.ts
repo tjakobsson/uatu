@@ -407,18 +407,54 @@ export function promptText(entry: TranscriptEntry): string | null {
  * `<command-args>y</command-args>` and a `<command-message>` label, in any
  * order and on any lines — rather than the composer text; this folds it back
  * to `/x y`. Text without a command-name tag comes back unchanged.
+ *
+ * The arguments are free-form and may themselves quote tag-shaped text, so
+ * they are read as the outer envelope (first open tag to last close tag) and
+ * the name and label are looked up outside it.
  */
 export function foldCommandMarkup(text: string): string {
-  const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1]?.trim();
-  if (!name) return text;
-  const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1]?.trim() ?? "";
-  const command = args ? `${name} ${args}` : name;
+  const args = outerSpan(text, "command-args");
+  let outside = args ? cut(text, args) : text;
+  const name = innerSpan(outside, "command-name");
+  const command = name?.value.trim() ?? "";
+  if (!name || !command) return text;
+  outside = cut(outside, name);
+  const message = innerSpan(outside, "command-message");
+  if (message) outside = cut(outside, message);
+  const argText = args?.value.trim() ?? "";
+  const folded = argText ? `${command} ${argText}` : command;
   // Anything outside the tags is kept: the fold replaces the markup, never
   // the rest of what was said around it.
-  const rest = text
-    .replace(/<command-(name|args|message)>[\s\S]*?<\/command-\1>/g, "")
-    .split("\n").map(line => line.trim()).filter(Boolean).join("\n");
-  return rest ? `${command}\n${rest}` : command;
+  const rest = outside.split("\n").map(line => line.trim()).filter(Boolean).join("\n");
+  return rest ? `${folded}\n${rest}` : folded;
+}
+
+type TagSpan = { start: number; end: number; value: string };
+
+/** The first `<tag>` through the first `</tag>` after it. */
+function innerSpan(text: string, tag: string): TagSpan | null {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return null;
+  const closeAt = text.indexOf(close, start + open.length);
+  if (closeAt < 0) return null;
+  return { start, end: closeAt + close.length, value: text.slice(start + open.length, closeAt) };
+}
+
+/** The first `<tag>` through the LAST `</tag>`: the outer envelope. */
+function outerSpan(text: string, tag: string): TagSpan | null {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return null;
+  const closeAt = text.lastIndexOf(close);
+  if (closeAt < start + open.length) return null;
+  return { start, end: closeAt + close.length, value: text.slice(start + open.length, closeAt) };
+}
+
+function cut(text: string, span: TagSpan): string {
+  return text.slice(0, span.start) + text.slice(span.end);
 }
 
 /** Stable per-file identity for a session id, mirroring the store layout. */
