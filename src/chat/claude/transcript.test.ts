@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { claudeProjectDir, listTranscriptSessions, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
+import { claudeProjectDir, foldCommandMarkup, listTranscriptSessions, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
 
 function line(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -88,6 +88,41 @@ describe("reading one transcript", () => {
     expect(promptText(blockEntry)).toBe("block text");
     expect(promptText(toolResultEntry)).toBeNull();
   });
+
+  test("prompt text folds slash-command markup to what was typed", () => {
+    const markup = "<command-message>openspec-explore</command-message>\n<command-name>/openspec-explore</command-name>\n<command-args>why is the build slow?</command-args>";
+    const stringEntry = { kind: "user", uuid: "u", parentUuid: null, timestamp: 1, isSidechain: false, parentToolUseId: null, message: { role: "user", content: markup } } as const;
+    const blockEntry = { ...stringEntry, message: { role: "user", content: [{ type: "text", text: markup }] } };
+    expect(promptText(stringEntry)).toBe("/openspec-explore why is the build slow?");
+    expect(promptText(blockEntry)).toBe("/openspec-explore why is the build slow?");
+  });
+});
+
+describe("folding slash-command markup", () => {
+  test("joins the command name and its arguments", () => {
+    expect(foldCommandMarkup("<command-message>openspec-explore</command-message>\n<command-name>/openspec-explore</command-name>\n<command-args>the user's actual text</command-args>"))
+      .toBe("/openspec-explore the user's actual text");
+  });
+
+  test("tolerates the store's own tag order, indentation and empty arguments", () => {
+    // Verbatim from a Claude Code transcript.
+    expect(foldCommandMarkup("<command-name>/context</command-name>\n            <command-message>context</command-message>\n            <command-args></command-args>"))
+      .toBe("/context");
+    expect(foldCommandMarkup("<command-name>/clear</command-name>")).toBe("/clear");
+  });
+
+  test("keeps multi-line arguments and any text around the tags", () => {
+    expect(foldCommandMarkup("<command-name>/plan</command-name>\n<command-args>first line\nsecond line</command-args>"))
+      .toBe("/plan first line\nsecond line");
+    expect(foldCommandMarkup("before\n<command-name>/x</command-name><command-args>y</command-args>\nafter"))
+      .toBe("/x y\nbefore\nafter");
+  });
+
+  test("leaves text without a command-name tag unchanged", () => {
+    expect(foldCommandMarkup("plain question")).toBe("plain question");
+    expect(foldCommandMarkup("<command-message>orphan</command-message> only")).toBe("<command-message>orphan</command-message> only");
+    expect(foldCommandMarkup("")).toBe("");
+  });
 });
 
 describe("enumerating a workspace's sessions", () => {
@@ -110,6 +145,15 @@ describe("enumerating a workspace's sessions", () => {
       createdAt: Date.parse("2026-08-22T10:00:00.000Z"),
       updatedAt: Date.parse("2026-08-22T10:00:05.000Z"),
     });
+  });
+
+  test("a session opened with a slash command summarizes as the typed command", async () => {
+    const { workspace, configDir, projectDir } = fixture();
+    writeFileSync(path.join(projectDir, "slash.jsonl"),
+      userLine("u1", "<command-message>openspec-explore</command-message>\n<command-name>/openspec-explore</command-name>\n<command-args>why is the build slow?</command-args>", "2026-08-22T10:00:00.000Z", { cwd: workspace }));
+
+    const { sessions } = await listTranscriptSessions(workspace, configDir);
+    expect(sessions[0]!.firstPrompt).toBe("/openspec-explore why is the build slow?");
   });
 
   test("a session recorded under a foreign directory is not offered", async () => {

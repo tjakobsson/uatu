@@ -1,7 +1,7 @@
 import { boundedSet } from "../../shared/bounded-map";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import type { ContextReportItem, ConversationItem, MessageAttachment, ModelSelection, TokenUsage } from "../types";
-import type { TranscriptEntry } from "./transcript";
+import { foldCommandMarkup, type TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
 
@@ -390,9 +390,11 @@ export function normalizeClaudeMessage(
       // The provider minted this user message when it accepted the prompt.
       return { ...base, outcome: "ignored" };
     }
-    const text = typeof message.content === "string"
+    // A slash command is stored as tag markup; the bubble shows what was
+    // typed, the same fold the session title reads.
+    const text = foldCommandMarkup(typeof message.content === "string"
       ? message.content
-      : blocks.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text as string).join("\n");
+      : blocks.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text as string).join("\n"));
     // Images the prompt carried replay as labeled placeholders: the
     // transcript stores bytes, not the workspace store reference, so the
     // reference is unrecoverable by design (types.ts: absent id).

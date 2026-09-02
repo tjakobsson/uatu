@@ -389,7 +389,7 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
 /** The user-typed text of an entry, or null for tool results and non-text. */
 export function promptText(entry: TranscriptEntry): string | null {
   const content = entry.message.content;
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return foldCommandMarkup(content);
   if (!Array.isArray(content)) return null;
   const blocks = content.filter((block): block is { type: string; text?: unknown } =>
     Boolean(block) && typeof block === "object");
@@ -398,7 +398,27 @@ export function promptText(entry: TranscriptEntry): string | null {
     .filter(block => block.type === "text" && typeof block.text === "string")
     .map(block => block.text as string)
     .join("\n");
-  return text.length > 0 ? text : null;
+  return text.length > 0 ? foldCommandMarkup(text) : null;
+}
+
+/**
+ * A slash-command prompt as the person typed it. Claude Code stores such a
+ * prompt as markup — `<command-name>/x</command-name>` plus
+ * `<command-args>y</command-args>` and a `<command-message>` label, in any
+ * order and on any lines — rather than the composer text; this folds it back
+ * to `/x y`. Text without a command-name tag comes back unchanged.
+ */
+export function foldCommandMarkup(text: string): string {
+  const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1]?.trim();
+  if (!name) return text;
+  const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1]?.trim() ?? "";
+  const command = args ? `${name} ${args}` : name;
+  // Anything outside the tags is kept: the fold replaces the markup, never
+  // the rest of what was said around it.
+  const rest = text
+    .replace(/<command-(name|args|message)>[\s\S]*?<\/command-\1>/g, "")
+    .split("\n").map(line => line.trim()).filter(Boolean).join("\n");
+  return rest ? `${command}\n${rest}` : command;
 }
 
 /** Stable per-file identity for a session id, mirroring the store layout. */
