@@ -157,11 +157,12 @@ export function parseConversationConfiguration(value: unknown): ConversationConf
 // newer agent unusable by an older client for no reason.
 export function parseChatAgent(value: unknown): ChatAgent {
   const record = expectRecord(value, "chat agent");
-  expectKeys(record, ["id", "name", "capabilities"], "chat agent");
+  expectKeys(record, ["id", "name", "capabilities", "permissionScopeNote"], "chat agent");
   expectIdentity(record.id, "agent id");
   expectNonEmptyString(record.name, "agent name");
   if (!Array.isArray(record.capabilities)) throw new Error("invalid agent capabilities");
   for (const capability of record.capabilities) expectNonEmptyString(capability, "agent capability");
+  if (record.permissionScopeNote !== undefined) expectNonEmptyString(record.permissionScopeNote, "agent permission scope note");
   return value as ChatAgent;
 }
 
@@ -280,7 +281,14 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
 
 export function parseQuestionRequest(value: unknown): QuestionRequest {
   const record = expectRecord(value, "question request");
-  expectKeys(record, ["id", "type", "createdAt", "requestId", "conversationId", "questions", "status", "outcome"], "question request");
+  expectKeys(record, ["id", "type", "createdAt", "requestId", "conversationId", "questions", "status", "outcome", "source", "intro", "link", "schema"], "question request");
+  if (record.source !== undefined) expectOneOf(record.source, ["dialog", "elicitation"], "question source");
+  if (record.intro !== undefined) expectNonEmptyString(record.intro, "question intro");
+  if (record.link !== undefined) {
+    expectNonEmptyString(record.link, "question link");
+    if (!/^https?:\/\//i.test(record.link as string)) throw new Error("question link must be an http(s) URL");
+  }
+  if (record.schema !== undefined) expectRecord(record.schema, "question schema");
   expectOptionalIdentity(record.conversationId, "question owning conversation");
   expectTimelineBase(record, "question");
   expectIdentity(record.requestId, "question request id");
@@ -384,6 +392,31 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectKeys(record, ["id", "type", "createdAt", "level", "message"], type);
       expectOneOf(record.level, ["info", "warning", "error"], "notice level");
       expectNonEmptyString(record.message, "notice message");
+      break;
+    case "context_report": {
+      expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories"], type);
+      expectOptionalCount(record.total, "context report total");
+      if (record.total === undefined) throw new Error("context report total must be a non-negative integer");
+      if (record.max !== undefined && (!Number.isSafeInteger(record.max) || (record.max as number) < 1)) throw new Error("context report max must be a positive integer");
+      if (record.model !== undefined) expectModelSelection(record.model);
+      if (record.categories !== undefined) {
+        if (!Array.isArray(record.categories)) throw new Error("context report categories must be an array");
+        for (const entry of record.categories) {
+          const category = expectRecord(entry, "context report category");
+          expectKeys(category, ["name", "tokens", "kind"], "context report category");
+          expectNonEmptyString(category.name, "context report category name");
+          expectOptionalCount(category.tokens, "context report category tokens");
+          if (category.tokens === undefined) throw new Error("context report category tokens must be a non-negative integer");
+          expectOneOf(category.kind, ["used", "free", "buffer", "deferred"], "context report category kind");
+        }
+      }
+      break;
+    }
+    case "compaction":
+      expectKeys(record, ["id", "type", "createdAt", "trigger", "preTokens", "postTokens"], type);
+      if (record.trigger !== undefined) expectOneOf(record.trigger, ["manual", "auto"], "compaction trigger");
+      expectOptionalCount(record.preTokens, "compaction preTokens");
+      expectOptionalCount(record.postTokens, "compaction postTokens");
       break;
     default:
       throw new Error(`invalid conversation item type: ${type}`);
@@ -517,7 +550,8 @@ export function parseChatEvent(value: unknown): ChatEvent {
 
 function parseStructuredQuestion(value: unknown): StructuredQuestion {
   const record = expectRecord(value, "structured question");
-  expectKeys(record, ["prompt", "header", "options", "multiple", "allowFreeForm"], "structured question");
+  expectKeys(record, ["prompt", "header", "options", "multiple", "allowFreeForm", "optional"], "structured question");
+  if (record.optional !== undefined && typeof record.optional !== "boolean") throw new Error("question optional flag must be boolean");
   expectNonEmptyString(record.prompt, "question prompt");
   expectNonEmptyString(record.header, "question header");
   if (!Array.isArray(record.options)) throw new Error("question options must be an array");

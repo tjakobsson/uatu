@@ -13,7 +13,7 @@ import type { Serve } from "bun";
 
 import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
-import { ReversibleHistoryTargetError } from "../chat/provider";
+import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError } from "../chat/service";
 import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
@@ -886,7 +886,9 @@ function parseQuestionMutationOutcome(value: unknown): QuestionOutcome | Respons
   if (!Array.isArray(outcome.answers) || outcome.answers.length > 32) return chatError(400, "invalid question answers");
   let bytes = 0;
   for (const answers of outcome.answers) {
-    if (!Array.isArray(answers) || answers.length === 0 || answers.length > 32) return chatError(400, "invalid question answers");
+    // Empty is legitimate for a question marked optional; the adapter checks
+    // that against the question itself.
+    if (!Array.isArray(answers) || answers.length > 32) return chatError(400, "invalid question answers");
     for (const answer of answers) {
       if (typeof answer !== "string" || !answer.trim() || answer.length > 4_096) return chatError(400, "invalid question answer");
       bytes += Buffer.byteLength(answer);
@@ -958,6 +960,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
   if (error instanceof ReversibleHistoryUnsupportedError) return chatError(409, error.message);
   if (error instanceof ReversibleHistoryTargetError) return chatError(409, error.message);
+  if (error instanceof InvalidQuestionAnswerError) return chatError(400, error.message);
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);

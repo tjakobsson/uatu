@@ -2,6 +2,21 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 12 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `ChatAgent` gained optional `permissionScopeNote`: the sentence a permission card shows under its persistent-approval choice, stated by the owning agent in its own terms. Capabilities gained `custom-model-id` (the agent runs any model id the user types; an unlisted `model` on a prompt is passed through verbatim).
+- The timeline gained two data-only items: `context_report` (the agent's own statement of window occupancy — total, window, categories) and `compaction` (where the agent compacted its context, with before/after figures). Neither is a message; `context_report` feeds the context readout like the empty-markdown usage carrier does.
+- `QuestionItem` gained optional `source` (`dialog` | `elicitation`), `intro`, `link`, and opaque `schema`: a tool-driven dialog or an MCP elicitation brokered as a question, answered and rejected through the existing question operations.
+- The `workspaceChat` streaming channel's event union reflects the same item shapes.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 12. Accept the new optional `permissionScopeNote` on the agent object and render it as the card's scope line when present; treat `context_report` and `compaction` items as data (one feeds the context readout, the other renders as a marker), never as message bubbles; and render a question carrying `source` with its `intro` and `link`. Clients that ignore the new fields and item kinds keep working once their validators admit them.
+
 ## Hub 5 / Workspace 11 - Unreleased
 
 Compatibility: breaking (workspace)

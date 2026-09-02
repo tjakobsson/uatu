@@ -5,8 +5,9 @@ import path from "node:path";
 
 import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
 import type { NormalizedProviderEvent } from "../provider";
-import { createClaudeEventMemory, normalizeClaudeMessage } from "./normalization";
+import { createClaudeEventMemory, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
 import { ClaudeProvider, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import type { QuestionRequest } from "../types";
 import { claudeProjectDir } from "./transcript";
 
 class FakeQuery implements ClaudeQueryHandle {
@@ -21,6 +22,7 @@ class FakeQuery implements ClaudeQueryHandle {
   supportedModels?: () => Promise<unknown>;
   supportedCommands?: () => Promise<unknown>;
   applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
+  getContextUsage?: () => Promise<unknown>;
 
   constructor(readonly input: ClaudeQueryInput) {}
 
@@ -127,6 +129,96 @@ describe("normalization against the recorded SDK traffic", () => {
   });
 });
 
+describe("context usage measures the window, not the turn (D1)", () => {
+  const call = (uuid: string, occupancy: number) => ({
+    type: "assistant", uuid, timestamp: "2026-09-02T10:00:00.000Z",
+    message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "step" }], usage: { input_tokens: 100, cache_read_input_tokens: occupancy - 100, output_tokens: 20 } },
+  });
+
+  test("a five-call turn at 30k occupancy yields a latest carrier of 30k, not 150k", () => {
+    const memory = createClaudeEventMemory();
+    const updates = [1, 2, 3, 4, 5].flatMap(index => normalizeClaudeMessage(call(`a${index}`, 30_000), memory, "live").updates);
+    const result = normalizeClaudeMessage({
+      type: "result", subtype: "success", uuid: "r1", timestamp: "2026-09-02T10:00:05.000Z",
+      // The SDK's per-turn sum: five calls of 30k input-side tokens.
+      usage: { input_tokens: 500, cache_read_input_tokens: 149_500, output_tokens: 100 },
+    }, memory, "live");
+    const carriers = updates.filter(update => update.kind === "upsert" && update.item.type === "assistant_message" && update.item.markdown === "")
+      .map(update => (update as { item: { id: string; usage: { input: number; cacheRead: number } } }).item);
+    expect(carriers.map(item => item.id)).toEqual(["usage:a1", "usage:a2", "usage:a3", "usage:a4", "usage:a5"]);
+    const latest = carriers.at(-1)!;
+    expect(latest.usage.input + latest.usage.cacheRead).toBe(30_000);
+    // The result carries the turn's status and nothing about the window.
+    expect(result.updates).toEqual([{ kind: "status", status: "completed" }]);
+    expect(result.assistantUsage).toBeUndefined();
+  });
+
+  test("a stored compaction boundary survives a reload with the same marker and report", () => {
+    // The transcript spells the boundary camelCase; the same row and report
+    // come out of a reopen as the live message produced.
+    const { items } = normalizeTranscriptEntries([
+      { kind: "user", uuid: "u1", parentUuid: null, timestamp: 1, isSidechain: false, parentToolUseId: null, message: { role: "user", content: "hi" } },
+      { kind: "system", subtype: "compact_boundary", compactMetadata: { trigger: "auto", preTokens: 180_000, postTokens: 40_000 }, uuid: "cb1", parentUuid: "u1", timestamp: 2, isSidechain: false, parentToolUseId: null, message: {} },
+      { kind: "assistant", uuid: "a1", parentUuid: "cb1", timestamp: 3, isSidechain: false, parentToolUseId: null, message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "after" }] } },
+    ]);
+    expect(items.map(item => item.id)).toEqual(["message:u1", "compaction:cb1", "context:cb1", "message:a1"]);
+    expect(items[1]).toEqual({ id: "compaction:cb1", type: "compaction", createdAt: 2, trigger: "auto", preTokens: 180_000, postTokens: 40_000 });
+    expect(items[2]).toEqual(expect.objectContaining({ type: "context_report", total: 40_000 }));
+  });
+
+  test("a subagent's frames carry no window carrier and never move the conversation's model", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage({ type: "system", subtype: "init", uuid: "i1", model: "claude-opus-5[1m]" }, memory, "live");
+    const child = normalizeClaudeMessage({
+      type: "assistant", uuid: "sub1", timestamp: "2026-09-02T10:00:00.000Z", parent_tool_use_id: "toolu_task",
+      message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "child" }], usage: { input_tokens: 50, cache_read_input_tokens: 5_000, output_tokens: 10 } },
+    }, memory, "live");
+    expect(child.updates.some(update => update.kind === "upsert" && update.item.id === "usage:sub1")).toBe(false);
+    expect(child.assistantUsage).toBeUndefined();
+    expect(memory.lastModel).toBe("claude-opus-5[1m]");
+    // The parent's own next frame is attributed to the parent's model.
+    const parent = normalizeClaudeMessage(call("a1", 30_000), memory, "live");
+    expect(parent.updates.some(update => update.kind === "upsert" && update.item.id === "usage:a1")).toBe(true);
+  });
+
+  test("a compact boundary marks the timeline and resets the readout to the post-compaction figure", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage(call("a1", 180_000), memory, "live");
+    const normalized = normalizeClaudeMessage({
+      type: "system", subtype: "compact_boundary", uuid: "cb1", timestamp: "2026-09-02T10:00:06.000Z",
+      compact_metadata: { trigger: "auto", pre_tokens: 180_000, post_tokens: 40_000 },
+    }, memory, "live");
+    expect(normalized.outcome).toBe("handled");
+    expect(normalized.updates).toEqual([
+      { kind: "upsert", item: { id: "compaction:cb1", type: "compaction", createdAt: Date.parse("2026-09-02T10:00:06.000Z"), trigger: "auto", preTokens: 180_000, postTokens: 40_000 } },
+      { kind: "upsert", item: { id: "context:cb1", type: "context_report", createdAt: Date.parse("2026-09-02T10:00:06.000Z"), total: 40_000, model: { providerId: "anthropic", modelId: "claude-haiku-4-5-20251001" } } },
+    ]);
+  });
+
+  test("the control channel's breakdown becomes a report whose used rows sum to its total", () => {
+    // The shape `getContextUsage()` answered on 2026-09-02 (Claude Code 2.1.258).
+    const item = normalizeContextUsage({
+      categories: [
+        { name: "System tools", tokens: 7608, color: "inactive" },
+        { name: "System tools (deferred)", tokens: 13170, color: "inactive", isDeferred: true },
+        { name: "Skills", tokens: 2079, color: "warning" },
+        { name: "Messages", tokens: 10, color: "purple" },
+        { name: "Free space", tokens: 990303, color: "promptBorder" },
+      ],
+      totalTokens: 9697, maxTokens: 1_000_000, rawMaxTokens: 1_000_000, percentage: 1, gridRows: [],
+    }, 1_700_000_000_000, "opus[1m]") as { type: string; total: number; max?: number; categories: Array<{ name: string; tokens: number; kind: string }>; model?: { modelId: string } };
+    expect(item.type).toBe("context_report");
+    expect(item.total).toBe(9697);
+    expect(item.max).toBe(1_000_000);
+    expect(item.model?.modelId).toBe("opus[1m]");
+    expect(item.categories.map(category => [category.name, category.kind])).toEqual([
+      ["System tools", "used"], ["System tools (deferred)", "deferred"], ["Skills", "used"], ["Messages", "used"], ["Free space", "free"],
+    ]);
+    expect(item.categories.filter(category => category.kind === "used").reduce((sum, category) => sum + category.tokens, 0)).toBe(item.total);
+    expect(normalizeContextUsage({ categories: [] }, 1, undefined)).toBeNull();
+  });
+});
+
 describe("model alias resolution", () => {
   test("session-reported resolved ids translate to the catalog's alias ids", () => {
     const memory = createClaudeEventMemory();
@@ -148,9 +240,9 @@ describe("catalog hydration probe", () => {
   const realCatalog = [
     { value: "default", resolvedModel: "claude-opus-5[1m]", displayName: "Default (recommended)", description: "Opus 5 with 1M context · Best for everyday, complex tasks", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
     { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]", displayName: "Opus (1M context)", description: "Opus 5 with 1M context · Best for everyday, complex tasks", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
-    { value: "claude-fable-5[1m]", resolvedModel: "claude-fable-5", displayName: "Fable", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
-    { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet", supportedEffortLevels: ["low", "medium", "high"] },
-    { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku" },
+    { value: "fable[1m]", resolvedModel: "claude-fable-5-1", displayName: "Fable", description: "Fable 5.1 · Most capable for your hardest and longest-running tasks", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet", description: "Sonnet 5 · Efficient for routine tasks", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+    { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", description: "Haiku 4.5 · Fastest for quick answers" },
   ];
 
   function probeFixture(): { provider: ClaudeProvider; queries: FakeQuery[]; workspace: string } {
@@ -192,7 +284,13 @@ describe("catalog hydration probe", () => {
     expect(queries[0]!.returned).toBe(true);
     // Live entries with derived windows; the CLI's recommended default is
     // first-class and flagged, exactly as Claude Code presents it.
-    expect(models.map(model => model.selection.modelId)).toEqual(["default", "opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"]);
+    // The catalog's rows first, then UatuCode's app-only set under "More
+    // models" — never an id the catalog already offers (D3).
+    expect(models.map(model => model.selection.modelId)).toEqual(["default", "opus[1m]", "fable[1m]", "sonnet", "haiku", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"]);
+    expect(models.slice(5).every(model => model.provider === "More models")).toBe(true);
+    // Every surface names the model with its version, derived from the
+    // description when the CLI's display name lacks one (D2).
+    expect(models.slice(1, 5).map(model => model.name)).toEqual(["Opus 5 (1M context)", "Fable 5.1", "Sonnet 5", "Haiku 4.5"]);
     const defaultEntry = models.find(model => model.selection.modelId === "default")!;
     expect(defaultEntry.default).toBe(true);
     expect(defaultEntry.name).toBe("Default (recommended)");
@@ -202,7 +300,9 @@ describe("catalog hydration probe", () => {
     // resolved model.
     expect(defaultEntry.resolvesTo).toEqual({ providerId: "anthropic", modelId: "opus[1m]" });
     expect(models.find(model => model.selection.modelId === "opus[1m]")?.contextLimit).toBe(1_000_000);
-    expect(models.find(model => model.selection.modelId === "claude-fable-5[1m]")?.contextLimit).toBe(1_000_000);
+    expect(models.find(model => model.selection.modelId === "fable[1m]")?.contextLimit).toBe(1_000_000);
+    expect(models.find(model => model.selection.modelId === "claude-opus-4-8")?.contextLimit).toBe(1_000_000);
+    expect(models.find(model => model.selection.modelId === "claude-opus-4-6")?.contextLimit).toBe(200_000);
     expect(models.find(model => model.selection.modelId === "sonnet")?.contextLimit).toBe(200_000);
     // The control channel's command list rode the same probe, with
     // descriptions init's bare names cannot carry.
@@ -340,14 +440,109 @@ describe("ClaudeProvider sessions", () => {
     expect(sent[0]!.message.content).toEqual([{ type: "text", text: "reply pong" }]);
 
     // The fake session answers; the stream normalizes and completes.
-    query.push({ type: "assistant", uuid: "a-1", timestamp: "2026-08-30T10:00:01.000Z", session_id: session.id, message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "pong" }] } });
+    query.push({ type: "assistant", uuid: "a-1", timestamp: "2026-08-30T10:00:01.000Z", session_id: session.id, message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "pong" }], usage: { input_tokens: 5, output_tokens: 2 } } });
     query.push({ type: "result", subtype: "success", uuid: "r-1", timestamp: "2026-08-30T10:00:02.000Z", session_id: session.id, is_error: false, usage: { input_tokens: 5, output_tokens: 2 } });
     await waitFor(() => events.some(event => event.updates.some(update => update.kind === "status" && update.status === "completed")));
     const texts = events.flatMap(event => event.updates).filter(update => update.kind === "upsert").map(update => (update as { item: { id: string } }).item.id);
     expect(texts).toContain("message:a-1");
-    expect(texts).toContain("usage:r-1");
+    // The window-fill carrier belongs to the assistant message (one API
+    // call); the result's per-turn sum is never a carrier (D1).
+    expect(texts).toContain("usage:a-1");
+    expect(texts).not.toContain("usage:r-1");
     // The turn retitled the pending conversation from its first prompt.
     expect(events.some(event => event.sessionLifecycle?.kind === "updated" && event.sessionLifecycle.title === "reply pong")).toBe(true);
+    stop();
+    await provider.dispose();
+  });
+
+  test("each turn's result is followed by one context report from the session's own breakdown", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "req-1", text: "first", delivery: "queue" });
+    const query = queries[0]!;
+    let contextReads = 0;
+    query.getContextUsage = async () => {
+      contextReads += 1;
+      return { categories: [{ name: "Messages", tokens: 3_000, color: "x" }, { name: "Free space", tokens: 197_000, color: "y" }], totalTokens: 3_000, maxTokens: 200_000 };
+    };
+    query.push({ type: "system", subtype: "init", uuid: "i-1", session_id: session.id, model: "claude-sonnet-5" });
+    query.push({ type: "assistant", uuid: "a-1", timestamp: "2026-08-30T10:00:01.000Z", session_id: session.id, message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "one" }], usage: { input_tokens: 5, output_tokens: 2 } } });
+    query.push({ type: "result", subtype: "success", uuid: "r-1", timestamp: "2026-08-30T10:00:02.000Z", session_id: session.id, is_error: false, usage: { input_tokens: 5, output_tokens: 2 } });
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    // The report follows the turn's completed status — the status is never
+    // held for the round trip — and lands before the idle session retires.
+    const order = events.map(event => event.eventType);
+    expect(order.indexOf("context.reported")).toBeGreaterThan(order.indexOf("result"));
+    await waitFor(() => query.returned);
+    expect(contextReads).toBe(1);
+    const report = events.find(event => event.eventType === "context.reported")!.updates[0] as { kind: string; item: { type: string; total: number; max: number; model?: { modelId: string }; categories: Array<{ name: string; tokens: number; kind: string }> } };
+    expect(report.item).toEqual(expect.objectContaining({ type: "context_report", total: 3_000, max: 200_000, model: { providerId: "anthropic", modelId: "claude-sonnet-5" } }));
+    expect(report.item.categories).toEqual([{ name: "Messages", tokens: 3_000, kind: "used" }, { name: "Free space", tokens: 197_000, kind: "free" }]);
+    // A second turn on a fresh session reports once more; a failing control
+    // call leaves the carrier as the only source and never fails the turn.
+    await provider.prompt(session.id, { id: "req-2", text: "second", delivery: "queue" });
+    const second = queries[1]!;
+    second.getContextUsage = async () => { throw new Error("no control channel"); };
+    second.push({ type: "result", subtype: "success", uuid: "r-2", timestamp: "2026-08-30T10:00:04.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => second.returned);
+    expect(events.filter(event => event.eventType === "context.reported")).toHaveLength(1);
+    expect(events.filter(event => event.updates.some(update => update.kind === "status" && update.status === "completed"))).toHaveLength(2);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a prompt delivered while the context report is in flight keeps its session alive", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const query = queries[0]!;
+    let release!: (value: unknown) => void;
+    query.getContextUsage = () => new Promise(resolve => { release = resolve; });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "status" && update.status === "completed")));
+    // The adapter releases a held prompt on the completed status — before
+    // the report has answered. It lands in this very session.
+    await provider.prompt(session.id, { id: "r2", text: "second", delivery: "queue" });
+    expect(queries).toHaveLength(1);
+    release({ categories: [], totalTokens: 10, maxTokens: 200_000 });
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    await Bun.sleep(10);
+    expect(provider.liveSessionCount()).toBe(1);
+    expect(query.returned).toBe(false);
+    // The second turn runs to its own result, and only then does the
+    // session retire.
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 12, maxTokens: 200_000 });
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => query.returned);
+    expect(provider.liveSessionCount()).toBe(0);
+    expect(events.filter(event => event.updates.some(update => update.kind === "status" && update.status === "completed"))).toHaveLength(2);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a context probe overtaken by a later turn's probe is dropped, so the newest report is the newest turn's", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const query = queries[0]!;
+    const pending: Array<(value: unknown) => void> = [];
+    query.getContextUsage = () => new Promise(resolve => { pending.push(resolve); });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => pending.length === 1);
+    await provider.prompt(session.id, { id: "r2", text: "second", delivery: "queue" });
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:04.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => pending.length === 2);
+    // The second turn's probe answers first; the first turn's late answer
+    // must not land after it.
+    pending[1]!({ categories: [], totalTokens: 2_000, maxTokens: 200_000 });
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    pending[0]!({ categories: [], totalTokens: 1_000, maxTokens: 200_000 });
+    await Bun.sleep(10);
+    const reports = events.filter(event => event.eventType === "context.reported").map(event => (event.updates[0] as { item: { total: number } }).item.total);
+    expect(reports).toEqual([2_000]);
     stop();
     await provider.dispose();
   });
@@ -360,6 +555,209 @@ describe("ClaudeProvider sessions", () => {
     await provider.interrupt(session.id);
     expect(queries[0]!.interrupts).toBe(1);
     await waitFor(() => events.some(event => event.updates.some(update => update.kind === "status" && update.status === "interrupted")));
+    stop();
+    await provider.dispose();
+  });
+
+  test("an elicitation form becomes question steps and answers as coerced MCP content", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "connect", delivery: "queue" });
+    const query = queries[0]!;
+    expect(query.input.options.supportedDialogKinds).toEqual(["refusal_fallback_prompt"]);
+    const schema = {
+      type: "object",
+      properties: {
+        username: { type: "string", title: "GitHub username", description: "Your login" },
+        retries: { type: "integer" },
+        verbose: { type: "boolean", description: "Log everything?" },
+        region: { type: "string", enum: ["eu", "us"], enumNames: ["Europe", "United States"] },
+      },
+      required: ["username"],
+    };
+    const answer = query.input.options.onElicitation!(
+      { serverName: "github", message: "Sign in to continue", mode: "form", requestedSchema: schema },
+      { signal: new AbortController().signal, requestId: "el-1" },
+    );
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    const card = (events.find(event => event.eventType === "interaction.requested")!.updates[0] as { item: QuestionRequest }).item;
+    expect(card).toEqual(expect.objectContaining({ id: "question:el-1", type: "question", source: "elicitation", intro: "github asks: Sign in to continue", schema, status: "pending" }));
+    // Only `username` is required: every other step can be skipped, and its
+    // prompt says so, so no fabricated value has to be sent for it.
+    expect(card.questions.map(question => [question.header, question.options.map(option => option.label), question.allowFreeForm, question.optional ?? false])).toEqual([
+      ["GitHub username", [], true, false],
+      ["retries", [], true, true],
+      ["verbose", ["Yes", "No"], false, true],
+      ["region", ["Europe", "United States"], false, true],
+    ]);
+    // Recovery lists the same context the live card carried.
+    expect(await provider.listQuestions!()).toEqual([expect.objectContaining({ requestId: "el-1", source: "elicitation", intro: "github asks: Sign in to continue", schema })]);
+    // An optional step left empty leaves its key out; nothing in-band.
+    await provider.replyQuestion(session.id, "el-1", [["octocat"], [], ["No"], ["United States"]]);
+    expect(await answer).toEqual({ action: "accept", content: { username: "octocat", verbose: false, region: "us" } });
+
+    // A multi-select array field and a titled-enum field are choices too;
+    // the array answers as a list of the declared values.
+    const multi = query.input.options.onElicitation!(
+      { serverName: "svc", message: "Scopes", mode: "form", requestedSchema: { type: "object", properties: {
+        scopes: { type: "array", items: { type: "string", enum: ["repo", "gist"], enumNames: ["Repositories", "Gists"] } },
+        tier: { type: "string", anyOf: [{ const: "free", title: "Free" }, { const: "pro", title: "Pro" }] },
+        count: { type: "integer", minimum: 1, maximum: 5 },
+        email: { type: "string", format: "email", maxLength: 40 },
+        tags: { type: "array", items: { type: "string", enum: ["a", "b", "c"] }, minItems: 2, maxItems: 2 },
+        when: { type: "string", format: "date" },
+        // A title on only some choices stays with its own value.
+        lane: { type: "string", anyOf: [{ const: "fast" }, { const: "slow", title: "Slow lane" }] },
+      }, required: ["scopes", "tier", "count", "email", "tags", "when", "lane"] } },
+      { signal: new AbortController().signal, requestId: "el-multi" },
+    );
+    await waitFor(() => events.filter(event => event.eventType === "interaction.requested").length === 2);
+    const multiCard = (events.filter(event => event.eventType === "interaction.requested")[1]!.updates[0] as { item: QuestionRequest }).item;
+    expect(multiCard.questions.map(question => [question.multiple, question.options.map(option => option.label), question.prompt])).toEqual([
+      [true, ["Repositories", "Gists"], "scopes"],
+      [false, ["Free", "Pro"], "tier"],
+      [false, [], "count (whole number, at least 1, at most 5)"],
+      [false, [], "email (an email address, at most 40 characters)"],
+      [true, ["a", "b", "c"], "tags (choose at least 2, choose at most 2)"],
+      [false, [], "when (a date (YYYY-MM-DD))"],
+      [false, ["fast", "Slow lane"], "lane"],
+    ]);
+    // Answers the schema refuses keep the card pending; the message says why.
+    const ok = { scopes: ["Repositories", "Gists"], tier: ["Pro"], count: [" 3 "], email: ["me@example.com"], tags: ["a", "c"], when: ["2026-09-02"], lane: ["Slow lane"] };
+    const attempt = (over: Partial<typeof ok>) => provider.replyQuestion(session.id, "el-multi", [over.scopes ?? ok.scopes, over.tier ?? ok.tier, over.count ?? ok.count, over.email ?? ok.email, over.tags ?? ok.tags, over.when ?? ok.when, over.lane ?? ok.lane]);
+    await expect(attempt({ count: ["1.5"] })).rejects.toThrow(/whole number/);
+    await expect(attempt({ count: ["9"] })).rejects.toThrow(/at most 5/);
+    await expect(attempt({ count: ["x"] })).rejects.toThrow(/enter a number/);
+    await expect(attempt({ email: ["not-an-address"] })).rejects.toThrow(/email address/);
+    await expect(attempt({ email: [`${"x".repeat(40)}@example.com`] })).rejects.toThrow(/at most 40 characters/);
+    await expect(attempt({ tags: ["a"] })).rejects.toThrow(/at least 2/);
+    await expect(attempt({ tags: ["a", "b", "c"] })).rejects.toThrow(/at most 2/);
+    // An impossible day is refused, not rolled forward into the next month.
+    await expect(attempt({ when: ["2025-02-30"] })).rejects.toThrow(/a date/);
+    await expect(attempt({ when: ["2025-2-3"] })).rejects.toThrow(/a date/);
+    expect(await provider.listQuestions!()).toEqual([expect.objectContaining({ requestId: "el-multi" })]);
+    await attempt({});
+    expect(await multi).toEqual({ action: "accept", content: { scopes: ["repo", "gist"], tier: "pro", count: 3, email: "me@example.com", tags: ["a", "c"], when: "2026-09-02", lane: "slow" } });
+
+    // Enum values that would make empty or identical labels are named and
+    // numbered, and answers map back by position, not by parsing.
+    const odd = query.input.options.onElicitation!(
+      { serverName: "svc", message: "Pick", mode: "form", requestedSchema: { type: "object", properties: { choice: { type: "string", enum: ["", "a", "a"] }, n: { type: "integer", enum: [1, "1"] } }, required: ["choice", "n"] } },
+      { signal: new AbortController().signal, requestId: "el-odd" },
+    );
+    await waitFor(() => events.filter(event => event.eventType === "interaction.requested").length === 3);
+    const oddCard = (events.filter(event => event.eventType === "interaction.requested")[2]!.updates[0] as { item: QuestionRequest }).item;
+    expect(oddCard.questions.map(question => question.options.map(option => option.label))).toEqual([["(empty)", "a", "a (2)"], ["1", "1 (2)"]]);
+    await provider.replyQuestion(session.id, "el-odd", [["a (2)"], ["1 (2)"]]);
+    expect(await odd).toEqual({ action: "accept", content: { choice: "a", n: "1" } });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a URL elicitation links out and a decline returns the MCP decline", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "auth", delivery: "queue" });
+    const query = queries[0]!;
+    const answer = query.input.options.onElicitation!(
+      { serverName: "linear", message: "Authorize UatuCode", mode: "url", url: "https://example.com/auth", title: "Linear" },
+      { signal: new AbortController().signal, requestId: "el-2" },
+    );
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    const card = (events.find(event => event.eventType === "interaction.requested")!.updates[0] as { item: QuestionRequest }).item;
+    expect(card.link).toBe("https://example.com/auth");
+    expect(card.intro).toBe("Linear asks: Authorize UatuCode");
+    expect(card.questions[0]!.options.map(option => option.label)).toEqual(["Done"]);
+    await provider.rejectQuestion(session.id, "el-2");
+    expect(await answer).toEqual({ action: "decline" });
+    // A custom-scheme callback cannot be a link; the prompt spells it out.
+    const custom = query.input.options.onElicitation!(
+      { serverName: "app", message: "Authorize", mode: "url", url: "vscode://auth/callback?x=1" },
+      { signal: new AbortController().signal, requestId: "el-3" },
+    );
+    await waitFor(() => events.filter(event => event.eventType === "interaction.requested").length === 2);
+    const customCard = (events.filter(event => event.eventType === "interaction.requested")[1]!.updates[0] as { item: QuestionRequest }).item;
+    expect(customCard.link).toBeUndefined();
+    expect(customCard.questions[0]!.prompt).toBe("Open vscode://auth/callback?x=1 to continue, then confirm here.");
+    await provider.replyQuestion(session.id, "el-3", [["Done"]]);
+    expect(await custom).toEqual({ action: "accept" });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a refusal-fallback dialog offers the retry and answers in the CLI's vocabulary", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "do it", delivery: "queue" });
+    const query = queries[0]!;
+    const answer = query.input.options.onUserDialog!(
+      { dialogKind: "refusal_fallback_prompt", payload: { originalModel: "claude-opus-5", fallbackModel: "claude-sonnet-5", guidanceText: "Opus declined; Sonnet can try." }, toolUseID: "tu-1" },
+      { signal: new AbortController().signal, requestId: "dl-1" },
+    );
+    await waitFor(() => events.some(event => event.eventType === "interaction.requested"));
+    const card = (events.find(event => event.eventType === "interaction.requested")!.updates[0] as { item: QuestionRequest }).item;
+    expect(card).toEqual(expect.objectContaining({ id: "question:dl-1", source: "dialog", intro: "Claude Code asks how to continue after claude-opus-5 declined this request." }));
+    expect(card.questions[0]!.prompt).toBe("Opus declined; Sonnet can try.");
+    expect(card.questions[0]!.options.map(option => option.label)).toEqual(["Retry on claude-sonnet-5", "Edit the prompt"]);
+    expect(card.schema).toEqual({ dialogKind: "refusal_fallback_prompt", payload: expect.objectContaining({ fallbackModel: "claude-sonnet-5" }) });
+    await provider.replyQuestion(session.id, "dl-1", [["Retry on claude-sonnet-5"]]);
+    expect(await answer).toEqual({ behavior: "completed", result: "retry_fallback" });
+
+    // An undeclared kind can only be dismissed, and a rejection cancels.
+    const other = query.input.options.onUserDialog!({ dialogKind: "plugin_hint", payload: { name: "x" } }, { signal: new AbortController().signal, requestId: "dl-2" });
+    await Bun.sleep(5);
+    await provider.rejectQuestion(session.id, "dl-2");
+    expect(await other).toEqual({ behavior: "cancelled" });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a dead session abandons its dialog and elicitation visibly with their own cancel results", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    const dialog = query.input.options.onUserDialog!({ dialogKind: "refusal_fallback_prompt", payload: {} }, { signal: new AbortController().signal, requestId: "dl-9" });
+    const elicitation = query.input.options.onElicitation!({ serverName: "s", message: "m" }, { signal: new AbortController().signal, requestId: "el-9" });
+    await waitFor(() => events.filter(event => event.eventType === "interaction.requested").length === 2);
+    query.fail(new Error("child process died"));
+    expect(await dialog).toEqual({ behavior: "cancelled" });
+    expect(await elicitation).toEqual({ action: "cancel" });
+    await waitFor(() => events.filter(event => event.eventType === "interaction.abandoned").length === 2);
+    const resolved = events.filter(event => event.eventType === "interaction.abandoned").map(event => (event.updates[0] as { item: QuestionRequest }).item);
+    expect(resolved.map(item => [item.id, item.status, item.outcome])).toEqual([
+      ["question:dl-9", "resolved", { kind: "rejected" }],
+      ["question:el-9", "resolved", { kind: "rejected" }],
+    ]);
+    expect(await provider.listQuestions!()).toEqual([]);
+    // An interrupted turn (aborted signal) abandons the same way.
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    const aborter = new AbortController();
+    const interrupted = queries[1]!.input.options.onUserDialog!({ dialogKind: "refusal_fallback_prompt", payload: {} }, { signal: aborter.signal, requestId: "dl-10" });
+    await Bun.sleep(5);
+    aborter.abort();
+    expect(await interrupted).toEqual({ behavior: "cancelled" });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a model id the CLI rejects fails that turn with the reported error", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    // A typed id is passed through verbatim (the adapter does not gate it
+    // for an agent that declares custom-model-id).
+    await provider.prompt(session.id, { id: "req-1", text: "hello", delivery: "queue", model: { providerId: "anthropic", modelId: "claude-nope-9" } });
+    const query = queries[0]!;
+    expect(query.input.options.model).toBe("claude-nope-9");
+    query.push({ type: "result", subtype: "error_during_execution", uuid: "r-1", timestamp: "2026-08-30T10:00:02.000Z", session_id: session.id, is_error: true, errors: ["API Error: 404 model: claude-nope-9 not found"] });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "status" && update.status === "failed")));
+    const failed = events.flatMap(event => event.updates).find(update => update.kind === "status" && update.status === "failed") as { message?: string };
+    expect(failed.message).toBe("API Error: 404 model: claude-nope-9 not found");
     stop();
     await provider.dispose();
   });

@@ -76,7 +76,6 @@ const INTENTIONALLY_IGNORED = new Set([
   "mirror_error",
   "informational",
   "conversation_reset",
-  "compact_boundary",
   "user_message_replay",
   "task_notification",
 ]);
@@ -111,6 +110,39 @@ export function normalizeClaudeMessage(
       memory.lastModel = model;
       return { ...base, outcome: "handled", configuration: { model: claudeModelSelection(model) } };
     }
+    // Compaction is a point in the timeline: a marker with the CLI's own
+    // pre/post figures, and — when it states the post-compaction size — a
+    // context report from it, so the readout drops to the compacted window
+    // instead of waiting for the next model call (spec: the presented fill
+    // reflects the post-compaction figure).
+    if (record.subtype === "compact_boundary") {
+      const envelope = envelopeIdentity(record);
+      if (!envelope) return { ...base, outcome: "unparseable" };
+      // The live message spells the figures snake_case; the transcript's
+      // record of the same boundary spells them camelCase.
+      const metadata = asRecord(record.compact_metadata ?? record.compactMetadata);
+      const trigger = metadata.trigger === "manual" || metadata.trigger === "auto" ? metadata.trigger : undefined;
+      const preTokens = typeof metadata.pre_tokens === "number" ? metadata.pre_tokens : typeof metadata.preTokens === "number" ? metadata.preTokens : undefined;
+      const postTokens = typeof metadata.post_tokens === "number" ? metadata.post_tokens : typeof metadata.postTokens === "number" ? metadata.postTokens : undefined;
+      const updates: NormalizedProviderUpdate[] = [{ kind: "upsert", item: {
+        id: `compaction:${envelope.uuid}`,
+        type: "compaction",
+        createdAt: envelope.createdAt,
+        ...(trigger ? { trigger } : {}),
+        ...(preTokens === undefined ? {} : { preTokens }),
+        ...(postTokens === undefined ? {} : { postTokens }),
+      } }];
+      if (postTokens !== undefined) {
+        updates.push({ kind: "upsert", item: {
+          id: `context:${envelope.uuid}`,
+          type: "context_report",
+          createdAt: envelope.createdAt,
+          total: postTokens,
+          ...(memory.lastModel ? { model: claudeModelSelection(memory.lastModel) } : {}),
+        } });
+      }
+      return { ...base, outcome: "handled", updates };
+    }
     return { ...base, outcome: "ignored" };
   }
 
@@ -120,6 +152,11 @@ export function normalizeClaudeMessage(
     const message = asRecord(record.message);
     const raw = typeof message.model === "string" ? message.model : undefined;
     const reported = raw !== undefined ? (memory.resolveModel?.(raw) ?? raw) : undefined;
+    // A frame produced inside a subagent (parent tool use set) speaks for
+    // the subagent's own window and model, not the conversation's: it
+    // neither moves the remembered model nor carries the parent's window
+    // fill. Its content still lands where it did before.
+    const subagentFrame = typeof record.parent_tool_use_id === "string" && record.parent_tool_use_id !== "";
     // The init message names the session's model in its full variant form
     // ("...[1m]"); assistant messages report the resolved base id. Keep the
     // variant id — it is what the catalog keys context windows by, so the
@@ -127,9 +164,29 @@ export function normalizeClaudeMessage(
     const model = reported !== undefined && memory.lastModel?.startsWith(`${reported}[`)
       ? memory.lastModel
       : reported;
-    if (model) memory.lastModel = model;
+    if (model && !subagentFrame) memory.lastModel = model;
     const updates = contentBlockUpdates(asArray(message.content), envelope, memory);
-    const usage = tokensToUsage(message.usage);
+    const usage = subagentFrame ? undefined : tokensToUsage(message.usage);
+    // Each assistant message's usage is ONE API call's accounting, and its
+    // input + cache read + cache write is the window occupancy after that
+    // call. It rides a dedicated empty-markdown carrier (same contract as
+    // the OpenCode normalizer) so the readout's tail scan finds the latest
+    // single-call figure. The turn's `result` usage is deliberately not a
+    // carrier: it sums every call of the turn and would read as several
+    // times the window (D1). The CLI emits one frame per completed content
+    // block, all sharing message.id: each frame's carrier is keyed by its
+    // own uuid (the accounting join needs that) and the occupancy figure is
+    // the same request-side count on every block, so the newest wins.
+    if (usage) {
+      updates.push({ kind: "upsert", item: {
+        id: `usage:${envelope.uuid}`,
+        type: "assistant_message",
+        createdAt: envelope.createdAt,
+        markdown: "",
+        usage,
+        ...(model ? { model: claudeModelSelection(model) } : {}),
+      } });
+    }
     return {
       ...base,
       outcome: "handled",
@@ -187,31 +244,25 @@ export function normalizeClaudeMessage(
     const envelope = envelopeIdentity(record);
     if (!envelope) return { ...base, outcome: "unparseable" };
     const failed = record.is_error === true;
-    const usage = tokensToUsage(record.usage);
-    const updates: NormalizedProviderUpdate[] = [];
-    if (usage) {
-      // Message-level accounting rides a dedicated empty-markdown carrier,
-      // same contract as the OpenCode normalizer.
-      updates.push({ kind: "upsert", item: {
-        id: `usage:${envelope.uuid}`,
-        type: "assistant_message",
-        createdAt: envelope.createdAt,
-        markdown: "",
-        usage,
-        ...(memory.lastModel ? { model: claudeModelSelection(memory.lastModel) } : {}),
-      } });
-    }
-    const message = typeof record.result === "string" && failed ? record.result : undefined;
+    // The result's usage is the turn's SUM over every API call ("MAIN AGENT
+    // LOOP ONLY … per-turn" in the SDK's words). It is neither a window
+    // occupancy nor one message's accounting, so nothing here reports it:
+    // the per-message carriers above already hold each call's figure.
+    // An error result names its cause in `errors` (a rejected model id, a
+    // budget cap) or, for some subtypes, in `result`; either is the turn's
+    // failed status message, so a bad choice fails visibly rather than
+    // silently falling back (spec: the CLI's error, not silence).
+    const errors = asArray(record.errors).filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+    const message = !failed ? undefined
+      : typeof record.result === "string" && record.result.trim() ? record.result
+        : errors.length > 0 ? errors.join("; ") : undefined;
     // Turn status rides the ordered update stream like any other change.
-    updates.push(failed
-      ? { kind: "status", status: "failed", ...(message ? { message } : {}) }
-      : { kind: "status", status: "completed" });
     return {
       ...base,
       outcome: "handled",
-      updates,
-      ...(usage ? { assistantUsage: { messageId: envelope.uuid, usage } } : {}),
-      ...(memory.lastModel && usage ? { assistantModel: { messageId: envelope.uuid, model: memory.lastModel, createdAt: envelope.createdAt } } : {}),
+      updates: [failed
+        ? { kind: "status", status: "failed", ...(message ? { message } : {}) }
+        : { kind: "status", status: "completed" }],
     };
   }
 
@@ -232,7 +283,15 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
   const accounting: Array<{ messageId: string; createdAt: number; usage?: TokenUsage; model?: string }> = [];
   for (const entry of entries) {
     const normalized = normalizeClaudeMessage(
-      { type: entry.kind, uuid: entry.uuid, timestamp: entry.timestamp, message: entry.message, ...(entry.toolUseResult ? { toolUseResult: entry.toolUseResult } : {}) },
+      {
+        type: entry.kind,
+        uuid: entry.uuid,
+        timestamp: entry.timestamp,
+        message: entry.message,
+        ...(entry.subtype ? { subtype: entry.subtype } : {}),
+        ...(entry.compactMetadata ? { compactMetadata: entry.compactMetadata } : {}),
+        ...(entry.toolUseResult ? { toolUseResult: entry.toolUseResult } : {}),
+      },
       memory,
       "stored",
       parentSessionId,
@@ -251,19 +310,8 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
         ...(normalized.assistantModel ? { model: normalized.assistantModel.model } : {}),
       });
     }
-    // A stored assistant message that reported usage also carries the
-    // window-fill carrier the timeline reads (live turns get it from the
-    // result message, which transcripts do not record).
-    if (normalized.assistantUsage && entry.kind === "assistant") {
-      items.push({
-        id: `usage:${entry.uuid}`,
-        type: "assistant_message",
-        createdAt: entry.timestamp,
-        markdown: "",
-        usage: normalized.assistantUsage.usage,
-        ...(normalized.assistantModel ? { model: claudeModelSelection(normalized.assistantModel.model) } : {}),
-      });
-    }
+    // The window-fill carrier for a stored assistant message rides its
+    // updates, exactly as it does live — one producer for both sources.
   }
   return { items, accounting };
 }
@@ -393,6 +441,40 @@ function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventM
     ...(attributedModel ? { model: attributedModel } : {}),
     ...(attributedUsage ? { usage: attributedUsage } : {}),
   } };
+}
+
+/**
+ * The control channel's `get_context_usage` answer → a context report item.
+ * Categories keep the CLI's own names; `kind` is derived so the readout can
+ * list what occupies the window (`used`) and leave the free remainder and
+ * deferred tool schemas out of the sum — the used rows add up to the total
+ * the CLI states (spec: the breakdown's total matches the presented fill).
+ */
+export function normalizeContextUsage(value: unknown, createdAt: number, model?: string): ConversationItem | null {
+  const record = asRecord(value);
+  if (typeof record.totalTokens !== "number" || !Number.isFinite(record.totalTokens) || record.totalTokens < 0) return null;
+  const max = typeof record.maxTokens === "number" && record.maxTokens > 0 ? record.maxTokens
+    : typeof record.rawMaxTokens === "number" && record.rawMaxTokens > 0 ? record.rawMaxTokens : undefined;
+  const categories = asArray(record.categories).flatMap(entry => {
+    const category = asRecord(entry);
+    if (typeof category.name !== "string" || !category.name || typeof category.tokens !== "number" || category.tokens < 0) return [];
+    const kind = category.isDeferred === true || /\(deferred\)/i.test(category.name) ? "deferred" as const
+      : /free space/i.test(category.name) ? "free" as const
+        : /buffer/i.test(category.name) ? "buffer" as const
+          : "used" as const;
+    return [{ name: category.name, tokens: Math.round(category.tokens), kind }];
+  });
+  return {
+    // Two reports in the same millisecond say the same thing; one id per
+    // instant keeps the projection from accumulating duplicates.
+    id: `context:report:${createdAt}`,
+    type: "context_report",
+    createdAt,
+    total: Math.round(record.totalTokens),
+    ...(max === undefined ? {} : { max: Math.round(max) }),
+    ...(model ? { model: claudeModelSelection(model) } : {}),
+    ...(categories.length > 0 ? { categories } : {}),
+  };
 }
 
 export function tokensToUsage(value: unknown): TokenUsage | undefined {

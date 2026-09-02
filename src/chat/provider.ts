@@ -3,7 +3,17 @@ import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfigura
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
 // children's pending questions.
-export type PendingQuestion = { requestId: string; conversationId: string; questions: StructuredQuestion[] };
+export type PendingQuestion = {
+  requestId: string;
+  conversationId: string;
+  questions: StructuredQuestion[];
+  // A dialog or elicitation carries its context so a card rebuilt after a
+  // missed announcement reads the same as the live one.
+  source?: "dialog" | "elicitation";
+  intro?: string;
+  link?: string;
+  schema?: Record<string, unknown>;
+};
 // `diff` is the change a file-edit permission would apply (OpenCode's
 // `metadata.diff`), carried through recovery so a card rebuilt after a missed
 // event shows the same change the live announcement would have.
@@ -104,6 +114,18 @@ export class UnsupportedVariantSelectionError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "UnsupportedVariantSelectionError";
+  }
+}
+
+/**
+ * An answer the request's own schema refuses (a fraction for an integer
+ * field, a value outside its range). Thrown before the interaction settles,
+ * so the card stays pending and the user can correct it.
+ */
+export class InvalidQuestionAnswerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidQuestionAnswerError";
   }
 }
 

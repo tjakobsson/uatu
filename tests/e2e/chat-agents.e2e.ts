@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import { openChatPanel } from "./chat-helpers";
@@ -55,6 +59,38 @@ test.describe("multi-agent chat", () => {
     await page.locator("#chat-conversation-select").selectOption(opencodeConversationId);
     await expect(page.locator("#chat-context")).toContainText("Fixture Agent");
     await expect(page.locator("#chat-input")).toHaveAttribute("placeholder", /Fixture Agent/);
+  });
+
+  test("a Claude Code permission card states Claude Code's own reach and never names OpenCode", async ({ page, request }, testInfo) => {
+    await bootDualAgentChat(page, request);
+    const seeded = await control(request, { action: "seed", agent: "claude", title: "Claude permission", items: [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Fix the greeting" },
+    ] }) as { conversation: { id: string } };
+    await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+    await expect(page.locator("#chat-context")).toContainText("Claude Code");
+    await control(request, { action: "item", conversationId: seeded.conversation.id, item: {
+      id: "permission:perm-c1", type: "permission", createdAt: 10, requestId: "perm-c1", action: "Claude wants to edit hello.sh", resources: ["/workspace/hello.sh"], status: "pending",
+      diff: "@@ -1 +1 @@\n-echo hello\n+echo Hello, world",
+    } });
+    const card = page.locator('[data-chat-item-id="permission:perm-c1"]');
+    await expect(card.getByRole("button", { name: "Allow always" })).toBeVisible();
+    // The scope line is the owning agent's own sentence (spec: names only
+    // that agent) — the OpenCode sentence must not leak onto a Claude card.
+    await expect(card.locator(".chat-request-scope")).toContainText("rest of this turn");
+    await expect(card).not.toContainText("OpenCode");
+    await page.evaluate(() => document.fonts.ready);
+    const shots = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/polish-claude-code-chat/screenshots");
+    const target = existsSync(shots) ? path.join(shots, "phase1-permission-card-claude.png") : testInfo.outputPath("phase1-permission-card-claude.png");
+    await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
+    await testInfo.attach("phase1-permission-card-claude", { path: target, contentType: "image/png" });
+
+    // The OpenCode-owned conversation keeps OpenCode's own sentence.
+    const opencode = await control(request, { action: "seed", title: "OpenCode permission", items: [] }) as { conversation: { id: string } };
+    await page.locator("#chat-conversation-select").selectOption(opencode.conversation.id);
+    await control(request, { action: "item", conversationId: opencode.conversation.id, item: {
+      id: "permission:perm-o1", type: "permission", createdAt: 10, requestId: "perm-o1", action: "run command", resources: ["bun test"], status: "pending",
+    } });
+    await expect(page.locator('[data-chat-item-id="permission:perm-o1"] .chat-request-scope')).toContainText("until OpenCode restarts");
   });
 
   test("a single-agent workspace creates without offering a choice", async ({ page, request }) => {

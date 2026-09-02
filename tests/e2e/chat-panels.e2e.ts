@@ -63,7 +63,7 @@ test.describe("chat panels and navigation", () => {
     const group = page.locator(".chat-activity-group");
     await expect(group).toHaveCount(1);
     await expect(group.locator(".chat-group-count")).toHaveText("3 steps");
-    await expect(group.locator("> summary .chat-activity-subject")).toHaveText("Read ×3");
+    await expect(group.locator("> summary .chat-activity-subject")).toHaveText("Read a.ts · Read b.ts · Read c.ts");
     await expect(group.locator('[data-chat-item-id="tool:a"]')).toHaveCount(1);
     await expect(group.locator('[data-chat-item-id="tool:a"]')).toBeHidden();
     await group.locator("summary").first().click();

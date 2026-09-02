@@ -265,6 +265,61 @@ export function createChatConfigurationPicker(
     return button;
   };
 
+  const typedProviderId = (): string =>
+    state.models.find(model => model.default)?.selection.providerId ?? state.models[0]?.selection.providerId ?? "custom";
+
+  // Built once and re-appended: a render while the user is mid-way through
+  // typing an id (a configuration event, a keystroke in the search box) must
+  // not wipe the field or drop focus.
+  let typedIdRow: HTMLElement | undefined;
+  const makeTypedIdRow = (): HTMLElement => {
+    if (typedIdRow) return typedIdRow;
+    const doc = elements.dialog.ownerDocument;
+    const form = doc.createElement("form");
+    form.className = "chat-configuration-custom-model";
+    form.dataset.customModelForm = "";
+    const heading = doc.createElement("h3");
+    heading.textContent = "Model id";
+    const label = doc.createElement("label");
+    label.className = "chat-configuration-custom-model-field";
+    const caption = doc.createElement("span");
+    caption.className = "sr-only";
+    caption.textContent = "Model id";
+    const input = doc.createElement("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = "Type a model id the list does not offer";
+    input.dataset.customModelInput = "";
+    input.setAttribute("aria-label", "Model id");
+    label.append(caption, input);
+    const submit = doc.createElement("button");
+    submit.type = "submit";
+    submit.textContent = "Use";
+    submit.dataset.customModelSubmit = "";
+    form.append(heading, label, submit);
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      const modelId = input.value.trim();
+      if (!modelId || /\s/.test(modelId) || modelId.length > 200) {
+        input.setAttribute("aria-invalid", "true");
+        input.focus();
+        return;
+      }
+      input.removeAttribute("aria-invalid");
+      const selection: ModelSelection = { providerId: typedProviderId(), modelId };
+      const changed = !sameModel(state.configuration.model, selection);
+      const hadVariant = changed && state.configuration.variant !== undefined;
+      state = { ...state, configuration: { ...state.configuration, model: selection, variant: changed ? undefined : state.configuration.variant } };
+      callbacks.onModel(selection);
+      if (hadVariant) callbacks.onVariant(undefined);
+      input.value = "";
+      renderModels();
+    });
+    typedIdRow = form;
+    return form;
+  };
+
   const renderFooter = (): void => {
     const modeAvailable = declares(state, "modes") && state.modes.length > 0;
     setSectionVisible(elements.modeSection, modeAvailable);
@@ -350,10 +405,13 @@ export function createChatConfigurationPicker(
     }
 
     const selectedAvailable = !selected || state.models.some(model => sameModel(model.selection, selected));
+    const typedIds = declares(state, "custom-model-id");
     if (selected && !selectedAvailable) {
+      // Under an agent that runs typed ids, an unlisted selection is the
+      // user's own entry, not a model that went away.
       elements.models.append(makeModelRow(
-        `${selected.providerId}/${selected.modelId}`,
-        "Current model, unavailable",
+        typedIds ? selected.modelId : `${selected.providerId}/${selected.modelId}`,
+        typedIds ? "Typed model id" : "Current model, unavailable",
         `${selected.providerId}/${selected.modelId}`,
         true,
         true,
@@ -395,6 +453,12 @@ export function createChatConfigurationPicker(
       }
       elements.models.append(section);
     }
+
+    // The typed-id row sits after every listed group and survives the
+    // search: it exists for the id the list does not have (D3). The id goes
+    // to the agent verbatim; its acceptance or rejection is reported on the
+    // turn, and its context window stays unknown until the agent says.
+    if (typedIds) elements.models.append(makeTypedIdRow());
 
     elements.resultStatus.textContent = modelResultCountLabel(filtered.length);
     elements.empty.hidden = filtered.length !== 0;

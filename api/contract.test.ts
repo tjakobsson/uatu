@@ -300,10 +300,15 @@ describe("structured question answers", () => {
     const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.QuestionOutcome, openapi.components.schemas));
 
     expect(validate({ kind: "answered", answers: [["Option"], ["custom text"]] })).toBe(true);
-    expect(validate({ kind: "answered", answers: [[]] })).toBe(false);
+    // Empty is legitimate only for a question marked optional — a rule the
+    // schema cannot express per question, so the array admits it and the
+    // workspace enforces it against the question itself.
+    expect(validate({ kind: "answered", answers: [[]] })).toBe(true);
     expect(validate({ kind: "answered", answers: [["   "]] })).toBe(false);
-    expect(answered?.items?.minItems).toBe(1);
+    expect(validate({ kind: "answered", answers: [[""]] })).toBe(false);
+    expect(answered?.items?.minItems).toBe(0);
     expect(answered?.description).toContain("same order");
     expect(answered?.description).toContain("custom strings");
+    expect(answered?.description).toContain("optional");
   });
 });

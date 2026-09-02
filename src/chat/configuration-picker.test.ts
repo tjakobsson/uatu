@@ -328,3 +328,65 @@ describe("configuration picker controller", () => {
     controller.destroy();
   });
 });
+
+describe("typed model ids", () => {
+  const submitTyped = (harness: ReturnType<typeof fixture>, value: string) => {
+    const input = harness.elements.models.querySelector<HTMLInputElement>("[data-custom-model-input]")!;
+    input.value = value;
+    harness.elements.models.querySelector<HTMLFormElement>("[data-custom-model-form]")!.dispatchEvent(harness.event("submit"));
+  };
+
+  it("offers a typed-id row under an agent that runs typed ids and submits the id verbatim", () => {
+    const harness = fixture();
+    harness.controller.update({ ...readyState(), agent: { name: "Claude Code", capabilities: ["models", "modes", "variants", "custom-model-id"] } });
+    const form = harness.elements.models.querySelector<HTMLFormElement>("[data-custom-model-form]");
+    expect(form).not.toBeNull();
+    // After every listed group, and still present when the search excludes
+    // every listed model.
+    expect(harness.elements.models.lastElementChild).toBe(form);
+    harness.elements.search.value = "zzz-no-such-model";
+    harness.elements.search.dispatchEvent(harness.event("input"));
+    expect(harness.elements.models.querySelector("[data-custom-model-form]")).not.toBeNull();
+    expect(harness.elements.empty.hidden).toBe(false);
+
+    submitTyped(harness, "  claude-opus-4-9  ");
+    expect(harness.calls.models).toEqual([{ providerId: "anthropic", modelId: "claude-opus-4-9" }]);
+    // The change from a listed model with a variant clears the variant, as
+    // any model change does; the typed id has no known variants to offer.
+    expect(harness.calls.variants).toEqual([undefined]);
+    // The selection shows as the user's own entry, not a vanished model.
+    const current = harness.elements.models.querySelector<HTMLButtonElement>('button[data-model-value="anthropic/claude-opus-4-9"]')!;
+    expect(current.querySelector(".chat-configuration-model-name")?.textContent).toBe("claude-opus-4-9");
+    expect(current.querySelector(".chat-configuration-model-identity")?.textContent).toBe("Typed model id");
+    expect(harness.elements.variantSection!.hidden).toBe(true);
+  });
+
+  it("keeps a half-typed id and its input across re-renders", () => {
+    const harness = fixture();
+    const state = { ...readyState(), agent: { name: "Claude Code", capabilities: ["models", "custom-model-id"] as const } };
+    harness.controller.update(state as never);
+    const input = harness.elements.models.querySelector<HTMLInputElement>("[data-custom-model-input]")!;
+    input.value = "claude-opus-4";
+    // A configuration event mid-typing re-renders the list; the row is the
+    // same node with the text still in it.
+    harness.controller.update({ ...state, configuration: { ...state.configuration, mode: "plan" } } as never);
+    const after = harness.elements.models.querySelector<HTMLInputElement>("[data-custom-model-input]")!;
+    expect(after).toBe(input);
+    expect(after.value).toBe("claude-opus-4");
+    harness.elements.search.value = "opus";
+    harness.elements.search.dispatchEvent(harness.event("input"));
+    expect(harness.elements.models.querySelector<HTMLInputElement>("[data-custom-model-input]")!.value).toBe("claude-opus-4");
+  });
+
+  it("refuses an empty or space-containing id and offers no row without the capability", () => {
+    const harness = fixture();
+    harness.controller.update({ ...readyState(), agent: { name: "Claude Code", capabilities: ["models", "custom-model-id"] } });
+    submitTyped(harness, "   ");
+    submitTyped(harness, "two words");
+    expect(harness.calls.models).toEqual([]);
+    expect(harness.elements.models.querySelector<HTMLInputElement>("[data-custom-model-input]")?.getAttribute("aria-invalid")).toBe("true");
+
+    harness.controller.update(readyState());
+    expect(harness.elements.models.querySelector("[data-custom-model-form]")).toBeNull();
+  });
+});
