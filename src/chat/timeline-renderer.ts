@@ -26,7 +26,11 @@ export class TimelineRenderer {
   // the agent's declaration; a card renders whatever its agent declared.
   permissionScopeNote: string | undefined;
 
-  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true, allowRevert = false): HTMLElement[] {
+  // `turnStartedAt` is when the running turn began (the surface's per-
+  // conversation clock): the working line states the elapsed time from it,
+  // and stamps it on the node so the surface can tick the label between
+  // renders. Absent for a settled conversation — nothing is working.
+  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true, allowRevert = false, turnStartedAt?: number): HTMLElement[] {
     if (!projection) {
       this.reset();
       clearChildren(target);
@@ -148,11 +152,16 @@ export class TimelineRenderer {
       dirty.push(node);
     }
 
-    // Assemble the top level: finished runs of activity rows collapse behind
-    // one group line; everything else stays flat. Member nodes keep their
-    // per-item identity — grouping only changes where they are parented.
+    // Assemble the top level: finished runs of activity rows and the live
+    // tail of a running turn collapse behind one group line; everything else
+    // stays flat. Member nodes keep their per-item identity — grouping only
+    // changes where they are parented.
     const liveGroupIds = new Set<string>();
-    for (const segment of activitySegments(visible, projection.status)) {
+    // The awaiting form of the working line (a turn with nothing back yet)
+    // is placed after the accepted drafts, not before them: the draft is the
+    // prompt the agent is working on, and the line answers it.
+    let awaitingNode: HTMLElement | null = null;
+    for (const segment of activitySegments(visible, projection.status, projection.acceptedDrafts.length > 0)) {
       if (!segment.group) {
         for (const item of segment.items) {
           const node = nodes.get(item.id);
@@ -163,14 +172,21 @@ export class TimelineRenderer {
       liveGroupIds.add(segment.group.id);
       let groupNode = this.groupEntries.get(segment.group.id);
       if (!groupNode) {
-        groupNode = buildNode(`<details class="chat-item chat-activity-group" data-chat-item-id="${escapeHtmlAttribute(segment.group.id)}"${expanded.has(segment.group.id) ? " open" : ""}><summary><span class="chat-group-count"></span><span class="chat-activity-subject"></span></summary><div class="chat-group-items"></div></details>`);
+        groupNode = buildNode(renderGroup(segment.group.id, segment.items.length === 0, expanded.has(segment.group.id)));
         this.groupEntries.set(segment.group.id, groupNode);
         dirty.push(groupNode);
       }
+      groupNode.dataset.outcome = segment.group.outcome;
+      if (segment.group.live && turnStartedAt !== undefined) groupNode.dataset.workingSince = String(turnStartedAt);
+      else delete groupNode.dataset.workingSince;
       const count = groupNode.querySelector(".chat-group-count");
-      if (count) count.textContent = `${segment.items.length} steps`;
+      if (count) count.textContent = segment.group.live ? workingLabel(turnStartedAt === undefined ? undefined : Date.now() - turnStartedAt) : `${segment.items.length} steps`;
       const subject = groupNode.querySelector(".chat-activity-subject");
       if (subject) subject.textContent = segment.group.summary;
+      if (segment.items.length === 0) {
+        awaitingNode = groupNode;
+        continue;
+      }
       const body = groupNode.querySelector(".chat-group-items");
       if (body) {
         let memberCursor = body.firstElementChild;
@@ -199,6 +215,7 @@ export class TimelineRenderer {
       ordered.push(node);
       dirty.push(node);
     }
+    if (awaitingNode) ordered.push(awaitingNode);
 
     const liveIds = new Set(projection.items.map(item => item.id));
     for (const [id, entry] of this.entries) {
@@ -317,34 +334,81 @@ export function subagentEntries(items: readonly ConversationItem[]): SubagentEnt
   return entries;
 }
 
+/**
+ * What a group line's status dot says. `failed` outranks `live`: a step that
+ * failed mid-turn is the one thing the reader must not miss while the line
+ * stays collapsed, so the dot reddens the moment it happens rather than at
+ * settle. `clean` is a finished group whose every member ended without
+ * failing (a cancelled step is not a failure).
+ */
+export type GroupOutcome = "live" | "clean" | "failed";
+
+type TimelineGroup = { id: string; live: boolean; summary: string; outcome: GroupOutcome };
+
 type TimelineSegment = {
-  group: { id: string; summary: string } | null;
+  group: TimelineGroup | null;
   items: ConversationItem[];
 };
 
 const GROUP_MIN = 3;
 
+type ActivityItem = Extract<ConversationItem, { type: "tool" | "command" | "reasoning" | "background_task" }>;
+
+function isActivity(item: ConversationItem): item is ActivityItem {
+  return item.type === "tool" || item.type === "command" || item.type === "reasoning" || item.type === "background_task";
+}
+
+/**
+ * Waiting on the agent's first sign of life for this turn: the prompt is
+ * accepted and nothing newer than the reader's own message has arrived. A
+ * local model that must load its weights sits in this state for a long
+ * while, and the composer's "Working" line — visually hidden in touch mode —
+ * would otherwise be the only thing saying anything was happening at all.
+ * Pure over the timeline, so the working line can be one element from this
+ * state through the steps to done.
+ */
+export function awaitingFirstResponse(items: readonly ConversationItem[], status: ConversationStatus, acceptedDrafts = false): boolean {
+  if (!isLiveConversationStatus(status)) return false;
+  if (acceptedDrafts) return true;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.type === "user_message") return true;
+    // A previous turn's footer, a hidden usage carrier, a context report,
+    // and a compaction marker say nothing about THIS turn's response; keep
+    // looking past them.
+    if (item.type === "turn_status" || item.type === "context_report" || item.type === "compaction") continue;
+    if (item.type === "assistant_message" && item.markdown === "") continue;
+    return false;
+  }
+  return false;
+}
+
 /**
  * Splits the timeline into flat items and groupable runs. A run of
- * consecutive activity rows (tool, command, reasoning) collapses behind one
- * group line when it is long enough and every member has finished — with one
- * exception: the trailing run of a still-running turn stays flat, because
- * that is the work the reader is watching happen.
+ * consecutive activity rows (tool, command, reasoning, background task)
+ * collapses behind one group line when it is long enough and every member
+ * has finished. The trailing run of a still-running turn collapses from its
+ * very first member instead: that is the work happening now, and one line
+ * saying so — opened on demand — keeps the timeline calm while it does.
+ * Letting the first steps render flat and then fold at three would be the
+ * flicker the line exists to remove. A turn with nothing back yet gets the
+ * same line with no members, so the reader watches one element from
+ * "accepted" to "done".
  */
-function activitySegments(items: readonly ConversationItem[], status: ConversationStatus): TimelineSegment[] {
+function activitySegments(items: readonly ConversationItem[], status: ConversationStatus, acceptedDrafts = false): TimelineSegment[] {
   const segments: TimelineSegment[] = [];
-  let run: ConversationItem[] = [];
+  let run: ActivityItem[] = [];
   const flushRun = (isTail: boolean) => {
     if (run.length === 0) return;
-    const finished = run.every(item => "status" in item && item.status !== "running" && item.status !== "pending");
+    const finished = run.every(item => item.status !== "running" && item.status !== "pending");
     const live = isTail && isLiveConversationStatus(status);
-    segments.push(run.length >= GROUP_MIN && finished && !live
-      ? { group: { id: `group:${run[0]!.id}`, summary: groupSummary(run) }, items: run }
+    segments.push(live || (run.length >= GROUP_MIN && finished)
+      ? { group: describeGroup(run, live), items: run }
       : { group: null, items: run });
     run = [];
   };
   for (const item of items) {
-    if (item.type === "tool" || item.type === "command" || item.type === "reasoning" || item.type === "background_task") {
+    if (isActivity(item)) {
       run.push(item);
       continue;
     }
@@ -352,7 +416,74 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
     segments.push({ group: null, items: [item] });
   }
   flushRun(true);
+  if (awaitingFirstResponse(items, status, acceptedDrafts)) {
+    // Keyed by the prompt it answers: a different element from the group the
+    // first step will start (which is keyed by that step), so the empty form
+    // never carries an open state — there is nothing in it to open.
+    const prompt = items.findLast(item => item.type === "user_message");
+    segments.push({ group: { id: `group:${prompt?.id ?? "awaiting"}`, live: true, summary: "", outcome: "live" }, items: [] });
+  }
   return segments;
+}
+
+function describeGroup(run: readonly ActivityItem[], live: boolean): TimelineGroup {
+  const failed = run.some(item => item.status === "failed");
+  return {
+    id: `group:${run[0]!.id}`,
+    live,
+    summary: live ? currentStep(run) : groupSummary(run),
+    outcome: failed ? "failed" : live ? "live" : "clean",
+  };
+}
+
+/**
+ * The step in flight, for the working line: the last member still running or
+ * pending, else the last member (between steps, the line names what just
+ * happened rather than going blank). Not the rolling summary — "Fetch … ·
+ * WebSearch ×3" reads as a ledger, and a status line should read as a status.
+ */
+function currentStep(run: readonly ActivityItem[]): string {
+  const step = run.findLast(item => item.status === "running" || item.status === "pending") ?? run[run.length - 1]!;
+  const { label, subject } = stepName(step);
+  return subject ? `${label} ${workspaceRelative(subject)}` : label;
+}
+
+/** "Working · 20s" from the turn's elapsed time; "Working" when no clock is known. */
+export function workingLabel(elapsedMs: number | undefined): string {
+  return elapsedMs === undefined ? "Working" : `Working · ${formatElapsed(elapsedMs)}`;
+}
+
+/** "12s" / "1m 5s", never empty — a clock that starts at "0s". */
+export function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+// The markup of a group line, in its two forms. The populated form is a
+// details whose body holds the member rows; the awaiting form has no members
+// and is not a details, so it offers no cursor and no toggle — but it keeps
+// the same classes and the same slots, so the swap to the populated form
+// when the first step arrives moves nothing on screen. The awaiting form
+// carries no item id: it is a status line, not a transcript entry, and
+// everything that walks `[data-chat-item-id]` (anchors, the last delivered
+// message) must keep seeing the entries only.
+function renderGroup(id: string, awaiting: boolean, open: boolean): string {
+  const line = `<span class="chat-group-dot" aria-hidden="true"></span><span class="chat-group-count"></span><span class="chat-activity-subject"></span>`;
+  if (awaiting) return `<div class="chat-item chat-activity-group is-awaiting"><div class="chat-group-line">${line}</div></div>`;
+  return `<details class="chat-item chat-activity-group" data-chat-item-id="${escapeHtmlAttribute(id)}"${open ? " open" : ""}><summary>${line}</summary><div class="chat-group-items"></div></details>`;
+}
+
+/**
+ * How a step is named on a group line: its kind, and what it acted on where
+ * the agent said. Grouped reasoning stays "Thought" without a duration — the
+ * line counts kinds of steps, and per-entry timings belong on the entries.
+ */
+function stepName(item: ActivityItem): { label: string; subject: string | undefined } {
+  if (item.type === "command") return { label: "Shell", subject: commandSubject(item.command) };
+  if (item.type === "reasoning") return { label: item.label ?? (item.status === "completed" ? "Thought" : "Thinking"), subject: undefined };
+  if (item.type === "background_task") return { label: backgroundTaskLabel(item), subject: item.description };
+  const detail = describeToolDetail(item);
+  return { label: detail.label, subject: toolSubject(detail) };
 }
 
 // How many steps a collapsed group names before it counts the rest.
@@ -366,15 +497,11 @@ const GROUP_NAMED = 3;
  * names the commands it contains); counting keeps a long run to one line,
  * and reasoning steps — which act on nothing — never take a named slot.
  */
-function groupSummary(run: readonly ConversationItem[]): string {
+function groupSummary(run: readonly ActivityItem[]): string {
   const named: string[] = [];
   const counts = new Map<string, number>();
   for (const item of run) {
-    // Grouped reasoning stays "Thought" without a duration: the group line
-    // counts kinds of steps, and per-entry timings belong on the entries.
-    const detail = item.type === "tool" ? describeToolDetail(item) : undefined;
-    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.label ?? (item.status === "completed" ? "Thought" : "Thinking")) : detail ? detail.label : item.type === "background_task" ? backgroundTaskLabel(item) : item.type;
-    const subject = item.type === "command" ? commandSubject(item.command) : detail ? toolSubject(detail) : item.type === "background_task" ? item.description : undefined;
+    const { label, subject } = stepName(item);
     if (subject && named.length < GROUP_NAMED) {
       named.push(`${label} ${workspaceRelative(subject)}`);
       continue;
