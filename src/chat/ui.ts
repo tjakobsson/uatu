@@ -11,6 +11,8 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
+import { composerRoutineState, latestPlanUtilization, latestRateLimit, planUtilizationLabel, rateLimitBadgeLabel } from "./composer-status";
+import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
 import { totalTokens } from "./usage";
 import {
@@ -93,6 +95,13 @@ export function initChat(api = new ChatApiClient()): void {
   const configurationVariantSection = document.querySelector<HTMLElement>("#chat-configuration-variant-section");
   const configurationVariant = document.querySelector<HTMLSelectElement>("#chat-configuration-variant");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
+  const rateLimitBadge = document.querySelector<HTMLElement>("#chat-rate-limit");
+  const planUsage = document.querySelector<HTMLElement>("#chat-plan-usage");
+  const composerChips = document.querySelector<HTMLElement>("#chat-composer-chips");
+  // The reason the latest status event carried (a retry's attempt and HTTP
+  // status), shown with the named state — per conversation, so a switch
+  // to another retrying conversation never borrows this one's reason.
+  const statusMessages = new Map<string, string | undefined>();
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
   // Attachment surfaces. Guarded at use rather than joining the required
@@ -1017,7 +1026,7 @@ export function initChat(api = new ChatApiClient()): void {
    */
   const awaitingFirstResponse = (): boolean => {
     if (!projection) return false;
-    if (projection.status !== "sending" && projection.status !== "running") return false;
+    if (!isLiveConversationStatus(projection.status)) return false;
     if (projection.acceptedDrafts.length > 0) return true;
     for (let index = projection.items.length - 1; index >= 0; index -= 1) {
       const item = projection.items[index]!;
@@ -1442,28 +1451,33 @@ export function initChat(api = new ChatApiClient()): void {
 
   const syncRoutineStatus = () => {
     const conversationStatus = projection?.status;
-    // Background work is a state of its own between working and idle: the
-    // agent is not mid-turn, but tasks it started still run (spec). Named
-    // only where the agent declares it runs such work.
-    const background = conversationStatus === "background" && declares("background-tasks");
-    const stateName = cancelling
-      ? "cancelling"
-      : submitting || conversationStatus === "sending"
-        ? "sending"
-        : conversationStatus === "running"
-          ? "working"
-          : background
-            ? "background"
-            : conversationStatus === "failed"
-              ? "failed"
-              : "ready";
-    const label = cancelling
-      ? "Cancelling"
-      : submitting && conversationStatus !== "running"
-        ? "Sending"
-        : background
-          ? backgroundStatusLabel(runningBackgroundTasks(projection?.items ?? []))
-          : conversationStatus ? (conversationStatus === "background" ? "Ready" : statusLabel(conversationStatus)) : "Select a conversation";
+    const { stateName, label } = composerRoutineState({
+      status: conversationStatus,
+      statusMessage: projection ? statusMessages.get(projection.conversationId) : undefined,
+      cancelling,
+      submitting,
+      backgroundDeclared: declares("background-tasks"),
+      backgroundTasks: runningBackgroundTasks(projection?.items ?? []),
+    });
+    // The rate-limit badge and plan utilization ride beside the status, from
+    // the latest notice / report the timeline holds (D11, spec).
+    const limit = projection ? latestRateLimit(projection.items) : undefined;
+    if (rateLimitBadge) {
+      const badge = limit ? rateLimitBadgeLabel(limit) : undefined;
+      rateLimitBadge.hidden = !badge;
+      rateLimitBadge.textContent = badge ?? "";
+      rateLimitBadge.dataset.level = limit?.level ?? "";
+      if (limit?.resetsAt) rateLimitBadge.title = `Resets ${new Date(limit.resetsAt).toLocaleString()}`;
+      else rateLimitBadge.removeAttribute("title");
+    }
+    if (planUsage) {
+      const plan = projection && declares("context") ? latestPlanUtilization(projection.items) : undefined;
+      const text = plan ? planUtilizationLabel(plan) : undefined;
+      planUsage.hidden = !text;
+      planUsage.textContent = text ?? "";
+      planUsage.title = plan?.fiveHour?.resetsAt ? `5-hour window resets ${new Date(plan.fiveHour.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+    }
+    if (composerChips) composerChips.hidden = (rateLimitBadge?.hidden ?? true) && (planUsage?.hidden ?? true);
     composerStatus.dataset.state = stateName;
     composerStatus.setAttribute("aria-label", label);
     composerStatus.title = stateName === "working" ? workingText() : label;
@@ -1480,7 +1494,7 @@ export function initChat(api = new ChatApiClient()): void {
       composerNote = null;
       lastStatus = status;
     }
-    const running = projection?.status === "running" || projection?.status === "sending";
+    const running = isLiveConversationStatus(projection?.status);
     if (projection && running && presentation.workingSince[projection.conversationId] === undefined) {
       const latestUserMessage = [...projection.items].reverse().find(item => item.type === "user_message");
       presentation.workingSince[projection.conversationId] = latestUserMessage?.createdAt ?? Date.now();
@@ -1666,7 +1680,8 @@ export function initChat(api = new ChatApiClient()): void {
         if (event.type === "conversation.configuration") renderConfiguration();
         if (event.type === "conversation.status") {
           if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
-          else if (event.status === "sending" || event.status === "running") setComposerError(null);
+          else if (isLiveConversationStatus(event.status)) setComposerError(null);
+          statusMessages.set(snapshot.conversation.id, event.message);
         }
         if (event.type === "conversation.updated") {
           conversations = conversations.map(conversation => conversation.id === event.conversation.id ? event.conversation : conversation);
@@ -2605,7 +2620,7 @@ export function initChat(api = new ChatApiClient()): void {
       return;
     }
     if (commandMatch && event.key === "Escape") { event.preventDefault(); closeCommandMenu(); return; }
-    const running = projection?.status === "running" || projection?.status === "sending";
+    const running = isLiveConversationStatus(projection?.status);
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing
       && (event.metaKey || event.ctrlKey || document.documentElement.dataset.uiMode !== "touch" || running)) {
       event.preventDefault();
@@ -2624,7 +2639,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (event.pointerType === "touch") event.preventDefault();
   });
   send.addEventListener("click", async () => {
-    if (!projection || (projection.status !== "running" && projection.status !== "sending") || cancelling) return;
+    if (!projection || !isLiveConversationStatus(projection.status) || cancelling) return;
     // Captured for the round trip: a failure landing after a switch belongs
     // to the conversation whose turn was being cancelled.
     const conversationId = projection.conversationId;

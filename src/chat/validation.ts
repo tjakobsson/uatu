@@ -34,6 +34,8 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "interrupted",
   "failed",
   "background",
+  "retrying",
+  "compacting",
 ]);
 const ACTIVITY_STATUSES = new Set<ActivityStatus>(["pending", "running", "completed", "failed", "cancelled"]);
 
@@ -341,11 +343,12 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.model !== undefined) expectModelSelection(record.model);
       break;
     case "reasoning":
-      expectKeys(record, ["id", "type", "createdAt", "text", "status", "durationMs"], type);
+      expectKeys(record, ["id", "type", "createdAt", "text", "status", "durationMs", "label"], type);
       expectString(record.text, "reasoning text");
       parseActivityStatus(record.status);
       // A duration validates like a timestamp: finite, non-negative number.
       expectOptionalTimestamp(record.durationMs, "durationMs");
+      if (record.label !== undefined) expectNonEmptyString(record.label, "reasoning label");
       break;
     case "tool":
       expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId", "model", "usage", "elapsedMs"], type);
@@ -391,12 +394,25 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalString(record.message, "turn status message");
       break;
     case "notice":
-      expectKeys(record, ["id", "type", "createdAt", "level", "message"], type);
+      expectKeys(record, ["id", "type", "createdAt", "level", "message", "code", "resetsAt"], type);
       expectOneOf(record.level, ["info", "warning", "error"], "notice level");
       expectNonEmptyString(record.message, "notice message");
+      if (record.code !== undefined) expectIdentity(record.code, "notice code");
+      expectOptionalTimestamp(record.resetsAt, "notice resetsAt");
       break;
     case "context_report": {
-      expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories"], type);
+      expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories", "plan"], type);
+      if (record.plan !== undefined) {
+        const plan = expectRecord(record.plan, "context report plan");
+        expectKeys(plan, ["fiveHour", "sevenDay"], "context report plan");
+        for (const key of ["fiveHour", "sevenDay"] as const) {
+          if (plan[key] === undefined) continue;
+          const window = expectRecord(plan[key], `context report plan ${key}`);
+          expectKeys(window, ["utilization", "resetsAt"], `context report plan ${key}`);
+          if (window.utilization !== undefined && (typeof window.utilization !== "number" || !Number.isFinite(window.utilization) || window.utilization < 0)) throw new Error(`context report plan ${key} utilization must be a non-negative number`);
+          expectOptionalTimestamp(window.resetsAt, `context report plan ${key} resetsAt`);
+        }
+      }
       expectOptionalCount(record.total, "context report total");
       if (record.total === undefined) throw new Error("context report total must be a non-negative integer");
       if (record.max !== undefined && (!Number.isSafeInteger(record.max) || (record.max as number) < 1)) throw new Error("context report max must be a positive integer");

@@ -1971,6 +1971,10 @@ describe("prompt, abort, permission, and question mutations", () => {
     listed.push({ conversationId: "session", taskId: "b3", description: "Still going", startedAt: 7 });
     const reopened = await adapter.history("session");
     expect(reopened.conversation.status).toBe("background");
+    // A named working state (a retry, a compaction) is still a live turn:
+    // the list must not demote it to background.
+    projection.statusUpdate("retrying");
+    expect((await adapter.history("session")).conversation.status).toBe("retrying");
     await adapter.dispose();
   });
 

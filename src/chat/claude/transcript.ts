@@ -155,7 +155,90 @@ export type TranscriptSessionSummary = {
   firstPrompt: string | null;
   createdAt: number;
   updatedAt: number;
+  // The title Claude Code itself assigned (the last `ai-title` entry), and
+  // the one a user set (the last `custom-title` entry); the provider ranks
+  // custom over generated over prompt-derived (D12).
+  generatedTitle?: string;
+  customTitle?: string;
 };
+
+export type TranscriptTitles = { generatedTitle?: string; customTitle?: string };
+
+// Title entries land wherever the CLI appended them — after the first turn
+// for `ai-title`, at rename time for `custom-title` — so neither the head
+// nor the tail alone can be trusted to hold them. The whole file is scanned
+// for the two markers (a byte search, parsing only the lines that carry
+// one), and the answer is cached by size and mtime so a listing pays the
+// scan once per change, not once per read.
+const TITLE_MARKERS: Array<[Buffer, "generatedTitle" | "customTitle", string]> = [
+  [Buffer.from('"type":"ai-title"'), "generatedTitle", "aiTitle"],
+  [Buffer.from('"type":"custom-title"'), "customTitle", "customTitle"],
+];
+const TITLE_SCAN_CHUNK = 1 << 16;
+const titleCache = new Map<string, { size: number; mtimeMs: number; titles: TranscriptTitles }>();
+
+/** The last title each marker names within `bytes` (whole lines only), written over `titles`. */
+function scanTitleLines(bytes: Buffer, titles: TranscriptTitles): void {
+  for (const [marker, key, field] of TITLE_MARKERS) {
+    let from = 0;
+    while (from < bytes.length) {
+      const at = bytes.indexOf(marker, from);
+      if (at < 0) break;
+      const lineStart = bytes.lastIndexOf(0x0a, at) + 1;
+      let lineEnd = bytes.indexOf(0x0a, at);
+      if (lineEnd < 0) lineEnd = bytes.length;
+      try {
+        const record = JSON.parse(bytes.subarray(lineStart, lineEnd).toString("utf8")) as Record<string, unknown>;
+        const value = typeof record[field] === "string" ? (record[field] as string).trim() : "";
+        if (value) titles[key] = value;
+      } catch {
+        // A line that only looks like a title entry contributes nothing.
+      }
+      from = lineEnd + 1;
+    }
+  }
+}
+const TITLE_CACHE_LIMIT = 4_096;
+
+/** The session's own titles from its transcript, cached per file version. */
+export async function readTranscriptTitles(file: string): Promise<TranscriptTitles> {
+  let info;
+  try {
+    info = await fs.stat(file);
+  } catch {
+    return {};
+  }
+  const cached = titleCache.get(file);
+  if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return cached.titles;
+  const titles: TranscriptTitles = {};
+  try {
+    // Chunked, never the whole file: a listing scans every candidate
+    // transcript, and one can run to hundreds of megabytes. Complete lines
+    // are searched as each chunk lands; the trailing partial line carries
+    // over, so a marker split across chunks is still seen whole.
+    const handle = await fs.open(file, "r");
+    try {
+      const chunk = Buffer.allocUnsafe(TITLE_SCAN_CHUNK);
+      let carry: Buffer = Buffer.alloc(0);
+      for (;;) {
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+        const eof = bytesRead === 0;
+        const buffer = eof ? carry : carry.length ? Buffer.concat([carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead);
+        const complete = eof ? buffer.length : buffer.lastIndexOf(0x0a) + 1;
+        scanTitleLines(buffer.subarray(0, complete), titles);
+        if (eof) break;
+        carry = Buffer.from(buffer.subarray(complete));
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return {};
+  }
+  if (titleCache.size >= TITLE_CACHE_LIMIT) titleCache.clear();
+  titleCache.set(file, { size: info.size, mtimeMs: info.mtimeMs, titles });
+  return titles;
+}
 
 export type TranscriptSessionList = {
   sessions: TranscriptSessionSummary[];
@@ -283,9 +366,12 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
         continue;
       }
       const firstUser = mainline.find(entry => entry.kind === "user" && promptText(entry) !== null);
+      const titles = await readTranscriptTitles(file);
       sessions.push({
         id: path.basename(name, ".jsonl"),
         firstPrompt: firstUser ? promptText(firstUser) : null,
+        ...(titles.generatedTitle === undefined ? {} : { generatedTitle: titles.generatedTitle }),
+        ...(titles.customTitle === undefined ? {} : { customTitle: titles.customTitle }),
         createdAt: mainline[0]!.timestamp,
         // Deterministic from entries when the head covered the whole file;
         // a file too large for that uses its mtime — recency is what the

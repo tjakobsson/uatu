@@ -1,6 +1,6 @@
 import { boundedSet } from "../../shared/bounded-map";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
-import type { ConversationItem, MessageAttachment, ModelSelection, TokenUsage } from "../types";
+import type { ContextReportItem, ConversationItem, MessageAttachment, ModelSelection, TokenUsage } from "../types";
 import type { TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
@@ -40,10 +40,26 @@ export type ClaudeEventMemory = {
   // later edges stay out of the timeline too.
   tasks: Map<string, { description: string; taskType?: string; toolUseId?: string; createdAt: number; progress?: string; backgrounded?: boolean; announced?: boolean; settled?: boolean }>;
   ambientTasks: Set<string>;
+  // Partial-message streams by API message id: which content block index
+  // holds text (from content_block_start), and how many of those the
+  // completed per-block assistant messages have consumed, so the completed
+  // block replaces exactly the streamed item it grew in (D10).
+  streams: Map<string, { createdAt: number; textBlocks: number[]; consumed: number }>;
+  // Every timeline item a wire frame minted, by the frame's uuid, so a
+  // retraction naming the frame (a refusal fallback's supersede) removes
+  // the tool and reasoning rows it produced and not only its text.
+  frameItems: Map<string, string[]>;
+  currentStream?: string;
+  // A named working state the turn is in (retrying, compacting); cleared —
+  // with a `running` status — by the next message that shows the turn moved.
+  transient?: "retrying" | "compacting";
+  // The last rate-limit standing reported, so a return to allowed can
+  // retire the badge without a notice for every allowed event.
+  rateLimited?: boolean;
 };
 
 export function createClaudeEventMemory(): ClaudeEventMemory {
-  return { tools: new Map(), todoTools: new Set(), tasks: new Map(), ambientTasks: new Set() };
+  return { tools: new Map(), todoTools: new Set(), tasks: new Map(), ambientTasks: new Set(), streams: new Map(), frameItems: new Map() };
 }
 
 const MEMORY_LIMIT = 2_048;
@@ -52,10 +68,6 @@ const MEMORY_LIMIT = 2_048;
 // timeline: progress, telemetry, and control chatter whose terminal states
 // are carried elsewhere.
 const INTENTIONALLY_IGNORED = new Set([
-  "stream_event",
-  "rate_limit_event",
-  "status",
-  "api_retry",
   "control_request_progress",
   "local_command_output",
   "hook_started",
@@ -71,7 +83,6 @@ const INTENTIONALLY_IGNORED = new Set([
   "notification",
   "files_persisted",
   "tool_use_summary",
-  "memory_recall",
   "elicitation_complete",
   "permission_denied",
   "prompt_suggestion",
@@ -110,6 +121,63 @@ export function normalizeClaudeMessage(
     if (record.subtype === "init" && model) {
       memory.lastModel = model;
       return { ...base, outcome: "handled", configuration: { model: claudeModelSelection(model) } };
+    }
+    if (record.subtype === "api_retry") {
+      const attempt = typeof record.attempt === "number" ? record.attempt : undefined;
+      const max = typeof record.max_retries === "number" ? record.max_retries : undefined;
+      const status = typeof record.error_status === "number" ? record.error_status : undefined;
+      const parts = [attempt !== undefined && max !== undefined ? `attempt ${attempt} of ${max}` : attempt !== undefined ? `attempt ${attempt}` : "", status !== undefined ? `HTTP ${status}` : ""].filter(Boolean);
+      memory.transient = "retrying";
+      // The retried request streams under a new API message id: whatever
+      // the abandoned one had streamed is not going to be completed, so its
+      // open items leave the timeline now rather than lingering forever.
+      const updates: NormalizedProviderUpdate[] = abandonCurrentStream(memory);
+      updates.push({ kind: "status", status: "retrying", ...(parts.length ? { message: parts.join(", ") } : {}) });
+      return { ...base, outcome: "handled", updates };
+    }
+    if (record.subtype === "status") {
+      const envelope = envelopeIdentity(record);
+      if (record.status === "compacting") {
+        memory.transient = "compacting";
+        return { ...base, outcome: "handled", updates: [{ kind: "status", status: "compacting" }] };
+      }
+      const updates: NormalizedProviderUpdate[] = resumeAfterTransient(memory);
+      if (record.compact_result === "failed" && envelope) {
+        const error = typeof record.compact_error === "string" && record.compact_error ? `: ${record.compact_error}` : "";
+        updates.push({ kind: "upsert", item: { id: `notice:compaction:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "warning", message: `Context compaction failed${error}.` } });
+      }
+      return { ...base, outcome: updates.length ? "handled" : "ignored", updates };
+    }
+    if (record.subtype === "model_refusal_fallback") {
+      const envelope = envelopeIdentity(record);
+      if (!envelope) return { ...base, outcome: "unparseable" };
+      const original = typeof record.original_model === "string" && record.original_model ? record.original_model : "the model";
+      const fallbackRaw = typeof record.fallback_model === "string" && record.fallback_model ? record.fallback_model : undefined;
+      // A session-scoped fallback swaps the model later usage is attributed
+      // to; a local one (a subagent's) leaves the session model alone.
+      if (fallbackRaw && record.scope !== "local") memory.lastModel = memory.resolveModel?.(fallbackRaw) ?? fallbackRaw;
+      const category = typeof record.api_refusal_category === "string" && record.api_refusal_category ? ` (${record.api_refusal_category})` : "";
+      const message = fallbackRaw
+        ? `${original} declined this request${category}; the turn continues on ${fallbackRaw}.`
+        : `${original} declined this request${category}.`;
+      // The refused leg's messages are retracted (SDK: the complete audit
+      // record for the turn); an assistant frame's `supersedes` evicts the
+      // same ids earlier, so both paths remove idempotently.
+      const updates: NormalizedProviderUpdate[] = evictFrames(record.retracted_message_uuids, memory);
+      updates.push({ kind: "upsert", item: { id: `notice:refusal:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "warning", code: "refusal-fallback", message } });
+      return { ...base, outcome: "handled", updates };
+    }
+    if (record.subtype === "memory_recall") {
+      const envelope = envelopeIdentity(record);
+      if (!envelope) return { ...base, outcome: "unparseable" };
+      const memories = asArray(record.memories).map(value => asRecord(value)).filter(entry => typeof entry.path === "string");
+      if (memories.length === 0) return { ...base, outcome: "ignored" };
+      const text = memories.map(entry => {
+        const scope = typeof entry.scope === "string" ? `[${entry.scope}] ` : "";
+        const content = typeof entry.content === "string" && entry.content.trim() ? entry.content.trim() : undefined;
+        return content ? `${scope}${entry.path}\n${content}` : `${scope}${entry.path}`;
+      }).join("\n\n");
+      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: { id: `memory:${envelope.uuid}`, type: "reasoning", createdAt: envelope.createdAt, text, status: "completed", label: "Recalled from memory" } }] };
     }
     // Compaction is a point in the timeline: a marker with the CLI's own
     // pre/post figures, and — when it states the post-compaction size — a
@@ -172,6 +240,68 @@ export function normalizeClaudeMessage(
     } }] };
   }
 
+  // A streamed frame: text deltas grow the current block's item in place
+  // (D10). Thinking deltas are deliberately not streamed — the reasoning row
+  // appears when its block completes — and a subagent's stream (parent tool
+  // use set) stays out of the parent's timeline.
+  if (type === "stream_event") {
+    const envelope = envelopeIdentity(record);
+    if (!envelope) return { ...base, outcome: "unparseable" };
+    if (record.parent_tool_use_id) return { ...base, outcome: "ignored" };
+    const event = asRecord(record.event);
+    const resumed = resumeAfterTransient(memory);
+    if (event.type === "message_start") {
+      const messageId = typeof asRecord(event.message).id === "string" ? asRecord(event.message).id as string : "";
+      if (messageId) boundedSet(memory.streams, messageId, { createdAt: envelope.createdAt, textBlocks: [], consumed: 0 }, MEMORY_LIMIT);
+      memory.currentStream = messageId || undefined;
+      return { ...base, outcome: resumed.length ? "handled" : "ignored", updates: resumed };
+    }
+    const stream = memory.currentStream ? memory.streams.get(memory.currentStream) : undefined;
+    const index = typeof event.index === "number" ? event.index : undefined;
+    if (!stream || index === undefined) return { ...base, outcome: resumed.length ? "handled" : "ignored", updates: resumed };
+    const itemId = `message:stream:${memory.currentStream}:${index}`;
+    if (event.type === "content_block_start" && asRecord(event.content_block).type === "text") {
+      stream.textBlocks.push(index);
+      return { ...base, outcome: "handled", updates: [...resumed, { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt: envelope.createdAt, markdown: "" } }] };
+    }
+    if (event.type === "content_block_delta" && asRecord(event.delta).type === "text_delta" && typeof asRecord(event.delta).text === "string" && stream.textBlocks.includes(index)) {
+      const text = asRecord(event.delta).text as string;
+      if (!text) return { ...base, outcome: "ignored", updates: resumed };
+      return { ...base, outcome: "handled", updates: [...resumed, {
+        kind: "text", itemId, identity: itemId, mode: "incremental", text,
+        item: { id: itemId, type: "assistant_message", createdAt: stream.createdAt, markdown: "" },
+      }] };
+    }
+    return { ...base, outcome: resumed.length ? "handled" : "ignored", updates: resumed };
+  }
+
+  // Routine session signals surface as named states and notices, never as
+  // silence (D11).
+  if (type === "rate_limit_event") {
+    const envelope = envelopeIdentity(record);
+    if (!envelope) return { ...base, outcome: "unparseable" };
+    const info = asRecord(record.rate_limit_info);
+    const kind = typeof info.rateLimitType === "string" ? rateLimitKindLabel(info.rateLimitType) : "plan";
+    const resetsAt = typeof info.resetsAt === "number" ? normalizeEpoch(info.resetsAt) : undefined;
+    // The reset time travels as an epoch (resetsAt) and is formatted where
+    // it is shown: the server's clock zone is not the reader's.
+    const utilization = typeof info.utilization === "number" ? ` (${Math.round(info.utilization * (info.utilization <= 1 ? 100 : 1))}% used)` : "";
+    if (info.status === "rejected") {
+      memory.rateLimited = true;
+      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: { id: `notice:rate-limit:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "error", code: "rate-limit-rejected", message: `Rate limit reached for your ${kind} window.`, ...(resetsAt === undefined ? {} : { resetsAt }) } }] };
+    }
+    if (info.status === "allowed_warning") {
+      // A warning is a standing too: the later plain "allowed" retires it.
+      memory.rateLimited = true;
+      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: { id: `notice:rate-limit:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "warning", code: "rate-limit-warning", message: `Approaching your ${kind} rate limit${utilization}.`, ...(resetsAt === undefined ? {} : { resetsAt }) } }] };
+    }
+    if (memory.rateLimited) {
+      memory.rateLimited = false;
+      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: { id: `notice:rate-limit:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "info", code: "rate-limit-cleared", message: "Rate limit cleared; requests are allowed again." } }] };
+    }
+    return { ...base, outcome: "ignored" };
+  }
+
   if (type === "assistant") {
     const envelope = envelopeIdentity(record);
     if (!envelope) return { ...base, outcome: "unparseable" };
@@ -187,11 +317,30 @@ export function normalizeClaudeMessage(
     // ("...[1m]"); assistant messages report the resolved base id. Keep the
     // variant id — it is what the catalog keys context windows by, so the
     // usage gauge measures against the window actually in effect.
-    const model = reported !== undefined && memory.lastModel?.startsWith(`${reported}[`)
+    // A message that names no model belongs to the session's current one —
+    // after a refusal fallback, the fallback model (D11).
+    const model = reported === undefined
       ? memory.lastModel
-      : reported;
+      : memory.lastModel?.startsWith(`${reported}[`) ? memory.lastModel : reported;
     if (model && !subagentFrame) memory.lastModel = model;
-    const updates = contentBlockUpdates(asArray(message.content), envelope, memory);
+    const updates: NormalizedProviderUpdate[] = resumeAfterTransient(memory);
+    // A frame that supersedes earlier messages (a refusal fallback's
+    // canonical replacement) evicts them on arrival.
+    updates.push(...evictFrames(record.supersedes, memory));
+    // The completed text block is the truth: it replaces the item its text
+    // streamed into (D10). The Nth completed text block of an API message
+    // is the Nth text block the stream started.
+    const stream = typeof message.id === "string" ? memory.streams.get(message.id) : undefined;
+    if (stream) {
+      for (const block of contentBlocks(message.content)) {
+        if (block.type !== "text") continue;
+        const index = stream.textBlocks[stream.consumed];
+        if (index === undefined) break;
+        stream.consumed += 1;
+        updates.push({ kind: "remove", itemId: `message:stream:${message.id}:${index}` });
+      }
+    }
+    updates.push(...contentBlockUpdates(asArray(message.content), envelope, memory));
     const usage = subagentFrame ? undefined : tokensToUsage(message.usage);
     // Each assistant message's usage is ONE API call's accounting, and its
     // input + cache read + cache write is the window occupancy after that
@@ -213,6 +362,7 @@ export function normalizeClaudeMessage(
         ...(model ? { model: claudeModelSelection(model) } : {}),
       } });
     }
+    rememberFrameItems(memory, envelope.uuid, updates);
     return {
       ...base,
       outcome: "handled",
@@ -233,6 +383,7 @@ export function normalizeClaudeMessage(
       const updates = results
         .map(block => toolResultUpdate(block, envelope, memory, toolOutcome, parentSessionId))
         .filter((update): update is NormalizedProviderUpdate => update !== null);
+      rememberFrameItems(memory, envelope.uuid, updates);
       return { ...base, outcome: updates.length > 0 ? "handled" : "ignored", updates };
     }
     if (source === "live") {
@@ -279,6 +430,9 @@ export function normalizeClaudeMessage(
     // failed status message, so a bad choice fails visibly rather than
     // silently falling back (spec: the CLI's error, not silence).
     const errors = asArray(record.errors).filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+    // The turn is over, whatever it was in the middle of: a later frame
+    // must not "resume" a retry or a compaction into a running status.
+    memory.transient = undefined;
     const message = !failed ? undefined
       : typeof record.result === "string" && record.result.trim() ? record.result
         : errors.length > 0 ? errors.join("; ") : undefined;
@@ -469,6 +623,53 @@ function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventM
   } };
 }
 
+/** The turn moved on from a retry or a compaction: back to plain running. */
+function resumeAfterTransient(memory: ClaudeEventMemory): NormalizedProviderUpdate[] {
+  if (!memory.transient) return [];
+  memory.transient = undefined;
+  return [{ kind: "status", status: "running" }];
+}
+
+/** Removes for every item the named frames minted (text, reasoning, tool rows); an unknown frame's text id as a fallback. */
+function evictFrames(value: unknown, memory: ClaudeEventMemory): NormalizedProviderUpdate[] {
+  // A tool row is minted by its call frame and again by its result frame:
+  // one removal per item across the whole retraction.
+  const itemIds = new Set<string>();
+  for (const uuid of asArray(value)) {
+    if (typeof uuid !== "string" || uuid.trim() === "") continue;
+    for (const itemId of memory.frameItems.get(uuid) ?? [`message:${uuid}`]) itemIds.add(itemId);
+    memory.frameItems.delete(uuid);
+  }
+  return [...itemIds].map(itemId => ({ kind: "remove" as const, itemId }));
+}
+
+/** Records which items a frame minted, so a later retraction of the frame can remove them all. */
+function rememberFrameItems(memory: ClaudeEventMemory, uuid: string, updates: NormalizedProviderUpdate[]): void {
+  const ids = updates.flatMap(update => update.kind === "upsert" && !update.item.id.startsWith("usage:") ? [update.item.id] : []);
+  if (ids.length === 0) return;
+  const known = memory.frameItems.get(uuid) ?? [];
+  boundedSet(memory.frameItems, uuid, [...new Set([...known, ...ids])], MEMORY_LIMIT);
+}
+
+/** Removes for the current stream's text blocks no completed message has consumed; forgets the stream. */
+function abandonCurrentStream(memory: ClaudeEventMemory): NormalizedProviderUpdate[] {
+  const id = memory.currentStream;
+  const stream = id ? memory.streams.get(id) : undefined;
+  memory.currentStream = undefined;
+  if (!id || !stream) return [];
+  memory.streams.delete(id);
+  return stream.textBlocks.slice(stream.consumed).map(index => ({ kind: "remove" as const, itemId: `message:stream:${id}:${index}` }));
+}
+
+function rateLimitKindLabel(kind: string): string {
+  return ({ five_hour: "5-hour", seven_day: "7-day", seven_day_opus: "7-day Opus", seven_day_sonnet: "7-day Sonnet", seven_day_overage_included: "7-day (overage included)", overage: "overage" } as Record<string, string>)[kind] ?? kind.replaceAll("_", " ");
+}
+
+/** Epoch seconds and milliseconds both arrive on the wire; normalize to ms. */
+function normalizeEpoch(value: number): number {
+  return value < 1e12 ? Math.round(value * 1000) : Math.round(value);
+}
+
 /**
  * task_started / task_progress / task_updated / task_notification → the one
  * `task:<id>` row. The start remembers the description and launch time;
@@ -574,7 +775,7 @@ export function markTasksBackgrounded(memory: ClaudeEventMemory, tasks: Array<{ 
  * deferred tool schemas out of the sum — the used rows add up to the total
  * the CLI states (spec: the breakdown's total matches the presented fill).
  */
-export function normalizeContextUsage(value: unknown, createdAt: number, model?: string): ConversationItem | null {
+export function normalizeContextUsage(value: unknown, createdAt: number, model?: string): ContextReportItem | null {
   const record = asRecord(value);
   if (typeof record.totalTokens !== "number" || !Number.isFinite(record.totalTokens) || record.totalTokens < 0) return null;
   const max = typeof record.maxTokens === "number" && record.maxTokens > 0 ? record.maxTokens

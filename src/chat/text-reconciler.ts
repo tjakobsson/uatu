@@ -29,6 +29,12 @@ export class ProviderTextReconciler {
     return this.text.get(identity) ?? "";
   }
 
+  /** The identity's stream is over and its item gone: nothing to reconcile against. */
+  forget(identity: string): void {
+    this.text.delete(identity);
+    this.confirmed.delete(identity);
+  }
+
   clear(): void {
     this.text.clear();
     this.confirmed.clear();

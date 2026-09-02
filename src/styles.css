@@ -6432,6 +6432,77 @@ body.is-resizing-chat .chat-resizer {
   animation: chat-status-spin 0.9s linear infinite;
 }
 
+/* A retry: the turn is live but waiting on the API. The dot pauses mid-spin
+   (a broken ring, no motion) so the reader sees a wait, not work; the label
+   carries the attempt and status. Compaction keeps the working ring but in
+   the subtle colour: work, but the agent's own housekeeping. */
+.chat-composer-status[data-state="retrying"]::before {
+  content: "";
+  width: 0.65rem;
+  height: 0.65rem;
+  border: 2px dashed currentColor;
+  border-radius: 999px;
+  color: var(--warning, #b7791f);
+}
+
+.chat-composer-status[data-state="compacting"]::before {
+  content: "";
+  width: 0.65rem;
+  height: 0.65rem;
+  border: 2px solid var(--text-subtle);
+  border-right-color: transparent;
+  border-radius: 999px;
+  animation: chat-status-spin 1.6s linear infinite;
+}
+
+/* The rate-limit badge and plan utilization: short text chips that say what
+   the login reported, present only while it holds. They take a row of their
+   own under the action rail, right-aligned under the status dot, so the
+   rail's fixed columns never squeeze them. */
+.chat-composer-actions > .chat-composer-chips {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.chat-composer-actions > .chat-composer-chips[hidden] {
+  display: none;
+}
+
+.chat-rate-limit,
+.chat-plan-usage {
+  flex: 0 0 auto;
+  max-width: 14rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.78em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-plan-usage {
+  color: var(--text-subtle);
+  border: 1px solid var(--border-soft);
+}
+
+.chat-rate-limit {
+  border: 1px solid var(--warning, #b7791f);
+  color: var(--warning, #b7791f);
+}
+
+.chat-rate-limit[data-level="rejected"] {
+  border-color: var(--danger, #cf4f57);
+  color: var(--danger, #cf4f57);
+}
+
+.chat-rate-limit[hidden],
+.chat-plan-usage[hidden] {
+  display: none;
+}
+
 /* Background work: the agent is not mid-turn, but something it started is
    still running. A slower pulse than working, so the two read as different
    states at a glance; the label names the count. */
@@ -7109,6 +7180,11 @@ html[data-ui-mode="touch"]:has(#chat-input:focus) .touch-tab-bar {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .chat-composer-status[data-state="compacting"]::before,
+  .chat-composer-status[data-state="background"]::before {
+    animation: none;
+  }
+
   .chat-surface *,
   .touch-tab { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 

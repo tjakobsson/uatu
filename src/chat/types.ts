@@ -121,7 +121,15 @@ export type ChatAvailability =
 // `background`: no turn is running, but the agent still holds live background
 // work (a backgrounded command, a subagent, a monitor). Distinct from both
 // working and idle: prompting is possible, and the composer names what runs.
-export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed" | "background";
+// `retrying`: the turn is live but the agent is waiting to retry a failed API
+// request; `compacting`: the turn is live and the agent is compacting its
+// context. Both are working states with a name, never idle ones.
+export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed" | "background" | "retrying" | "compacting";
+
+/** A turn is in flight: the composer offers Cancel, a new prompt is held. */
+export function isLiveConversationStatus(status: ConversationStatus | undefined): boolean {
+  return status === "running" || status === "sending" || status === "retrying" || status === "compacting";
+}
 export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type ModelSelection = {
@@ -266,6 +274,10 @@ export type ReasoningItem = TimelineItemBase & {
   // How long the model thought, when the provider reports it (history parts
   // carry start/end) or the event stream lets us measure it.
   durationMs?: number;
+  // What kind of recalled context this is, when it is not the model's own
+  // thinking ("Recalled from memory"): shown as the row's label in place of
+  // "Thought". Absent for ordinary reasoning.
+  label?: string;
 };
 
 export type ToolItem = TimelineItemBase & {
@@ -414,6 +426,13 @@ export type NoticeItem = TimelineItemBase & {
   type: "notice";
   level: "info" | "warning" | "error";
   message: string;
+  // A machine-readable kind for notices the surface reacts to beyond
+  // showing them: `rate-limit-warning` and `rate-limit-rejected` drive the
+  // composer's rate-limit badge (the latest one wins), `rate-limit-cleared`
+  // retires it, `refusal-fallback` names a model swap. Absent otherwise.
+  code?: string;
+  // When a rate-limit notice's window resets, as a timestamp.
+  resetsAt?: number;
 };
 
 // One row of an agent-reported context breakdown. `kind` says what the row
@@ -440,6 +459,18 @@ export type ContextReportItem = TimelineItemBase & {
   max?: number;
   model?: ModelSelection;
   categories?: ContextReportCategory[];
+  // Plan utilization the login reports (claude.ai plans only): percent of
+  // each rate-limit window used and when it resets. Empty when the login
+  // reports no windows (an API-key session); absent when the report does
+  // not speak to the plan (a compaction's post-count, an agent that never
+  // reports it), in which case the previous report's plan still stands.
+  plan?: PlanUtilization;
+};
+
+export type PlanUtilizationWindow = { utilization?: number; resetsAt?: number };
+export type PlanUtilization = {
+  fiveHour?: PlanUtilizationWindow;
+  sevenDay?: PlanUtilizationWindow;
 };
 
 /**

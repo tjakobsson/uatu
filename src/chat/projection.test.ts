@@ -156,6 +156,17 @@ describe("chat projection", () => {
     ]);
   });
 
+  test("removing a streamed item forgets its reconciled text", () => {
+    const server = new ConversationProjection(new ConversationReplay("g1", "c1", 10_000));
+    const id = "message:stream:m1:0";
+    const item = { id, type: "assistant_message" as const, createdAt: 1, markdown: "" };
+    server.apply({ kind: "text", itemId: id, identity: id, mode: "incremental", text: "Hello", item });
+    server.apply({ kind: "remove", itemId: id });
+    // The same identity later is a fresh stream, not a continuation.
+    server.apply({ kind: "text", itemId: id, identity: id, mode: "incremental", text: "Again", item });
+    expect(server.items()).toEqual([expect.objectContaining({ id, markdown: "Again" })]);
+  });
+
   test("projects configuration and conversation updates in sequence", () => {
     const initial = projectionFromSnapshot({
       ...snapshot(),

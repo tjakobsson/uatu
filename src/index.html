@@ -854,6 +854,13 @@
                   <path class="chat-send-cancel" d="M5 5l10 10M15 5L5 15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
+              <!-- Chips the login reports beside the status: plan utilization
+                   and a standing rate limit. Their own row under the actions,
+                   present only while one of them has something to say. -->
+              <span id="chat-composer-chips" class="chat-composer-chips" hidden>
+                <span id="chat-plan-usage" class="chat-plan-usage" hidden></span>
+                <span id="chat-rate-limit" class="chat-rate-limit" role="status" hidden></span>
+              </span>
             </div>
           </form>
           <span id="chat-conversation-inventory-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>

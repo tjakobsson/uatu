@@ -301,6 +301,26 @@ The four authoritative rules of the `follow-mode` capability — defined in `ope
 - **Rule C** (file event + follow on): selection moves to the changed file.
 - **Rule D** (file event + follow off): selection unchanged; if the changed file equals the current selection, the preview reloads in place; otherwise just the tree refreshes.
 
+## Chat surface
+
+The chat surface speaks one timeline model for every agent (`src/chat/types.ts`); each agent's provider normalizes its own wire format into it below the seam (`src/chat/provider.ts`). The kinds a conversation can hold:
+
+| Item kind | What it is | Where it shows |
+|---|---|---|
+| `user_message`, `assistant_message` | The conversation. An `assistant_message` with empty markdown is a usage carrier (`usage:<id>`, one API call's occupancy), never a bubble. Claude Code streams text into a `message:stream:<api-message-id>:<block>` item that the completed block replaces. | Timeline |
+| `reasoning` | The model's thinking, or recalled context when `label` is set ("Recalled from memory") | Activity row, groups |
+| `tool`, `command`, `file_change` | What the agent did. A running tool carries `elapsedMs` from the agent's progress heartbeat; a shell tool's command is its subject. | Activity rows, groups |
+| `permission`, `question` | Interactions the user must answer. A `question` with `source` is a tool-driven dialog or an MCP elicitation, answered through the same operations. The persistent-approval sentence on a permission card is the owning agent's own (`ChatAgent.permissionScopeNote`). | Cards |
+| `task_progress` | The agent's todo list, one presentation updated in place | Pinned track |
+| `background_task` | A task the agent runs in the background, updated in place from start to settling. Running ones are listed above the composer with a stop control; settled ones are rows. | Composer list, timeline |
+| `context_report` | The agent's own statement of window occupancy (total, max, categories, plan utilization). Data for the readout, never a row; the readout uses whichever of a report or a usage carrier is newest. | Context meter |
+| `compaction` | Where the agent compacted its context, with before/after figures | Timeline marker |
+| `turn_status`, `notice` | A turn's outcome; warnings and errors. A `notice.code` (`rate-limit-*`, `refusal-fallback`) drives the composer's badge. | Timeline, composer |
+
+Conversation status is `idle`, `sending`, `running`, `completed`, `interrupted`, `failed`, plus three named states: `retrying` and `compacting` are live-turn states (the composer offers Cancel, a new prompt is held), `background` means no turn is running but the agent still holds live background work (prompting is possible). `isLiveConversationStatus()` in `types.ts` is the one rule for which statuses are live.
+
+A Claude Code conversation's session lifetime (`src/chat/claude/provider.ts`) follows the work, not the first result: the SDK session is retired on a turn's result only when no accepted prompt is pending, no unprompted follow-up is in flight, and the background set (`background_tasks_changed`, ambient tasks excluded) is empty. While the set is non-empty the conversation reports `background`. When a backgrounded task settles the CLI starts a follow-up turn by itself (see the D9 spike in the change's design notes); the provider reports that turn as running and completed like any other. A set that empties with no follow-up returns the conversation to idle after a short grace window. Conversation titles follow the transcript's own entries: a user rename (`custom-title`) outranks Claude Code's generated title (`ai-title`), which outranks the first prompt.
+
 ## Terminal subsystem
 
 The terminal panel is the only feature with a WebSocket transport.
