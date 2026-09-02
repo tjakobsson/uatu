@@ -10,6 +10,7 @@ import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
+import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
 import { contextReadout } from "./context-readout";
 import { totalTokens } from "./usage";
 import {
@@ -483,6 +484,69 @@ export function initChat(api = new ChatApiClient()): void {
     taskList.hidden = false;
   };
 
+  const backgroundTasks = document.querySelector<HTMLDetailsElement>("#chat-background-tasks");
+  const backgroundTasksLabel = document.querySelector<HTMLElement>("#chat-background-tasks-label");
+  const backgroundTasksItems = document.querySelector<HTMLElement>("#chat-background-tasks-items");
+
+  /**
+   * Work the agent left running in the background, pinned above the
+   * composer with a stop control per task (spec: each task is listed with a
+   * stop action). Settled tasks leave the list and take a timeline row.
+   * Rebuilt only on change, for the same tap reason as the other tracks.
+   */
+  let paintedBackgroundTasks = "";
+  const syncBackgroundTasks = () => {
+    if (!backgroundTasks || !backgroundTasksLabel || !backgroundTasksItems) return;
+    const entries = projection && declares("background-tasks") ? runningBackgroundTasks(projection.items) : [];
+    const signature = entries.map(entry => [entry.taskId, entry.description, entry.progress ?? ""].join("\u0001")).join("\u0002");
+    if (signature === paintedBackgroundTasks) return;
+    paintedBackgroundTasks = signature;
+    if (entries.length === 0) {
+      backgroundTasks.hidden = true;
+      backgroundTasksItems.replaceChildren();
+      return;
+    }
+    backgroundTasksLabel.textContent = backgroundStatusLabel(entries);
+    backgroundTasksItems.replaceChildren(...entries.map(entry => {
+      const row = document.createElement("li");
+      row.className = "is-running";
+      row.dataset.backgroundTask = entry.taskId;
+      const text = document.createElement("span");
+      text.className = "chat-background-task-text";
+      text.textContent = entry.description;
+      text.title = entry.description;
+      row.append(text);
+      if (entry.progress) {
+        const progress = document.createElement("span");
+        progress.className = "chat-background-task-progress";
+        progress.textContent = entry.progress;
+        row.append(progress);
+      }
+      const stop = document.createElement("button");
+      stop.type = "button";
+      stop.className = "chat-task-stop";
+      stop.dataset.stopTask = entry.taskId;
+      stop.textContent = "Stop";
+      stop.setAttribute("aria-label", `Stop ${entry.description}`);
+      row.append(stop);
+      return row;
+    }));
+    backgroundTasks.hidden = false;
+  };
+  backgroundTasksItems?.addEventListener("click", event => {
+    const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-stop-task]");
+    if (!button || !projection) return;
+    const source = projection;
+    const taskId = button.dataset.stopTask ?? "";
+    // The agent reports the stop as the task settling, which is what moves
+    // the row out of this list; until then the control stays inert.
+    button.disabled = true;
+    void api.stopTask(source.conversationId, taskId, newRequestId()).catch(error => {
+      button.disabled = false;
+      announceFailureFor(source)(messageOf(error), true);
+    });
+  });
+
   const subagents = document.querySelector<HTMLDetailsElement>("#chat-subagents");
   const subagentsLabel = document.querySelector<HTMLElement>("#chat-subagents-label");
   const subagentsItems = document.querySelector<HTMLElement>("#chat-subagents-items");
@@ -895,6 +959,7 @@ export function initChat(api = new ChatApiClient()): void {
     rendering = false;
     syncTaskList();
     syncSubagents();
+    syncBackgroundTasks();
     syncOutstandingRequests();
     syncContextIndicator();
     syncPromptRail();
@@ -1365,20 +1430,28 @@ export function initChat(api = new ChatApiClient()): void {
 
   const syncRoutineStatus = () => {
     const conversationStatus = projection?.status;
+    // Background work is a state of its own between working and idle: the
+    // agent is not mid-turn, but tasks it started still run (spec). Named
+    // only where the agent declares it runs such work.
+    const background = conversationStatus === "background" && declares("background-tasks");
     const stateName = cancelling
       ? "cancelling"
       : submitting || conversationStatus === "sending"
         ? "sending"
         : conversationStatus === "running"
           ? "working"
-          : conversationStatus === "failed"
-            ? "failed"
-            : "ready";
+          : background
+            ? "background"
+            : conversationStatus === "failed"
+              ? "failed"
+              : "ready";
     const label = cancelling
       ? "Cancelling"
       : submitting && conversationStatus !== "running"
         ? "Sending"
-        : conversationStatus ? statusLabel(conversationStatus) : "Select a conversation";
+        : background
+          ? backgroundStatusLabel(runningBackgroundTasks(projection?.items ?? []))
+          : conversationStatus ? (conversationStatus === "background" ? "Ready" : statusLabel(conversationStatus)) : "Select a conversation";
     composerStatus.dataset.state = stateName;
     composerStatus.setAttribute("aria-label", label);
     composerStatus.title = stateName === "working" ? workingText() : label;

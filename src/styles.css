@@ -6432,6 +6432,17 @@ body.is-resizing-chat .chat-resizer {
   animation: chat-status-spin 0.9s linear infinite;
 }
 
+/* Background work: the agent is not mid-turn, but something it started is
+   still running. A slower pulse than working, so the two read as different
+   states at a glance; the label names the count. */
+.chat-composer-status[data-state="background"]::before {
+  content: "◍";
+  color: var(--accent);
+  font-size: 0.85rem;
+  line-height: 1;
+  animation: chat-waiting-pulse 2.4s ease-in-out infinite;
+}
+
 .chat-composer-status[data-state="cancelling"]::before {
   content: "×";
 }
@@ -7832,6 +7843,57 @@ html[data-chat-keyboard] #chat-subagents-items,
 html[data-chat-keyboard] .chat-reverted-items,
 html[data-chat-keyboard] .chat-queue {
   display: none;
+}
+
+/* Rows of the background-task list: the task's description leads, its
+   latest progress note follows, and the stop control sits at the end. */
+#chat-background-tasks-items li::before {
+  content: "◍";
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.chat-background-tasks li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.chat-background-task-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-background-task-progress {
+  color: var(--text-subtle);
+  font-size: 0.9em;
+}
+
+.chat-task-stop {
+  flex: 0 0 auto;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.4rem;
+  background: var(--surface-raised);
+  color: inherit;
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.chat-task-stop:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.chat-task-summary {
+  margin: 0.45rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .chat-track-dismiss {

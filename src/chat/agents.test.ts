@@ -72,8 +72,19 @@ class StubAgentService implements WorkspaceChatService {
   async respondQuestion(id: string, interactionId: string) {
     return this.record("respondQuestion", [id, interactionId], { outcome: { kind: "rejected" as const } });
   }
+  async stopTask(id: string, taskId: string) { return this.record("stopTask", [id, taskId], { stopped: true as const }); }
   async dispose() { this.calls.push({ method: "dispose", args: [] }); }
 }
+
+describe("background task stops route to the owning agent", () => {
+  test("stopTask strips the qualifier and reaches the agent that owns the conversation", async () => {
+    const { service, a, b } = fixture();
+    expect(await service.stopTask("claude:conv-1", "task-9", "req-1")).toEqual({ stopped: true });
+    expect(b.calls).toContainEqual({ method: "stopTask", args: ["conv-1", "task-9"] });
+    expect(a.calls.some(call => call.method === "stopTask")).toBe(false);
+    await expect(service.stopTask("nope:conv-1", "task-9", "req-1")).rejects.toThrow();
+  });
+});
 
 function fixture(): { service: MultiAgentChatService; a: StubAgentService; b: StubAgentService } {
   const a = new StubAgentService();

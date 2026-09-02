@@ -77,7 +77,10 @@ export class TimelineRenderer {
     // finished run's group.
     // A context report is data of the same kind: the readout consumes it,
     // the timeline never shows it.
-    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === "") && item.type !== "context_report");
+    // A running background task is presented in the composer's live list;
+    // only a settled one takes a place in the timeline (D8).
+    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === "") && item.type !== "context_report"
+      && !(item.type === "background_task" && item.status === "running"));
 
     const nodes = new Map<string, HTMLElement>();
     for (const [visibleIndex, item] of visible.entries()) {
@@ -341,7 +344,7 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
     run = [];
   };
   for (const item of items) {
-    if (item.type === "tool" || item.type === "command" || item.type === "reasoning") {
+    if (item.type === "tool" || item.type === "command" || item.type === "reasoning" || item.type === "background_task") {
       run.push(item);
       continue;
     }
@@ -370,8 +373,8 @@ function groupSummary(run: readonly ConversationItem[]): string {
     // Grouped reasoning stays "Thought" without a duration: the group line
     // counts kinds of steps, and per-entry timings belong on the entries.
     const detail = item.type === "tool" ? describeToolDetail(item) : undefined;
-    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.status === "completed" ? "Thought" : "Thinking") : detail ? detail.label : item.type;
-    const subject = item.type === "command" ? commandSubject(item.command) : detail ? toolSubject(detail) : undefined;
+    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.status === "completed" ? "Thought" : "Thinking") : detail ? detail.label : item.type === "background_task" ? backgroundTaskLabel(item) : item.type;
+    const subject = item.type === "command" ? commandSubject(item.command) : detail ? toolSubject(detail) : item.type === "background_task" ? item.description : undefined;
     if (subject && named.length < GROUP_NAMED) {
       named.push(`${label} ${workspaceRelative(subject)}`);
       continue;
@@ -642,6 +645,13 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // Never reached: reports are filtered before rendering. Kept exhaustive so
   // a new kind fails loudly here rather than falling into the activity shell.
   if (item.type === "context_report") return "";
+  // A settled background task: its outcome and the agent's summary, in
+  // place. (Running ones are filtered out above and listed by the composer.)
+  if (item.type === "background_task") {
+    const outcome = item.status === "completed" ? "completed" : item.status === "failed" ? "failed" : item.status === "stopped" ? "cancelled" : "running";
+    const body = `${item.summary ? `<pre class="chat-task-summary">${escapeHtml(item.summary)}</pre>` : ""}${item.toolUseId ? `<p class="chat-tool-meta">Started by the ${escapeHtml(item.taskType === "local_agent" ? "Agent" : "Bash")} step above.</p>` : ""}`;
+    return activityShell(id, outcome, backgroundTaskLabel(item), item.description, body, open, false, readerClosed, stamp, item.status === "stopped" ? "stopped" : undefined);
+  }
   if (item.type === "file_change") {
     return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(item.operation)}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
   }
@@ -756,7 +766,7 @@ function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: 
   // list each time reprints it verbatim on every tool call.
   const label = detail.kind === "todo" && todo ? todo.label : detail.label;
   const subject = detail.kind === "todo" ? todo?.task : toolSubject(detail);
-  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, timestampAttribute(item.createdAt));
+  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, timestampAttribute(item.createdAt), activityStatusText(item.status, item.elapsedMs));
 }
 
 // One rendering for every diff the chat shows — a tool's edit, a patch, and a
@@ -842,12 +852,25 @@ export function workspaceRelative(reference: string): string {
 // `auto` marks a row the stream opened rather than the reader. It is carried in
 // the DOM because that is where the next render reads the open state back from,
 // and the two have to stay distinguishable there.
-function activityShell(id: string, status: string, label: string, subject: string | undefined, body: string, open: boolean, auto: boolean, readerClosed: boolean, stamp: string): string {
+function activityShell(id: string, status: string, label: string, subject: string | undefined, body: string, open: boolean, auto: boolean, readerClosed: boolean, stamp: string, statusText = status): string {
   const subjectHtml = subject ? `<span class="chat-activity-subject">${escapeHtml(workspaceRelative(subject))}</span>` : "";
   // Both markers ride on the rebuilt node, because a rebuild is how this row
   // survives streaming and neither state is recoverable from the item itself.
   const markers = `${!open && auto ? " data-auto-open" : ""}${readerClosed ? ` ${READER_CLOSED}` : ""}`;
-  return `<details class="chat-item chat-activity is-${status}" data-chat-item-id="${id}"${stamp}${open || auto ? " open" : ""}${markers}><summary><span>${escapeHtml(label)}</span>${subjectHtml}<span class="chat-activity-status">${escapeHtml(status)}</span></summary>${body}</details>`;
+  return `<details class="chat-item chat-activity is-${status}" data-chat-item-id="${id}"${stamp}${open || auto ? " open" : ""}${markers}><summary><span>${escapeHtml(label)}</span>${subjectHtml}<span class="chat-activity-status">${escapeHtml(statusText)}</span></summary>${body}</details>`;
+}
+
+/** "Background task finished" / "failed" / "stopped", or "Background task" while it runs. */
+export function backgroundTaskLabel(item: Extract<ConversationItem, { type: "background_task" }>): string {
+  const noun = item.taskType === "local_agent" ? "Background agent" : item.taskType === "local_workflow" ? "Background workflow" : "Background task";
+  return item.status === "completed" ? `${noun} finished` : item.status === "failed" ? `${noun} failed` : item.status === "stopped" ? `${noun} stopped` : noun;
+}
+
+/** "running · 12s" for a tool the agent reports elapsed time for, else the bare status. */
+function activityStatusText(status: ActivityStatus, elapsedMs: number | undefined): string {
+  if (status !== "running" || elapsedMs === undefined) return status;
+  const worked = formatWorked(elapsedMs);
+  return worked ? `running · ${worked}` : status;
 }
 
 // A request's state, as data rather than something CSS has to re-derive: the
@@ -1031,7 +1054,7 @@ export function compactionLabel(item: Extract<ConversationItem, { type: "compact
 }
 
 export function statusLabel(status: ConversationStatus): string {
-  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed" })[status];
+  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed", background: "Background work running" })[status];
 }
 
 function counts(additions?: number, deletions?: number): string {

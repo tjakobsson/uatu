@@ -61,6 +61,13 @@ export class InvalidPermissionChoiceError extends Error {
   }
 }
 
+export class BackgroundTasksUnsupportedError extends Error {
+  constructor() {
+    super("this agent does not run background tasks");
+    this.name = "BackgroundTasksUnsupportedError";
+  }
+}
+
 export class InvalidModelSelectionError extends Error {
   constructor() {
     super("selected model is not available");
@@ -412,6 +419,12 @@ export class ChatAdapter {
           items[index] = { ...item, status: "cancelled" };
         }
       }
+    }
+    // Live background work is held by the provider, not the transcript: a
+    // reopened conversation gets its running tasks from the provider's own
+    // list so the composer shows the state it is actually in (spec).
+    for (const task of await this.liveBackgroundTasks(id)) {
+      if (!items.some(item => item.id === task.id)) items.push(task);
     }
     // A subagent's attribution reached the parent as a live upsert, and the
     // parent's own store has no memory of it — so a reopened conversation
@@ -1348,6 +1361,20 @@ export class ChatAdapter {
     });
   }
 
+  /**
+   * Stops one of the conversation's running background tasks. The agent
+   * reports the stop as that task settling, which is what the timeline
+   * records; this only carries the request.
+   */
+  stopTask(conversationId: string, taskId: string, clientRequestId: string): Promise<{ stopped: true }> {
+    return this.receipts.run(`stop-task:${conversationId}:${taskId}:${clientRequestId}`, async () => {
+      await this.requireSession(conversationId);
+      if (!this.provider.stopTask || !this.provider.describe().capabilities.includes("background-tasks")) throw new BackgroundTasksUnsupportedError();
+      await this.provider.stopTask(conversationId, taskId);
+      return { stopped: true as const };
+    });
+  }
+
   respondQuestion(conversationId: string, requestId: string, clientRequestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }> {
     return this.receipts.run(`question:${conversationId}:${requestId}:${clientRequestId}`, async () => {
       const session = await this.requireSession(conversationId);
@@ -1777,6 +1804,27 @@ export class ChatAdapter {
     return items;
   }
 
+  /** The provider's live background tasks for this conversation, as running rows. */
+  private async liveBackgroundTasks(id: string): Promise<ConversationItem[]> {
+    if (!this.provider.listBackgroundTasks) return [];
+    try {
+      return (await this.provider.listBackgroundTasks())
+        .filter(task => task.conversationId === id)
+        .map(task => ({
+          id: `task:${task.taskId}`,
+          type: "background_task" as const,
+          createdAt: task.startedAt,
+          taskId: task.taskId,
+          description: task.description,
+          ...(task.taskType === undefined ? {} : { taskType: task.taskType }),
+          ...(task.toolUseId === undefined ? {} : { toolUseId: task.toolUseId }),
+          status: "running" as const,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
   /** Publishes a conversation's own pending permissions into its projection. */
   private async seedPendingPermissions(conversationId: string): Promise<void> {
     try {
@@ -1951,6 +1999,8 @@ export class ChatAdapter {
       return existing;
     }
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
+      // `background` is not a live turn: the process is up for the tasks,
+      // but the conversation accepts a prompt.
       if (status === "running" || status === "sending") this.liveTurns.add(id);
       else this.liveTurns.delete(id);
       // A turn that ended on its own releases the next held message. Only

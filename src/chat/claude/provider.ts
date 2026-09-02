@@ -6,6 +6,7 @@ import path from "node:path";
 import type {
   ChatProvider,
   NormalizedProviderEvent,
+  PendingBackgroundTask,
   PendingPermission,
   PendingQuestion,
   ProviderAttachment,
@@ -39,6 +40,8 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   supportedCommands?(): Promise<unknown>;
   /** The CLI's own context breakdown (the `/context` data), structurally. */
   getContextUsage?(): Promise<unknown>;
+  /** Stop one background task; the CLI reports a stopped task_notification. */
+  stopTask?(taskId: string): Promise<void>;
   rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
 };
@@ -75,6 +78,12 @@ export type ClaudeQueryInput = {
     onUserDialog?: (request: ClaudeUserDialogRequest, options: { signal: AbortSignal; requestId: string }) => Promise<ClaudeUserDialogResult | null>;
     /** The dialog kinds this host renders; the CLI emits no other. */
     supportedDialogKinds?: string[];
+    /**
+     * This host renders a per-task stop control, so an interrupt aborts the
+     * turn only and spares running background tasks (the CLI's documented
+     * behaviour when declared).
+     */
+    perTaskStopAffordance?: boolean;
   };
 };
 
@@ -138,6 +147,12 @@ export type ClaudeProviderOptions = {
    */
   stateFile?: string;
   now?: () => number;
+  /**
+   * How long a session whose background set emptied with nothing pending
+   * waits for the CLI's own follow-up turn before it is idle for good (D9).
+   * Tests shorten it.
+   */
+  backgroundGraceMs?: number;
 };
 
 const DEFAULT_TITLE = "New conversation";
@@ -156,6 +171,10 @@ const CATALOG_PROBE_COOLDOWN_MS = 60_000;
 // One control round-trip after each turn; a CLI that never answers must not
 // hold the session open past this.
 const CONTEXT_REPORT_TIMEOUT_MS = 3_000;
+// When the background set empties with no turn pending, the CLI starts its
+// own follow-up turn within a fraction of a second (D9). A session whose set
+// emptied and that shows no follow-up inside this window is idle for good.
+const BACKGROUND_FOLLOW_UP_GRACE_MS = 5_000;
 const TITLE_LIMIT = 80;
 
 type LiveSession = {
@@ -170,6 +189,19 @@ type LiveSession = {
   // Set by interrupt(): the turn's terminal result reports the user's
   // cancellation, not a failure of its own.
   interrupted?: boolean;
+  // Live background work, replaced on every background_tasks_changed level
+  // signal (ambient ids excluded) and reset when the process starts (D7).
+  // A non-empty set keeps the session alive past its turn's result.
+  backgroundTasks: Map<string, { description: string; taskType?: string; toolUseId?: string; startedAt: number }>;
+  // The CLI's own session state, when it reports one (session_state_changed).
+  state?: "idle" | "running" | "requires_action";
+  // A turn the CLI started by itself — the follow-up after a settled
+  // background task (D9) — so its messages report running/completed like an
+  // accepted prompt's, and retirement waits for its result.
+  unpromptedTurn: boolean;
+  // Armed when the set empties with nothing pending: retires the session if
+  // no follow-up turn starts within the grace window.
+  idleTimer?: ReturnType<typeof setTimeout>;
 };
 
 /**
@@ -229,6 +261,7 @@ export class ClaudeProvider implements ChatProvider {
   private persistChain: Promise<void> = Promise.resolve();
   private readonly forkSession: NonNullable<ClaudeProviderOptions["forkSession"]>;
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
+  private readonly backgroundGraceMs: number;
   private disposed = false;
 
   constructor(options: ClaudeProviderOptions) {
@@ -241,6 +274,7 @@ export class ClaudeProvider implements ChatProvider {
     this.forkSession = options.forkSession ?? defaultForkSession;
     this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
     this.now = options.now ?? (() => Date.now());
+    this.backgroundGraceMs = options.backgroundGraceMs ?? BACKGROUND_FOLLOW_UP_GRACE_MS;
   }
 
   describe(): ChatAgent {
@@ -248,7 +282,7 @@ export class ClaudeProvider implements ChatProvider {
     return {
       id: "claude",
       name: "Claude Code",
-      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id"],
+      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks"],
       permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
     };
   }
@@ -805,7 +839,10 @@ export class ClaudeProvider implements ChatProvider {
     await this.hydration?.catch(() => undefined);
     const sessions = [...this.live.values()];
     this.live.clear();
-    for (const session of sessions) this.abandonInteractions(session.id, "The workspace shut down before the user answered.");
+    for (const session of sessions) {
+      this.clearIdleTimer(session);
+      this.abandonInteractions(session.id, "The workspace shut down before the user answered.");
+    }
     await Promise.all(sessions.map(async session => {
       await session.query.interrupt().catch(() => undefined);
       session.queue.close();
@@ -856,9 +893,10 @@ export class ClaudeProvider implements ChatProvider {
         onElicitation: (request, options) => this.brokerElicitation(sessionId, request, options),
         onUserDialog: (request, options) => this.brokerDialog(sessionId, request, options),
         supportedDialogKinds: [...CLAUDE_SUPPORTED_DIALOG_KINDS],
+        perTaskStopAffordance: true,
       },
     });
-    const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0 };
+    const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false };
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
     // Fire-and-forget: the catalog answers when the session is up, and a
@@ -876,7 +914,24 @@ export class ClaudeProvider implements ChatProvider {
     try {
       for await (const message of session.query) {
         this.captureCommands(message);
+        this.trackSessionLevel(session, message, memory);
         const normalized = normalizeClaudeMessage(message, memory, "live", session.id);
+        // The level signal precedes the start edge (spike, D9): the edge is
+        // what carries the tool-use link, so the live entry learns it here.
+        if (normalized.eventType === "system" && (message as { subtype?: unknown }).subtype === "task_started") {
+          const started = message as { task_id?: unknown; tool_use_id?: unknown };
+          const entry = typeof started.task_id === "string" ? session.backgroundTasks.get(started.task_id) : undefined;
+          if (entry && typeof started.tool_use_id === "string" && started.tool_use_id) entry.toolUseId = started.tool_use_id;
+        }
+        // A turn the CLI started by itself (the follow-up after a settled
+        // background task, D9): report it running so the composer and the
+        // held-message queue treat it like any turn.
+        if (session.pendingTurns === 0 && !session.unpromptedTurn && this.live.get(session.id) === session
+          && (normalized.eventType === "assistant" || (normalized.eventType === "system" && (message as { subtype?: unknown }).subtype === "init"))) {
+          session.unpromptedTurn = true;
+          this.clearIdleTimer(session);
+          this.emit(session.id, { updates: [{ kind: "status", status: "running" }], outcome: "handled", eventType: "turn.unprompted" });
+        }
         // A result that lands after the user cancelled is the cancellation's
         // own echo: report interrupted, not a turn failure.
         if (session.interrupted && normalized.eventType === "result") {
@@ -887,24 +942,31 @@ export class ClaudeProvider implements ChatProvider {
         this.emit(session.id, normalized);
         // A terminal result ends the turn; an idle conversation holds no
         // process (spec). Unless another accepted prompt is still pending
-        // for this very session, retire the query — the next prompt
-        // resumes fresh.
+        // for this very session — or background work is still live (D7) —
+        // retire the query; the next prompt resumes fresh.
         if (normalized.eventType === "result") {
           session.pendingTurns = Math.max(0, session.pendingTurns - 1);
+          session.unpromptedTurn = false;
           // The turn's status is already out; the authoritative breakdown
           // follows it as a context report (D1). Not awaited here: the
           // reader must stay free to consume a next turn the adapter may
-          // already have delivered on the completed status. Only a session
-          // about to retire waits for it, so the report lands before the
-          // process goes. Bounded and best-effort: a failure leaves the
-          // per-message carrier as the readout's source.
+          // already have delivered on the completed status, or the CLI's
+          // own follow-up (D9). Bounded and best-effort: a failure leaves
+          // the per-message carrier as the readout's source.
           // Retirement follows the report but never holds the reader: a held
           // prompt the completed status released can land in this very
           // session meanwhile, and its events must be read as they come.
           // The idle check is made once the report is in, against the
-          // counters as they stand then; a retired query ends this loop.
-          void this.reportContextUsage(session, memory.lastModel).then(async () => {
-            if (session.pendingTurns === 0 && this.live.get(session.id) === session) await this.retireSession(session);
+          // counters and the background set as they stand then; a retired
+          // query ends this loop.
+          const report = this.reportContextUsage(session, memory.lastModel);
+          if (session.backgroundTasks.size > 0 && session.pendingTurns === 0) {
+            // Not idle: the composer shows background work, prompting stays
+            // possible, and the process stays up for the tasks (spec).
+            this.emit(session.id, { updates: [{ kind: "status", status: "background" }], outcome: "handled", eventType: "turn.background" });
+          }
+          void report.then(async () => {
+            if (this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
           });
         }
       }
@@ -1515,6 +1577,86 @@ export class ClaudeProvider implements ChatProvider {
     return pending;
   }
 
+  /**
+   * The level signals the normalizer does not turn into items: the live
+   * background set (replace semantics, ambient ids dropped) and the CLI's own
+   * session state. Both feed retirement (D7); the set also decides when the
+   * conversation reports the background state and when it returns to idle.
+   */
+  private trackSessionLevel(session: LiveSession, message: unknown, memory: ReturnType<typeof createClaudeEventMemory>): void {
+    if (!message || typeof message !== "object") return;
+    const record = message as Record<string, unknown>;
+    if (record.type !== "system") return;
+    if (record.subtype === "session_state_changed") {
+      if (record.state === "idle" || record.state === "running" || record.state === "requires_action") session.state = record.state;
+      if (session.state === "idle" && this.sessionIsIdle(session) && this.live.get(session.id) === session) {
+        void this.retireSession(session);
+      }
+      return;
+    }
+    if (record.subtype !== "background_tasks_changed" || !Array.isArray(record.tasks)) return;
+    const next = new Map<string, { description: string; taskType?: string; toolUseId?: string; startedAt: number }>();
+    for (const value of record.tasks) {
+      if (!value || typeof value !== "object") continue;
+      const task = value as Record<string, unknown>;
+      if (typeof task.task_id !== "string" || !task.task_id || task.ambient === true) continue;
+      const known = session.backgroundTasks.get(task.task_id) ?? memory.tasks.get(task.task_id);
+      next.set(task.task_id, {
+        description: typeof task.description === "string" && task.description ? task.description : known?.description ?? "Background task",
+        ...(typeof task.task_type === "string" && task.task_type ? { taskType: task.task_type } : known?.taskType ? { taskType: known.taskType } : {}),
+        ...(known?.toolUseId ? { toolUseId: known.toolUseId } : {}),
+        startedAt: known && "startedAt" in known ? (known as { startedAt: number }).startedAt : (known as { createdAt?: number } | undefined)?.createdAt ?? this.now(),
+      });
+    }
+    session.backgroundTasks = next;
+    if (next.size === 0 && session.pendingTurns === 0 && !session.unpromptedTurn) {
+      // The set emptied with nothing pending. The CLI's own follow-up turn
+      // (D9) arrives within a fraction of a second; a session that shows
+      // none inside the grace window returns to idle and retires.
+      this.clearIdleTimer(session);
+      session.idleTimer = setTimeout(() => {
+        session.idleTimer = undefined;
+        if (this.live.get(session.id) !== session || !this.sessionIsIdle(session)) return;
+        this.emit(session.id, { updates: [{ kind: "status", status: "idle" }], outcome: "handled", eventType: "turn.background-cleared" });
+        void this.retireSession(session);
+      }, this.backgroundGraceMs);
+      (session.idleTimer as unknown as { unref?: () => void }).unref?.();
+    } else if (next.size > 0) {
+      this.clearIdleTimer(session);
+    }
+  }
+
+  private clearIdleTimer(session: LiveSession): void {
+    if (session.idleTimer === undefined) return;
+    clearTimeout(session.idleTimer);
+    session.idleTimer = undefined;
+  }
+
+  /** No accepted turn pending, no follow-up in flight, no live background work. */
+  private sessionIsIdle(session: LiveSession): boolean {
+    return session.pendingTurns === 0 && !session.unpromptedTurn && session.backgroundTasks.size === 0 && session.state !== "running";
+  }
+
+  /** Every live background task, for a reopened conversation's live list. */
+  async listBackgroundTasks(): Promise<PendingBackgroundTask[]> {
+    const tasks: PendingBackgroundTask[] = [];
+    for (const session of this.live.values()) {
+      for (const [taskId, task] of session.backgroundTasks) {
+        tasks.push({ conversationId: session.id, taskId, description: task.description, ...(task.taskType ? { taskType: task.taskType } : {}), ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}), startedAt: task.startedAt });
+      }
+    }
+    return tasks;
+  }
+
+  /** Stop one background task; the CLI settles its row as stopped. */
+  async stopTask(sessionId: string, taskId: string): Promise<void> {
+    const session = this.live.get(sessionId);
+    if (!session) throw new Error("no live Claude Code session holds that task");
+    if (!session.backgroundTasks.has(taskId)) throw new Error(`no running background task ${taskId} in this conversation`);
+    if (!session.query.stopTask) throw new Error("this Claude Code install cannot stop background tasks");
+    await session.query.stopTask(taskId);
+  }
+
   /** The CLI's own context breakdown, emitted as a report item after a turn. */
   private async reportContextUsage(session: LiveSession, model: string | undefined): Promise<void> {
     if (!session.query.getContextUsage || this.live.get(session.id) !== session) return;
@@ -1538,6 +1680,7 @@ export class ClaudeProvider implements ChatProvider {
   /** An idle session holds no process: retire its query and its cards. */
   private async retireSession(session: LiveSession): Promise<void> {
     if (this.live.get(session.id) !== session) return;
+    this.clearIdleTimer(session);
     this.live.delete(session.id);
     this.abandonInteractions(session.id, "The turn ended before the user answered.");
     session.queue.close();

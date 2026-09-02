@@ -8,6 +8,10 @@ describe("OpenCode v2 identity policy", () => {
   test("declares durable conversation rename support", () => {
     const provider = new SdkV2Provider({} as OpencodeClient, "/workspace");
     expect(provider.describe().capabilities).toContain("conversation-rename");
+    // Background work and typed model ids are Claude Code's declarations;
+    // OpenCode's stays as it was.
+    expect(provider.describe().capabilities).not.toContain("background-tasks");
+    expect(provider.describe().capabilities).not.toContain("custom-model-id");
   });
 
   test("normalizes native and compatibility persisted configuration without inventing fields", () => {

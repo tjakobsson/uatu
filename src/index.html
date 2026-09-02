@@ -789,6 +789,13 @@
             <summary><span id="chat-task-list-label"></span></summary>
             <ul id="chat-task-list-items"></ul>
           </details>
+          <!-- Work the agent left running in the background: one row per
+               live task with a stop control. Settled tasks leave this list
+               and take a row in the timeline instead. -->
+          <details id="chat-background-tasks" class="chat-task-list chat-background-tasks" hidden>
+            <summary><span id="chat-background-tasks-label"></span></summary>
+            <ul id="chat-background-tasks-items" aria-label="Background tasks"></ul>
+          </details>
           <details id="chat-reverted" class="chat-reverted" hidden open>
             <summary><span id="chat-reverted-label">Reverted messages</span></summary>
             <div id="chat-reverted-items" class="chat-reverted-items" role="list" aria-label="Reverted messages"></div>

@@ -26,6 +26,7 @@ class FakeChatService implements WorkspaceChatService {
   selectedAgent: string | undefined;
   questionResponses: QuestionOutcome[] = [];
   rejectAnswers: Error | null = null;
+  stoppedTasks: string[] = [];
   removals: string[] = [];
   reversibleMutations = { undo: 0, redo: 0, revert: 0, restore: 0 };
   private readonly reversibleReceipts = new Map<string, ReversibleHistoryResult>();
@@ -141,6 +142,11 @@ class FakeChatService implements WorkspaceChatService {
 
   private snapshot(): ConversationSnapshot {
     return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: [] };
+  }
+  async stopTask(id: string, taskId: string) {
+    this.require(id);
+    this.stoppedTasks.push(taskId);
+    return { stopped: true as const };
   }
   private require(id: string) { if (id !== "local") throw new ConversationNotFoundError(); }
 }
@@ -518,6 +524,26 @@ describe("workspace chat routes", () => {
     expect((await send()).status).toBe(409);
     service.renameConversation = async () => { throw new ConversationNotFoundError(); };
     expect((await send()).status).toBe(404);
+  });
+
+  test("stops a background task through the chat service and refuses a request without an id", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/tasks/:taskId/stop"] as {
+      POST(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const send = (body: Record<string, unknown>) => handler.POST(request("/api/chat/conversations/opencode:local/tasks/b2f6/stop", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }, { conversationId: "opencode:local", taskId: "b2f6" }) as never);
+
+    const response = await send({ requestId: crypto.randomUUID() });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ stopped: true });
+    expect(service.stoppedTasks).toEqual(["b2f6"]);
+    expect((await send({})).status).toBe(400);
+    expect((await send({ requestId: crypto.randomUUID(), extra: 1 })).status).toBe(400);
+    expect(service.stoppedTasks).toEqual(["b2f6"]);
   });
 
   test("rejects empty and whitespace-only question answers before calling the service", async () => {

@@ -510,6 +510,23 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return result;
   }
 
+  // What each stop request carried, for spec assertions.
+  readonly stoppedTasks: string[] = [];
+
+  async stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }> {
+    this.require(id);
+    const key = `stop-task:${id}:${taskId}:${requestId}`;
+    const existing = this.receipts.get(key) as { stopped: true } | undefined;
+    if (existing) return existing;
+    this.stoppedTasks.push(taskId);
+    // The agent reports the stop as the task settling: same row, stopped.
+    const item = this.items.get(id)!.get(`task:${taskId}`);
+    if (item?.type === "background_task") this.publishItem(id, { ...item, status: "stopped", summary: "Stopped by the user." });
+    const result = { stopped: true } as const;
+    this.receipts.set(key, result);
+    return result;
+  }
+
   async dispose(): Promise<void> {
     for (const subscription of [...this.inventorySubscriptions]) subscription.cancel();
     this.inventory.dispose();

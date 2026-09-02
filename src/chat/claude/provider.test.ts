@@ -23,6 +23,7 @@ class FakeQuery implements ClaudeQueryHandle {
   supportedCommands?: () => Promise<unknown>;
   applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
   getContextUsage?: () => Promise<unknown>;
+  stopTask?: (taskId: string) => Promise<void>;
 
   constructor(readonly input: ClaudeQueryInput) {}
 
@@ -216,6 +217,59 @@ describe("context usage measures the window, not the turn (D1)", () => {
     ]);
     expect(item.categories.filter(category => category.kind === "used").reduce((sum, category) => sum + category.tokens, 0)).toBe(item.total);
     expect(normalizeContextUsage({ categories: [] }, 1, undefined)).toBeNull();
+  });
+});
+
+describe("background tasks and tool progress normalize into in-place rows (D8)", () => {
+  const at = (seconds: number) => new Date(Date.UTC(2026, 8, 2, 10, 0, seconds)).toISOString();
+
+  test("start, progress, and completion upsert the same task row linked to its tool use", () => {
+    const memory = createClaudeEventMemory();
+    const started = normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: at(0), task_id: "b2f6", tool_use_id: "toolu_1", description: "Sleep for 8 seconds then echo done", task_type: "local_bash", is_backgrounded: true }, memory, "live");
+    expect(started.outcome).toBe("handled");
+    expect(started.updates).toEqual([{ kind: "upsert", item: { id: "task:b2f6", type: "background_task", createdAt: Date.parse(at(0)), taskId: "b2f6", description: "Sleep for 8 seconds then echo done", taskType: "local_bash", toolUseId: "toolu_1", status: "running" } }]);
+    const progress = normalizeClaudeMessage({ type: "system", subtype: "task_progress", uuid: "tp1", timestamp: at(3), task_id: "b2f6", description: "Sleep for 8 seconds then echo done", usage: { total_tokens: 0, tool_uses: 1, duration_ms: 3000 }, last_tool_name: "Bash" }, memory, "live");
+    expect(progress.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:b2f6", createdAt: Date.parse(at(0)), status: "running", progress: "Using Bash" }) });
+    const notified = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn1", timestamp: at(8), task_id: "b2f6", tool_use_id: "toolu_1", status: "completed", output_file: "/tmp/out", summary: "done" }, memory, "live");
+    expect(notified.updates[0]).toEqual({ kind: "upsert", item: { id: "task:b2f6", type: "background_task", createdAt: Date.parse(at(0)), taskId: "b2f6", description: "Sleep for 8 seconds then echo done", taskType: "local_bash", toolUseId: "toolu_1", status: "completed", summary: "done" } });
+  });
+
+  test("failure, stop, and a killed patch settle the row with their outcome", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: at(0), task_id: "f1", description: "Flaky job" }, memory, "live");
+    const failed = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn1", timestamp: at(5), task_id: "f1", status: "failed", output_file: "/tmp/f", summary: "exit 1" }, memory, "live");
+    expect(failed.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:f1", status: "failed", summary: "exit 1" }) });
+    normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts2", timestamp: at(0), task_id: "s1", description: "Long job" }, memory, "live");
+    const stopped = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn2", timestamp: at(5), task_id: "s1", status: "stopped", output_file: "/tmp/s", summary: "" }, memory, "live");
+    expect(stopped.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:s1", status: "stopped" }) });
+    const killed = normalizeClaudeMessage({ type: "system", subtype: "task_updated", uuid: "tu1", timestamp: at(6), task_id: "s1", patch: { status: "killed", end_time: 1 } }, memory, "live");
+    expect(killed.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:s1", status: "stopped" }) });
+    // A notification for a task never seen starting still gets a row.
+    const orphan = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn3", timestamp: at(9), task_id: "o1", status: "completed", output_file: "/tmp/o", summary: "ok" }, memory, "live");
+    expect(orphan.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:o1", description: "Background task", status: "completed", summary: "ok" }) });
+  });
+
+  test("ambient housekeeping tasks never become rows, start to finish", () => {
+    const memory = createClaudeEventMemory();
+    const started = normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: at(0), task_id: "amb", description: "Live update watcher", ambient: true, skip_transcript: true }, memory, "live");
+    expect(started.outcome).toBe("ignored");
+    expect(started.updates).toEqual([]);
+    // Later edges omit the flag; the remembered id keeps them out.
+    const progress = normalizeClaudeMessage({ type: "system", subtype: "task_progress", uuid: "tp1", timestamp: at(1), task_id: "amb", description: "Live update watcher", usage: { total_tokens: 0, tool_uses: 0, duration_ms: 1 } }, memory, "live");
+    expect(progress.outcome).toBe("ignored");
+    const notified = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn1", timestamp: at(2), task_id: "amb", status: "completed", output_file: "/tmp/a", summary: "x", ambient: true }, memory, "live");
+    expect(notified.outcome).toBe("ignored");
+  });
+
+  test("a tool progress heartbeat gives the running tool row an elapsed time; reasoning rows are unaffected", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage({ type: "assistant", uuid: "a1", timestamp: at(0), message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "thinking", thinking: "hmm" }, { type: "tool_use", id: "toolu_9", name: "Bash", input: { command: "sleep 30" } }] } }, memory, "live");
+    const heartbeat = normalizeClaudeMessage({ type: "tool_progress", uuid: "hb1", timestamp: at(12), tool_use_id: "toolu_9", tool_name: "Bash", parent_tool_use_id: null, elapsed_time_seconds: 12.4, heartbeat: true }, memory, "live");
+    expect(heartbeat.outcome).toBe("handled");
+    expect(heartbeat.updates).toEqual([{ kind: "upsert", item: { id: "tool:toolu_9", type: "tool", createdAt: Date.parse(at(0)), name: "Bash", status: "running", input: JSON.stringify({ command: "sleep 30" }, null, 1), elapsedMs: 12_400 } }]);
+    expect(heartbeat.updates.some(update => update.kind === "upsert" && update.item.type === "reasoning")).toBe(false);
+    // Unknown tool ids (a subagent's inner tool) are ignored, not invented.
+    expect(normalizeClaudeMessage({ type: "tool_progress", uuid: "hb2", timestamp: at(13), tool_use_id: "toolu_unknown", tool_name: "Read", parent_tool_use_id: "toolu_9", elapsed_time_seconds: 1 }, memory, "live").outcome).toBe("ignored");
   });
 });
 
@@ -699,6 +753,109 @@ describe("ClaudeProvider sessions", () => {
     aborter.abort();
     expect(await interrupted).toEqual({ behavior: "cancelled" });
     stop();
+    await provider.dispose();
+  });
+
+  test("background work keeps the session alive past its result and reports the background state", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "run it in the background", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "init", uuid: "i1", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Sleep then echo" }, { task_id: "amb", task_type: "local_watch", description: "Watcher", ambient: true }] });
+    query.push({ type: "system", subtype: "task_started", uuid: "ts1", session_id: session.id, timestamp: "2026-09-02T10:00:03.000Z", task_id: "b1", tool_use_id: "toolu_1", description: "Sleep then echo", task_type: "local_bash", is_backgrounded: true });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // Not retired: the process is up for the task; the composer state says so.
+    expect(provider.liveSessionCount()).toBe(1);
+    expect(query.returned).toBe(false);
+    const statuses = events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
+    expect(statuses).toEqual(["running", "completed", "background"]);
+    // Ambient ids stay out of the live list; the real task is listed.
+    expect(await provider.listBackgroundTasks()).toEqual([expect.objectContaining({ conversationId: session.id, taskId: "b1", description: "Sleep then echo", taskType: "local_bash", toolUseId: "toolu_1" })]);
+    // Prompting is still possible on the live session.
+    await provider.prompt(session.id, { id: "r2", text: "meanwhile", delivery: "queue" });
+    expect(queries).toHaveLength(1);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:07.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "turn.background").length === 2);
+    expect(provider.liveSessionCount()).toBe(1);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a settled task wakes the CLI's own follow-up turn, which runs as a turn and then retires the session", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "background sleep", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Sleep then echo" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // The spike's sequence (D9): the set empties, the task settles, then the
+    // CLI starts a turn by itself — init, assistant, result.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [] });
+    query.push({ type: "system", subtype: "task_notification", uuid: "tn1", session_id: session.id, timestamp: "2026-09-02T10:00:13.000Z", task_id: "b1", tool_use_id: "toolu_1", status: "completed", output_file: "/tmp/o", summary: "done" });
+    query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
+    expect(provider.liveSessionCount()).toBe(1);
+    query.push({ type: "assistant", uuid: "a2", timestamp: "2026-09-02T10:00:15.000Z", session_id: session.id, message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "FINISHED done" }], usage: { input_tokens: 5, output_tokens: 2 } } });
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:16.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => query.returned);
+    expect(provider.liveSessionCount()).toBe(0);
+    const statuses = events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
+    expect(statuses).toEqual(["running", "completed", "background", "running", "completed"]);
+    const rows = events.flatMap(event => event.updates).filter(update => update.kind === "upsert" && update.item.type === "background_task").map(update => (update as { item: { status: string; summary?: string } }).item);
+    expect(rows.at(-1)).toEqual(expect.objectContaining({ status: "completed", summary: "done" }));
+    stop();
+    await provider.dispose();
+  });
+
+  test("an emptied set with no follow-up returns the conversation to idle and retires after the grace window", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-grace-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      backgroundGraceMs: 30,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Job" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // The user stops it; the CLI settles the row and empties the set.
+    let stopped: string | undefined;
+    query.stopTask = async (taskId: string) => { stopped = taskId; };
+    await provider.stopTask(session.id, "b1");
+    expect(stopped).toBe("b1");
+    await expect(provider.stopTask(session.id, "nope")).rejects.toThrow(/no running background task/);
+    query.push({ type: "system", subtype: "task_notification", uuid: "tn1", session_id: session.id, timestamp: "2026-09-02T10:00:06.000Z", task_id: "b1", status: "stopped", output_file: "/tmp/o", summary: "" });
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [] });
+    await waitFor(() => query.returned);
+    expect(provider.liveSessionCount()).toBe(0);
+    const statuses = events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
+    expect(statuses).toEqual(["running", "completed", "background", "idle"]);
+    const rows = events.flatMap(event => event.updates).filter(update => update.kind === "upsert" && update.item.type === "background_task").map(update => (update as { item: { status: string } }).item.status);
+    expect(rows.at(-1)).toBe("stopped");
+    await expect(provider.stopTask(session.id, "b1")).rejects.toThrow(/no live/);
+    stop();
+    await provider.dispose();
+  });
+
+  test("the agent declares background tasks and asks the CLI for a per-task stop affordance", async () => {
+    const { provider, queries } = fixture();
+    expect(provider.describe().capabilities).toContain("background-tasks");
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    expect(queries[0]!.input.options.perTaskStopAffordance).toBe(true);
     await provider.dispose();
   });
 

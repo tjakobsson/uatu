@@ -112,7 +112,7 @@ const fakeSecondAgent = new FakeE2EChatService({
   // Claude Code's own persistent-approval sentence and its typed-id
   // capability, as the real descriptor declares them (chat/claude/provider).
   permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
-  extraCapabilities: ["custom-model-id"],
+  extraCapabilities: ["custom-model-id", "background-tasks"],
 });
 // The fake owns attachment persistence (its prompt path validates ids
 // against its own store), so the routers delegate rather than keeping a

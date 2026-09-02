@@ -19,6 +19,19 @@ export type PendingQuestion = {
 // event shows the same change the live announcement would have.
 export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[]; diff?: string; plan?: string; choices?: PermissionChoice[] };
 
+// One live background task the provider still holds, for a reader opening a
+// conversation whose live announcements they missed (spec: the state is
+// populated when an existing conversation with live background work is
+// opened). `conversationId` is the owning session, like PendingPermission's.
+export type PendingBackgroundTask = {
+  conversationId: string;
+  taskId: string;
+  description: string;
+  taskType?: string;
+  toolUseId?: string;
+  startedAt: number;
+};
+
 export type ProviderSession = {
   id: string;
   title: string;
@@ -209,4 +222,15 @@ export interface ChatProvider {
   listQuestions?(): Promise<PendingQuestion[]>;
   replyQuestion(sessionId: string, requestId: string, answers: string[][]): Promise<void>;
   rejectQuestion(sessionId: string, requestId: string): Promise<void>;
+  /**
+   * Every live background task the provider holds, each naming its owning
+   * session — what a reopened conversation's live list is seeded from.
+   * Optional: a provider without background work never lists any.
+   */
+  listBackgroundTasks?(): Promise<PendingBackgroundTask[]>;
+  /**
+   * Stop one running background task; the agent reports the stop as that
+   * task settling. Optional: only an agent declaring `background-tasks`.
+   */
+  stopTask?(sessionId: string, taskId: string): Promise<void>;
 }

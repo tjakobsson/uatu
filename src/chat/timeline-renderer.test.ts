@@ -717,6 +717,51 @@ describe("group summaries name what the steps acted on", () => {
   });
 });
 
+describe("background task rows and tool elapsed time", () => {
+  const settled = (status: "completed" | "failed" | "stopped", createdAt: number): ConversationItem => ({
+    id: `task:${status}`, type: "background_task", createdAt, taskId: status, description: "Sleep for 20 seconds then echo done", taskType: "local_bash", toolUseId: "toolu_1", status, summary: status === "completed" ? "done" : status === "failed" ? "exit 1" : undefined,
+  });
+
+  test("a running task is not a timeline row; a settled one names its outcome and summary", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      { id: "task:live", type: "background_task", createdAt: 1, taskId: "live", description: "Still running", status: "running", progress: "Using Bash" },
+      settled("completed", 2),
+    ], { status: "background" }), new Set());
+    expect(host.querySelector('[data-chat-item-id="task:live"]')).toBeNull();
+    const row = host.querySelector('[data-chat-item-id="task:completed"]')!;
+    expect(row.querySelector("summary > span")?.textContent).toBe("Background task finished");
+    expect(row.querySelector(".chat-activity-subject")?.textContent).toBe("Sleep for 20 seconds then echo done");
+    expect(row.querySelector(".chat-task-summary")?.textContent).toBe("done");
+    expect(row.className).toContain("is-completed");
+  });
+
+  test("failed and stopped tasks read as such and join activity groups", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([settled("failed", 1), settled("stopped", 2), { id: "tool:x", type: "tool", createdAt: 3, name: "Read", status: "completed", input: JSON.stringify({ file_path: "out.txt" }), output: "done" }], { status: "completed" }), new Set());
+    expect(host.querySelector(".chat-activity-group > summary .chat-activity-subject")?.textContent).toBe("Background task failed Sleep for 20 seconds then echo done · Background task stopped Sleep for 20 seconds then echo done · Read out.txt");
+    expect(host.querySelector('[data-chat-item-id="task:failed"] .chat-activity-status')?.textContent).toBe("failed");
+    expect(host.querySelector('[data-chat-item-id="task:stopped"] .chat-activity-status')?.textContent).toBe("stopped");
+    expect(host.querySelector('[data-chat-item-id="task:stopped"]')?.className).toContain("is-cancelled");
+  });
+
+  test("a running tool with a reported elapsed time states it in place; reasoning rows do not", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const tool: ConversationItem = { id: "tool:slow", type: "tool", createdAt: 1, name: "Bash", status: "running", input: JSON.stringify({ command: "sleep 30" }) };
+    renderer.render(host, projectionWith([tool]), new Set());
+    expect(host.querySelector('[data-chat-item-id="tool:slow"] .chat-activity-status')?.textContent).toBe("running");
+    renderer.render(host, projectionWith([{ ...tool, elapsedMs: 12_400 }]), new Set());
+    expect(host.querySelector('[data-chat-item-id="tool:slow"] .chat-activity-status')?.textContent).toBe("running · 12s");
+    renderer.render(host, projectionWith([{ ...tool, status: "completed", output: "ok" }]), new Set());
+    expect(host.querySelector('[data-chat-item-id="tool:slow"] .chat-activity-status')?.textContent).toBe("completed");
+    renderer.render(host, projectionWith([{ id: "reasoning:1", type: "reasoning", createdAt: 1, text: "hmm", status: "running" }]), new Set());
+    expect(host.querySelector('[data-chat-item-id="reasoning:1"] .chat-activity-status')?.textContent).toBe("running");
+  });
+});
+
 describe("compaction markers and context reports", () => {
   const tool = (id: string, createdAt: number): ConversationItem => ({ id, type: "tool", createdAt, name: "Bash", status: "completed", input: JSON.stringify({ command: `echo ${id}` }), output: id });
 

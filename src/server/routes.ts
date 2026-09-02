@@ -810,6 +810,15 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return run(() => deps.chatService.respondPermission(id, interactionId, requestId, body.outcome as PermissionOutcome, body.choiceId as string | undefined));
       }),
     },
+    [p("/api/chat/conversations/:conversationId/tasks/:taskId/stop")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const taskId = routeIdentity(request, "taskId");
+        const requestId = bodyIdentity(body, "requestId");
+        if (taskId instanceof Response) return taskId;
+        if (requestId instanceof Response) return requestId;
+        return run(() => deps.chatService.stopTask(id, taskId, requestId));
+      }),
+    },
     [p("/api/chat/conversations/:conversationId/questions/:interactionId")]: {
       POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
         const interactionId = routeIdentity(request, "interactionId");
