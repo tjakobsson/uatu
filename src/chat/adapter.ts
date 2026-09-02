@@ -61,6 +61,13 @@ export class InvalidPermissionChoiceError extends Error {
   }
 }
 
+export class BackgroundTasksUnsupportedError extends Error {
+  constructor() {
+    super("this agent does not run background tasks");
+    this.name = "BackgroundTasksUnsupportedError";
+  }
+}
+
 export class InvalidModelSelectionError extends Error {
   constructor() {
     super("selected model is not available");
@@ -413,6 +420,28 @@ export class ChatAdapter {
         }
       }
     }
+    // Live background work is held by the provider, not the transcript: a
+    // reopened conversation gets its running tasks from the provider's own
+    // list so the composer shows the state it is actually in (spec).
+    const liveTasks = await this.liveBackgroundTasks(id);
+    if (liveTasks !== null) {
+      const live = new Set(liveTasks.map(task => task.id));
+      for (const task of liveTasks) {
+        if (!items.some(item => item.id === task.id)) items.push(task);
+      }
+      // A row the provider no longer lists as live has settled or died with
+      // its process; a stale "running" row — in this page or already in the
+      // projection — would offer a Stop that errors.
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index]!;
+        if (item.type === "background_task" && item.status === "running" && !live.has(item.id)) items[index] = { ...item, status: "stopped" };
+      }
+      for (const existing of this.projection(id).items()) {
+        if (existing.type === "background_task" && existing.status === "running" && !live.has(existing.id) && !items.some(item => item.id === existing.id)) {
+          items.push({ ...existing, status: "stopped" });
+        }
+      }
+    }
     // A subagent's attribution reached the parent as a live upsert, and the
     // parent's own store has no memory of it — so a reopened conversation
     // would show costs that simply vanished. The child's stored messages do
@@ -531,7 +560,20 @@ export class ChatAdapter {
       }
     }
     const projection = this.projection(id);
+    // The live-task snapshot above was taken before several awaits; a task
+    // that settled in the projection meanwhile keeps its settled row.
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (item.type !== "background_task" || item.status !== "running") continue;
+      const current = projection.find(candidate => candidate.id === item.id);
+      if (current?.type === "background_task" && current.status !== "running") items[index] = current;
+    }
     projection.seed(items);
+    // A reopened conversation whose agent still holds live work is in the
+    // background state, not idle: the list and the status must agree.
+    if (items.some(item => item.type === "background_task" && item.status === "running") && projection.status !== "running" && projection.status !== "sending" && projection.status !== "background") {
+      projection.statusUpdate("background");
+    }
     const reversibleHistory = await this.readReversibleHistoryState(id);
     return {
       conversation: this.summary(session, projection.status),
@@ -1348,6 +1390,20 @@ export class ChatAdapter {
     });
   }
 
+  /**
+   * Stops one of the conversation's running background tasks. The agent
+   * reports the stop as that task settling, which is what the timeline
+   * records; this only carries the request.
+   */
+  stopTask(conversationId: string, taskId: string, clientRequestId: string): Promise<{ stopped: true }> {
+    return this.receipts.run(`stop-task:${conversationId}:${taskId}:${clientRequestId}`, async () => {
+      await this.requireSession(conversationId);
+      if (!this.provider.stopTask || !this.provider.describe().capabilities.includes("background-tasks")) throw new BackgroundTasksUnsupportedError();
+      await this.provider.stopTask(conversationId, taskId);
+      return { stopped: true as const };
+    });
+  }
+
   respondQuestion(conversationId: string, requestId: string, clientRequestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }> {
     return this.receipts.run(`question:${conversationId}:${requestId}:${clientRequestId}`, async () => {
       const session = await this.requireSession(conversationId);
@@ -1777,6 +1833,28 @@ export class ChatAdapter {
     return items;
   }
 
+  /** The provider's live background tasks for this conversation, as running rows. */
+  /** Null when the provider cannot list: unknown, not empty. */
+  private async liveBackgroundTasks(id: string): Promise<ConversationItem[] | null> {
+    if (!this.provider.listBackgroundTasks) return null;
+    try {
+      return (await this.provider.listBackgroundTasks())
+        .filter(task => task.conversationId === id)
+        .map(task => ({
+          id: `task:${task.taskId}`,
+          type: "background_task" as const,
+          createdAt: task.startedAt,
+          taskId: task.taskId,
+          description: task.description,
+          ...(task.taskType === undefined ? {} : { taskType: task.taskType }),
+          ...(task.toolUseId === undefined ? {} : { toolUseId: task.toolUseId }),
+          status: "running" as const,
+        }));
+    } catch {
+      return null;
+    }
+  }
+
   /** Publishes a conversation's own pending permissions into its projection. */
   private async seedPendingPermissions(conversationId: string): Promise<void> {
     try {
@@ -1951,6 +2029,8 @@ export class ChatAdapter {
       return existing;
     }
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
+      // `background` is not a live turn: the process is up for the tasks,
+      // but the conversation accepts a prompt.
       if (status === "running" || status === "sending") this.liveTurns.add(id);
       else this.liveTurns.delete(id);
       // A turn that ended on its own releases the next held message. Only
@@ -2288,6 +2368,20 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
       questions: incoming.questions.length ? incoming.questions : current.questions,
       ...(reopened ? { status: "resolved" as const, outcome: current.outcome } : {}),
     };
+  }
+  // A settled background task is terminal too: a late progress patch or a
+  // stale running snapshot must neither reopen it nor drop its summary.
+  if (current.type === "background_task" && incoming.type === "background_task") {
+    const keepTerminal = current.status !== "running";
+    const merged = {
+      ...current,
+      ...incoming,
+      status: keepTerminal && incoming.status === "running" ? current.status : incoming.status,
+      ...(incoming.summary ?? current.summary ? { summary: incoming.summary ?? current.summary } : {}),
+    };
+    // A progress note belongs to a running task only.
+    if (merged.status !== "running") delete merged.progress;
+    return merged;
   }
   if (current.type === "tool" && incoming.type === "tool") {
     const keepTerminal = current.status === "completed" || current.status === "failed" || current.status === "cancelled";

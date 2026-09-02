@@ -3008,6 +3008,7 @@ describe("hub end to end", () => {
       ["DELETE", "/s/myproject/api/chat/conversations/local/queue/held-1", "/s/{workspaceId}/api/chat/conversations/{conversationId}/queue/{messageId}", { requestId: "stopped-unqueue" }],
       ["POST", "/s/myproject/api/chat/conversations/local/permissions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}", { requestId: "stopped", outcome: "rejected" }],
       ["POST", "/s/myproject/api/chat/conversations/local/questions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/questions/{interactionId}", { requestId: "stopped", outcome: { kind: "rejected" } }],
+      ["POST", "/s/myproject/api/chat/conversations/local/tasks/b2f6/stop", "/s/{workspaceId}/api/chat/conversations/{conversationId}/tasks/{taskId}/stop", { requestId: "stopped-task" }],
     ];
     for (const [method, requestPath, contractPath, body] of stoppedOperations) {
       const response = await fetch(`${origin}${requestPath}`, {

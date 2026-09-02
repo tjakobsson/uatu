@@ -230,6 +230,10 @@ export class ChatApiClient {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/questions/${encodeURIComponent(interactionId)}`), { requestId, outcome }, value => value);
   }
 
+  stopTask(conversationId: string, taskId: string, requestId: string): Promise<unknown> {
+    return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/tasks/${encodeURIComponent(taskId)}/stop`), { requestId }, value => value);
+  }
+
   inventoryStream(handlers: InventoryStreamHandlers): ChatEventStream {
     let closed = false;
     let source: EventSource | null = null;

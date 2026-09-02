@@ -143,18 +143,37 @@ composer list, settled rows in place). Stop is a new provider action
 `"background-tasks"` capability that only the Claude agent declares.
 
 ### D9. Waking the model on task completion
-Two candidate paths; a spike task decides:
+Two candidate paths were considered; the spike (task 5.1, output in
+`screenshots/phase2-spike-d9-output.txt`) decided it:
 1. **CLI-driven.** Newer CLIs hold the result while background agents run
-   ("heldBackResult") and may continue the turn themselves. If the audit's
-   `queue-operation` entries were the CLI queuing the notification for a turn the
-   host must start, this path does not exist for Bash tasks.
+   ("heldBackResult") and may continue the turn themselves.
 2. **Host-driven.** On a non-ambient `task_notification` with no pending turn,
    the provider pushes a synthetic user envelope through the existing prompt
-   queue. The CLI attaches its queued notification to that turn. The envelope is
-   flagged `synthetic` so the normalizer emits no `user_message` for it; the
-   timeline shows the task's settled row, then the agent's follow-up.
-Path 2 satisfies the spec regardless; path 1 is preferred if it works because it
-does not invent a user turn. The spike is the first Phase 2 task.
+   queue, flagged so the normalizer emits no `user_message` for it.
+
+**Answer (2026-09-02, Claude Code 2.1.258, SDK 0.3.252): path 1.** With the
+SDK input stream kept open, a backgrounded `sleep 8 && echo done` produced
+`result` #1 ("STARTED") at +4.8s, then at +11.4s `background_tasks_changed`
+(empty set), `task_updated` (completed), `task_notification` (completed,
+output file), and — with no envelope from the host — a second `system/init`,
+a Read of the output file, "FINISHED done", and `result` #2 at +15.4s. The
+CLI starts the follow-up turn on its own. The audit's unconsumed
+`queue-operation` entries were the consequence of the provider retiring the
+session on the first result: with no process left, the queued turn never
+ran. So path 2 is not built. What the provider must do instead:
+
+- keep the session alive while the background set is non-empty (D7);
+- treat the unprompted follow-up as a turn: `running` when its first
+  message arrives with no accepted prompt pending, `completed`/`failed` on
+  its result, so the composer and the held-message queue behave as they do
+  for any turn;
+- the second `init` is the same session (same id); it re-reports the model
+  and slash commands and is handled like the first.
+
+No `session_state_changed` message was observed in the spike, so the level
+signal cannot be a precondition for retirement on this CLI: a session is
+retired on a result (or on a later `idle` signal, where one is sent) when no
+prompt is pending and the background set is empty.
 
 ### D10. Streaming rides `stream_event` behind `includePartialMessages`
 The provider sets `includePartialMessages: true` and the normalizer folds
@@ -199,9 +218,9 @@ reviewer spots regressions from the folder instead of running a session. The
 - [Holding sessions alive for background work keeps a `claude` process per
   conversation] → bounded by the CLI's own task timeouts; workspace shutdown
   still terminates them; the composer shows what is holding the process.
-- [Host-driven wake-up (D9 path 2) invents a turn the user did not type] → the
-  envelope is hidden from the timeline and the follow-up is attributed to the
-  task row; if the spike proves the CLI wakes itself, path 2 is not built.
+- [Host-driven wake-up (D9 path 2) invents a turn the user did not type] → not
+  built: the spike proved the CLI wakes itself (D9); the follow-up is an
+  ordinary turn in the timeline, attributed to the task row that preceded it.
 - [`getContextUsage()` is one more control round-trip per turn] → fired after
   the result, never awaited by the turn; failure leaves the per-message carrier.
 - [Static "More models" manifest drifts as Anthropic ships models] → the section
@@ -215,9 +234,7 @@ reviewer spots regressions from the folder instead of running a session. The
 
 ## Open Questions
 
-- D9: does the current CLI (2.1.x) start a follow-up turn on its own for a
-  settled Bash background task under the SDK, or only queue the notification?
-  The first Phase 2 task answers this with a scripted SDK run; either answer
-  fits the spec and the task list.
+- (answered) D9: the current CLI (2.1.258) starts the follow-up turn on its own
+  for a settled Bash background task under the SDK; see D9.
 - Exact `dialog_kind` values the CLI sends today, for tailored rendering; the
   generic form covers the rest.

@@ -13,7 +13,7 @@ import type { Serve } from "bun";
 
 import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
-import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../chat/provider";
+import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError } from "../chat/service";
 import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
@@ -810,6 +810,15 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return run(() => deps.chatService.respondPermission(id, interactionId, requestId, body.outcome as PermissionOutcome, body.choiceId as string | undefined));
       }),
     },
+    [p("/api/chat/conversations/:conversationId/tasks/:taskId/stop")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const taskId = routeIdentity(request, "taskId");
+        const requestId = bodyIdentity(body, "requestId");
+        if (taskId instanceof Response) return taskId;
+        if (requestId instanceof Response) return requestId;
+        return run(() => deps.chatService.stopTask(id, taskId, requestId));
+      }),
+    },
     [p("/api/chat/conversations/:conversationId/questions/:interactionId")]: {
       POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
         const interactionId = routeIdentity(request, "interactionId");
@@ -961,6 +970,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof ReversibleHistoryUnsupportedError) return chatError(409, error.message);
   if (error instanceof ReversibleHistoryTargetError) return chatError(409, error.message);
   if (error instanceof InvalidQuestionAnswerError) return chatError(400, error.message);
+  if (error instanceof BackgroundTaskUnavailableError) return chatError(409, error.message);
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);
