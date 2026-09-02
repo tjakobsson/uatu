@@ -1037,6 +1037,20 @@ export function initChat(api = new ChatApiClient()): void {
     }
   };
 
+  // The tick runs while anything on screen is working: the parent's turn, or
+  // the subagent in the drill-down. A child keeps running after its parent
+  // has gone background or idle, and its working line is stamped from the
+  // child's own status — so the parent's status alone cannot decide whether
+  // the clock is needed. Re-evaluated wherever either status can change.
+  const syncWorkingTimer = () => {
+    const working = isLiveConversationStatus(projection?.status) || isLiveConversationStatus(child?.projection?.status);
+    if (working && workingTimer === null) workingTimer = setInterval(() => { syncRoutineStatus(); tickWorkingLines(); }, 1_000);
+    if (!working && workingTimer !== null) {
+      clearInterval(workingTimer);
+      workingTimer = null;
+    }
+  };
+
   const showComposerError = (message: string | null) => {
     composerError.textContent = message ?? "";
     composerError.hidden = !message;
@@ -1493,11 +1507,7 @@ export function initChat(api = new ChatApiClient()): void {
       delete presentation.workingSince[projection.conversationId];
       save();
     }
-    if (running && workingTimer === null) workingTimer = setInterval(() => { syncRoutineStatus(); tickWorkingLines(); }, 1_000);
-    if (!running && workingTimer !== null) {
-      clearInterval(workingTimer);
-      workingTimer = null;
-    }
+    syncWorkingTimer();
     send.type = running ? "button" : "submit";
     send.dataset.action = running ? "cancel" : "send";
     // A message needs content, not necessarily words: pending attachments make
@@ -2340,6 +2350,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
     childRenderer.permissionScopeNote = agent?.permissionScopeNote;
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"), false, turnStartedAt(child?.projection));
+    syncWorkingTimer();
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
@@ -2390,6 +2401,7 @@ export function initChat(api = new ChatApiClient()): void {
     releaseChildBack?.();
     releaseChildBack = null;
     if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
+    syncWorkingTimer();
     if (drilldownOlder) {
       drilldownOlder.hidden = true;
       drilldownOlder.disabled = false;

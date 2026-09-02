@@ -369,6 +369,35 @@ describe("activity grouping", () => {
     expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id") ?? child.className)).toEqual(["draft-r1", "chat-item chat-activity-group is-awaiting"]);
   });
 
+  test("a previous turn's trailing run is not the live tail while the new prompt is only a draft", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    // The last turn ended on three finished tools, and the next prompt has
+    // been accepted but not echoed yet. That old run must settle as a
+    // finished group — not be re-cast as the work in flight — and the draft
+    // gets the one working line, in its awaiting form.
+    const draft = { requestId: "r2", messageId: "pending:r2", text: "again" };
+    renderer.render(host, projectionWith([user, tool("a"), tool("b"), tool("c")], { status: "sending", acceptedDrafts: [draft] }), new Set(), true, false, Date.now() - 1_000);
+    expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id") ?? child.className))
+      .toEqual(["message:u1", "group:tool:a", "draft-r2", "chat-item chat-activity-group is-awaiting"]);
+    const working = host.querySelectorAll("[data-working-since]");
+    expect(working).toHaveLength(1);
+    expect(working[0]!.classList.contains("is-awaiting")).toBe(true);
+    const old = host.querySelector('[data-chat-item-id="group:tool:a"]')!;
+    expect(old.getAttribute("data-outcome")).toBe("clean");
+    expect(old.querySelector(".chat-group-count")!.textContent).toBe("3 steps");
+    expect(old.querySelector(".chat-activity-subject")!.textContent).toBe("Read a.ts · Read b.ts · Read c.ts");
+  });
+
+  test("a short trailing run before a drafted prompt stays flat", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const draft = { requestId: "r2", messageId: "pending:r2", text: "again" };
+    renderer.render(host, projectionWith([user, tool("a"), tool("b")], { status: "sending", acceptedDrafts: [draft] }), new Set());
+    expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id") ?? child.className))
+      .toEqual(["message:u1", "tool:a", "tool:b", "draft-r2", "chat-item chat-activity-group is-awaiting"]);
+  });
+
   test("the first step swaps the empty line for a populated one in the same place", () => {
     const renderer = new TimelineRenderer();
     const host = target();

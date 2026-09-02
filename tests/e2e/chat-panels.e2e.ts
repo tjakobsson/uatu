@@ -221,6 +221,33 @@ test.describe("chat panels and navigation", () => {
     await expect(older).toBeHidden();
   });
 
+  test("a subagent's working line keeps ticking while its parent is idle", async ({ page, request }) => {
+    // The child is mid-turn on its own; the parent that launched it has
+    // settled. The drill-down's working line is stamped from the child's
+    // status, and its clock must advance from the child's status too — the
+    // parent's idle composer says nothing about the subagent's turn.
+    const started = Date.now() - 5_000;
+    const child = await control(request, { action: "seed", title: "Busy child", child: true, items: [
+      { id: "message:cu", type: "user_message", createdAt: started, text: "go" },
+      bash("tool:child1", started + 1_000, "sleep 30", "running"),
+    ] }) as { conversation: { id: string } };
+    await control(request, { action: "status", conversationId: child.conversation.id, status: "running" });
+    await seedAndOpen(page, request, "Idle parent", [
+      { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Long task", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
+    ]);
+    await expect(page.locator("#chat-items .chat-activity-group[data-working-since]")).toHaveCount(0);
+
+    await page.locator("#chat-subagents summary").click();
+    await page.getByRole("button", { name: "explore · Long task" }).click();
+    const line = page.locator("#chat-drilldown-items .chat-activity-group[data-working-since]");
+    await expect(line).toHaveCount(1);
+    const label = line.locator("> summary .chat-group-count");
+    await expect(label).toHaveText(/^Working · \d+s$/);
+    const seconds = async () => Number((await label.textContent())!.match(/(\d+)s$/)![1]);
+    const first = await seconds();
+    await expect.poll(seconds, { timeout: 5_000 }).toBeGreaterThan(first);
+  });
+
   test("a stale pagination failure cannot overwrite a replacement drill-down", async ({ page, request }) => {
     const childB = await control(request, {
       action: "seed", title: "Child B", child: true,

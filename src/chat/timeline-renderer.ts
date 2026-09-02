@@ -394,6 +394,12 @@ export function awaitingFirstResponse(items: readonly ConversationItem[], status
  * flicker the line exists to remove. A turn with nothing back yet gets the
  * same line with no members, so the reader watches one element from
  * "accepted" to "done".
+ *
+ * The live tail is the run after the prompt of the running turn. While that
+ * prompt exists only as an accepted draft — the user-message echo has not
+ * landed — every item on the timeline precedes it, so a trailing run there
+ * is the PREVIOUS turn's work and follows the finished-run rules; the draft
+ * gets the awaiting line, and only that.
  */
 function activitySegments(items: readonly ConversationItem[], status: ConversationStatus, acceptedDrafts = false): TimelineSegment[] {
   const segments: TimelineSegment[] = [];
@@ -401,7 +407,7 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
   const flushRun = (isTail: boolean) => {
     if (run.length === 0) return;
     const finished = run.every(item => item.status !== "running" && item.status !== "pending");
-    const live = isTail && isLiveConversationStatus(status);
+    const live = isTail && !acceptedDrafts && isLiveConversationStatus(status);
     segments.push(live || (run.length >= GROUP_MIN && finished)
       ? { group: describeGroup(run, live), items: run }
       : { group: null, items: run });
