@@ -568,19 +568,36 @@ describe("a group line's status dot", () => {
   const user: ConversationItem = { id: "message:u1", type: "user_message", createdAt: 1, text: "go" };
   const failed: ConversationItem = { id: "tool:bad", type: "tool", createdAt: 2, name: "read", status: "failed", input: JSON.stringify({ filePath: "missing.ts" }), error: "ENOENT" };
   const outcome = (host: HTMLElement) => host.querySelector(".chat-activity-group")!.getAttribute("data-outcome");
+  // The words beside the dot: the outcome for a reader who cannot see its
+  // colour — a screen reader, or eyes that do not tell red from grey.
+  const worded = (host: HTMLElement) => host.querySelector(".chat-activity-group .chat-group-outcome")!.textContent;
 
-  test("a finished group whose every step succeeded is clean", () => {
+  test("a finished group whose every step succeeded is clean, and says nothing more", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     renderer.render(host, projectionWith([user, tool("a"), tool("b"), tool("c")], { status: "idle" }), new Set());
     expect(outcome(host)).toBe("clean");
+    expect(worded(host)).toBe("");
+    // The dot is decoration; the summary's words carry everything a reader needs.
+    expect(host.querySelector(".chat-activity-group .chat-group-dot")!.getAttribute("aria-hidden")).toBe("true");
+    expect(host.querySelector(".chat-activity-group > summary")!.textContent).toBe("3 stepsRead a.ts · Read b.ts · Read c.ts");
   });
 
-  test("a finished group with one failed step is failed", () => {
+  test("a finished group with one failed step is failed, in words as well as colour", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     renderer.render(host, projectionWith([user, tool("a"), failed, tool("c")], { status: "idle" }), new Set());
     expect(outcome(host)).toBe("failed");
+    expect(worded(host)).toBe("1 failed");
+    expect(host.querySelector(".chat-activity-group .chat-group-count")!.textContent).toBe("3 steps");
+  });
+
+  test("the failed count counts every failed step", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const other: ConversationItem = { ...failed, id: "tool:worse" };
+    renderer.render(host, projectionWith([user, failed, tool("b"), other], { status: "idle" }), new Set());
+    expect(worded(host)).toBe("2 failed");
   });
 
   test("a live group reddens the moment a member fails, while still working", () => {
@@ -588,9 +605,19 @@ describe("a group line's status dot", () => {
     const host = target();
     renderer.render(host, projectionWith([user, tool("a"), tool("b", "running")], { status: "running" }), new Set());
     expect(outcome(host)).toBe("live");
+    expect(worded(host)).toBe("");
     renderer.render(host, projectionWith([user, tool("a"), failed, tool("c", "running")], { status: "running" }), new Set());
     expect(outcome(host)).toBe("failed");
+    expect(worded(host)).toBe("1 failed");
     expect(host.querySelector(".chat-activity-group .chat-group-count")!.textContent).toBe("Working");
+  });
+
+  test("the awaiting line has the failed slot, empty", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([user], { status: "running" }), new Set());
+    expect(outcome(host)).toBe("live");
+    expect(worded(host)).toBe("");
   });
 });
 

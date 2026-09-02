@@ -8102,8 +8102,9 @@ html[data-ui-mode="touch"] .chat-header {
 }
 
 /* The status dot: what the line's steps came to, readable without opening it.
-   Colour is the signal here because the text beside it already says "Working"
-   or names the steps; the dot only has to say live, clean, or failed. */
+   The text beside it already says "Working" or names the steps, so the dot
+   only has to say live, clean, or failed — and failed is also said in words
+   (`.chat-group-outcome`, "1 failed") so the outcome never rests on colour. */
 .chat-group-dot {
   flex: 0 0 auto;
   align-self: center;
@@ -8130,6 +8131,22 @@ html[data-ui-mode="touch"] .chat-header {
 
 .chat-group-count {
   flex: 0 0 auto;
+}
+
+/* The failed count, present only when a step failed; empty otherwise so it
+   takes no gap. Red as well as worded: the words carry the meaning. */
+.chat-group-outcome {
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+
+.chat-group-outcome:empty {
+  display: none;
+}
+
+.chat-group-outcome::before {
+  content: "· ";
+  color: var(--text-subtle);
 }
 
 .chat-group-items {

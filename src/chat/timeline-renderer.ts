@@ -181,6 +181,8 @@ export class TimelineRenderer {
       else delete groupNode.dataset.workingSince;
       const count = groupNode.querySelector(".chat-group-count");
       if (count) count.textContent = segment.group.live ? workingLabel(turnStartedAt === undefined ? undefined : Date.now() - turnStartedAt) : `${segment.items.length} steps`;
+      const failed = groupNode.querySelector(".chat-group-outcome");
+      if (failed) failed.textContent = failedLabel(segment.group.failed);
       const subject = groupNode.querySelector(".chat-activity-subject");
       if (subject) subject.textContent = segment.group.summary;
       if (segment.items.length === 0) {
@@ -343,7 +345,7 @@ export function subagentEntries(items: readonly ConversationItem[]): SubagentEnt
  */
 export type GroupOutcome = "live" | "clean" | "failed";
 
-type TimelineGroup = { id: string; live: boolean; summary: string; outcome: GroupOutcome };
+type TimelineGroup = { id: string; live: boolean; summary: string; outcome: GroupOutcome; failed: number };
 
 type TimelineSegment = {
   group: TimelineGroup | null;
@@ -427,19 +429,30 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
     // first step will start (which is keyed by that step), so the empty form
     // never carries an open state — there is nothing in it to open.
     const prompt = items.findLast(item => item.type === "user_message");
-    segments.push({ group: { id: `group:${prompt?.id ?? "awaiting"}`, live: true, summary: "", outcome: "live" }, items: [] });
+    segments.push({ group: { id: `group:${prompt?.id ?? "awaiting"}`, live: true, summary: "", outcome: "live", failed: 0 }, items: [] });
   }
   return segments;
 }
 
 function describeGroup(run: readonly ActivityItem[], live: boolean): TimelineGroup {
-  const failed = run.some(item => item.status === "failed");
+  const failed = run.filter(item => item.status === "failed").length;
   return {
     id: `group:${run[0]!.id}`,
     live,
     summary: live ? currentStep(run) : groupSummary(run),
-    outcome: failed ? "failed" : live ? "live" : "clean",
+    outcome: failed > 0 ? "failed" : live ? "live" : "clean",
+    failed,
   };
+}
+
+/**
+ * The words beside the dot when a step failed — "1 failed" — so the outcome
+ * reaches a reader who cannot tell the dot's colours apart or is hearing the
+ * line read out. Clean and live say nothing here: the count and "Working"
+ * already cover them, and a line that keeps saying "fine" is noise.
+ */
+function failedLabel(failed: number): string {
+  return failed > 0 ? `${failed} failed` : "";
 }
 
 /**
@@ -472,9 +485,11 @@ export function formatElapsed(ms: number): string {
 // when the first step arrives moves nothing on screen. The awaiting form
 // carries no item id: it is a status line, not a transcript entry, and
 // everything that walks `[data-chat-item-id]` (anchors, the last delivered
-// message) must keep seeing the entries only.
+// message) must keep seeing the entries only. The dot is decoration: what
+// its colour says is also said in words (the failed count), so the line
+// never relies on colour alone.
 function renderGroup(id: string, awaiting: boolean, open: boolean): string {
-  const line = `<span class="chat-group-dot" aria-hidden="true"></span><span class="chat-group-count"></span><span class="chat-activity-subject"></span>`;
+  const line = `<span class="chat-group-dot" aria-hidden="true"></span><span class="chat-group-count"></span><span class="chat-group-outcome"></span><span class="chat-activity-subject"></span>`;
   if (awaiting) return `<div class="chat-item chat-activity-group is-awaiting"><div class="chat-group-line">${line}</div></div>`;
   return `<details class="chat-item chat-activity-group" data-chat-item-id="${escapeHtmlAttribute(id)}"${open ? " open" : ""}><summary>${line}</summary><div class="chat-group-items"></div></details>`;
 }

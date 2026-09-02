@@ -75,6 +75,7 @@ test.describe("chat panels and navigation", () => {
     await expect(group).toHaveCount(1);
     await expect(group).toHaveAttribute("data-outcome", "clean");
     await expect(group.locator(".chat-group-count")).toHaveText("3 steps");
+    await expect(group.locator("> summary .chat-group-outcome")).toBeHidden();
     await expect(group.locator("> summary .chat-activity-subject")).toHaveText("Read a.ts · Read b.ts · Read c.ts");
     await expect(group.locator('[data-chat-item-id="tool:a"]')).toHaveCount(1);
     await expect(group.locator('[data-chat-item-id="tool:a"]')).toBeHidden();
@@ -141,7 +142,7 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeVisible();
   });
 
-  test("a failed step reddens the dot, live and once finished, without the line being opened", async ({ page, request }, testInfo) => {
+  test("a failed step reddens the dot and is counted in words, live and once finished, without the line being opened", async ({ page, request }, testInfo) => {
     await page.setViewportSize({ width: 1400, height: 1000 });
     const started = Date.now() - 40_000;
     const id = await seedAndOpen(page, request, "Failed step", [
@@ -152,12 +153,19 @@ test.describe("chat panels and navigation", () => {
     const line = page.locator(".chat-activity-group");
     await expect(line).toHaveAttribute("data-outcome", "live");
     const dot = line.locator(".chat-group-dot");
+    const worded = line.locator("> summary .chat-group-outcome");
+    await expect(worded).toBeHidden();
     const accent = await dot.evaluate(node => getComputedStyle(node).backgroundColor);
 
     await control(request, { action: "item", conversationId: id, item: { id: "tool:build", type: "tool", createdAt: started + 2_000, name: "Bash", status: "failed", input: JSON.stringify({ command: "bun run build" }), error: "exit 1" } });
     await control(request, { action: "item", conversationId: id, item: { ...readTool("c", "c.ts"), createdAt: started + 3_000 } });
     await expect(line).toHaveAttribute("data-outcome", "failed");
     await expect(line.locator("> summary .chat-group-count")).toHaveText(/^Working/);
+    // The colour is not the only signal: the line says so in words, visible
+    // and in the summary's accessible name.
+    await expect(worded).toBeVisible();
+    await expect(worded).toHaveText("1 failed");
+    await expect(line.locator("> summary")).toContainText("1 failed");
     const danger = await dot.evaluate(node => getComputedStyle(node).backgroundColor);
     expect(danger).not.toBe(accent);
 
@@ -165,6 +173,7 @@ test.describe("chat panels and navigation", () => {
     await control(request, { action: "status", conversationId: id, status: "completed" });
     await expect(line).toHaveAttribute("data-outcome", "failed");
     await expect(line.locator("> summary .chat-group-count")).toHaveText("3 steps");
+    await expect(worded).toHaveText("1 failed");
     await expect(line).not.toHaveAttribute("open", "");
     expect(await dot.evaluate(node => getComputedStyle(node).backgroundColor)).toBe(danger);
     await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-finished-group-failed-dot-desktop");
