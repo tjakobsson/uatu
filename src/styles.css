@@ -6586,6 +6586,14 @@ body.is-resizing-chat .chat-resizer {
   display: none;
 }
 
+/* The pin is for a sidebar beside the chat: never in the touch layout,
+   where the sidebar is the Files tab, and never behind a collapsed one.
+   The script retires it too; this is the layout's own word on it. */
+html[data-ui-mode="touch"] .chat-plan-pin,
+.app-shell.is-sidebar-collapsed .chat-plan-pin {
+  display: none;
+}
+
 /* One window: label and figure on a line, the meter under them, the reset
    below. Shared by the readout and the Usage pane (chat/usage-pane.ts). */
 .plan-rows {

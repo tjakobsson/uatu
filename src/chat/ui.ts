@@ -1559,6 +1559,19 @@ export function initChat(api = new ChatApiClient()): void {
   planPin?.addEventListener("click", () => {
     if (revealUsagePane()) syncPlanPin();
   });
+  // The pin's conditions move under an open readout: the sidebar collapses
+  // or expands, the layout flips to touch and back, the pane is hidden or
+  // shown from its own chrome or the panels menu. Each is a DOM stamp its
+  // owner writes (sidebar/shell, shell/ui-mode, sidebar/panes), so the pin
+  // watches the stamps rather than subscribing to three owners.
+  const planPinObserver = new MutationObserver(() => {
+    if (planUsage?.open) syncPlanPin();
+  });
+  planPinObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-ui-mode"] });
+  const appShell = document.querySelector(".app-shell");
+  if (appShell) planPinObserver.observe(appShell, { attributes: true, attributeFilter: ["class"] });
+  const usagePaneSection = document.querySelector('.sidebar-pane[data-pane-id="usage"]');
+  if (usagePaneSection) planPinObserver.observe(usagePaneSection, { attributes: true, attributeFilter: ["hidden", "class"] });
 
   const syncRoutineStatus = () => {
     const conversationStatus = projection?.status;

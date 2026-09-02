@@ -460,6 +460,12 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(pin).toBeVisible();
     const usagePane = page.locator('[data-pane-id="usage"]');
     await expect(usagePane).toBeHidden();
+    // The pin follows the sidebar while the readout stays open: collapsing
+    // the sidebar retires it, expanding brings it back.
+    await page.locator("#sidebar-collapse").click();
+    await expect(pin).toBeHidden();
+    await page.locator("#sidebar-expand").click();
+    await expect(pin).toBeVisible();
     await pin.click();
     await expect(usagePane).toBeVisible();
     await expect(usagePane.locator(".usage-pane-head")).toHaveText(/^Max plan · as of /);
@@ -467,6 +473,14 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(pin).toBeHidden();
     await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
     await capture(page, testInfo, "after-usage-pane-desktop", USAGE_SCREENSHOTS);
+    // Hiding the pane from its own chrome brings the pin back; pinning
+    // again reveals the pane once more.
+    await usagePane.getByRole("button", { name: "Hide Usage" }).click();
+    await expect(usagePane).toBeHidden();
+    await expect(pin).toBeVisible();
+    await pin.click();
+    await expect(usagePane).toBeVisible();
+    await expect(pin).toBeHidden();
 
     // A minimal report degrades to its two rows, unnamed and without totals.
     await control(request, { action: "item", conversationId: id, item: { id: "context:report:3", type: "context_report", createdAt: 5, total: 26_000, max: 200_000, plan: { fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } } } });
@@ -566,5 +580,18 @@ test.describe("Claude Code plan readout at phone width", () => {
     const readoutBottom = await readout.evaluate(element => element.getBoundingClientRect().bottom);
     expect(readoutBottom).toBeLessThanOrEqual(composerTop + 8);
     await capture(page, testInfo, "after-plan-readout-phone", USAGE_SCREENSHOTS);
+
+    // A live switch to the desktop layout puts the sidebar beside the chat
+    // and the still-open readout gains its pin; switching back retires it.
+    await page.locator("#touch-tab-files").click();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.locator("#ui-mode-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
+    await openChatPanel(page);
+    await expect(readout).toBeVisible();
+    await expect(page.locator("#chat-plan-pin")).toBeVisible();
+    await page.locator("#ui-mode-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await expect(page.locator("#chat-plan-pin")).toBeHidden();
   });
 });
