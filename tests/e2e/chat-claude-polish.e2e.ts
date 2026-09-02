@@ -221,4 +221,81 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(page.locator('[data-chat-item-id="message:a1"]')).toContainText("Retried on Sonnet");
     await expect(page.locator("#chat-composer-status")).toHaveAttribute("data-state", "ready");
   });
+
+  test("background work is a state of its own: the composer names the running task, lists it with a stop, and the settled row lands in place", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Background work", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Run sleep 20 && echo done in the background, then tell me when it finishes" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { id: "tool:bg", type: "tool", createdAt: 10, name: "Bash", status: "completed", input: JSON.stringify({ command: "sleep 20 && echo done", description: "Sleep then report", run_in_background: true }), output: "Command running in background with ID: b2f6" } });
+    const task: ConversationItem = { id: "task:b2f6", type: "background_task", createdAt: 11, taskId: "b2f6", description: "Sleep then report", taskType: "local_bash", toolUseId: "tool:bg", status: "running" };
+    await control(request, { action: "item", conversationId: id, item: task });
+    await control(request, { action: "item", conversationId: id, item: { id: "message:a1", type: "assistant_message", createdAt: 12, markdown: "Started; I will report when it finishes.", completedAt: 12 } });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    await control(request, { action: "status", conversationId: id, status: "background" });
+
+    // The composer: a background state, named, with the conversation still
+    // accepting a prompt; the live list names the task with a stop.
+    const status = page.locator("#chat-composer-status");
+    await expect(status).toHaveAttribute("data-state", "background");
+    await expect(status).toHaveAttribute("aria-label", "1 background task running · Sleep then report");
+    // Prompting stays possible: the composer takes text and offers Send,
+    // not Cancel, while the task runs.
+    await page.locator("#chat-input").fill("still there?");
+    await expect(page.locator("#chat-send")).toBeEnabled();
+    await expect(page.locator("#chat-send")).not.toHaveAttribute("aria-label", /Cancel/);
+    await page.locator("#chat-input").fill("");
+    const list = page.locator("#chat-background-tasks");
+    await expect(list).toBeVisible();
+    await expect(list.locator("#chat-background-tasks-label")).toHaveText("1 background task running · Sleep then report");
+    await expect(page.locator('[data-chat-item-id="task:b2f6"]')).toHaveCount(0);
+    await capture(page, testInfo, "phase2-background-state-composer");
+    await control(request, { action: "item", conversationId: id, item: { ...task, progress: "Using Bash" } });
+    await list.locator("summary").click();
+    await expect(list.locator("li")).toHaveCount(1);
+    await expect(list.locator("li .chat-background-task-progress")).toHaveText("Using Bash");
+    await capture(page, testInfo, "phase2-task-list-stop");
+
+    // Stop: the request reaches the agent, which settles the row as stopped;
+    // the list empties and the timeline records the outcome in place.
+    const stop = list.getByRole("button", { name: "Stop Sleep then report" });
+    const stopRequest = page.waitForResponse(response => response.url().includes("/tasks/b2f6/stop"));
+    await stop.click();
+    expect((await stopRequest).status()).toBe(200);
+    await control(request, { action: "status", conversationId: id, status: "idle" });
+    await expect(list).toBeHidden();
+    const row = page.locator('[data-chat-item-id="task:b2f6"]');
+    await expect(row).toContainText("Background task stopped");
+    await expect(row.locator(".chat-activity-subject")).toHaveText("Sleep then report");
+    await expect(status).toHaveAttribute("data-state", "ready");
+
+    // A second task settles on its own: completed, with the agent's summary.
+    const second: ConversationItem = { id: "task:c1", type: "background_task", createdAt: 20, taskId: "c1", description: "Build the docs", taskType: "local_bash", status: "running" };
+    await control(request, { action: "item", conversationId: id, item: second });
+    await control(request, { action: "status", conversationId: id, status: "background" });
+    await expect(status).toHaveAttribute("data-state", "background");
+    await control(request, { action: "item", conversationId: id, item: { ...second, status: "completed", summary: "done\n[exited with code 0]" } });
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { id: "message:a2", type: "assistant_message", createdAt: 21, markdown: "The build finished: done.", completedAt: 21 } });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    const settled = page.locator('[data-chat-item-id="task:c1"]');
+    await expect(settled).toContainText("Background task finished");
+    await settled.locator("summary").click();
+    await expect(settled.locator(".chat-task-summary")).toContainText("exited with code 0");
+    await expect(list).toBeHidden();
+    await capture(page, testInfo, "phase2-settled-task-row");
+  });
+
+  test("a reopened conversation shows its live background work from the agent's own report", async ({ page, request }) => {
+    const id = await bootClaude(page, request, "Reopen with background work", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep the watcher running" },
+      { id: "task:w1", type: "background_task", createdAt: 2, taskId: "w1", description: "Watch the build", taskType: "local_bash", status: "running" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "background" });
+    await page.reload();
+    await openChatPanel(page);
+    await page.locator("#chat-conversation-select").selectOption(id);
+    await expect(page.locator("#chat-composer-status")).toHaveAttribute("data-state", "background");
+    await expect(page.locator("#chat-background-tasks-label")).toHaveText("1 background task running · Watch the build");
+  });
 });

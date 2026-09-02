@@ -53,7 +53,11 @@ export type ChatCapability =
   // The agent runs any model id the user types, listed or not: the picker
   // offers a typed-id row and an unlisted selection is passed through
   // verbatim for the agent to accept or reject visibly.
-  | "custom-model-id";
+  | "custom-model-id"
+  // The agent can run work in the background and reports it: live tasks
+  // are listed with a stop action, settled tasks land in the timeline, and
+  // the conversation presents a background-work state.
+  | "background-tasks";
 
 // Image attachment bounds, shared by the composer (intake refusal), the
 // upload route (authoritative enforcement), and the store. 10 MiB sits
@@ -114,7 +118,10 @@ export type ChatAvailability =
     diagnostics?: ChatStartupDiagnostics;
   };
 
-export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed";
+// `background`: no turn is running, but the agent still holds live background
+// work (a backgrounded command, a subagent, a monitor). Distinct from both
+// working and idle: prompting is possible, and the composer names what runs.
+export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed" | "background";
 export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type ModelSelection = {
@@ -277,6 +284,9 @@ export type ToolItem = TimelineItemBase & {
   // row that launched it. Absent until the child has reported something.
   model?: string;
   usage?: TokenUsage;
+  // How long the tool has been running, from the agent's own progress
+  // heartbeat, when it reports one for a tool still producing no output.
+  elapsedMs?: number;
 };
 
 export type CommandItem = TimelineItemBase & {
@@ -444,6 +454,27 @@ export type CompactionItem = TimelineItemBase & {
   postTokens?: number;
 };
 
+/**
+ * One background task the agent runs — a backgrounded shell command, a
+ * backgrounded subagent, a monitor — updated in place as it progresses and
+ * settles (D8). Running tasks are presented in the composer's live list;
+ * settled ones as timeline rows with their outcome and summary. `toolUseId`
+ * links the task to the tool row that launched it. Ambient housekeeping
+ * tasks never become items.
+ */
+export type BackgroundTaskItem = TimelineItemBase & {
+  type: "background_task";
+  taskId: string;
+  description: string;
+  taskType?: string;
+  toolUseId?: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  // The agent's latest progress note, while running.
+  progress?: string;
+  // The agent's summary, once settled.
+  summary?: string;
+};
+
 export type ConversationItem =
   | UserMessageItem
   | AssistantMessageItem
@@ -457,7 +488,8 @@ export type ConversationItem =
   | TurnStatusItem
   | NoticeItem
   | ContextReportItem
-  | CompactionItem;
+  | CompactionItem
+  | BackgroundTaskItem;
 
 export type InteractionRequest = PermissionRequest | QuestionRequest;
 

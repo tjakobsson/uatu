@@ -26,18 +26,18 @@
 
 ## 5. Phase 2 — Session lifetime and the background set (D7)
 
-- [ ] 5.1 Spike D9: with a scripted SDK session, background a `sleep 5 && echo done` and record whether the CLI starts a follow-up turn on its own or only queues the notification; verify by committing the script output to the change's `screenshots/` folder and updating design.md D9 with the answer
-- [ ] 5.2 Track `background_tasks_changed` (excluding ambient ids) and `session_state_changed` on `LiveSession`, and retire a session only when no pending turn, an empty set, and idle all hold; verify provider tests that a result with live tasks keeps the session and an emptied set retires it
-- [ ] 5.3 Emit a conversation-level `background` working state while the set is non-empty and teach the adapter's live-turn tracking and the composer status region the new state; verify adapter and ui tests that the composer names the running count and still accepts a prompt, saved as `screenshots/phase2-background-state-composer.png`
-- [ ] 5.4 Add the `"background-tasks"` capability to the declaration and validation, declared by Claude Code only; verify the capabilities test and that OpenCode's declaration is unchanged
+- [x] 5.1 Spike D9: with a scripted SDK session, background a `sleep 5 && echo done` and record whether the CLI starts a follow-up turn on its own or only queues the notification; verify by committing the script output to the change's `screenshots/` folder and updating design.md D9 with the answer
+- [x] 5.2 Track `background_tasks_changed` (excluding ambient ids) and `session_state_changed` on `LiveSession`, and retire a session only when no pending turn, an empty set, and idle all hold; verify provider tests that a result with live tasks keeps the session and an emptied set retires it
+- [x] 5.3 Emit a conversation-level `background` working state while the set is non-empty and teach the adapter's live-turn tracking and the composer status region the new state; verify adapter and ui tests that the composer names the running count and still accepts a prompt, saved as `screenshots/phase2-background-state-composer.png`
+- [x] 5.4 Add the `"background-tasks"` capability to the declaration and validation, declared by Claude Code only; verify the capabilities test and that OpenCode's declaration is unchanged
 
 ## 6. Phase 2 — Task rows, stop, and wake-up (D8, D9)
 
-- [ ] 6.1 Add the `background_task` item kind and normalize `task_started`, `task_progress`, `task_updated`, and `task_notification` into in-place upserts linked to the launching `tool_use_id`; verify normalization tests covering start, progress, completion, failure, stop, and ambient exclusion
-- [ ] 6.2 Render running tasks as the composer list with a stop action and settled tasks as timeline rows with outcome and summary, populated on reopen from the provider's `backgroundTasks()` snapshot; verify renderer tests and a fixture e2e that lists, stops, and settles a task, saved as `screenshots/phase2-task-list-stop.png` and `phase2-settled-task-row.png`
-- [ ] 6.3 Add the `stopTask` chat API action routed to the provider's `stopTask(taskId)`; verify a routes test and a provider test that a stop yields a `stopped` row
-- [ ] 6.4 Implement the wake-up path chosen in 5.1 (CLI-driven observation or the hidden synthetic envelope) so a settled non-ambient task with no pending turn produces a follow-up assistant turn; verify a provider test with a stubbed query and a real-model run in a scratch workspace where "sleep 20 && echo done" backgrounded yields an unprompted follow-up, saved as `screenshots/phase2-wakeup-follow-up-turn.png`
-- [ ] 6.5 Normalize `tool_progress` heartbeats into an elapsed-time field on running tool rows and render it in place; verify normalization and renderer tests and that reasoning rows are unaffected
+- [x] 6.1 Add the `background_task` item kind and normalize `task_started`, `task_progress`, `task_updated`, and `task_notification` into in-place upserts linked to the launching `tool_use_id`; verify normalization tests covering start, progress, completion, failure, stop, and ambient exclusion
+- [x] 6.2 Render running tasks as the composer list with a stop action and settled tasks as timeline rows with outcome and summary, populated on reopen from the provider's `backgroundTasks()` snapshot; verify renderer tests and a fixture e2e that lists, stops, and settles a task, saved as `screenshots/phase2-task-list-stop.png` and `phase2-settled-task-row.png`
+- [x] 6.3 Add the `stopTask` chat API action routed to the provider's `stopTask(taskId)`; verify a routes test and a provider test that a stop yields a `stopped` row
+- [x] 6.4 Implement the wake-up path chosen in 5.1 (CLI-driven observation or the hidden synthetic envelope) so a settled non-ambient task with no pending turn produces a follow-up assistant turn; verify a provider test with a stubbed query and a real-model run in a scratch workspace where "sleep 20 && echo done" backgrounded yields an unprompted follow-up, saved as `screenshots/phase2-wakeup-follow-up-turn.png`
+- [x] 6.5 Normalize `tool_progress` heartbeats into an elapsed-time field on running tool rows and render it in place; verify normalization and renderer tests and that reasoning rows are unaffected
 
 ## 7. Phase 3 — Streaming and status signals (D10, D11)
 

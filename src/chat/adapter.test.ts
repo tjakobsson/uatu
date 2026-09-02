@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "./adapter";
+import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "./adapter";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type ProviderEvent, type ProviderMessage } from "./opencode/normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -1912,6 +1912,74 @@ describe("prompt, abort, permission, and question mutations", () => {
     }
     events.cancel();
     expect(seen.some(frame => frame.includes(`"delivered"`) && frame.includes(held.messageId))).toBe(true);
+  });
+
+  test("background work is not a live turn: a prompt is accepted, not held, and stop reaches the provider", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "background-tasks"] };
+    provider.sessions = [fixtureSession("session")];
+    const stops: Array<{ sessionId: string; taskId: string }> = [];
+    (provider as unknown as { stopTask: (sessionId: string, taskId: string) => Promise<void> }).stopTask = async (sessionId, taskId) => { stops.push({ sessionId, taskId }); };
+    (provider as unknown as { listBackgroundTasks: () => Promise<unknown[]> }).listBackgroundTasks = async () => [
+      { conversationId: "session", taskId: "b1", description: "Sleep then echo", taskType: "local_bash", toolUseId: "toolu_1", startedAt: 5 },
+      { conversationId: "other", taskId: "b2", description: "Elsewhere", startedAt: 6 },
+    ];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const projection = adapter.projectionForTests("session");
+    projection.statusUpdate("running");
+    projection.statusUpdate("completed");
+    projection.statusUpdate("background");
+    // Not live: the next prompt is delivered, not held (spec: prompting
+    // remains possible while background work runs).
+    expect((await adapter.prompt("session", "r1", "meanwhile")).held).toBe(false);
+    expect(provider.prompts).toHaveLength(1);
+    // Stop is idempotent per request id and addressed to the owning session.
+    expect(await adapter.stopTask("session", "b1", "req-1")).toEqual({ stopped: true });
+    expect(await adapter.stopTask("session", "b1", "req-1")).toEqual({ stopped: true });
+    expect(stops).toEqual([{ sessionId: "session", taskId: "b1" }]);
+    // A reopened conversation is seeded with the provider's live tasks —
+    // this conversation's only.
+    const snapshot = await adapter.history("session");
+    const tasks = snapshot.items.filter(item => item.type === "background_task");
+    expect(tasks).toEqual([expect.objectContaining({ id: "task:b1", status: "running", description: "Sleep then echo", toolUseId: "toolu_1", createdAt: 5 })]);
+    await adapter.dispose();
+  });
+
+  test("a settled background task is terminal: a stale running snapshot or a late patch cannot reopen it", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "background-tasks"] };
+    provider.sessions = [fixtureSession("session")];
+    const listed: Array<{ conversationId: string; taskId: string; description: string; startedAt: number }> = [{ conversationId: "session", taskId: "b1", description: "Job", startedAt: 5 }];
+    (provider as unknown as { listBackgroundTasks: () => Promise<unknown[]> }).listBackgroundTasks = async () => listed;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const projection = adapter.projectionForTests("session");
+    projection.apply({ kind: "upsert", item: { id: "task:b1", type: "background_task", createdAt: 5, taskId: "b1", description: "Job", status: "running", progress: "Using Bash" } });
+    projection.apply({ kind: "upsert", item: { id: "task:b1", type: "background_task", createdAt: 5, taskId: "b1", description: "Job", status: "completed", summary: "done" } });
+    // A late patch without the summary keeps it and the terminal status.
+    projection.apply({ kind: "upsert", item: { id: "task:b1", type: "background_task", createdAt: 5, taskId: "b1", description: "Job", status: "running" } });
+    expect(projection.find(item => item.id === "task:b1")).toEqual(expect.objectContaining({ status: "completed", summary: "done" }));
+    // The provider's list still says running (its level signal lags): the
+    // settled row wins, and a row the provider does not list at all is closed.
+    projection.apply({ kind: "upsert", item: { id: "task:b2", type: "background_task", createdAt: 6, taskId: "b2", description: "Gone", status: "running" } });
+    const snapshot = await adapter.history("session");
+    const rows = snapshot.items.filter(item => item.type === "background_task");
+    expect(rows).toEqual([
+      expect.objectContaining({ id: "task:b1", status: "completed", summary: "done" }),
+      expect.objectContaining({ id: "task:b2", status: "stopped" }),
+    ]);
+    // With live work listed, a reopened conversation reports background.
+    listed.push({ conversationId: "session", taskId: "b3", description: "Still going", startedAt: 7 });
+    const reopened = await adapter.history("session");
+    expect(reopened.conversation.status).toBe("background");
+    await adapter.dispose();
+  });
+
+  test("an agent without the background-tasks capability cannot stop tasks", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await expect(adapter.stopTask("session", "b1", "req-1")).rejects.toBeInstanceOf(BackgroundTasksUnsupportedError);
+    await adapter.dispose();
   });
 
   test("a held message freezes the configuration it was submitted under", async () => {

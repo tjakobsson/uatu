@@ -34,10 +34,16 @@ export type ClaudeEventMemory = {
   // too. The task list's first-seen time keeps the presentation anchored.
   todoTools: Set<string>;
   taskListCreatedAt?: number;
+  // Background tasks by id: what task_started said, so later progress and
+  // the settling notification re-upsert the same row with its description
+  // and launch time. Ambient (housekeeping) ids are remembered so their
+  // later edges stay out of the timeline too.
+  tasks: Map<string, { description: string; taskType?: string; toolUseId?: string; createdAt: number; progress?: string; backgrounded?: boolean; announced?: boolean; settled?: boolean }>;
+  ambientTasks: Set<string>;
 };
 
 export function createClaudeEventMemory(): ClaudeEventMemory {
-  return { tools: new Map(), todoTools: new Set() };
+  return { tools: new Map(), todoTools: new Set(), tasks: new Map(), ambientTasks: new Set() };
 }
 
 const MEMORY_LIMIT = 2_048;
@@ -56,11 +62,7 @@ const INTENTIONALLY_IGNORED = new Set([
   "hook_progress",
   "hook_response",
   "plugin_install",
-  "tool_progress",
   "auth_status",
-  "task_started",
-  "task_updated",
-  "task_progress",
   "background_tasks_changed",
   "thinking_tokens",
   "session_state_changed",
@@ -77,7 +79,6 @@ const INTENTIONALLY_IGNORED = new Set([
   "informational",
   "conversation_reset",
   "user_message_replay",
-  "task_notification",
 ]);
 
 export function claudeModelSelection(modelId: string): ModelSelection {
@@ -143,7 +144,32 @@ export function normalizeClaudeMessage(
       }
       return { ...base, outcome: "handled", updates };
     }
+    // Background work: one row per task, re-upserted in place from start to
+    // settling (D8). Ambient housekeeping tasks never become rows (spec).
+    if (record.subtype === "task_started" || record.subtype === "task_progress" || record.subtype === "task_updated" || record.subtype === "task_notification") {
+      return backgroundTaskUpdate(record, memory, base);
+    }
     return { ...base, outcome: "ignored" };
+  }
+
+  // A heartbeat for a tool still running without output: the row gains an
+  // elapsed-time readout in place (spec: a running tool reports elapsed
+  // time). Only a tool this memory launched can be updated; reasoning rows
+  // are untouched.
+  if (type === "tool_progress") {
+    const toolUseId = typeof record.tool_use_id === "string" ? record.tool_use_id : "";
+    const known = memory.tools.get(toolUseId);
+    const seconds = typeof record.elapsed_time_seconds === "number" && Number.isFinite(record.elapsed_time_seconds) ? record.elapsed_time_seconds : undefined;
+    if (!known || seconds === undefined || memory.todoTools.has(toolUseId)) return { ...base, outcome: "ignored" };
+    return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: {
+      id: `tool:${toolUseId}`,
+      type: "tool",
+      createdAt: known.createdAt,
+      name: known.name,
+      status: "running",
+      ...(known.input === undefined ? {} : { input: known.input }),
+      elapsedMs: Math.max(0, Math.round(seconds * 1000)),
+    } }] };
   }
 
   if (type === "assistant") {
@@ -441,6 +467,104 @@ function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventM
     ...(attributedModel ? { model: attributedModel } : {}),
     ...(attributedUsage ? { usage: attributedUsage } : {}),
   } };
+}
+
+/**
+ * task_started / task_progress / task_updated / task_notification → the one
+ * `task:<id>` row. The start remembers the description and launch time;
+ * progress and patches re-upsert with the latest note; the notification
+ * settles the row with its outcome and summary. An edge for a task this
+ * memory never saw start (a level-only CLI, a reopen) still gets a row from
+ * what the edge itself carries.
+ */
+function backgroundTaskUpdate(record: RecordValue, memory: ClaudeEventMemory, base: { updates: NormalizedProviderUpdate[]; eventType: string }): Omit<NormalizedProviderEvent, "conversationId"> {
+  const taskId = typeof record.task_id === "string" && record.task_id ? record.task_id : "";
+  if (!taskId) return { ...base, outcome: "unparseable" };
+  const envelope = envelopeIdentity(record) ?? { uuid: taskId, createdAt: Date.now() };
+  if (record.ambient === true || record.skip_transcript === true) {
+    memory.ambientTasks.add(taskId);
+    if (memory.ambientTasks.size > MEMORY_LIMIT) memory.ambientTasks.clear();
+    return { ...base, outcome: "ignored" };
+  }
+  if (memory.ambientTasks.has(taskId)) return { ...base, outcome: "ignored" };
+  const known = memory.tasks.get(taskId);
+  const description = typeof record.description === "string" && record.description ? record.description : known?.description;
+  const patch = asRecord(record.patch);
+  // Only work the agent actually sent to the background is a background
+  // task: a blocking command or a foreground subagent emits the same edges
+  // with `is_backgrounded` false and is already shown as its tool row. The
+  // flag arrives on the start edge, on a later patch (a foreground task
+  // moved to the background), or through the level signal (see
+  // markTasksBackgrounded); until then the edges are remembered but silent.
+  const backgrounded = record.is_backgrounded === true || patch.is_backgrounded === true || known?.backgrounded === true;
+  const patchedDescription = typeof patch.description === "string" && patch.description ? patch.description : undefined;
+  const taskType = typeof record.task_type === "string" && record.task_type ? record.task_type : known?.taskType;
+  const toolUseId = typeof record.tool_use_id === "string" && record.tool_use_id ? record.tool_use_id : known?.toolUseId;
+  const createdAt = known?.createdAt ?? envelope.createdAt;
+  const finalDescription = patchedDescription ?? description ?? (backgrounded && record.subtype === "task_notification" ? "Background task" : undefined);
+  // An unnamed edge for work never known to run in the background says
+  // nothing (a stray notification); an unnamed background edge is malformed.
+  if (!finalDescription) return { ...base, outcome: backgrounded ? "unparseable" : "ignored" };
+  if (!backgrounded) {
+    // Foreground so far: keep what the edge said so a later promotion or
+    // the level signal can name the task, but show nothing.
+    boundedSet(memory.tasks, taskId, { description: finalDescription, ...(taskType ? { taskType } : {}), ...(toolUseId ? { toolUseId } : {}), createdAt }, MEMORY_LIMIT);
+    return { ...base, outcome: "ignored" };
+  }
+  // Progress note: a summary while running, else the last tool it used.
+  const progress = record.subtype === "task_progress"
+    ? (typeof record.summary === "string" && record.summary ? record.summary
+      : typeof record.last_tool_name === "string" && record.last_tool_name ? `Using ${record.last_tool_name}` : known?.progress)
+    : known?.progress;
+  let status: "running" | "completed" | "failed" | "stopped" = "running";
+  let summary: string | undefined;
+  if (record.subtype === "task_notification") {
+    status = record.status === "failed" ? "failed" : record.status === "stopped" ? "stopped" : "completed";
+    summary = typeof record.summary === "string" && record.summary ? record.summary : undefined;
+  } else if (record.subtype === "task_updated") {
+    if (patch.status === "failed") status = "failed";
+    else if (patch.status === "killed") status = "stopped";
+    else if (patch.status === "completed") status = "completed";
+    if (typeof patch.error === "string" && patch.error) summary = patch.error;
+  }
+  // `announced`: a row for this task has been emitted, so the level signal
+  // need not mint one.
+  boundedSet(memory.tasks, taskId, { description: finalDescription, ...(taskType ? { taskType } : {}), ...(toolUseId ? { toolUseId } : {}), createdAt, ...(progress ? { progress } : {}), backgrounded: true, announced: true, ...(status !== "running" ? { settled: true } : {}) }, MEMORY_LIMIT);
+  return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: {
+    id: `task:${taskId}`,
+    type: "background_task",
+    createdAt,
+    taskId,
+    description: finalDescription,
+    ...(taskType ? { taskType } : {}),
+    ...(toolUseId ? { toolUseId } : {}),
+    status,
+    ...(status === "running" && progress ? { progress } : {}),
+    ...(summary ? { summary } : {}),
+  } }] };
+}
+
+/**
+ * The level signal's word on what runs in the background: every listed
+ * non-ambient id is a background task from here on, whether or not its
+ * start edge said so (the level precedes the edges in practice).
+ */
+export function markTasksBackgrounded(memory: ClaudeEventMemory, tasks: Array<{ taskId: string; description?: string; taskType?: string }>, createdAt: number): void {
+  for (const task of tasks) {
+    // The level names it as user work now, whatever an earlier edge said.
+    memory.ambientTasks.delete(task.taskId);
+    const known = memory.tasks.get(task.taskId);
+    boundedSet(memory.tasks, task.taskId, {
+      description: known?.description ?? task.description ?? "Background task",
+      ...(known?.taskType ?? task.taskType ? { taskType: known?.taskType ?? task.taskType! } : {}),
+      ...(known?.toolUseId ? { toolUseId: known.toolUseId } : {}),
+      createdAt: known?.createdAt ?? createdAt,
+      ...(known?.progress ? { progress: known.progress } : {}),
+      backgrounded: true,
+      ...(known?.announced ? { announced: true } : {}),
+      ...(known?.settled ? { settled: true } : {}),
+    }, MEMORY_LIMIT);
+  }
 }
 
 /**

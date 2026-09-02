@@ -33,6 +33,7 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "completed",
   "interrupted",
   "failed",
+  "background",
 ]);
 const ACTIVITY_STATUSES = new Set<ActivityStatus>(["pending", "running", "completed", "failed", "cancelled"]);
 
@@ -347,7 +348,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.durationMs, "durationMs");
       break;
     case "tool":
-      expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId", "model", "usage"], type);
+      expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId", "model", "usage", "elapsedMs"], type);
       expectNonEmptyString(record.name, "tool name");
       parseActivityStatus(record.status);
       expectOptionalString(record.input, "tool input");
@@ -356,6 +357,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalString(record.childConversationId, "tool child conversation id");
       expectOptionalString(record.model, "tool model");
       expectTokenUsage(record.usage, "tool usage");
+      expectOptionalTimestamp(record.elapsedMs, "tool elapsedMs");
       break;
     case "command":
       expectKeys(record, ["id", "type", "createdAt", "command", "status", "output", "exitCode"], type);
@@ -412,6 +414,16 @@ export function parseConversationItem(value: unknown): ConversationItem {
       }
       break;
     }
+    case "background_task":
+      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary"], type);
+      expectIdentity(record.taskId, "background task id");
+      expectNonEmptyString(record.description, "background task description");
+      expectOptionalString(record.taskType, "background task type");
+      expectOptionalIdentity(record.toolUseId, "background task tool use id");
+      expectOneOf(record.status, ["running", "completed", "failed", "stopped"], "background task status");
+      expectOptionalString(record.progress, "background task progress");
+      expectOptionalString(record.summary, "background task summary");
+      break;
     case "compaction":
       expectKeys(record, ["id", "type", "createdAt", "trigger", "preTokens", "postTokens"], type);
       if (record.trigger !== undefined) expectOneOf(record.trigger, ["manual", "auto"], "compaction trigger");

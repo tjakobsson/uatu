@@ -5,9 +5,10 @@ import path from "node:path";
 
 import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
 import type { NormalizedProviderEvent } from "../provider";
-import { createClaudeEventMemory, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
+import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
 import { ClaudeProvider, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
+import { BackgroundTaskUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
 
 class FakeQuery implements ClaudeQueryHandle {
@@ -23,6 +24,7 @@ class FakeQuery implements ClaudeQueryHandle {
   supportedCommands?: () => Promise<unknown>;
   applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
   getContextUsage?: () => Promise<unknown>;
+  stopTask?: (taskId: string) => Promise<void>;
 
   constructor(readonly input: ClaudeQueryInput) {}
 
@@ -216,6 +218,81 @@ describe("context usage measures the window, not the turn (D1)", () => {
     ]);
     expect(item.categories.filter(category => category.kind === "used").reduce((sum, category) => sum + category.tokens, 0)).toBe(item.total);
     expect(normalizeContextUsage({ categories: [] }, 1, undefined)).toBeNull();
+  });
+});
+
+describe("background tasks and tool progress normalize into in-place rows (D8)", () => {
+  const at = (seconds: number) => new Date(Date.UTC(2026, 8, 2, 10, 0, seconds)).toISOString();
+
+  test("start, progress, and completion upsert the same task row linked to its tool use", () => {
+    const memory = createClaudeEventMemory();
+    const started = normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: at(0), task_id: "b2f6", tool_use_id: "toolu_1", description: "Sleep for 8 seconds then echo done", task_type: "local_bash", is_backgrounded: true }, memory, "live");
+    expect(started.outcome).toBe("handled");
+    expect(started.updates).toEqual([{ kind: "upsert", item: { id: "task:b2f6", type: "background_task", createdAt: Date.parse(at(0)), taskId: "b2f6", description: "Sleep for 8 seconds then echo done", taskType: "local_bash", toolUseId: "toolu_1", status: "running" } }]);
+    const progress = normalizeClaudeMessage({ type: "system", subtype: "task_progress", uuid: "tp1", timestamp: at(3), task_id: "b2f6", description: "Sleep for 8 seconds then echo done", usage: { total_tokens: 0, tool_uses: 1, duration_ms: 3000 }, last_tool_name: "Bash" }, memory, "live");
+    expect(progress.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:b2f6", createdAt: Date.parse(at(0)), status: "running", progress: "Using Bash" }) });
+    const notified = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn1", timestamp: at(8), task_id: "b2f6", tool_use_id: "toolu_1", status: "completed", output_file: "/tmp/out", summary: "done" }, memory, "live");
+    expect(notified.updates[0]).toEqual({ kind: "upsert", item: { id: "task:b2f6", type: "background_task", createdAt: Date.parse(at(0)), taskId: "b2f6", description: "Sleep for 8 seconds then echo done", taskType: "local_bash", toolUseId: "toolu_1", status: "completed", summary: "done" } });
+  });
+
+  test("failure, stop, and a killed patch settle the row with their outcome", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: at(0), task_id: "f1", description: "Flaky job", is_backgrounded: true }, memory, "live");
+    const failed = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn1", timestamp: at(5), task_id: "f1", status: "failed", output_file: "/tmp/f", summary: "exit 1" }, memory, "live");
+    expect(failed.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:f1", status: "failed", summary: "exit 1" }) });
+    normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts2", timestamp: at(0), task_id: "s1", description: "Long job", is_backgrounded: true }, memory, "live");
+    const stopped = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn2", timestamp: at(5), task_id: "s1", status: "stopped", output_file: "/tmp/s", summary: "" }, memory, "live");
+    expect(stopped.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:s1", status: "stopped" }) });
+    const killed = normalizeClaudeMessage({ type: "system", subtype: "task_updated", uuid: "tu1", timestamp: at(6), task_id: "s1", patch: { status: "killed", end_time: 1 } }, memory, "live");
+    expect(killed.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:s1", status: "stopped" }) });
+    // A notification for a task never known to run in the background is
+    // not a row; one the level signal named is, even without a start edge.
+    const orphan = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn3", timestamp: at(9), task_id: "o1", status: "completed", output_file: "/tmp/o", summary: "ok" }, memory, "live");
+    expect(orphan.outcome).toBe("ignored");
+    markTasksBackgrounded(memory, [{ taskId: "o2", description: "Named by the level", taskType: "local_bash" }], Date.parse(at(8)));
+    const named = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn4", timestamp: at(9), task_id: "o2", status: "completed", output_file: "/tmp/o", summary: "ok" }, memory, "live");
+    expect(named.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:o2", description: "Named by the level", taskType: "local_bash", createdAt: Date.parse(at(8)), status: "completed", summary: "ok" }) });
+  });
+
+  test("foreground work is never a background row until the agent sends it to the background", () => {
+    const memory = createClaudeEventMemory();
+    // A blocking subagent: start, progress, and completion edges with the
+    // flag unset stay silent — its tool row already shows the work.
+    const start = normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: at(0), task_id: "fg", tool_use_id: "toolu_task", description: "Explore the repo", task_type: "local_agent", subagent_type: "Explore", is_backgrounded: false }, memory, "live");
+    expect(start.outcome).toBe("ignored");
+    expect(normalizeClaudeMessage({ type: "system", subtype: "task_progress", uuid: "tp1", timestamp: at(1), task_id: "fg", description: "Explore the repo", usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 } }, memory, "live").outcome).toBe("ignored");
+    // Moved to the background (Ctrl+B): from here it is a background task,
+    // linked to the tool use that launched it.
+    const promoted = normalizeClaudeMessage({ type: "system", subtype: "task_updated", uuid: "tu1", timestamp: at(2), task_id: "fg", patch: { is_backgrounded: true } }, memory, "live");
+    expect(promoted.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:fg", description: "Explore the repo", taskType: "local_agent", toolUseId: "toolu_task", status: "running", createdAt: Date.parse(at(0)) }) });
+    const done = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn1", timestamp: at(5), task_id: "fg", status: "completed", output_file: "/tmp/o", summary: "found it" }, memory, "live");
+    expect(done.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:fg", status: "completed", summary: "found it" }) });
+    // A foreground task that completes in the foreground never shows.
+    normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts2", timestamp: at(6), task_id: "fg2", description: "Quick check", is_backgrounded: false }, memory, "live");
+    expect(normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn2", timestamp: at(7), task_id: "fg2", status: "completed", output_file: "/tmp/o", summary: "ok" }, memory, "live").outcome).toBe("ignored");
+  });
+
+  test("ambient housekeeping tasks never become rows, start to finish", () => {
+    const memory = createClaudeEventMemory();
+    const started = normalizeClaudeMessage({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: at(0), task_id: "amb", description: "Live update watcher", ambient: true, skip_transcript: true }, memory, "live");
+    expect(started.outcome).toBe("ignored");
+    expect(started.updates).toEqual([]);
+    // Later edges omit the flag; the remembered id keeps them out.
+    const progress = normalizeClaudeMessage({ type: "system", subtype: "task_progress", uuid: "tp1", timestamp: at(1), task_id: "amb", description: "Live update watcher", usage: { total_tokens: 0, tool_uses: 0, duration_ms: 1 } }, memory, "live");
+    expect(progress.outcome).toBe("ignored");
+    const notified = normalizeClaudeMessage({ type: "system", subtype: "task_notification", uuid: "tn1", timestamp: at(2), task_id: "amb", status: "completed", output_file: "/tmp/a", summary: "x", ambient: true }, memory, "live");
+    expect(notified.outcome).toBe("ignored");
+  });
+
+  test("a tool progress heartbeat gives the running tool row an elapsed time; reasoning rows are unaffected", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage({ type: "assistant", uuid: "a1", timestamp: at(0), message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "thinking", thinking: "hmm" }, { type: "tool_use", id: "toolu_9", name: "Bash", input: { command: "sleep 30" } }] } }, memory, "live");
+    const heartbeat = normalizeClaudeMessage({ type: "tool_progress", uuid: "hb1", timestamp: at(12), tool_use_id: "toolu_9", tool_name: "Bash", parent_tool_use_id: null, elapsed_time_seconds: 12.4, heartbeat: true }, memory, "live");
+    expect(heartbeat.outcome).toBe("handled");
+    expect(heartbeat.updates).toEqual([{ kind: "upsert", item: { id: "tool:toolu_9", type: "tool", createdAt: Date.parse(at(0)), name: "Bash", status: "running", input: JSON.stringify({ command: "sleep 30" }, null, 1), elapsedMs: 12_400 } }]);
+    expect(heartbeat.updates.some(update => update.kind === "upsert" && update.item.type === "reasoning")).toBe(false);
+    // Unknown tool ids (a subagent's inner tool) are ignored, not invented.
+    expect(normalizeClaudeMessage({ type: "tool_progress", uuid: "hb2", timestamp: at(13), tool_use_id: "toolu_unknown", tool_name: "Read", parent_tool_use_id: "toolu_9", elapsed_time_seconds: 1 }, memory, "live").outcome).toBe("ignored");
   });
 });
 
@@ -742,6 +819,355 @@ describe("ClaudeProvider sessions", () => {
     aborter.abort();
     expect(await interrupted).toEqual({ behavior: "cancelled" });
     stop();
+    await provider.dispose();
+  });
+
+  test("background work keeps the session alive past its result and reports the background state", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "run it in the background", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "init", uuid: "i1", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Sleep then echo" }, { task_id: "amb", task_type: "local_watch", description: "Watcher", ambient: true }] });
+    query.push({ type: "system", subtype: "task_started", uuid: "ts1", session_id: session.id, timestamp: "2026-09-02T10:00:03.000Z", task_id: "b1", tool_use_id: "toolu_1", description: "Sleep then echo", task_type: "local_bash", is_backgrounded: true });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // Not retired: the process is up for the task; the composer state says so.
+    expect(provider.liveSessionCount()).toBe(1);
+    expect(query.returned).toBe(false);
+    const statuses = events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
+    expect(statuses).toEqual(["running", "completed", "background"]);
+    // Ambient ids stay out of the live list; the real task is listed.
+    expect(await provider.listBackgroundTasks()).toEqual([expect.objectContaining({ conversationId: session.id, taskId: "b1", description: "Sleep then echo", taskType: "local_bash", toolUseId: "toolu_1" })]);
+    // Prompting is still possible on the live session.
+    await provider.prompt(session.id, { id: "r2", text: "meanwhile", delivery: "queue" });
+    expect(queries).toHaveLength(1);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:07.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "turn.background").length === 2);
+    expect(provider.liveSessionCount()).toBe(1);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a backgrounded subagent's frames and a fresh control session's init never start a turn", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "spawn", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "agent1", task_type: "local_agent", description: "Explore" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // The subagent keeps streaming on the same query, tagged with its parent
+    // tool use: not the conversation's turn.
+    query.push({ type: "assistant", uuid: "sub1", timestamp: "2026-09-02T10:00:06.000Z", session_id: session.id, parent_tool_use_id: "toolu_task", message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "exploring" }] } });
+    await Bun.sleep(10);
+    expect(events.some(event => event.eventType === "turn.unprompted")).toBe(false);
+    // The agent settles and the set empties with no follow-up: idle, retired.
+    query.push({ type: "system", subtype: "task_notification", uuid: "tn1", session_id: session.id, timestamp: "2026-09-02T10:00:08.000Z", task_id: "agent1", status: "completed", output_file: "/tmp/o", summary: "done" });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a prompt the CLI reports queued behind its follow-up keeps the session until it runs", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 10, maxTokens: 200_000 });
+    // The CLI answers a result while a user send is still queued behind it.
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false, queued_turn_count: 1 });
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    await Bun.sleep(10);
+    expect(provider.liveSessionCount()).toBe(1);
+    expect(query.returned).toBe(false);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false, queued_turn_count: 0 });
+    await waitFor(() => query.returned);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a stream that closes with a turn still queued fails that turn instead of dropping it", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 10, maxTokens: 200_000 });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false, queued_turn_count: 1 });
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    await query.return();
+    await waitFor(() => events.some(event => event.eventType === "result" && event.updates.some(update => update.kind === "status" && update.status === "failed")));
+    expect(provider.liveSessionCount()).toBe(0);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a task announced before any level snapshot settles when the process dies", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: "2026-09-02T10:00:01.000Z", session_id: session.id, task_id: "early", task_type: "local_bash", description: "Early job", is_backgrounded: true });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "task:early")));
+    await query.return();
+    await waitFor(() => events.some(event => event.eventType === "result"));
+    const ended = events.find(event => event.eventType === "result")!;
+    expect(ended.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:early", status: "stopped", summary: "The Claude Code session ended before this task finished." }) });
+    expect(ended.updates.at(-1)).toEqual({ kind: "status", status: "failed", message: "Claude Code session ended before finishing the turn" });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a first level snapshot that names an announced task ambient withdraws its row", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    // The start edge beat the snapshot and claimed background work.
+    query.push({ type: "system", subtype: "task_started", uuid: "ts1", timestamp: "2026-09-02T10:00:01.000Z", session_id: session.id, task_id: "amb", task_type: "local_bash", description: "Watcher", is_backgrounded: true });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "task:amb")));
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "amb", task_type: "local_bash", description: "Watcher", ambient: true }] });
+    await waitFor(() => events.some(event => event.eventType === "background.reconciled"));
+    expect(events.find(event => event.eventType === "background.reconciled")!.updates).toEqual([{ kind: "remove", itemId: "task:amb" }]);
+    expect(await provider.listBackgroundTasks()).toEqual([]);
+    const before = events.length;
+    query.push({ type: "system", subtype: "task_progress", uuid: "tp1", session_id: session.id, task_id: "amb", description: "Watcher", usage: { total_tokens: 0, tool_uses: 1, duration_ms: 500 } });
+    await waitFor(() => events.length > before);
+    expect(events[before]!.outcome).toBe("ignored");
+    stop();
+    await provider.dispose();
+  });
+
+  test("a process that dies while background work runs settles its rows and clears the state", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Long job" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    query.fail(new Error("child process died"));
+    await waitFor(() => events.some(event => event.eventType === "session.failed"));
+    const failure = events.find(event => event.eventType === "session.failed")!;
+    expect(failure.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "task:b1", type: "background_task", status: "stopped", summary: expect.stringContaining("failed before this task finished") }) });
+    expect(await provider.listBackgroundTasks()).toEqual([]);
+    expect(provider.liveSessionCount()).toBe(0);
+    // A stop after the fact is a conflict, not a failure.
+    await expect(provider.stopTask(session.id, "b1")).rejects.toBeInstanceOf(BackgroundTaskUnavailableError);
+    stop();
+    await provider.dispose();
+  });
+
+  test("cancelling while only background work runs does not poison the next turn's result", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "background it", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Job" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // No turn is live: the cancel is a no-op on the process and latches nothing.
+    await provider.interrupt(session.id);
+    expect(query.interrupts).toBe(0);
+    await provider.prompt(session.id, { id: "r2", text: "next", delivery: "queue" });
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.updates.some(update => update.kind === "status" && update.status === "completed")).length === 2);
+    expect(events.some(event => event.updates.some(update => update.kind === "status" && update.status === "interrupted"))).toBe(false);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a settled task wakes the CLI's own follow-up turn, which runs as a turn and then retires the session", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "background sleep", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Sleep then echo" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // The spike's sequence (D9): the set empties, the task settles, then the
+    // CLI starts a turn by itself — init, assistant, result.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [] });
+    query.push({ type: "system", subtype: "task_notification", uuid: "tn1", session_id: session.id, timestamp: "2026-09-02T10:00:13.000Z", task_id: "b1", tool_use_id: "toolu_1", status: "completed", output_file: "/tmp/o", summary: "done" });
+    query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
+    expect(provider.liveSessionCount()).toBe(1);
+    query.push({ type: "assistant", uuid: "a2", timestamp: "2026-09-02T10:00:15.000Z", session_id: session.id, message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "FINISHED done" }], usage: { input_tokens: 5, output_tokens: 2 } } });
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:16.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => query.returned);
+    expect(provider.liveSessionCount()).toBe(0);
+    const statuses = events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
+    expect(statuses).toEqual(["running", "completed", "background", "running", "completed"]);
+    const rows = events.flatMap(event => event.updates).filter(update => update.kind === "upsert" && update.item.type === "background_task").map(update => (update as { item: { status: string; summary?: string } }).item);
+    expect(rows.at(-1)).toEqual(expect.objectContaining({ status: "completed", summary: "done" }));
+    stop();
+    await provider.dispose();
+  });
+
+  test("an emptied set with no follow-up returns the conversation to idle and retires after the grace window", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-grace-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      backgroundGraceMs: 30,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Job" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // The user stops it; the CLI settles the row and empties the set.
+    let stopped: string | undefined;
+    query.stopTask = async (taskId: string) => { stopped = taskId; };
+    await provider.stopTask(session.id, "b1");
+    expect(stopped).toBe("b1");
+    await expect(provider.stopTask(session.id, "nope")).rejects.toThrow(/no longer running/);
+    query.push({ type: "system", subtype: "task_notification", uuid: "tn1", session_id: session.id, timestamp: "2026-09-02T10:00:06.000Z", task_id: "b1", status: "stopped", output_file: "/tmp/o", summary: "" });
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [] });
+    await waitFor(() => query.returned);
+    expect(provider.liveSessionCount()).toBe(0);
+    const statuses = events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
+    expect(statuses).toEqual(["running", "completed", "background", "idle"]);
+    const rows = events.flatMap(event => event.updates).filter(update => update.kind === "upsert" && update.item.type === "background_task").map(update => (update as { item: { status: string } }).item.status);
+    expect(rows.at(-1)).toBe("stopped");
+    await expect(provider.stopTask(session.id, "b1")).rejects.toThrow(/no longer running/);
+    stop();
+    await provider.dispose();
+  });
+
+  test("the level signal mints and settles rows for tasks whose bookends never arrived", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    // Named by the level only: a running row appears without task_started.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "q1", task_type: "local_bash", description: "Quiet job" }] });
+    await waitFor(() => events.some(event => event.eventType === "background.reconciled"));
+    expect((events.find(event => event.eventType === "background.reconciled")!.updates[0] as { item: { id: string; status: string; description: string } }).item).toEqual(expect.objectContaining({ id: "task:q1", status: "running", description: "Quiet job" }));
+    // Announced normally: the level adds no second row for it.
+    query.push({ type: "system", subtype: "task_started", uuid: "ts2", session_id: session.id, timestamp: "2026-09-02T10:00:03.000Z", task_id: "q2", description: "Loud job", is_backgrounded: true });
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [{ task_id: "q1", task_type: "local_bash", description: "Quiet job" }, { task_id: "q2", task_type: "local_bash", description: "Loud job" }] });
+    await Bun.sleep(10);
+    expect(events.filter(event => event.eventType === "background.reconciled")).toHaveLength(1);
+    // Turned ambient: still running, so no outcome — the row just leaves.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg3", session_id: session.id, tasks: [{ task_id: "q1", task_type: "local_bash", description: "Quiet job", ambient: true }, { task_id: "q2", task_type: "local_bash", description: "Loud job" }] });
+    await waitFor(() => events.filter(event => event.eventType === "background.reconciled").length === 2);
+    expect(events.filter(event => event.eventType === "background.reconciled")[1]!.updates).toEqual([{ kind: "remove", itemId: "task:q1" }]);
+    expect((await provider.listBackgroundTasks()).map(task => task.taskId)).toEqual(["q2"]);
+    // Its progress edges carry no ambient flag; the level's word holds.
+    const before = events.length;
+    query.push({ type: "system", subtype: "task_progress", uuid: "tp1", session_id: session.id, task_id: "q1", description: "Quiet job", usage: { total_tokens: 0, tool_uses: 1, duration_ms: 500 } });
+    await waitFor(() => events.length > before);
+    expect(events[before]!.outcome).toBe("ignored");
+    // Flipped back: user work again, listed again.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg4", session_id: session.id, tasks: [{ task_id: "q1", task_type: "local_bash", description: "Quiet job" }, { task_id: "q2", task_type: "local_bash", description: "Loud job" }] });
+    await waitFor(() => events.filter(event => event.eventType === "background.reconciled").length === 3);
+    expect((events.filter(event => event.eventType === "background.reconciled")[2]!.updates[0] as { item: { id: string; status: string } }).item).toEqual(expect.objectContaining({ id: "task:q1", status: "running" }));
+    // Dropped by the level with no notification: settled, never stuck
+    // running — but with no outcome invented, since the level carries none.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg5", session_id: session.id, tasks: [{ task_id: "q2", task_type: "local_bash", description: "Loud job" }] });
+    await waitFor(() => events.filter(event => event.eventType === "background.reconciled").length === 4);
+    expect((events.filter(event => event.eventType === "background.reconciled")[3]!.updates[0] as { item: { id: string; status: string } }).item).toEqual(expect.objectContaining({ id: "task:q1", status: "stopped", summary: "The task left Claude Code's task list without reporting an outcome." }));
+    // The late notification still carries the real outcome over that row.
+    query.push({ type: "system", subtype: "task_notification", uuid: "tn-late", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, task_id: "q1", status: "failed", output_file: "/tmp/q1", summary: "exit 1" });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "task:q1" && (update.item as { status: string }).status === "failed")));
+    stop();
+    await provider.dispose();
+  });
+
+  test("a set that empties while the context report is pending leaves retirement to the grace timer", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-grace2-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      backgroundGraceMs: 200,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    let release!: (value: unknown) => void;
+    query.getContextUsage = () => new Promise(resolve => { release = resolve; });
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Quick job" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    // The task finishes while the probe is still out; the CLI's follow-up
+    // is on its way. The probe's continuation must not close the session.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [] });
+    await Bun.sleep(5);
+    release({ categories: [], totalTokens: 10, maxTokens: 200_000 });
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    await Bun.sleep(10);
+    expect(provider.liveSessionCount()).toBe(1);
+    expect(query.returned).toBe(false);
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 12, maxTokens: 200_000 });
+    query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:07.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => query.returned);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a stream that ends inside the grace window clears the background state", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-grace3-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      backgroundGraceMs: 10_000,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Quick job" }] });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [] });
+    await Bun.sleep(20);
+    // The CLI exits cleanly with the set already empty: no row to settle,
+    // but the conversation must leave background mode all the same.
+    await query.return();
+    await waitFor(() => events.some(event => event.eventType === "turn.background-cleared"));
+    const cleared = events.find(event => event.eventType === "turn.background-cleared")!;
+    expect(cleared.updates).toEqual([{ kind: "status", status: "idle" }]);
+    expect(provider.liveSessionCount()).toBe(0);
+    stop();
+    await provider.dispose();
+  });
+
+  test("the agent declares background tasks and asks the CLI for a per-task stop affordance", async () => {
+    const { provider, queries } = fixture();
+    expect(provider.describe().capabilities).toContain("background-tasks");
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    expect(queries[0]!.input.options.perTaskStopAffordance).toBe(true);
     await provider.dispose();
   });
 

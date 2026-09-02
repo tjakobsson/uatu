@@ -2,6 +2,22 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 13 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Added the capability-gated, idempotent `workspaceStopChatTask` operation (`POST …/tasks/{taskId}/stop`), offered by agents declaring the new `background-tasks` capability.
+- The timeline gained the `background_task` item: one task the agent runs in the background, updated in place from start to settling (`running`, `completed`, `failed`, `stopped`) with its progress and summary. A running task is listed by the composer; a settled one is a timeline row.
+- `ConversationStatus` gained `background`: no turn is running but the agent still holds live background work; prompting is possible.
+- `tool` items gained optional `elapsedMs`, the agent's own elapsed time for a tool still running without output.
+- The `workspaceChat` streaming channel's event union reflects the same shapes.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 13. Treat `background` as a non-live status that still accepts a prompt, render `background_task` items (running ones as a live list with a stop control where the agent declares `background-tasks`, settled ones in place), and admit `elapsedMs` on tool items. Clients that ignore the new status, item, and field keep working once their validators admit them.
+
 ## Hub 5 / Workspace 12 - Unreleased
 
 Compatibility: breaking (workspace)

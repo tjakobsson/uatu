@@ -109,6 +109,7 @@ export interface MultiAgentWorkspaceChatService {
   restore(id: string, messageId: string, requestId: string): Promise<ReversibleHistoryResult>;
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
+  stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }>;
   dispose(): Promise<void>;
 }
 
@@ -323,6 +324,11 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome) {
     const { agent, conversationId } = this.resolve(id);
     return agent.service.respondQuestion(conversationId, interactionId, requestId, outcome);
+  }
+
+  async stopTask(id: string, taskId: string, requestId: string) {
+    const { agent, conversationId } = this.resolve(id);
+    return agent.service.stopTask(conversationId, taskId, requestId);
   }
 
   async dispose(): Promise<void> {
