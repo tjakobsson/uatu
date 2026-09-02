@@ -240,6 +240,23 @@ describe("chat domain validation", () => {
     expect(() => parseConversationItem({ ...base, schema: "not-an-object" })).toThrow(/schema/);
   });
 
+  test("named live statuses, labelled reasoning, coded notices, and plan utilization parse", () => {
+    for (const status of ["background", "retrying", "compacting"]) {
+      expect(parseConversationItem({ id: "s", type: "turn_status", createdAt: 1, status })).toBeTruthy();
+    }
+    expect(() => parseConversationItem({ id: "s", type: "turn_status", createdAt: 1, status: "paused" })).toThrow(/status/);
+    expect(parseConversationItem({ id: "memory:1", type: "reasoning", createdAt: 1, text: "x", status: "completed", label: "Recalled from memory" })).toBeTruthy();
+    expect(() => parseConversationItem({ id: "memory:1", type: "reasoning", createdAt: 1, text: "x", status: "completed", label: "" })).toThrow(/label/);
+    expect(parseConversationItem({ id: "n", type: "notice", createdAt: 1, level: "error", message: "m", code: "rate-limit-rejected", resetsAt: 5 })).toBeTruthy();
+    expect(() => parseConversationItem({ id: "n", type: "notice", createdAt: 1, level: "error", message: "m", resetsAt: -1 })).toThrow(/resetsAt/);
+    expect(parseConversationItem({ id: "c", type: "context_report", createdAt: 1, total: 10, plan: { fiveHour: { utilization: 37, resetsAt: 5 }, sevenDay: {} } })).toBeTruthy();
+    expect(() => parseConversationItem({ id: "c", type: "context_report", createdAt: 1, total: 10, plan: { monthly: {} } })).toThrow(/plan/);
+    expect(() => parseConversationItem({ id: "c", type: "context_report", createdAt: 1, total: 10, plan: { fiveHour: { utilization: -1 } } })).toThrow(/utilization/);
+    expect(parseConversationItem({ id: "t", type: "tool", createdAt: 1, name: "Bash", status: "running", elapsedMs: 1200 })).toBeTruthy();
+    expect(parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "running" })).toBeTruthy();
+    expect(() => parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "paused" })).toThrow(/background task status/);
+  });
+
   test("context reports and compaction markers parse as closed shapes", () => {
     const report = { id: "context:1", type: "context_report", createdAt: 5, total: 9697, max: 1_000_000, model: { providerId: "anthropic", modelId: "opus[1m]" }, categories: [{ name: "Messages", tokens: 10, kind: "used" }, { name: "Free space", tokens: 990_303, kind: "free" }] } as ConversationItem;
     expect(parseConversationItem(report)).toEqual(report);

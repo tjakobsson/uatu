@@ -9,6 +9,7 @@ import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type Ch
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
+import { isLiveConversationStatus } from "./types";
 import type {
   ChatAgent,
   ChatMode,
@@ -571,7 +572,7 @@ export class ChatAdapter {
     projection.seed(items);
     // A reopened conversation whose agent still holds live work is in the
     // background state, not idle: the list and the status must agree.
-    if (items.some(item => item.type === "background_task" && item.status === "running") && projection.status !== "running" && projection.status !== "sending" && projection.status !== "background") {
+    if (items.some(item => item.type === "background_task" && item.status === "running") && !isLiveConversationStatus(projection.status) && projection.status !== "background") {
       projection.statusUpdate("background");
     }
     const reversibleHistory = await this.readReversibleHistoryState(id);
@@ -977,7 +978,7 @@ export class ChatAdapter {
   // comes back "idle" while the turn is still running, and dispatching
   // into it would race the very turn the queue exists to wait out.
   private turnActive(conversationId: string, projection: ConversationProjection): boolean {
-    return projection.status === "running" || projection.status === "sending" || this.liveTurns.has(conversationId);
+    return isLiveConversationStatus(projection.status) || this.liveTurns.has(conversationId);
   }
 
   // Fire-and-forget by design: delivery is triggered by status transitions
@@ -2030,8 +2031,8 @@ export class ChatAdapter {
     }
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
       // `background` is not a live turn: the process is up for the tasks,
-      // but the conversation accepts a prompt.
-      if (status === "running" || status === "sending") this.liveTurns.add(id);
+      // but the conversation accepts a prompt. Retrying and compacting are.
+      if (isLiveConversationStatus(status)) this.liveTurns.add(id);
       else this.liveTurns.delete(id);
       // A turn that ended on its own releases the next held message. Only
       // these two: an interruption leaves the queue dormant by decision, and
@@ -2165,6 +2166,10 @@ export class ConversationProjection {
     if (update.kind === "upsert") return this.upsert(update.item);
     if (update.kind === "remove") {
       this.timeline.delete(update.itemId);
+      // A removed item's stream is over: its reconciler text goes with it,
+      // or a long conversation would keep every replaced streaming block.
+      this.text.forget(update.itemId);
+      this.text.forget(update.itemId.replace(/^part:|^reasoning:/, ""));
       return this.replay.publish({ type: "item.remove", itemId: update.itemId });
     }
     // Status reports apply unconditionally, including a completion that

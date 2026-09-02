@@ -298,4 +298,145 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(page.locator("#chat-composer-status")).toHaveAttribute("data-state", "background");
     await expect(page.locator("#chat-background-tasks-label")).toHaveText("1 background task running · Watch the build");
   });
+
+  test("assistant text grows in place as it streams and the completed block matches it", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Streaming", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Two sentences about autumn" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    const streamed = "message:stream:msg_1:0";
+    await control(request, { action: "item", conversationId: id, item: { id: streamed, type: "assistant_message", createdAt: 10, markdown: "" } });
+    await control(request, { action: "delta", conversationId: id, itemId: streamed, delta: "Autumn brings a crisp chill to the air" });
+    const node = page.locator(`[data-chat-item-id="${streamed}"]`);
+    await expect(node).toContainText("Autumn brings a crisp chill to the air");
+    await control(request, { action: "delta", conversationId: id, itemId: streamed, delta: " and turns the leaves gold." });
+    await expect(node).toHaveText("Autumn brings a crisp chill to the air and turns the leaves gold.");
+    await expect(page.locator("#chat-items .chat-assistant-message")).toHaveCount(1);
+    await capture(page, testInfo, "phase3-streaming-text");
+    await control(request, { action: "delta", conversationId: id, itemId: streamed, delta: "\n\nHarvest fills the markets." });
+    await expect(node).toContainText("Harvest fills the markets.");
+    // The completed block replaces the streamed item: same text, one bubble.
+    await control(request, { action: "item", conversationId: id, item: { id: "message:a1", type: "assistant_message", createdAt: 10, markdown: "Autumn brings a crisp chill to the air and turns the leaves gold.\n\nHarvest fills the markets.", completedAt: 12 } });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    const final = page.locator('[data-chat-item-id="message:a1"]');
+    await expect(final).toContainText("Harvest fills the markets.");
+    await expect(final.locator(".chat-assistant-content")).toHaveText("Autumn brings a crisp chill to the air and turns the leaves gold.\n\nHarvest fills the markets.");
+  });
+
+  test("retries, compaction, and rate limits are named states, not silence", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Session signals", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Summarize everything" },
+    ]);
+    const status = page.locator("#chat-composer-status");
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await expect(status).toHaveAttribute("data-state", "working");
+    await control(request, { action: "status", conversationId: id, status: "retrying", message: "attempt 2 of 10, HTTP 529" });
+    await expect(status).toHaveAttribute("data-state", "retrying");
+    await expect(status).toHaveAttribute("aria-label", "Retrying (attempt 2 of 10, HTTP 529)");
+    // Still a live turn: the primary action is Cancel, not Send.
+    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", /Cancel/);
+    await control(request, { action: "item", conversationId: id, item: { id: "notice:rl1", type: "notice", createdAt: 5, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt: Date.now() + 3_600_000 } });
+    const badge = page.locator("#chat-rate-limit");
+    await expect(badge).toBeVisible();
+    await expect(badge).toHaveText(/^Rate limited · resets /);
+    await expect(badge).toHaveAttribute("data-level", "rejected");
+    await expect(page.locator('[data-chat-item-id="notice:rl1"]')).toHaveAttribute("data-notice-code", "rate-limit-rejected");
+    await capture(page, testInfo, "phase3-status-retrying-compacting-ratelimit");
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await expect(status).toHaveAttribute("data-state", "working");
+    await control(request, { action: "status", conversationId: id, status: "compacting" });
+    await expect(status).toHaveAttribute("data-state", "compacting");
+    await expect(status).toHaveAttribute("aria-label", "Compacting context");
+    await control(request, { action: "item", conversationId: id, item: { id: "notice:rl2", type: "notice", createdAt: 6, level: "info", message: "Rate limit cleared; requests are allowed again.", code: "rate-limit-cleared" } });
+    await expect(badge).toBeHidden();
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    await expect(status).toHaveAttribute("data-state", "ready");
+    // Reduced motion: the named states keep their marks without animating.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await control(request, { action: "status", conversationId: id, status: "compacting" });
+    await expect(status).toHaveAttribute("data-state", "compacting");
+    const animation = await status.evaluate(node => getComputedStyle(node, "::before").animationName);
+    expect(animation).toBe("none");
+    await page.emulateMedia({ reducedMotion: null });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+  });
+
+  test("recalled memories show inline as recalled context and plan utilization sits beside the meter", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Memory and plan", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "What did we decide about merges?" },
+      { id: "memory:1", type: "reasoning", createdAt: 2, text: "[personal] squash-merge-clean-message.md\nSquash merges use a curated message.", status: "completed", label: "Recalled from memory" },
+      { id: "message:a1", type: "assistant_message", createdAt: 3, markdown: "Squash merges use a curated message.", completedAt: 3 },
+      { id: "context:report:1", type: "context_report", createdAt: 4, total: 24_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" }, plan: { fiveHour: { utilization: 37, resetsAt: Date.now() + 3_600_000 }, sevenDay: { utilization: 12 } } },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const row = page.locator('[data-chat-item-id="memory:1"]');
+    await expect(row.locator("summary > span").first()).toHaveText("Recalled from memory");
+    await row.locator("summary").click();
+    await expect(row.locator("pre")).toContainText("Squash merges use a curated message.");
+    await capture(page, testInfo, "phase3-memory-recall-row");
+    const plan = page.locator("#chat-plan-usage");
+    await expect(plan).toBeVisible();
+    await expect(plan).toHaveText("Plan 37% of 5h · 12% of 7d");
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("12%");
+    await capture(page, testInfo, "phase3-plan-utilization");
+    // A compaction's post-count report says nothing about the plan: the
+    // chip stands. An API-key session's report states an empty plan: hidden.
+    await control(request, { action: "item", conversationId: id, item: { id: "context:report:2", type: "context_report", createdAt: 5, total: 25_000, max: 200_000 } });
+    await expect(plan).toHaveText("Plan 37% of 5h · 12% of 7d");
+    await control(request, { action: "item", conversationId: id, item: { id: "context:report:3", type: "context_report", createdAt: 6, total: 25_000, max: 200_000, plan: {} } });
+    await expect(plan).toBeHidden();
+  });
+
+  test("an elicitation card asks for the server's fields and a running tool states its elapsed time", async ({ page, request }) => {
+    const id = await bootClaude(page, request, "Elicitation", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Connect to GitHub" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    const elicitation: ConversationItem = {
+      id: "question:el-1", type: "question", createdAt: 10, requestId: "el-1", status: "pending", source: "elicitation",
+      intro: "github asks: Sign in to continue", link: "https://example.com/auth",
+      schema: { type: "object", properties: { username: { type: "string" }, verbose: { type: "boolean" } } },
+      questions: [
+        { prompt: "Your login", header: "GitHub username", options: [], multiple: false, allowFreeForm: true },
+        { prompt: "Log everything?", header: "verbose", options: [{ label: "Yes", description: "" }, { label: "No", description: "" }], multiple: false, allowFreeForm: false },
+      ],
+    };
+    await control(request, { action: "item", conversationId: id, item: elicitation });
+    const card = page.locator('[data-chat-item-id="question:el-1"]');
+    await expect(card).toHaveAttribute("data-question-source", "elicitation");
+    await expect(card.locator(".chat-request-link a")).toHaveAttribute("href", "https://example.com/auth");
+    await card.getByRole("radio", { name: "Type your own answer" }).check();
+    await card.locator("[data-question-custom-input]").fill("octocat");
+    await card.getByRole("button", { name: "Next" }).click();
+    await card.getByRole("radio", { name: "No" }).check();
+    await card.getByRole("button", { name: "Answer", exact: true }).click();
+    await expect(card).toContainText("Answered");
+
+    const tool: ConversationItem = { id: "tool:slow", type: "tool", createdAt: 20, name: "Bash", status: "running", input: JSON.stringify({ command: "sleep 30" }) };
+    await control(request, { action: "item", conversationId: id, item: tool });
+    const rowStatus = page.locator('[data-chat-item-id="tool:slow"] .chat-activity-status');
+    await expect(rowStatus).toHaveText("running");
+    await control(request, { action: "item", conversationId: id, item: { ...tool, elapsedMs: 12_400 } });
+    await expect(rowStatus).toHaveText("running · 12s");
+    await control(request, { action: "item", conversationId: id, item: { ...tool, elapsedMs: 31_000 } });
+    await expect(rowStatus).toHaveText("running · 31s");
+    await control(request, { action: "item", conversationId: id, item: { ...tool, status: "completed", output: "done" } });
+    await expect(rowStatus).toHaveText("completed");
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+  });
+
+  test("the chooser follows the title Claude Code assigns after the first turn", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Investigate the flaky build on CI and report what you find about it", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Investigate the flaky build on CI and report what you find about it" },
+      { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "Looking.", completedAt: 2 },
+    ]);
+    const option = page.locator("#chat-conversation-select option:checked");
+    await expect(option).toContainText("Investigate the flaky build");
+    // The provider announces the generated title as a session update; the
+    // chooser and the header follow it.
+    await control(request, { action: "externalRename", conversationId: id, title: "Flaky CI build investigation" });
+    await expect(option).toContainText("Flaky CI build investigation");
+    await expect(page.locator("#chat-title")).toHaveText("Flaky CI build investigation");
+    await capture(page, testInfo, "phase3-generated-title-in-chooser");
+  });
 });

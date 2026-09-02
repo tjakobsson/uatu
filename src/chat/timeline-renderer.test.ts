@@ -93,6 +93,19 @@ describe("TimelineRenderer", () => {
     expect(article.querySelectorAll("[data-chat-copy]")).toHaveLength(2);
   });
 
+  test("a retry or a compaction keeps a partial response open", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const assistant: ConversationItem = { id: "part:live", type: "assistant_message", createdAt: 1, markdown: "So far\n\n```sh\necho ok\n```" };
+    for (const status of ["retrying", "compacting"] as const) {
+      renderer.render(host, projectionWith([assistant], { status }), new Set());
+      const article = host.querySelector<HTMLElement>(".chat-assistant-message")!;
+      expect(article.querySelectorAll("[data-chat-copy]")).toHaveLength(0);
+    }
+    renderer.render(host, projectionWith([assistant], { status: "completed" }), new Set());
+    expect(host.querySelectorAll("[data-chat-copy='code']")).toHaveLength(1);
+  });
+
   test("patches cumulative completed Markdown without adding answer actions", () => {
     const renderer = new TimelineRenderer();
     const host = target();
@@ -714,6 +727,34 @@ describe("group summaries name what the steps acted on", () => {
     renderer.render(host, projectionWith([{ id: "tool:bg", type: "tool", createdAt: 1, name: "Bash", status: "completed", input: JSON.stringify({ command: "sleep 20 && echo done", description: "Wait then report", run_in_background: true }), output: "Command running in background" }]), new Set());
     const row = host.querySelector('[data-chat-item-id="tool:bg"]')!;
     expect(row.querySelector(".chat-tool-meta")?.textContent).toBe("Wait then report · started in the background");
+  });
+});
+
+describe("recalled memory rows and coded notices", () => {
+  test("a memory recall renders as a labelled reasoning-style row and collapses into groups like reasoning", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const recalled: ConversationItem = { id: "memory:1", type: "reasoning", createdAt: 1, text: "[personal] ~/.claude/memory/ux.md", status: "completed", label: "Recalled from memory" };
+    renderer.render(host, projectionWith([recalled]), new Set());
+    expect(host.querySelector('[data-chat-item-id="memory:1"] summary > span')?.textContent).toBe("Recalled from memory");
+    expect(host.querySelector('[data-chat-item-id="memory:1"] pre')?.textContent).toBe("[personal] ~/.claude/memory/ux.md");
+    renderer.render(host, projectionWith([
+      recalled,
+      { id: "reasoning:1", type: "reasoning", createdAt: 2, text: "hmm", status: "completed" },
+      { id: "tool:1", type: "tool", createdAt: 3, name: "Read", status: "completed", input: JSON.stringify({ file_path: "a.ts" }), output: "x" },
+    ], { status: "completed" }), new Set());
+    expect(host.querySelector(".chat-activity-group > summary .chat-activity-subject")?.textContent).toBe("Read a.ts · Recalled from memory · Thought");
+  });
+
+  test("a coded notice carries its code for the surface to react to", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ id: "notice:rl", type: "notice", createdAt: 1, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt: 1_788_400_000_000 }]), new Set());
+    const notice = host.querySelector('[data-chat-item-id="notice:rl"]')!;
+    expect(notice.getAttribute("data-notice-code")).toBe("rate-limit-rejected");
+    // The reset time is the reader's clock, appended where the notice shows.
+    expect(notice.textContent).toMatch(/^Rate limit reached for your 5-hour window\. Resets \d.*\.$/);
+    expect(notice.getAttribute("role")).toBe("alert");
   });
 });
 

@@ -15,11 +15,11 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "../types";
+import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
-import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { listTranscriptSessions, readSessionTranscript, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
+import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection } from "./normalization";
+import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
 /**
  * The slice of an SDK `Query` this provider drives. Narrow on purpose: tests
@@ -43,6 +43,8 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   getContextUsage?(): Promise<unknown>;
   /** Stop one background task; the CLI reports a stopped task_notification. */
   stopTask?(taskId: string): Promise<void>;
+  /** The `/usage` data: session cost and claude.ai plan rate-limit windows. The SDK's own (experimental) name. */
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?(): Promise<unknown>;
   rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
 };
@@ -72,6 +74,8 @@ export type ClaudeQueryInput = {
     permissionMode?: string;
     model?: string;
     effort?: string;
+    /** Stream assistant text as it arrives (D10). */
+    includePartialMessages?: boolean;
     canUseTool?: (toolName: string, input: Record<string, unknown>, options: ClaudeCanUseToolOptions) => Promise<ClaudePermissionResult>;
     /** MCP elicitations (structurally the SDK's OnElicitation). */
     onElicitation?: (request: ClaudeElicitationRequest, options: { signal: AbortSignal; requestId: string }) => Promise<ClaudeElicitationResult | null>;
@@ -140,7 +144,9 @@ export type ClaudeProviderOptions = {
    */
   catalogProbe?: boolean;
   /** Conversation rewind: fork the native session up to a boundary (D8). */
-  forkSession?: (sessionId: string, options: { upToMessageId: string; dir: string }) => Promise<{ sessionId: string }>;
+  forkSession?: (sessionId: string, options: { upToMessageId: string; dir: string; title?: string }) => Promise<{ sessionId: string }>;
+  /** A user rename: appends a custom-title entry to the native session (D12). */
+  renameNativeSession?: (sessionId: string, title: string, options: { dir: string }) => Promise<void>;
   /**
    * Durable per-workspace state (conversation configurations, fork
    * redirections) — uatu's own XDG state home by default; never Claude
@@ -154,6 +160,8 @@ export type ClaudeProviderOptions = {
    * Tests shorten it.
    */
   backgroundGraceMs?: number;
+  // Re-read delays for a generated title that lands after the result.
+  titleRefreshDelaysMs?: number[];
 };
 
 const DEFAULT_TITLE = "New conversation";
@@ -172,6 +180,9 @@ const CATALOG_PROBE_COOLDOWN_MS = 60_000;
 // One control round-trip after each turn; a CLI that never answers must not
 // hold the session open past this.
 const CONTEXT_REPORT_TIMEOUT_MS = 3_000;
+// The CLI generates its title from an un-awaited side call that can land
+// after the first result; a short turn is re-read a few times for it.
+const TITLE_REFRESH_DELAYS_MS = [1_000, 3_000, 8_000];
 // When the background set empties with no turn pending, the CLI starts its
 // own follow-up turn within a fraction of a second (D9). A session whose set
 // emptied and that shows no follow-up inside this window is idle for good.
@@ -192,6 +203,8 @@ type LiveSession = {
   interrupted?: boolean;
   // The latest context probe's turn; an older probe's answer is discarded.
   reportGeneration?: number;
+  // The login answered the usage read with no windows: no point asking again.
+  planUnavailable?: boolean;
   // Results seen on this process: an unprompted turn can only follow one.
   resultsSeen: number;
   // User sends the CLI reported still queued on its last result.
@@ -265,8 +278,23 @@ export class ClaudeProvider implements ChatProvider {
   private durableRestore: Promise<void> | null = null;
   private persistChain: Promise<void> = Promise.resolve();
   private readonly forkSession: NonNullable<ClaudeProviderOptions["forkSession"]>;
+  private readonly renameNativeSession: NonNullable<ClaudeProviderOptions["renameNativeSession"]>;
+  // The generated title last announced per conversation, so a refresh after
+  // a turn announces a change once rather than on every result.
+  private readonly announcedTitles = new Map<string, string>();
+  // Bumped by every user rename: a transcript read that was in flight
+  // across one is stale and must not announce over the user's title.
+  private readonly renameGenerations = new Map<string, number>();
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly backgroundGraceMs: number;
+  private readonly titleRefreshDelaysMs: number[];
+  // Conversations whose last rate-limit signal was a standing (warning or
+  // rejection): carried across processes so the eventual "allowed" clears it.
+  private readonly rateLimitedSessions = new Set<string>();
+  // A rename asked for before the native transcript existed: written to it
+  // once the first turn has created it.
+  private readonly deferredRenames = new Map<string, string>();
+  private readonly titleRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
 
   constructor(options: ClaudeProviderOptions) {
@@ -277,9 +305,11 @@ export class ClaudeProvider implements ChatProvider {
     this.offerBypassPermissions = options.offerBypassPermissions === true;
     this.catalogProbe = options.catalogProbe !== false;
     this.forkSession = options.forkSession ?? defaultForkSession;
+    this.renameNativeSession = options.renameNativeSession ?? defaultRenameSession;
     this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
     this.now = options.now ?? (() => Date.now());
     this.backgroundGraceMs = options.backgroundGraceMs ?? BACKGROUND_FOLLOW_UP_GRACE_MS;
+    this.titleRefreshDelaysMs = options.titleRefreshDelaysMs ?? TITLE_REFRESH_DELAYS_MS;
   }
 
   describe(): ChatAgent {
@@ -287,7 +317,7 @@ export class ClaudeProvider implements ChatProvider {
     return {
       id: "claude",
       name: "Claude Code",
-      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks"],
+      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "conversation-rename"],
       permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
     };
   }
@@ -420,7 +450,9 @@ export class ClaudeProvider implements ChatProvider {
       const summary = byNative.get(this.nativeId(session.id)) ?? session;
       return {
         id: session.id,
-        title: deriveTitle(summary.firstPrompt),
+        // A UatuCode rename wins, then Claude Code's own generated title,
+        // then the first prompt (D12).
+        title: summary.customTitle ?? summary.generatedTitle ?? deriveTitle(summary.firstPrompt),
         directory: this.workspacePath,
         createdAt: summary.createdAt,
         updatedAt: summary.updatedAt,
@@ -843,6 +875,8 @@ export class ClaudeProvider implements ChatProvider {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
+    for (const timer of this.titleRefreshTimers.values()) clearTimeout(timer);
+    this.titleRefreshTimers.clear();
     // Nothing durable may still be in flight when the workspace stops.
     await this.persistChain.catch(() => undefined);
     await this.probeQuery?.return?.().catch(() => undefined);
@@ -886,6 +920,8 @@ export class ClaudeProvider implements ChatProvider {
         ...(hasTranscript ? { resume: nativeId } : { sessionId: nativeId }),
         pathToClaudeCodeExecutable: this.executable,
         enableFileCheckpointing: true,
+        // Assistant text streams as it arrives (D10).
+        includePartialMessages: true,
         // Unset resolves to the declared default (auto) so the session
         // actually runs the mode the picker presents as active.
         permissionMode: mode ?? configuration.mode ?? "auto",
@@ -921,11 +957,22 @@ export class ClaudeProvider implements ChatProvider {
   private async readSession(session: LiveSession): Promise<void> {
     const memory = createClaudeEventMemory();
     memory.resolveModel = id => this.modelAliases.get(id) ?? id;
+    memory.rateLimited = this.rateLimitedSessions.has(session.id);
     try {
       for await (const message of session.query) {
         this.captureCommands(message);
         this.trackSessionLevel(session, message, memory);
         const normalized = normalizeClaudeMessage(message, memory, "live", session.id);
+        if (memory.rateLimited) this.rateLimitedSessions.add(session.id); else this.rateLimitedSessions.delete(session.id);
+        this.adoptRefusalFallback(session.id, message);
+        // A retry or a compaction names a state of the conversation's own
+        // turn. Outside one (a background subagent's retry, the CLI's side
+        // title call) there is no turn to hold prompts for: the state is
+        // dropped, and with it the resume that would follow.
+        if (session.pendingTurns === 0 && !session.unpromptedTurn && normalized.updates.some(update => update.kind === "status" && (update.status === "retrying" || update.status === "compacting"))) {
+          normalized.updates = normalized.updates.filter(update => !(update.kind === "status" && (update.status === "retrying" || update.status === "compacting")));
+          memory.transient = undefined;
+        }
         // The level signal precedes the start edge (spike, D9): the edge is
         // what carries the tool-use link, so the live entry learns it here.
         if (normalized.eventType === "system" && (message as { subtype?: unknown }).subtype === "task_started") {
@@ -942,7 +989,7 @@ export class ClaudeProvider implements ChatProvider {
         // frames tagged with its parent tool use, and those are not a turn.
         const ownFrame = !(message as { parent_tool_use_id?: unknown }).parent_tool_use_id;
         if (session.pendingTurns === 0 && !session.unpromptedTurn && session.resultsSeen > 0 && ownFrame && this.live.get(session.id) === session
-          && (normalized.eventType === "assistant" || (normalized.eventType === "system" && (message as { subtype?: unknown }).subtype === "init"))) {
+          && (normalized.eventType === "assistant" || normalized.eventType === "stream_event" || (normalized.eventType === "system" && (message as { subtype?: unknown }).subtype === "init"))) {
           session.unpromptedTurn = true;
           this.clearIdleTimer(session);
           this.emit(session.id, { updates: [{ kind: "status", status: "running" }], outcome: "handled", eventType: "turn.unprompted" });
@@ -982,15 +1029,21 @@ export class ClaudeProvider implements ChatProvider {
           // counters and the background set as they stand then; a retired
           // query ends this loop.
           const report = this.reportContextUsage(session, memory.lastModel);
+          // Claude Code assigns its own title after a turn; the chooser
+          // follows it unless the user renamed the conversation (D12). A
+          // transcript read, independent of the process: never awaited.
+          void this.refreshGeneratedTitle(session.id);
           if (session.backgroundTasks.size > 0 && session.pendingTurns === 0) {
             // Not idle: the composer shows background work, prompting stays
             // possible, and the process stays up for the tasks (spec).
             this.emit(session.id, { updates: [{ kind: "status", status: "background" }], outcome: "handled", eventType: "turn.background" });
           }
-          void report.then(async () => {
+          void report.then(async generation => {
             // A set that emptied while the report was out has armed the
             // follow-up grace timer (D9); retirement is that timer's call.
-            if (session.idleTimer !== undefined) return;
+            // A probe a later turn overtook is not the one to retire on:
+            // that turn's own continuation decides, once its read is in.
+            if (session.idleTimer !== undefined || session.reportGeneration !== generation) return;
             if (this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
           });
         }
@@ -1232,8 +1285,11 @@ export class ClaudeProvider implements ChatProvider {
     const context = await this.reversibleContext(sessionId);
     const lastVisible = context.turns[stagedState.boundaryIndex - 1];
     const previousNative = this.nativeId(sessionId);
+    // The SDK names a fork "<title> (fork)" as a custom title unless told
+    // otherwise; the conversation keeps the title it already shows.
+    const title = (await this.getSession(sessionId))?.title;
     const replacement = lastVisible
-      ? (await this.forkSession(previousNative, { upToMessageId: lastVisible.uuid, dir: this.workspacePath })).sessionId
+      ? (await this.forkSession(previousNative, { upToMessageId: lastVisible.uuid, dir: this.workspacePath, ...(title ? { title } : {}) })).sessionId
       : randomUUID();
     const nativeBefore = this.activeNative.get(sessionId);
     const hadHidden = this.hiddenNative.has(replacement);
@@ -1286,6 +1342,7 @@ export class ClaudeProvider implements ChatProvider {
           hiddenNative?: string[];
           staged?: Record<string, { boundaryIndex: number; tipSnapshot: Record<string, SnapshotEntry>; commit?: { fork: string; prior?: string } }>;
           modeBeforePlan?: Record<string, string>;
+          deferredRenames?: Record<string, string>;
           pending?: Record<string, { title: string; createdAt: number; updatedAt: number }>;
         };
         for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
@@ -1328,6 +1385,11 @@ export class ClaudeProvider implements ChatProvider {
         }
         // Without it, a restart mid-plan loses the "implement and return
         // to <mode>" intent the conversation still deserves.
+        // A rename asked for before the first turn survives a restart the
+        // same way the pending session it names does.
+        for (const [id, title] of Object.entries(stored.deferredRenames ?? {})) {
+          if (typeof title === "string" && title && !this.deferredRenames.has(id)) this.deferredRenames.set(id, title);
+        }
         for (const [id, mode] of Object.entries(stored.modeBeforePlan ?? {})) {
           if (!this.modeBeforePlan.has(id)) this.modeBeforePlan.set(id, mode);
         }
@@ -1369,6 +1431,7 @@ export class ClaudeProvider implements ChatProvider {
       staged: Object.fromEntries([...this.staged].map(([id, staged]) =>
         [id, { boundaryIndex: staged.boundaryIndex, tipSnapshot: Object.fromEntries(staged.tipSnapshot), ...(staged.commit ? { commit: staged.commit } : {}) }])),
       modeBeforePlan: Object.fromEntries(this.modeBeforePlan),
+      deferredRenames: Object.fromEntries(this.deferredRenames),
       pending: Object.fromEntries([...this.pending.values()].map(session =>
         [session.id, { title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt }])),
     });
@@ -1606,6 +1669,26 @@ export class ClaudeProvider implements ChatProvider {
     });
   }
 
+  /**
+   * A session-scoped refusal fallback is the CLI swapping the session's
+   * model for good: the conversation's configuration follows, so the picker
+   * tells the truth and the next process starts on the fallback rather than
+   * handing the refused model back through the model option. A local
+   * fallback (a subagent's) leaves the conversation alone.
+   */
+  private adoptRefusalFallback(sessionId: string, message: unknown): void {
+    const record = message as { type?: unknown; subtype?: unknown; scope?: unknown; fallback_model?: unknown };
+    if (record.type !== "system" || record.subtype !== "model_refusal_fallback" || record.scope === "local") return;
+    if (typeof record.fallback_model !== "string" || !record.fallback_model) return;
+    const modelId = this.modelAliases.get(record.fallback_model) ?? record.fallback_model;
+    const current = this.configurations.get(sessionId);
+    if (current?.model?.modelId === modelId) return;
+    const configuration = { ...current, model: claudeModelSelection(modelId) };
+    this.configurations.set(sessionId, configuration);
+    this.persistDurableState();
+    this.emit(sessionId, { updates: [], outcome: "handled", eventType: "model.fallback", configuration: { model: configuration.model } });
+  }
+
   private requireInteraction(sessionId: string, requestId: string, kind: "permission" | "question"): PendingInteraction {
     const pending = this.interactions.get(requestId);
     if (!pending || pending.conversationId !== sessionId || pending.kind !== kind) {
@@ -1763,15 +1846,136 @@ export class ClaudeProvider implements ChatProvider {
     await session.query.stopTask(taskId);
   }
 
-  /** The CLI's own context breakdown, emitted as a report item after a turn. */
-  private async reportContextUsage(session: LiveSession, model: string | undefined): Promise<void> {
-    if (!session.query.getContextUsage || this.live.get(session.id) !== session) return;
-    // One probe per turn; a probe a later turn's probe has overtaken says
-    // nothing current and is dropped, so the newest report is the newest
-    // turn's (newest-wins in the readout relies on that).
-    const generation = (session.reportGeneration = (session.reportGeneration ?? 0) + 1);
+  /** The `/usage` plan windows, when the login has plan limits; bounded like the context read. */
+  private async readPlanUtilization(session: LiveSession): Promise<PlanUtilization | undefined> {
+    const read = session.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (!read || this.live.get(session.id) !== session) return undefined;
+    // A login that answered with no windows once (an API key) is not asked
+    // again for the life of the process.
+    if (session.planUnavailable) return {};
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      const raw = await Promise.race([
+        read.call(session.query),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTEXT_REPORT_TIMEOUT_MS); }),
+      ]);
+      // Answered with no windows (an API-key login): an explicit empty plan,
+      // so the report states it rather than staying silent like a timeout.
+      if (raw === null) return undefined;
+      const plan = normalizePlanUtilization(raw);
+      if (!plan) session.planUnavailable = true;
+      return plan ?? {};
+    } catch {
+      return undefined;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /** Announces Claude Code's own title when it changed and no user rename stands. */
+  private async refreshGeneratedTitle(sessionId: string, attempt = 0): Promise<void> {
+    const timer = this.titleRefreshTimers.get(sessionId);
+    if (timer !== undefined) { clearTimeout(timer); this.titleRefreshTimers.delete(sessionId); }
+    try {
+      const generation = this.renameGenerations.get(sessionId) ?? 0;
+      const file = sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir);
+      // A rename asked for before the transcript existed is written now that
+      // the first turn has created it, ahead of reading what it says.
+      const deferred = this.deferredRenames.get(sessionId);
+      // A newer rename during the existence check supersedes this one: the
+      // native write must not land after it and overwrite it.
+      if (deferred !== undefined && await fileExists(file) && (this.renameGenerations.get(sessionId) ?? 0) === generation && this.deferredRenames.get(sessionId) === deferred) {
+        this.deferredRenames.delete(sessionId);
+        await this.renameNativeSession(this.nativeId(sessionId), deferred, { dir: this.workspacePath }).catch(() => {
+          if (!this.deferredRenames.has(sessionId)) this.deferredRenames.set(sessionId, deferred);
+        });
+        this.persistDurableState();
+      }
+      const titles = await readTranscriptTitles(file);
+      if ((this.renameGenerations.get(sessionId) ?? 0) !== generation || this.disposed) return;
+      const title = titles.customTitle ?? titles.generatedTitle;
+      if (!title && attempt < this.titleRefreshDelaysMs.length && !this.deferredRenames.has(sessionId)) {
+        // Not there yet: the CLI's title call may still be in flight.
+        const handle = setTimeout(() => { this.titleRefreshTimers.delete(sessionId); void this.refreshGeneratedTitle(sessionId, attempt + 1); }, this.titleRefreshDelaysMs[attempt]);
+        (handle as unknown as { unref?: () => void }).unref?.();
+        this.titleRefreshTimers.set(sessionId, handle);
+        return;
+      }
+      if (!title || this.announcedTitles.get(sessionId) === title) return;
+      this.announcedTitles.set(sessionId, title);
+      if (this.announcedTitles.size > 4_096) this.announcedTitles.clear();
+      const pending = this.pending.get(sessionId);
+      if (pending) this.pending.set(sessionId, { ...pending, title, updatedAt: this.now() });
+      this.emit(sessionId, {
+        updates: [],
+        outcome: "handled",
+        eventType: "session.updated",
+        sessionLifecycle: { kind: "updated", id: sessionId, directory: this.workspacePath, title },
+      });
+    } catch {
+      // No transcript, no title: the prompt-derived one stands.
+    }
+  }
+
+  /**
+   * A UatuCode rename: recorded in the native session as a custom title, so
+   * it outlives the workspace and outranks Claude Code's generated one.
+   */
+  async renameSession(sessionId: string, title: string): Promise<ProviderSession> {
+    await this.restoreDurableState();
+    const session = await this.getSession(sessionId);
+    if (!session) throw new Error(`unknown Claude conversation: ${sessionId}`);
+    if (session.parentId) throw new Error("a subagent transcript cannot be renamed");
+    const trimmed = title.trim();
+    this.renameGenerations.set(sessionId, (this.renameGenerations.get(sessionId) ?? 0) + 1);
+    if (this.renameGenerations.size > 4_096) this.renameGenerations.clear();
+    // A conversation that has not run a turn has no native transcript yet
+    // (the SDK's rename throws on one): the title is kept here and written
+    // to the transcript once the first turn has created it.
+    if (await fileExists(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))) {
+      await this.renameNativeSession(this.nativeId(sessionId), trimmed, { dir: this.workspacePath });
+      this.deferredRenames.delete(sessionId);
+    } else {
+      this.deferredRenames.set(sessionId, trimmed);
+      this.persistDurableState();
+    }
+    this.announcedTitles.set(sessionId, trimmed);
+    const pending = this.pending.get(sessionId);
+    const renamed: ProviderSession = { ...session, title: trimmed, updatedAt: this.now() };
+    if (pending) {
+      this.pending.set(sessionId, renamed);
+      this.persistDurableState();
+    }
+    this.emit(sessionId, {
+      updates: [],
+      outcome: "handled",
+      eventType: "session.updated",
+      sessionLifecycle: { kind: "updated", id: sessionId, directory: this.workspacePath, title: trimmed },
+    });
+    return renamed;
+  }
+
+  /** The CLI's own context breakdown, emitted as a report item after a turn. */
+  private async reportContextUsage(session: LiveSession, model: string | undefined): Promise<number> {
+    // One probe per turn; a probe a later turn's probe has overtaken says
+    // nothing current and is dropped, so the newest report is the newest
+    // turn's (newest-wins in the readout relies on that). The generation
+    // is returned so the caller's continuation can tell whether it is
+    // still the latest probe before acting on the session.
+    const generation = (session.reportGeneration = (session.reportGeneration ?? 0) + 1);
+    await this.probeContextUsage(session, model, generation);
+    return generation;
+  }
+
+  private async probeContextUsage(session: LiveSession, model: string | undefined, generation: number): Promise<void> {
+    if (!session.query.getContextUsage || this.live.get(session.id) !== session) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Plan utilization rides the same report when the login reports it
+      // (claude.ai plans); an API-key session states an empty plan, and a
+      // read that failed says nothing, leaving the previous report's plan.
+      // Both reads go out together under one timer: they are independent.
+      const planRead = this.readPlanUtilization(session);
       const raw = await Promise.race([
         session.query.getContextUsage(),
         new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTEXT_REPORT_TIMEOUT_MS); }),
@@ -1779,7 +1983,9 @@ export class ClaudeProvider implements ChatProvider {
       if (raw === null || session.reportGeneration !== generation) return;
       const item = normalizeContextUsage(raw, this.now(), model);
       if (!item) return;
-      this.emit(session.id, { updates: [{ kind: "upsert", item }], outcome: "handled", eventType: "context.reported" });
+      const plan = await planRead;
+      if (session.reportGeneration !== generation) return;
+      this.emit(session.id, { updates: [{ kind: "upsert", item: plan !== undefined ? { ...item, plan } : item }], outcome: "handled", eventType: "context.reported" });
     } catch {
       // The per-message carrier stands.
     } finally {
@@ -2052,10 +2258,45 @@ function reversibleState(turns: ReversibleClaudeTurn[], boundaryIndex: number | 
   };
 }
 
-function defaultForkSession(sessionId: string, options: { upToMessageId: string; dir: string }): Promise<{ sessionId: string }> {
+/** `/usage` → the plan windows the meter can show beside the fill. */
+export function normalizePlanUtilization(raw: unknown): PlanUtilization | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as Record<string, unknown>;
+  if (record.rate_limits_available !== true || !record.rate_limits || typeof record.rate_limits !== "object") return undefined;
+  const limits = record.rate_limits as Record<string, unknown>;
+  const window = (value: unknown): PlanUtilizationWindow | undefined => {
+    if (!value || typeof value !== "object") return undefined;
+    const entry = value as Record<string, unknown>;
+    const utilization = typeof entry.utilization === "number" && Number.isFinite(entry.utilization) && entry.utilization >= 0 ? entry.utilization : undefined;
+    const resetsAt = typeof entry.resets_at === "string" ? Date.parse(entry.resets_at) : typeof entry.resets_at === "number" ? (entry.resets_at < 1e12 ? entry.resets_at * 1000 : entry.resets_at) : NaN;
+    if (utilization === undefined && Number.isNaN(resetsAt)) return undefined;
+    return { ...(utilization === undefined ? {} : { utilization }), ...(Number.isNaN(resetsAt) ? {} : { resetsAt: Math.round(resetsAt) }) };
+  };
+  const fiveHour = window(limits.five_hour);
+  const sevenDay = window(limits.seven_day);
+  if (!fiveHour && !sevenDay) return undefined;
+  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}) };
+}
+
+function defaultRenameSession(sessionId: string, title: string, options: { dir: string }): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { renameSession } = require("@anthropic-ai/claude-agent-sdk") as typeof import("@anthropic-ai/claude-agent-sdk");
+  return renameSession(sessionId, title, { dir: options.dir });
+}
+
+async function fileExists(file: string): Promise<boolean> {
+  try {
+    await fs.stat(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function defaultForkSession(sessionId: string, options: { upToMessageId: string; dir: string; title?: string }): Promise<{ sessionId: string }> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { forkSession } = require("@anthropic-ai/claude-agent-sdk") as typeof import("@anthropic-ai/claude-agent-sdk");
-  return forkSession(sessionId, { upToMessageId: options.upToMessageId, dir: options.dir });
+  return forkSession(sessionId, { upToMessageId: options.upToMessageId, dir: options.dir, ...(options.title ? { title: options.title } : {}) });
 }
 
 type PendingInteraction = {

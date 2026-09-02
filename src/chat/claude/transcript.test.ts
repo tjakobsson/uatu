@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { claudeProjectDir, listTranscriptSessions, promptText, readSessionTranscript, sessionTranscriptPath } from "./transcript";
+import { claudeProjectDir, listTranscriptSessions, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
 
 function line(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -188,5 +188,36 @@ describe("against the real store layout", () => {
     // encoder must agree with it byte for byte.
     const encoded = path.basename(claudeProjectDir("/Users/tobias/src/github.com/tjakobsson/uatu", "/cfg"));
     expect(encoded).toBe("-Users-tobias-src-github-com-tjakobsson-uatu");
+  });
+});
+
+describe("transcript titles (D12)", () => {
+  test("the last ai-title and custom-title entries are read wherever they sit, and cached per file version", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "uatu-transcript-titles-"));
+    const file = path.join(root, "s.jsonl");
+    writeFileSync(file, [
+      JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: root, message: { role: "user", content: "hi" } }),
+      JSON.stringify({ type: "ai-title", aiTitle: "First title", sessionId: "s" }),
+      JSON.stringify({ type: "assistant", uuid: "a1", parentUuid: "u1", isSidechain: false, timestamp: "2026-09-02T10:00:01.000Z", cwd: root, message: { role: "assistant", content: [{ type: "text", text: "x".repeat(300_000) }] } }),
+      JSON.stringify({ type: "ai-title", aiTitle: "  Second title  ", sessionId: "s" }),
+    ].join("\n") + "\n");
+    expect(await readTranscriptTitles(file)).toEqual({ generatedTitle: "Second title" });
+    writeFileSync(file, `${JSON.stringify({ type: "custom-title", customTitle: "Mine", sessionId: "s" })}\n`, { flag: "a" });
+    expect(await readTranscriptTitles(file)).toEqual({ generatedTitle: "Second title", customTitle: "Mine" });
+    expect(await readTranscriptTitles(path.join(root, "missing.jsonl"))).toEqual({});
+    // A title is what it says, suffix and all: the provider keeps the SDK's
+    // fork bookkeeping out by naming the fork itself.
+    writeFileSync(file, `${JSON.stringify({ type: "custom-title", customTitle: "Mine (fork)", sessionId: "s2" })}\n`, { flag: "a" });
+    expect(await readTranscriptTitles(file)).toEqual({ generatedTitle: "Second title", customTitle: "Mine (fork)" });
+    // A title past the first scan chunk, behind a line larger than the chunk
+    // (an embedded image), is still found — and the scan never buffers the
+    // file whole, so the cache key is the only thing that grows.
+    const large = path.join(root, "large.jsonl");
+    writeFileSync(large, [
+      JSON.stringify({ type: "user", uuid: "u1", message: { role: "user", content: "x".repeat(300_000) } }),
+      JSON.stringify({ type: "ai-title", aiTitle: "Past the chunk", sessionId: "large" }),
+      JSON.stringify({ type: "custom-title", customTitle: "Split", sessionId: "large" }),
+    ].join("\n") + "\n");
+    expect(await readTranscriptTitles(large)).toEqual({ generatedTitle: "Past the chunk", customTitle: "Split" });
   });
 });

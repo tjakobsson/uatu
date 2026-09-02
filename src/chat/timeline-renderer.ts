@@ -5,7 +5,7 @@ import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ActivityStatus, ConversationItem, ConversationStatus, MessageAttachment, PermissionOutcome, QueuedMessage, QuestionRequest, RevertedUserMessage, TokenUsage, ToolItem } from "./types";
+import { isLiveConversationStatus, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -337,7 +337,7 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
   const flushRun = (isTail: boolean) => {
     if (run.length === 0) return;
     const finished = run.every(item => "status" in item && item.status !== "running" && item.status !== "pending");
-    const live = isTail && (status === "running" || status === "sending");
+    const live = isTail && isLiveConversationStatus(status);
     segments.push(run.length >= GROUP_MIN && finished && !live
       ? { group: { id: `group:${run[0]!.id}`, summary: groupSummary(run) }, items: run }
       : { group: null, items: run });
@@ -373,7 +373,7 @@ function groupSummary(run: readonly ConversationItem[]): string {
     // Grouped reasoning stays "Thought" without a duration: the group line
     // counts kinds of steps, and per-entry timings belong on the entries.
     const detail = item.type === "tool" ? describeToolDetail(item) : undefined;
-    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.status === "completed" ? "Thought" : "Thinking") : detail ? detail.label : item.type === "background_task" ? backgroundTaskLabel(item) : item.type;
+    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.label ?? (item.status === "completed" ? "Thought" : "Thinking")) : detail ? detail.label : item.type === "background_task" ? backgroundTaskLabel(item) : item.type;
     const subject = item.type === "command" ? commandSubject(item.command) : detail ? toolSubject(detail) : item.type === "background_task" ? item.description : undefined;
     if (subject && named.length < GROUP_NAMED) {
       named.push(`${label} ${workspaceRelative(subject)}`);
@@ -387,6 +387,9 @@ function groupSummary(run: readonly ConversationItem[]): string {
 
 /** "Thinking" while it streams; "Thought for 12s" (or just "Thought") after. */
 export function reasoningLabel(item: Extract<ConversationItem, { type: "reasoning" }>): string {
+  // Recalled context carries its own label; only the model's own thinking
+  // is "Thought".
+  if (item.label) return item.label;
   if (item.status !== "completed") return "Thinking";
   const worked = item.durationMs === undefined ? "" : formatWorked(item.durationMs);
   return worked ? `Thought for ${worked}` : "Thought";
@@ -637,7 +640,11 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);
     return `<footer class="chat-item chat-turn-status is-${item.status}" data-chat-item-id="${id}"${stamp} role="status">${escapeHtml(statusLabel(item.status))}${item.message ? `: ${escapeHtml(item.message)}` : ""}${worked ? ` <span class="chat-turn-worked">· worked ${worked}</span>` : ""}</footer>`;
   }
-  if (item.type === "notice") return `<aside class="chat-item chat-notice is-${item.level}" data-chat-item-id="${id}"${stamp} role="${item.level === "error" ? "alert" : "status"}">${escapeHtml(item.message)}</aside>`;
+  if (item.type === "notice") {
+    // A reset time is formatted here, in the reader's zone, never on the server.
+    const resets = item.resetsAt === undefined ? "" : ` Resets ${new Date(item.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`;
+    return `<aside class="chat-item chat-notice is-${item.level}" data-chat-item-id="${id}"${stamp}${item.code ? ` data-notice-code="${escapeHtmlAttribute(item.code)}"` : ""} role="${item.level === "error" ? "alert" : "status"}">${escapeHtml(item.message + resets)}</aside>`;
+  }
   // Compaction is a boundary, not a step: a quiet rule across the timeline
   // stating that the agent summarized what came before, with the agent's
   // own figures when it reported them. Earlier content stays above it.
@@ -684,7 +691,8 @@ function assistantMessageComplete(items: readonly ConversationItem[], index: num
   if (!item || item.type !== "assistant_message") return false;
   if (item.completedAt !== undefined) return true;
   if (items.slice(index + 1).some(candidate => candidate.type === "turn_status")) return true;
-  return status !== "sending" && status !== "running";
+  // A retry or a compaction is still the same turn: the response may go on.
+  return !isLiveConversationStatus(status);
 }
 
 export function decorateAssistantCopyActions(container: HTMLElement): void {
@@ -1054,7 +1062,7 @@ export function compactionLabel(item: Extract<ConversationItem, { type: "compact
 }
 
 export function statusLabel(status: ConversationStatus): string {
-  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed", background: "Background work running" })[status];
+  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed", background: "Background work running", retrying: "Retrying", compacting: "Compacting context" })[status];
 }
 
 function counts(additions?: number, deletions?: number): string {
