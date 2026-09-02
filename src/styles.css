@@ -5069,6 +5069,73 @@ body.is-resizing-chat .chat-resizer {
    request's saved pattern, and dies with the OpenCode instance — it is not the
    project-persistent rule its type shape suggests. Quiet enough not to shout
    over the request, present enough to be read before clicking. */
+/* The typed-id row at the foot of the model list: a heading like the
+   provider groups above it, then one field and one action on a line. Present
+   only under an agent that runs typed ids; survives the search filter because
+   it exists for the id the list does not have. */
+.chat-configuration-custom-model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.4rem 0.5rem;
+  align-items: center;
+  margin-top: 0.35rem;
+}
+
+.chat-configuration-custom-model > h3 {
+  grid-column: 1 / -1;
+}
+
+.chat-configuration-custom-model-field {
+  display: block;
+  min-width: 0;
+}
+
+.chat-configuration-custom-model-field input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--mono-font-family);
+  font-size: 0.92em;
+}
+
+.chat-configuration-custom-model input[aria-invalid="true"] {
+  border-color: var(--danger, #c0392b);
+}
+
+.chat-configuration-custom-model > button {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  background: var(--surface-raised);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-request-intro,
+.chat-request-link {
+  margin: 0.35rem 0 0.5rem;
+}
+
+.chat-request-link a {
+  overflow-wrap: anywhere;
+}
+
+.chat-request-raw {
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  color: var(--text-subtle);
+}
+
+.chat-request-raw > summary {
+  cursor: pointer;
+}
+
+.chat-request-raw pre {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .chat-request-scope {
   margin: 0.45rem 0 0;
   font-size: 0.85em;
@@ -5550,6 +5617,35 @@ body.is-resizing-chat .chat-resizer {
   line-height: 1.55;
 }
 
+/* A compaction boundary: one quiet rule with a centred label. Not a card —
+   nothing here asks for attention — and not an activity row, because it is
+   not a step the agent took but a point the transcript folded at. */
+.chat-compaction {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.5rem 0;
+  color: var(--text-subtle);
+  font-size: 0.82em;
+}
+
+.chat-compaction::before,
+.chat-compaction::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border-soft);
+}
+
+.chat-compaction-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .chat-request,
 .chat-file-change,
 .chat-notice,
@@ -5685,6 +5781,19 @@ body.is-resizing-chat .chat-resizer {
 
 .chat-tool-meta {
   margin: 0.55rem 0 0;
+}
+
+/* The full command line of a shell row, whole where the summary showed one
+   bounded line. Wraps mid-token when it must, for the same reason the paths
+   and pipelines below do. */
+.chat-tool-command {
+  margin: 0.45rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-tool-background {
+  font-style: italic;
 }
 
 /* Everything in a card that is a path, a pattern, or a shell pipeline. None
@@ -6428,7 +6537,8 @@ body.is-resizing-chat .chat-resizer {
   overflow-y: auto;
 }
 
-.chat-configuration-provider h3 {
+.chat-configuration-provider h3,
+.chat-configuration-custom-model > h3 {
   margin: 0.65rem 0 0.25rem;
   color: var(--text-subtle);
   font-size: 0.72rem;

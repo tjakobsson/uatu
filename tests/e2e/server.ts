@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { MultiAgentChatService } from "../../src/chat/agents";
+import { CLAUDE_PERMISSION_SCOPE_NOTE } from "../../src/chat/claude/provider";
+import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../../src/chat/opencode/sdk-v2-provider";
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "../../src/assets/uatu-logo.svg" with { type: "file" };
 import icon192Asset from "../../src/assets/icon-192.png" with { type: "file" };
@@ -56,6 +58,10 @@ let activeEntries: WatchEntry[] = [];
 let personalState: Record<string, unknown> = { version: 1 };
 const fakeChatAgent = new FakeE2EChatService({
   agentName: process.env.UATU_E2E_PRIMARY_AGENT_NAME ?? undefined,
+  // The OpenCode-shaped primary fixture carries OpenCode's own verified
+  // persistent-approval sentence, imported so the e2e assertions prove the
+  // real descriptor text.
+  permissionScopeNote: OPENCODE_PERMISSION_SCOPE_NOTE,
   restoreFile: async (relativePath, contents) => {
     const target = path.resolve(activeWorkspaceRoot, relativePath);
     const relative = path.relative(activeWorkspaceRoot, target);
@@ -99,7 +105,15 @@ const controlJson = (value: unknown, agentId = "opencode") => Response.json(qual
 // exercise single-agent behavior (creation without a choice), and the agent
 // set is fixed per router — so the harness swaps routers behind a delegating
 // proxy instead of mutating one.
-const fakeSecondAgent = new FakeE2EChatService({ restoreFile: async () => undefined, agentName: "Claude Code", agentId: "claude-fixture" });
+const fakeSecondAgent = new FakeE2EChatService({
+  restoreFile: async () => undefined,
+  agentName: "Claude Code",
+  agentId: "claude-fixture",
+  // Claude Code's own persistent-approval sentence and its typed-id
+  // capability, as the real descriptor declares them (chat/claude/provider).
+  permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
+  extraCapabilities: ["custom-model-id"],
+});
 // The fake owns attachment persistence (its prompt path validates ids
 // against its own store), so the routers delegate rather than keeping a
 // second store the fake would never see.

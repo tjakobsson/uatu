@@ -1,0 +1,46 @@
+# D9 spike — Claude Code 2.1.258, @anthropic-ai/claude-agent-sdk 0.3.252, 2026-09-02T07:10:31.071Z
+# prompt: background "sleep 8 && echo done", reply STARTED, end turn; observe whether a second turn starts unprompted.
++   0.0s sent the prompt
++   0.3s system/init 
++   1.4s rate_limit_event 
++   1.5s system/thinking_tokens 
++   1.8s system/thinking_tokens 
++   2.1s system/thinking_tokens 
++   2.5s system/thinking_tokens 
++   2.5s system/thinking_tokens 
++   2.5s assistant ["thinking"]
++   3.0s assistant ["tool_use:Bash"]
++   3.4s system/background_tasks_changed {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2f6qh1hb","task_type":"local_bash","description":"Sleep for 8 seconds then echo done"}]}
++   3.4s system/task_started {"type":"system","subtype":"task_started","task_id":"b2f6qh1hb","tool_use_id":"toolu_01AF5U7MbpSiAKhiXkffqcdW","description":"Sleep for 8 seconds then echo done","is_backgrounded":true,"task_type":"local_bash"}
++   3.4s user [{"tool_use_id":"toolu_01AF5U7MbpSiAKhiXkffqcdW","type":"tool_result","content":"Command running in background with ID: b2f6qh1hb. Output is being written to: /private/tmp/claude-501/-private-tmp-clau
++   4.2s system/thinking_tokens 
++   4.6s system/thinking_tokens 
++   4.6s system/thinking_tokens 
++   4.6s assistant ["thinking"]
++   4.6s assistant ["STARTED"]
++   4.8s result subtype=success num_turns=2 queued=0
++   4.8s result #1; waiting to see whether a follow-up turn starts by itself
++  11.4s system/background_tasks_changed {"type":"system","subtype":"background_tasks_changed","tasks":[]}
++  11.4s system/task_updated {"type":"system","subtype":"task_updated","task_id":"b2f6qh1hb","patch":{"status":"completed","end_time":1788333026678}}
++  11.4s system/task_notification {"type":"system","subtype":"task_notification","task_id":"b2f6qh1hb","tool_use_id":"toolu_01AF5U7MbpSiAKhiXkffqcdW","status":"completed","output_file":"/private/tmp/claude-501/-private-tmp-claude-501--Users-tobias-src-github-com-tjakobsson-uatu-60ee4ffc-38e6-4272-9715-7a501854730f-scratchpad-real-ws
++  11.5s system/init 
++  12.2s system/thinking_tokens 
++  12.6s system/thinking_tokens 
++  12.9s system/thinking_tokens 
++  12.9s system/thinking_tokens 
++  12.9s assistant ["thinking"]
++  13.8s assistant ["tool_use:Read"]
++  13.8s user [{"tool_use_id":"toolu_01LfQ7EBpkfGrE5ft4jEws7E","type":"tool_result","content":"1\tdone\n2\t\n3\t[exited with code 0]\n4\t"}]
++  14.9s system/thinking_tokens 
++  14.9s system/thinking_tokens 
++  15.0s system/thinking_tokens 
++  15.0s system/thinking_tokens 
++  15.0s system/thinking_tokens 
++  15.4s system/thinking_tokens 
++  15.4s system/thinking_tokens 
++  15.4s assistant ["thinking"]
++  15.4s assistant ["FINISHED\ndone"]
++  15.4s result subtype=success num_turns=2 queued=0
++  15.4s result #2; waiting to see whether a follow-up turn starts by itself
++  15.8s done: results=2 notified=true
++  15.8s VERDICT: the CLI started a follow-up turn on its own (path 1, CLI-driven)

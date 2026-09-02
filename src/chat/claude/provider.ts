@@ -14,9 +14,9 @@ import type {
   ProviderSession,
 } from "../provider";
 import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "../types";
-import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
-import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel } from "./models";
-import { createClaudeEventMemory, normalizeClaudeMessage, normalizeTranscriptEntries } from "./normalization";
+import { InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
+import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
+import { createClaudeEventMemory, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
 import { listTranscriptSessions, readSessionTranscript, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
 /**
@@ -37,6 +37,8 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   applyFlagSettings?(settings: Record<string, unknown>): Promise<void>;
   supportedModels?(): Promise<unknown>;
   supportedCommands?(): Promise<unknown>;
+  /** The CLI's own context breakdown (the `/context` data), structurally. */
+  getContextUsage?(): Promise<unknown>;
   rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
 };
@@ -67,8 +69,41 @@ export type ClaudeQueryInput = {
     model?: string;
     effort?: string;
     canUseTool?: (toolName: string, input: Record<string, unknown>, options: ClaudeCanUseToolOptions) => Promise<ClaudePermissionResult>;
+    /** MCP elicitations (structurally the SDK's OnElicitation). */
+    onElicitation?: (request: ClaudeElicitationRequest, options: { signal: AbortSignal; requestId: string }) => Promise<ClaudeElicitationResult | null>;
+    /** Tool-driven blocking dialogs (structurally the SDK's OnUserDialog). */
+    onUserDialog?: (request: ClaudeUserDialogRequest, options: { signal: AbortSignal; requestId: string }) => Promise<ClaudeUserDialogResult | null>;
+    /** The dialog kinds this host renders; the CLI emits no other. */
+    supportedDialogKinds?: string[];
   };
 };
+
+/** The SDK's ElicitationRequest, structurally. */
+export type ClaudeElicitationRequest = {
+  serverName: string;
+  message: string;
+  mode?: "form" | "url";
+  url?: string;
+  elicitationId?: string;
+  requestedSchema?: Record<string, unknown>;
+  title?: string;
+  displayName?: string;
+  description?: string;
+};
+
+/** The MCP ElicitResult, structurally. */
+export type ClaudeElicitationResult = { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> };
+
+/** The SDK's UserDialogRequest / UserDialogResult, structurally. */
+export type ClaudeUserDialogRequest = { dialogKind: string; payload: Record<string, unknown>; toolUseID?: string };
+export type ClaudeUserDialogResult = { behavior: "completed"; result: unknown } | { behavior: "cancelled" };
+
+/**
+ * The dialog kinds this host renders and answers (D6). The CLI emits only
+ * declared kinds and degrades the rest to their no-dialog behaviour, so a
+ * kind is listed here only once it has a tailored card.
+ */
+export const CLAUDE_SUPPORTED_DIALOG_KINDS = ["refusal_fallback_prompt"];
 
 export type ClaudeUserEnvelope = {
   type: "user";
@@ -106,8 +141,21 @@ export type ClaudeProviderOptions = {
 };
 
 const DEFAULT_TITLE = "New conversation";
+/**
+ * What "Allow always" actually does under Claude Code, as brokerToolUse
+ * implements it: the reply returns only the SDK's session-destination
+ * suggestions, so the CLI adds an allow rule for the rest of that live
+ * process — and an idle conversation holds no process, so the rule lasts
+ * the turn (a process kept up for background work carries it a little
+ * further, which the sentence deliberately does not promise). Nothing is
+ * written to the user's settings. The spec forbids asserting more.
+ */
+export const CLAUDE_PERMISSION_SCOPE_NOTE = "“Allow always” also covers similar requests for the rest of this turn. Nothing is saved to your settings.";
 const CATALOG_PROBE_TIMEOUT_MS = 20_000;
 const CATALOG_PROBE_COOLDOWN_MS = 60_000;
+// One control round-trip after each turn; a CLI that never answers must not
+// hold the session open past this.
+const CONTEXT_REPORT_TIMEOUT_MS = 3_000;
 const TITLE_LIMIT = 80;
 
 type LiveSession = {
@@ -122,6 +170,8 @@ type LiveSession = {
   // Set by interrupt(): the turn's terminal result reports the user's
   // cancellation, not a failure of its own.
   interrupted?: boolean;
+  // The latest context probe's turn; an older probe's answer is discarded.
+  reportGeneration?: number;
 };
 
 /**
@@ -197,7 +247,12 @@ export class ClaudeProvider implements ChatProvider {
 
   describe(): ChatAgent {
     // Extended one capability at a time by the task that implements it.
-    return { id: "claude", name: "Claude Code", capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents"] };
+    return {
+      id: "claude",
+      name: "Claude Code",
+      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id"],
+      permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
+    };
   }
 
   async listCommands(): Promise<ChatCommand[]> {
@@ -208,7 +263,9 @@ export class ClaudeProvider implements ChatProvider {
   }
   async listModels(): Promise<ChatModel[]> {
     await this.hydrateCatalog();
-    return this.liveModels ?? CLAUDE_MODELS;
+    // The catalog's own rows first, then UatuCode's app-only set under its
+    // own group (D3) — never shadowing an id the catalog already offers.
+    return withMoreModels(this.liveModels ?? CLAUDE_MODELS);
   }
 
   /**
@@ -289,7 +346,7 @@ export class ClaudeProvider implements ChatProvider {
   async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
     await this.restoreDurableState();
     if (variant !== undefined) {
-      const model = (this.liveModels ?? CLAUDE_MODELS).find(candidate => candidate.selection.modelId === selection.modelId)
+      const model = withMoreModels(this.liveModels ?? CLAUDE_MODELS).find(candidate => candidate.selection.modelId === selection.modelId)
         ?? findClaudeModel(selection.modelId);
       if (!model?.variants?.includes(variant)) {
         throw new UnsupportedVariantSelectionError(`model ${selection.modelId} does not offer effort level ${variant}`);
@@ -686,18 +743,15 @@ export class ClaudeProvider implements ChatProvider {
 
   async replyQuestion(sessionId: string, requestId: string, answers: string[][]): Promise<void> {
     const pending = this.requireInteraction(sessionId, requestId, "question");
-    // AskUserQuestion expects answers keyed by the full question text on its
-    // own input; a multi-select answer joins its labels.
-    const record: Record<string, string> = {};
-    (pending.questionTexts ?? []).forEach((text, index) => {
-      record[text] = (answers[index] ?? []).join(", ");
-    });
-    pending.settle({ behavior: "allow", updatedInput: { ...pending.input, answers: record } });
+    // Each question kind maps the shared answer shape onto its own result:
+    // the question tool's keyed record, an elicitation's content, a
+    // dialog's choice.
+    pending.settle(pending.onAnswer!(answers));
   }
 
   async rejectQuestion(sessionId: string, requestId: string): Promise<void> {
     const pending = this.requireInteraction(sessionId, requestId, "question");
-    pending.settle({ behavior: "deny", message: "The user declined to answer." });
+    pending.settle(pending.onReject!());
   }
 
   /**
@@ -725,11 +779,18 @@ export class ClaudeProvider implements ChatProvider {
   async listQuestions(): Promise<PendingQuestion[]> {
     return [...this.interactions.values()]
       .filter(pending => pending.kind === "question")
-      .map(pending => ({
-        requestId: pending.requestId,
-        conversationId: pending.conversationId,
-        questions: (pending.item as QuestionRequest).questions,
-      }));
+      .map(pending => {
+        const item = pending.item as QuestionRequest;
+        return {
+          requestId: pending.requestId,
+          conversationId: pending.conversationId,
+          questions: item.questions,
+          ...(item.source === undefined ? {} : { source: item.source }),
+          ...(item.intro === undefined ? {} : { intro: item.intro }),
+          ...(item.link === undefined ? {} : { link: item.link }),
+          ...(item.schema === undefined ? {} : { schema: item.schema }),
+        };
+      });
   }
 
   /**
@@ -791,6 +852,12 @@ export class ClaudeProvider implements ChatProvider {
         // the session is live takes effect on the next session start.
         ...((variant ?? configuration.variant) ? { effort: (variant ?? configuration.variant)! } : {}),
         canUseTool: (toolName, input, options) => this.brokerToolUse(sessionId, toolName, input, options),
+        // Dialogs and elicitations are pending interactions like a tool
+        // approval: a card in the owning conversation, answered through the
+        // same registry, abandoned visibly when the session ends (D6).
+        onElicitation: (request, options) => this.brokerElicitation(sessionId, request, options),
+        onUserDialog: (request, options) => this.brokerDialog(sessionId, request, options),
+        supportedDialogKinds: [...CLAUDE_SUPPORTED_DIALOG_KINDS],
       },
     });
     const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0 };
@@ -824,10 +891,23 @@ export class ClaudeProvider implements ChatProvider {
         // process (spec). Unless another accepted prompt is still pending
         // for this very session, retire the query — the next prompt
         // resumes fresh.
-        if (normalized.eventType === "result") session.pendingTurns = Math.max(0, session.pendingTurns - 1);
-        if (normalized.eventType === "result" && session.pendingTurns === 0 && this.live.get(session.id) === session) {
-          await this.retireSession(session);
-          return;
+        if (normalized.eventType === "result") {
+          session.pendingTurns = Math.max(0, session.pendingTurns - 1);
+          // The turn's status is already out; the authoritative breakdown
+          // follows it as a context report (D1). Not awaited here: the
+          // reader must stay free to consume a next turn the adapter may
+          // already have delivered on the completed status. Only a session
+          // about to retire waits for it, so the report lands before the
+          // process goes. Bounded and best-effort: a failure leaves the
+          // per-message carrier as the readout's source.
+          // Retirement follows the report but never holds the reader: a held
+          // prompt the completed status released can land in this very
+          // session meanwhile, and its events must be read as they come.
+          // The idle check is made once the report is in, against the
+          // counters as they stand then; a retired query ends this loop.
+          void this.reportContextUsage(session, memory.lastModel).then(async () => {
+            if (session.pendingTurns === 0 && this.live.get(session.id) === session) await this.retireSession(session);
+          });
         }
       }
       // The stream ended without dispose: the session's process is gone.
@@ -1211,58 +1291,166 @@ export class ClaudeProvider implements ChatProvider {
   private brokerToolUse(sessionId: string, toolName: string, input: Record<string, unknown>, options: ClaudeCanUseToolOptions): Promise<ClaudePermissionResult> {
     const requestId = options.toolUseID ?? randomUUID();
     const createdAt = this.now();
-    return new Promise<ClaudePermissionResult>(resolve => {
-      const questions = toolName === "AskUserQuestion" ? normalizeAskUserQuestions(input) : null;
-      // A completed plan asks for its own kind of approval: the card carries
-      // the plan and intents rather than the generic allow pair (D5).
-      const plan = toolName === "ExitPlanMode" && typeof input.plan === "string" ? input.plan : null;
-      const returnMode = this.modeBeforePlan.get(sessionId);
-      const item: PermissionRequest | QuestionRequest = questions
-        ? { id: `question:${requestId}`, type: "question", createdAt, requestId, questions, status: "pending" }
-        : plan !== null
-          ? {
-            id: `permission:${requestId}`,
-            type: "permission",
-            createdAt,
-            requestId,
-            action: "Review the plan",
-            resources: [],
-            status: "pending",
-            plan,
-            choices: [
-              { id: "implement", label: "Approve and implement" },
-              ...(returnMode && returnMode !== "plan"
-                ? [{ id: "implement-and-restore", label: `Approve, then return to ${returnMode}`, description: "Implement the plan, then go back to the mode this conversation used before planning." }]
-                : []),
-            ],
-          }
-          : {
-            id: `permission:${requestId}`,
-            type: "permission",
-            createdAt,
-            requestId,
-            action: options.title ?? options.displayName ?? toolName,
-            resources: permissionResources(input, options),
-            status: "pending",
-          };
-      const settle = (result: ClaudePermissionResult, resolution?: "answered") => {
+    const questions = toolName === "AskUserQuestion" ? normalizeAskUserQuestions(input) : null;
+    // A completed plan asks for its own kind of approval: the card carries
+    // the plan and intents rather than the generic allow pair (D5).
+    const plan = toolName === "ExitPlanMode" && typeof input.plan === "string" ? input.plan : null;
+    const returnMode = this.modeBeforePlan.get(sessionId);
+    const item: PermissionRequest | QuestionRequest = questions
+      ? { id: `question:${requestId}`, type: "question", createdAt, requestId, questions, status: "pending" }
+      : plan !== null
+        ? {
+          id: `permission:${requestId}`,
+          type: "permission",
+          createdAt,
+          requestId,
+          action: "Review the plan",
+          resources: [],
+          status: "pending",
+          plan,
+          choices: [
+            { id: "implement", label: "Approve and implement" },
+            ...(returnMode && returnMode !== "plan"
+              ? [{ id: "implement-and-restore", label: `Approve, then return to ${returnMode}`, description: "Implement the plan, then go back to the mode this conversation used before planning." }]
+              : []),
+          ],
+        }
+        : {
+          id: `permission:${requestId}`,
+          type: "permission",
+          createdAt,
+          requestId,
+          action: options.title ?? options.displayName ?? toolName,
+          resources: permissionResources(input, options),
+          status: "pending",
+        };
+    return this.awaitInteraction<ClaudePermissionResult>(sessionId, {
+      requestId,
+      kind: questions ? "question" : "permission",
+      item,
+      input,
+      suggestions: options.suggestions,
+      signal: options.signal,
+      abandoned: reason => ({ behavior: "deny", message: reason }),
+      ...(questions ? {
+        // AskUserQuestion expects answers keyed by the full question text on
+        // its own input; a multi-select answer joins its labels.
+        onAnswer: answers => {
+          const record: Record<string, string> = {};
+          questions.forEach((question, index) => { record[question.prompt] = (answers[index] ?? []).join(", "); });
+          return { behavior: "allow", updatedInput: { ...input, answers: record } };
+        },
+        onReject: () => ({ behavior: "deny", message: "The user declined to answer." }),
+      } : {}),
+    });
+  }
+
+  /**
+   * An MCP server's elicitation (D6): a form-mode request becomes one
+   * question step per schema property (enum and boolean fields as choices,
+   * the rest free-form), a URL-mode request a single "done" confirmation
+   * with the link to open. Accept returns the coerced values; decline and
+   * a dead session return their own MCP actions.
+   */
+  private brokerElicitation(sessionId: string, request: ClaudeElicitationRequest, options: { signal: AbortSignal; requestId: string }): Promise<ClaudeElicitationResult | null> {
+    const requestId = options.requestId || randomUUID();
+    const createdAt = this.now();
+    const { questions, coerce } = elicitationQuestions(request);
+    const item: QuestionRequest = {
+      id: `question:${requestId}`,
+      type: "question",
+      createdAt,
+      requestId,
+      questions,
+      status: "pending",
+      source: "elicitation",
+      intro: `${request.title ?? request.displayName ?? request.serverName} asks: ${request.message}`,
+      ...(request.mode === "url" && request.url && /^https?:\/\//i.test(request.url) ? { link: request.url } : {}),
+      ...(request.requestedSchema ? { schema: request.requestedSchema } : {}),
+    };
+    return this.awaitInteraction<ClaudeElicitationResult>(sessionId, {
+      requestId,
+      kind: "question",
+      item,
+      input: {},
+      suggestions: undefined,
+      signal: options.signal,
+      abandoned: () => ({ action: "cancel" }),
+      onAnswer: answers => request.mode === "url" ? { action: "accept" } : { action: "accept", content: coerce(answers) },
+      onReject: () => ({ action: "decline" }),
+    });
+  }
+
+  /**
+   * A tool-driven blocking dialog (D6): a known kind renders as choices with
+   * its own result vocabulary; an undeclared kind — which the CLI should
+   * never send — gets a card that can only dismiss it, the CLI's documented
+   * answer for a kind the host does not render.
+   */
+  private brokerDialog(sessionId: string, request: ClaudeUserDialogRequest, options: { signal: AbortSignal; requestId: string }): Promise<ClaudeUserDialogResult | null> {
+    const requestId = options.requestId || request.toolUseID || randomUUID();
+    const createdAt = this.now();
+    const dialog = dialogQuestions(request);
+    const item: QuestionRequest = {
+      id: `question:${requestId}`,
+      type: "question",
+      createdAt,
+      requestId,
+      questions: dialog.questions,
+      status: "pending",
+      source: "dialog",
+      intro: dialog.intro,
+      schema: { dialogKind: request.dialogKind, payload: request.payload },
+    };
+    return this.awaitInteraction<ClaudeUserDialogResult>(sessionId, {
+      requestId,
+      kind: "question",
+      item,
+      input: request.payload,
+      suggestions: undefined,
+      signal: options.signal,
+      abandoned: () => ({ behavior: "cancelled" }),
+      onAnswer: answers => dialog.result(answers),
+      onReject: () => ({ behavior: "cancelled" }),
+    });
+  }
+
+  /**
+   * Registers one pending interaction and resolves with the request's own
+   * result when the user answers, when the turn is interrupted (the SDK
+   * aborts the signal), or when the session ends — never left hanging.
+   */
+  private awaitInteraction<T>(sessionId: string, registration: {
+    requestId: string;
+    kind: "permission" | "question";
+    item: PermissionRequest | QuestionRequest;
+    input: Record<string, unknown>;
+    suggestions: unknown[] | undefined;
+    signal: AbortSignal;
+    abandoned: (reason: string) => T;
+    onAnswer?: (answers: string[][]) => T;
+    onReject?: () => T;
+  }): Promise<T> {
+    const { requestId, item } = registration;
+    return new Promise<T>(resolve => {
+      const settle = (result: T, resolution?: "answered") => {
         if (!this.interactions.has(requestId)) return;
         this.interactions.delete(requestId);
-        options.signal.removeEventListener("abort", onAbort);
+        registration.signal.removeEventListener("abort", onAbort);
         // The adapter publishes resolutions it brokered itself; only an
         // unanswered end (abort, session death) must resolve the card here.
         if (resolution !== "answered") {
           this.emit(sessionId, {
-            updates: [{ kind: "upsert", item: questions
-              ? { ...(item as QuestionRequest), status: "resolved", outcome: { kind: "rejected" } }
-              : { ...(item as PermissionRequest), status: "resolved", outcome: "rejected" } }],
+            updates: [{ kind: "upsert", item: item.type === "question"
+              ? { ...item, status: "resolved", outcome: { kind: "rejected" } }
+              : { ...item, status: "resolved", outcome: "rejected" } }],
             outcome: "handled",
             eventType: "interaction.abandoned",
           });
         }
         resolve(result);
       };
-      const onAbort = () => settle({ behavior: "deny", message: "The turn was interrupted before the user answered." });
+      const onAbort = () => settle(registration.abandoned("The turn was interrupted before the user answered."));
       // Registration precedes abort observation: settle() is a no-op until
       // the map holds this request, so an abort firing between the two
       // would strand a permanently pending card while Claude waits on the
@@ -1270,19 +1458,20 @@ export class ClaudeProvider implements ChatProvider {
       this.interactions.set(requestId, {
         requestId,
         conversationId: sessionId,
-        kind: questions ? "question" : "permission",
+        kind: registration.kind,
         item,
-        input,
-        suggestions: options.suggestions,
-        ...(questions ? { questionTexts: questions.map(question => question.prompt) } : {}),
-        settle: result => settle(result, "answered"),
-        abandon: reason => settle({ behavior: "deny", message: reason }),
+        input: registration.input,
+        suggestions: registration.suggestions,
+        ...(registration.onAnswer ? { onAnswer: registration.onAnswer as (answers: string[][]) => unknown } : {}),
+        ...(registration.onReject ? { onReject: registration.onReject as () => unknown } : {}),
+        settle: result => settle(result as T, "answered"),
+        abandon: reason => settle(registration.abandoned(reason)),
       });
-      if (options.signal.aborted) {
+      if (registration.signal.aborted) {
         onAbort();
         return;
       }
-      options.signal.addEventListener("abort", onAbort, { once: true });
+      registration.signal.addEventListener("abort", onAbort, { once: true });
       this.emit(sessionId, { updates: [{ kind: "upsert", item }], outcome: "handled", eventType: "interaction.requested" });
     });
   }
@@ -1326,6 +1515,30 @@ export class ClaudeProvider implements ChatProvider {
       throw new Error(`no pending ${kind} ${requestId} for this conversation`);
     }
     return pending;
+  }
+
+  /** The CLI's own context breakdown, emitted as a report item after a turn. */
+  private async reportContextUsage(session: LiveSession, model: string | undefined): Promise<void> {
+    if (!session.query.getContextUsage || this.live.get(session.id) !== session) return;
+    // One probe per turn; a probe a later turn's probe has overtaken says
+    // nothing current and is dropped, so the newest report is the newest
+    // turn's (newest-wins in the readout relies on that).
+    const generation = (session.reportGeneration = (session.reportGeneration ?? 0) + 1);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const raw = await Promise.race([
+        session.query.getContextUsage(),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTEXT_REPORT_TIMEOUT_MS); }),
+      ]);
+      if (raw === null || session.reportGeneration !== generation) return;
+      const item = normalizeContextUsage(raw, this.now(), model);
+      if (!item) return;
+      this.emit(session.id, { updates: [{ kind: "upsert", item }], outcome: "handled", eventType: "context.reported" });
+    } catch {
+      // The per-message carrier stands.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   /** An idle session holds no process: retire its query and its cards. */
@@ -1471,7 +1684,12 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
     // catalog keys by alias ("sonnet", "opus[1m]"); the join is what lets
     // the context gauge find the window actually in effect.
     const resolvedModel = typeof info.resolvedModel === "string" && info.resolvedModel ? info.resolvedModel : undefined;
-    const name = typeof info.displayName === "string" && info.displayName ? info.displayName : info.value;
+    const description = typeof info.description === "string" && info.description ? info.description : undefined;
+    const displayName = typeof info.displayName === "string" && info.displayName ? info.displayName : info.value;
+    // Every surface names the model from this one field, so the version is
+    // derived here once (D2). The default row keeps the CLI's own label;
+    // surfaces name what it resolves to.
+    const name = isDefault ? displayName : versionedModelName(displayName, description, resolvedModel);
     const variants = Array.isArray(info.supportedEffortLevels)
       ? info.supportedEffortLevels.filter((level): level is string => typeof level === "string")
       : undefined;
@@ -1481,7 +1699,7 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
       provider: "Anthropic",
       name,
       ...(variants && variants.length > 0 ? { variants } : {}),
-      ...(typeof info.description === "string" && info.description ? { detail: info.description } : {}),
+      ...(description ? { detail: description } : {}),
       ...(isDefault ? { default: true } : {}),
       ...(resolvedModel && resolvedModel !== info.value ? { resolvesTo: { providerId: "anthropic", modelId: resolvedModel } } : {}),
       // No ModelInfo field carries the window; derive it from the ids
@@ -1505,7 +1723,7 @@ function modelsFromCatalog(raw: unknown): { models: ChatModel[]; aliases: Map<st
     if (model.default) continue;
     const resolved = resolvedByIndex.get(index);
     if (!resolved) continue;
-    const stripped = resolved.replace(/\[[^\]]*\]$/, "");
+    const stripped = stripWindowMarker(resolved);
     if (stripped !== resolved && stripped !== model.selection.modelId && !aliases.has(stripped)) aliases.set(stripped, model.selection.modelId);
   }
   // Name the default's resolution: the concrete entry sharing its resolved
@@ -1600,10 +1818,251 @@ type PendingInteraction = {
   item: PermissionRequest | QuestionRequest;
   input: Record<string, unknown>;
   suggestions: unknown[] | undefined;
-  questionTexts?: string[];
-  settle: (result: ClaudePermissionResult) => void;
+  // For a question: how the shared answer shape becomes this request's own
+  // result (a tool allow, an MCP accept, a dialog choice), and what a
+  // rejection returns.
+  onAnswer?: (answers: string[][]) => unknown;
+  onReject?: () => unknown;
+  settle: (result: unknown) => void;
   abandon: (reason: string) => void;
 };
+
+/**
+ * An elicitation's JSON schema → question steps, one per property, with a
+ * coercion back to the schema's types on answer. Enum and boolean fields
+ * are choices; everything else is free-form. A schema without properties
+ * asks for one confirmation.
+ */
+function elicitationQuestions(request: ClaudeElicitationRequest): { questions: StructuredQuestion[]; coerce: (answers: string[][]) => Record<string, unknown> } {
+  if (request.mode === "url") {
+    // A link the card can offer is http(s); any other scheme (an app's
+    // OAuth callback) is spelled out in the prompt so the user can still
+    // open it by hand.
+    const linkable = typeof request.url === "string" && /^https?:\/\//i.test(request.url);
+    return {
+      questions: [{
+        prompt: !request.url ? "Continue?" : linkable ? "Open the link to continue, then confirm here." : `Open ${request.url} to continue, then confirm here.`,
+        header: "Open link",
+        options: [{ label: "Done", description: "I finished the step in my browser" }],
+        multiple: false,
+        allowFreeForm: false,
+      }],
+      coerce: () => ({}),
+    };
+  }
+  const schema = request.requestedSchema ?? {};
+  const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+    ? Object.entries(schema.properties as Record<string, unknown>) : [];
+  if (properties.length === 0) {
+    return {
+      questions: [{ prompt: request.message, header: "Confirm", options: [{ label: "Accept", description: "" }], multiple: false, allowFreeForm: false }],
+      coerce: () => ({}),
+    };
+  }
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((entry): entry is string => typeof entry === "string") : []);
+  // An optional field is an optional question: the form may submit it with
+  // no answer, and the content then leaves that key out rather than
+  // inventing a value. Nothing in-band — a user value can be any string.
+  const fields = properties.map(([key, value]) => {
+    const field = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const type = typeof field.type === "string" ? field.type : "string";
+    // MCP's multi-select shape is an array whose items carry the enum; the
+    // titled-enum shape is an anyOf of const/title entries. Both become
+    // choices, the array one with several allowed.
+    const items = type === "array" && field.items && typeof field.items === "object" && !Array.isArray(field.items) ? field.items as Record<string, unknown> : undefined;
+    const source = items ?? field;
+    const choices = enumChoices(source);
+    return {
+      key,
+      type: items ? (typeof items.type === "string" ? items.type : "string") : type,
+      multiple: items !== undefined,
+      enumValues: choices.map(choice => choice.value),
+      // Positional: a title supplied for only some choices must not slide
+      // onto its neighbour.
+      enumNames: choices.map(choice => choice.name),
+      integer: type === "integer" || (items !== undefined && items.type === "integer"),
+      minimum: typeof field.minimum === "number" ? field.minimum : undefined,
+      maximum: typeof field.maximum === "number" ? field.maximum : undefined,
+      minLength: typeof field.minLength === "number" ? field.minLength : undefined,
+      maxLength: typeof field.maxLength === "number" ? field.maxLength : undefined,
+      format: typeof field.format === "string" ? field.format : undefined,
+      minItems: typeof field.minItems === "number" ? field.minItems : undefined,
+      maxItems: typeof field.maxItems === "number" ? field.maxItems : undefined,
+      optional: !required.has(key),
+      title: typeof field.title === "string" && field.title ? field.title : key,
+      description: typeof field.description === "string" ? field.description : "",
+    };
+  });
+  // Every option needs a non-empty, distinct label (the wire rejects an
+  // empty one, and two alike could not be told apart on answer): an empty
+  // enum value is named, and repeats are numbered. Answers map back by
+  // position in this list, never by parsing the label.
+  const enumLabels = (field: typeof fields[number]): string[] => {
+    const seen = new Map<string, number>();
+    return field.enumValues.map((entry, index) => {
+      const base = field.enumNames[index] ?? (String(entry).trim() || "(empty)");
+      const count = (seen.get(base) ?? 0) + 1;
+      seen.set(base, count);
+      return count > 1 ? `${base} (${count})` : base;
+    });
+  };
+  const questions: StructuredQuestion[] = fields.map(field => {
+    const options = field.enumValues.length > 0
+      ? enumLabels(field).map(label => ({ label, description: "" }))
+      : field.type === "boolean"
+        ? [{ label: "Yes", description: "" }, { label: "No", description: "" }]
+        : [];
+    // The constraints the answer will be checked against, said up front.
+    const constraints = field.type === "number" || field.integer
+      ? [field.integer ? "whole number" : "number", field.minimum !== undefined ? `at least ${field.minimum}` : "", field.maximum !== undefined ? `at most ${field.maximum}` : ""]
+      : field.multiple
+        ? [field.minItems !== undefined ? `choose at least ${field.minItems}` : "", field.maxItems !== undefined ? `choose at most ${field.maxItems}` : ""]
+        : [field.format ? formatLabel(field.format) : "", field.minLength !== undefined ? `at least ${field.minLength} characters` : "", field.maxLength !== undefined ? `at most ${field.maxLength} characters` : ""];
+    const hint = constraints.filter(Boolean).join(", ");
+    return {
+      prompt: `${field.description || field.title}${hint ? ` (${hint})` : ""}`,
+      header: field.title,
+      options,
+      multiple: field.multiple && options.length > 0,
+      allowFreeForm: field.enumValues.length === 0 && field.type !== "boolean",
+      ...(field.optional ? { optional: true } : {}),
+    };
+  });
+  // Answers are checked against the schema before the interaction settles:
+  // MCP validates the content and a rejected reply would land after the card
+  // is gone, with no way to correct it. A refusal keeps the card pending.
+  const coerce = (answers: string[][]): Record<string, unknown> => {
+    const content: Record<string, unknown> = {};
+    fields.forEach((field, index) => {
+      const given = answers[index] ?? [];
+      if (given.length === 0) return;
+      const labels = enumLabels(field);
+      const pick = (answer: string): unknown => {
+        const chosen = labels.indexOf(answer);
+        if (chosen >= 0) return field.enumValues[chosen];
+        if (field.enumValues.length > 0) throw new InvalidQuestionAnswerError(`${field.title}: choose one of the offered values`);
+        if (field.type === "boolean") return answer === "Yes";
+        if (field.type === "string") {
+          if (field.minLength !== undefined && answer.length < field.minLength) throw new InvalidQuestionAnswerError(`${field.title}: enter at least ${field.minLength} characters`);
+          if (field.maxLength !== undefined && answer.length > field.maxLength) throw new InvalidQuestionAnswerError(`${field.title}: enter at most ${field.maxLength} characters`);
+          if (field.format && !matchesFormat(field.format, answer)) throw new InvalidQuestionAnswerError(`${field.title}: enter ${formatLabel(field.format)}`);
+          return answer;
+        }
+        if (field.type === "number" || field.type === "integer") {
+          const parsed = Number(answer.trim());
+          if (!Number.isFinite(parsed) || answer.trim() === "") throw new InvalidQuestionAnswerError(`${field.title}: enter a number`);
+          if (field.integer && !Number.isInteger(parsed)) throw new InvalidQuestionAnswerError(`${field.title}: enter a whole number`);
+          if (field.minimum !== undefined && parsed < field.minimum) throw new InvalidQuestionAnswerError(`${field.title}: enter at least ${field.minimum}`);
+          if (field.maximum !== undefined && parsed > field.maximum) throw new InvalidQuestionAnswerError(`${field.title}: enter at most ${field.maximum}`);
+          return parsed;
+        }
+        return answer;
+      };
+      if (field.multiple) {
+        if (field.minItems !== undefined && given.length < field.minItems) throw new InvalidQuestionAnswerError(`${field.title}: choose at least ${field.minItems}`);
+        if (field.maxItems !== undefined && given.length > field.maxItems) throw new InvalidQuestionAnswerError(`${field.title}: choose at most ${field.maxItems}`);
+      }
+      content[field.key] = field.multiple ? given.map(pick) : pick(given[0]!);
+    });
+    return content;
+  };
+  return { questions, coerce };
+}
+
+/** The string formats MCP elicitation schemas may name, as the user reads them. */
+function formatLabel(format: string): string {
+  return ({ email: "an email address", uri: "a URL", date: "a date (YYYY-MM-DD)", "date-time": "a date and time (ISO 8601)" } as Record<string, string>)[format] ?? `a ${format}`;
+}
+
+/** A real calendar day, or null: Date.parse would quietly roll 2025-02-30 into March. */
+function calendarDate(value: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day ? date : null;
+}
+
+/** A conservative check for the formats the MCP spec allows on elicitation strings; unknown formats pass. */
+function matchesFormat(format: string, value: string): boolean {
+  switch (format) {
+    case "email": return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+    case "uri": try { new URL(value); return true; } catch { return false; }
+    case "date": return calendarDate(value) !== null;
+    case "date-time": {
+      // RFC 3339: full date, "T", time with seconds, optional fraction, zone.
+      const match = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.exec(value);
+      return match !== null && calendarDate(match[1]!) !== null && !Number.isNaN(Date.parse(value));
+    }
+    default: return true;
+  }
+}
+
+/** The enum a schema (or an array's items) offers, in either MCP spelling. */
+function enumChoices(schema: Record<string, unknown>): Array<{ value: string | number | boolean; name?: string }> {
+  const scalar = (entry: unknown): entry is string | number | boolean => ["string", "number", "boolean"].includes(typeof entry);
+  if (Array.isArray(schema.enum)) {
+    const names = Array.isArray(schema.enumNames) ? schema.enumNames : [];
+    return schema.enum.filter(scalar).map((value, index) => ({ value, ...(typeof names[index] === "string" ? { name: names[index] as string } : {}) }));
+  }
+  const variants = Array.isArray(schema.anyOf) ? schema.anyOf : Array.isArray(schema.oneOf) ? schema.oneOf : [];
+  return variants.flatMap(variant => {
+    if (!variant || typeof variant !== "object" || Array.isArray(variant)) return [];
+    const record = variant as Record<string, unknown>;
+    if (!scalar(record.const)) return [];
+    return [{ value: record.const, ...(typeof record.title === "string" && record.title ? { name: record.title } : {}) }];
+  });
+}
+
+/**
+ * A dialog kind → its card and result vocabulary. `refusal_fallback_prompt`
+ * (the one kind declared) offers the retry and the edit; anything else can
+ * only be dismissed, which the CLI treats as its default behaviour.
+ */
+function dialogQuestions(request: ClaudeUserDialogRequest): { intro: string; questions: StructuredQuestion[]; result: (answers: string[][]) => ClaudeUserDialogResult } {
+  const payload = request.payload;
+  if (request.dialogKind === "refusal_fallback_prompt") {
+    const original = typeof payload.originalModel === "string" && payload.originalModel ? payload.originalModel : "the current model";
+    const fallback = typeof payload.fallbackModel === "string" && payload.fallbackModel ? payload.fallbackModel : "the fallback model";
+    const retry = `Retry on ${fallback}`;
+    const edit = "Edit the prompt";
+    return {
+      intro: `Claude Code asks how to continue after ${original} declined this request.`,
+      questions: [{
+        prompt: typeof payload.guidanceText === "string" && payload.guidanceText ? payload.guidanceText : `${original} declined to continue. The turn can be retried on ${fallback}.`,
+        header: "Refusal",
+        options: [
+          { label: retry, description: "Rerun this turn on the fallback model" },
+          { label: edit, description: "Stop this turn so the request can be changed" },
+        ],
+        multiple: false,
+        allowFreeForm: false,
+      }],
+      // The result vocabulary is the CLI's own for this kind: its dialog
+      // registry declares `result: enum(["retry_fallback", "edit_prompt",
+      // "cancelled"])` with `cancelled` as the default (Claude Code 2.1.258;
+      // not surfaced in the SDK's types, read from the CLI bundle).
+      result: answers => {
+        const answer = answers[0]?.[0];
+        if (answer === retry) return { behavior: "completed", result: "retry_fallback" };
+        if (answer === edit) return { behavior: "completed", result: "edit_prompt" };
+        return { behavior: "cancelled" };
+      },
+    };
+  }
+  const kind = request.dialogKind.replaceAll("_", " ");
+  return {
+    intro: `Claude Code asks for a "${kind}" dialog this client cannot render; dismissing applies the dialog's default.`,
+    questions: [{
+      prompt: JSON.stringify(payload).slice(0, 400) || "(no details)",
+      header: kind.charAt(0).toUpperCase() + kind.slice(1),
+      options: [{ label: "Dismiss", description: "Apply the dialog's default behaviour" }],
+      multiple: false,
+      allowFreeForm: false,
+    }],
+    result: () => ({ behavior: "cancelled" }),
+  };
+}
 
 /** Only session-destination suggestions survive: never persist an allow. */
 function sessionScopedSuggestions(suggestions: unknown[] | undefined): unknown[] | undefined {

@@ -47,7 +47,8 @@ export function syncQuestionForm(form: HTMLFormElement): void {
   const panels = [...form.querySelectorAll<HTMLElement>("[data-question-panel]")];
   if (panels.length === 0) return;
   const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
-  const answered = panels.map(panel => panelAnswers(panel).length > 0);
+  // An optional question counts as answered when left empty.
+  const answered = panels.map(panel => panelAnswers(panel).length > 0 || panel.dataset.questionOptional === "true");
   form.querySelectorAll<HTMLButtonElement>("[data-question-tab]").forEach((tab, index) => {
     tab.setAttribute("aria-selected", String(index === activeIndex));
     tab.classList.toggle("is-active", index === activeIndex);

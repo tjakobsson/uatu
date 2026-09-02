@@ -281,7 +281,8 @@ describe("activity grouping", () => {
       .toEqual(["message:u1", "group:tool:a", "part:a1"]);
     const group = host.querySelector('[data-chat-item-id="group:tool:a"]')!;
     expect(group.querySelector(".chat-group-count")!.textContent).toBe("3 steps");
-    expect(group.querySelector(".chat-activity-subject")!.textContent).toBe("Read ×3");
+    // Named, not counted: the collapsed line says what the steps acted on.
+    expect(group.querySelector(".chat-activity-subject")!.textContent).toBe("Read a.ts · Read b.ts · Read c.ts");
     expect(group.querySelectorAll(".chat-group-items [data-chat-item-id]")).toHaveLength(3);
   });
 
@@ -603,6 +604,159 @@ describe("task progress renders one presentation updated in place", () => {
   });
 });
 
+describe("dialogs and elicitations reuse the question card", () => {
+  test("a dialog card says who asks, offers the kind's choices, and keeps the raw request", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{
+      ...question,
+      id: "question:dl-1",
+      requestId: "dl-1",
+      source: "dialog",
+      intro: "Claude Code asks how to continue after claude-opus-5 declined this request.",
+      schema: { dialogKind: "refusal_fallback_prompt", payload: { fallbackModel: "claude-sonnet-5" } },
+      questions: [{ prompt: "Opus declined.", header: "Refusal", options: [{ label: "Retry on claude-sonnet-5", description: "" }, { label: "Edit the prompt", description: "" }], multiple: false, allowFreeForm: false }],
+    }]), new Set());
+    const card = host.querySelector('[data-chat-item-id="question:dl-1"]')!;
+    expect(card.getAttribute("data-question-source")).toBe("dialog");
+    expect(card.querySelector("summary")?.textContent).toContain("Dialog");
+    expect(card.querySelector(".chat-request-intro")?.textContent).toContain("declined this request");
+    expect([...card.querySelectorAll("[data-question-provider-option]")].map(input => input.getAttribute("value"))).toEqual(["Retry on claude-sonnet-5", "Edit the prompt"]);
+    // No free-form entry for a fixed vocabulary.
+    expect(card.querySelector("[data-question-custom-toggle]")).toBeNull();
+    expect(card.querySelector(".chat-request-raw pre")?.textContent).toContain("refusal_fallback_prompt");
+  });
+
+  test("an elicitation card links out, renders schema fields as steps, and drops the raw request once resolved", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const elicitation: ConversationItem = {
+      ...question,
+      id: "question:el-1",
+      requestId: "el-1",
+      source: "elicitation",
+      intro: "github asks: Sign in to continue",
+      link: "https://example.com/auth",
+      schema: { type: "object", properties: { username: { type: "string" } } },
+      questions: [
+        { prompt: "Your login", header: "GitHub username", options: [], multiple: false, allowFreeForm: true },
+        { prompt: "Log everything?", header: "verbose", options: [{ label: "Yes", description: "" }, { label: "No", description: "" }], multiple: false, allowFreeForm: false },
+      ],
+    };
+    renderer.render(host, projectionWith([elicitation]), new Set());
+    const card = host.querySelector('[data-chat-item-id="question:el-1"]')!;
+    expect(card.querySelector("summary")?.textContent).toContain("Input requested");
+    const link = card.querySelector<HTMLAnchorElement>(".chat-request-link a")!;
+    expect(link.getAttribute("href")).toBe("https://example.com/auth");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(card.querySelectorAll("[data-question-panel]")).toHaveLength(2);
+    expect(card.querySelector("[data-question-custom-input]")).not.toBeNull();
+    expect(card.querySelector(".chat-request-raw")).not.toBeNull();
+
+    renderer.render(host, projectionWith([{ ...elicitation, status: "resolved", outcome: { kind: "answered", answers: [["octocat"], ["No"]] } } as ConversationItem]), new Set());
+    const resolved = host.querySelector('[data-chat-item-id="question:el-1"]')!;
+    expect(resolved.querySelector(".chat-request-trace")?.textContent).toBe("Answered");
+    expect(resolved.querySelector(".chat-request-raw")).toBeNull();
+  });
+});
+
+describe("group summaries name what the steps acted on", () => {
+  const bash = (id: string, createdAt: number, command: string): ConversationItem => ({ id, type: "tool", createdAt, name: "Bash", status: "completed", input: JSON.stringify({ command }), output: "ok" });
+
+  test("a finished run of Bash rows reads their commands", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      bash("tool:1", 1, "./hello.sh"),
+      bash("tool:2", 2, "ls -la"),
+      { id: "tool:3", type: "tool", createdAt: 3, name: "Read", status: "completed", input: JSON.stringify({ file_path: "README.md" }), output: "# Hi" },
+    ], { status: "completed" }), new Set());
+    const group = host.querySelector(".chat-activity-group")!;
+    expect(group.querySelector(".chat-activity-subject")?.textContent).toBe("Bash ./hello.sh · Bash ls -la · Read README.md");
+    // Each row still names its own command as the subject.
+    expect(host.querySelector('[data-chat-item-id="tool:1"] .chat-activity-subject')?.textContent).toBe("./hello.sh");
+    expect(host.querySelector('[data-chat-item-id="tool:1"] .chat-tool-command')?.textContent).toBe("./hello.sh");
+  });
+
+  test("a long run names the first three and counts the rest by kind", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      bash("tool:1", 1, "./hello.sh"),
+      bash("tool:2", 2, "ls -la"),
+      bash("tool:3", 3, "date"),
+      bash("tool:4", 4, "cat notes.md"),
+      bash("tool:5", 5, "whoami"),
+      { id: "tool:6", type: "tool", createdAt: 6, name: "Read", status: "completed", input: JSON.stringify({ file_path: "README.md" }), output: "# Hi" },
+    ], { status: "completed" }), new Set());
+    expect(host.querySelector(".chat-activity-group .chat-activity-subject")?.textContent).toBe("Bash ./hello.sh · Bash ls -la · Bash date · Bash ×2 · Read");
+  });
+
+  test("reasoning steps are counted, never named, so the commands keep the named slots", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const thought = (id: string, createdAt: number): ConversationItem => ({ id, type: "reasoning", createdAt, text: "hmm", status: "completed" });
+    renderer.render(host, projectionWith([
+      thought("reasoning:1", 1),
+      bash("tool:1", 2, "./hello.sh"),
+      thought("reasoning:2", 3),
+      bash("tool:2", 4, "ls -la"),
+      thought("reasoning:3", 5),
+      { id: "tool:3", type: "tool", createdAt: 6, name: "Read", status: "completed", input: JSON.stringify({ file_path: "README.md" }), output: "# Hi" },
+      thought("reasoning:4", 7),
+    ], { status: "completed" }), new Set());
+    expect(host.querySelector(".chat-activity-group > summary .chat-activity-subject")?.textContent).toBe("Bash ./hello.sh · Bash ls -la · Read README.md · Thought ×4");
+  });
+
+  test("a backgrounded command says so in its body", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ id: "tool:bg", type: "tool", createdAt: 1, name: "Bash", status: "completed", input: JSON.stringify({ command: "sleep 20 && echo done", description: "Wait then report", run_in_background: true }), output: "Command running in background" }]), new Set());
+    const row = host.querySelector('[data-chat-item-id="tool:bg"]')!;
+    expect(row.querySelector(".chat-tool-meta")?.textContent).toBe("Wait then report · started in the background");
+  });
+});
+
+describe("compaction markers and context reports", () => {
+  const tool = (id: string, createdAt: number): ConversationItem => ({ id, type: "tool", createdAt, name: "Bash", status: "completed", input: JSON.stringify({ command: `echo ${id}` }), output: id });
+
+  test("a compaction renders as a labelled boundary with the reported figures", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      tool("tool:a", 1),
+      { id: "compaction:1", type: "compaction", createdAt: 2, trigger: "auto", preTokens: 180_000, postTokens: 40_000 },
+      tool("tool:b", 3),
+    ], { status: "completed" }), new Set());
+    const marker = host.querySelector(".chat-compaction")!;
+    expect(marker.textContent).toBe("Context compacted · 180,000 → 40,000 tokens");
+    expect(marker.getAttribute("role")).toBe("status");
+    // Between the two runs, with the earlier content still above it.
+    const ids = [...host.querySelectorAll("[data-chat-item-id]")].map(node => node.getAttribute("data-chat-item-id"));
+    expect(ids).toEqual(["tool:a", "compaction:1", "tool:b"]);
+  });
+
+  test("a manual compaction without figures still names itself", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ id: "compaction:2", type: "compaction", createdAt: 2, trigger: "manual" }]), new Set());
+    expect(host.querySelector(".chat-compaction")?.textContent).toBe("Context compacted on request");
+  });
+
+  test("a context report is data for the readout, never a row, and never splits a group", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      tool("tool:a", 1),
+      { id: "context:report:1", type: "context_report", createdAt: 2, total: 9_697, max: 1_000_000 },
+      tool("tool:b", 3),
+      tool("tool:c", 4),
+    ], { status: "completed" }), new Set());
+    expect(host.querySelector('[data-chat-item-id="context:report:1"]')).toBeNull();
+    expect(host.querySelectorAll(".chat-activity-group")).toHaveLength(1);
+  });
+});
+
 describe("plan approvals carry the plan and agent-provided intents", () => {
   const plan: ConversationItem = {
     id: "permission:plan1",
@@ -670,13 +824,38 @@ describe("permission choices state the authority they grant", () => {
     expect(persistent.textContent).toBe("Allow always");
   });
 
-  test("states the reach of persistent approval and never calls it session-limited", () => {
-    const text = renderPending().textContent ?? "";
+  test("states the owning agent's reach of persistent approval and never calls it session-limited", () => {
+    // OpenCode's own verified sentence, carried on its descriptor.
+    const renderer = new TimelineRenderer();
+    renderer.permissionScopeNote = "“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.";
+    const host = target();
+    renderer.render(host, projectionWith([permission]), new Set());
+    const text = host.textContent ?? "";
     expect(text).toContain("later conversations");
     expect(text).toContain("until OpenCode restarts");
     // The mislabel this change exists to remove, in any of its shapes.
     expect(text).not.toContain("Allow session");
     expect(text).not.toMatch(/only (this|the current) (session|conversation)\b/i);
+  });
+
+  test("a Claude Code card states Claude Code's reach and never names another agent", () => {
+    const renderer = new TimelineRenderer();
+    renderer.permissionScopeNote = "“Allow always” also covers similar requests for the rest of this turn. Nothing is saved to your settings.";
+    const host = target();
+    renderer.render(host, projectionWith([permission]), new Set());
+    const scope = host.querySelector(".chat-request-scope")!.textContent ?? "";
+    expect(scope).toContain("rest of this turn");
+    expect(host.textContent).not.toContain("OpenCode");
+    // Changing the declared sentence re-renders the card with the new one.
+    renderer.permissionScopeNote = "Something else entirely.";
+    renderer.render(host, projectionWith([permission]), new Set());
+    expect(host.querySelector(".chat-request-scope")!.textContent).toBe("Something else entirely.");
+  });
+
+  test("an agent that declares no scope sentence gets no scope line, not another agent's", () => {
+    const host = renderPending();
+    expect(host.querySelector(".chat-request-scope")).toBeNull();
+    expect(host.textContent).not.toContain("OpenCode");
   });
 
   test("a pending edit permission shows its diff where the choices are; a plain one shows none", () => {

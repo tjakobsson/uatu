@@ -10,7 +10,8 @@ import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
-import { contextTokens, totalTokens } from "./usage";
+import { contextReadout } from "./context-readout";
+import { totalTokens } from "./usage";
 import {
   addAcceptedDraft,
   applyChatEvent,
@@ -22,7 +23,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type TokenUsage } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -661,43 +662,26 @@ export function initChat(api = new ChatApiClient()): void {
    * about a conversation, not an absence of data about it.
    */
   // What the meter last painted, by identity — items are immutable, so the
-  // same usage object means the same figures. This sync runs on every rendered
+  // same source item means the same figures. This sync runs on every rendered
   // frame of a streaming turn, and text deltas must not pay for meter and
   // breakdown rebuilds that would come out identical.
-  let paintedUsage: TokenUsage | undefined;
+  let paintedSource: ConversationItem | undefined;
   let paintedUsageModel: string | undefined;
   const syncContextIndicator = () => {
     if (!contextUsage?.isConnected || !contextUsageFill || !contextUsageLabel || !contextUsageBreakdown) return;
-    // The newest assistant usage, scanned from the tail — it is almost always
-    // right at the end of a long timeline.
-    let usage: TokenUsage | undefined;
-    let usageModel: ModelSelection | undefined;
-    let zeroUsage: TokenUsage | undefined;
-    let zeroUsageModel: ModelSelection | undefined;
-    const timelineItems = projection?.items ?? [];
-    for (let index = timelineItems.length - 1; index >= 0; index -= 1) {
-      const item = timelineItems[index]!;
-      if (item.type !== "assistant_message" || !item.usage) continue;
-      // OpenCode starts a new assistant message with an all-zero report before
-      // its real input/cache accounting arrives. Do not flash the meter to 0
-      // between turns when an earlier meaningful occupancy is still known.
-      if (!zeroUsage) { zeroUsage = item.usage; zeroUsageModel = item.model; }
-      if (contextTokens(item.usage) > 0) { usage = item.usage; usageModel = item.model; break; }
-    }
-    if (!usage) { usage = zeroUsage; usageModel = zeroUsageModel; }
-    const displayedModel = displayedConfiguration().model;
-    const reportingModel = usageModel ? modelValue(usageModel) : displayedModel ? modelValue(displayedModel) : "";
-    if (usage === paintedUsage && reportingModel === paintedUsageModel) return;
-    paintedUsage = usage;
+    // The newest report or carrier, scanned from the tail — it is almost
+    // always right at the end of a long timeline (see context-readout.ts).
+    const readout = contextReadout(projection?.items ?? [], models, displayedConfiguration().model);
+    const reportingModel = readout?.model ? modelValue(readout.model) : "";
+    if (readout?.source === paintedSource && reportingModel === paintedUsageModel) return;
+    paintedSource = readout?.source;
     paintedUsageModel = reportingModel;
-    if (!usage || !declares("context")) {
+    if (!readout || !declares("context")) {
       contextUsage.hidden = true;
       contextUsage.open = false;
       return;
     }
-    const used = contextTokens(usage);
-    const limit = models.find(model => modelValue(model.selection) === reportingModel)?.contextLimit;
-    const fraction = limit && limit > 0 ? Math.min(1, used / limit) : undefined;
+    const { used, limit, fraction } = readout;
     const fillPercent = Math.round((fraction ?? 0) * 100);
     contextUsageFill.style.setProperty("--context-fill", `${fillPercent}%`);
     // Keep the unfilled wedge centred on the right, so partial usage reads as
@@ -709,17 +693,11 @@ export function initChat(api = new ChatApiClient()): void {
     // the only signal.
     contextUsageLabel.textContent = fraction === undefined ? "?" : `${Math.round(fraction * 100)}%`;
     contextUsage.dataset.fill = fraction === undefined ? "unknown" : fraction >= 0.9 ? "full" : fraction >= 0.75 ? "high" : "normal";
+    contextUsage.dataset.source = readout.source.type === "context_report" ? "report" : "usage";
     contextUsage.title = fraction === undefined
       ? `${used.toLocaleString()} tokens in the context window`
       : `${used.toLocaleString()} of ${limit!.toLocaleString()} tokens in the context window`;
-    const rows: Array<[string, number]> = [["In context", used]];
-    if (limit !== undefined) rows.push(["Limit", limit]);
-    if (usage.input !== undefined) rows.push(["Input", usage.input]);
-    if (usage.cacheRead !== undefined) rows.push(["Cache read", usage.cacheRead]);
-    if (usage.cacheWrite !== undefined) rows.push(["Cache write", usage.cacheWrite]);
-    if (usage.reasoning !== undefined) rows.push(["Reasoning", usage.reasoning]);
-    if (usage.output !== undefined) rows.push(["Output", usage.output]);
-    contextUsageBreakdown.replaceChildren(...rows.flatMap(([label, value]) => {
+    contextUsageBreakdown.replaceChildren(...readout.rows.flatMap(([label, value]) => {
       const term = document.createElement("dt");
       term.textContent = label;
       const detail = document.createElement("dd");
@@ -908,6 +886,8 @@ export function initChat(api = new ChatApiClient()): void {
 
   const renderNow = (newContent: boolean) => {
     rendering = true;
+    // The card states the owning agent's own persistent-approval reach.
+    renderer.permissionScopeNote = agent?.permissionScopeNote;
     const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"));
     revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
     queueDock.render(queueDockElement, projection?.queued ?? []);
@@ -965,9 +945,10 @@ export function initChat(api = new ChatApiClient()): void {
     for (let index = projection.items.length - 1; index >= 0; index -= 1) {
       const item = projection.items[index]!;
       if (item.type === "user_message") return true;
-      // A previous turn's footer and a hidden usage carrier say nothing about
-      // THIS turn; keep looking past them.
-      if (item.type === "turn_status") continue;
+      // A previous turn's footer, a hidden usage carrier, a context report,
+      // and a compaction marker say nothing about THIS turn's response; keep
+      // looking past them.
+      if (item.type === "turn_status" || item.type === "context_report" || item.type === "compaction") continue;
       if (item.type === "assistant_message" && item.markdown === "") continue;
       return false;
     }
@@ -1505,7 +1486,9 @@ export function initChat(api = new ChatApiClient()): void {
     configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant!) : "";
     configurationDetails.hidden = !showMode && !showReasoning;
     const accessibleValues = [
-      declares("models") ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      // An unlisted selection is the user's own typed id under an agent that
+      // runs them; only elsewhere is it a model that went away.
+      declares("models") ? `Model: ${displayedModel ? modelChipName(displayedModel) : configuration.model ? (declares("custom-model-id") ? `${configuration.model.modelId}, typed` : `${configuration.model.providerId}/${configuration.model.modelId}, unavailable`) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
       offersMode ? `Mode: ${displayedMode ? configurationOptionLabel(displayedMode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
       offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
@@ -2253,7 +2236,8 @@ export function initChat(api = new ChatApiClient()): void {
       const answers = collectQuestionAnswers(questionForm);
       // The button is disabled until every step is satisfied, so this only
       // catches a form submitted some other way (Enter in the free-form field).
-      const missing = answers.flatMap((answer, index) => answer.length === 0 ? [index] : []);
+      // An optional question may go unanswered; every other one must not.
+      const missing = answers.flatMap((answer, index) => answer.length === 0 && !item.questions[index]?.optional ? [index] : []);
       if (missing.length > 0) {
         showQuestionPanel(questionForm, missing[0]!);
         announceFailureFor(source)(`Still to answer: ${missing.map(index => item.questions[index]!.header).filter(Boolean).join(", ")}`, true);
@@ -2266,6 +2250,7 @@ export function initChat(api = new ChatApiClient()): void {
   const renderChild = (newContent: boolean) => {
     if (!drilldownItems || !drilldownTimeline) return;
     if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
+    childRenderer.permissionScopeNote = agent?.permissionScopeNote;
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"));
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
@@ -2875,7 +2860,10 @@ export function initChat(api = new ChatApiClient()): void {
     const selectedModelRecord = declares("models") && configuration.model
       ? models.find(model => sameModel(model.selection, configuration.model!))
       : undefined;
-    const selectedModel = selectedModelRecord?.selection;
+    // A typed model id is not in the list; under an agent that runs typed
+    // ids it travels verbatim (spec: the next prompt runs under that id).
+    const selectedModel = selectedModelRecord?.selection
+      ?? (declares("models") && declares("custom-model-id") && configuration.model ? configuration.model : undefined);
     const selectedVariant = declares("variants") && configuration.variant && selectedModelRecord?.variants?.includes(configuration.variant)
       ? configuration.variant
       : undefined;

@@ -787,7 +787,10 @@ export class ChatAdapter {
     let available: ChatModel[] | undefined;
     if (model && modelChanged) {
       available = await this.provider.listModels();
-      if (!available.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
+      // An agent that runs typed ids takes an unlisted selection verbatim;
+      // its acceptance or rejection is the agent's to report on the turn.
+      const typedIds = this.provider.describe().capabilities.includes("custom-model-id");
+      if (!typedIds && !available.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
     }
     // Same freshness rule as the model: only a change pays the list round
     // trip, and an unknown name is refused rather than passed through for
@@ -1817,6 +1820,10 @@ export class ChatAdapter {
         requestId: request.requestId,
         questions: request.questions,
         status: "pending" as const,
+        ...(request.source === undefined ? {} : { source: request.source }),
+        ...(request.intro === undefined ? {} : { intro: request.intro }),
+        ...(request.link === undefined ? {} : { link: request.link }),
+        ...(request.schema === undefined ? {} : { schema: request.schema }),
       });
     }
     return items;
@@ -2174,6 +2181,7 @@ export class ConversationProjection {
     for (let index = 0; index < item.questions.length; index += 1) {
       const question = item.questions[index]!;
       const answers = outcome.answers[index]!;
+      if (answers.length === 0 && question.optional) continue;
       if (answers.length === 0 || answers.some(answer => typeof answer !== "string" || answer.trim().length === 0)) {
         throw new InteractionConflictError("question requires a non-empty answer");
       }

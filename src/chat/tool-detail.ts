@@ -13,7 +13,16 @@ export type ToolDetail =
   | { kind: "question"; label: string; asked: Array<{ header: string; prompt: string }>; answer?: string }
   | { kind: "agent"; label: string; description: string; subagent?: string; prompt: string; conversationId?: string; result?: string }
   | { kind: "skill"; label: string; name: string }
+  // A shell command: the command line is the subject, the agent's own
+  // description of it the meta line, and `background` marks a launch the
+  // agent sent to the background (Claude Code's `run_in_background`), which
+  // is what a later background-task row links to by tool_use_id.
+  | { kind: "bash"; label: string; command: string; description?: string; background: boolean }
   | { kind: "generic"; label: string };
+
+// A subject is one line of a row; a shell pipeline is cut there and bounded
+// so the row stays legible and the whole command still lives in the body.
+const SUBJECT_LIMIT = 160;
 
 export function describeToolDetail(item: Pick<ToolItem, "name" | "input" | "output" | "childConversationId">): ToolDetail {
   const label = humanizeToolName(item.name);
@@ -44,6 +53,21 @@ export function describeToolDetail(item: Pick<ToolItem, "name" | "input" | "outp
           return [{ header: optionalText(entry.header) ?? "Question", prompt }];
         }),
         ...(optionalText(item.output) === undefined ? {} : { answer: text(item.output) }),
+      };
+    }
+    // Claude Code's Bash tool: the one thing worth knowing about the row is
+    // what it ran. Without this case it fell to the raw-JSON generic view
+    // and a run of five commands read "Bash ×5".
+    case "bash": {
+      const command = optionalText(input.command);
+      if (command === undefined) break;
+      const description = optionalText(input.description);
+      return {
+        kind: "bash",
+        label: "Bash",
+        command,
+        ...(description === undefined ? {} : { description }),
+        background: input.run_in_background === true,
       };
     }
     case "edit": {
@@ -150,9 +174,19 @@ export function toolSubject(detail: ToolDetail): string | undefined {
       return detail.subagent ? `${detail.subagent} · ${detail.description}` : detail.description;
     case "skill":
       return detail.name;
+    case "bash":
+      return commandSubject(detail.command);
     default:
       return undefined;
   }
+}
+
+/** The first line of a command, bounded, with a marker when more follows. */
+export function commandSubject(command: string): string {
+  const lines = command.split("\n").map(line => line.trim()).filter(Boolean);
+  const first = lines[0] ?? command.trim();
+  const bounded = first.length > SUBJECT_LIMIT ? `${first.slice(0, SUBJECT_LIMIT - 1)}…` : first;
+  return lines.length > 1 ? `${bounded} …` : bounded;
 }
 
 export type TodoEntry = { text: string; state: "pending" | "active" | "done" };

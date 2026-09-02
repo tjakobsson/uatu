@@ -39,6 +39,12 @@ type FakeE2EChatServiceOptions = {
   // surface's declaration-driven naming is observable in multi-agent specs.
   agentName?: string;
   agentId?: string;
+  // The persistent-approval sentence this fake's permission cards carry —
+  // per agent, exactly as the real descriptors declare their own.
+  permissionScopeNote?: string;
+  // Capabilities this fake declares beyond the shared default set (a
+  // Claude-shaped fixture declares typed model ids; the OpenCode one does not).
+  extraCapabilities?: ChatCapability[];
 };
 
 export class FakeE2EChatService implements WorkspaceChatService {
@@ -101,7 +107,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // surface an agent that offers less produces — the one path a workspace with
   // a single real agent can never reach on its own.
   private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments"];
-  private capabilities: ChatCapability[] = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
+  private capabilities: ChatCapability[];
   private modelInventory: ChatModel[] = FakeE2EChatService.defaultModels();
   // The real store against a throwaway root: e2e uploads exercise the real
   // sniffing, caps, and id policy rather than a parallel fake.
@@ -113,6 +119,11 @@ export class FakeE2EChatService implements WorkspaceChatService {
   constructor(private readonly options: FakeE2EChatServiceOptions = {}) {
     this.agentName = options.agentName ?? "Fixture Agent";
     this.agentId = options.agentId ?? "e2e";
+    this.capabilities = this.defaultCapabilities();
+  }
+
+  private defaultCapabilities(): ChatCapability[] {
+    return [...FakeE2EChatService.DEFAULT_CAPABILITIES, ...(this.options.extraCapabilities ?? [])];
   }
 
   private static defaultModels(): ChatModel[] {
@@ -127,7 +138,12 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.unavailable ?? {
       state: "ready",
       version: "e2e",
-      agent: { id: this.agentId, name: this.agentName, capabilities: this.capabilities },
+      agent: {
+        id: this.agentId,
+        name: this.agentName,
+        capabilities: this.capabilities,
+        ...(this.options.permissionScopeNote ? { permissionScopeNote: this.options.permissionScopeNote } : {}),
+      },
     };
   }
 
@@ -327,7 +343,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
       throw new Error("prompt rejected by fixture");
     }
     await new Promise(resolve => setTimeout(resolve, 75));
-    if (model && !(await this.models()).some(candidate =>
+    // An agent that runs typed ids takes an unlisted selection verbatim,
+    // exactly as the real adapter does for a declaring provider.
+    if (model && !this.capabilities.includes("custom-model-id") && !(await this.models()).some(candidate =>
       candidate.selection.providerId === model.providerId && candidate.selection.modelId === model.modelId)) {
       throw new Error("selected model is not available");
     }
@@ -521,6 +539,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.failNextReversible = null;
     this.failNextHistory = false;
     this.failNextOlderHistory = false;
+    // A staged startup failure is one test's setup too: left in place it
+    // makes the next test on this worker boot against an unavailable agent.
+    this.unavailable = null;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();
     this.items.clear();
@@ -538,7 +559,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.children.clear();
     // A narrowed agent is one test's setup, not the fixture's resting state:
     // left in place it reaches whichever test boots against this worker next.
-    this.capabilities = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
+    this.capabilities = this.defaultCapabilities();
     this.modelInventory = FakeE2EChatService.defaultModels();
   }
 

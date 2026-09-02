@@ -51,7 +51,10 @@ function hashSuffix(input: string): string {
 }
 
 export type TranscriptEntry = {
-  kind: "user" | "assistant";
+  // `system` is admitted for one subtype only: the compaction boundary,
+  // which the timeline marks (spec: the timeline marks where compaction
+  // happened) and the readout resets on, live and on reload alike.
+  kind: "user" | "assistant" | "system";
   uuid: string;
   parentUuid: string | null;
   timestamp: number;
@@ -60,8 +63,13 @@ export type TranscriptEntry = {
   parentToolUseId: string | null;
   cwd?: string;
   // The API-shaped message payload: { role, content } with content either a
-  // string or an array of typed blocks. Interpreted by the normalizer, not here.
+  // string or an array of typed blocks. Interpreted by the normalizer, not
+  // here. Empty for a system record, which carries no message.
   message: Record<string, unknown>;
+  // A system record's subtype and, for a compaction boundary, the store's
+  // own figures (camelCase on disk, unlike the live message's snake_case).
+  subtype?: string;
+  compactMetadata?: { trigger?: string; preTokens?: number; postTokens?: number };
   // The store's own record of a tool's outcome, when present. A Task
   // completion carries the subagent linkage here: agentId, resolvedModel,
   // usage.
@@ -99,14 +107,25 @@ export async function readSessionTranscript(file: string): Promise<TranscriptRea
 function validateEntry(value: unknown): TranscriptEntry | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  if (record.type !== "user" && record.type !== "assistant") return null;
+  const compaction = record.type === "system" && record.subtype === "compact_boundary";
+  if (record.type !== "user" && record.type !== "assistant" && !compaction) return null;
   if (typeof record.uuid !== "string" || !record.uuid) return null;
-  const message = record.message;
+  const message = compaction ? (record.message ?? {}) : record.message;
   if (!message || typeof message !== "object" || Array.isArray(message)) return null;
   const timestamp = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
   if (Number.isNaN(timestamp)) return null;
+  const metadata = compaction && record.compactMetadata && typeof record.compactMetadata === "object" && !Array.isArray(record.compactMetadata)
+    ? record.compactMetadata as Record<string, unknown> : undefined;
   return {
-    kind: record.type,
+    kind: record.type as "user" | "assistant" | "system",
+    ...(compaction ? {
+      subtype: "compact_boundary",
+      compactMetadata: {
+        ...(typeof metadata?.trigger === "string" ? { trigger: metadata.trigger } : {}),
+        ...(typeof metadata?.preTokens === "number" ? { preTokens: metadata.preTokens } : {}),
+        ...(typeof metadata?.postTokens === "number" ? { postTokens: metadata.postTokens } : {}),
+      },
+    } : {}),
     uuid: record.uuid,
     parentUuid: typeof record.parentUuid === "string" ? record.parentUuid : null,
     timestamp,
