@@ -203,7 +203,8 @@ type LiveSession = {
   interrupted?: boolean;
   // The latest context probe's turn; an older probe's answer is discarded.
   reportGeneration?: number;
-  // The login answered the usage read with no windows: no point asking again.
+  // The login answered the usage read with no windows: later reads are for
+  // the conversation's running totals only, the plan stays stated as empty.
   planUnavailable?: boolean;
   // Results seen on this process: an unprompted turn can only follow one.
   resultsSeen: number;
@@ -1853,9 +1854,6 @@ export class ClaudeProvider implements ChatProvider {
   private async readPlanUtilization(session: LiveSession): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
     const read = session.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (!read || this.live.get(session.id) !== session) return undefined;
-    // A login that answered with no windows once (an API key) is not asked
-    // again for the life of the process.
-    if (session.planUnavailable) return { plan: {} };
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const raw = await Promise.race([
@@ -1864,8 +1862,12 @@ export class ClaudeProvider implements ChatProvider {
       ]);
       // Answered with no windows (an API-key login): an explicit empty plan,
       // so the report states it rather than staying silent like a timeout.
+      // That answer holds for the life of the process, so the plan is not
+      // re-read; the call still goes out, because the same answer carries
+      // the conversation's running totals, which change with every turn and
+      // are the figure such a login budgets by.
       if (raw === null) return undefined;
-      const plan = normalizePlanUtilization(raw);
+      const plan = session.planUnavailable ? undefined : normalizePlanUtilization(raw);
       if (!plan) session.planUnavailable = true;
       const totals = normalizeSessionTotals(raw);
       return { plan: plan ?? {}, ...(totals ? { session: totals } : {}) };

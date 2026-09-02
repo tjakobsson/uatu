@@ -67,6 +67,11 @@ totals, with no plan name, windows, or sidebar control.
 - **WHEN** the login reports only the 5-hour and 7-day windows
 - **THEN** the summary and readout show those two and nothing else
 
+#### Scenario: Windows without a base percentage are still a plan
+- **WHEN** the login reports only a model-scoped bucket, or base windows with a reset and no percentage
+- **THEN** the composer summary names the first window that has a percentage, else reads "Plan usage"
+- **AND** activating it shows those windows as rows, and is not the cost-only readout
+
 #### Scenario: No plan, no summary
 - **WHEN** the login has no plan limits (an API-key session) and the agent reports no conversation cost
 - **THEN** no summary is shown beside the composer

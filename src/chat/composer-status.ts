@@ -113,9 +113,30 @@ export function sessionCostLabel(session: SessionTotals): string {
  * the report says neither, and the chip stays hidden.
  */
 export function planSummaryLabel(report: Pick<ContextReportItem, "plan" | "session">): string | undefined {
-  const plan = report.plan ? planUtilizationLabel(report.plan) : undefined;
-  if (plan) return plan;
+  if (report.plan) {
+    const base = planUtilizationLabel(report.plan);
+    if (base) return base;
+    // Windows without a base percentage — a model-scoped bucket alone, or
+    // base windows that came with a reset and no figure — are still a plan,
+    // and the readout can show them. The chip names the first row that has
+    // a figure, else the plan itself, rather than falling through to the
+    // cost and claiming the login has no limits.
+    const rows = planReadoutRows(report.plan);
+    if (rows.length) {
+      const measured = rows.find(row => row.utilization !== undefined);
+      return measured ? `${measured.label} ${Math.round(measured.utilization!)}%` : "Plan usage";
+    }
+  }
   return report.session ? sessionCostLabel(report.session) : undefined;
+}
+
+/**
+ * Whether the plan gives the readout anything to draw: one rule for the
+ * chip's plan-or-cost classification and the readout's rows, so a plan the
+ * rows can render is never filed as "no plan" by a stricter summary test.
+ */
+export function planHasRows(plan: PlanUtilization): boolean {
+  return planReadoutRows(plan).length > 0;
 }
 
 // The chip turns to the warning colour at this fill — the point where the

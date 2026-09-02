@@ -1321,6 +1321,38 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a login without windows keeps reporting the conversation's totals on later turns of the same process", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    // Two prompts accepted up front: the first result retires nothing, so
+    // the second turn's report comes from the same live query, where the
+    // first read already found the login without plan windows.
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    const query = queries[0]!;
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 100, maxTokens: 200_000 });
+    let reads = 0;
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => {
+      reads += 1;
+      return { session: { total_cost_usd: 0.5 * reads, total_api_duration_ms: 1_000 * reads, model_usage: {} }, subscription_type: null, rate_limits_available: false, rate_limits: null };
+    };
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 1);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
+    const reports = events.filter(event => event.eventType === "context.reported").map(event => (event.updates[0] as { item: { plan?: unknown; session?: { costUsd: number; apiDurationMs: number } } }).item);
+    expect(reads).toBe(2);
+    expect(reports[0]!.plan).toEqual({});
+    expect(reports[0]!.session).toMatchObject({ costUsd: 0.5, apiDurationMs: 1_000 });
+    // The plan stays stated as empty; the totals are the second read's, not
+    // the first's carried forward and not dropped.
+    expect(reports[1]!.plan).toEqual({});
+    expect(reports[1]!.session).toMatchObject({ costUsd: 1, apiDurationMs: 2_000 });
+    stop();
+    await provider.dispose();
+  });
+
   test("the chooser follows Claude Code's own title, and a UatuCode rename outranks it", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-title-")));
     const workspace = path.join(root, "workspace");

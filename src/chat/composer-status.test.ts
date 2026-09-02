@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { composerRoutineState, latestPlanUtilization, latestRateLimit, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel } from "./composer-status";
+import { composerRoutineState, latestPlanUtilization, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel } from "./composer-status";
 import type { ConversationItem } from "./types";
 
 const base = { cancelling: false, submitting: false, backgroundDeclared: true, backgroundTasks: [] as [] };
@@ -72,6 +72,30 @@ describe("rate-limit badge and plan utilization", () => {
     // A cheap turn keeps its figure rather than rounding to nothing.
     expect(sessionCostLabel({ ...session, costUsd: 0.0123 })).toBe("$0.0123 this conversation");
     expect(sessionCostLabel({ ...session, costUsd: 0 })).toBe("$0.00 this conversation");
+  });
+
+  test("a plan with rows but no base percentage is a plan, not a cost-only login", () => {
+    const now = Date.parse("2026-09-02T10:00:00.000Z");
+    const session = { costUsd: 1.2345, apiDurationMs: 42_000, durationMs: 90_000, linesAdded: 12, linesRemoved: 3, models: [] };
+    // Only a model-scoped bucket: no base summary, yet a row to draw. The
+    // chip names that row; the readout classifies as a plan and shows it.
+    const modelOnly = { modelScoped: [{ label: "Fable", utilization: 83.4, resetsAt: now + 3_600_000 }] };
+    expect(planUtilizationLabel(modelOnly)).toBeUndefined();
+    expect(planHasRows(modelOnly)).toBe(true);
+    expect(planReadoutRows(modelOnly, now).map(row => row.label)).toEqual(["Week · Fable"]);
+    expect(planSummaryLabel({ plan: modelOnly, session })).toBe("Week · Fable 83%");
+    // Base windows that came with a reset and no figure: rows with an empty
+    // meter, a chip that names the plan rather than the cost.
+    const resetOnly = { fiveHour: { resetsAt: now + 35 * 60_000 }, sevenDay: { resetsAt: now + 4 * 86_400_000 } };
+    expect(planUtilizationLabel(resetOnly)).toBeUndefined();
+    expect(planHasRows(resetOnly)).toBe(true);
+    expect(planReadoutRows(resetOnly, now).map(row => [row.key, row.utilization])).toEqual([["session", undefined], ["week", undefined]]);
+    expect(planSummaryLabel({ plan: resetOnly, session })).toBe("Plan usage");
+    expect(planSummaryLabel({ plan: resetOnly })).toBe("Plan usage");
+    // The genuinely empty plan is the one that falls through to the cost.
+    expect(planHasRows({})).toBe(false);
+    expect(planHasRows({ extraUsage: { enabled: false } })).toBe(false);
+    expect(planSummaryLabel({ plan: { extraUsage: { enabled: false } }, session })).toBe("$1.23 this conversation");
   });
 
   test("the summary warns at 80% of any window, base or per-model", () => {

@@ -11,7 +11,7 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
-import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel } from "./composer-status";
+import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLevel, rateLimitBadgeLabel } from "./composer-status";
 import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
@@ -1528,7 +1528,9 @@ export function initChat(api = new ChatApiClient()): void {
   // cost — the figure that login budgets by — and the readout is only the
   // "This conversation" block: no plan name, no meters, no pin, since there
   // is no plan to name or keep in the sidebar. The pane still hears the
-  // empty plan and says the login reports none.
+  // empty plan and says the login reports none. "Empty" is the readout's
+  // own test — no row to draw — not the chip's base summary: a plan of only
+  // a model-scoped bucket, or of reset-only base windows, has rows to show.
   const syncPlanUsage = () => {
     if (!planUsage || !planUsageSummary) return;
     const report = projection && declares("context") ? latestPlanReport(projection.items) : undefined;
@@ -1542,7 +1544,7 @@ export function initChat(api = new ChatApiClient()): void {
       if (report?.plan) noteUsageReport({ plan: report.plan, reportedAt: report.createdAt });
       return;
     }
-    const hasWindows = planUtilizationLabel(plan) !== undefined;
+    const hasWindows = planHasRows(plan);
     planUsageSummary.textContent = text;
     planUsage.dataset.level = hasWindows ? planUtilizationLevel(plan) : "normal";
     planUsage.dataset.summary = hasWindows ? "plan" : "cost";
