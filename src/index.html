@@ -336,6 +336,22 @@
             <div id="git-log" class="pane-body"></div>
             <div class="pane-resizer" data-pane-resizer="git-log" role="separator" aria-orientation="horizontal" aria-label="Resize Git Log"></div>
           </section>
+          <!-- Plan usage, kept in view: the same windows the composer's plan
+               summary reads, from whichever Claude Code conversation reported
+               most recently. Hidden by default; the readout's pin reveals it. -->
+          <section class="sidebar-pane" data-pane-id="usage">
+            <header class="pane-header">
+              <h2>Usage</h2>
+              <div class="pane-actions">
+                <button class="pane-action" type="button" data-pane-collapse="usage" aria-label="Collapse Usage" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="usage" aria-label="Hide Usage" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div id="usage-pane" class="pane-body usage-pane">
+              <p class="pane-empty">Plan usage appears here after a Claude Code turn.</p>
+            </div>
+            <div class="pane-resizer" data-pane-resizer="usage" role="separator" aria-orientation="horizontal" aria-label="Resize Usage"></div>
+          </section>
         </div>
 
         <footer class="sidebar-footer">
@@ -858,7 +874,30 @@
                    and a standing rate limit. Their own row under the actions,
                    present only while one of them has something to say. -->
               <span id="chat-composer-chips" class="chat-composer-chips" hidden>
-                <span id="chat-plan-usage" class="chat-plan-usage" hidden></span>
+                <!-- The plan summary is the readout's own summary element:
+                     activating "Session 9% · Week 25%" opens every window
+                     the login reports, floated over the timeline like the
+                     context breakdown so the composer never moves. -->
+                <details id="chat-plan-usage" class="chat-plan-usage" hidden>
+                  <summary id="chat-plan-usage-summary" class="chat-plan-usage-summary" title="Plan usage"></summary>
+                  <div id="chat-plan-readout" class="chat-plan-readout" role="group" aria-label="Plan usage">
+                    <div class="chat-plan-readout-head">
+                      <span id="chat-plan-readout-name" class="chat-plan-readout-name">Plan usage</span>
+                      <button id="chat-plan-pin" class="chat-plan-pin" type="button" hidden>Keep in sidebar</button>
+                    </div>
+                    <div id="chat-plan-readout-rows" class="plan-rows"></div>
+                    <section id="chat-plan-readout-session" class="chat-plan-session" aria-label="This conversation" hidden>
+                      <h3 class="chat-plan-session-title">This conversation</h3>
+                      <p id="chat-plan-session-cost" class="chat-plan-session-cost"></p>
+                      <table class="chat-plan-session-models">
+                        <thead>
+                          <tr><th scope="col">Model</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cost</th></tr>
+                        </thead>
+                        <tbody id="chat-plan-session-models"></tbody>
+                      </table>
+                    </section>
+                  </div>
+                </details>
                 <span id="chat-rate-limit" class="chat-rate-limit" role="status" hidden></span>
               </span>
             </div>

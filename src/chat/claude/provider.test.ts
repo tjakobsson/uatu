@@ -6,7 +6,7 @@ import path from "node:path";
 import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { ClaudeProvider, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
@@ -1304,8 +1304,9 @@ describe("ClaudeProvider sessions", () => {
     });
     query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
     await waitFor(() => events.some(event => event.eventType === "context.reported"));
-    const report = (events.find(event => event.eventType === "context.reported")!.updates[0] as { item: { plan?: unknown } }).item;
-    expect(report.plan).toEqual({ fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, sevenDay: { utilization: 12.4 } });
+    const report = (events.find(event => event.eventType === "context.reported")!.updates[0] as { item: { plan?: unknown; session?: unknown } }).item;
+    expect(report.plan).toEqual({ subscription: "max", fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, sevenDay: { utilization: 12.4 } });
+    expect(report.session).toBeUndefined();
 
     // An API-key login: no plan windows, stated as an empty plan.
     await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
@@ -3003,5 +3004,87 @@ describe("ClaudeProvider sessions", () => {
 
     await expect(provider.listMessages("33333333-4444-4555-8666-777777777777", { limit: 10 })).rejects.toThrow("unknown Claude conversation");
     await provider.dispose();
+  });
+});
+
+describe("/usage normalization", () => {
+  // The SDK's shape as of 2.1.258; the experimental method may change under
+  // us, and this pins what a full answer turns into.
+  const full = {
+    session: {
+      total_cost_usd: 1.2345, total_api_duration_ms: 42_000, total_duration_ms: 90_000, total_lines_added: 12, total_lines_removed: 3,
+      model_usage: {
+        "claude-opus-5[1m]": { inputTokens: 1_000, outputTokens: 200, cacheReadInputTokens: 50_000, cacheCreationInputTokens: 4_000, webSearchRequests: 0, costUSD: 1.1, contextWindow: 1_000_000, maxOutputTokens: 32_000 },
+        "claude-haiku-4-5": { inputTokens: 300, outputTokens: 40, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 0.1345, contextWindow: 200_000, maxOutputTokens: 8_000 },
+        "broken": { inputTokens: "many", outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 },
+      },
+    },
+    subscription_type: "max",
+    rate_limits_available: true,
+    rate_limits: {
+      five_hour: { utilization: 9, resets_at: "2026-09-02T14:00:00.000Z" },
+      seven_day: { utilization: 25, resets_at: "2026-09-06T21:00:00.000Z" },
+      seven_day_opus: { utilization: 61, resets_at: "2026-09-06T21:00:00.000Z" },
+      seven_day_sonnet: { utilization: 4, resets_at: null },
+      seven_day_oauth_apps: { utilization: 0, resets_at: "2026-09-06T21:00:00.000Z" },
+      model_scoped: [
+        { display_name: "Fable", utilization: 83, resets_at: "2026-09-06T21:00:00.000Z" },
+        { display_name: "", utilization: 1, resets_at: null },
+        { utilization: 2 },
+      ],
+      extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" },
+    },
+    behaviors: { day: { request_count: 1 }, week: { request_count: 2 } },
+  };
+
+  test("a full response yields every window, the plan name, extra usage, and session totals — never behaviors", () => {
+    const plan = normalizePlanUtilization(full)!;
+    expect(plan).toEqual({
+      subscription: "max",
+      fiveHour: { utilization: 9, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") },
+      sevenDay: { utilization: 25, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") },
+      sevenDayOpus: { utilization: 61, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") },
+      sevenDaySonnet: { utilization: 4 },
+      sevenDayOauthApps: { utilization: 0, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") },
+      modelScoped: [{ label: "Fable", utilization: 83, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") }],
+      extraUsage: { enabled: true, monthlyLimit: 100, usedCredits: 12.5, utilization: 12.5, currency: "USD" },
+    });
+    expect("behaviors" in plan).toBe(false);
+    expect(normalizeSessionTotals(full)).toEqual({
+      costUsd: 1.2345, apiDurationMs: 42_000, durationMs: 90_000, linesAdded: 12, linesRemoved: 3,
+      models: [
+        { id: "claude-opus-5[1m]", input: 1_000, output: 200, cacheRead: 50_000, cacheWrite: 4_000, costUsd: 1.1 },
+        { id: "claude-haiku-4-5", input: 300, output: 40, cacheRead: 0, cacheWrite: 0, costUsd: 0.1345 },
+      ],
+    });
+  });
+
+  test("a two-window response renders exactly as before the widening", () => {
+    const plan = normalizePlanUtilization({ session: {}, subscription_type: null, rate_limits_available: true, rate_limits: { five_hour: { utilization: 37, resets_at: "2026-09-02T14:00:00.000Z" }, seven_day: { utilization: 12.4, resets_at: null } } });
+    expect(plan).toEqual({ fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, sevenDay: { utilization: 12.4 } });
+    expect(normalizeSessionTotals({ session: {} })).toBeUndefined();
+  });
+
+  test("a null rate_limits answer is no plan; a plan name alone is not a plan", () => {
+    expect(normalizePlanUtilization({ session: {}, subscription_type: null, rate_limits_available: false, rate_limits: null })).toBeUndefined();
+    expect(normalizePlanUtilization({ subscription_type: "pro", rate_limits_available: true, rate_limits: {} })).toBeUndefined();
+    expect(normalizePlanUtilization(null)).toBeUndefined();
+    expect(normalizePlanUtilization("usage")).toBeUndefined();
+  });
+
+  test("malformed fields cost the field, not the report", () => {
+    const plan = normalizePlanUtilization({
+      subscription_type: 7, rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: -3, resets_at: "not a date" },
+        seven_day: { utilization: "half", resets_at: 1_788_400_000 },
+        seven_day_opus: "lots",
+        model_scoped: "Fable",
+        extra_usage: { is_enabled: "yes", monthly_limit: 100 },
+      },
+    });
+    expect(plan).toEqual({ sevenDay: { resetsAt: 1_788_400_000_000 } });
+    expect(normalizeSessionTotals({ session: { total_cost_usd: "free" } })).toBeUndefined();
+    expect(normalizeSessionTotals({ session: { total_cost_usd: 0.5, total_duration_ms: "long", model_usage: null } })).toEqual({ costUsd: 0.5, apiDurationMs: 0, durationMs: 0, linesAdded: 0, linesRemoved: 0, models: [] });
   });
 });

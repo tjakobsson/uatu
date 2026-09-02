@@ -465,12 +465,60 @@ export type ContextReportItem = TimelineItemBase & {
   // not speak to the plan (a compaction's post-count, an agent that never
   // reports it), in which case the previous report's plan still stands.
   plan?: PlanUtilization;
+  // What this conversation has cost so far, as the agent tallies it: money,
+  // wall-clock and API time, lines changed, and per-model token totals.
+  // Rides the same report as the plan so the two refresh together.
+  session?: SessionTotals;
 };
 
 export type PlanUtilizationWindow = { utilization?: number; resetsAt?: number };
+// A per-model weekly bucket the server labels itself ("Fable"); the label
+// is shown verbatim because the bucket set is the server's to define.
+export type PlanModelWindow = PlanUtilizationWindow & { label: string };
+export type PlanExtraUsage = {
+  enabled: boolean;
+  usedCredits?: number;
+  monthlyLimit?: number;
+  // Percent of the monthly credit limit used, 0-100, like the windows.
+  utilization?: number;
+  currency?: string;
+};
+/**
+ * Everything the login reports about its plan. Every field is optional so a
+ * login that reports only the two base windows (or a future SDK that drops
+ * one) still renders; `fiveHour` and `sevenDay` keep their names because the
+ * composer summary and the wire validation are keyed on them. Utilization
+ * is a percentage, 0-100.
+ */
 export type PlanUtilization = {
+  // 'pro' | 'max' | 'team' | 'enterprise', or whatever the login says.
+  subscription?: string;
   fiveHour?: PlanUtilizationWindow;
   sevenDay?: PlanUtilizationWindow;
+  sevenDayOpus?: PlanUtilizationWindow;
+  sevenDaySonnet?: PlanUtilizationWindow;
+  sevenDayOauthApps?: PlanUtilizationWindow;
+  modelScoped?: PlanModelWindow[];
+  extraUsage?: PlanExtraUsage;
+};
+
+export type SessionModelTotals = {
+  // The raw model id the agent keyed its tally by; the readout resolves it
+  // through the catalog where it can and shows it verbatim otherwise.
+  id: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number;
+};
+export type SessionTotals = {
+  costUsd: number;
+  apiDurationMs: number;
+  durationMs: number;
+  linesAdded: number;
+  linesRemoved: number;
+  models: SessionModelTotals[];
 };
 
 /**

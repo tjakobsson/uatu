@@ -5,7 +5,7 @@
 
 import { backgroundStatusLabel } from "./background-tasks";
 import { statusLabel } from "./timeline-renderer";
-import type { BackgroundTaskItem, ConversationItem, ConversationStatus, NoticeItem, PlanUtilization } from "./types";
+import type { BackgroundTaskItem, ContextReportItem, ConversationItem, ConversationStatus, NoticeItem, PlanUtilization, PlanUtilizationWindow } from "./types";
 
 export type ComposerRoutineState = {
   stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "failed" | "ready";
@@ -66,17 +66,125 @@ export function rateLimitBadgeLabel(standing: RateLimitStanding): string {
  * compaction's post-count — says nothing about the plan and is skipped.
  */
 export function latestPlanUtilization(items: readonly ConversationItem[]): PlanUtilization | undefined {
+  return latestPlanReport(items)?.plan;
+}
+
+/** The report behind `latestPlanUtilization`, for the session totals that ride with it. */
+export function latestPlanReport(items: readonly ConversationItem[]): ContextReportItem | undefined {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    if (item?.type === "context_report" && item.plan !== undefined) return item.plan;
+    if (item?.type === "context_report" && item.plan !== undefined) return item;
   }
   return undefined;
 }
 
-/** "Plan 37% of 5h · 12% of 7d", whichever windows were reported. */
+/**
+ * "Session 37% · Week 12%", whichever base windows were reported. The words
+ * are Claude Code's own: its `/usage` dialog calls the 5-hour window the
+ * current session and the 7-day window the current week, and a reader who
+ * has seen that dialog must not meet different names here.
+ */
 export function planUtilizationLabel(plan: PlanUtilization): string | undefined {
   const parts: string[] = [];
-  if (plan.fiveHour?.utilization !== undefined) parts.push(`${Math.round(plan.fiveHour.utilization)}% of 5h`);
-  if (plan.sevenDay?.utilization !== undefined) parts.push(`${Math.round(plan.sevenDay.utilization)}% of 7d`);
-  return parts.length ? `Plan ${parts.join(" · ")}` : undefined;
+  if (plan.fiveHour?.utilization !== undefined) parts.push(`Session ${Math.round(plan.fiveHour.utilization)}%`);
+  if (plan.sevenDay?.utilization !== undefined) parts.push(`Week ${Math.round(plan.sevenDay.utilization)}%`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+// The chip turns to the warning colour at this fill — the point where the
+// rest of the window is a plan, not a margin.
+export const PLAN_WARNING_UTILIZATION = 80;
+
+/** Warning when any reported window is at or past the threshold. */
+export function planUtilizationLevel(plan: PlanUtilization): "warning" | "normal" {
+  const windows: Array<PlanUtilizationWindow | undefined> = [plan.fiveHour, plan.sevenDay, plan.sevenDayOpus, plan.sevenDaySonnet, plan.sevenDayOauthApps, ...(plan.modelScoped ?? [])];
+  return windows.some(window => window?.utilization !== undefined && window.utilization >= PLAN_WARNING_UTILIZATION) ? "warning" : "normal";
+}
+
+export type PlanReadoutRow = {
+  key: string;
+  label: string;
+  // Percent used, 0-100; absent when the login reported the window without
+  // a figure (the meter then draws empty and the figure reads "?").
+  utilization?: number;
+  resetsAt?: number;
+  // "resets 14:00 · in 35m", or "" where the window carries no reset. Both
+  // forms because neither answers alone: the clock time survives a glance
+  // away, the relative one says whether to wait.
+  resetLabel: string;
+  // What the row is measuring when it is not time: "$12.50 of $100".
+  note?: string;
+};
+
+/**
+ * The readout's rows in a fixed order — the two base windows, the per-model
+ * weeks, the server-labelled buckets, OAuth apps, then extra usage — so the
+ * eye lands in the same place on every open. Extra usage appears only when
+ * the login has it enabled: a disabled row would be a feature advertisement.
+ */
+export function planReadoutRows(plan: PlanUtilization, now = Date.now()): PlanReadoutRow[] {
+  const rows: PlanReadoutRow[] = [];
+  const window = (key: string, label: string, entry: PlanUtilizationWindow | undefined) => {
+    if (!entry) return;
+    rows.push({
+      key,
+      label,
+      ...(entry.utilization === undefined ? {} : { utilization: entry.utilization }),
+      ...(entry.resetsAt === undefined ? {} : { resetsAt: entry.resetsAt }),
+      resetLabel: entry.resetsAt === undefined ? "" : `resets ${resetClock(entry.resetsAt, now)} · ${relativeReset(entry.resetsAt, now)}`,
+    });
+  };
+  window("session", "Session", plan.fiveHour);
+  window("week", "Week", plan.sevenDay);
+  window("week-opus", "Week · Opus", plan.sevenDayOpus);
+  window("week-sonnet", "Week · Sonnet", plan.sevenDaySonnet);
+  (plan.modelScoped ?? []).forEach((entry, index) => window(`week-model-${index}`, `Week · ${entry.label}`, entry));
+  window("week-oauth-apps", "Week · OAuth apps", plan.sevenDayOauthApps);
+  const extra = plan.extraUsage;
+  if (extra?.enabled) {
+    const currency = extra.currency ?? "USD";
+    const money = (value: number) => {
+      try { return value.toLocaleString(undefined, { style: "currency", currency, maximumFractionDigits: 2 }); }
+      catch { return `${value.toFixed(2)} ${currency}`; }
+    };
+    const note = extra.usedCredits !== undefined && extra.monthlyLimit !== undefined
+      ? `${money(extra.usedCredits)} of ${money(extra.monthlyLimit)}`
+      : extra.usedCredits !== undefined ? `${money(extra.usedCredits)} used` : undefined;
+    rows.push({ key: "extra-usage", label: "Extra usage", ...(extra.utilization === undefined ? {} : { utilization: extra.utilization }), resetLabel: "", ...(note ? { note } : {}) });
+  }
+  return rows;
+}
+
+/**
+ * "in 4d 11h" / "in 2h 05m" / "in 35m"; "now" once the reset has passed
+ * and the next report has not yet said so. Minutes are dropped past a day
+ * because a weekly window is not waited on to the minute.
+ */
+export function relativeReset(resetsAt: number, now = Date.now()): string {
+  const remaining = resetsAt - now;
+  if (remaining < 30_000) return "now";
+  const minutes = Math.round(remaining / 60_000);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  const days = Math.floor(hours / 24);
+  return `in ${days}d ${hours % 24}h`;
+}
+
+/**
+ * The reset as a clock time — bare within the coming day ("14:00"), with
+ * the weekday beyond it ("Sat 21:00"), since a bare time a week out would
+ * read as today.
+ */
+export function resetClock(resetsAt: number, now = Date.now()): string {
+  const date = new Date(resetsAt);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return resetsAt - now < 86_400_000 ? time : `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+/** The plan name as a reader says it: "Max plan", "Pro plan"; "Team", "Enterprise" likewise. */
+export function planName(plan: PlanUtilization): string | undefined {
+  const subscription = plan.subscription?.trim();
+  if (!subscription) return undefined;
+  return `${subscription.charAt(0).toUpperCase()}${subscription.slice(1)} plan`;
 }

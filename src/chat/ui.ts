@@ -11,7 +11,8 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
-import { composerRoutineState, latestPlanUtilization, latestRateLimit, planUtilizationLabel, rateLimitBadgeLabel } from "./composer-status";
+import { composerRoutineState, latestPlanReport, latestRateLimit, planName, planReadoutRows, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel } from "./composer-status";
+import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
 import { totalTokens } from "./usage";
@@ -26,7 +27,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type ContextReportItem, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type SessionTotals } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -96,7 +97,14 @@ export function initChat(api = new ChatApiClient()): void {
   const configurationVariant = document.querySelector<HTMLSelectElement>("#chat-configuration-variant");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
   const rateLimitBadge = document.querySelector<HTMLElement>("#chat-rate-limit");
-  const planUsage = document.querySelector<HTMLElement>("#chat-plan-usage");
+  const planUsage = document.querySelector<HTMLDetailsElement>("#chat-plan-usage");
+  const planUsageSummary = document.querySelector<HTMLElement>("#chat-plan-usage-summary");
+  const planReadoutName = document.querySelector<HTMLElement>("#chat-plan-readout-name");
+  const planReadoutRowsElement = document.querySelector<HTMLElement>("#chat-plan-readout-rows");
+  const planPin = document.querySelector<HTMLButtonElement>("#chat-plan-pin");
+  const planSession = document.querySelector<HTMLElement>("#chat-plan-readout-session");
+  const planSessionCost = document.querySelector<HTMLElement>("#chat-plan-session-cost");
+  const planSessionModels = document.querySelector<HTMLElement>("#chat-plan-session-models");
   const composerChips = document.querySelector<HTMLElement>("#chat-composer-chips");
   // The reason the latest status event carried (a retry's attempt and HTTP
   // status), shown with the named state — per conversation, so a switch
@@ -1449,6 +1457,109 @@ export function initChat(api = new ChatApiClient()): void {
     void stageAttachmentFiles(images);
   });
 
+  /**
+   * The plan summary and its readout. The summary is the newest plan the
+   * timeline holds, in Claude Code's own words; opening it shows every
+   * window the login reported, the plan's name, and what this conversation
+   * has cost. Painted only when the report behind it changes — this runs on
+   * every rendered frame of a streaming turn, like the context meter — and
+   * the rows alone are re-painted once a minute while open so the relative
+   * resets keep pace with the clock.
+   */
+  let paintedPlanReport: ContextReportItem | undefined;
+  let planTick: ReturnType<typeof setInterval> | undefined;
+  const paintPlanRows = () => {
+    if (planReadoutRowsElement && paintedPlanReport?.plan) planReadoutRowsElement.replaceChildren(...buildPlanRowNodes(document, planReadoutRows(paintedPlanReport.plan)));
+  };
+  // The pin makes sense only where the sidebar sits beside the chat: on the
+  // desktop layout with the sidebar expanded, and while the pane is not
+  // already showing. Touch mode reaches the pane through the panels menu on
+  // the Files tab, where the sidebar actually renders.
+  const syncPlanPin = () => {
+    if (!planPin) return;
+    const pane = appState.panes.usage;
+    const desktop = document.documentElement.dataset.uiMode === "desktop";
+    const sidebarShown = !document.querySelector(".app-shell")?.classList.contains("is-sidebar-collapsed");
+    planPin.hidden = !desktop || !sidebarShown || (pane.visible && !pane.collapsed);
+  };
+  // A session tally is keyed by the wire id ("claude-opus-5[1m]"); the
+  // catalog knows it by selection or resolved id, with or without the
+  // window marker, and a live catalog may carry only the family ("opus[1m]")
+  // where the wire id carries family and version. An exact id wins, the
+  // family stands in — skipping the default row, which names no model of
+  // its own — and anything the catalog cannot name is shown as reported.
+  const sessionModelName = (id: string): string => {
+    const strip = (value: string) => value.replace(/\[[^\]]*\]$/, "");
+    const bare = strip(id);
+    const ids = (model: ChatModel) => [model.selection.modelId, model.resolvesTo?.modelId].filter((candidate): candidate is string => candidate !== undefined);
+    const exact = models.find(model => ids(model).some(candidate => candidate === id || strip(candidate) === bare));
+    const family = exact ?? models.find(model => !model.default && ids(model).some(candidate => bare.includes(strip(candidate))));
+    return family?.name ?? id;
+  };
+  const money = (value: number): string => value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.1 ? 4 : 2 });
+  const paintPlanSession = (session: SessionTotals | undefined) => {
+    if (!planSession || !planSessionCost || !planSessionModels) return;
+    planSession.hidden = !session;
+    if (!session) return;
+    const parts = [money(session.costUsd)];
+    if (session.apiDurationMs > 0) parts.push(`${formatApiTime(session.apiDurationMs)} of API time`);
+    if (session.linesAdded > 0 || session.linesRemoved > 0) parts.push(`+${session.linesAdded} −${session.linesRemoved} lines`);
+    planSessionCost.textContent = parts.join(" · ");
+    planSessionModels.replaceChildren(...session.models.map(model => {
+      const row = document.createElement("tr");
+      const cells = [
+        [sessionModelName(model.id), model.id],
+        [formatTokens(model.input + model.cacheRead + model.cacheWrite), `${model.input.toLocaleString()} input · ${model.cacheRead.toLocaleString()} cache read · ${model.cacheWrite.toLocaleString()} cache write`],
+        [formatTokens(model.output), `${model.output.toLocaleString()} output`],
+        [money(model.costUsd), ""],
+      ];
+      for (const [text, title] of cells) {
+        const cell = document.createElement("td");
+        cell.textContent = text!;
+        if (title) cell.title = title;
+        row.append(cell);
+      }
+      return row;
+    }));
+  };
+  const syncPlanUsage = () => {
+    if (!planUsage || !planUsageSummary) return;
+    const report = projection && declares("context") ? latestPlanReport(projection.items) : undefined;
+    const plan = report?.plan;
+    const text = plan ? planUtilizationLabel(plan) : undefined;
+    planUsage.hidden = !text;
+    if (!text || !report || !plan) {
+      planUsage.open = false;
+      paintedPlanReport = undefined;
+      // An empty plan still tells the pane something: this login has none.
+      if (report?.plan) noteUsageReport({ plan: report.plan, reportedAt: report.createdAt });
+      return;
+    }
+    planUsageSummary.textContent = text;
+    planUsage.dataset.level = planUtilizationLevel(plan);
+    if (report === paintedPlanReport) return;
+    paintedPlanReport = report;
+    const name = planName(plan);
+    if (planReadoutName) planReadoutName.textContent = name ?? "Plan usage";
+    planUsageSummary.title = `${name ?? "Plan usage"} · open for every window and its reset`;
+    paintPlanRows();
+    paintPlanSession(report.session);
+    noteUsageReport({ plan, reportedAt: report.createdAt });
+  };
+  planUsage?.addEventListener("toggle", () => {
+    if (planUsage.open) {
+      syncPlanPin();
+      paintPlanRows();
+      if (planTick === undefined) planTick = setInterval(paintPlanRows, 60_000);
+    } else if (planTick !== undefined) {
+      clearInterval(planTick);
+      planTick = undefined;
+    }
+  });
+  planPin?.addEventListener("click", () => {
+    if (revealUsagePane()) syncPlanPin();
+  });
+
   const syncRoutineStatus = () => {
     const conversationStatus = projection?.status;
     const { stateName, label } = composerRoutineState({
@@ -1470,13 +1581,7 @@ export function initChat(api = new ChatApiClient()): void {
       if (limit?.resetsAt) rateLimitBadge.title = `Resets ${new Date(limit.resetsAt).toLocaleString()}`;
       else rateLimitBadge.removeAttribute("title");
     }
-    if (planUsage) {
-      const plan = projection && declares("context") ? latestPlanUtilization(projection.items) : undefined;
-      const text = plan ? planUtilizationLabel(plan) : undefined;
-      planUsage.hidden = !text;
-      planUsage.textContent = text ?? "";
-      planUsage.title = plan?.fiveHour?.resetsAt ? `5-hour window resets ${new Date(plan.fiveHour.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
-    }
+    syncPlanUsage();
     if (composerChips) composerChips.hidden = (rateLimitBadge?.hidden ?? true) && (planUsage?.hidden ?? true);
     composerStatus.dataset.state = stateName;
     composerStatus.setAttribute("aria-label", label);
@@ -2353,6 +2458,10 @@ export function initChat(api = new ChatApiClient()): void {
     childRenderer.permissionScopeNote = agent?.permissionScopeNote;
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"));
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
+    // A subagent's report is the same login's plan: the Usage pane follows
+    // it like the parent's (newest wins, by the report's own time).
+    const childReport = child?.projection && declares("context") ? latestPlanReport(child.projection.items) : undefined;
+    if (childReport?.plan) noteUsageReport({ plan: childReport.plan, reportedAt: childReport.createdAt });
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
       decorateFileLinks(node);
@@ -3476,6 +3585,15 @@ function formatTokens(value: number): string {
 
 function modelValue(model: ModelSelection): string {
   return JSON.stringify([model.providerId, model.modelId]);
+}
+
+/** "42s", "3m 12s", "1h 04m": API time as the reader waited for it. */
+function formatApiTime(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
 function sameModel(left: ModelSelection, right: ModelSelection): boolean {

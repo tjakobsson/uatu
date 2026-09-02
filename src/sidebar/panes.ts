@@ -4,6 +4,7 @@
 
 import { paneParticipatesInStack } from "./pane-stack";
 import { renderSidebar } from "./shell";
+import { onRevealUsagePane } from "../chat/usage-pane";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import {
   ALL_PANE_DEFS,
@@ -243,6 +244,17 @@ export function initSidebarPanes() {
       });
     });
   }
+
+  // The chat readout's "Keep in sidebar" pin: reveal the Usage pane the way
+  // the panels menu would, leaving every other pane's persisted state alone.
+  onRevealUsagePane(() => {
+    const pane = appState.panes.usage;
+    if (pane.visible && !pane.collapsed) return;
+    pane.visible = true;
+    pane.collapsed = false;
+    persistPaneState();
+    renderSidebar();
+  });
 
   syncPaneDom();
   renderPanelsMenu();

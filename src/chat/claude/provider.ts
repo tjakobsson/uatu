@@ -15,7 +15,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "../types";
+import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection } from "./normalization";
@@ -1846,13 +1846,16 @@ export class ClaudeProvider implements ChatProvider {
     await session.query.stopTask(taskId);
   }
 
-  /** The `/usage` plan windows, when the login has plan limits; bounded like the context read. */
-  private async readPlanUtilization(session: LiveSession): Promise<PlanUtilization | undefined> {
+  /**
+   * The `/usage` read: the plan windows when the login has plan limits, and
+   * the session's own running totals; bounded like the context read.
+   */
+  private async readPlanUtilization(session: LiveSession): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
     const read = session.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (!read || this.live.get(session.id) !== session) return undefined;
     // A login that answered with no windows once (an API key) is not asked
     // again for the life of the process.
-    if (session.planUnavailable) return {};
+    if (session.planUnavailable) return { plan: {} };
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const raw = await Promise.race([
@@ -1864,7 +1867,8 @@ export class ClaudeProvider implements ChatProvider {
       if (raw === null) return undefined;
       const plan = normalizePlanUtilization(raw);
       if (!plan) session.planUnavailable = true;
-      return plan ?? {};
+      const totals = normalizeSessionTotals(raw);
+      return { plan: plan ?? {}, ...(totals ? { session: totals } : {}) };
     } catch {
       return undefined;
     } finally {
@@ -1983,9 +1987,9 @@ export class ClaudeProvider implements ChatProvider {
       if (raw === null || session.reportGeneration !== generation) return;
       const item = normalizeContextUsage(raw, this.now(), model);
       if (!item) return;
-      const plan = await planRead;
+      const usage = await planRead;
       if (session.reportGeneration !== generation) return;
-      this.emit(session.id, { updates: [{ kind: "upsert", item: plan !== undefined ? { ...item, plan } : item }], outcome: "handled", eventType: "context.reported" });
+      this.emit(session.id, { updates: [{ kind: "upsert", item: usage !== undefined ? { ...item, ...usage } : item }], outcome: "handled", eventType: "context.reported" });
     } catch {
       // The per-message carrier stands.
     } finally {
@@ -2258,24 +2262,107 @@ function reversibleState(turns: ReversibleClaudeTurn[], boundaryIndex: number | 
   };
 }
 
-/** `/usage` → the plan windows the meter can show beside the fill. */
+/**
+ * `/usage` → everything the readout shows about the plan: the base
+ * windows the composer summary reads, the per-model weekly windows, the
+ * server-labelled model buckets, extra-usage credits, and the plan name.
+ * Undefined when the login reports no windows at all (an API key), which
+ * the caller states as an empty plan. Every field is read defensively: the
+ * SDK marks this method experimental, and a shape change must cost a field,
+ * not the report. `behaviors` is deliberately left behind (design D6).
+ */
 export function normalizePlanUtilization(raw: unknown): PlanUtilization | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const record = raw as Record<string, unknown>;
   if (record.rate_limits_available !== true || !record.rate_limits || typeof record.rate_limits !== "object") return undefined;
   const limits = record.rate_limits as Record<string, unknown>;
-  const window = (value: unknown): PlanUtilizationWindow | undefined => {
-    if (!value || typeof value !== "object") return undefined;
-    const entry = value as Record<string, unknown>;
-    const utilization = typeof entry.utilization === "number" && Number.isFinite(entry.utilization) && entry.utilization >= 0 ? entry.utilization : undefined;
-    const resetsAt = typeof entry.resets_at === "string" ? Date.parse(entry.resets_at) : typeof entry.resets_at === "number" ? (entry.resets_at < 1e12 ? entry.resets_at * 1000 : entry.resets_at) : NaN;
-    if (utilization === undefined && Number.isNaN(resetsAt)) return undefined;
-    return { ...(utilization === undefined ? {} : { utilization }), ...(Number.isNaN(resetsAt) ? {} : { resetsAt: Math.round(resetsAt) }) };
+  const fiveHour = planWindow(limits.five_hour);
+  const sevenDay = planWindow(limits.seven_day);
+  const sevenDayOpus = planWindow(limits.seven_day_opus);
+  const sevenDaySonnet = planWindow(limits.seven_day_sonnet);
+  const sevenDayOauthApps = planWindow(limits.seven_day_oauth_apps);
+  const modelScoped = Array.isArray(limits.model_scoped)
+    ? limits.model_scoped.flatMap((entry): PlanModelWindow[] => {
+      const label = entry && typeof entry === "object" ? (entry as Record<string, unknown>).display_name : undefined;
+      const window = planWindow(entry);
+      return typeof label === "string" && label.trim() && window ? [{ label: label.trim(), ...window }] : [];
+    })
+    : [];
+  if (!fiveHour && !sevenDay && !sevenDayOpus && !sevenDaySonnet && !sevenDayOauthApps && modelScoped.length === 0) return undefined;
+  const extraUsage = planExtraUsage(limits.extra_usage);
+  return {
+    ...(typeof record.subscription_type === "string" && record.subscription_type ? { subscription: record.subscription_type } : {}),
+    ...(fiveHour ? { fiveHour } : {}),
+    ...(sevenDay ? { sevenDay } : {}),
+    ...(sevenDayOpus ? { sevenDayOpus } : {}),
+    ...(sevenDaySonnet ? { sevenDaySonnet } : {}),
+    ...(sevenDayOauthApps ? { sevenDayOauthApps } : {}),
+    ...(modelScoped.length ? { modelScoped } : {}),
+    ...(extraUsage ? { extraUsage } : {}),
   };
-  const fiveHour = window(limits.five_hour);
-  const sevenDay = window(limits.seven_day);
-  if (!fiveHour && !sevenDay) return undefined;
-  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}) };
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function planWindow(value: unknown): PlanUtilizationWindow | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entry = value as Record<string, unknown>;
+  const utilization = nonNegativeNumber(entry.utilization);
+  const resetsAt = typeof entry.resets_at === "string" ? Date.parse(entry.resets_at) : typeof entry.resets_at === "number" ? (entry.resets_at < 1e12 ? entry.resets_at * 1000 : entry.resets_at) : NaN;
+  if (utilization === undefined && Number.isNaN(resetsAt)) return undefined;
+  return { ...(utilization === undefined ? {} : { utilization }), ...(Number.isNaN(resetsAt) ? {} : { resetsAt: Math.round(resetsAt) }) };
+}
+
+function planExtraUsage(value: unknown): PlanExtraUsage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entry = value as Record<string, unknown>;
+  if (typeof entry.is_enabled !== "boolean") return undefined;
+  const usedCredits = nonNegativeNumber(entry.used_credits);
+  const monthlyLimit = nonNegativeNumber(entry.monthly_limit);
+  const utilization = nonNegativeNumber(entry.utilization);
+  return {
+    enabled: entry.is_enabled,
+    ...(usedCredits === undefined ? {} : { usedCredits }),
+    ...(monthlyLimit === undefined ? {} : { monthlyLimit }),
+    ...(utilization === undefined ? {} : { utilization }),
+    ...(typeof entry.currency === "string" && entry.currency ? { currency: entry.currency } : {}),
+  };
+}
+
+/**
+ * `/usage` → the session's own running totals. Present only when the agent
+ * states a cost; counters it left out read as zero, and a model row whose
+ * tally is not numbers is dropped rather than shown as zeros.
+ */
+export function normalizeSessionTotals(raw: unknown): SessionTotals | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const session = (raw as Record<string, unknown>).session;
+  if (!session || typeof session !== "object") return undefined;
+  const entry = session as Record<string, unknown>;
+  const costUsd = nonNegativeNumber(entry.total_cost_usd);
+  if (costUsd === undefined) return undefined;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const models: SessionModelTotals[] = [];
+  if (entry.model_usage && typeof entry.model_usage === "object") {
+    for (const [id, value] of Object.entries(entry.model_usage as Record<string, unknown>)) {
+      if (!id || !value || typeof value !== "object") continue;
+      const usage = value as Record<string, unknown>;
+      const fields = [usage.inputTokens, usage.outputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens, usage.costUSD];
+      if (!fields.every(field => typeof field === "number" && Number.isFinite(field))) continue;
+      const [input, output, cacheRead, cacheWrite, modelCost] = fields as number[];
+      models.push({ id, input: input!, output: output!, cacheRead: cacheRead!, cacheWrite: cacheWrite!, costUsd: modelCost! });
+    }
+  }
+  return {
+    costUsd,
+    apiDurationMs: count(entry.total_api_duration_ms),
+    durationMs: count(entry.total_duration_ms),
+    linesAdded: count(entry.total_lines_added),
+    linesRemoved: count(entry.total_lines_removed),
+    models,
+  };
 }
 
 function defaultRenameSession(sessionId: string, title: string, options: { dir: string }): Promise<void> {

@@ -1,7 +1,16 @@
+import type { APIRequestContext } from "@playwright/test";
+
 import { expect, test } from "./fixtures";
 
+import { openChatPanel } from "./chat-helpers";
 import { treeRow } from "./tree-helpers";
 import { standardBeforeEach, sidebarPanesFitVisibleHeight } from "./fixtures";
+
+async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<any> {
+  const response = await request.post("/__e2e/chat", { data: body });
+  expect(response.ok()).toBe(true);
+  return response.json();
+}
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -154,6 +163,53 @@ test("declutter defaults: fresh clients hide Git Log; the panes menu no longer l
 
   // The retired pane left no DOM behind.
   await expect(page.locator('[data-pane-id="selection-inspector"]')).toHaveCount(0);
+});
+
+test("Usage pane: hidden by default, one toggle away in the panels menu, revealed by the readout's pin, and persistent across reload", async ({ page, request }) => {
+  const usagePane = page.locator('[data-pane-id="usage"]');
+  await expect(usagePane).toBeHidden();
+
+  // Like Git Log: available from the menu, empty until a turn reports.
+  await page.locator("#panels-toggle").click();
+  const option = page.locator('#panels-menu label:has-text("Usage") input');
+  await expect(option).toBeVisible();
+  await option.check();
+  await expect(usagePane).toBeVisible();
+  await expect(usagePane.locator(".pane-empty")).toHaveText("Plan usage appears here after a Claude Code turn.");
+  await usagePane.getByRole("button", { name: "Collapse Usage" }).click();
+  await expect(usagePane).toHaveClass(/is-collapsed/);
+  await usagePane.getByRole("button", { name: "Expand Usage" }).click();
+  await usagePane.getByRole("button", { name: "Hide Usage" }).click();
+  await expect(usagePane).toBeHidden();
+  await page.locator("#panels-toggle").click();
+
+  // A Claude conversation with a plan report: the readout's pin reveals the
+  // pane with the figures, and only the Usage pane's state changes.
+  await control(request, { action: "agents", count: 2 });
+  const seeded = await control(request, {
+    action: "seed", agent: "claude", title: "Plan pin",
+    items: [{ id: "context:report:1", type: "context_report", createdAt: 3, total: 24_000, max: 200_000, plan: { subscription: "pro", fiveHour: { utilization: 9, resetsAt: Date.now() + 3_600_000 }, sevenDay: { utilization: 25, resetsAt: Date.now() + 4 * 86_400_000 } } }],
+  }) as { conversation: { id: string } };
+  // The chat API is behind the workspace credential, which the token query
+  // parameter installs (the same path the chat tests boot through).
+  const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await openChatPanel(page);
+  await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
+  await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+  await page.locator("#chat-plan-usage-summary").click();
+  await page.locator("#chat-plan-pin").click();
+  await expect(usagePane).toBeVisible();
+  await expect(usagePane.locator(".usage-pane-head")).toHaveText(/^Pro plan · as of /);
+  await expect(usagePane.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
+  await expect(page.locator('[data-pane-id="files"]')).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await expect(usagePane).toBeVisible();
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
 });
 
 test("legacy stored pane state with a selection-inspector entry boots cleanly", async ({ page }) => {

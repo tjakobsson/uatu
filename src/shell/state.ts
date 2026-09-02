@@ -55,6 +55,7 @@ export const ALL_PANE_DEFS = [
   { id: "search", label: "Search" },
   { id: "files", label: "Files" },
   { id: "git-log", label: "Git Log" },
+  { id: "usage", label: "Usage" },
 ] as const;
 export type PaneId = (typeof ALL_PANE_DEFS)[number]["id"];
 export type PaneDef = (typeof ALL_PANE_DEFS)[number];
@@ -71,6 +72,11 @@ function defaultPaneState(): PaneState {
     // first-screen need — one toggle away in the panes menu. Stored pane
     // state always wins, so existing arrangements are untouched.
     "git-log": { visible: false, collapsed: false, height: 120 },
+    // Hidden by default: plan usage already has the composer chip, and the
+    // pane is the stay-on view for the reader who pins it from the readout.
+    // Tall enough for the plan line and the two base windows uncut; the
+    // per-model rows scroll.
+    usage: { visible: false, collapsed: false, height: 200 },
   };
 }
 

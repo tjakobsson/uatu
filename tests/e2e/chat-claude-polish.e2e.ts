@@ -19,6 +19,9 @@ import { openChatConfiguration, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 const CHANGE_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/polish-claude-code-chat/screenshots");
+// The plan-usage readout landed as its own change; its evidence goes to its
+// own folder while the change is open and to the test output once archived.
+const USAGE_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/claude-usage-readout/screenshots");
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<any> {
   const response = await request.post("/__e2e/chat", { data: body });
@@ -26,10 +29,10 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
   return response.json();
 }
 
-async function capture(page: Page, testInfo: TestInfo, name: string): Promise<void> {
+async function capture(page: Page, testInfo: TestInfo, name: string, folder = CHANGE_SCREENSHOTS): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(150);
-  const target = existsSync(CHANGE_SCREENSHOTS) ? path.join(CHANGE_SCREENSHOTS, `${name}.png`) : testInfo.outputPath(`${name}.png`);
+  const target = existsSync(folder) ? path.join(folder, `${name}.png`) : testInfo.outputPath(`${name}.png`);
   await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
   await testInfo.attach(name, { path: target, contentType: "image/png" });
 }
@@ -50,6 +53,27 @@ const bash = (id: string, createdAt: number, command: string, status: "running" 
 const carrier = (id: string, createdAt: number, modelId: string, input: number, cacheRead: number): ConversationItem => ({
   id, type: "assistant_message", createdAt, markdown: "", usage: { input, cacheRead, output: 40 }, model: { providerId: "anthropic", modelId },
 });
+
+/** A Max login's `/usage` as the provider normalises it, with the Fable bucket at the given fill. */
+const fullPlan = (now: number, fable: number) => {
+  const week = now + 4 * 86_400_000 + 11 * 3_600_000;
+  return {
+    subscription: "max",
+    fiveHour: { utilization: 9, resetsAt: now + 35 * 60_000 },
+    sevenDay: { utilization: 25, resetsAt: week },
+    sevenDayOpus: { utilization: 61, resetsAt: week },
+    sevenDaySonnet: { utilization: 4, resetsAt: week },
+    modelScoped: [{ label: "Fable", utilization: fable, resetsAt: week }],
+    extraUsage: { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" },
+  };
+};
+const sessionTotals = {
+  costUsd: 1.2345, apiDurationMs: 42_000, durationMs: 90_000, linesAdded: 12, linesRemoved: 3,
+  models: [
+    { id: "claude-opus-5[1m]", input: 1_000, output: 200, cacheRead: 50_000, cacheWrite: 4_000, costUsd: 1.1 },
+    { id: "claude-haiku-4-5-20251001", input: 300, output: 40, cacheRead: 0, cacheWrite: 0, costUsd: 0.1345 },
+  ],
+};
 
 /** Boots the dual-agent workspace and opens a seeded Claude conversation. */
 async function bootClaude(page: Page, request: APIRequestContext, title: string, items: ConversationItem[] = [], configuration: Record<string, unknown> = {}): Promise<string> {
@@ -375,16 +399,82 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(row.locator("pre")).toContainText("Squash merges use a curated message.");
     await capture(page, testInfo, "phase3-memory-recall-row");
     const plan = page.locator("#chat-plan-usage");
+    const summary = page.locator("#chat-plan-usage-summary");
     await expect(plan).toBeVisible();
-    await expect(plan).toHaveText("Plan 37% of 5h · 12% of 7d");
+    await expect(summary).toHaveText("Session 37% · Week 12%");
     await expect(page.locator("#chat-context-usage-label")).toHaveText("12%");
     await capture(page, testInfo, "phase3-plan-utilization");
     // A compaction's post-count report says nothing about the plan: the
     // chip stands. An API-key session's report states an empty plan: hidden.
     await control(request, { action: "item", conversationId: id, item: { id: "context:report:2", type: "context_report", createdAt: 5, total: 25_000, max: 200_000 } });
-    await expect(plan).toHaveText("Plan 37% of 5h · 12% of 7d");
+    await expect(summary).toHaveText("Session 37% · Week 12%");
     await control(request, { action: "item", conversationId: id, item: { id: "context:report:3", type: "context_report", createdAt: 6, total: 25_000, max: 200_000, plan: {} } });
     await expect(plan).toBeHidden();
+  });
+
+  test("plan usage reads in Claude Code's words, warns at 80%, and opens a readout of every window and the conversation's cost", async ({ page, request }, testInfo) => {
+    const now = Date.now();
+    const id = await bootClaude(page, request, "Plan readout", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "How much of my plan is left?" },
+      { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "Open the plan summary under the composer.", completedAt: 2 },
+      { id: "context:report:1", type: "context_report", createdAt: 3, total: 24_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" }, plan: fullPlan(now, 47), session: sessionTotals },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const plan = page.locator("#chat-plan-usage");
+    const summary = page.locator("#chat-plan-usage-summary");
+    await expect(summary).toHaveText("Session 9% · Week 25%");
+    await expect(plan).toHaveAttribute("data-level", "normal");
+    await capture(page, testInfo, "after-plan-chip-desktop", USAGE_SCREENSHOTS);
+
+    await summary.click();
+    const readout = page.locator("#chat-plan-readout");
+    await expect(readout).toBeVisible();
+    await expect(page.locator("#chat-plan-readout-name")).toHaveText("Max plan");
+    const rows = readout.locator(".plan-row");
+    await expect(rows.locator(".plan-row-label")).toHaveText(["Session", "Week", "Week · Opus", "Week · Sonnet", "Week · Fable", "Extra usage"]);
+    await expect(rows.locator(".plan-row-figure")).toHaveText(["9%", "25%", "61%", "4%", "47%", "13%"]);
+    await expect(rows.nth(0).locator(".plan-row-reset")).toHaveText(/^resets \d{1,2}:\d{2}( [AP]M)? · in 35m$/);
+    await expect(rows.nth(1).locator(".plan-row-reset")).toHaveText(/^resets \w{3} \d{1,2}:\d{2}( [AP]M)? · in 4d 11h$/);
+    await expect(rows.nth(5).locator(".plan-row-reset")).toHaveText("$12.50 of $100.00");
+    // This conversation: the total, then each model with its own cost, the
+    // catalog's name where the wire id resolves to one.
+    const session = page.locator("#chat-plan-readout-session");
+    await expect(session).toBeVisible();
+    await expect(page.locator("#chat-plan-session-cost")).toHaveText("$1.23 · 42s of API time · +12 −3 lines");
+    const modelRows = page.locator("#chat-plan-session-models tr");
+    await expect(modelRows).toHaveCount(2);
+    await expect(modelRows.nth(0).locator("td")).toHaveText(["Opus 5 (1M context)", "55k", "200", "$1.10"]);
+    await expect(modelRows.nth(1).locator("td")).toHaveText(["Haiku 4.5", "300", "40", "$0.13"]);
+    await capture(page, testInfo, "after-plan-readout-desktop", USAGE_SCREENSHOTS);
+
+    // A later report with a bucket at 83% turns the summary to a warning
+    // and repaints the open readout in place.
+    await control(request, { action: "item", conversationId: id, item: { id: "context:report:2", type: "context_report", createdAt: 4, total: 26_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" }, plan: fullPlan(now, 83), session: sessionTotals } });
+    await expect(plan).toHaveAttribute("data-level", "warning");
+    await expect(rows.nth(4).locator(".plan-row-figure")).toHaveText("83%");
+    await expect(rows.nth(4)).toHaveAttribute("data-level", "warning");
+    await capture(page, testInfo, "after-plan-readout-warning-desktop", USAGE_SCREENSHOTS);
+
+    // The pin reveals the Usage pane beside the chat and then retires,
+    // leaving the other panes' arrangement alone.
+    const pin = page.locator("#chat-plan-pin");
+    await expect(pin).toBeVisible();
+    const usagePane = page.locator('[data-pane-id="usage"]');
+    await expect(usagePane).toBeHidden();
+    await pin.click();
+    await expect(usagePane).toBeVisible();
+    await expect(usagePane.locator(".usage-pane-head")).toHaveText(/^Max plan · as of /);
+    await expect(usagePane.locator(".plan-row-label")).toHaveText(["Session", "Week", "Week · Opus", "Week · Sonnet", "Week · Fable", "Extra usage"]);
+    await expect(pin).toBeHidden();
+    await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
+    await capture(page, testInfo, "after-usage-pane-desktop", USAGE_SCREENSHOTS);
+
+    // A minimal report degrades to its two rows, unnamed and without totals.
+    await control(request, { action: "item", conversationId: id, item: { id: "context:report:3", type: "context_report", createdAt: 5, total: 26_000, max: 200_000, plan: { fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } } } });
+    await expect(plan).toHaveAttribute("data-level", "normal");
+    await expect(rows.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
+    await expect(page.locator("#chat-plan-readout-name")).toHaveText("Plan usage");
+    await expect(session).toBeHidden();
+    await expect(usagePane.locator(".plan-row")).toHaveCount(2);
   });
 
   test("an elicitation card asks for the server's fields and a running tool states its elapsed time", async ({ page, request }) => {
@@ -438,5 +528,43 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(option).toContainText("Flaky CI build investigation");
     await expect(page.locator("#chat-title")).toHaveText("Flaky CI build investigation");
     await capture(page, testInfo, "phase3-generated-title-in-chooser");
+  });
+});
+
+test.describe("Claude Code plan readout at phone width", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the readout spans the composer and offers no pin where the sidebar is a tab", async ({ page, request }, testInfo) => {
+    const now = Date.now();
+    await request.post("/__e2e/reset");
+    await control(request, { action: "agents", count: 2 });
+    await control(request, { action: "models", agent: "claude", models: claudeModels });
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Plan readout",
+      items: [
+        { id: "message:u1", type: "user_message", createdAt: 1, text: "How much of my plan is left?" },
+        { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "Open the plan summary under the composer.", completedAt: 2 },
+        { id: "context:report:1", type: "context_report", createdAt: 3, total: 24_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" }, plan: fullPlan(now, 47), session: sessionTotals },
+      ],
+      configuration: { model: { providerId: "anthropic", modelId: "sonnet" } },
+    }) as { conversation: { id: string } };
+    const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-surface")).toBeVisible();
+    await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+    const summary = page.locator("#chat-plan-usage-summary");
+    await expect(summary).toHaveText("Session 9% · Week 25%");
+    await summary.click();
+    const readout = page.locator("#chat-plan-readout");
+    await expect(readout).toBeVisible();
+    await expect(readout.locator(".plan-row-label")).toHaveText(["Session", "Week", "Week · Opus", "Week · Sonnet", "Week · Fable", "Extra usage"]);
+    await expect(page.locator("#chat-plan-pin")).toBeHidden();
+    // The readout floats: the composer's textarea did not move to make room.
+    const composerTop = await page.locator("#chat-composer").evaluate(element => element.getBoundingClientRect().top);
+    const readoutBottom = await readout.evaluate(element => element.getBoundingClientRect().bottom);
+    expect(readoutBottom).toBeLessThanOrEqual(composerTop + 8);
+    await capture(page, testInfo, "after-plan-readout-phone", USAGE_SCREENSHOTS);
   });
 });
