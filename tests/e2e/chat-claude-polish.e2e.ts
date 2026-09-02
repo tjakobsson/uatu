@@ -412,6 +412,49 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(plan).toBeHidden();
   });
 
+  test("a login without plan limits keeps the conversation's cost reachable: the chip states it and the readout is this conversation alone", async ({ page, request }, testInfo) => {
+    // API-key, Bedrock, and Vertex logins: the provider reports an empty
+    // plan beside real session totals.
+    const id = await bootClaude(page, request, "API-key cost", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "What has this cost so far?" },
+      { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "Open the chip under the composer.", completedAt: 2 },
+      { id: "context:report:1", type: "context_report", createdAt: 3, total: 24_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" }, plan: {}, session: sessionTotals },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const plan = page.locator("#chat-plan-usage");
+    const summary = page.locator("#chat-plan-usage-summary");
+    await expect(plan).toBeVisible();
+    await expect(summary).toHaveText("$1.23 this conversation");
+    await expect(plan).toHaveAttribute("data-summary", "cost");
+    await expect(plan).toHaveAttribute("data-level", "normal");
+    await summary.click();
+    const readout = page.locator("#chat-plan-readout");
+    await expect(readout).toBeVisible();
+    // No plan to name, meter, or keep in the sidebar: only this conversation.
+    await expect(page.locator("#chat-plan-readout-head")).toBeHidden();
+    await expect(page.locator("#chat-plan-readout-rows")).toBeHidden();
+    await expect(page.locator("#chat-plan-pin")).toBeHidden();
+    await expect(readout.locator(".plan-row")).toHaveCount(0);
+    await expect(page.locator("#chat-plan-readout-session")).toBeVisible();
+    await expect(page.locator("#chat-plan-session-cost")).toHaveText("$1.23 · 42s of API time · +12 −3 lines");
+    const modelRows = page.locator("#chat-plan-session-models tr");
+    await expect(modelRows).toHaveCount(2);
+    await expect(modelRows.nth(0).locator("td")).toHaveText(["Opus 5 (1M context)", "55k", "200", "$1.10"]);
+    await capture(page, testInfo, "after-cost-chip-readout-desktop", USAGE_SCREENSHOTS);
+    // The pane hears the empty plan and says so, rather than waiting.
+    await page.locator("#panels-toggle").click();
+    await page.locator('#panels-menu label:has-text("Usage") input').check();
+    await expect(page.locator('[data-pane-id="usage"] .pane-empty')).toHaveText("This login reports no plan limits.");
+    await page.locator("#panels-toggle").click();
+    // A later report with windows restores the plan summary and its header.
+    await control(request, { action: "item", conversationId: id, item: { id: "context:report:2", type: "context_report", createdAt: 4, total: 25_000, max: 200_000, plan: { subscription: "pro", fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } }, session: sessionTotals } });
+    await expect(summary).toHaveText("Session 9% · Week 25%");
+    await expect(plan).toHaveAttribute("data-summary", "plan");
+    await expect(page.locator("#chat-plan-readout-head")).toBeVisible();
+    await expect(page.locator("#chat-plan-readout-name")).toHaveText("Pro plan");
+    await expect(readout.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
+    await expect(page.locator('[data-pane-id="usage"] .plan-row')).toHaveCount(2);
+  });
+
   test("plan usage reads in Claude Code's words, warns at 80%, and opens a readout of every window and the conversation's cost", async ({ page, request }, testInfo) => {
     const now = Date.now();
     const id = await bootClaude(page, request, "Plan readout", [

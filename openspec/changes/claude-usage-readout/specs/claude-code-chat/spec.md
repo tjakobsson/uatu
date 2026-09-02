@@ -22,8 +22,11 @@ and model-scoped buckets under the label the login reports for them, SHALL
 show extra-usage credits where the login has them enabled, and SHALL show
 this conversation's accumulated cost and per-model token totals where the
 agent reports them. A login that reports only the two base windows SHALL
-render the summary and readout with just those. The summary SHALL be
-absent for a login without plan limits.
+render the summary and readout with just those. For a login without plan
+limits no plan summary SHALL be shown; where the agent still reports this
+conversation's accumulated cost, the summary SHALL state that cost instead,
+and activating it SHALL show only this conversation's cost and per-model
+totals, with no plan name, windows, or sidebar control.
 
 #### Scenario: A retry is not a silent stall
 - **WHEN** Claude Code retries a failed API request
@@ -65,5 +68,10 @@ absent for a login without plan limits.
 - **THEN** the summary and readout show those two and nothing else
 
 #### Scenario: No plan, no summary
-- **WHEN** the login has no plan limits (an API-key session)
-- **THEN** no plan summary is shown beside the composer
+- **WHEN** the login has no plan limits (an API-key session) and the agent reports no conversation cost
+- **THEN** no summary is shown beside the composer
+
+#### Scenario: No plan, the cost is still reachable
+- **WHEN** the login has no plan limits and the agent reports this conversation's accumulated cost
+- **THEN** the composer summary states the cost, as "$1.23 this conversation"
+- **AND** activating it shows only this conversation's cost and per-model usage, with no plan name or windows

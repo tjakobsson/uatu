@@ -6560,6 +6560,13 @@ body.is-resizing-chat .chat-resizer {
   margin-bottom: 0.5rem;
 }
 
+/* A login without plan limits has no plan to name or windows to meter:
+   the readout is then only the conversation's own tally. */
+.chat-plan-readout-head[hidden],
+.plan-rows[hidden] {
+  display: none;
+}
+
 .chat-plan-readout-name {
   color: var(--text-strong);
   font-weight: 600;
@@ -6661,6 +6668,13 @@ html[data-ui-mode="touch"] .chat-plan-pin,
   margin-top: 0.7rem;
   padding-top: 0.6rem;
   border-top: 1px solid var(--border-soft);
+}
+
+/* Nothing above it to rule off from when the plan rows are hidden. */
+.plan-rows[hidden] + .chat-plan-session {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .chat-plan-session[hidden] {

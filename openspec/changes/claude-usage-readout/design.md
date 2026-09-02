@@ -46,7 +46,7 @@ and `ContextReportItem.session?: { costUsd, apiDurationMs, durationMs, linesAdde
 
 **D6. `behaviors` is not carried.** It scans every local transcript on the machine, is explicitly approximate, is null for non-subscribers, and answers a different question ("what is eating my week") from the readout's ("how much is left"). Left as a follow-up once the base readout has been lived with.
 
-**D7. Session totals ride the same context report.** They are per conversation and refresh with the plan; the readout's "This conversation" block reads them from the same newest report. Model ids are shown through the existing model catalog name resolution where a match exists, else raw.
+**D7. Session totals ride the same context report.** They are per conversation and refresh with the plan; the readout's "This conversation" block reads them from the same newest report. Model ids are shown through the existing model catalog name resolution where a match exists, else raw. A login without plan limits (API key, Bedrock, Vertex) reports an empty plan beside real session totals; the chip then reads "$1.23 this conversation" and the readout is the "This conversation" block alone — no plan name, no meters, no pin — so the cost stays reachable where the windows are not.
 
 **D8. Validation.** `validation.ts` accepts the new optional fields and rejects wrong types; unknown windows the SDK adds later are ignored, not rejected.
 

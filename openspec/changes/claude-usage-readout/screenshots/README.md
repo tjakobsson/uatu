@@ -28,6 +28,9 @@ After:
   gone from the readout.
 - `after-plan-readout-phone.png` shows the readout at phone width. It spans
   the composer and offers no pin, because the sidebar is the Files tab there.
+- `after-cost-chip-readout-desktop.png` is an API-key login: no plan windows,
+  so the chip reads "$1.23 this conversation" and the open readout is the
+  "This conversation" block alone, with no plan name, meters, or pin.
 
 Each filename says what it demonstrates. A task is not done until its
 screenshot is here.

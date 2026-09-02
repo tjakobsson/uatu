@@ -5,7 +5,7 @@
 
 import { backgroundStatusLabel } from "./background-tasks";
 import { statusLabel } from "./timeline-renderer";
-import type { BackgroundTaskItem, ContextReportItem, ConversationItem, ConversationStatus, NoticeItem, PlanUtilization, PlanUtilizationWindow } from "./types";
+import type { BackgroundTaskItem, ContextReportItem, ConversationItem, ConversationStatus, NoticeItem, PlanUtilization, PlanUtilizationWindow, SessionTotals } from "./types";
 
 export type ComposerRoutineState = {
   stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "failed" | "ready";
@@ -89,6 +89,33 @@ export function planUtilizationLabel(plan: PlanUtilization): string | undefined 
   if (plan.fiveHour?.utilization !== undefined) parts.push(`Session ${Math.round(plan.fiveHour.utilization)}%`);
   if (plan.sevenDay?.utilization !== undefined) parts.push(`Week ${Math.round(plan.sevenDay.utilization)}%`);
   return parts.length ? parts.join(" · ") : undefined;
+}
+
+/**
+ * Dollars as the readout shows them: cents for anything a reader would
+ * budget, four places below ten cents so a cheap turn does not round to
+ * nothing.
+ */
+export function formatUsd(value: number): string {
+  return value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.1 ? 4 : 2 });
+}
+
+/** "$1.23 this conversation": the chip's words for a login that has no windows to report. */
+export function sessionCostLabel(session: SessionTotals): string {
+  return `${formatUsd(session.costUsd)} this conversation`;
+}
+
+/**
+ * What the composer chip says for a report: the plan windows where the login
+ * has them, else this conversation's cost where the agent tallied one. An
+ * API-key, Bedrock, or Vertex login reports an empty plan with real session
+ * totals, and the cost is the figure that login budgets by. Undefined when
+ * the report says neither, and the chip stays hidden.
+ */
+export function planSummaryLabel(report: Pick<ContextReportItem, "plan" | "session">): string | undefined {
+  const plan = report.plan ? planUtilizationLabel(report.plan) : undefined;
+  if (plan) return plan;
+  return report.session ? sessionCostLabel(report.session) : undefined;
 }
 
 // The chip turns to the warning colour at this fill — the point where the

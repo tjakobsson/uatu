@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { composerRoutineState, latestPlanUtilization, latestRateLimit, planName, planReadoutRows, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset } from "./composer-status";
+import { composerRoutineState, latestPlanUtilization, latestRateLimit, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel } from "./composer-status";
 import type { ConversationItem } from "./types";
 
 const base = { cancelling: false, submitting: false, backgroundDeclared: true, backgroundTasks: [] as [] };
@@ -57,6 +57,21 @@ describe("rate-limit badge and plan utilization", () => {
     // A compaction's post-count says nothing about the plan: the last one stands.
     expect(latestPlanUtilization([report, compactionReport])).toEqual(report.plan);
     expect(latestPlanUtilization([])).toBeUndefined();
+  });
+
+  test("the chip states the conversation's cost when the login reports no windows", () => {
+    const session = { costUsd: 1.2345, apiDurationMs: 42_000, durationMs: 90_000, linesAdded: 12, linesRemoved: 3, models: [] };
+    // Windows win wherever the login has them; the cost is the API-key,
+    // Bedrock, and Vertex reading, whose plan comes back empty.
+    expect(planSummaryLabel({ plan: { fiveHour: { utilization: 9 } }, session })).toBe("Session 9%");
+    expect(planSummaryLabel({ plan: {}, session })).toBe("$1.23 this conversation");
+    expect(planSummaryLabel({ session })).toBe("$1.23 this conversation");
+    // Neither reading: nothing to say, and the chip stays hidden.
+    expect(planSummaryLabel({ plan: {} })).toBeUndefined();
+    expect(planSummaryLabel({})).toBeUndefined();
+    // A cheap turn keeps its figure rather than rounding to nothing.
+    expect(sessionCostLabel({ ...session, costUsd: 0.0123 })).toBe("$0.0123 this conversation");
+    expect(sessionCostLabel({ ...session, costUsd: 0 })).toBe("$0.00 this conversation");
   });
 
   test("the summary warns at 80% of any window, base or per-model", () => {

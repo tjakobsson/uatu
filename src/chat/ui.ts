@@ -11,7 +11,7 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
-import { composerRoutineState, latestPlanReport, latestRateLimit, planName, planReadoutRows, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel } from "./composer-status";
+import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel } from "./composer-status";
 import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
@@ -99,6 +99,8 @@ export function initChat(api = new ChatApiClient()): void {
   const rateLimitBadge = document.querySelector<HTMLElement>("#chat-rate-limit");
   const planUsage = document.querySelector<HTMLDetailsElement>("#chat-plan-usage");
   const planUsageSummary = document.querySelector<HTMLElement>("#chat-plan-usage-summary");
+  const planReadout = document.querySelector<HTMLElement>("#chat-plan-readout");
+  const planReadoutHead = document.querySelector<HTMLElement>("#chat-plan-readout-head");
   const planReadoutName = document.querySelector<HTMLElement>("#chat-plan-readout-name");
   const planReadoutRowsElement = document.querySelector<HTMLElement>("#chat-plan-readout-rows");
   const planPin = document.querySelector<HTMLButtonElement>("#chat-plan-pin");
@@ -1496,12 +1498,11 @@ export function initChat(api = new ChatApiClient()): void {
     const family = exact ?? models.find(model => !model.default && ids(model).some(candidate => bare.includes(strip(candidate))));
     return family?.name ?? id;
   };
-  const money = (value: number): string => value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.1 ? 4 : 2 });
   const paintPlanSession = (session: SessionTotals | undefined) => {
     if (!planSession || !planSessionCost || !planSessionModels) return;
     planSession.hidden = !session;
     if (!session) return;
-    const parts = [money(session.costUsd)];
+    const parts = [formatUsd(session.costUsd)];
     if (session.apiDurationMs > 0) parts.push(`${formatApiTime(session.apiDurationMs)} of API time`);
     if (session.linesAdded > 0 || session.linesRemoved > 0) parts.push(`+${session.linesAdded} −${session.linesRemoved} lines`);
     planSessionCost.textContent = parts.join(" · ");
@@ -1511,7 +1512,7 @@ export function initChat(api = new ChatApiClient()): void {
         [sessionModelName(model.id), model.id],
         [formatTokens(model.input + model.cacheRead + model.cacheWrite), `${model.input.toLocaleString()} input · ${model.cacheRead.toLocaleString()} cache read · ${model.cacheWrite.toLocaleString()} cache write`],
         [formatTokens(model.output), `${model.output.toLocaleString()} output`],
-        [money(model.costUsd), ""],
+        [formatUsd(model.costUsd), ""],
       ];
       for (const [text, title] of cells) {
         const cell = document.createElement("td");
@@ -1522,11 +1523,17 @@ export function initChat(api = new ChatApiClient()): void {
       return row;
     }));
   };
+  // A login without plan limits (API key, Bedrock, Vertex) reports an empty
+  // plan beside real session totals. The chip then carries the conversation's
+  // cost — the figure that login budgets by — and the readout is only the
+  // "This conversation" block: no plan name, no meters, no pin, since there
+  // is no plan to name or keep in the sidebar. The pane still hears the
+  // empty plan and says the login reports none.
   const syncPlanUsage = () => {
     if (!planUsage || !planUsageSummary) return;
     const report = projection && declares("context") ? latestPlanReport(projection.items) : undefined;
     const plan = report?.plan;
-    const text = plan ? planUtilizationLabel(plan) : undefined;
+    const text = report ? planSummaryLabel(report) : undefined;
     planUsage.hidden = !text;
     if (!text || !report || !plan) {
       planUsage.open = false;
@@ -1535,13 +1542,20 @@ export function initChat(api = new ChatApiClient()): void {
       if (report?.plan) noteUsageReport({ plan: report.plan, reportedAt: report.createdAt });
       return;
     }
+    const hasWindows = planUtilizationLabel(plan) !== undefined;
     planUsageSummary.textContent = text;
-    planUsage.dataset.level = planUtilizationLevel(plan);
+    planUsage.dataset.level = hasWindows ? planUtilizationLevel(plan) : "normal";
+    planUsage.dataset.summary = hasWindows ? "plan" : "cost";
     if (report === paintedPlanReport) return;
     paintedPlanReport = report;
     const name = planName(plan);
+    if (planReadoutHead) planReadoutHead.hidden = !hasWindows;
+    if (planReadoutRowsElement) planReadoutRowsElement.hidden = !hasWindows;
+    planReadout?.setAttribute("aria-label", hasWindows ? "Plan usage" : "This conversation's usage");
     if (planReadoutName) planReadoutName.textContent = name ?? "Plan usage";
-    planUsageSummary.title = `${name ?? "Plan usage"} · open for every window and its reset`;
+    planUsageSummary.title = hasWindows
+      ? `${name ?? "Plan usage"} · open for every window and its reset`
+      : "This login reports no plan limits · open for this conversation's cost and per-model usage";
     paintPlanRows();
     paintPlanSession(report.session);
     noteUsageReport({ plan, reportedAt: report.createdAt });
