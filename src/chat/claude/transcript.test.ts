@@ -111,11 +111,11 @@ describe("folding slash-command markup", () => {
     expect(foldCommandMarkup("<command-name>/clear</command-name>")).toBe("/clear");
   });
 
-  test("keeps multi-line arguments and any text around the tags", () => {
+  test("keeps multi-line arguments and tolerates whitespace around the envelope", () => {
     expect(foldCommandMarkup("<command-name>/plan</command-name>\n<command-args>first line\nsecond line</command-args>"))
       .toBe("/plan first line\nsecond line");
-    expect(foldCommandMarkup("before\n<command-name>/x</command-name><command-args>y</command-args>\nafter"))
-      .toBe("/x y\nbefore\nafter");
+    expect(foldCommandMarkup("  \n  <command-message>plan</command-message>\n  <command-name>/plan</command-name>\n  <command-args>y</command-args>\n"))
+      .toBe("/plan y");
   });
 
   test("keeps tag-shaped text quoted inside the arguments", () => {
@@ -126,8 +126,25 @@ describe("folding slash-command markup", () => {
       .toBe(typed);
     expect(foldCommandMarkup("<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>explain <command-name>/foo</command-name> and <command-message>bar</command-message></command-args>"))
       .toBe("/review explain <command-name>/foo</command-name> and <command-message>bar</command-message>");
-    expect(foldCommandMarkup("<command-name>/x</command-name>\n<command-args>a <command-args>b</command-args>\nc</command-args>\nafter"))
-      .toBe("/x a <command-args>b</command-args>\nc\nafter");
+    expect(foldCommandMarkup("<command-name>/x</command-name>\n<command-args>a <command-args>b</command-args>\nc</command-args>"))
+      .toBe("/x a <command-args>b</command-args>\nc");
+  });
+
+  test("leaves a prompt that quotes the tags inline unchanged", () => {
+    // Only the generated envelope folds; a person talking about the markup
+    // is not issuing a command.
+    const quoted = "Can you explain <command-name>/init</command-name>?";
+    expect(foldCommandMarkup(quoted)).toBe(quoted);
+    const listed = "=====REAL TRANSCRIPTS\n60ee4ffc: <command-name>/clear</command-name>\n60ee4ffc: <command-message>clear</command-message>";
+    expect(foldCommandMarkup(listed)).toBe(listed);
+    const leadingTag = "<command-name>/init</command-name> is what the store writes, right?";
+    expect(foldCommandMarkup(leadingTag)).toBe(leadingTag);
+    // The store ends the envelope at its closing tag; text after it means
+    // the tags were quoted.
+    const trailing = "<command-message>x</command-message>\n<command-name>/x</command-name>\n<command-args>y</command-args>\nand then some";
+    expect(foldCommandMarkup(trailing)).toBe(trailing);
+    const trailingNoArgs = "<command-name>/x</command-name>\nand then some";
+    expect(foldCommandMarkup(trailingNoArgs)).toBe(trailingNoArgs);
   });
 
   test("leaves text without a command-name tag unchanged", () => {
