@@ -3,7 +3,7 @@ import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
-import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
+import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
 import type { ActivityStatus, ConversationItem, ConversationStatus, MessageAttachment, PermissionOutcome, QueuedMessage, QuestionRequest, RevertedUserMessage, TokenUsage, ToolItem } from "./types";
 
@@ -22,6 +22,10 @@ export class TimelineRenderer {
   private conversationId: string | null = null;
 
   /** Reconciles the DOM under `target` and returns the created or changed nodes. */
+  // The owning agent's persistent-approval sentence, set by the surface from
+  // the agent's declaration; a card renders whatever its agent declared.
+  permissionScopeNote: string | undefined;
+
   render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true, allowRevert = false): HTMLElement[] {
     if (!projection) {
       this.reset();
@@ -71,7 +75,9 @@ export class TimelineRenderer {
     // while having nothing to show. Filtered before rendering AND before
     // grouping, so a carrier sitting between two tool calls cannot split a
     // finished run's group.
-    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === ""));
+    // A context report is data of the same kind: the readout consumes it,
+    // the timeline never shows it.
+    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === "") && item.type !== "context_report");
 
     const nodes = new Map<string, HTMLElement>();
     for (const [visibleIndex, item] of visible.entries()) {
@@ -92,7 +98,7 @@ export class TimelineRenderer {
       // when a later user message is visible remains incomplete.
       const completedAssistant = item.type === "assistant_message"
         && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
-      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant)].join("\u0001");
+      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? ""].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
@@ -131,7 +137,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert));
+      const node = buildNode(renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote));
       if (completedAssistant) decorateAssistantCopyActions(node);
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
@@ -346,15 +352,34 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
   return segments;
 }
 
+// How many steps a collapsed group names before it counts the rest.
+const GROUP_NAMED = 3;
+
+/**
+ * The collapsed line of a group: the first few steps that acted on
+ * something, named with it ("Bash ./hello.sh · Bash ls -la · Read
+ * README.md"), then everything else counted by kind ("Thought ×3"). Naming
+ * is what makes the line legible without opening it (spec: a group still
+ * names the commands it contains); counting keeps a long run to one line,
+ * and reasoning steps — which act on nothing — never take a named slot.
+ */
 function groupSummary(run: readonly ConversationItem[]): string {
+  const named: string[] = [];
   const counts = new Map<string, number>();
   for (const item of run) {
     // Grouped reasoning stays "Thought" without a duration: the group line
     // counts kinds of steps, and per-entry timings belong on the entries.
-    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.status === "completed" ? "Thought" : "Thinking") : item.type === "tool" ? describeToolDetail(item).label : item.type;
+    const detail = item.type === "tool" ? describeToolDetail(item) : undefined;
+    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.status === "completed" ? "Thought" : "Thinking") : detail ? detail.label : item.type;
+    const subject = item.type === "command" ? commandSubject(item.command) : detail ? toolSubject(detail) : undefined;
+    if (subject && named.length < GROUP_NAMED) {
+      named.push(`${label} ${workspaceRelative(subject)}`);
+      continue;
+    }
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
-  return [...counts.entries()].map(([label, count]) => count > 1 ? `${label} ×${count}` : label).join(" · ");
+  const counted = [...counts.entries()].map(([label, count]) => count > 1 ? `${label} ×${count}` : label);
+  return [...named, ...counted].join(" · ");
 }
 
 /** "Thinking" while it streams; "Thought for 12s" (or just "Thought") after. */
@@ -595,7 +620,7 @@ export class RevertedMessagesDockRenderer {
 
 type RequestOrigin = { conversationId: string; label: string };
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   if (item.type === "user_message") {
@@ -610,6 +635,13 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
     return `<footer class="chat-item chat-turn-status is-${item.status}" data-chat-item-id="${id}"${stamp} role="status">${escapeHtml(statusLabel(item.status))}${item.message ? `: ${escapeHtml(item.message)}` : ""}${worked ? ` <span class="chat-turn-worked">· worked ${worked}</span>` : ""}</footer>`;
   }
   if (item.type === "notice") return `<aside class="chat-item chat-notice is-${item.level}" data-chat-item-id="${id}"${stamp} role="${item.level === "error" ? "alert" : "status"}">${escapeHtml(item.message)}</aside>`;
+  // Compaction is a boundary, not a step: a quiet rule across the timeline
+  // stating that the agent summarized what came before, with the agent's
+  // own figures when it reported them. Earlier content stays above it.
+  if (item.type === "compaction") return `<div class="chat-item chat-compaction" data-chat-item-id="${id}"${stamp} role="status"><span class="chat-compaction-label">${escapeHtml(compactionLabel(item))}</span></div>`;
+  // Never reached: reports are filtered before rendering. Kept exhaustive so
+  // a new kind fails loudly here rather than falling into the activity shell.
+  if (item.type === "context_report") return "";
   if (item.type === "file_change") {
     return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(item.operation)}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
   }
@@ -623,7 +655,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
     }).join("");
     return `<section class="chat-item chat-task-progress" data-chat-item-id="${id}"${stamp} aria-label="Task progress"><header class="chat-task-progress-header">Tasks <span class="chat-task-progress-count">${done}/${item.entries.length}</span></header><ol class="chat-task-list">${rows}</ol></section>`;
   }
-  if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents);
+  if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents, permissionScopeNote);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, origin, allowSubagents);
   if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents);
   // A command's text is the subject, not the label. As a label it lands in the
@@ -764,6 +796,10 @@ function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): 
       return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${allowSubagents && detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
     case "skill":
       return `${outputBlock(item)}${error}`;
+    case "bash":
+      // The command in full (the summary showed its first line), what the
+      // agent said it was for, then the bounded output.
+      return `<pre class="chat-tool-command">${escapeHtml(detail.command)}</pre>${detail.description || detail.background ? `<p class="chat-tool-meta">${detail.description ? escapeHtml(detail.description) : ""}${detail.background ? `${detail.description ? " · " : ""}<span class="chat-tool-background">started in the background</span>` : ""}</p>` : ""}${outputBlock(item)}${error}`;
     default:
       // An unknown tool: show its input, then bound its output like any other.
       return `${item.input ? `<pre>${escapeHtml(item.input)}</pre>` : ""}${outputBlock(item)}${error}`;
@@ -849,21 +885,16 @@ function requestOrigin(origin: RequestOrigin | undefined, allowSubagents: boolea
   return `<p class="chat-request-origin">Requested by ${escapeHtml(origin.label)}. <button type="button" data-open-conversation="${escapeHtmlAttribute(origin.conversationId)}">Open transcript</button></p>`;
 }
 
-function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true): string {
+function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true, permissionScopeNote?: string): string {
   const pending = item.status === "pending";
-  // `approved-session` is the transported value and stays. Verified against a
-  // live OpenCode 1.18.18: this reply carries past the request into every later
-  // conversation the same OpenCode server handles, and is lost when that server
-  // restarts (it never reaches `/api/permission/saved`). It also grants the
-  // request's `always` pattern — `echo *` for a literal `echo scoped` — so it
-  // covers more than the resource on the card. "Allow session" implied one
-  // conversation; the card now states the reach that was actually being given.
-  // "OpenCode" is named on purpose in the scope line below and is not
-  // neutralized like the rest of the agent copy: the sentence states
-  // OpenCode's own persistent-approval lifetime (see the opencode-chat
-  // permission spec), which is agent-specific behavior, not just an agent
-  // name. A second agent that persists grants differently needs its own
-  // statement here, not a find-and-replace.
+  // `approved-session` is the transported value and stays; "Allow always" is
+  // the human-facing text, because under every agent that offers it the
+  // reply carries past the single request on the card.
+  // What "Allow always" actually covers is the owning agent's own statement
+  // (`ChatAgent.permissionScopeNote`): OpenCode's reaches later conversations
+  // until its server restarts, Claude Code's lasts one live session — two
+  // different lifetimes, two different sentences, neither written here. An
+  // agent that declares none gets no scope line rather than another agent's.
   // A resolved request recedes: the outcome moves into the summary so it stays
   // legible at a glance, the choices and their scope note fall away, and the
   // resources it named stay in the collapsed body for a user auditing what was
@@ -871,9 +902,10 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // Agent-provided approval intents replace the generic pair: each choice is
   // one approve button carrying its id, and Reject stays universal. The
   // always/session scope note applies only to the generic pair.
+  const scope = permissionScopeNote ? `<p class="chat-request-scope">${escapeHtml(permissionScopeNote)}</p>` : "";
   const actions = item.choices?.length
     ? `<div class="chat-request-actions">${item.choices.map(choice => `<button type="button" data-permission-choice="${escapeHtmlAttribute(choice.id)}"${choice.description ? ` title="${escapeHtmlAttribute(choice.description)}"` : ""}>${escapeHtml(choice.label)}</button>`).join("")}<button type="button" data-permission-outcome="rejected">Reject</button></div>`
-    : `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`;
+    : `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div>${scope}`;
   const body = pending && active
     ? actions
     : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : "";
@@ -918,7 +950,8 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, o
     const custom = question.allowFreeForm
       ? `<label class="chat-question-option chat-question-custom-option"><input type="${type}" name="${question.multiple ? `q-${index}-custom-choice` : `q-${index}`}" data-question-custom-toggle aria-controls="${escapeHtmlAttribute(customInputId)}" aria-expanded="false"><span class="chat-question-option-text"><span class="chat-question-option-label">Type your own answer</span></span></label><label class="chat-question-custom-editor" data-question-custom-editor for="${escapeHtmlAttribute(customInputId)}" hidden><span class="sr-only">Type your own answer</span><input id="${escapeHtmlAttribute(customInputId)}" name="q-${index}-custom-text" type="text" data-question-custom-input autocomplete="off"></label>`
       : "";
-    return `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${options}${custom}</fieldset>`;
+    const hints = [question.multiple ? "choose one or more" : "", question.optional ? "optional" : ""].filter(Boolean);
+    return `<fieldset class="chat-question-panel" data-question-panel="${index}"${question.optional ? ` data-question-optional="true"` : ""}${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${hints.length ? ` <span class="chat-question-hint">${escapeHtml(hints.join(" · "))}</span>` : ""}</p>${options}${custom}</fieldset>`;
   }).join("");
   // Same receding as a permission: a resolved question carries its outcome in
   // the summary and drops the answered form. Its prompts stay in the collapsed
@@ -927,7 +960,15 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, o
   const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : resolvedBody;
   const state = requestState(item.status, active);
   const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</span>` : requestBadge(state);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}${body}</details>`;
+  // A dialog or elicitation says who is asking above the form, offers the
+  // link it wants opened as a real link, and keeps the request as received
+  // behind a collapsed "Raw request" for a reader auditing what an MCP
+  // server or a tool asked for.
+  const heading = item.source === "dialog" ? "Dialog" : item.source === "elicitation" ? "Input requested" : "Question";
+  const intro = item.intro ? `<p class="chat-request-intro">${escapeHtml(item.intro)}</p>` : "";
+  const link = item.link ? `<p class="chat-request-link"><a href="${escapeHtmlAttribute(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.link)}</a></p>` : "";
+  const raw = item.schema && pending ? `<details class="chat-request-raw"><summary>Raw request</summary><pre>${escapeHtml(JSON.stringify(item.schema, null, 1))}</pre></details>` : "";
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}${item.source ? ` data-question-source="${escapeHtmlAttribute(item.source)}"` : ""}><summary>${heading}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}${intro}${link}${body}${raw}</details>`;
 }
 
 export function decorateFileLinks(container: HTMLElement): void {
@@ -974,6 +1015,19 @@ export function decorateFileLinks(container: HTMLElement): void {
     fragment.append(text.slice(offset));
     node.replaceWith(fragment);
   }
+}
+
+/** "Context compacted · 180,000 → 40,000 tokens", or as much as was reported. */
+export function compactionLabel(item: Extract<ConversationItem, { type: "compaction" }>): string {
+  const figures = item.preTokens !== undefined && item.postTokens !== undefined
+    ? `${item.preTokens.toLocaleString()} → ${item.postTokens.toLocaleString()} tokens`
+    : item.postTokens !== undefined
+      ? `now ${item.postTokens.toLocaleString()} tokens`
+      : item.preTokens !== undefined
+        ? `was ${item.preTokens.toLocaleString()} tokens`
+        : "";
+  const trigger = item.trigger === "manual" ? "Context compacted on request" : "Context compacted";
+  return figures ? `${trigger} · ${figures}` : trigger;
 }
 
 export function statusLabel(status: ConversationStatus): string {

@@ -49,7 +49,11 @@ export type ChatCapability =
   | "reversible-history"
   // The agent accepts image attachments on a prompt. Whether a particular
   // model can see them is per-model (`ChatModel.imageInput`), not per-agent.
-  | "attachments";
+  | "attachments"
+  // The agent runs any model id the user types, listed or not: the picker
+  // offers a typed-id row and an unlisted selection is passed through
+  // verbatim for the agent to accept or reject visibly.
+  | "custom-model-id";
 
 // Image attachment bounds, shared by the composer (intake refusal), the
 // upload route (authoritative enforcement), and the store. 10 MiB sits
@@ -78,6 +82,12 @@ export type ChatAgent = {
   id: string;
   name: string;
   capabilities: ChatCapability[];
+  // The sentence a permission card shows under its persistent-approval
+  // choice: what that approval covers under THIS agent, in the agent's own
+  // terms. Two agents with different persistence semantics carry different
+  // sentences; the renderer never writes one of its own. Absent when the
+  // agent offers no persistent approval it can describe.
+  permissionScopeNote?: string;
 };
 
 // The agent identity a conversation or status entry names on the wire.
@@ -333,6 +343,9 @@ export type StructuredQuestion = {
   options: QuestionOption[];
   multiple: boolean;
   allowFreeForm: boolean;
+  // The question may be submitted with no answer (an optional field of an
+  // elicitation form); its answer array is then empty. Absent means required.
+  optional?: boolean;
 };
 
 export type QuestionOutcome =
@@ -347,6 +360,18 @@ export type QuestionRequest = TimelineItemBase & {
   questions: StructuredQuestion[];
   status: "pending" | "resolved";
   outcome?: QuestionOutcome;
+  // Who is asking, beyond the agent's own structured question: a
+  // tool-driven blocking dialog the agent asked the host to render, or an
+  // MCP server's elicitation. Absent for the agent's own question tool.
+  source?: "dialog" | "elicitation";
+  // A sentence of context above the form — the server and message behind
+  // an elicitation, the refusal a dialog is about.
+  intro?: string;
+  // A link the request asks the user to open (a URL-mode elicitation).
+  link?: string;
+  // The request as received (an elicitation's JSON schema, a dialog's
+  // payload), for a reader auditing what was asked. Opaque on the wire.
+  schema?: Record<string, unknown>;
 };
 
 // One task's standing in the agent's own running task list.
@@ -381,6 +406,44 @@ export type NoticeItem = TimelineItemBase & {
   message: string;
 };
 
+// One row of an agent-reported context breakdown. `kind` says what the row
+// is: `used` content occupies the window and sums to the report's total;
+// `free` is the remaining window; `buffer` a compaction reserve; `deferred`
+// rows are out-of-window tool schemas listed for awareness only.
+export type ContextReportCategory = {
+  name: string;
+  tokens: number;
+  kind: "used" | "free" | "buffer" | "deferred";
+};
+
+/**
+ * The agent's own statement of how full the context window is, at the point
+ * in the timeline where it was reported (after a turn, after a compaction).
+ * Never rendered as a row: the context readout reads it, the way it reads
+ * the empty-markdown usage carriers, and prefers whichever is newest.
+ * `max` is the window the total was measured against; absent when the
+ * report did not state one, in which case the model's known limit stands.
+ */
+export type ContextReportItem = TimelineItemBase & {
+  type: "context_report";
+  total: number;
+  max?: number;
+  model?: ModelSelection;
+  categories?: ContextReportCategory[];
+};
+
+/**
+ * The agent compacted the conversation here. Content before the marker
+ * stays in the timeline; the figures are the agent's own pre/post token
+ * counts when it reported them.
+ */
+export type CompactionItem = TimelineItemBase & {
+  type: "compaction";
+  trigger?: "manual" | "auto";
+  preTokens?: number;
+  postTokens?: number;
+};
+
 export type ConversationItem =
   | UserMessageItem
   | AssistantMessageItem
@@ -392,7 +455,9 @@ export type ConversationItem =
   | QuestionRequest
   | TaskProgressItem
   | TurnStatusItem
-  | NoticeItem;
+  | NoticeItem
+  | ContextReportItem
+  | CompactionItem;
 
 export type InteractionRequest = PermissionRequest | QuestionRequest;
 

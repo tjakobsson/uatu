@@ -15,6 +15,7 @@ import {
   parseReversibleHistoryResult,
   parseReversibleHistoryState,
 } from "./validation";
+import type { ConversationItem } from "./types";
 
 const summary = {
   id: "opencode:session-1",
@@ -220,6 +221,38 @@ describe("chat domain validation", () => {
     expect(() => parseConversationItem({ ...items[1], usage: 12_400 })).toThrow();
     expect(() => parseConversationItem({ ...items[1], model: { providerId: "anthropic" } })).toThrow();
     expect(() => parseConversationItem({ ...items[3], model: 5 })).toThrow();
+  });
+
+  test("an optional question parses and may be answered with an empty array", () => {
+    const question = { prompt: "Retries?", header: "retries", options: [], multiple: false, allowFreeForm: true, optional: true };
+    expect(parseConversationItem({ id: "question:o", type: "question", createdAt: 1, requestId: "o", status: "pending", questions: [question] })).toBeTruthy();
+    expect(parseConversationItem({ id: "question:o", type: "question", createdAt: 1, requestId: "o", status: "resolved", questions: [question], outcome: { kind: "answered", answers: [[]] } })).toBeTruthy();
+    expect(() => parseConversationItem({ id: "question:o", type: "question", createdAt: 1, requestId: "o", status: "pending", questions: [{ ...question, optional: "yes" }] })).toThrow(/optional/);
+  });
+
+  test("a dialog or elicitation question carries its source, intro, link, and raw request", () => {
+    const base = { id: "question:d1", type: "question", createdAt: 3, requestId: "d1", status: "pending", questions: [{ prompt: "Retry?", header: "Refusal", options: [{ label: "Retry", description: "" }], multiple: false, allowFreeForm: false }] };
+    expect(parseConversationItem({ ...base, source: "dialog", intro: "Claude Code asks", schema: { dialogKind: "refusal_fallback_prompt", payload: {} } })).toBeTruthy();
+    expect(parseConversationItem({ ...base, source: "elicitation", intro: "github asks", link: "https://example.com/auth" })).toBeTruthy();
+    expect(() => parseConversationItem({ ...base, source: "hook" })).toThrow(/question source/);
+    expect(() => parseConversationItem({ ...base, link: "javascript:alert(1)" })).toThrow(/http/);
+    expect(() => parseConversationItem({ ...base, intro: "" })).toThrow(/intro/);
+    expect(() => parseConversationItem({ ...base, schema: "not-an-object" })).toThrow(/schema/);
+  });
+
+  test("context reports and compaction markers parse as closed shapes", () => {
+    const report = { id: "context:1", type: "context_report", createdAt: 5, total: 9697, max: 1_000_000, model: { providerId: "anthropic", modelId: "opus[1m]" }, categories: [{ name: "Messages", tokens: 10, kind: "used" }, { name: "Free space", tokens: 990_303, kind: "free" }] } as ConversationItem;
+    expect(parseConversationItem(report)).toEqual(report);
+    expect(parseConversationItem({ id: "context:2", type: "context_report", createdAt: 5, total: 0 })).toBeTruthy();
+    expect(() => parseConversationItem({ id: "context:3", type: "context_report", createdAt: 5 })).toThrow(/total/);
+    expect(() => parseConversationItem({ ...report, max: 0 })).toThrow(/max/);
+    expect(() => parseConversationItem({ ...report, categories: [{ name: "Messages", tokens: 10, kind: "spent" }] })).toThrow(/category kind/);
+    expect(() => parseConversationItem({ ...report, percentage: 1 })).toThrow(/unknown context_report field/);
+    const compaction = { id: "compaction:1", type: "compaction", createdAt: 6, trigger: "auto", preTokens: 180_000, postTokens: 40_000 } as ConversationItem;
+    expect(parseConversationItem(compaction)).toEqual(compaction);
+    expect(parseConversationItem({ id: "compaction:2", type: "compaction", createdAt: 6 })).toBeTruthy();
+    expect(() => parseConversationItem({ ...compaction, trigger: "scheduled" })).toThrow(/compaction trigger/);
+    expect(() => parseConversationItem({ ...compaction, preTokens: -1 })).toThrow(/preTokens/);
   });
 
   test("rejects contradictory interaction request state and unsafe extra fields", () => {

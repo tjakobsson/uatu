@@ -8,7 +8,7 @@ import type { WorkspaceChatService } from "../chat/service";
 import type { ChatAvailability, ConversationSnapshot, ConversationSummary, MessageAttachment, ModelSelection, PermissionOutcome, QuestionOutcome, ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
-import { ReversibleHistoryTargetError } from "../chat/provider";
+import { ReversibleHistoryTargetError, InvalidQuestionAnswerError } from "../chat/provider";
 import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 
@@ -25,6 +25,7 @@ class FakeChatService implements WorkspaceChatService {
   selectedModel: ModelSelection | undefined;
   selectedAgent: string | undefined;
   questionResponses: QuestionOutcome[] = [];
+  rejectAnswers: Error | null = null;
   removals: string[] = [];
   reversibleMutations = { undo: 0, redo: 0, revert: 0, restore: 0 };
   private readonly reversibleReceipts = new Map<string, ReversibleHistoryResult>();
@@ -134,7 +135,8 @@ class FakeChatService implements WorkspaceChatService {
     return result;
   }
   async respondPermission(id: string, _interactionId: string, _requestId: string, outcome: PermissionOutcome) { this.require(id); return { outcome }; }
-  async respondQuestion(id: string, _interactionId: string, _requestId: string, outcome: QuestionOutcome) { this.require(id); this.questionResponses.push(outcome); return { outcome }; }
+  async respondQuestion(id: string, _interactionId: string, _requestId: string, outcome: QuestionOutcome) {
+    if (this.rejectAnswers) throw this.rejectAnswers; this.require(id); this.questionResponses.push(outcome); return { outcome }; }
   async dispose() { this.inventory.dispose(); }
 
   private snapshot(): ConversationSnapshot {
@@ -529,9 +531,17 @@ describe("workspace chat routes", () => {
       body: JSON.stringify({ requestId: crypto.randomUUID(), outcome: { kind: "answered", answers } }),
     }, { conversationId: "opencode:local", interactionId: "question-1" }) as never);
 
-    expect((await send([[]])).status).toBe(400);
+    // An empty array is the adapter's to judge (an optional question
+    // allows it); a blank string never is.
     expect((await send([["   "]])).status).toBe(400);
+    expect((await send([[""]])).status).toBe(400);
     expect(service.questionResponses).toEqual([]);
+    expect((await send([[]])).status).toBe(200);
+    // An answer the request's schema refuses is the caller's to correct.
+    service.rejectAnswers = new InvalidQuestionAnswerError("count: enter a whole number");
+    const refused = await send([["1.5"]]);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "count: enter a whole number" });
   });
 
   test("streams retained events immediately with replay IDs and no-buffering headers", async () => {

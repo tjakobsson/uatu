@@ -46,6 +46,16 @@ export function createSdkV2Provider(options: {
   return new SdkV2Provider(client, options.directory);
 }
 
+/**
+ * OpenCode's persistent-approval reach, verified against a live OpenCode
+ * 1.18.18: an "always" reply carries past the request into every later
+ * conversation the same OpenCode server handles, grants the request's
+ * `always` pattern rather than only the resource on the card, and is lost
+ * when that server restarts (it never reaches `/api/permission/saved`).
+ * The card states exactly this and names OpenCode on purpose.
+ */
+export const OPENCODE_PERMISSION_SCOPE_NOTE = "“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.";
+
 export class SdkV2Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
 
@@ -85,6 +95,7 @@ export class SdkV2Provider implements ChatProvider {
       id: "opencode",
       name: "OpenCode",
       capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments", "reversible-history"],
+      permissionScopeNote: OPENCODE_PERMISSION_SCOPE_NOTE,
     };
   }
 

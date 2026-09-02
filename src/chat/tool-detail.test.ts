@@ -43,6 +43,30 @@ describe("describeToolDetail", () => {
     ] });
   });
 
+  test("a shell command is its own subject, with the description as meta", () => {
+    const single = describeToolDetail({ name: "Bash", input: JSON.stringify({ command: "./hello.sh", description: "Run the greeting script" }) });
+    expect(single).toEqual({ kind: "bash", label: "Bash", command: "./hello.sh", description: "Run the greeting script", background: false });
+    expect(toolSubject(single)).toBe("./hello.sh");
+
+    // A multi-line command is cut at its first line in the subject and
+    // marked as continuing; the body keeps it whole.
+    const multi = describeToolDetail({ name: "Bash", input: JSON.stringify({ command: "cd src &&\nls -la \\\n  | head" }) });
+    expect(multi).toEqual({ kind: "bash", label: "Bash", command: "cd src &&\nls -la \\\n  | head", background: false });
+    expect(toolSubject(multi)).toBe("cd src && …");
+
+    // A backgrounded launch is flagged so its task row can link back.
+    const background = describeToolDetail({ name: "Bash", input: JSON.stringify({ command: "sleep 20 && echo done", run_in_background: true }) });
+    expect(background).toEqual({ kind: "bash", label: "Bash", command: "sleep 20 && echo done", background: true });
+    expect(toolSubject(background)).toBe("sleep 20 && echo done");
+
+    // A very long single line is bounded, not truncated silently.
+    const long = describeToolDetail({ name: "bash", input: JSON.stringify({ command: `echo ${"x".repeat(300)}` }) });
+    expect(toolSubject(long)!.length).toBeLessThanOrEqual(160);
+    expect(toolSubject(long)!.endsWith("…")).toBe(true);
+    // No command, no bash detail.
+    expect(describeToolDetail({ name: "Bash", input: JSON.stringify({ description: "nothing" }) })).toEqual({ kind: "generic", label: "Bash" });
+  });
+
   test("falls back to generic for unknown tools and malformed input", () => {
     expect(describeToolDetail({ name: "mcp__server__thing", input: "{}" })).toEqual({ kind: "generic", label: "mcp__server__thing" });
     expect(describeToolDetail({ name: "edit", input: "not json" })).toEqual({ kind: "generic", label: "Edit" });
