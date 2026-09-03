@@ -3,7 +3,21 @@
 // collapsed to its edge strip, and reopening after a reload is a no-op
 // because the open preference persists per context.
 
-import { expect, type Page } from "@playwright/test";
+import { existsSync } from "node:fs";
+import path from "node:path";
+
+import { expect, type Page, type TestInfo } from "@playwright/test";
+
+/** Saves a screenshot into a change's screenshots folder when that folder
+ *  exists (review reads the folder instead of running a session), else into
+ *  the test's output directory, and attaches it to the report either way. */
+export async function captureScreenshot(page: Page, testInfo: TestInfo, screenshotsDir: string, name: string): Promise<void> {
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(150);
+  const target = existsSync(screenshotsDir) ? path.join(screenshotsDir, `${name}.png`) : testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
+  await testInfo.attach(name, { path: target, contentType: "image/png" });
+}
 
 /** Expand the desktop chat panel if it is collapsed (the fresh-context
  *  default) and wait for its content to present. */

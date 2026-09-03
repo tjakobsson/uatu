@@ -1520,6 +1520,30 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("a stored session opened with a slash command is titled and replayed as the typed command", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-slash-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    const projectDir = claudeProjectDir(workspace, configDir);
+    mkdirSync(projectDir, { recursive: true });
+    // Claude Code stores a slash-command prompt as markup, not as typed, and
+    // its own ai-title may never arrive.
+    const markup = "<command-message>openspec-explore</command-message>\n<command-name>/openspec-explore</command-name>\n<command-args>why is the build slow?</command-args>";
+    writeFileSync(path.join(projectDir, "slash-session.jsonl"), [
+      JSON.stringify({ type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-09-02T10:00:00.000Z", cwd: workspace, message: { role: "user", content: markup } }),
+      JSON.stringify({ type: "assistant", uuid: "a1", parentUuid: "u1", isSidechain: false, timestamp: "2026-09-02T10:00:01.000Z", cwd: workspace, message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "Looking." }] } }),
+    ].join("\n") + "\n");
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      queryFactory: input => new FakeQuery(input),
+    });
+    expect((await provider.listSessions()).find(entry => entry.id === "slash-session")?.title).toBe("/openspec-explore why is the build slow?");
+    const page = await provider.listMessages("slash-session", { limit: 10 });
+    expect(page.items.find(item => item.type === "user_message")).toEqual(expect.objectContaining({ text: "/openspec-explore why is the build slow?" }));
+    await provider.dispose();
+  });
+
   test("a retry outside the conversation's own turn names no state, and a stream frame wakes the follow-up turn", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);

@@ -9,7 +9,7 @@ import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
+import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, statusLabel, subagentEntries, subagentLabel, workingLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLevel, rateLimitBadgeLabel, sessionTotalsTitle } from "./composer-status";
 import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pane";
@@ -125,8 +125,6 @@ export function initChat(api = new ChatApiClient()): void {
   const imageViewerName = document.querySelector<HTMLElement>("#chat-image-viewer-name");
   const imageViewerClose = document.querySelector<HTMLButtonElement>("#chat-image-viewer-close");
   const copyStatus = document.querySelector<HTMLElement>("#chat-copy-status");
-  const waiting = document.querySelector<HTMLElement>("#chat-waiting");
-  const waitingLabel = document.querySelector<HTMLElement>("#chat-waiting-label");
   const contextUsage = document.querySelector<HTMLDetailsElement>("#chat-context-usage");
   const contextUsageFill = document.querySelector<HTMLElement>("#chat-context-usage-meter .chat-context-meter-fill");
   const contextUsageLabel = document.querySelector<HTMLElement>("#chat-context-usage-label");
@@ -984,7 +982,7 @@ export function initChat(api = new ChatApiClient()): void {
     rendering = true;
     // The card states the owning agent's own persistent-approval reach.
     renderer.permissionScopeNote = agent?.permissionScopeNote;
-    const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"));
+    const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
     revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
     queueDock.render(queueDockElement, projection?.queued ?? []);
     syncHistoryControls();
@@ -1023,40 +1021,45 @@ export function initChat(api = new ChatApiClient()): void {
     const base = statusLabel(projection.status);
     const workingSince = presentation.workingSince[projection.conversationId];
     if (workingSince === undefined) return base;
-    const seconds = Math.max(0, Math.round((Date.now() - workingSince) / 1000));
-    const elapsed = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
-    return `${base} · ${elapsed}`;
+    return `${base} · ${formatElapsed(Date.now() - workingSince)}`;
   };
 
   /**
-   * Waiting on the agent's first sign of life for this turn: the prompt is
-   * accepted and nothing newer than the reader's own message has arrived. A
-   * local model that must load its weights sits in this state for a long
-   * while, and the composer's "Working" line — visually hidden in touch
-   * mode — was the only thing saying anything was happening at all.
+   * When the running turn began, for the timeline's working line. The
+   * presentation's own clock once syncControls has started it; before that
+   * (the first render of a turn runs ahead of syncControls) and for a
+   * subagent's transcript, which has no clock of its own, the prompt that
+   * started the turn — the same instant syncControls will record.
    */
-  const awaitingFirstResponse = (): boolean => {
-    if (!projection) return false;
-    if (!isLiveConversationStatus(projection.status)) return false;
-    if (projection.acceptedDrafts.length > 0) return true;
-    for (let index = projection.items.length - 1; index >= 0; index -= 1) {
-      const item = projection.items[index]!;
-      if (item.type === "user_message") return true;
-      // A previous turn's footer, a hidden usage carrier, a context report,
-      // and a compaction marker say nothing about THIS turn's response; keep
-      // looking past them.
-      if (item.type === "turn_status" || item.type === "context_report" || item.type === "compaction") continue;
-      if (item.type === "assistant_message" && item.markdown === "") continue;
-      return false;
-    }
-    return false;
+  const turnStartedAt = (source: ChatProjection | null | undefined): number | undefined => {
+    if (!source || !isLiveConversationStatus(source.status)) return undefined;
+    return presentation.workingSince[source.conversationId] ?? source.items.findLast(item => item.type === "user_message")?.createdAt ?? Date.now();
   };
 
-  const syncWaiting = () => {
-    if (!waiting || !waitingLabel) return;
-    const show = awaitingFirstResponse();
-    waiting.hidden = !show;
-    if (show) waitingLabel.textContent = workingText();
+  // The once-a-second tick of every working line on screen. Writes the
+  // label only — a full render for a clock would rebuild nothing and cost a
+  // layout pass every second of every turn.
+  const tickWorkingLines = () => {
+    for (const container of [items, drilldownItems]) {
+      for (const line of container?.querySelectorAll<HTMLElement>(".chat-activity-group[data-working-since]") ?? []) {
+        const label = line.querySelector(".chat-group-count");
+        if (label) label.textContent = workingLabel(Date.now() - Number(line.dataset.workingSince));
+      }
+    }
+  };
+
+  // The tick runs while anything on screen is working: the parent's turn, or
+  // the subagent in the drill-down. A child keeps running after its parent
+  // has gone background or idle, and its working line is stamped from the
+  // child's own status — so the parent's status alone cannot decide whether
+  // the clock is needed. Re-evaluated wherever either status can change.
+  const syncWorkingTimer = () => {
+    const working = isLiveConversationStatus(projection?.status) || isLiveConversationStatus(child?.projection?.status);
+    if (working && workingTimer === null) workingTimer = setInterval(() => { syncRoutineStatus(); tickWorkingLines(); }, 1_000);
+    if (!working && workingTimer !== null) {
+      clearInterval(workingTimer);
+      workingTimer = null;
+    }
   };
 
   const showComposerError = (message: string | null) => {
@@ -1644,11 +1647,7 @@ export function initChat(api = new ChatApiClient()): void {
       delete presentation.workingSince[projection.conversationId];
       save();
     }
-    if (running && workingTimer === null) workingTimer = setInterval(() => { syncRoutineStatus(); syncWaiting(); }, 1_000);
-    if (!running && workingTimer !== null) {
-      clearInterval(workingTimer);
-      workingTimer = null;
-    }
+    syncWorkingTimer();
     send.type = running ? "button" : "submit";
     send.dataset.action = running ? "cancel" : "send";
     // A message needs content, not necessarily words: pending attachments make
@@ -1666,7 +1665,6 @@ export function initChat(api = new ChatApiClient()): void {
     syncHistoryControls();
     olderButton.hidden = !projection?.olderCursor;
     syncRoutineStatus();
-    syncWaiting();
   };
 
   const noteComposer = (message: string | null) => {
@@ -2292,7 +2290,7 @@ export function initChat(api = new ChatApiClient()): void {
       const page = await api.snapshot(current.conversationId, current.olderCursor);
       if (projection?.conversationId !== current.conversationId) return;
       projection = prependSnapshot(projection, page);
-      const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"));
+      const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
       timeline.scrollTop = anchor.afterMutation(geometry());
       for (const node of dirty) { decorateFileLinks(node); decorateAttachmentImages(node); }
     } catch (error) { announce(messageOf(error), true); }
@@ -2491,7 +2489,8 @@ export function initChat(api = new ChatApiClient()): void {
     if (!drilldownItems || !drilldownTimeline) return;
     if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
     childRenderer.permissionScopeNote = agent?.permissionScopeNote;
-    const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"));
+    const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"), false, turnStartedAt(child?.projection));
+    syncWorkingTimer();
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
     // A subagent's report is the same login's plan: the Usage pane follows
     // it like the parent's (newest wins, by the report's own time).
@@ -2546,6 +2545,7 @@ export function initChat(api = new ChatApiClient()): void {
     releaseChildBack?.();
     releaseChildBack = null;
     if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
+    syncWorkingTimer();
     if (drilldownOlder) {
       drilldownOlder.hidden = true;
       drilldownOlder.disabled = false;

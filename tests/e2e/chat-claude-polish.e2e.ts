@@ -207,11 +207,21 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await control(request, { action: "item", conversationId: id, item: bash("tool:2", 11, "ls -la", "completed", "total 3\ndocs\nhello.sh\nREADME.md") });
     await control(request, { action: "item", conversationId: id, item: { id: "tool:3", type: "tool", createdAt: 12, name: "Read", status: "completed", input: JSON.stringify({ file_path: "docs/notes.md" }), output: "# Notes" } });
     await control(request, { action: "item", conversationId: id, item: bash("tool:4", 13, "sleep 20 && echo done", "running") });
-    // The live tail stays flat and every row names its command.
+    // The live tail collapses behind the working line, which names the step
+    // in flight; every member row still names its command once opened.
+    const working = page.locator(".chat-activity-group");
+    await expect(working).toHaveCount(1);
+    await expect(working).toHaveAttribute("data-outcome", "live");
+    // The fixture's prompt sits at createdAt 1, so the clock here reads
+    // decades; the chat-panels suite covers the figure with a real timestamp.
+    await expect(working.locator("> summary .chat-group-count")).toHaveText(/^Working · /);
+    await expect(working.locator("> summary .chat-activity-subject")).toHaveText("Bash sleep 20 && echo done");
+    await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeHidden();
+    await working.locator("> summary").click();
     await expect(page.locator('[data-chat-item-id="tool:1"] .chat-activity-subject')).toHaveText("./hello.sh");
     await expect(page.locator('[data-chat-item-id="tool:4"] .chat-activity-subject')).toHaveText("sleep 20 && echo done");
-    await expect(page.locator(".chat-activity-group")).toHaveCount(0);
     await capture(page, testInfo, "phase1-live-tail");
+    await working.locator("> summary").click();
 
     await control(request, { action: "item", conversationId: id, item: bash("tool:4", 13, "sleep 20 && echo done", "completed", "done") });
     await control(request, { action: "item", conversationId: id, item: { id: "message:a1", type: "assistant_message", createdAt: 20, markdown: "All three ran.", completedAt: 20 } });

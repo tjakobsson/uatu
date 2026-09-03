@@ -59,9 +59,10 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
     // The fixed trailing action becomes cancel while the turn is live.
     await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
-    // With a turn in flight and nothing back yet, the timeline says so.
-    await expect(page.locator("#chat-waiting")).toBeVisible();
-    await expect(page.locator("#chat-waiting")).toContainText("Working");
+    // With a turn in flight and nothing back yet, the timeline's working
+    // line says so — the same line the first step will join.
+    await expect(page.locator(".chat-activity-group.is-awaiting")).toBeVisible();
+    await expect(page.locator(".chat-activity-group.is-awaiting")).toContainText("Working");
 
     await input.fill("Use the smaller approach");
     const heldResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
