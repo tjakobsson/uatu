@@ -235,18 +235,27 @@ const stateReconciler = createStateReconciler<StatePayload>({
   },
 });
 
-// Reconcile authoritative state AND ensure a current channel. The two are
-// deliberately not conditional on each other: a fetch that fails, or whose
-// payload a fresher one already superseded, still leaves this page holding a
-// stream that may be the half-dead one which prompted the wake-up. Only a
-// fresh attempt can error and hand recovery to the channel's retry cycle, so
-// the transport is replaced on every path out of here.
+// Reconcile authoritative state AND ensure a current channel.
+//
+// The channel is superseded FIRST, and there is no `await` between the
+// caller's context change and this call, so the stream being replaced cannot
+// deliver anything more. That ordering matters twice over:
+//
+//   - The old stream carries the context the client has just moved away from
+//     (a file pin the caller is widening, an old compare target). A frame from
+//     it would reinstate that context — and, being newer by the server's own
+//     clock, would also discard the payload this fetch is about to bring back,
+//     leaving the session on the context the user asked to leave.
+//   - The stream this page holds may be the half-dead one that prompted a
+//     wake-up. Replacing it must not depend on the fetch succeeding: only a
+//     fresh attempt can error and hand recovery to the channel's retry cycle.
+//
+// The fetch is then a fallback rather than the primary path — when the fresh
+// stream connects, its own first frame is the newer state and this payload is
+// correctly discarded.
 async function reconcileDocumentState(): Promise<void> {
-  try {
-    await stateReconciler.reconcile();
-  } finally {
-    connectEvents();
-  }
+  connectEvents();
+  await stateReconciler.reconcile();
 }
 
 export async function refreshServerStateForContext(): Promise<void> {
