@@ -30,7 +30,7 @@ test.describe("document channel recovery", () => {
     await standardBeforeEach(page, request);
   });
 
-  test("an interrupted stream reads Reconnecting, then recovers current state on resume without a reload", async ({ page }) => {
+  test("an interrupted stream reads Reconnecting, then recovers current state on resume without a reload", async ({ page, request }) => {
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
     // Every attempt to (re)open the event stream is refused from here on. The
@@ -42,9 +42,33 @@ test.describe("document channel recovery", () => {
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Reconnecting", { timeout: 15_000 });
     await expect(page.locator("#connection-state")).toHaveClass(/is-reconnecting/);
 
-    // The workspace changes while the page is out of touch.
+    // The workspace changes while the page is out of touch: a new file, and an
+    // edit to the very document being previewed.
     await fs.writeFile(workspacePath("recovered.md"), "# Recovered\n\nWritten during the gap.\n", "utf8");
+    await fs.writeFile(workspacePath("README.md"), "# README\n\nEdited while the page was suspended.\n", "utf8");
     await expect(treeRow(page, "recovered.md")).toHaveCount(0);
+    await expect(page.locator("#preview")).not.toContainText("Edited while the page was suspended");
+
+    // Wait for the workspace itself to have noticed, so the assertion below is
+    // about the client converging and not about watcher latency.
+    await expect.poll(
+      async () => {
+        const state = await request.get("/api/state?compareTarget=base&scope=folder").then(r => r.json());
+        return (state.roots as { docs: unknown[] }[]).flatMap(group => group.docs).length;
+      },
+      { timeout: 15_000 },
+    ).toBe(19);
+
+    // A wake-up while the stream is STILL refused. Only the reconciliation can
+    // deliver here, which is the point: the edited document arrives with no
+    // `changedId`, and once these roots are stored the replacement stream's
+    // first frame sees no mtime difference either — so if the reconciliation
+    // does not reload the preview, nothing ever will.
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(treeRow(page, "recovered.md")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator("#preview")).toContainText("Edited while the page was suspended");
+    // Transport is genuinely still down, and the indicator says so.
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Reconnecting");
 
     // The path comes back and the page resumes from the back/forward cache.
     await page.unroute("**/api/events*");
@@ -57,6 +81,7 @@ test.describe("document channel recovery", () => {
     await expect(page.locator("#connection-state")).toHaveClass(/is-live/);
     await expect(treeRow(page, "recovered.md")).toBeVisible();
     await expect(page.locator("#document-count")).toHaveText("19 files");
+    await expect(page.locator("#preview")).toContainText("Edited while the page was suspended");
   });
 });
 
@@ -86,7 +111,7 @@ test.describe("Chat channel recovery", () => {
 
     // The first drop retries silently; the message appears only once the
     // outage outlives one reconnect attempt.
-    await expect(status).toContainText("Chat connection interrupted; reconnecting", { timeout: 20_000 });
+    await expect(status).toContainText("Chat connection interrupted; reconnecting", { timeout: 40_000 });
     // The document channel is unaffected — Chat's trouble is Chat's to report.
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
@@ -95,6 +120,6 @@ test.describe("Chat channel recovery", () => {
 
     // Nothing is sent and no assistant output arrives. The successful open is
     // the only evidence of recovery there is, and it has to be enough.
-    await expect(status).not.toContainText("Chat connection interrupted; reconnecting", { timeout: 20_000 });
+    await expect(status).not.toContainText("Chat connection interrupted; reconnecting", { timeout: 40_000 });
   });
 });

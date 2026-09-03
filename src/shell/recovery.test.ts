@@ -69,6 +69,28 @@ describe("createStateReconciler", () => {
     expect(applied).toEqual(["newer"]);
   });
 
+  test("the newest request still applies when an older one answered first", async () => {
+    const applied: string[] = [];
+    const older = defer<string>();
+    const newer = defer<string>();
+    const pending = [older, newer];
+    const reconciler = createStateReconciler<string>({
+      fetchState: () => pending.shift()!.promise,
+      applyState: value => applied.push(value),
+    });
+
+    const first = reconciler.reconcile();
+    const second = reconciler.reconcile();
+    // Replies in issue order. Ordering by completion would have let the first
+    // reply block the second, leaving the UI on the older context after a
+    // rapid scope change.
+    older.resolve("older context");
+    expect(await first).toBe(true);
+    newer.resolve("newer context");
+    expect(await second).toBe(true);
+    expect(applied).toEqual(["older context", "newer context"]);
+  });
+
   test("a stream frame applied mid-fetch invalidates the fetch in flight", async () => {
     const applied: string[] = [];
     const slow = defer<string>();
@@ -83,6 +105,18 @@ describe("createStateReconciler", () => {
     slow.resolve("stale");
     expect(await inFlight).toBe(false);
     expect(applied).toEqual([]);
+  });
+
+  test("a request issued after a stream frame is not treated as stale", async () => {
+    const applied: string[] = [];
+    const reconciler = createStateReconciler<string>({
+      fetchState: async () => "after the frame",
+      applyState: value => applied.push(value),
+    });
+
+    reconciler.noteApplied();
+    expect(await reconciler.reconcile()).toBe(true);
+    expect(applied).toEqual(["after the frame"]);
   });
 
   test("a failing fetch rejects without consuming the application slot", async () => {
@@ -172,6 +206,32 @@ describe("createLifecycleRecovery", () => {
     await flush();
     h.win.fire("online");
     expect(runs).toBe(2);
+  });
+
+  test("a signal arriving during a recovery is safe to drop because every attempt ends with a channel", async () => {
+    // The owner's contract (see shell/events.ts): a recovery installs a fresh
+    // channel whether its state fetch succeeds or fails. That is what makes
+    // dropping an overlapping signal safe rather than a lost wake-up — the
+    // in-flight attempt already does everything the duplicate would ask for.
+    const gate = defer<void>();
+    const channels: string[] = [];
+    const h = harness(async () => {
+      try {
+        await gate.promise;
+        throw new Error("workspace unreachable");
+      } catch {
+        channels.push("installed");
+      }
+    });
+
+    h.win.fire("pageshow", { persisted: true } as Partial<Event>);
+    // Connectivity is restored while the doomed fetch is still in flight.
+    h.win.fire("online");
+    expect(channels).toHaveLength(0);
+
+    gate.resolve();
+    await flush();
+    expect(channels).toEqual(["installed"]);
   });
 
   test("a discarded page tears the channel down; a frozen one does not", () => {

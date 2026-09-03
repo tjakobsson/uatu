@@ -27,23 +27,31 @@ export function createStateReconciler<T>(options: {
   fetchState: () => Promise<T>;
   applyState: (value: T) => void;
 }): StateReconciler<T> {
-  // Monotonic count of applications of authoritative state, from any source.
-  // A reconcile captures it before its fetch and refuses to apply if it moved
-  // — that single token covers both "a second reconcile finished first" and
-  // "the live stream delivered state while this fetch was in flight".
-  let applied = 0;
+  // Reconciles are ordered by when they were ISSUED, not by when they answer.
+  // Each takes the next sequence number and may apply only if nothing newer
+  // has already been applied. Ordering by completion instead would discard
+  // the newer of two overlapping requests whenever the older answered first —
+  // which is exactly the case a rapid scope change produces, and it would
+  // leave the UI on the older context.
+  let issued = 0;
+  let appliedThrough = 0;
 
   return {
     async reconcile() {
-      const token = applied;
+      const sequence = ++issued;
       const payload = await options.fetchState();
-      if (token !== applied) return false;
+      // Strictly newer, so a completion that an even later request already
+      // overtook is dropped and the newest still wins whatever the order of
+      // the replies.
+      if (sequence <= appliedThrough) return false;
+      appliedThrough = sequence;
       options.applyState(payload);
-      applied += 1;
       return true;
     },
     noteApplied() {
-      applied += 1;
+      // A stream frame is at least as new as every request issued so far, so
+      // it supersedes all of them.
+      appliedThrough = issued;
     },
   };
 }

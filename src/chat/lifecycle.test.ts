@@ -136,6 +136,7 @@ describe("chat lifecycle recovery", () => {
 
     type Handlers = { error: (error: ChatTransportError) => void; recovered?: () => void };
     const streamHandlers: Handlers[] = [];
+    const inventoryHandlers: Handlers[] = [];
 
     const api = {
       status: async () => ([{
@@ -149,7 +150,10 @@ describe("chat lifecycle recovery", () => {
         streamHandlers.push(handlers);
         return { close() {} };
       },
-      inventoryStream: () => ({ close() {} }),
+      inventoryStream: (handlers: Handlers) => {
+        inventoryHandlers.push(handlers);
+        return { close() {} };
+      },
       attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
     } as unknown as ChatApiClient;
 
@@ -183,6 +187,19 @@ describe("chat lifecycle recovery", () => {
     handlers.error(new ChatTransportError("The active turn failed"));
     handlers.recovered?.();
     expect(status.textContent).toContain("The active turn failed");
+
+    // Both streams down at once: the conversation stream coming back must not
+    // retract the inventory stream's warning while it is still down.
+    const inventory = inventoryHandlers[0]!;
+    inventory.error(new ChatConnectionInterruptedError("Chat inventory connection interrupted; reconnecting"));
+    handlers.error(new ChatConnectionInterruptedError("Chat connection interrupted; reconnecting"));
+    handlers.recovered?.();
+    expect(status.textContent).not.toContain("Chat connection interrupted; reconnecting");
+    expect(status.textContent).toContain("Chat inventory connection interrupted; reconnecting");
+
+    // The inventory stream's own recovery is what takes its message down.
+    inventory.recovered?.();
+    expect(status.textContent).toBe("");
 
     window.dispatchEvent(new Event("pagehide"));
   });

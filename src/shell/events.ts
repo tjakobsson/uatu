@@ -205,10 +205,32 @@ const stateReconciler = createStateReconciler<StatePayload>({
     return (await response.json()) as StatePayload;
   },
   applyState: payload => {
+    // Decided against the roots this client still holds, BEFORE the snapshot
+    // overwrites them. A document edited while the page was suspended arrives
+    // with no `changedId` and, once these roots are replaced, the replacement
+    // stream's first frame sees no mtime difference either — so this is the
+    // only place the staleness is still visible.
+    const selectedId = appState.selectedId;
+    const staleSelection = shouldRefreshPreview(
+      selectedId,
+      payload.changedId,
+      appState.roots,
+      payload.roots,
+    );
+
     applyServerSnapshot(payload);
     syncStateGeneration(payload.generatedAt);
     renderBuildBadge(payload.build);
     renderSidebar();
+    if (selectedId && staleSelection) {
+      forgetDocumentCache(selectedId);
+      void loadDocument(selectedId).then(() => {
+        // Same signal the in-place reload gives on Rule D: the document the
+        // user was reading changed under them, and the swap is otherwise
+        // silent.
+        if (appState.selectedId === selectedId) signalActiveDocumentUpdated();
+      });
+    }
     // Replace the transport too: after a gap, the stream that was open (or
     // silently dead) has no claim to being current.
     connectEvents();
@@ -228,7 +250,19 @@ export function watchPageLifecycle(): void {
   lifecycle ??= createLifecycleRecovery({
     win: window,
     doc: document,
-    recover: () => stateReconciler.reconcile(),
+    recover: async () => {
+      try {
+        await stateReconciler.reconcile();
+      } catch {
+        // The workspace was unreachable — but the transport still has to be
+        // replaced. The stream this page is holding may be the half-dead one
+        // that prompted the wake-up, and only a fresh attempt can error and
+        // hand recovery to the channel's own retry cycle. Without this, a
+        // wake-up that arrives while the network is still down leaves nothing
+        // running at all.
+        connectEvents();
+      }
+    },
     discard: disconnectEvents,
   });
 }

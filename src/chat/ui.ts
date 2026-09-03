@@ -55,6 +55,10 @@ type Presentation = {
   lastAgentId?: string;
 };
 
+// A status line that also reports what it is currently saying, so an owner of
+// a specific message can check it is still the one on screen before removing it.
+type Announcer = ((message: string, error?: boolean) => void) & { current: () => string };
+
 const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, dismissedSubagents: {} };
 
 export function initChat(api = new ChatApiClient()): void {
@@ -368,7 +372,7 @@ export function initChat(api = new ChatApiClient()): void {
 
   // One status-line contract for every surface that has one; the parent's
   // state element and the drill-down's differ only in which element speaks.
-  const announcerFor = (target: HTMLElement | null) => {
+  const announcerFor = (target: HTMLElement | null): Announcer => {
     // The message lives in its own leading text node: an announcement must
     // not level appended children (the takeover renders one diagnosis panel
     // per failed agent into this element, and each panel's announce would
@@ -398,25 +402,35 @@ export function initChat(api = new ChatApiClient()): void {
   const announce = announcerFor(state);
   const announceChild = announcerFor(drilldownState);
 
-  // Connection-interruption messaging has a single owner. The status line is
-  // shared with provider outages, validation refusals, and turn failures —
-  // all of which the user still has to act on — so a reconnect may not clear
-  // the line wholesale. It removes only the message it put there, and only
-  // while that message is still the one on screen.
-  let connectionInterruption: string | null = null;
-
-  const reportTransportError = (error: unknown) => {
-    const message = messageOf(error);
-    if (error instanceof ChatConnectionInterruptedError) connectionInterruption = message;
-    announce(message, true);
+  // Connection-interruption messaging has a dedicated owner, PER STREAM. The
+  // status line is shared with provider outages, validation refusals, and turn
+  // failures — all of which the user still has to act on — so a reconnect may
+  // not clear the line wholesale. And the conversation and inventory streams
+  // fail and recover independently: one of them coming back must not retract
+  // the other's warning while it is still down.
+  const interruptionsFor = (speak: Announcer) => {
+    const owned = new Map<string, string>();
+    return {
+      report(stream: string, error: unknown) {
+        const message = messageOf(error);
+        if (error instanceof ChatConnectionInterruptedError) owned.set(stream, message);
+        speak(message, true);
+      },
+      // This stream's transport is healthy again. Its message goes; if the
+      // other stream is still interrupted, the line states that instead of
+      // falling silent.
+      clear(stream: string) {
+        const message = owned.get(stream);
+        if (message === undefined) return;
+        owned.delete(stream);
+        if (speak.current() !== message) return;
+        const remaining = [...owned.values()].at(-1);
+        speak(remaining ?? "", remaining !== undefined);
+      },
+    };
   };
-
-  const clearConnectionInterruption = () => {
-    const owned = connectionInterruption;
-    if (owned === null) return;
-    connectionInterruption = null;
-    if (announce.current() === owned) announce("");
-  };
+  const interruptions = interruptionsFor(announce);
+  const childInterruptions = interruptionsFor(announceChild);
 
   const geometryOf = (scroller: HTMLElement, container: HTMLElement): AnchorGeometry => {
     const bounds = scroller.getBoundingClientRect();
@@ -1870,11 +1884,11 @@ export function initChat(api = new ChatApiClient()): void {
         if (historyMutations.has(conversationId)) pendingHistoryResyncs.add(conversationId);
         else recoverSelectedConversation(conversationId);
       },
-      error: error => { if (token === selectionGeneration) reportTransportError(error); },
+      error: error => { if (token === selectionGeneration) interruptions.report("conversation", error); },
       // Transport is healthy again. Cursor replay and `resync` still own
       // whether the projection is correct, so this clears the reconnect
       // message and nothing else — no refetch, no reprojection.
-      recovered: () => { if (token === selectionGeneration) clearConnectionInterruption(); },
+      recovered: () => { if (token === selectionGeneration) interruptions.clear("conversation"); },
     });
 
   async function refreshSelectedConversation(id: string): Promise<boolean> {
@@ -2696,7 +2710,8 @@ export function initChat(api = new ChatApiClient()): void {
             if (result.outcome === "applied") { announceChild(""); renderChild(true); }
           },
           resync: () => { if (generation === childGeneration) openChildConversation(id, label); },
-          error: error => { if (generation === childGeneration) announceChild(error.message, true); },
+          error: error => { if (generation === childGeneration) childInterruptions.report("child", error); },
+          recovered: () => { if (generation === childGeneration) childInterruptions.clear("child"); },
         });
       } catch (error) {
         if (generation === childGeneration) announceChild(messageOf(error), true);
@@ -3398,8 +3413,8 @@ export function initChat(api = new ChatApiClient()): void {
     try {
       inventoryStream = api.inventoryStream({
         invalidation: () => { void inventoryReconciler.request(); },
-        error: reportTransportError,
-        recovered: clearConnectionInterruption,
+        error: error => interruptions.report("inventory", error),
+        recovered: () => interruptions.clear("inventory"),
       });
     } catch (error) {
       announce(messageOf(error), true);
