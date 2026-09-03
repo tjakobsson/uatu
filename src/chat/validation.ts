@@ -429,11 +429,12 @@ export function parseConversationItem(value: unknown): ConversationItem {
       }
       if (record.session !== undefined) {
         const session = expectRecord(record.session, "context report session");
-        expectKeys(session, ["costUsd", "apiDurationMs", "durationMs", "linesAdded", "linesRemoved", "models"], "context report session");
+        expectKeys(session, ["costUsd", "apiDurationMs", "durationMs", "linesAdded", "linesRemoved", "models", "since"], "context report session");
         for (const key of ["costUsd", "apiDurationMs", "durationMs", "linesAdded", "linesRemoved"] as const) {
           if (session[key] === undefined) throw new Error(`context report session ${key} must be a non-negative number`);
           expectOptionalNonNegative(session[key], `context report session ${key}`);
         }
+        expectOptionalTimestamp(session.since, "context report session since");
         if (!Array.isArray(session.models)) throw new Error("context report session models must be an array");
         for (const entry of session.models) {
           const model = expectRecord(entry, "context report session model");

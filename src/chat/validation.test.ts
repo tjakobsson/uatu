@@ -263,7 +263,7 @@ describe("chat domain validation", () => {
         modelScoped: [{ label: "Fable", utilization: 83, resetsAt: 9 }],
         extraUsage: { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" },
       },
-      session: { costUsd: 1.2, apiDurationMs: 42, durationMs: 90, linesAdded: 1, linesRemoved: 0, models: [{ id: "claude-opus-5", input: 1, output: 2, cacheRead: 3, cacheWrite: 4, costUsd: 1.1 }] },
+      session: { costUsd: 1.2, apiDurationMs: 42, durationMs: 90, linesAdded: 1, linesRemoved: 0, models: [{ id: "claude-opus-5", input: 1, output: 2, cacheRead: 3, cacheWrite: 4, costUsd: 1.1 }], since: 1 },
     };
     expect(parseConversationItem(superset)).toBeTruthy();
     // An unknown window key is a newer SDK talking, not a broken report.
@@ -274,6 +274,7 @@ describe("chat domain validation", () => {
     expect(() => parseConversationItem({ ...superset, plan: { ...superset.plan, extraUsage: { enabled: "yes" } } })).toThrow(/extraUsage enabled/);
     expect(() => parseConversationItem({ ...superset, session: { ...superset.session, costUsd: "free" } })).toThrow(/session costUsd/);
     expect(() => parseConversationItem({ ...superset, session: { ...superset.session, models: [{ id: "x", input: 1 }] } })).toThrow(/session model output/);
+    expect(() => parseConversationItem({ ...superset, session: { ...superset.session, since: "boot" } })).toThrow(/session since/);
     expect(() => parseConversationItem({ ...superset, session: { ...superset.session, behaviors: {} } })).toThrow(/unknown context report session field/);
     expect(parseConversationItem({ id: "t", type: "tool", createdAt: 1, name: "Bash", status: "running", elapsedMs: 1200 })).toBeTruthy();
     expect(parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "running" })).toBeTruthy();

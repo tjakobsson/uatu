@@ -221,7 +221,40 @@ type LiveSession = {
   // Armed when the set empties with nothing pending: retires the session if
   // no follow-up turn starts within the grace window.
   idleTimer?: ReturnType<typeof setTimeout>;
+  // This query's own running totals as last read: folded into the
+  // conversation's ledger when the query retires, since a resumed query
+  // starts its counters fresh (SDK: "resumed sessions start fresh").
+  lastTotals?: SessionTotals;
 };
+
+// What retired queries of one conversation spent, and when this process began
+// observing it. The SDK's `/usage` session counters cover the current query
+// only, and an idle conversation's next turn resumes a fresh one, so "this
+// conversation" is the sum over the generations this process saw.
+type SessionTotalsLedger = { settled?: SessionTotals; since: number };
+
+/** Sums two tallies: scalars added, per-model rows merged by model id. */
+export function mergeSessionTotals(base: SessionTotals | undefined, next: SessionTotals): SessionTotals {
+  if (!base) return next;
+  const models = base.models.map(model => ({ ...model }));
+  for (const model of next.models) {
+    const known = models.find(entry => entry.id === model.id);
+    if (!known) { models.push({ ...model }); continue; }
+    known.input += model.input;
+    known.output += model.output;
+    known.cacheRead += model.cacheRead;
+    known.cacheWrite += model.cacheWrite;
+    known.costUsd += model.costUsd;
+  }
+  return {
+    costUsd: base.costUsd + next.costUsd,
+    apiDurationMs: base.apiDurationMs + next.apiDurationMs,
+    durationMs: base.durationMs + next.durationMs,
+    linesAdded: base.linesAdded + next.linesAdded,
+    linesRemoved: base.linesRemoved + next.linesRemoved,
+    models,
+  };
+}
 
 /**
  * The Claude Code chat provider: one SDK `query()` session per live
@@ -292,6 +325,10 @@ export class ClaudeProvider implements ChatProvider {
   // Conversations whose last rate-limit signal was a standing (warning or
   // rejection): carried across processes so the eventual "allowed" clears it.
   private readonly rateLimitedSessions = new Set<string>();
+  // Per conversation, the totals of the queries this process has retired and
+  // when it began observing the conversation: process memory, like the
+  // rate-limit standing, so a restart truthfully starts a new "since".
+  private readonly sessionLedgers = new Map<string, SessionTotalsLedger>();
   // A rename asked for before the native transcript existed: written to it
   // once the first turn has created it.
   private readonly deferredRenames = new Map<string, string>();
@@ -946,6 +983,14 @@ export class ClaudeProvider implements ChatProvider {
     const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0 };
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
+    // Observation begins with the conversation's first query in this
+    // process: everything that query and its successors spend is counted.
+    // The adapter stamps the prompt's user message after this call, so a
+    // conversation that starts here has no message older than `since`.
+    if (!this.sessionLedgers.has(sessionId)) {
+      if (this.sessionLedgers.size >= 4_096) this.sessionLedgers.delete(this.sessionLedgers.keys().next().value!);
+      this.sessionLedgers.set(sessionId, { since: this.now() });
+    }
     // Fire-and-forget: the catalog answers when the session is up, and a
     // failure just leaves the manifest fallback in place until the next one.
     // Catalogs change under a running workspace — a CLI update ships new
@@ -1052,6 +1097,7 @@ export class ClaudeProvider implements ChatProvider {
       // The stream ended without dispose: the session's process is gone.
       if (!this.disposed && this.live.get(session.id) === session) {
         this.live.delete(session.id);
+        this.foldSessionTotals(session);
         // A grace window in flight means the conversation still reads as
         // background work with an empty set: this exit is its idle edge.
         const inGrace = session.idleTimer !== undefined;
@@ -1077,6 +1123,7 @@ export class ClaudeProvider implements ChatProvider {
     } catch (error) {
       if (this.disposed || this.live.get(session.id) !== session) return;
       this.live.delete(session.id);
+      this.foldSessionTotals(session);
       this.clearIdleTimer(session);
       this.abandonInteractions(session.id, "The session failed before the user answered.");
       this.emit(session.id, {
@@ -1869,13 +1916,40 @@ export class ClaudeProvider implements ChatProvider {
       if (raw === null) return undefined;
       const plan = session.planUnavailable ? undefined : normalizePlanUtilization(raw);
       if (!plan) session.planUnavailable = true;
-      const totals = normalizeSessionTotals(raw);
+      const totals = this.accumulateSessionTotals(session, normalizeSessionTotals(raw));
       return { plan: plan ?? {}, ...(totals ? { session: totals } : {}) };
     } catch {
       return undefined;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  /**
+   * The conversation's totals as the readout states them: what this
+   * process's retired queries spent plus the current query's own count,
+   * from `since`. The read is remembered per query so retirement can fold
+   * it; a count that went down is the CLI's own reset (a `/clear`), and
+   * what stood before it is folded rather than lost.
+   */
+  private accumulateSessionTotals(session: LiveSession, read: SessionTotals | undefined): SessionTotals | undefined {
+    const ledger = this.sessionLedgers.get(session.id);
+    if (!ledger) return read;
+    if (read) {
+      if (session.lastTotals && read.costUsd < session.lastTotals.costUsd) this.foldSessionTotals(session);
+      session.lastTotals = read;
+    }
+    const current = session.lastTotals ?? read;
+    if (!current && !ledger.settled) return undefined;
+    return { ...(current ? mergeSessionTotals(ledger.settled, current) : ledger.settled!), since: ledger.since };
+  }
+
+  /** A query that ends takes its counters with it: its last read joins the ledger. */
+  private foldSessionTotals(session: LiveSession): void {
+    const ledger = this.sessionLedgers.get(session.id);
+    if (!ledger || !session.lastTotals) return;
+    ledger.settled = mergeSessionTotals(ledger.settled, session.lastTotals);
+    session.lastTotals = undefined;
   }
 
   /** Announces Claude Code's own title when it changed and no user rename stands. */
@@ -2004,6 +2078,7 @@ export class ClaudeProvider implements ChatProvider {
     if (this.live.get(session.id) !== session) return;
     this.clearIdleTimer(session);
     this.live.delete(session.id);
+    this.foldSessionTotals(session);
     this.abandonInteractions(session.id, "The turn ended before the user answered.");
     session.queue.close();
     await session.query.return?.().catch(() => undefined);

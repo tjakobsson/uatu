@@ -60,8 +60,13 @@ totals, with no plan name, windows, or sidebar control.
 - **THEN** the readout lists "Week · Opus" and "Week · Fable" with their own percentages and resets
 
 #### Scenario: Conversation cost is stated
-- **WHEN** the agent reports this conversation's accumulated cost and per-model usage
+- **WHEN** the agent reports this conversation's cost and per-model usage
 - **THEN** the readout shows the total cost and, per model, input and output tokens with that model's cost
+- **AND** the figures are accumulated across the conversation's turns, including turns that ran as separate resumed agent queries, with per-model rows merged by model
+
+#### Scenario: A tally that began mid-conversation says so
+- **WHEN** the workspace process first saw the conversation after its first user message (it was restarted mid-conversation)
+- **THEN** the readout's block is titled "This conversation · since HH:MM" rather than "This conversation"
 
 #### Scenario: A minimal report degrades cleanly
 - **WHEN** the login reports only the 5-hour and 7-day windows

@@ -106,6 +106,25 @@ export function sessionCostLabel(session: SessionTotals): string {
 }
 
 /**
+ * The readout block's title. The agent counts per query and each turn of an
+ * idle conversation resumes a fresh one, so the totals are summed by the
+ * workspace process from `since`, when it first saw the conversation. A
+ * conversation with a message older than that — one resumed after a restart
+ * — is titled "since HH:MM" (with the weekday once a day has passed) rather
+ * than claiming the whole conversation.
+ */
+export function sessionTotalsTitle(session: Pick<SessionTotals, "since">, items: readonly ConversationItem[], now = Date.now()): string {
+  let firstMessageAt: number | undefined;
+  for (const item of items) {
+    if (item.type === "user_message" && (firstMessageAt === undefined || item.createdAt < firstMessageAt)) firstMessageAt = item.createdAt;
+  }
+  if (session.since === undefined || firstMessageAt === undefined || session.since <= firstMessageAt) return "This conversation";
+  const date = new Date(session.since);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `This conversation · since ${now - session.since < 86_400_000 ? time : `${date.toLocaleDateString([], { weekday: "short" })} ${time}`}`;
+}
+
+/**
  * What the composer chip says for a report: the plan windows where the login
  * has them, else this conversation's cost where the agent tallied one. An
  * API-key, Bedrock, or Vertex login reports an empty plan with real session

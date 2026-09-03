@@ -1,9 +1,31 @@
 import { describe, expect, test } from "bun:test";
 
-import { composerRoutineState, latestPlanUtilization, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel } from "./composer-status";
+import { composerRoutineState, latestPlanUtilization, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel, sessionTotalsTitle } from "./composer-status";
 import type { ConversationItem } from "./types";
 
 const base = { cancelling: false, submitting: false, backgroundDeclared: true, backgroundTasks: [] as [] };
+
+describe("session totals title", () => {
+  const user = (createdAt: number): ConversationItem => ({ id: `m${createdAt}`, type: "user_message", createdAt, text: "hi" });
+  const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  test("a tally that began at or before the first message is the whole conversation", () => {
+    expect(sessionTotalsTitle({}, [user(10)])).toBe("This conversation");
+    expect(sessionTotalsTitle({ since: 5 }, [user(10)])).toBe("This conversation");
+    expect(sessionTotalsTitle({ since: 10 }, [user(10)])).toBe("This conversation");
+    expect(sessionTotalsTitle({ since: 10 }, [])).toBe("This conversation");
+    // The oldest message decides, wherever the items put it.
+    expect(sessionTotalsTitle({ since: 10 }, [user(20), user(30)])).toBe("This conversation");
+  });
+
+  test("a tally that began after the first message is stated since when, with the weekday once a day has passed", () => {
+    const since = Date.parse("2026-09-02T21:33:00");
+    const items = [user(since - 3_600_000), user(since + 60_000)];
+    expect(sessionTotalsTitle({ since }, items, since + 5_000)).toBe(`This conversation · since ${clock(since)}`);
+    const weekday = new Date(since).toLocaleDateString([], { weekday: "short" });
+    expect(sessionTotalsTitle({ since }, items, since + 2 * 86_400_000)).toBe(`This conversation · since ${weekday} ${clock(since)}`);
+  });
+});
 
 describe("composer routine state", () => {
   test("each conversation status maps to a named state with an accessible label", () => {

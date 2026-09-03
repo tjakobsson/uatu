@@ -11,7 +11,7 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, subagentLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
-import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLevel, rateLimitBadgeLabel } from "./composer-status";
+import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLevel, rateLimitBadgeLabel, sessionTotalsTitle } from "./composer-status";
 import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
@@ -105,6 +105,7 @@ export function initChat(api = new ChatApiClient()): void {
   const planReadoutRowsElement = document.querySelector<HTMLElement>("#chat-plan-readout-rows");
   const planPin = document.querySelector<HTMLButtonElement>("#chat-plan-pin");
   const planSession = document.querySelector<HTMLElement>("#chat-plan-readout-session");
+  const planSessionTitle = document.querySelector<HTMLElement>("#chat-plan-session-title");
   const planSessionCost = document.querySelector<HTMLElement>("#chat-plan-session-cost");
   const planSessionModels = document.querySelector<HTMLElement>("#chat-plan-session-models");
   const composerChips = document.querySelector<HTMLElement>("#chat-composer-chips");
@@ -1498,10 +1499,15 @@ export function initChat(api = new ChatApiClient()): void {
     const family = exact ?? models.find(model => !model.default && ids(model).some(candidate => bare.includes(strip(candidate))));
     return family?.name ?? id;
   };
-  const paintPlanSession = (session: SessionTotals | undefined) => {
+  const paintPlanSession = (session: SessionTotals | undefined, items: readonly ConversationItem[]) => {
     if (!planSession || !planSessionCost || !planSessionModels) return;
     planSession.hidden = !session;
     if (!session) return;
+    // "This conversation", or "since HH:MM" when the tally began after the
+    // conversation's first message (a workspace restarted mid-conversation).
+    const title = sessionTotalsTitle(session, items);
+    if (planSessionTitle) planSessionTitle.textContent = title;
+    planSession.setAttribute("aria-label", title);
     const parts = [formatUsd(session.costUsd)];
     if (session.apiDurationMs > 0) parts.push(`${formatApiTime(session.apiDurationMs)} of API time`);
     if (session.linesAdded > 0 || session.linesRemoved > 0) parts.push(`+${session.linesAdded} −${session.linesRemoved} lines`);
@@ -1559,7 +1565,7 @@ export function initChat(api = new ChatApiClient()): void {
       ? `${name ?? "Plan usage"} · open for every window and its reset`
       : "This login reports no plan limits · open for this conversation's cost and per-model usage";
     paintPlanRows();
-    paintPlanSession(report.session);
+    paintPlanSession(report.session, projection?.items ?? []);
     noteUsageReport({ plan, reportedAt: report.createdAt });
   };
   planUsage?.addEventListener("toggle", () => {

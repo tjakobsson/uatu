@@ -519,6 +519,12 @@ export type SessionTotals = {
   linesAdded: number;
   linesRemoved: number;
   models: SessionModelTotals[];
+  // Epoch ms from which the tally is complete. Claude Code counts per
+  // query, and each turn of an idle conversation resumes a fresh one, so the
+  // provider sums the generations it saw; a process that started
+  // mid-conversation saw none of the earlier ones. The readout says "since
+  // HH:MM" when this is later than the conversation's first message.
+  since?: number;
 };
 
 /**
