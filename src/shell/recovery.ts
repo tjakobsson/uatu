@@ -15,43 +15,37 @@
 
 export type StateReconciler<T> = {
   // Fetches and applies authoritative state. Resolves `true` when this call's
-  // payload was the one applied, `false` when a newer application overtook it.
+  // payload was the one applied, `false` when fresher state had already been
+  // applied by the time it answered.
   reconcile(): Promise<boolean>;
-  // Records that authoritative state arrived by some other route — a live
-  // stream frame. This invalidates any fetch already in flight, whose payload
-  // is now the older of the two.
-  noteApplied(): void;
+  // Records authoritative state that arrived by some other route — a live
+  // stream frame — with the server-side freshness of that payload.
+  noteApplied(freshness: number): void;
 };
 
 export function createStateReconciler<T>(options: {
   fetchState: () => Promise<T>;
   applyState: (value: T) => void;
+  // When the SERVER produced this payload. Ordering by arrival instead would
+  // be wrong in both directions: a fetch issued second can answer first, and
+  // a stream frame the server produced before the fetch can be delivered
+  // after it. Only the server's own clock orders the two sources, and both
+  // payloads come from the same process.
+  freshnessOf: (value: T) => number;
 }): StateReconciler<T> {
-  // Reconciles are ordered by when they were ISSUED, not by when they answer.
-  // Each takes the next sequence number and may apply only if nothing newer
-  // has already been applied. Ordering by completion instead would discard
-  // the newer of two overlapping requests whenever the older answered first —
-  // which is exactly the case a rapid scope change produces, and it would
-  // leave the UI on the older context.
-  let issued = 0;
-  let appliedThrough = 0;
+  let appliedFreshness = Number.NEGATIVE_INFINITY;
 
   return {
     async reconcile() {
-      const sequence = ++issued;
       const payload = await options.fetchState();
-      // Strictly newer, so a completion that an even later request already
-      // overtook is dropped and the newest still wins whatever the order of
-      // the replies.
-      if (sequence <= appliedThrough) return false;
-      appliedThrough = sequence;
+      const freshness = options.freshnessOf(payload);
+      if (freshness <= appliedFreshness) return false;
+      appliedFreshness = freshness;
       options.applyState(payload);
       return true;
     },
-    noteApplied() {
-      // A stream frame is at least as new as every request issued so far, so
-      // it supersedes all of them.
-      appliedThrough = issued;
+    noteApplied(freshness: number) {
+      if (freshness > appliedFreshness) appliedFreshness = freshness;
     },
   };
 }

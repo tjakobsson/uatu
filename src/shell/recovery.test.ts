@@ -38,96 +38,131 @@ function fakeTarget(): LifecycleRecoveryTarget & { fire(type: string, event?: Pa
   };
 }
 
+// Payloads carry the server-side timestamp the reconciler orders by, so a
+// test can state "the server produced this at 2" directly.
+type Payload = { body: string; generatedAt: number };
+
+function payload(body: string, generatedAt: number): Payload {
+  return { body, generatedAt };
+}
+
 describe("createStateReconciler", () => {
   test("applies the payload it fetched and reports that it won", async () => {
     const applied: string[] = [];
-    const reconciler = createStateReconciler<string>({
-      fetchState: async () => "current",
-      applyState: value => applied.push(value),
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: async () => payload("current", 1),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
     });
     expect(await reconciler.reconcile()).toBe(true);
     expect(applied).toEqual(["current"]);
   });
 
-  test("an out-of-order fetch cannot overwrite state a later fetch already applied", async () => {
+  test("an out-of-order fetch cannot overwrite state the server produced earlier", async () => {
     const applied: string[] = [];
-    const slow = defer<string>();
-    const fast = defer<string>();
+    const slow = defer<Payload>();
+    const fast = defer<Payload>();
     const pending = [slow, fast];
-    const reconciler = createStateReconciler<string>({
+    const reconciler = createStateReconciler<Payload>({
       fetchState: () => pending.shift()!.promise,
-      applyState: value => applied.push(value),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
     });
 
     const first = reconciler.reconcile();
     const second = reconciler.reconcile();
-    // The second request answers first — it is the newer picture of the world.
-    fast.resolve("newer");
+    // The second request answers first, and the server produced its payload
+    // later — it is the newer picture of the world.
+    fast.resolve(payload("newer", 2));
     expect(await second).toBe(true);
-    slow.resolve("older");
+    slow.resolve(payload("older", 1));
     expect(await first).toBe(false);
     expect(applied).toEqual(["newer"]);
   });
 
   test("the newest request still applies when an older one answered first", async () => {
     const applied: string[] = [];
-    const older = defer<string>();
-    const newer = defer<string>();
+    const older = defer<Payload>();
+    const newer = defer<Payload>();
     const pending = [older, newer];
-    const reconciler = createStateReconciler<string>({
+    const reconciler = createStateReconciler<Payload>({
       fetchState: () => pending.shift()!.promise,
-      applyState: value => applied.push(value),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
     });
 
     const first = reconciler.reconcile();
     const second = reconciler.reconcile();
-    // Replies in issue order. Ordering by completion would have let the first
-    // reply block the second, leaving the UI on the older context after a
-    // rapid scope change.
-    older.resolve("older context");
+    // Replies arrive in issue order. Ordering by completion would have let the
+    // first reply block the second, leaving the UI on the older context after
+    // a rapid scope change.
+    older.resolve(payload("older context", 1));
     expect(await first).toBe(true);
-    newer.resolve("newer context");
+    newer.resolve(payload("newer context", 2));
     expect(await second).toBe(true);
     expect(applied).toEqual(["older context", "newer context"]);
   });
 
-  test("a stream frame applied mid-fetch invalidates the fetch in flight", async () => {
+  test("a stream frame the server produced later invalidates the fetch in flight", async () => {
     const applied: string[] = [];
-    const slow = defer<string>();
-    const reconciler = createStateReconciler<string>({
+    const slow = defer<Payload>();
+    const reconciler = createStateReconciler<Payload>({
       fetchState: () => slow.promise,
-      applyState: value => applied.push(value),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
     });
 
     const inFlight = reconciler.reconcile();
-    // The replacement stream delivered its own authoritative state first.
-    reconciler.noteApplied();
-    slow.resolve("stale");
+    // The stream delivered state the server produced after this fetch's.
+    reconciler.noteApplied(5);
+    slow.resolve(payload("stale", 4));
     expect(await inFlight).toBe(false);
     expect(applied).toEqual([]);
   });
 
-  test("a request issued after a stream frame is not treated as stale", async () => {
+  test("a fetch the server answered after a buffered frame still applies", async () => {
+    // The frame arrived later but the server produced it EARLIER — a frame
+    // buffered before the fetch was issued and delivered while it was in
+    // flight. Ordering by arrival would discard the fresher fetch.
     const applied: string[] = [];
-    const reconciler = createStateReconciler<string>({
-      fetchState: async () => "after the frame",
-      applyState: value => applied.push(value),
+    const slow = defer<Payload>();
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: () => slow.promise,
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
     });
 
-    reconciler.noteApplied();
-    expect(await reconciler.reconcile()).toBe(true);
-    expect(applied).toEqual(["after the frame"]);
+    const inFlight = reconciler.reconcile();
+    reconciler.noteApplied(1);
+    slow.resolve(payload("fresher", 9));
+    expect(await inFlight).toBe(true);
+    expect(applied).toEqual(["fresher"]);
+  });
+
+  test("an out-of-order stream frame cannot lower the applied watermark", async () => {
+    const applied: string[] = [];
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: async () => payload("stale", 3),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
+    });
+
+    reconciler.noteApplied(7);
+    reconciler.noteApplied(2);
+    expect(await reconciler.reconcile()).toBe(false);
+    expect(applied).toEqual([]);
   });
 
   test("a failing fetch rejects without consuming the application slot", async () => {
     const applied: string[] = [];
-    const outcomes: Array<() => Promise<string>> = [
+    const outcomes: Array<() => Promise<Payload>> = [
       async () => { throw new Error("offline"); },
-      async () => "recovered",
+      async () => payload("recovered", 1),
     ];
-    const reconciler = createStateReconciler<string>({
+    const reconciler = createStateReconciler<Payload>({
       fetchState: () => outcomes.shift()!(),
-      applyState: value => applied.push(value),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
     });
 
     await expect(reconciler.reconcile()).rejects.toThrow("offline");
@@ -219,7 +254,7 @@ describe("createLifecycleRecovery", () => {
       try {
         await gate.promise;
         throw new Error("workspace unreachable");
-      } catch {
+      } finally {
         channels.push("installed");
       }
     });

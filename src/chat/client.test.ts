@@ -176,13 +176,15 @@ describe("chat API client", () => {
       error: () => {},
     });
 
-    expect(sources[0]!.url).toBe("/s/work/api/chat/conversations/events");
     sources[0]!.emit("inventory", { type: "conversation.inventory" });
     sources[0]!.fail();
     timers.runNext();
     sources[1]!.emit("inventory", { type: "conversation.inventory" });
 
-    expect(sources[1]!.url).toBe("/s/work/api/chat/conversations/events");
+    // The client says whether it is replacing a stream it lost; the first
+    // attempt is not, its retry is.
+    expect(sources[0]!.url).toBe("/s/work/api/chat/conversations/events?reconnect=0");
+    expect(sources[1]!.url).toBe("/s/work/api/chat/conversations/events?reconnect=1");
     expect(invalidations).toEqual([
       { type: "conversation.inventory" },
       { type: "conversation.inventory" },
@@ -303,6 +305,28 @@ describe("chat API client", () => {
     expect(timers.delays()).toEqual([1_000]);
     expect(errors).toHaveLength(1);
     stream.close();
+  });
+
+  test("a replay cursor is not a reconnect; the client marks recovery explicitly", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+
+    // The ordinary snapshot-to-stream handoff carries the snapshot's cursor
+    // and is not a recovery.
+    const first = client.stream("c1", "cursor-c1", { event: () => {}, resync: () => {}, error: () => {} });
+    expect(sources[0]!.url).toContain("cursor=cursor-c1");
+    expect(sources[0]!.url).toContain("reconnect=0");
+
+    // The client's own retry after a failure is.
+    sources[0]!.fail();
+    timers.runNext();
+    expect(sources[1]!.url).toContain("reconnect=1");
+    first.close();
+
+    // And a caller replacing a stream it lost says so on the first attempt.
+    client.stream("c1", "cursor-c1", { event: () => {}, resync: () => {}, error: () => {} }, { resumed: true }).close();
+    expect(sources[2]!.url).toContain("reconnect=1");
   });
 
   test("a superseded source's open neither resets accounting nor reports recovery", () => {

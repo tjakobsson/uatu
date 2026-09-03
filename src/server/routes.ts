@@ -516,7 +516,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           const iterator = events[Symbol.asyncIterator]();
           let pending: Promise<IteratorResult<void>> | null = null;
           let finished = false;
-          streamMetrics.opened("chat-inventory");
+          streamMetrics.opened("chat-inventory", { reconnect: new URL(request.url).searchParams.get("reconnect") === "1" });
           const finish = async (outcome: StreamOutcome) => {
             if (finished) return;
             finished = true;
@@ -612,9 +612,11 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           const iterator = events[Symbol.asyncIterator]();
           let pending = iterator.next();
           let finished = false;
-          // A cursor means the client is resuming a stream it lost. Only the
-          // fact that one was supplied is recorded — never its value.
-          streamMetrics.opened("chat-conversation", { reconnect: Boolean(cursor) });
+          // The client says whether this replaces a stream it lost. A cursor
+          // cannot stand in for that: every stream opened from a snapshot
+          // carries one, so inferring recovery from it would count ordinary
+          // conversation navigation as a reconnect.
+          streamMetrics.opened("chat-conversation", { reconnect: url.searchParams.get("reconnect") === "1" });
           const finish = async (outcome: StreamOutcome) => {
             if (finished) return;
             finished = true;

@@ -108,9 +108,9 @@ function openDocumentStream(generation: number): EventSource {
     );
 
     applyServerSnapshot(payload);
-    // This is newer than anything a reconciliation fetch still has in flight;
-    // telling the reconciler keeps that older payload from landing on top.
-    stateReconciler.noteApplied();
+    // Ordered by the server's own clock, so a fetch still in flight lands
+    // only if the server produced its payload after this frame.
+    stateReconciler.noteApplied(payload.generatedAt);
     // Transport is only proven once this generation's authoritative state has
     // been applied — an open socket that never delivers state is exactly the
     // half-dead connection the indicator must not call `Connected`.
@@ -204,6 +204,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
     if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
     return (await response.json()) as StatePayload;
   },
+  freshnessOf: payload => payload.generatedAt,
   applyState: payload => {
     // Decided against the roots this client still holds, BEFORE the snapshot
     // overwrites them. A document edited while the page was suspended arrives
@@ -231,14 +232,25 @@ const stateReconciler = createStateReconciler<StatePayload>({
         if (appState.selectedId === selectedId) signalActiveDocumentUpdated();
       });
     }
-    // Replace the transport too: after a gap, the stream that was open (or
-    // silently dead) has no claim to being current.
-    connectEvents();
   },
 });
 
+// Reconcile authoritative state AND ensure a current channel. The two are
+// deliberately not conditional on each other: a fetch that fails, or whose
+// payload a fresher one already superseded, still leaves this page holding a
+// stream that may be the half-dead one which prompted the wake-up. Only a
+// fresh attempt can error and hand recovery to the channel's retry cycle, so
+// the transport is replaced on every path out of here.
+async function reconcileDocumentState(): Promise<void> {
+  try {
+    await stateReconciler.reconcile();
+  } finally {
+    connectEvents();
+  }
+}
+
 export async function refreshServerStateForContext(): Promise<void> {
-  await stateReconciler.reconcile();
+  await reconcileDocumentState();
 }
 
 // Installed once, by boot. `pageshow` from the back/forward cache, a return
@@ -250,19 +262,7 @@ export function watchPageLifecycle(): void {
   lifecycle ??= createLifecycleRecovery({
     win: window,
     doc: document,
-    recover: async () => {
-      try {
-        await stateReconciler.reconcile();
-      } catch {
-        // The workspace was unreachable — but the transport still has to be
-        // replaced. The stream this page is holding may be the half-dead one
-        // that prompted the wake-up, and only a fresh attempt can error and
-        // hand recovery to the channel's own retry cycle. Without this, a
-        // wake-up that arrives while the network is still down leaves nothing
-        // running at all.
-        connectEvents();
-      }
-    },
+    recover: reconcileDocumentState,
     discard: disconnectEvents,
   });
 }

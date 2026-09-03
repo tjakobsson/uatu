@@ -1854,7 +1854,12 @@ export function initChat(api = new ChatApiClient()): void {
   // without reprojecting: replaying from the cursor the projection already
   // holds keeps the timeline, its scroll anchor, and the composer draft
   // exactly as the user left them.
-  const openConversationStream = (conversationId: string, cursor: string, token: number): ChatEventStream =>
+  const openConversationStream = (
+    conversationId: string,
+    cursor: string,
+    token: number,
+    options: { resumed?: boolean } = {},
+  ): ChatEventStream =>
     api.stream(conversationId, cursor, {
       event: (event, cursor) => {
         if (!projection || token !== selectionGeneration) return;
@@ -1889,7 +1894,7 @@ export function initChat(api = new ChatApiClient()): void {
       // whether the projection is correct, so this clears the reconnect
       // message and nothing else — no refetch, no reprojection.
       recovered: () => { if (token === selectionGeneration) interruptions.clear("conversation"); },
-    });
+    }, options);
 
   async function refreshSelectedConversation(id: string): Promise<boolean> {
     const token = selectionGeneration;
@@ -3408,14 +3413,16 @@ export function initChat(api = new ChatApiClient()): void {
     }, 1_500);
   };
 
-  const startInventoryStream = () => {
+  // `resumed` distinguishes replacing a stream this client lost from opening
+  // the first one — only the former is transport recovery.
+  const startInventoryStream = (resumed = false) => {
     if (inventoryStream) return;
     try {
       inventoryStream = api.inventoryStream({
         invalidation: () => { void inventoryReconciler.request(); },
         error: error => interruptions.report("inventory", error),
         recovered: () => interruptions.clear("inventory"),
-      });
+      }, { resumed });
     } catch (error) {
       announce(messageOf(error), true);
     }
@@ -3634,11 +3641,11 @@ export function initChat(api = new ChatApiClient()): void {
       const inventory = inventoryReconciler.request();
       inventoryStream?.close();
       inventoryStream = null;
-      startInventoryStream();
+      startInventoryStream(true);
       const current = projection;
       if (current && activeConversationId() === current.conversationId) {
         stream?.close();
-        stream = openConversationStream(current.conversationId, current.cursor, selectionGeneration);
+        stream = openConversationStream(current.conversationId, current.cursor, selectionGeneration, { resumed: true });
       }
       await inventory;
     },

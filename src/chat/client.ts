@@ -84,6 +84,17 @@ function reconnectDelay(failures: number): number {
 
 export type ChatEventStream = { close(): void };
 
+// Whether this stream is resuming one the client lost. A replay cursor cannot
+// stand in for it: the first stream after a snapshot carries the snapshot's
+// cursor and is an ordinary handoff, not a recovery.
+export type ChatStreamOptions = { resumed?: boolean };
+
+// The client's own retries are recoveries by definition; the first attempt is
+// one only if the caller says the stream it replaces was lost.
+function reconnectMarker(attempt: number, options: ChatStreamOptions): string {
+  return attempt > 0 || options.resumed === true ? "1" : "0";
+}
+
 export class ChatApiClient {
   constructor(
     private readonly fetcher: FetchLike = (input, init) => fetch(input, init),
@@ -252,15 +263,18 @@ export class ChatApiClient {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/tasks/${encodeURIComponent(taskId)}/stop`), { requestId }, value => value);
   }
 
-  inventoryStream(handlers: InventoryStreamHandlers): ChatEventStream {
+  inventoryStream(handlers: InventoryStreamHandlers, options: ChatStreamOptions = {}): ChatEventStream {
     let closed = false;
     let source: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
+    let attempt = 0;
 
     const connect = () => {
       if (closed) return;
-      const nextSource = this.eventSourceFactory(appUrl("/api/chat/conversations/events"));
+      const query = new URLSearchParams({ reconnect: reconnectMarker(attempt, options) });
+      attempt += 1;
+      const nextSource = this.eventSourceFactory(appUrl(`/api/chat/conversations/events?${query}`));
       source = nextSource;
       // A successful open is the proof of transport recovery. Waiting for an
       // inventory event instead would leave an idle workspace — one where no
@@ -309,17 +323,20 @@ export class ChatApiClient {
     return { close };
   }
 
-  stream(conversationId: string, cursor: string, handlers: StreamHandlers): ChatEventStream {
+  stream(conversationId: string, cursor: string, handlers: StreamHandlers, options: ChatStreamOptions = {}): ChatEventStream {
     let closed = false;
     let source: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let lastCursor = cursor;
     let failures = 0;
+    let attempt = 0;
 
     const connect = () => {
       if (closed) return;
       const query = new URLSearchParams();
       if (lastCursor) query.set("cursor", lastCursor);
+      query.set("reconnect", reconnectMarker(attempt, options));
+      attempt += 1;
       source = this.eventSourceFactory(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/events?${query}`));
       const receive = (raw: MessageEvent<string>) => {
         try {

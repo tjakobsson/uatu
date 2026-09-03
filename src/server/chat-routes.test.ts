@@ -343,22 +343,29 @@ describe("workspace chat routes", () => {
     expect(metrics.get(openedCounter("chat-conversation"))).toBe(1);
     expect(metrics.get(reconnectedCounter("chat-conversation"))).toBe(0);
 
-    // A cursor means the client is resuming; only that fact is recorded.
-    const resumed = (await conversation.GET(
-      request("/api/chat/conversations/opencode:local/events?cursor=abc", {}, { conversationId: "opencode:local" }) as never,
+    // A cursor alone is NOT a reconnect — every stream opened from a snapshot
+    // carries one. The client says so explicitly.
+    const navigated = (await conversation.GET(
+      request("/api/chat/conversations/opencode:local/events?cursor=abc&reconnect=0", {}, { conversationId: "opencode:local" }) as never,
     )).body!.getReader();
     expect(metrics.get(openedCounter("chat-conversation"))).toBe(2);
+    expect(metrics.get(reconnectedCounter("chat-conversation"))).toBe(0);
+
+    const resumed = (await conversation.GET(
+      request("/api/chat/conversations/opencode:local/events?cursor=abc&reconnect=1", {}, { conversationId: "opencode:local" }) as never,
+    )).body!.getReader();
+    expect(metrics.get(openedCounter("chat-conversation"))).toBe(3);
     expect(metrics.get(reconnectedCounter("chat-conversation"))).toBe(1);
-    expect(metrics.get(activeGauge("chat-conversation"))).toBe(2);
 
     await inventoryReader.cancel();
     await fresh.cancel();
+    await navigated.cancel();
     await resumed.cancel();
     expect(metrics.get(closedCounter("chat-inventory", "cancelled"))).toBe(1);
     // The resumed stream's cursor is unknown to the replay, so it answers with
     // a resync and ends — a completion. The one still waiting for events is a
     // client cancellation. Two endings, two different counters.
-    expect(metrics.get(closedCounter("chat-conversation", "completed"))).toBe(1);
+    expect(metrics.get(closedCounter("chat-conversation", "completed"))).toBe(2);
     expect(metrics.get(closedCounter("chat-conversation", "cancelled"))).toBe(1);
     expect(metrics.get(activeGauge("chat-inventory"))).toBe(0);
     expect(metrics.get(activeGauge("chat-conversation"))).toBe(0);
