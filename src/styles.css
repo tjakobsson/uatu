@@ -5930,32 +5930,9 @@ body.is-resizing-chat .chat-resizer {
   display: block;
 }
 
-/* The agent has the prompt and nothing has come back yet. The pulse is the
-   liveness signal (Paseo-style square); the label restates the status and
-   elapsed time, whose composer twin is visually hidden in touch mode. */
-.chat-waiting {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.35rem 0.25rem 0.9rem;
-  color: var(--text-subtle);
-  font-size: 0.85em;
-}
-
-.chat-waiting[hidden] {
-  display: none;
-}
-
-.chat-waiting-pulse {
-  flex: 0 0 auto;
-  width: 0.6rem;
-  height: 0.6rem;
-  border-radius: 0.15rem;
-  background: var(--accent);
-  animation: chat-waiting-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes chat-waiting-pulse {
+/* The liveness pulse shared by the timeline's working line and the composer's
+   background-work state. */
+@keyframes chat-live-pulse {
   0%,
   100% {
     transform: scale(0.65);
@@ -5965,12 +5942,6 @@ body.is-resizing-chat .chat-resizer {
   50% {
     transform: scale(1);
     opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chat-waiting-pulse {
-    animation: none;
   }
 }
 
@@ -6511,7 +6482,7 @@ body.is-resizing-chat .chat-resizer {
   color: var(--accent);
   font-size: 0.85rem;
   line-height: 1;
-  animation: chat-waiting-pulse 2.4s ease-in-out infinite;
+  animation: chat-live-pulse 2.4s ease-in-out infinite;
 }
 
 .chat-composer-status[data-state="cancelling"]::before {
@@ -8082,41 +8053,100 @@ html[data-ui-mode="touch"] .chat-header {
   display: inline;
 }
 
-/* Grouped steps: a finished run of activity rows collapses to one line at the
-   same visual weight as a single row — the group is chrome about chrome. It
-   sits between prose blocks, so it needs its own vertical air to not read as
-   a line of the paragraph above or a kicker for the heading below. */
+/* Grouped steps: a run of activity rows collapses to one line at the same
+   visual weight as a single row — the group is chrome about chrome. It sits
+   between prose blocks, so it needs its own vertical air to not read as a
+   line of the paragraph above or a kicker for the heading below. The same
+   line is the working line of a running turn ("Working · 20s" and the step
+   in flight); it has an awaiting form with no members (`.is-awaiting`, a
+   plain div with the same slots, so the swap to the populated form when the
+   first step arrives moves nothing). */
 .chat-activity-group {
   margin: 0.65rem 0 1rem;
   color: var(--text-subtle);
 }
 
-.chat-activity-group > summary {
+.chat-activity-group > summary,
+.chat-activity-group > .chat-group-line {
   display: flex;
   align-items: baseline;
   gap: 0.55rem;
   padding: 0.2rem 0;
-  cursor: pointer;
   font-size: 0.875em;
   list-style: none;
+}
+
+.chat-activity-group > summary {
+  cursor: pointer;
 }
 
 .chat-activity-group > summary::-webkit-details-marker {
   display: none;
 }
 
-.chat-activity-group > summary::before {
+.chat-activity-group > summary::before,
+.chat-activity-group > .chat-group-line::before {
   content: "▸";
   flex: 0 0 auto;
   font-size: 0.8em;
+}
+
+/* The awaiting form keeps the cursor's width so its dot and label sit exactly
+   where the populated form's will, but shows no cursor: nothing to open. */
+.chat-activity-group > .chat-group-line::before {
+  visibility: hidden;
 }
 
 .chat-activity-group[open] > summary::before {
   content: "▾";
 }
 
+/* The status dot: what the line's steps came to, readable without opening it.
+   The text beside it already says "Working" or names the steps, so the dot
+   only has to say live, clean, or failed — and failed is also said in words
+   (`.chat-group-outcome`, "1 failed") so the outcome never rests on colour. */
+.chat-group-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--border-soft);
+}
+
+.chat-activity-group[data-outcome="live"] .chat-group-dot {
+  background: var(--accent);
+  animation: chat-live-pulse 1.2s ease-in-out infinite;
+}
+
+.chat-activity-group[data-outcome="failed"] .chat-group-dot {
+  background: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-activity-group[data-outcome="live"] .chat-group-dot {
+    animation: none;
+  }
+}
+
 .chat-group-count {
   flex: 0 0 auto;
+}
+
+/* The failed count, present only when a step failed; empty otherwise so it
+   takes no gap. Red as well as worded: the words carry the meaning. */
+.chat-group-outcome {
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+
+.chat-group-outcome:empty {
+  display: none;
+}
+
+.chat-group-outcome::before {
+  content: "· ";
+  color: var(--text-subtle);
 }
 
 .chat-group-items {
@@ -8125,8 +8155,14 @@ html[data-ui-mode="touch"] .chat-header {
   border-left: 2px solid var(--border-soft);
 }
 
-html[data-ui-mode="touch"] .chat-activity-group > summary {
+html[data-ui-mode="touch"] .chat-activity-group > summary,
+html[data-ui-mode="touch"] .chat-activity-group > .chat-group-line {
   font-size: 0.8125rem;
+}
+
+html[data-ui-mode="touch"] .chat-group-dot {
+  width: 0.6rem;
+  height: 0.6rem;
 }
 
 /* Prompt rail: one dot per user prompt, pinned to the timeline edge. */

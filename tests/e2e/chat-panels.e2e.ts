@@ -1,8 +1,15 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationConfiguration, ConversationItem } from "../../src/chat/types";
-import { chooseChatModel, openChatConfiguration, openChatPanel } from "./chat-helpers";
+import { captureScreenshot, chooseChatModel, openChatConfiguration, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
+
+// Where the zen-chat-activity change keeps its evidence: the working line's
+// closed and open forms, a failed dot, and the phone width.
+const ZEN_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/zen-chat-activity/screenshots");
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   await request.post("/__e2e/reset");
@@ -37,6 +44,10 @@ function readTool(id: string, file: string): ConversationItem {
   return { id: `tool:${id}`, type: "tool", createdAt: 5, name: "read", status: "completed", input: JSON.stringify({ filePath: file }) };
 }
 
+function bash(id: string, createdAt: number, command: string, status: "running" | "completed", output?: string): ConversationItem {
+  return { id, type: "tool", createdAt, name: "Bash", status, input: JSON.stringify({ command, description: `Run ${command.split(" ")[0]}` }), ...(output === undefined ? {} : { output }) };
+}
+
 function todoWrite(id: string, states: string[]): ConversationItem {
   return {
     id: `tool:${id}`,
@@ -62,12 +73,122 @@ test.describe("chat panels and navigation", () => {
 
     const group = page.locator(".chat-activity-group");
     await expect(group).toHaveCount(1);
+    await expect(group).toHaveAttribute("data-outcome", "clean");
     await expect(group.locator(".chat-group-count")).toHaveText("3 steps");
+    await expect(group.locator("> summary .chat-group-outcome")).toBeHidden();
     await expect(group.locator("> summary .chat-activity-subject")).toHaveText("Read a.ts · Read b.ts · Read c.ts");
     await expect(group.locator('[data-chat-item-id="tool:a"]')).toHaveCount(1);
     await expect(group.locator('[data-chat-item-id="tool:a"]')).toBeHidden();
     await group.locator("summary").first().click();
     await expect(group.locator('[data-chat-item-id="tool:a"]')).toBeVisible();
+  });
+
+  test("the working line carries a turn from nothing-back-yet through its steps to done, and stays open if opened", async ({ page, request }, testInfo) => {
+    // The change's desktop evidence is captured at 1400x1000 so the before
+    // and after shots line up.
+    await page.setViewportSize({ width: 1400, height: 1000 });
+    // A real prompt time: the working line's clock counts from it, and the
+    // steps land after it — the timeline orders by createdAt.
+    const started = Date.now() - 20_000;
+    const at = (seconds: number) => started + seconds * 1_000;
+    const id = await seedAndOpen(page, request, "Working line", [
+      { id: "message:u1", type: "user_message", createdAt: started, text: "Run hello.sh, list the folder, then read the notes" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    // Nothing back yet: the line is already there, live, with its clock.
+    const line = page.locator(".chat-activity-group");
+    await expect(line).toHaveCount(1);
+    await expect(line).toHaveClass(/is-awaiting/);
+    await expect(line).toHaveAttribute("data-outcome", "live");
+    await expect(line.locator(".chat-group-count")).toHaveText(/^Working · \d+s$/);
+    const awaitingBox = await line.boundingBox();
+
+    // The first step joins the same line: one line, same place, now a group
+    // naming the step in flight.
+    await control(request, { action: "item", conversationId: id, item: { id: "reasoning:1", type: "reasoning", createdAt: at(1), text: "Plan the three steps.", status: "running" } });
+    await expect(line).toHaveCount(1);
+    await expect(line).not.toHaveClass(/is-awaiting/);
+    await expect(line.locator("> summary .chat-activity-subject")).toHaveText("Thinking");
+    await expect(line.locator("> summary .chat-group-count")).toHaveText(/^Working · \d+s$/);
+    expect(Math.abs((await line.boundingBox())!.y - awaitingBox!.y)).toBeLessThan(2);
+
+    await control(request, { action: "item", conversationId: id, item: { id: "reasoning:1", type: "reasoning", createdAt: at(1), text: "Plan the three steps.", status: "completed", durationMs: 3000 } });
+    await control(request, { action: "item", conversationId: id, item: bash("tool:1", at(4), "./hello.sh", "completed", "Hello from hello.sh") });
+    await control(request, { action: "item", conversationId: id, item: bash("tool:2", at(5), "ls -la", "completed", "total 3\ndocs\nhello.sh\nREADME.md") });
+    await control(request, { action: "item", conversationId: id, item: { id: "tool:3", type: "tool", createdAt: at(6), name: "Read", status: "completed", input: JSON.stringify({ file_path: "docs/notes.md" }), output: "# Notes" } });
+    await control(request, { action: "item", conversationId: id, item: bash("tool:4", at(7), "sleep 20 && echo done", "running", "still going") });
+    await expect(line).toHaveCount(1);
+    await expect(line.locator("> summary .chat-activity-subject")).toHaveText("Bash sleep 20 && echo done");
+    await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeHidden();
+    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-working-line-closed-desktop");
+
+    // Opened: the member rows with their state, and the running member with
+    // output already open so its tail shows.
+    await line.locator("> summary").click();
+    await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeVisible();
+    await expect(page.locator('[data-chat-item-id="tool:4"]')).toHaveAttribute("open", "");
+    await expect(page.locator('[data-chat-item-id="tool:4"] .chat-tool-stream')).toContainText("still going");
+    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-working-line-open-desktop");
+
+    // Finishing settles the same line into the group summary, still open.
+    await control(request, { action: "item", conversationId: id, item: bash("tool:4", at(7), "sleep 20 && echo done", "completed", "done") });
+    await control(request, { action: "item", conversationId: id, item: { id: "message:a1", type: "assistant_message", createdAt: at(19), markdown: "All three ran.", completedAt: at(19) } });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    await expect(line).toHaveCount(1);
+    await expect(line).toHaveAttribute("data-outcome", "clean");
+    await expect(line.locator("> summary .chat-group-count")).toHaveText("5 steps");
+    await expect(line.locator("> summary .chat-activity-subject")).toHaveText("Bash ./hello.sh · Bash ls -la · Read docs/notes.md · Thought · Bash");
+    await expect(line).toHaveAttribute("open", "");
+    await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeVisible();
+  });
+
+  test("a failed step reddens the dot and is counted in words, live and once finished, without the line being opened", async ({ page, request }, testInfo) => {
+    await page.setViewportSize({ width: 1400, height: 1000 });
+    const started = Date.now() - 40_000;
+    const id = await seedAndOpen(page, request, "Failed step", [
+      { id: "message:u1", type: "user_message", createdAt: started, text: "Read the notes and run the build" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { ...readTool("a", "a.ts"), createdAt: started + 1_000 } });
+    const line = page.locator(".chat-activity-group");
+    await expect(line).toHaveAttribute("data-outcome", "live");
+    const dot = line.locator(".chat-group-dot");
+    const worded = line.locator("> summary .chat-group-outcome");
+    await expect(worded).toBeHidden();
+    const accent = await dot.evaluate(node => getComputedStyle(node).backgroundColor);
+
+    await control(request, { action: "item", conversationId: id, item: { id: "tool:build", type: "tool", createdAt: started + 2_000, name: "Bash", status: "failed", input: JSON.stringify({ command: "bun run build" }), error: "exit 1" } });
+    await control(request, { action: "item", conversationId: id, item: { ...readTool("c", "c.ts"), createdAt: started + 3_000 } });
+    await expect(line).toHaveAttribute("data-outcome", "failed");
+    await expect(line.locator("> summary .chat-group-count")).toHaveText(/^Working/);
+    // The colour is not the only signal: the line says so in words, visible
+    // and in the summary's accessible name.
+    await expect(worded).toBeVisible();
+    await expect(worded).toHaveText("1 failed");
+    await expect(line.locator("> summary")).toContainText("1 failed");
+    const danger = await dot.evaluate(node => getComputedStyle(node).backgroundColor);
+    expect(danger).not.toBe(accent);
+
+    await control(request, { action: "item", conversationId: id, item: { id: "message:a1", type: "assistant_message", createdAt: started + 9_000, markdown: "The build failed; see the step.", completedAt: started + 9_000 } });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    await expect(line).toHaveAttribute("data-outcome", "failed");
+    await expect(line.locator("> summary .chat-group-count")).toHaveText("3 steps");
+    await expect(worded).toHaveText("1 failed");
+    await expect(line).not.toHaveAttribute("open", "");
+    expect(await dot.evaluate(node => getComputedStyle(node).backgroundColor)).toBe(danger);
+    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-finished-group-failed-dot-desktop");
+  });
+
+  test("reduced motion stills the working line's pulse", async ({ page, request }) => {
+    const id = await seedAndOpen(page, request, "Reduced motion", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "go" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    const dot = page.locator(".chat-activity-group .chat-group-dot");
+    await expect(dot).toBeVisible();
+    expect(await dot.evaluate(node => getComputedStyle(node).animationName)).toBe("chat-live-pulse");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    expect(await dot.evaluate(node => getComputedStyle(node).animationName)).toBe("none");
   });
 
   test("the live task list pins progress above the composer", async ({ page, request }) => {
@@ -107,6 +228,33 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-drilldown-items")).toContainText("the earliest finding");
     // One page back is the whole transcript here, so the offer retires.
     await expect(older).toBeHidden();
+  });
+
+  test("a subagent's working line keeps ticking while its parent is idle", async ({ page, request }) => {
+    // The child is mid-turn on its own; the parent that launched it has
+    // settled. The drill-down's working line is stamped from the child's
+    // status, and its clock must advance from the child's status too — the
+    // parent's idle composer says nothing about the subagent's turn.
+    const started = Date.now() - 5_000;
+    const child = await control(request, { action: "seed", title: "Busy child", child: true, items: [
+      { id: "message:cu", type: "user_message", createdAt: started, text: "go" },
+      bash("tool:child1", started + 1_000, "sleep 30", "running"),
+    ] }) as { conversation: { id: string } };
+    await control(request, { action: "status", conversationId: child.conversation.id, status: "running" });
+    await seedAndOpen(page, request, "Idle parent", [
+      { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Long task", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
+    ]);
+    await expect(page.locator("#chat-items .chat-activity-group[data-working-since]")).toHaveCount(0);
+
+    await page.locator("#chat-subagents summary").click();
+    await page.getByRole("button", { name: "explore · Long task" }).click();
+    const line = page.locator("#chat-drilldown-items .chat-activity-group[data-working-since]");
+    await expect(line).toHaveCount(1);
+    const label = line.locator("> summary .chat-group-count");
+    await expect(label).toHaveText(/^Working · \d+s$/);
+    const seconds = async () => Number((await label.textContent())!.match(/(\d+)s$/)![1]);
+    const first = await seconds();
+    await expect.poll(seconds, { timeout: 5_000 }).toBeGreaterThan(first);
   });
 
   test("a stale pagination failure cannot overwrite a replacement drill-down", async ({ page, request }) => {
@@ -516,5 +664,37 @@ test.describe("chat panels and navigation", () => {
 
     await expect(page.locator('[data-chat-item-id="part:r1"] summary')).toContainText("Thinking");
     await expect(page.locator('[data-chat-item-id="part:r2"] summary')).toContainText("Thought for 12s");
+  });
+});
+
+test.describe("the working line at phone width", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("collapses the live tail behind one line in touch mode", async ({ page, request }, testInfo) => {
+    await request.post("/__e2e/reset");
+    const started = Date.now() - 20_000;
+    const at = (seconds: number) => started + seconds * 1_000;
+    const seeded = await control(request, { action: "seed", title: "Working line", items: [
+      { id: "message:u1", type: "user_message", createdAt: started, text: "Run hello.sh, list the folder, then read the notes" },
+    ] }) as { conversation: { id: string } };
+    const id = seeded.conversation.id;
+    const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(id);
+
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { id: "reasoning:1", type: "reasoning", createdAt: at(1), text: "Plan the three steps.", status: "completed", durationMs: 3000 } });
+    await control(request, { action: "item", conversationId: id, item: bash("tool:1", at(4), "./hello.sh", "completed", "Hello from hello.sh") });
+    await control(request, { action: "item", conversationId: id, item: bash("tool:2", at(5), "ls -la", "completed", "total 3\ndocs\nhello.sh\nREADME.md") });
+    await control(request, { action: "item", conversationId: id, item: { id: "tool:3", type: "tool", createdAt: at(6), name: "Read", status: "completed", input: JSON.stringify({ file_path: "docs/notes.md" }), output: "# Notes" } });
+    await control(request, { action: "item", conversationId: id, item: bash("tool:4", at(7), "sleep 20 && echo done", "running") });
+    const line = page.locator(".chat-activity-group");
+    await expect(line).toHaveCount(1);
+    await expect(line).toHaveAttribute("data-outcome", "live");
+    await expect(line.locator("> summary .chat-activity-subject")).toHaveText("Bash sleep 20 && echo done");
+    await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeHidden();
+    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-working-line-phone");
   });
 });
