@@ -19,6 +19,7 @@ type FakeSource = LiveChannelSource & {
 function createHarness() {
   const sources: FakeSource[] = [];
   const statuses: LiveChannelStatus[] = [];
+  const reconnectFlags: boolean[] = [];
   const scheduled: { delay: number; run: () => void; id: number }[] = [];
   let nextTimerId = 1;
 
@@ -37,7 +38,8 @@ function createHarness() {
   const channel = createLiveChannel({
     timers,
     onStatus: status => statuses.push(status),
-    open: generation => {
+    open: (generation, context) => {
+      reconnectFlags.push(context.reconnect);
       const listeners = new Map<string, ((event: Event) => void)[]>();
       const source: FakeSource = {
         generation,
@@ -66,6 +68,7 @@ function createHarness() {
     channel,
     sources,
     statuses,
+    reconnectFlags,
     scheduled,
     // Fires exactly the pending reconnect, mirroring a real timer firing once.
     runPendingTimer() {
@@ -125,15 +128,60 @@ describe("createLiveChannel", () => {
     expect(stale.closed).toBe(true);
     expect(harness.channel.isCurrent(staleGeneration)).toBe(false);
     expect(harness.channel.isCurrent(harness.channel.currentGeneration())).toBe(true);
+    // Superseding a generation leaves nothing confirmed, and the channel says
+    // so rather than coasting on the previous generation's success.
+    expect(harness.statuses).toEqual(["reconnecting"]);
 
     // A late error from the superseded source must not disturb the new one.
     stale.fail();
     expect(harness.scheduled).toHaveLength(0);
-    expect(harness.statuses).toEqual([]);
+    expect(harness.statuses).toEqual(["reconnecting"]);
 
     // Nor may a late confirmation from it report a stale success.
     harness.channel.confirm(staleGeneration);
+    expect(harness.statuses).toEqual(["reconnecting"]);
+  });
+
+  test("a deliberate replacement of a confirmed channel stops claiming Connected", () => {
+    const harness = createHarness();
+    harness.channel.connect();
+    harness.channel.confirm(harness.channel.currentGeneration());
+    expect(harness.statuses.at(-1)).toBe("live");
+
+    // A lifecycle wake-up or a context change replaces the stream. Nothing is
+    // confirmed until the replacement delivers state, and the replacement may
+    // take arbitrarily long.
+    harness.channel.connect();
+    expect(harness.statuses.at(-1)).toBe("reconnecting");
+    expect(harness.channel.isRecovering()).toBe(true);
+
+    harness.channel.confirm(harness.channel.currentGeneration());
+    expect(harness.statuses.at(-1)).toBe("live");
+  });
+
+  test("the first connect leaves the shell on its own Connecting state", () => {
+    const harness = createHarness();
+    harness.channel.connect();
     expect(harness.statuses).toEqual([]);
+  });
+
+  test("an attempt is marked a recovery only when it replaces a lost stream", () => {
+    const harness = createHarness();
+    harness.channel.connect();
+    expect(harness.reconnectFlags).toEqual([false]);
+
+    // A deliberate context change is not a recovery.
+    harness.channel.connect();
+    expect(harness.reconnectFlags).toEqual([false, false]);
+
+    // A caller replacing a stream it believes it lost says so.
+    harness.channel.connect({ resumed: true });
+    expect(harness.reconnectFlags).toEqual([false, false, true]);
+
+    // And the channel's own retry after a failure is one by definition.
+    harness.sources.at(-1)!.fail();
+    harness.runPendingTimer();
+    expect(harness.reconnectFlags).toEqual([false, false, true, true]);
   });
 
   test("confirming the current generation reports live and resets failure accounting", () => {
@@ -160,6 +208,15 @@ describe("createLiveChannel", () => {
     harness.channel.connect();
     harness.sources[0]!.emit("open");
     expect(harness.statuses).toEqual([]);
+  });
+
+  test("a replacement that opens but delivers nothing keeps reporting reconnecting", () => {
+    const harness = createHarness();
+    harness.channel.connect();
+    harness.channel.confirm(harness.channel.currentGeneration());
+    harness.channel.connect();
+    harness.sources.at(-1)!.emit("open");
+    expect(harness.statuses.at(-1)).toBe("reconnecting");
   });
 
   test("disposal stops the retry cycle and closes the current source", () => {

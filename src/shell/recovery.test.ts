@@ -126,6 +126,24 @@ describe("createStateReconciler", () => {
     expect(applied).toEqual(["scope the user asked for"]);
   });
 
+  test("a frame older than applied state is refused", () => {
+    const applied: string[] = [];
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: async () => payload("reconciled", 10),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
+    });
+
+    // The initial frame of a stream opened just before the fetch answered: the
+    // server produced it earlier, so it must not put the older roots back.
+    expect(reconciler.acceptFrame(3)).toBe(true);
+    return reconciler.reconcile().then(() => {
+      expect(applied).toEqual(["reconciled"]);
+      expect(reconciler.acceptFrame(4)).toBe(false);
+      expect(reconciler.acceptFrame(11)).toBe(true);
+    });
+  });
+
   test("a stream frame the server produced later invalidates the fetch in flight", async () => {
     const applied: string[] = [];
     const slow = defer<Payload>();
@@ -137,7 +155,7 @@ describe("createStateReconciler", () => {
 
     const inFlight = reconciler.reconcile();
     // The stream delivered state the server produced after this fetch's.
-    reconciler.noteApplied(5);
+    reconciler.acceptFrame(5);
     slow.resolve(payload("stale", 4));
     expect(await inFlight).toBe(false);
     expect(applied).toEqual([]);
@@ -156,7 +174,7 @@ describe("createStateReconciler", () => {
     });
 
     const inFlight = reconciler.reconcile();
-    reconciler.noteApplied(1);
+    reconciler.acceptFrame(1);
     slow.resolve(payload("fresher", 9));
     expect(await inFlight).toBe(true);
     expect(applied).toEqual(["fresher"]);
@@ -170,8 +188,8 @@ describe("createStateReconciler", () => {
       freshnessOf: value => value.generatedAt,
     });
 
-    reconciler.noteApplied(7);
-    reconciler.noteApplied(2);
+    reconciler.acceptFrame(7);
+    reconciler.acceptFrame(2);
     expect(await reconciler.reconcile()).toBe(false);
     expect(applied).toEqual([]);
   });
@@ -192,7 +210,7 @@ describe("createStateReconciler", () => {
 
     const first = reconciler.reconcile();
     const second = reconciler.reconcile();
-    reconciler.noteApplied(50);
+    reconciler.acceptFrame(50);
     newer.resolve(payload("scope the user asked for", 40));
     expect(await second).toBe(false);
     older.resolve(payload("previous scope", 60));

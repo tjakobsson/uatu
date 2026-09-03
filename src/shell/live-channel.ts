@@ -48,16 +48,25 @@ export function reconnectDelay(consecutiveFailures: number): number {
 
 export type LiveChannelOptions = {
   // Opens one attempt. The owner attaches its own message listeners here and
-  // guards them with `isCurrent(generation)`.
-  open: (generation: number) => LiveChannelSource;
+  // guards them with `isCurrent(generation)`. `reconnect` says whether this
+  // attempt replaces a stream that was lost, so the workspace can count
+  // recoveries apart from first connects and context changes.
+  open: (generation: number, context: { reconnect: boolean }) => LiveChannelSource;
   onStatus: (status: LiveChannelStatus) => void;
   timers?: LiveChannelTimers;
+};
+
+export type LiveChannelConnectOptions = {
+  // Whether this attempt replaces a stream the client believes it lost, as
+  // opposed to a deliberate context change. Only the former is transport
+  // recovery, and only it should be counted as one.
+  resumed?: boolean;
 };
 
 export type LiveChannel = {
   // Supersedes any current attempt with a fresh one. Also the entry point for
   // deliberate replacement (a scope change, a lifecycle wake-up).
-  connect(): void;
+  connect(options?: LiveChannelConnectOptions): void;
   // The owner applied authoritative state from `generation`. Resets failure
   // accounting and reports `live` — unless the generation has already been
   // superseded, in which case the report is stale and is dropped.
@@ -94,18 +103,28 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     consecutiveFailures += 1;
     reconnectTimer = timers.setTimeout(() => {
       reconnectTimer = null;
-      connect();
+      connect({ resumed: true });
     }, reconnectDelay(consecutiveFailures));
   };
 
-  function connect(): void {
+  function connect(connectOptions: LiveChannelConnectOptions = {}): void {
     if (disposed) return;
     cancelPendingReconnect();
     source?.close();
     source = null;
+    const superseding = generation > 0;
     generation += 1;
     const attempt = generation;
-    const next = options.open(attempt);
+    // Superseding a generation leaves nothing confirmed. Continuing to report
+    // `Connected` through a replacement that may take arbitrarily long would
+    // be a claim this channel cannot back — the new generation has delivered
+    // no state yet. Before the first connect the shell is still `Connecting`,
+    // which is its own truthful state.
+    if (superseding) {
+      recovering = true;
+      options.onStatus("reconnecting");
+    }
+    const next = options.open(attempt, { reconnect: connectOptions.resumed === true });
     source = next;
     next.addEventListener("error", () => {
       if (attempt !== generation || disposed) return;

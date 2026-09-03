@@ -18,9 +18,11 @@ export type StateReconciler<T> = {
   // payload was the one applied, `false` when fresher state had already been
   // applied by the time it answered.
   reconcile(): Promise<boolean>;
-  // Records authoritative state that arrived by some other route — a live
-  // stream frame — with the server-side freshness of that payload.
-  noteApplied(freshness: number): void;
+  // The gate for authoritative state arriving by another route — a live
+  // stream frame. Returns `false` when state the server produced later has
+  // already been applied, in which case the caller must ignore the frame;
+  // returns `true` and records it otherwise.
+  acceptFrame(freshness: number): boolean;
 };
 
 export function createStateReconciler<T>(options: {
@@ -37,17 +39,17 @@ export function createStateReconciler<T>(options: {
   // happened to answer it first and stamp it earlier — otherwise an
   // overlapping pair of scope changes can settle on the older scope.
   //
-  // Between a request and a STREAM FRAME, server freshness decides. Arrival
-  // order says nothing there: a frame the server produced before the fetch can
-  // still be delivered while it is in flight, and treating it as newer would
-  // discard the fresher payload.
+  // Between ANY TWO PAYLOADS, server freshness decides. Arrival order says
+  // nothing: a frame the server produced before a fetch can be delivered while
+  // it is in flight, and a frame produced before a fetch's reply can be
+  // dispatched after it. One watermark both sources must beat, so neither can
+  // overwrite the other's newer state.
   let issued = 0;
-  // The newest request that has ANSWERED — applied, superseded by a frame, or
-  // failed. All three settle the intent: once a newer request has come back,
-  // an older one's context is obsolete and must not be reinstated, whatever
-  // became of the newer payload.
+  // The newest request that has ANSWERED — applied, superseded, or failed. All
+  // three settle the intent: once a newer request has come back, an older
+  // one's context is obsolete, whatever became of the newer payload.
   let settledSequence = 0;
-  let frameFreshness = Number.NEGATIVE_INFINITY;
+  let appliedFreshness = Number.NEGATIVE_INFINITY;
 
   return {
     async reconcile() {
@@ -61,14 +63,18 @@ export function createStateReconciler<T>(options: {
       }
       if (sequence <= settledSequence) return false;
       settledSequence = sequence;
-      if (options.freshnessOf(payload) <= frameFreshness) return false;
+      const freshness = options.freshnessOf(payload);
+      if (freshness <= appliedFreshness) return false;
+      appliedFreshness = freshness;
       options.applyState(payload);
       return true;
     },
-    noteApplied(freshness: number) {
+    acceptFrame(freshness: number) {
       // Deliberately does NOT touch the request ordering: a frame proves the
       // server's state at a moment, not that any pending request is obsolete.
-      if (freshness > frameFreshness) frameFreshness = freshness;
+      if (freshness <= appliedFreshness) return false;
+      appliedFreshness = freshness;
+      return true;
     },
   };
 }
