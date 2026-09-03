@@ -103,6 +103,29 @@ describe("createStateReconciler", () => {
     expect(applied).toEqual(["older context", "newer context"]);
   });
 
+  test("the newest request wins even when the server stamped it earlier", async () => {
+    // Overlapping scope changes: the server handles the later-issued request
+    // first and stamps it earlier. Freshness alone would let the stale request
+    // put the user back on the previous scope.
+    const applied: string[] = [];
+    const older = defer<Payload>();
+    const newer = defer<Payload>();
+    const pending = [older, newer];
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: () => pending.shift()!.promise,
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
+    });
+
+    const first = reconciler.reconcile();
+    const second = reconciler.reconcile();
+    newer.resolve(payload("scope the user asked for", 100));
+    expect(await second).toBe(true);
+    older.resolve(payload("previous scope", 101));
+    expect(await first).toBe(false);
+    expect(applied).toEqual(["scope the user asked for"]);
+  });
+
   test("a stream frame the server produced later invalidates the fetch in flight", async () => {
     const applied: string[] = [];
     const slow = defer<Payload>();

@@ -375,6 +375,47 @@ describe("workspace chat routes", () => {
     expect(names.some(name => name.includes("abc") || name.includes("opencode:local"))).toBe(false);
   });
 
+  test("a downstream disconnect is recorded as a cancellation, not a completion", async () => {
+    const metrics = new MetricsRegistry();
+    const service = new FakeChatService();
+    const table = routes(service, "/", undefined, metrics);
+    const inventory = table["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
+    const conversation = table["/api/chat/conversations/:conversationId/events"] as {
+      GET(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+
+    // The browser (or the Hub proxying for it) goes away: the request aborts
+    // while a read is pending. That is the ordinary mobile disconnect, and it
+    // must not be filed as the stream finishing normally.
+    const inventoryAbort = new AbortController();
+    const inventoryReader = (await inventory.GET(
+      request("/api/chat/conversations/events", { signal: inventoryAbort.signal }),
+    )).body!.getReader();
+    await inventoryReader.read();
+    const inventoryPending = inventoryReader.read();
+    inventoryAbort.abort();
+    expect((await inventoryPending).done).toBe(true);
+
+    const conversationAbort = new AbortController();
+    const conversationReader = (await conversation.GET(
+      request(
+        "/api/chat/conversations/opencode:local/events",
+        { signal: conversationAbort.signal },
+        { conversationId: "opencode:local" },
+      ) as never,
+    )).body!.getReader();
+    const conversationPending = conversationReader.read();
+    conversationAbort.abort();
+    await conversationPending.catch(() => undefined);
+    await Bun.sleep(10);
+
+    expect(metrics.get(closedCounter("chat-inventory", "cancelled"))).toBe(1);
+    expect(metrics.get(closedCounter("chat-inventory", "completed"))).toBe(0);
+    expect(metrics.get(closedCounter("chat-conversation", "cancelled"))).toBe(1);
+    expect(metrics.get(closedCounter("chat-conversation", "completed"))).toBe(0);
+    expect(metrics.get(closedCounter("chat-conversation", "failed"))).toBe(0);
+  });
+
   test("cleans up inventory subscriptions on request abort", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };

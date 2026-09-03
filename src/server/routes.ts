@@ -517,6 +517,13 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           let pending: Promise<IteratorResult<void>> | null = null;
           let finished = false;
           streamMetrics.opened("chat-inventory", { reconnect: new URL(request.url).searchParams.get("reconnect") === "1" });
+          // An aborted subscription ends its iterator the same way a genuine
+          // end-of-stream does — `done`, or a rejection. Without consulting
+          // the signal, the ordinary browser disconnect (the common case on
+          // mobile) would be filed as a completion or a failure, and the
+          // counters could not answer the one question they exist for.
+          const endedBy = (fallback: StreamOutcome): StreamOutcome =>
+            abort.signal.aborted ? "cancelled" : fallback;
           const finish = async (outcome: StreamOutcome) => {
             if (finished) return;
             finished = true;
@@ -539,10 +546,10 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   controller.enqueue(encoder.encode('event: inventory\ndata: {"type":"conversation.inventory"}\n\n'));
                   return;
                 }
-                await finish("completed");
+                await finish(endedBy("completed"));
               } catch {
                 // Cancellation closes the transport without an in-band error.
-                await finish("failed");
+                await finish(endedBy("failed"));
               }
               try { controller.close(); } catch { /* consumer cancelled */ }
             },
@@ -617,6 +624,8 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           // carries one, so inferring recovery from it would count ordinary
           // conversation navigation as a reconnect.
           streamMetrics.opened("chat-conversation", { reconnect: url.searchParams.get("reconnect") === "1" });
+          const endedBy = (fallback: StreamOutcome): StreamOutcome =>
+            abort.signal.aborted ? "cancelled" : fallback;
           const finish = async (outcome: StreamOutcome) => {
             if (finished) return;
             finished = true;
@@ -647,11 +656,11 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   if (event.type !== "resync") return;
                   break;
                 }
-                await finish("completed");
+                await finish(endedBy("completed"));
               } catch {
                 // A transport cancellation closes the stream without inventing
                 // an in-band provider error.
-                await finish("failed");
+                await finish(endedBy("failed"));
               }
               try { controller.close(); } catch { /* consumer cancelled */ }
             },

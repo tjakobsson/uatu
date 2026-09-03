@@ -26,26 +26,39 @@ export type StateReconciler<T> = {
 export function createStateReconciler<T>(options: {
   fetchState: () => Promise<T>;
   applyState: (value: T) => void;
-  // When the SERVER produced this payload. Ordering by arrival instead would
-  // be wrong in both directions: a fetch issued second can answer first, and
-  // a stream frame the server produced before the fetch can be delivered
-  // after it. Only the server's own clock orders the two sources, and both
-  // payloads come from the same process.
+  // When the SERVER produced this payload. Only the server's own clock can
+  // order a fetch against a stream frame, and both come from the same process.
   freshnessOf: (value: T) => number;
 }): StateReconciler<T> {
-  let appliedFreshness = Number.NEGATIVE_INFINITY;
+  // Two orderings, because the two hazards are different.
+  //
+  // Between REQUESTS, client intent decides. A request carries the context the
+  // user asked for, so the newest one issued must win even if the server
+  // happened to answer it first and stamp it earlier — otherwise an
+  // overlapping pair of scope changes can settle on the older scope.
+  //
+  // Between a request and a STREAM FRAME, server freshness decides. Arrival
+  // order says nothing there: a frame the server produced before the fetch can
+  // still be delivered while it is in flight, and treating it as newer would
+  // discard the fresher payload.
+  let issued = 0;
+  let appliedSequence = 0;
+  let frameFreshness = Number.NEGATIVE_INFINITY;
 
   return {
     async reconcile() {
+      const sequence = ++issued;
       const payload = await options.fetchState();
-      const freshness = options.freshnessOf(payload);
-      if (freshness <= appliedFreshness) return false;
-      appliedFreshness = freshness;
+      if (sequence <= appliedSequence) return false;
+      if (options.freshnessOf(payload) <= frameFreshness) return false;
+      appliedSequence = sequence;
       options.applyState(payload);
       return true;
     },
     noteApplied(freshness: number) {
-      if (freshness > appliedFreshness) appliedFreshness = freshness;
+      // Deliberately does NOT touch the request ordering: a frame proves the
+      // server's state at a moment, not that any pending request is obsolete.
+      if (freshness > frameFreshness) frameFreshness = freshness;
     },
   };
 }
