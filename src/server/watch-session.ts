@@ -30,6 +30,7 @@ import {
   DEFAULT_WATCH_CONTEXT,
   type WatchContext,
 } from "../shared/watch-context";
+import { StreamLifecycleMetrics, type StreamOutcome } from "../debug/stream-metrics";
 import { DEFAULT_RESPECT_GITIGNORE, scanRoots, type WatchEntry } from "./roots";
 
 export const BUILD_SUMMARY: BuildSummary = {
@@ -45,6 +46,17 @@ export const BUILD_SUMMARY: BuildSummary = {
 const encoder = new TextEncoder();
 
 type EventController = ReadableStreamDefaultController<Uint8Array>;
+
+// One connected browser. `keepalive` is the timer producing this stream's
+// comment frames; it is owned by the subscriber record so that every exit
+// path (client cancel, enqueue failure, session stop) releases it through
+// the same `dropSubscriber` call rather than leaking an interval per
+// disconnect.
+type Subscriber = {
+  controller: EventController;
+  context: WatchContext;
+  keepalive: ReturnType<typeof setInterval> | null;
+};
 
 export function canSetFileScope(roots: RootGroup[], documentId: string): boolean {
   const document = findDocument(roots, documentId);
@@ -77,10 +89,25 @@ export function createStatePayload(
   };
 }
 
+// Cadence for the document channel's transport keepalive. An SSE comment
+// frame produces bytes on an otherwise byte-silent stream so intermediaries
+// (the Hub proxy, tailscale serve, any fronting reverse proxy) do not treat
+// the connection as abandoned. It matches the Chat streams' cadence so the
+// two live channels age out of a proxy's idle window together. Comments are
+// invisible to `EventSource` listeners, so a keepalive can never reach the
+// application as state.
+export const DOCUMENT_KEEPALIVE_MS = 15_000;
+
+const KEEPALIVE_FRAME = ": keepalive\n\n";
+
 export type WatchSessionOptions = {
   usePolling?: boolean;
   respectGitignore?: boolean;
   terminalEnabled?: boolean;
+  // Test seam: the keepalive cadence for the document event stream. Product
+  // code never sets it — a focused test would otherwise have to wait a real
+  // 15 seconds to observe one comment frame.
+  keepaliveIntervalMs?: number;
   // Optional metrics registry. When provided, the watch session will
   // increment counters for watcher events and refresh lifecycle. Callers
   // construct the registry so it can be shared with the snapshot writer
@@ -245,7 +272,9 @@ export function createWatchSession(
     "last-commit": [],
   };
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
-  const subscribers = new Set<{ controller: EventController; context: WatchContext }>();
+  const keepaliveIntervalMs = options.keepaliveIntervalMs ?? DOCUMENT_KEEPALIVE_MS;
+  const streamMetrics = new StreamLifecycleMetrics(metrics);
+  const subscribers = new Set<Subscriber>();
   const matcherCache = new Map<string, IgnoreMatcher>();
 
   const watchPaths = entries.map(entry => entry.absolutePath);
@@ -448,15 +477,16 @@ export function createWatchSession(
         clearInterval(reconcileTimer);
       }
 
-      for (const subscriber of subscribers) {
+      for (const subscriber of [...subscribers]) {
+        if (subscriber.keepalive) clearInterval(subscriber.keepalive);
+        subscriber.keepalive = null;
         try {
           subscriber.controller.close();
         } catch {
           // The browser may already have closed the SSE stream.
         }
+        if (subscribers.delete(subscriber)) streamMetrics.closed("document", "completed");
       }
-
-      subscribers.clear();
       return watcher ? watcher.close() : Promise.resolve();
     },
     getRoots(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
@@ -486,19 +516,37 @@ export function createWatchSession(
     getStatePayload(changedId: string | null = null, context: WatchContext = DEFAULT_WATCH_CONTEXT) {
       return payloadFor(context, changedId);
     },
-    eventsResponse(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
-      let currentSubscriber: { controller: EventController; context: WatchContext } | null = null;
+    // `options.reconnect` is the client saying this request replaces a stream
+    // it lost. It is a bare boolean marker — nothing about the previous
+    // connection travels with it — and exists so the workspace can count
+    // recoveries separately from first connects.
+    eventsResponse(context: WatchContext = DEFAULT_WATCH_CONTEXT, options: { reconnect?: boolean } = {}) {
+      let currentSubscriber: Subscriber | null = null;
 
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           const normalizedContext = normalizeContext(context);
-          currentSubscriber = { controller, context: normalizedContext };
-          subscribers.add(currentSubscriber);
+          const subscriber: Subscriber = { controller, context: normalizedContext, keepalive: null };
+          currentSubscriber = subscriber;
+          subscribers.add(subscriber);
+          streamMetrics.opened("document", { reconnect: options.reconnect === true });
           controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(normalizedContext))}\n\n`));
+          // A comment frame, not an event: `EventSource` never dispatches it,
+          // so the bytes keep every hop's idle timer alive without the client
+          // seeing a state update. An enqueue failure means the peer is gone
+          // between polls — release rather than retry.
+          subscriber.keepalive = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(KEEPALIVE_FRAME));
+            } catch {
+              dropSubscriber(subscriber, "failed");
+            }
+          }, keepaliveIntervalMs);
+          if (typeof subscriber.keepalive.unref === "function") subscriber.keepalive.unref();
         },
         cancel() {
           if (currentSubscriber) {
-            subscribers.delete(currentSubscriber);
+            dropSubscriber(currentSubscriber, "cancelled");
             currentSubscriber = null;
           }
         },
@@ -514,6 +562,18 @@ export function createWatchSession(
     },
   };
 
+  // The single release path for a subscriber: stops its keepalive timer and
+  // forgets it. Called from stream cancel, a failed enqueue, and a failed
+  // keepalive alike so no exit leaves an interval running against a dead
+  // controller.
+  function dropSubscriber(subscriber: Subscriber, outcome: StreamOutcome) {
+    if (subscriber.keepalive) {
+      clearInterval(subscriber.keepalive);
+      subscriber.keepalive = null;
+    }
+    if (subscribers.delete(subscriber)) streamMetrics.closed("document", outcome);
+  }
+
   function broadcast(changedId: string | null) {
     for (const subscriber of subscribers) {
       try {
@@ -524,7 +584,7 @@ export function createWatchSession(
         const message = encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(subscriber.context, changedId))}\n\n`);
         subscriber.controller.enqueue(message);
       } catch {
-        subscribers.delete(subscriber);
+        dropSubscriber(subscriber, "failed");
       }
     }
   }

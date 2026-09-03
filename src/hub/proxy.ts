@@ -84,6 +84,35 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
 export async function proxyHttp(request: Request, session: RunningSession): Promise<Response> {
   const requestUrl = new URL(request.url);
   const target = childUrlFor(session, requestUrl);
+  const transport = classifyProxyTransport(requestUrl.pathname);
+
+  // Downstream abandonment has to reach the child, or a phone that walked out
+  // of Wi-Fi mid-stream leaves the workspace holding a subscriber forever.
+  // Nothing here buffers: the cancellation is a signal, not a drain.
+  const upstreamAbort = new AbortController();
+  let settled = false;
+  const onDownstreamAbort = () => finish("cancelled");
+  // Idempotent: downstream abort, body cancel, normal completion and upstream
+  // failure can arrive in any order, and more than one may fire for the same
+  // stream. Whichever is first names the outcome; the rest are no-ops.
+  let statusCategory: ProxyStatusCategory = "unreachable";
+  const finish = (outcome: StreamOutcome) => {
+    if (settled) return;
+    settled = true;
+    request.signal.removeEventListener("abort", onDownstreamAbort);
+    if (outcome !== "completed") upstreamAbort.abort();
+    // Only live streams are diagnosed; an ordinary asset fetch ending is not
+    // a lifecycle event anyone reads.
+    if (transport !== "other") recordProxyStream({ transport, outcome, status: statusCategory });
+  };
+
+  // Already gone before we even reached the child: still a downstream
+  // cancellation. Aborting the controller alone would let the fetch reject
+  // into the catch below and file an ordinary abandonment as an unreachable
+  // upstream — complete with the error log that is reserved for real
+  // failures.
+  if (request.signal.aborted) finish("cancelled");
+  else request.signal.addEventListener("abort", onDownstreamAbort, { once: true });
 
   let upstream: Response;
   try {
@@ -92,10 +121,14 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
       headers: forwardedHeaders(request, session),
       body: request.body,
       redirect: "manual",
+      signal: upstreamAbort.signal,
     });
   } catch {
+    finish("failed");
     return new Response("session unreachable", { status: 502 });
   }
+
+  statusCategory = statusCategoryOf(upstream.status);
 
   // Stream the body through untouched — SSE depends on this staying
   // unbuffered. Strip hop-by-hop response headers; everything else
@@ -130,6 +163,7 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
     /\bgzip\b/.test(request.headers.get("accept-encoding") ?? "")
   ) {
     const compressed = Bun.gzipSync(new Uint8Array(await upstream.arrayBuffer()));
+    finish("completed");
     headers.set("content-encoding", "gzip");
     headers.set("content-length", String(compressed.byteLength));
     headers.set("vary", "accept-encoding");
@@ -140,11 +174,113 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
     });
   }
 
-  return new Response(upstream.body, {
+  if (upstream.body === null) {
+    finish("completed");
+    return new Response(null, { status: upstream.status, statusText: upstream.statusText, headers });
+  }
+
+  return new Response(cancellableBody(upstream.body, finish), {
     status: upstream.status,
     statusText: upstream.statusText,
     headers,
   });
+}
+
+// How a proxied stream ended. Fixed set — these names are the only stream
+// lifecycle vocabulary the hub records (see design D6), so a diagnostic can
+// never widen into request contents.
+export type StreamOutcome = "completed" | "cancelled" | "failed";
+
+// The transport classes the hub can name. Derived from the route shape alone,
+// never from the workspace id, the conversation id, the query string, or any
+// header — so the set is closed and a diagnostic cannot leak an identifier.
+export const PROXY_TRANSPORT_CLASSES = ["document", "chat-conversation", "chat-inventory", "search", "other"] as const;
+export type ProxyTransportClass = (typeof PROXY_TRANSPORT_CLASSES)[number];
+
+// Status is recorded as a category, not a code, and `unreachable` covers a
+// fetch that never got an answer.
+export const PROXY_STATUS_CATEGORIES = ["2xx", "3xx", "4xx", "5xx", "unreachable"] as const;
+export type ProxyStatusCategory = (typeof PROXY_STATUS_CATEGORIES)[number];
+
+export type ProxyStreamDiagnostic = {
+  transport: ProxyTransportClass;
+  outcome: StreamOutcome;
+  status: ProxyStatusCategory;
+};
+
+export function classifyProxyTransport(pathname: string): ProxyTransportClass {
+  if (pathname.endsWith("/api/events")) return "document";
+  if (pathname.endsWith("/api/chat/conversations/events")) return "chat-inventory";
+  if (/\/api\/chat\/conversations\/[^/]+\/events$/.test(pathname)) return "chat-conversation";
+  if (pathname.endsWith("/api/search")) return "search";
+  return "other";
+}
+
+export function statusCategoryOf(status: number): ProxyStatusCategory {
+  if (status >= 200 && status < 300) return "2xx";
+  if (status >= 300 && status < 400) return "3xx";
+  if (status >= 400 && status < 500) return "4xx";
+  if (status >= 500) return "5xx";
+  return "unreachable";
+}
+
+export type ProxyStreamDiagnosticSink = (record: ProxyStreamDiagnostic) => void;
+
+// Expected endings — a phone sleeping, a tab closing — are the common case on
+// mobile and would drown the log. Only an unexpected upstream failure speaks,
+// and it says nothing but its class and status category.
+const defaultSink: ProxyStreamDiagnosticSink = record => {
+  if (record.outcome !== "failed") return;
+  console.error(`uatu hub: proxied ${record.transport} stream failed (${record.status})`);
+};
+
+let diagnosticSink: ProxyStreamDiagnosticSink = defaultSink;
+
+export function setProxyStreamDiagnostics(sink: ProxyStreamDiagnosticSink | null): void {
+  diagnosticSink = sink ?? defaultSink;
+}
+
+function recordProxyStream(record: ProxyStreamDiagnostic): void {
+  try {
+    diagnosticSink(record);
+  } catch {
+    // A diagnostic must never take a proxied stream down with it.
+  }
+}
+
+// Re-wraps the child's body so that a downstream cancel becomes an upstream
+// cancel. `highWaterMark: 0` keeps it a pass-through: one chunk moves only
+// when the browser asks for one, so SSE and NDJSON keep their latency and
+// nothing accumulates in the hub.
+function cancellableBody(
+  body: ReadableStream<Uint8Array>,
+  finish: (outcome: StreamOutcome) => void,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await reader.read();
+        if (result.done) {
+          finish("completed");
+          controller.close();
+          return;
+        }
+        controller.enqueue(result.value);
+      } catch (error) {
+        finish("failed");
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      // Cancel the reader first, then abort the fetch. Aborting makes the
+      // in-flight cancel reject with AbortError — an expected consequence of
+      // the teardown we just asked for, not a failure to report.
+      const released = reader.cancel(reason).catch(() => undefined);
+      finish("cancelled");
+      return released;
+    },
+  }, { highWaterMark: 0 });
 }
 
 const COMPRESSIBLE_TYPES = /^(text\/|application\/(javascript|json|manifest\+json|xml)|image\/svg)/;

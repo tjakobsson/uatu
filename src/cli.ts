@@ -296,6 +296,7 @@ async function runWatch(options: WatchOptions) {
           getWorkspaceCredential: () => watchSession!.getTerminalToken(),
           basePath: options.basePath,
           manifestScope: options.manifestScope,
+          metrics,
           debug: options.debug,
           getMetricsSnapshot: () => metrics.snapshot(),
         }),

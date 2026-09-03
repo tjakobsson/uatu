@@ -19,6 +19,7 @@ import { ChatUnavailableError } from "../chat/service";
 import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
+import { StreamLifecycleMetrics, type StreamOutcome } from "../debug/stream-metrics";
 import { getDocumentDiff } from "../document/diff";
 import { collectFileFacts } from "../document/file-facts";
 import {
@@ -90,6 +91,13 @@ type BaseDeps = {
   // (dashboard, login, sibling sessions) as in-app, so an installed webapp
   // never shows iOS's out-of-scope browser chrome navigating between them.
   manifestScope?: "base-path" | "origin";
+  // Optional metrics registry, shared with the watch session so document and
+  // Chat stream lifecycles land in one snapshot.
+  metrics?: import("../debug/metrics").MetricsRegistry;
+  // Test seam: the Chat streams' keepalive cadence. Product code leaves it
+  // unset — a focused route test would otherwise have to wait a real 15
+  // seconds to observe one comment frame.
+  chatKeepaliveMs?: number;
 };
 
 export type ProdRouteDeps = BaseDeps & {
@@ -301,7 +309,12 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
     [p("/api/events")]: {
       GET: (request: Request) => {
         const context = requestContext(request);
-        return context instanceof Response ? context : getSession().eventsResponse(context);
+        if (context instanceof Response) return context;
+        // A bare marker the client sets when this request replaces a stream it
+        // lost. It carries nothing about the old connection — it exists only so
+        // recoveries are countable apart from first connects.
+        const reconnect = new URL(request.url).searchParams.get("reconnect") === "1";
+        return getSession().eventsResponse(context, { reconnect });
       },
     },
     [p("/api/search")]: {
@@ -407,6 +420,8 @@ const CHAT_ATTACHMENT_FORM_OVERHEAD_BYTES = 16 * 1024;
 type RouteRequest = Request & { params?: Record<string, string> };
 
 function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
+  const keepaliveMs = deps.chatKeepaliveMs ?? CHAT_KEEPALIVE_MS;
+  const streamMetrics = new StreamLifecycleMetrics(deps.metrics);
   const authenticated = (request: Request): Response | null => {
     const url = new URL(request.url);
     return hasValidWorkspaceCredentials(request, url, deps.getWorkspaceCredential())
@@ -501,9 +516,18 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           const iterator = events[Symbol.asyncIterator]();
           let pending: Promise<IteratorResult<void>> | null = null;
           let finished = false;
-          const finish = async () => {
+          streamMetrics.opened("chat-inventory", { reconnect: new URL(request.url).searchParams.get("reconnect") === "1" });
+          // An aborted subscription ends its iterator the same way a genuine
+          // end-of-stream does — `done`, or a rejection. Without consulting
+          // the signal, the ordinary browser disconnect (the common case on
+          // mobile) would be filed as a completion or a failure, and the
+          // counters could not answer the one question they exist for.
+          const endedBy = (fallback: StreamOutcome): StreamOutcome =>
+            abort.signal.aborted ? "cancelled" : fallback;
+          const finish = async (outcome: StreamOutcome) => {
             if (finished) return;
             finished = true;
+            streamMetrics.closed("chat-inventory", outcome);
             await iterator.return?.().catch(() => undefined);
             events.cancel();
             request.signal.removeEventListener("abort", onAbort);
@@ -512,7 +536,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
             async pull(controller) {
               try {
                 pending ??= iterator.next();
-                const result = await nextChatEvent(pending, CHAT_KEEPALIVE_MS);
+                const result = await nextChatEvent(pending, keepaliveMs);
                 if (result === "keepalive") {
                   controller.enqueue(encoder.encode(": keepalive\n\n"));
                   return;
@@ -522,15 +546,16 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   controller.enqueue(encoder.encode('event: inventory\ndata: {"type":"conversation.inventory"}\n\n'));
                   return;
                 }
+                await finish(endedBy("completed"));
               } catch {
                 // Cancellation closes the transport without an in-band error.
+                await finish(endedBy("failed"));
               }
-              await finish();
               try { controller.close(); } catch { /* consumer cancelled */ }
             },
             cancel() {
               abort.abort();
-              return finish();
+              return finish("cancelled");
             },
           }, { highWaterMark: 0 });
           return new Response(stream, {
@@ -594,9 +619,17 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           const iterator = events[Symbol.asyncIterator]();
           let pending = iterator.next();
           let finished = false;
-          const finish = async () => {
+          // The client says whether this replaces a stream it lost. A cursor
+          // cannot stand in for that: every stream opened from a snapshot
+          // carries one, so inferring recovery from it would count ordinary
+          // conversation navigation as a reconnect.
+          streamMetrics.opened("chat-conversation", { reconnect: url.searchParams.get("reconnect") === "1" });
+          const endedBy = (fallback: StreamOutcome): StreamOutcome =>
+            abort.signal.aborted ? "cancelled" : fallback;
+          const finish = async (outcome: StreamOutcome) => {
             if (finished) return;
             finished = true;
+            streamMetrics.closed("chat-conversation", outcome);
             await iterator.return?.().catch(() => undefined);
             events.cancel();
             request.signal.removeEventListener("abort", onAbort);
@@ -609,7 +642,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
             async pull(controller) {
               try {
                 while (!abort.signal.aborted) {
-                  const result = await nextChatEvent(pending, CHAT_KEEPALIVE_MS);
+                  const result = await nextChatEvent(pending, keepaliveMs);
                   if (result === "keepalive") {
                     controller.enqueue(encoder.encode(": keepalive\n\n"));
                     return;
@@ -623,16 +656,17 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   if (event.type !== "resync") return;
                   break;
                 }
+                await finish(endedBy("completed"));
               } catch {
                 // A transport cancellation closes the stream without inventing
                 // an in-band provider error.
+                await finish(endedBy("failed"));
               }
-              await finish();
               try { controller.close(); } catch { /* consumer cancelled */ }
             },
             cancel() {
               abort.abort();
-              void finish();
+              void finish("cancelled");
             },
           });
           return new Response(stream, {
