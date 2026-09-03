@@ -176,6 +176,50 @@ describe("createStateReconciler", () => {
     expect(applied).toEqual([]);
   });
 
+  test("a newer request losing to a stream frame still bars the older one", async () => {
+    // The newer request's payload is older than a frame that landed between
+    // the two replies. It loses — but it has still answered, so the older
+    // request that follows must not reinstate the context it was issued for.
+    const applied: string[] = [];
+    const older = defer<Payload>();
+    const newer = defer<Payload>();
+    const pending = [older, newer];
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: () => pending.shift()!.promise,
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
+    });
+
+    const first = reconciler.reconcile();
+    const second = reconciler.reconcile();
+    reconciler.noteApplied(50);
+    newer.resolve(payload("scope the user asked for", 40));
+    expect(await second).toBe(false);
+    older.resolve(payload("previous scope", 60));
+    expect(await first).toBe(false);
+    expect(applied).toEqual([]);
+  });
+
+  test("a newer request that failed still bars the older one", async () => {
+    const applied: string[] = [];
+    const older = defer<Payload>();
+    const newer = defer<Payload>();
+    const pending = [older, newer];
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: () => pending.shift()!.promise,
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
+    });
+
+    const first = reconciler.reconcile();
+    const second = reconciler.reconcile().catch(() => "rejected");
+    newer.reject(new Error("workspace unreachable"));
+    expect(await second).toBe("rejected");
+    older.resolve(payload("previous scope", 60));
+    expect(await first).toBe(false);
+    expect(applied).toEqual([]);
+  });
+
   test("a failing fetch rejects without consuming the application slot", async () => {
     const applied: string[] = [];
     const outcomes: Array<() => Promise<Payload>> = [

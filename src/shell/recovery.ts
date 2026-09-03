@@ -42,16 +42,26 @@ export function createStateReconciler<T>(options: {
   // still be delivered while it is in flight, and treating it as newer would
   // discard the fresher payload.
   let issued = 0;
-  let appliedSequence = 0;
+  // The newest request that has ANSWERED — applied, superseded by a frame, or
+  // failed. All three settle the intent: once a newer request has come back,
+  // an older one's context is obsolete and must not be reinstated, whatever
+  // became of the newer payload.
+  let settledSequence = 0;
   let frameFreshness = Number.NEGATIVE_INFINITY;
 
   return {
     async reconcile() {
       const sequence = ++issued;
-      const payload = await options.fetchState();
-      if (sequence <= appliedSequence) return false;
+      let payload: T;
+      try {
+        payload = await options.fetchState();
+      } catch (error) {
+        if (sequence > settledSequence) settledSequence = sequence;
+        throw error;
+      }
+      if (sequence <= settledSequence) return false;
+      settledSequence = sequence;
       if (options.freshnessOf(payload) <= frameFreshness) return false;
-      appliedSequence = sequence;
       options.applyState(payload);
       return true;
     },
