@@ -7,12 +7,17 @@ function storageWith(value: string | null): Pick<Storage, "getItem"> {
 }
 
 describe("readPaneState defaults", () => {
-  test("fresh clients get the lean sidebar: Change Overview + Files on, Git Log and Search off", () => {
+  test("fresh clients get the lean sidebar: Change Overview + Files on, Git Log, Search, and Usage off", () => {
     const state = readPaneState(null);
     expect(state["change-overview"].visible).toBe(true);
     expect(state.files.visible).toBe(true);
     expect(state["git-log"].visible).toBe(false);
     expect(state.search.visible).toBe(false);
+    expect(state.usage).toEqual({ visible: false, collapsed: false, height: 200 });
+  });
+
+  test("the Usage pane is in the catalog after Git Log", () => {
+    expect(ALL_PANE_DEFS.map(pane => pane.id)).toEqual(["change-overview", "search", "files", "git-log", "usage"]);
   });
 
   test("the retired selection-inspector pane is gone from the catalog", () => {
@@ -40,6 +45,8 @@ describe("readPaneState stored state", () => {
     );
     expect(state.files.visible).toBe(false);
     expect("selection-inspector" in state).toBe(false);
+    // A stored arrangement that predates the Usage pane boots with it hidden.
+    expect(state.usage.visible).toBe(false);
   });
 
   test("corrupt JSON and failing storage fall back to defaults", () => {

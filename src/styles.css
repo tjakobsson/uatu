@@ -6443,7 +6443,7 @@ body.is-resizing-chat .chat-resizer {
 }
 
 .chat-rate-limit,
-.chat-plan-usage {
+.chat-plan-usage-summary {
   flex: 0 0 auto;
   max-width: 14rem;
   padding: 0.15rem 0.5rem;
@@ -6454,9 +6454,38 @@ body.is-resizing-chat .chat-resizer {
   text-overflow: ellipsis;
 }
 
+/* The plan summary is a <details> whose summary is the chip. Static
+   positioning on the details itself: the readout hangs off the composer,
+   not the chip, so it lines up with the context breakdown. */
 .chat-plan-usage {
+  position: static;
+  flex: 0 0 auto;
+}
+
+.chat-plan-usage-summary {
+  display: block;
+  list-style: none;
+  cursor: pointer;
   color: var(--text-subtle);
   border: 1px solid var(--border-soft);
+}
+
+.chat-plan-usage-summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-plan-usage[open] > .chat-plan-usage-summary {
+  color: var(--text-strong);
+  border-color: var(--border-medium);
+}
+
+/* Warning is the rate-limit badge's colour: the same signal, one step
+   earlier — the reading says a window is nearly spent before the server
+   says so. */
+.chat-plan-usage[data-level="warning"] > .chat-plan-usage-summary {
+  color: var(--warning, #b7791f);
+  border-color: var(--warning, #b7791f);
+  font-weight: 600;
 }
 
 .chat-rate-limit {
@@ -6472,6 +6501,232 @@ body.is-resizing-chat .chat-resizer {
 .chat-rate-limit[hidden],
 .chat-plan-usage[hidden] {
   display: none;
+}
+
+/* The readout floats over the timeline like the context breakdown, hung
+   from the composer's right edge where the chips row sits. Capped with an
+   internal scroll so a login with many buckets never covers the composer. */
+.chat-plan-readout {
+  position: absolute;
+  right: max(1rem, calc((100% - 52rem) / 2));
+  bottom: calc(100% - 0.25rem);
+  z-index: 5;
+  width: min(22rem, calc(100% - 2rem));
+  max-height: min(60vh, 32rem);
+  overflow: auto;
+  padding: 0.7rem 0.85rem 0.8rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.7rem;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow, 0 8px 24px rgb(0 0 0 / 18%));
+  font-size: 0.78em;
+  text-align: left;
+}
+
+.chat-plan-readout-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+/* A login without plan limits has no plan to name or windows to meter:
+   the readout is then only the conversation's own tally. */
+.chat-plan-readout-head[hidden],
+.plan-rows[hidden] {
+  display: none;
+}
+
+.chat-plan-readout-name {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.chat-plan-pin {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.92em;
+  cursor: pointer;
+}
+
+.chat-plan-pin:hover {
+  color: var(--text-strong);
+  border-color: var(--accent);
+}
+
+.chat-plan-pin[hidden] {
+  display: none;
+}
+
+/* The pin is for a sidebar beside the chat: never in the touch layout,
+   where the sidebar is the Files tab, and never behind a collapsed one.
+   The script retires it too; this is the layout's own word on it. */
+html[data-ui-mode="touch"] .chat-plan-pin,
+.app-shell.is-sidebar-collapsed .chat-plan-pin {
+  display: none;
+}
+
+/* One window: label and figure on a line, the meter under them, the reset
+   below. Shared by the readout and the Usage pane (chat/usage-pane.ts). */
+.plan-rows {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.plan-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--text-subtle);
+}
+
+.plan-row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-row-figure {
+  flex: 0 0 auto;
+  color: var(--text-strong);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-meter {
+  position: relative;
+  height: 0.4rem;
+  margin-top: 0.2rem;
+  border-radius: 999px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+
+.plan-meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--plan-fill, 0%);
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+/* Colour is emphasis on a figure already stated, never the only signal. */
+.plan-row[data-level="warning"] .plan-meter-fill {
+  background: var(--warning, #b7791f);
+}
+
+.plan-row[data-level="warning"] .plan-row-figure {
+  color: var(--warning, #b7791f);
+}
+
+.plan-row-reset {
+  margin-top: 0.15rem;
+  color: var(--text-subtle);
+  font-size: 0.92em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* This conversation's tally under the windows: cost first, then a small
+   per-model table. Hidden until the agent reports one. */
+.chat-plan-session {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* Nothing above it to rule off from when the plan rows are hidden. */
+.plan-rows[hidden] + .chat-plan-session {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.chat-plan-session[hidden] {
+  display: none;
+}
+
+.chat-plan-session-title {
+  margin: 0 0 0.2rem;
+  color: var(--text-strong);
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.chat-plan-session-cost {
+  margin: 0 0 0.4rem;
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-plan-session-models {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-plan-session-models th,
+.chat-plan-session-models td {
+  padding: 0.1rem 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.chat-plan-session-models th {
+  color: var(--text-subtle);
+  font-weight: 500;
+}
+
+.chat-plan-session-models th:first-child,
+.chat-plan-session-models td:first-child {
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.chat-plan-session-models td:first-child {
+  color: var(--text-strong);
+}
+
+.chat-plan-session-models tbody:empty {
+  display: none;
+}
+
+/* The Usage pane: the same rows, in the sidebar's type size, with the
+   report's time above them so a stale login is visibly stale. */
+.usage-pane {
+  font-size: 0.8rem;
+}
+
+.usage-pane-head {
+  margin: 0 0 0.55rem;
+  color: var(--text-subtle);
+  font-size: 0.78rem;
+}
+
+/* Touch: the readout spans the composer, and the rows get a finger's worth
+   of room; the pin never shows (the sidebar is the Files tab there). */
+html[data-ui-mode="touch"] .chat-plan-readout {
+  left: 0.75rem;
+  right: 0.75rem;
+  width: auto;
+  max-height: 55vh;
+  font-size: 0.86em;
+}
+
+html[data-ui-mode="touch"] .plan-rows {
+  gap: 0.7rem;
+}
+
+html[data-ui-mode="touch"] .plan-meter {
+  height: 0.5rem;
 }
 
 /* Background work: the agent is not mid-turn, but something it started is

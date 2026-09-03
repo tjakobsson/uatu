@@ -15,7 +15,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion } from "../types";
+import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection } from "./normalization";
@@ -203,7 +203,8 @@ type LiveSession = {
   interrupted?: boolean;
   // The latest context probe's turn; an older probe's answer is discarded.
   reportGeneration?: number;
-  // The login answered the usage read with no windows: no point asking again.
+  // The login answered the usage read with no windows: later reads are for
+  // the conversation's running totals only, the plan stays stated as empty.
   planUnavailable?: boolean;
   // Results seen on this process: an unprompted turn can only follow one.
   resultsSeen: number;
@@ -220,7 +221,40 @@ type LiveSession = {
   // Armed when the set empties with nothing pending: retires the session if
   // no follow-up turn starts within the grace window.
   idleTimer?: ReturnType<typeof setTimeout>;
+  // This query's own running totals as last read: folded into the
+  // conversation's ledger when the query retires, since a resumed query
+  // starts its counters fresh (SDK: "resumed sessions start fresh").
+  lastTotals?: SessionTotals;
 };
+
+// What retired queries of one conversation spent, and when this process began
+// observing it. The SDK's `/usage` session counters cover the current query
+// only, and an idle conversation's next turn resumes a fresh one, so "this
+// conversation" is the sum over the generations this process saw.
+type SessionTotalsLedger = { settled?: SessionTotals; since: number };
+
+/** Sums two tallies: scalars added, per-model rows merged by model id. */
+export function mergeSessionTotals(base: SessionTotals | undefined, next: SessionTotals): SessionTotals {
+  if (!base) return next;
+  const models = base.models.map(model => ({ ...model }));
+  for (const model of next.models) {
+    const known = models.find(entry => entry.id === model.id);
+    if (!known) { models.push({ ...model }); continue; }
+    known.input += model.input;
+    known.output += model.output;
+    known.cacheRead += model.cacheRead;
+    known.cacheWrite += model.cacheWrite;
+    known.costUsd += model.costUsd;
+  }
+  return {
+    costUsd: base.costUsd + next.costUsd,
+    apiDurationMs: base.apiDurationMs + next.apiDurationMs,
+    durationMs: base.durationMs + next.durationMs,
+    linesAdded: base.linesAdded + next.linesAdded,
+    linesRemoved: base.linesRemoved + next.linesRemoved,
+    models,
+  };
+}
 
 /**
  * The Claude Code chat provider: one SDK `query()` session per live
@@ -291,6 +325,10 @@ export class ClaudeProvider implements ChatProvider {
   // Conversations whose last rate-limit signal was a standing (warning or
   // rejection): carried across processes so the eventual "allowed" clears it.
   private readonly rateLimitedSessions = new Set<string>();
+  // Per conversation, the totals of the queries this process has retired and
+  // when it began observing the conversation: process memory, like the
+  // rate-limit standing, so a restart truthfully starts a new "since".
+  private readonly sessionLedgers = new Map<string, SessionTotalsLedger>();
   // A rename asked for before the native transcript existed: written to it
   // once the first turn has created it.
   private readonly deferredRenames = new Map<string, string>();
@@ -945,6 +983,14 @@ export class ClaudeProvider implements ChatProvider {
     const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0 };
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
+    // Observation begins with the conversation's first query in this
+    // process: everything that query and its successors spend is counted.
+    // The adapter stamps the prompt's user message after this call, so a
+    // conversation that starts here has no message older than `since`.
+    if (!this.sessionLedgers.has(sessionId)) {
+      if (this.sessionLedgers.size >= 4_096) this.sessionLedgers.delete(this.sessionLedgers.keys().next().value!);
+      this.sessionLedgers.set(sessionId, { since: this.now() });
+    }
     // Fire-and-forget: the catalog answers when the session is up, and a
     // failure just leaves the manifest fallback in place until the next one.
     // Catalogs change under a running workspace — a CLI update ships new
@@ -1051,6 +1097,7 @@ export class ClaudeProvider implements ChatProvider {
       // The stream ended without dispose: the session's process is gone.
       if (!this.disposed && this.live.get(session.id) === session) {
         this.live.delete(session.id);
+        this.foldSessionTotals(session);
         // A grace window in flight means the conversation still reads as
         // background work with an empty set: this exit is its idle edge.
         const inGrace = session.idleTimer !== undefined;
@@ -1076,6 +1123,7 @@ export class ClaudeProvider implements ChatProvider {
     } catch (error) {
       if (this.disposed || this.live.get(session.id) !== session) return;
       this.live.delete(session.id);
+      this.foldSessionTotals(session);
       this.clearIdleTimer(session);
       this.abandonInteractions(session.id, "The session failed before the user answered.");
       this.emit(session.id, {
@@ -1846,13 +1894,13 @@ export class ClaudeProvider implements ChatProvider {
     await session.query.stopTask(taskId);
   }
 
-  /** The `/usage` plan windows, when the login has plan limits; bounded like the context read. */
-  private async readPlanUtilization(session: LiveSession): Promise<PlanUtilization | undefined> {
+  /**
+   * The `/usage` read: the plan windows when the login has plan limits, and
+   * the session's own running totals; bounded like the context read.
+   */
+  private async readPlanUtilization(session: LiveSession): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
     const read = session.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (!read || this.live.get(session.id) !== session) return undefined;
-    // A login that answered with no windows once (an API key) is not asked
-    // again for the life of the process.
-    if (session.planUnavailable) return {};
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const raw = await Promise.race([
@@ -1861,15 +1909,47 @@ export class ClaudeProvider implements ChatProvider {
       ]);
       // Answered with no windows (an API-key login): an explicit empty plan,
       // so the report states it rather than staying silent like a timeout.
+      // That answer holds for the life of the process, so the plan is not
+      // re-read; the call still goes out, because the same answer carries
+      // the conversation's running totals, which change with every turn and
+      // are the figure such a login budgets by.
       if (raw === null) return undefined;
-      const plan = normalizePlanUtilization(raw);
+      const plan = session.planUnavailable ? undefined : normalizePlanUtilization(raw);
       if (!plan) session.planUnavailable = true;
-      return plan ?? {};
+      const totals = this.accumulateSessionTotals(session, normalizeSessionTotals(raw));
+      return { plan: plan ?? {}, ...(totals ? { session: totals } : {}) };
     } catch {
       return undefined;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  /**
+   * The conversation's totals as the readout states them: what this
+   * process's retired queries spent plus the current query's own count,
+   * from `since`. The read is remembered per query so retirement can fold
+   * it; a count that went down is the CLI's own reset (a `/clear`), and
+   * what stood before it is folded rather than lost.
+   */
+  private accumulateSessionTotals(session: LiveSession, read: SessionTotals | undefined): SessionTotals | undefined {
+    const ledger = this.sessionLedgers.get(session.id);
+    if (!ledger) return read;
+    if (read) {
+      if (session.lastTotals && read.costUsd < session.lastTotals.costUsd) this.foldSessionTotals(session);
+      session.lastTotals = read;
+    }
+    const current = session.lastTotals ?? read;
+    if (!current && !ledger.settled) return undefined;
+    return { ...(current ? mergeSessionTotals(ledger.settled, current) : ledger.settled!), since: ledger.since };
+  }
+
+  /** A query that ends takes its counters with it: its last read joins the ledger. */
+  private foldSessionTotals(session: LiveSession): void {
+    const ledger = this.sessionLedgers.get(session.id);
+    if (!ledger || !session.lastTotals) return;
+    ledger.settled = mergeSessionTotals(ledger.settled, session.lastTotals);
+    session.lastTotals = undefined;
   }
 
   /** Announces Claude Code's own title when it changed and no user rename stands. */
@@ -1983,9 +2063,9 @@ export class ClaudeProvider implements ChatProvider {
       if (raw === null || session.reportGeneration !== generation) return;
       const item = normalizeContextUsage(raw, this.now(), model);
       if (!item) return;
-      const plan = await planRead;
+      const usage = await planRead;
       if (session.reportGeneration !== generation) return;
-      this.emit(session.id, { updates: [{ kind: "upsert", item: plan !== undefined ? { ...item, plan } : item }], outcome: "handled", eventType: "context.reported" });
+      this.emit(session.id, { updates: [{ kind: "upsert", item: usage !== undefined ? { ...item, ...usage } : item }], outcome: "handled", eventType: "context.reported" });
     } catch {
       // The per-message carrier stands.
     } finally {
@@ -1998,6 +2078,7 @@ export class ClaudeProvider implements ChatProvider {
     if (this.live.get(session.id) !== session) return;
     this.clearIdleTimer(session);
     this.live.delete(session.id);
+    this.foldSessionTotals(session);
     this.abandonInteractions(session.id, "The turn ended before the user answered.");
     session.queue.close();
     await session.query.return?.().catch(() => undefined);
@@ -2258,24 +2339,108 @@ function reversibleState(turns: ReversibleClaudeTurn[], boundaryIndex: number | 
   };
 }
 
-/** `/usage` → the plan windows the meter can show beside the fill. */
+/**
+ * `/usage` → everything the readout shows about the plan: the base
+ * windows the composer summary reads, the per-model weekly windows, the
+ * server-labelled model buckets, extra-usage credits, and the plan name.
+ * Undefined when the login reports neither a window nor extra usage (an
+ * API key), which the caller states as an empty plan; extra usage alone is
+ * still a plan, since every time window is optional on the wire. Every field is read defensively: the
+ * SDK marks this method experimental, and a shape change must cost a field,
+ * not the report. `behaviors` is deliberately left behind (design D6).
+ */
 export function normalizePlanUtilization(raw: unknown): PlanUtilization | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const record = raw as Record<string, unknown>;
   if (record.rate_limits_available !== true || !record.rate_limits || typeof record.rate_limits !== "object") return undefined;
   const limits = record.rate_limits as Record<string, unknown>;
-  const window = (value: unknown): PlanUtilizationWindow | undefined => {
-    if (!value || typeof value !== "object") return undefined;
-    const entry = value as Record<string, unknown>;
-    const utilization = typeof entry.utilization === "number" && Number.isFinite(entry.utilization) && entry.utilization >= 0 ? entry.utilization : undefined;
-    const resetsAt = typeof entry.resets_at === "string" ? Date.parse(entry.resets_at) : typeof entry.resets_at === "number" ? (entry.resets_at < 1e12 ? entry.resets_at * 1000 : entry.resets_at) : NaN;
-    if (utilization === undefined && Number.isNaN(resetsAt)) return undefined;
-    return { ...(utilization === undefined ? {} : { utilization }), ...(Number.isNaN(resetsAt) ? {} : { resetsAt: Math.round(resetsAt) }) };
+  const fiveHour = planWindow(limits.five_hour);
+  const sevenDay = planWindow(limits.seven_day);
+  const sevenDayOpus = planWindow(limits.seven_day_opus);
+  const sevenDaySonnet = planWindow(limits.seven_day_sonnet);
+  const sevenDayOauthApps = planWindow(limits.seven_day_oauth_apps);
+  const modelScoped = Array.isArray(limits.model_scoped)
+    ? limits.model_scoped.flatMap((entry): PlanModelWindow[] => {
+      const label = entry && typeof entry === "object" ? (entry as Record<string, unknown>).display_name : undefined;
+      const window = planWindow(entry);
+      return typeof label === "string" && label.trim() && window ? [{ label: label.trim(), ...window }] : [];
+    })
+    : [];
+  const extraUsage = planExtraUsage(limits.extra_usage);
+  if (!fiveHour && !sevenDay && !sevenDayOpus && !sevenDaySonnet && !sevenDayOauthApps && modelScoped.length === 0 && !extraUsage) return undefined;
+  return {
+    ...(typeof record.subscription_type === "string" && record.subscription_type ? { subscription: record.subscription_type } : {}),
+    ...(fiveHour ? { fiveHour } : {}),
+    ...(sevenDay ? { sevenDay } : {}),
+    ...(sevenDayOpus ? { sevenDayOpus } : {}),
+    ...(sevenDaySonnet ? { sevenDaySonnet } : {}),
+    ...(sevenDayOauthApps ? { sevenDayOauthApps } : {}),
+    ...(modelScoped.length ? { modelScoped } : {}),
+    ...(extraUsage ? { extraUsage } : {}),
   };
-  const fiveHour = window(limits.five_hour);
-  const sevenDay = window(limits.seven_day);
-  if (!fiveHour && !sevenDay) return undefined;
-  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}) };
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function planWindow(value: unknown): PlanUtilizationWindow | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entry = value as Record<string, unknown>;
+  const utilization = nonNegativeNumber(entry.utilization);
+  const resetsAt = typeof entry.resets_at === "string" ? Date.parse(entry.resets_at) : typeof entry.resets_at === "number" ? (entry.resets_at < 1e12 ? entry.resets_at * 1000 : entry.resets_at) : NaN;
+  if (utilization === undefined && Number.isNaN(resetsAt)) return undefined;
+  return { ...(utilization === undefined ? {} : { utilization }), ...(Number.isNaN(resetsAt) ? {} : { resetsAt: Math.round(resetsAt) }) };
+}
+
+function planExtraUsage(value: unknown): PlanExtraUsage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entry = value as Record<string, unknown>;
+  if (typeof entry.is_enabled !== "boolean") return undefined;
+  const usedCredits = nonNegativeNumber(entry.used_credits);
+  const monthlyLimit = nonNegativeNumber(entry.monthly_limit);
+  const utilization = nonNegativeNumber(entry.utilization);
+  return {
+    enabled: entry.is_enabled,
+    ...(usedCredits === undefined ? {} : { usedCredits }),
+    ...(monthlyLimit === undefined ? {} : { monthlyLimit }),
+    ...(utilization === undefined ? {} : { utilization }),
+    ...(typeof entry.currency === "string" && entry.currency ? { currency: entry.currency } : {}),
+  };
+}
+
+/**
+ * `/usage` → the session's own running totals. Present only when the agent
+ * states a cost; counters it left out read as zero, and a model row whose
+ * tally is not numbers is dropped rather than shown as zeros.
+ */
+export function normalizeSessionTotals(raw: unknown): SessionTotals | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const session = (raw as Record<string, unknown>).session;
+  if (!session || typeof session !== "object") return undefined;
+  const entry = session as Record<string, unknown>;
+  const costUsd = nonNegativeNumber(entry.total_cost_usd);
+  if (costUsd === undefined) return undefined;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const models: SessionModelTotals[] = [];
+  if (entry.model_usage && typeof entry.model_usage === "object") {
+    for (const [id, value] of Object.entries(entry.model_usage as Record<string, unknown>)) {
+      if (!id || !value || typeof value !== "object") continue;
+      const usage = value as Record<string, unknown>;
+      const fields = [usage.inputTokens, usage.outputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens, usage.costUSD];
+      if (!fields.every(field => typeof field === "number" && Number.isFinite(field))) continue;
+      const [input, output, cacheRead, cacheWrite, modelCost] = fields as number[];
+      models.push({ id, input: input!, output: output!, cacheRead: cacheRead!, cacheWrite: cacheWrite!, costUsd: modelCost! });
+    }
+  }
+  return {
+    costUsd,
+    apiDurationMs: count(entry.total_api_duration_ms),
+    durationMs: count(entry.total_duration_ms),
+    linesAdded: count(entry.total_lines_added),
+    linesRemoved: count(entry.total_lines_removed),
+    models,
+  };
 }
 
 function defaultRenameSession(sessionId: string, title: string, options: { dir: string }): Promise<void> {

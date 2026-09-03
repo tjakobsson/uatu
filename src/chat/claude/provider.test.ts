@@ -6,7 +6,7 @@ import path from "node:path";
 import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { ClaudeProvider, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
@@ -1304,8 +1304,9 @@ describe("ClaudeProvider sessions", () => {
     });
     query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
     await waitFor(() => events.some(event => event.eventType === "context.reported"));
-    const report = (events.find(event => event.eventType === "context.reported")!.updates[0] as { item: { plan?: unknown } }).item;
-    expect(report.plan).toEqual({ fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, sevenDay: { utilization: 12.4 } });
+    const report = (events.find(event => event.eventType === "context.reported")!.updates[0] as { item: { plan?: unknown; session?: unknown } }).item;
+    expect(report.plan).toEqual({ subscription: "max", fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, sevenDay: { utilization: 12.4 } });
+    expect(report.session).toBeUndefined();
 
     // An API-key login: no plan windows, stated as an empty plan.
     await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
@@ -1316,6 +1317,154 @@ describe("ClaudeProvider sessions", () => {
     await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
     const plain = (events.filter(event => event.eventType === "context.reported")[1]!.updates[0] as { item: { plan?: unknown } }).item;
     expect(plain.plan).toEqual({});
+    stop();
+    await provider.dispose();
+  });
+
+  test("a login without windows keeps reporting the conversation's totals on later turns of the same process", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    // Two prompts accepted up front: the first result retires nothing, so
+    // the second turn's report comes from the same live query, where the
+    // first read already found the login without plan windows.
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    const query = queries[0]!;
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 100, maxTokens: 200_000 });
+    let reads = 0;
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => {
+      reads += 1;
+      return { session: { total_cost_usd: 0.5 * reads, total_api_duration_ms: 1_000 * reads, model_usage: {} }, subscription_type: null, rate_limits_available: false, rate_limits: null };
+    };
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 1);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
+    const reports = events.filter(event => event.eventType === "context.reported").map(event => (event.updates[0] as { item: { plan?: unknown; session?: { costUsd: number; apiDurationMs: number } } }).item);
+    expect(reads).toBe(2);
+    expect(reports[0]!.plan).toEqual({});
+    expect(reports[0]!.session).toMatchObject({ costUsd: 0.5, apiDurationMs: 1_000 });
+    // The plan stays stated as empty; the totals are the second read's, not
+    // the first's carried forward and not dropped.
+    expect(reports[1]!.plan).toEqual({});
+    expect(reports[1]!.session).toMatchObject({ costUsd: 1, apiDurationMs: 2_000 });
+    stop();
+    await provider.dispose();
+  });
+
+  test("totals are summed across the fresh queries a conversation's turns resume, per model, from when this process first saw it", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    const before = Date.now();
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const first = queries[0]!;
+    first.getContextUsage = async () => ({ categories: [], totalTokens: 100, maxTokens: 200_000 });
+    first.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({
+      session: {
+        total_cost_usd: 0.5, total_api_duration_ms: 1_000, total_duration_ms: 5_000, total_lines_added: 3, total_lines_removed: 1,
+        model_usage: { "claude-opus-5": { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 1_000, cacheCreationInputTokens: 50, costUSD: 0.5 } },
+      },
+      subscription_type: null, rate_limits_available: false, rate_limits: null,
+    });
+    first.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 1);
+    // The idle conversation's query retires; the next prompt resumes a fresh
+    // one whose counters start over (SDK: "resumed sessions start fresh").
+    await waitFor(() => provider.liveSessionCount() === 0);
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    const second = queries[1]!;
+    expect(second).not.toBe(first);
+    second.getContextUsage = async () => ({ categories: [], totalTokens: 120, maxTokens: 200_000 });
+    second.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({
+      session: {
+        total_cost_usd: 0.25, total_api_duration_ms: 400, total_duration_ms: 2_000, total_lines_added: 0, total_lines_removed: 2,
+        model_usage: {
+          "claude-opus-5": { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 200, cacheCreationInputTokens: 0, costUSD: 0.125 },
+          "claude-haiku-4-5": { inputTokens: 30, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.125 },
+        },
+      },
+      subscription_type: null, rate_limits_available: false, rate_limits: null,
+    });
+    second.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
+    const reports = events.filter(event => event.eventType === "context.reported").map(event => (event.updates[0] as { item: { session?: { since?: number; [field: string]: unknown } } }).item);
+    const since = reports[0]!.session!.since!;
+    // Observation began with the first query of this process, which the
+    // adapter's user-message stamp follows: never later than the message.
+    expect(since).toBeGreaterThanOrEqual(before);
+    expect(since).toBeLessThanOrEqual(Date.now());
+    expect(reports[0]!.session).toEqual({
+      costUsd: 0.5, apiDurationMs: 1_000, durationMs: 5_000, linesAdded: 3, linesRemoved: 1,
+      models: [{ id: "claude-opus-5", input: 100, output: 20, cacheRead: 1_000, cacheWrite: 50, costUsd: 0.5 }],
+      since,
+    });
+    // The second report is the conversation's sum, not the fresh query's own
+    // count: scalars added, the shared model's row merged, the new one appended.
+    expect(reports[1]!.session).toEqual({
+      costUsd: 0.75, apiDurationMs: 1_400, durationMs: 7_000, linesAdded: 3, linesRemoved: 3,
+      models: [
+        { id: "claude-opus-5", input: 110, output: 25, cacheRead: 1_200, cacheWrite: 50, costUsd: 0.625 },
+        { id: "claude-haiku-4-5", input: 30, output: 4, cacheRead: 0, cacheWrite: 0, costUsd: 0.125 },
+      ],
+      since,
+    });
+    stop();
+    await provider.dispose();
+  });
+
+  test("a query whose counters went down mid-life had them reset: what stood before is folded, not lost", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    await provider.prompt(session.id, { id: "r2", text: "/clear", delivery: "queue" });
+    const query = queries[0]!;
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 100, maxTokens: 200_000 });
+    const reads = [0.5, 0.25];
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({
+      session: { total_cost_usd: reads.shift(), total_api_duration_ms: 0, model_usage: {} }, subscription_type: null, rate_limits_available: false, rate_limits: null,
+    });
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 1);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
+    const reports = events.filter(event => event.eventType === "context.reported").map(event => (event.updates[0] as { item: { session?: { costUsd: number } } }).item);
+    expect(reports[0]!.session).toMatchObject({ costUsd: 0.5 });
+    expect(reports[1]!.session).toMatchObject({ costUsd: 0.75 });
+    stop();
+    await provider.dispose();
+  });
+
+  test("an extra-usage-only read does not file the login as planless: windows on the next read of the same process still land", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    const query = queries[0]!;
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 100, maxTokens: 200_000 });
+    let reads = 0;
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => {
+      reads += 1;
+      return {
+        session: {}, subscription_type: "max", rate_limits_available: true,
+        rate_limits: {
+          ...(reads > 1 ? { five_hour: { utilization: 37, resets_at: "2026-09-02T14:00:00.000Z" } } : {}),
+          extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" },
+        },
+      };
+    };
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 1);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
+    const reports = events.filter(event => event.eventType === "context.reported").map(event => (event.updates[0] as { item: { plan?: unknown } }).item);
+    expect(reads).toBe(2);
+    const extraUsage = { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" };
+    expect(reports[0]!.plan).toEqual({ subscription: "max", extraUsage });
+    expect(reports[1]!.plan).toEqual({ subscription: "max", fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, extraUsage });
     stop();
     await provider.dispose();
   });
@@ -3027,5 +3176,95 @@ describe("ClaudeProvider sessions", () => {
 
     await expect(provider.listMessages("33333333-4444-4555-8666-777777777777", { limit: 10 })).rejects.toThrow("unknown Claude conversation");
     await provider.dispose();
+  });
+});
+
+describe("/usage normalization", () => {
+  // The SDK's shape as of 2.1.258; the experimental method may change under
+  // us, and this pins what a full answer turns into.
+  const full = {
+    session: {
+      total_cost_usd: 1.2345, total_api_duration_ms: 42_000, total_duration_ms: 90_000, total_lines_added: 12, total_lines_removed: 3,
+      model_usage: {
+        "claude-opus-5[1m]": { inputTokens: 1_000, outputTokens: 200, cacheReadInputTokens: 50_000, cacheCreationInputTokens: 4_000, webSearchRequests: 0, costUSD: 1.1, contextWindow: 1_000_000, maxOutputTokens: 32_000 },
+        "claude-haiku-4-5": { inputTokens: 300, outputTokens: 40, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 0.1345, contextWindow: 200_000, maxOutputTokens: 8_000 },
+        "broken": { inputTokens: "many", outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 },
+      },
+    },
+    subscription_type: "max",
+    rate_limits_available: true,
+    rate_limits: {
+      five_hour: { utilization: 9, resets_at: "2026-09-02T14:00:00.000Z" },
+      seven_day: { utilization: 25, resets_at: "2026-09-06T21:00:00.000Z" },
+      seven_day_opus: { utilization: 61, resets_at: "2026-09-06T21:00:00.000Z" },
+      seven_day_sonnet: { utilization: 4, resets_at: null },
+      seven_day_oauth_apps: { utilization: 0, resets_at: "2026-09-06T21:00:00.000Z" },
+      model_scoped: [
+        { display_name: "Fable", utilization: 83, resets_at: "2026-09-06T21:00:00.000Z" },
+        { display_name: "", utilization: 1, resets_at: null },
+        { utilization: 2 },
+      ],
+      extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" },
+    },
+    behaviors: { day: { request_count: 1 }, week: { request_count: 2 } },
+  };
+
+  test("a full response yields every window, the plan name, extra usage, and session totals — never behaviors", () => {
+    const plan = normalizePlanUtilization(full)!;
+    expect(plan).toEqual({
+      subscription: "max",
+      fiveHour: { utilization: 9, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") },
+      sevenDay: { utilization: 25, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") },
+      sevenDayOpus: { utilization: 61, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") },
+      sevenDaySonnet: { utilization: 4 },
+      sevenDayOauthApps: { utilization: 0, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") },
+      modelScoped: [{ label: "Fable", utilization: 83, resetsAt: Date.parse("2026-09-06T21:00:00.000Z") }],
+      extraUsage: { enabled: true, monthlyLimit: 100, usedCredits: 12.5, utilization: 12.5, currency: "USD" },
+    });
+    expect("behaviors" in plan).toBe(false);
+    expect(normalizeSessionTotals(full)).toEqual({
+      costUsd: 1.2345, apiDurationMs: 42_000, durationMs: 90_000, linesAdded: 12, linesRemoved: 3,
+      models: [
+        { id: "claude-opus-5[1m]", input: 1_000, output: 200, cacheRead: 50_000, cacheWrite: 4_000, costUsd: 1.1 },
+        { id: "claude-haiku-4-5", input: 300, output: 40, cacheRead: 0, cacheWrite: 0, costUsd: 0.1345 },
+      ],
+    });
+  });
+
+  test("a two-window response renders exactly as before the widening", () => {
+    const plan = normalizePlanUtilization({ session: {}, subscription_type: null, rate_limits_available: true, rate_limits: { five_hour: { utilization: 37, resets_at: "2026-09-02T14:00:00.000Z" }, seven_day: { utilization: 12.4, resets_at: null } } });
+    expect(plan).toEqual({ fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, sevenDay: { utilization: 12.4 } });
+    expect(normalizeSessionTotals({ session: {} })).toBeUndefined();
+  });
+
+  test("a null rate_limits answer is no plan; a plan name alone is not a plan", () => {
+    expect(normalizePlanUtilization({ session: {}, subscription_type: null, rate_limits_available: false, rate_limits: null })).toBeUndefined();
+    expect(normalizePlanUtilization({ subscription_type: "pro", rate_limits_available: true, rate_limits: {} })).toBeUndefined();
+    expect(normalizePlanUtilization(null)).toBeUndefined();
+    expect(normalizePlanUtilization("usage")).toBeUndefined();
+  });
+
+  test("extra usage alone is a plan: the credit row survives without any time window", () => {
+    const plan = normalizePlanUtilization({
+      session: {}, subscription_type: "max", rate_limits_available: true,
+      rate_limits: { extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" } },
+    });
+    expect(plan).toEqual({ subscription: "max", extraUsage: { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" } });
+  });
+
+  test("malformed fields cost the field, not the report", () => {
+    const plan = normalizePlanUtilization({
+      subscription_type: 7, rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: -3, resets_at: "not a date" },
+        seven_day: { utilization: "half", resets_at: 1_788_400_000 },
+        seven_day_opus: "lots",
+        model_scoped: "Fable",
+        extra_usage: { is_enabled: "yes", monthly_limit: 100 },
+      },
+    });
+    expect(plan).toEqual({ sevenDay: { resetsAt: 1_788_400_000_000 } });
+    expect(normalizeSessionTotals({ session: { total_cost_usd: "free" } })).toBeUndefined();
+    expect(normalizeSessionTotals({ session: { total_cost_usd: 0.5, total_duration_ms: "long", model_usage: null } })).toEqual({ costUsd: 0.5, apiDurationMs: 0, durationMs: 0, linesAdded: 0, linesRemoved: 0, models: [] });
   });
 });

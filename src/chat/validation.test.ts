@@ -250,8 +250,32 @@ describe("chat domain validation", () => {
     expect(parseConversationItem({ id: "n", type: "notice", createdAt: 1, level: "error", message: "m", code: "rate-limit-rejected", resetsAt: 5 })).toBeTruthy();
     expect(() => parseConversationItem({ id: "n", type: "notice", createdAt: 1, level: "error", message: "m", resetsAt: -1 })).toThrow(/resetsAt/);
     expect(parseConversationItem({ id: "c", type: "context_report", createdAt: 1, total: 10, plan: { fiveHour: { utilization: 37, resetsAt: 5 }, sevenDay: {} } })).toBeTruthy();
-    expect(() => parseConversationItem({ id: "c", type: "context_report", createdAt: 1, total: 10, plan: { monthly: {} } })).toThrow(/plan/);
     expect(() => parseConversationItem({ id: "c", type: "context_report", createdAt: 1, total: 10, plan: { fiveHour: { utilization: -1 } } })).toThrow(/utilization/);
+  });
+
+  test("a widened plan report passes as a superset, wrong-typed fields fail, and windows the SDK adds later are ignored", () => {
+    const superset = {
+      id: "c", type: "context_report", createdAt: 1, total: 10,
+      plan: {
+        subscription: "max",
+        fiveHour: { utilization: 9, resetsAt: 5 }, sevenDay: { utilization: 25, resetsAt: 9 },
+        sevenDayOpus: { utilization: 61 }, sevenDaySonnet: { utilization: 4 }, sevenDayOauthApps: { utilization: 0, resetsAt: 9 },
+        modelScoped: [{ label: "Fable", utilization: 83, resetsAt: 9 }],
+        extraUsage: { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" },
+      },
+      session: { costUsd: 1.2, apiDurationMs: 42, durationMs: 90, linesAdded: 1, linesRemoved: 0, models: [{ id: "claude-opus-5", input: 1, output: 2, cacheRead: 3, cacheWrite: 4, costUsd: 1.1 }], since: 1 },
+    };
+    expect(parseConversationItem(superset)).toBeTruthy();
+    // An unknown window key is a newer SDK talking, not a broken report.
+    expect(parseConversationItem({ ...superset, plan: { ...superset.plan, thirtyDay: { utilization: 1 } } })).toBeTruthy();
+    expect(() => parseConversationItem({ ...superset, plan: { ...superset.plan, subscription: 7 } })).toThrow(/subscription/);
+    expect(() => parseConversationItem({ ...superset, plan: { ...superset.plan, sevenDayOpus: { utilization: "lots" } } })).toThrow(/sevenDayOpus utilization/);
+    expect(() => parseConversationItem({ ...superset, plan: { ...superset.plan, modelScoped: [{ utilization: 1 }] } })).toThrow(/modelScoped label/);
+    expect(() => parseConversationItem({ ...superset, plan: { ...superset.plan, extraUsage: { enabled: "yes" } } })).toThrow(/extraUsage enabled/);
+    expect(() => parseConversationItem({ ...superset, session: { ...superset.session, costUsd: "free" } })).toThrow(/session costUsd/);
+    expect(() => parseConversationItem({ ...superset, session: { ...superset.session, models: [{ id: "x", input: 1 }] } })).toThrow(/session model output/);
+    expect(() => parseConversationItem({ ...superset, session: { ...superset.session, since: "boot" } })).toThrow(/session since/);
+    expect(() => parseConversationItem({ ...superset, session: { ...superset.session, behaviors: {} } })).toThrow(/unknown context report session field/);
     expect(parseConversationItem({ id: "t", type: "tool", createdAt: 1, name: "Bash", status: "running", elapsedMs: 1200 })).toBeTruthy();
     expect(parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "running" })).toBeTruthy();
     expect(() => parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "paused" })).toThrow(/background task status/);

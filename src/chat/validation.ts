@@ -401,16 +401,49 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.resetsAt, "notice resetsAt");
       break;
     case "context_report": {
-      expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories", "plan"], type);
+      expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories", "plan", "session"], type);
       if (record.plan !== undefined) {
+        // The plan is the one place unknown keys pass: the SDK adds windows
+        // over time and a new one must not make an older client reject the
+        // whole report. Known fields are still held to their types.
         const plan = expectRecord(record.plan, "context report plan");
-        expectKeys(plan, ["fiveHour", "sevenDay"], "context report plan");
-        for (const key of ["fiveHour", "sevenDay"] as const) {
+        if (plan.subscription !== undefined) expectNonEmptyString(plan.subscription, "context report plan subscription");
+        for (const key of ["fiveHour", "sevenDay", "sevenDayOpus", "sevenDaySonnet", "sevenDayOauthApps"] as const) {
           if (plan[key] === undefined) continue;
-          const window = expectRecord(plan[key], `context report plan ${key}`);
-          expectKeys(window, ["utilization", "resetsAt"], `context report plan ${key}`);
-          if (window.utilization !== undefined && (typeof window.utilization !== "number" || !Number.isFinite(window.utilization) || window.utilization < 0)) throw new Error(`context report plan ${key} utilization must be a non-negative number`);
-          expectOptionalTimestamp(window.resetsAt, `context report plan ${key} resetsAt`);
+          expectPlanWindow(plan[key], `context report plan ${key}`, []);
+        }
+        if (plan.modelScoped !== undefined) {
+          if (!Array.isArray(plan.modelScoped)) throw new Error("context report plan modelScoped must be an array");
+          for (const entry of plan.modelScoped) {
+            const window = expectPlanWindow(entry, "context report plan modelScoped", ["label"]);
+            expectNonEmptyString(window.label, "context report plan modelScoped label");
+          }
+        }
+        if (plan.extraUsage !== undefined) {
+          const extra = expectRecord(plan.extraUsage, "context report plan extraUsage");
+          expectKeys(extra, ["enabled", "usedCredits", "monthlyLimit", "utilization", "currency"], "context report plan extraUsage");
+          if (typeof extra.enabled !== "boolean") throw new Error("context report plan extraUsage enabled must be a boolean");
+          for (const key of ["usedCredits", "monthlyLimit", "utilization"] as const) expectOptionalNonNegative(extra[key], `context report plan extraUsage ${key}`);
+          expectOptionalString(extra.currency, "context report plan extraUsage currency");
+        }
+      }
+      if (record.session !== undefined) {
+        const session = expectRecord(record.session, "context report session");
+        expectKeys(session, ["costUsd", "apiDurationMs", "durationMs", "linesAdded", "linesRemoved", "models", "since"], "context report session");
+        for (const key of ["costUsd", "apiDurationMs", "durationMs", "linesAdded", "linesRemoved"] as const) {
+          if (session[key] === undefined) throw new Error(`context report session ${key} must be a non-negative number`);
+          expectOptionalNonNegative(session[key], `context report session ${key}`);
+        }
+        expectOptionalTimestamp(session.since, "context report session since");
+        if (!Array.isArray(session.models)) throw new Error("context report session models must be an array");
+        for (const entry of session.models) {
+          const model = expectRecord(entry, "context report session model");
+          expectKeys(model, ["id", "input", "output", "cacheRead", "cacheWrite", "costUsd"], "context report session model");
+          expectNonEmptyString(model.id, "context report session model id");
+          for (const key of ["input", "output", "cacheRead", "cacheWrite", "costUsd"] as const) {
+            if (model[key] === undefined) throw new Error(`context report session model ${key} must be a non-negative number`);
+            expectOptionalNonNegative(model[key], `context report session model ${key}`);
+          }
         }
       }
       expectOptionalCount(record.total, "context report total");
@@ -665,6 +698,18 @@ function expectNullableString(value: unknown, field: string): void {
 
 function expectOptionalString(value: unknown, field: string): void {
   if (value !== undefined) expectString(value, field);
+}
+
+function expectOptionalNonNegative(value: unknown, field: string): void {
+  if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) throw new Error(`${field} must be a non-negative number`);
+}
+
+function expectPlanWindow(value: unknown, field: string, extraKeys: string[]): Record<string, unknown> {
+  const window = expectRecord(value, field);
+  expectKeys(window, ["utilization", "resetsAt", ...extraKeys], field);
+  expectOptionalNonNegative(window.utilization, `${field} utilization`);
+  expectOptionalTimestamp(window.resetsAt, `${field} resetsAt`);
+  return window;
 }
 
 function expectOptionalCount(value: unknown, field: string): void {
