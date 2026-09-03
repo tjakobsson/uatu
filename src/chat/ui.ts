@@ -2634,6 +2634,37 @@ export function initChat(api = new ChatApiClient()): void {
    * one on screen: the drill-down is one level deep by design, and back
    * returns to the conversation the picker still shows.
    */
+  // The drill-down's own event stream. Split out of the open path so a
+  // lifecycle resume can replace a stalled one from the cursor the child
+  // projection already holds — the transcript on screen is as live a surface
+  // as the parent conversation, and a half-dead socket under it silently
+  // stops reporting subagent output.
+  const openChildStream = (
+    entry: Drilldown,
+    id: string,
+    label: string,
+    cursor: string,
+    generation: number,
+    options: { resumed?: boolean } = {},
+  ): ChatEventStream =>
+    api.stream(id, cursor, {
+      event: (event, cursor) => {
+        if (generation !== childGeneration || !entry.projection) return;
+        const result = applyChatEvent(entry.projection, event, cursor);
+        // A gap in a drill-down is refetched in place; it is a view over a
+        // turn, so there is no selection to re-run.
+        if (result.outcome === "gap" || result.outcome === "resync") {
+          openChildConversation(id, label);
+          return;
+        }
+        entry.projection = result.projection;
+        if (result.outcome === "applied") { announceChild(""); renderChild(true); }
+      },
+      resync: () => { if (generation === childGeneration) openChildConversation(id, label); },
+      error: error => { if (generation === childGeneration) childInterruptions.report("child", error); },
+      recovered: () => { if (generation === childGeneration) childInterruptions.clear("child"); },
+    }, options);
+
   const openChildConversation = (id: string, label: string) => {
     if (!drilldown || !drilldownItems || !drilldownTimeline) return;
     const generation = ++childGeneration;
@@ -2701,23 +2732,7 @@ export function initChat(api = new ChatApiClient()): void {
         next.projection = projectionFromSnapshot(snapshot, []);
         announceChild(snapshot.items.length ? "" : "This subagent has not reported anything yet.");
         renderChild(false);
-        next.stream = api.stream(id, snapshot.cursor, {
-          event: (event, cursor) => {
-            if (generation !== childGeneration || !next.projection) return;
-            const result = applyChatEvent(next.projection, event, cursor);
-            // A gap in a drill-down is refetched in place; it is a view over a
-            // turn, so there is no selection to re-run.
-            if (result.outcome === "gap" || result.outcome === "resync") {
-              openChildConversation(id, label);
-              return;
-            }
-            next.projection = result.projection;
-            if (result.outcome === "applied") { announceChild(""); renderChild(true); }
-          },
-          resync: () => { if (generation === childGeneration) openChildConversation(id, label); },
-          error: error => { if (generation === childGeneration) childInterruptions.report("child", error); },
-          recovered: () => { if (generation === childGeneration) childInterruptions.clear("child"); },
-        });
+        next.stream = openChildStream(next, id, label, snapshot.cursor, generation);
       } catch (error) {
         if (generation === childGeneration) announceChild(messageOf(error), true);
       }
@@ -3646,6 +3661,21 @@ export function initChat(api = new ChatApiClient()): void {
       if (current && activeConversationId() === current.conversationId) {
         stream?.close();
         stream = openConversationStream(current.conversationId, current.cursor, selectionGeneration, { resumed: true });
+      }
+      // An open subagent transcript owns its own stream, which the parent's
+      // replacement does not touch. Left alone it stays half-dead and silently
+      // stops reporting, while the surface looks recovered.
+      const openChild = child;
+      if (openChild?.projection) {
+        openChild.stream?.close();
+        openChild.stream = openChildStream(
+          openChild,
+          openChild.conversationId,
+          openChild.label,
+          openChild.projection.cursor,
+          childGeneration,
+          { resumed: true },
+        );
       }
       await inventory;
     },

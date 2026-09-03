@@ -106,7 +106,12 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
     if (transport !== "other") recordProxyStream({ transport, outcome, status: statusCategory });
   };
 
-  if (request.signal.aborted) upstreamAbort.abort();
+  // Already gone before we even reached the child: still a downstream
+  // cancellation. Aborting the controller alone would let the fetch reject
+  // into the catch below and file an ordinary abandonment as an unreachable
+  // upstream — complete with the error log that is reserved for real
+  // failures.
+  if (request.signal.aborted) finish("cancelled");
   else request.signal.addEventListener("abort", onDownstreamAbort, { once: true });
 
   let upstream: Response;

@@ -123,6 +123,27 @@ describe("proxied stream cancellation", () => {
     }
   });
 
+  test("a request already aborted before proxying is recorded as a cancellation", async () => {
+    const records: ProxyStreamDiagnostic[] = [];
+    setProxyStreamDiagnostics(record => records.push(record));
+    const child = streamingChild();
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      const response = await proxyHttp(
+        new Request("http://hub.example/s/project/api/events", { signal: controller.signal }),
+        child.session,
+      );
+      if (response.status === 200) await response.body!.cancel();
+      // An abandonment that beat us to the child is still an abandonment, not
+      // an unreachable workspace.
+      expect(records).toEqual([{ transport: "document", outcome: "cancelled", status: "unreachable" }]);
+    } finally {
+      setProxyStreamDiagnostics(null);
+      await child.server.stop(true);
+    }
+  });
+
   test("a request already aborted before proxying never leaves a live child stream", async () => {
     const child = streamingChild();
     try {
