@@ -9,6 +9,8 @@ import type { ChatAvailability, ConversationSnapshot, ConversationSummary, Messa
 import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
 import { ReversibleHistoryTargetError, InvalidQuestionAnswerError } from "../chat/provider";
+import { MetricsRegistry } from "../debug/metrics";
+import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
 import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 
@@ -151,7 +153,7 @@ class FakeChatService implements WorkspaceChatService {
   private require(id: string) { if (id !== "local") throw new ConversationNotFoundError(); }
 }
 
-function routes(chatService = new FakeChatService(), basePath = "/") {
+function routes(chatService = new FakeChatService(), basePath = "/", chatKeepaliveMs?: number, metrics?: MetricsRegistry) {
   const repo = path.resolve(import.meta.dir, "..", "..");
   // The real router over the single-agent fake: route tests exercise the
   // qualifying seam exactly as production does. The fake keeps owning the
@@ -171,6 +173,8 @@ function routes(chatService = new FakeChatService(), basePath = "/") {
   return buildRoutes({
     mode: "prod",
     basePath,
+    ...(chatKeepaliveMs === undefined ? {} : { chatKeepaliveMs }),
+    ...(metrics === undefined ? {} : { metrics }),
     assets: {
       mermaid: path.join(repo, "node_modules/mermaid/dist/mermaid.min.js"),
       logo: path.join(repo, "src/assets/uatu-logo.svg"),
@@ -281,6 +285,87 @@ describe("workspace chat routes", () => {
     service.inventory.invalidate();
     expect(new TextDecoder().decode((await waiting).value)).toBe(frame);
     await reader.cancel();
+  });
+
+  test("an idle inventory stream emits comment keepalives that carry no event", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service, "/", 10)["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
+    const response = await handler.GET(request("/api/chat/conversations/events"));
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+
+    // Nothing invalidates, so every following frame is a comment: no `event:`
+    // line for a listener to fire on and no `data:` line to parse. Presentation
+    // cannot move on one of these.
+    for (let index = 0; index < 3; index += 1) {
+      const frame = new TextDecoder().decode((await reader.read()).value);
+      expect(frame).toBe(": keepalive\n\n");
+    }
+    await reader.cancel();
+    expect(service.inventory.subscriberCount()).toBe(0);
+  });
+
+  test("an idle conversation stream emits comment keepalives without advancing the cursor", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service, "/", 10)["/api/chat/conversations/:conversationId/events"] as {
+      GET(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", {}, { conversationId: "opencode:local" }) as never);
+    const reader = response.body!.getReader();
+
+    for (let index = 0; index < 3; index += 1) {
+      const frame = new TextDecoder().decode((await reader.read()).value);
+      expect(frame).toBe(": keepalive\n\n");
+      // No `id:` line, so a keepalive cannot move the replay cursor a
+      // reconnect would resume from.
+      expect(frame).not.toContain("id:");
+    }
+    await reader.cancel();
+  });
+
+  test("Chat stream metrics separate first connects, resumes, cancellations, and completions", async () => {
+    const metrics = new MetricsRegistry();
+    const service = new FakeChatService();
+    const table = routes(service, "/", undefined, metrics);
+    const inventory = table["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
+    const conversation = table["/api/chat/conversations/:conversationId/events"] as {
+      GET(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+
+    const inventoryReader = (await inventory.GET(request("/api/chat/conversations/events"))).body!.getReader();
+    await inventoryReader.read();
+    expect(metrics.get(openedCounter("chat-inventory"))).toBe(1);
+    expect(metrics.get(activeGauge("chat-inventory"))).toBe(1);
+
+    const fresh = (await conversation.GET(
+      request("/api/chat/conversations/opencode:local/events", {}, { conversationId: "opencode:local" }) as never,
+    )).body!.getReader();
+    expect(metrics.get(openedCounter("chat-conversation"))).toBe(1);
+    expect(metrics.get(reconnectedCounter("chat-conversation"))).toBe(0);
+
+    // A cursor means the client is resuming; only that fact is recorded.
+    const resumed = (await conversation.GET(
+      request("/api/chat/conversations/opencode:local/events?cursor=abc", {}, { conversationId: "opencode:local" }) as never,
+    )).body!.getReader();
+    expect(metrics.get(openedCounter("chat-conversation"))).toBe(2);
+    expect(metrics.get(reconnectedCounter("chat-conversation"))).toBe(1);
+    expect(metrics.get(activeGauge("chat-conversation"))).toBe(2);
+
+    await inventoryReader.cancel();
+    await fresh.cancel();
+    await resumed.cancel();
+    expect(metrics.get(closedCounter("chat-inventory", "cancelled"))).toBe(1);
+    // The resumed stream's cursor is unknown to the replay, so it answers with
+    // a resync and ends — a completion. The one still waiting for events is a
+    // client cancellation. Two endings, two different counters.
+    expect(metrics.get(closedCounter("chat-conversation", "completed"))).toBe(1);
+    expect(metrics.get(closedCounter("chat-conversation", "cancelled"))).toBe(1);
+    expect(metrics.get(activeGauge("chat-inventory"))).toBe(0);
+    expect(metrics.get(activeGauge("chat-conversation"))).toBe(0);
+
+    // No counter name carries the cursor value or the conversation id.
+    const names = Object.keys(metrics.snapshot().counters);
+    expect(names.some(name => name.includes("abc") || name.includes("opencode:local"))).toBe(false);
   });
 
   test("cleans up inventory subscriptions on request abort", async () => {

@@ -9,6 +9,7 @@
 // degrade silently.
 
 import type { BuildSummary } from "../shared/types";
+import type { LiveChannelStatus } from "./live-channel";
 
 const connectionStateElementMaybe = document.querySelector<HTMLElement>("#connection-state");
 const connectionLabelElementMaybe = connectionStateElementMaybe?.querySelector<HTMLElement>(".connection-label") ?? null;
@@ -54,6 +55,17 @@ function syncConnectionDisplay() {
   }
   connectionLabelElement.textContent = label;
   connectionStateElement.title = title;
+}
+
+// The one translation from live-channel transport status to indicator state.
+// It lives here rather than at the call site so the indicator's contract —
+// `Connected` only after authoritative state was applied, `Reconnecting` for
+// the whole gap — is testable without dragging in the SSE reducer's DOM
+// dependencies.
+export function applyChannelStatus(status: LiveChannelStatus) {
+  if (status === "live") setConnectionState("live", "Online");
+  else if (status === "reconnecting") setConnectionState("reconnecting", "Reconnecting");
+  else setConnectionState("connecting", "Connecting");
 }
 
 export function renderBuildBadge(build: BuildSummary) {

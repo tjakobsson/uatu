@@ -18,7 +18,7 @@ import { setFollowEnabled, syncFollowToggle } from "./follow";
 import type { StatePayload } from "../shared/types";
 import { applyViewMode } from "../preview/view-mode";
 import { renderBuildBadge } from "./connection";
-import { applyServerSnapshot, connectEvents } from "./events";
+import { applyServerSnapshot, connectEvents, watchPageLifecycle } from "./events";
 import { replaceSelection, scrollToFragment } from "./history";
 import {
   appState,
@@ -163,6 +163,9 @@ export async function loadInitialState() {
   }
 
   connectEvents();
+  // A frozen or backgrounded page misses everything the stream would have
+  // delivered; the lifecycle watcher is what brings it back without a reload.
+  watchPageLifecycle();
   enablePersonalStatePersistence();
   // Restored/default values are read-only at boot: writing a full snapshot
   // here could overwrite newer field-level writes from another open client.

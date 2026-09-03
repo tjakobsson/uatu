@@ -17,7 +17,9 @@ import {
   shouldRefreshPreview,
   type StatePayload,
 } from "../shared/types";
-import { setConnectionState } from "./connection";
+import { applyChannelStatus } from "./connection";
+import { createLiveChannel, type LiveChannel } from "./live-channel";
+import { createLifecycleRecovery, createStateReconciler, type LifecycleRecovery } from "./recovery";
 import { renderBuildBadge } from "./connection";
 import { appUrl } from "../shared/app-url";
 import { replaceSelection } from "./history";
@@ -26,28 +28,20 @@ import { appState } from "./state";
 import { renderCommitPreview } from "./url";
 import { contextualAppUrl, setClientScope } from "./watch-context";
 
-let activeEvents: EventSource | null = null;
+// Recovery for this stream is owned by `createLiveChannel`, not by the
+// browser. Native `EventSource` retry is unbounded in the one case that
+// matters — a mobile device whose network path vanished leaves the source in
+// `CONNECTING` with no error and no timeout, so the app sits on
+// "Reconnecting" forever and never observes the server again (the
+// client-freshness handshake rides the reconnect's first state payload). The
+// channel closes each failed source and reopens on a capped-backoff schedule
+// of its own, and it treats a generation as connected only once that
+// generation's authoritative state has been applied below.
+let channel: LiveChannel | null = null;
 
-// Browsers permanently close an EventSource whose automatic retry itself
-// fails — exactly what happens when the server is mid-restart and refuses
-// the connection. A CLOSED source will never fire another event, so left
-// alone the app would sit on "Reconnecting" forever and never observe the
-// restarted server (the client-freshness handshake rides the reconnect's
-// first state payload). This timer re-establishes the stream ourselves.
-const RECONNECT_DELAY_MS = 2000;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-function scheduleReconnect(source: EventSource) {
-  // A superseded source (scope change already reconnected) must not respawn.
-  if (activeEvents !== source || reconnectTimer !== null) {
-    return;
-  }
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    if (activeEvents === source) {
-      connectEvents();
-    }
-  }, RECONNECT_DELAY_MS);
+function documentChannel(): LiveChannel {
+  channel ??= createLiveChannel({ open: openDocumentStream, onStatus: applyChannelStatus });
+  return channel;
 }
 
 function scopesEqual(left: StatePayload["scope"], right: StatePayload["scope"]): boolean {
@@ -78,29 +72,31 @@ export function applyServerSnapshot(payload: StatePayload): void {
 }
 
 export function connectEvents() {
-  // A pending reconnect timer belongs to the source being superseded; left
-  // armed it would block scheduling for the new source and then no-op when
-  // it fires (its activeEvents check fails) — stranding a CLOSED stream.
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  activeEvents?.close();
-  const events = new EventSource(contextualAppUrl(appUrl("/api/events")));
-  activeEvents = events;
+  documentChannel().connect();
+}
 
-  events.addEventListener("open", () => {
-    setConnectionState("live", "Online");
-  });
+// Tears down the live channel for good. Called when the page is being
+// discarded: a retry cycle outliving the page would keep firing timers
+// against a document that is on its way out.
+export function disconnectEvents() {
+  channel?.dispose();
+  channel = null;
+  lifecycle?.dispose();
+  lifecycle = null;
+}
 
-  events.addEventListener("error", () => {
-    setConnectionState("reconnecting", "Reconnecting");
-    if (events.readyState === EventSource.CLOSED) {
-      scheduleReconnect(events);
-    }
-  });
+function openDocumentStream(generation: number): EventSource {
+  // Every attempt after the first is a recovery. Saying so lets the workspace
+  // count reconnects apart from fresh connects without the request carrying
+  // anything about the connection that was lost.
+  const url = new URL(contextualAppUrl(appUrl("/api/events")), window.location.href);
+  if (generation > 1) url.searchParams.set("reconnect", "1");
+  const events = new EventSource(`${url.pathname}${url.search}`);
 
   events.addEventListener("state", async event => {
+    // A payload from a superseded attempt describes a connection this client
+    // has already replaced; applying it could overwrite newer state.
+    if (!documentChannel().isCurrent(generation)) return;
     const payload = JSON.parse((event as MessageEvent<string>).data) as StatePayload;
     const previousSelectedId = appState.selectedId;
     const previousScope = appState.scope;
@@ -112,6 +108,13 @@ export function connectEvents() {
     );
 
     applyServerSnapshot(payload);
+    // This is newer than anything a reconciliation fetch still has in flight;
+    // telling the reconciler keeps that older payload from landing on top.
+    stateReconciler.noteApplied();
+    // Transport is only proven once this generation's authoritative state has
+    // been applied — an open socket that never delivers state is exactly the
+    // half-dead connection the indicator must not call `Connected`.
+    documentChannel().confirm(generation);
     if (!scopesEqual(previousScope, payload.scope)) {
       // EventSource automatically reconnects its original URL. Replace it
       // after server-side normalization so a later reconnect cannot revive a
@@ -186,16 +189,46 @@ export function connectEvents() {
       renderEmptyPreview("No document selected", "Waiting for viewable files");
     }
   });
+
+  return events;
 }
 
-export async function refreshServerStateForContext(): Promise<StatePayload> {
-  const response = await fetch(contextualAppUrl(appUrl("/api/state")));
-  if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
-  const payload = (await response.json()) as StatePayload;
-  applyServerSnapshot(payload);
-  syncStateGeneration(payload.generatedAt);
-  renderBuildBadge(payload.build);
-  renderSidebar();
-  connectEvents();
-  return payload;
+// The one path that converges this client on authoritative state and a fresh
+// stream. Both the explicit callers (scope widening, compare-target change)
+// and the lifecycle wake-up below go through it, so the reconciler's ordering
+// guard covers them all: an older fetch cannot land on top of newer state,
+// whichever route delivered that state.
+const stateReconciler = createStateReconciler<StatePayload>({
+  fetchState: async () => {
+    const response = await fetch(contextualAppUrl(appUrl("/api/state")));
+    if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
+    return (await response.json()) as StatePayload;
+  },
+  applyState: payload => {
+    applyServerSnapshot(payload);
+    syncStateGeneration(payload.generatedAt);
+    renderBuildBadge(payload.build);
+    renderSidebar();
+    // Replace the transport too: after a gap, the stream that was open (or
+    // silently dead) has no claim to being current.
+    connectEvents();
+  },
+});
+
+export async function refreshServerStateForContext(): Promise<void> {
+  await stateReconciler.reconcile();
+}
+
+// Installed once, by boot. `pageshow` from the back/forward cache, a return
+// to the foreground, and a regained network connection all mean the same
+// thing — this page has been out of touch and cannot trust what it holds.
+let lifecycle: LifecycleRecovery | null = null;
+
+export function watchPageLifecycle(): void {
+  lifecycle ??= createLifecycleRecovery({
+    win: window,
+    doc: document,
+    recover: () => stateReconciler.reconcile(),
+    discard: disconnectEvents,
+  });
 }

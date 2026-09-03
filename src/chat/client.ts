@@ -35,15 +35,33 @@ export class ChatTransportError extends Error {
   }
 }
 
+// A transport gap the client is already recovering from — distinct from a
+// provider failure, a rejected turn, or invalid data, all of which need the
+// user to do something. Typed rather than string-matched so the surface can
+// own the reconnect message specifically: on a successful open it removes
+// this one and leaves any other error standing.
+export class ChatConnectionInterruptedError extends ChatTransportError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatConnectionInterruptedError";
+  }
+}
+
 type StreamHandlers = {
   event: (event: ChatEvent, cursor: string) => void;
   resync: (reason?: ChatEvent & { type: "resync" }) => void;
   error: (error: ChatTransportError) => void;
+  // The stream opened. Only transport is proven: cursor replay and the
+  // `resync` event still own whether the projection is correct.
+  recovered?: () => void;
 };
 
 type InventoryStreamHandlers = {
   invalidation: (event: ConversationInventoryEvent) => void;
   error: (error: ChatTransportError) => void;
+  // The stream opened. Transport is healthy again; nothing about the
+  // conversation projection is implied.
+  recovered?: () => void;
 };
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -244,6 +262,15 @@ export class ChatApiClient {
       if (closed) return;
       const nextSource = this.eventSourceFactory(appUrl("/api/chat/conversations/events"));
       source = nextSource;
+      // A successful open is the proof of transport recovery. Waiting for an
+      // inventory event instead would leave an idle workspace — one where no
+      // conversation is changing — reporting "reconnecting" indefinitely, and
+      // would make the next interruption inherit an inflated failure count.
+      nextSource.addEventListener("open", (() => {
+        if (source !== nextSource || closed) return;
+        failures = 0;
+        handlers.recovered?.();
+      }) as EventListener);
       nextSource.addEventListener("inventory", ((raw: MessageEvent<string>) => {
         let event: ConversationInventoryEvent;
         try {
@@ -261,7 +288,7 @@ export class ChatApiClient {
         source = null;
         if (closed) return;
         failures += 1;
-        if (failures > 1) handlers.error(new ChatTransportError("Chat inventory connection interrupted; reconnecting"));
+        if (failures > 1) handlers.error(new ChatConnectionInterruptedError("Chat inventory connection interrupted; reconnecting"));
         if (closed) return;
         reconnectTimer = this.timers.setTimeout(() => {
           reconnectTimer = null;
@@ -313,6 +340,12 @@ export class ChatApiClient {
           handlers.resync();
         }
       };
+      const opened = source;
+      opened.addEventListener("open", (() => {
+        if (source !== opened || closed) return;
+        failures = 0;
+        handlers.recovered?.();
+      }) as EventListener);
       source.addEventListener("chat", receive as EventListener);
       source.addEventListener("resync", receive as EventListener);
       source.onerror = () => {
@@ -322,7 +355,7 @@ export class ChatApiClient {
         failures += 1;
         // The first drop retries silently; a banner only appears once the
         // outage persists past one reconnect attempt.
-        if (failures > 1) handlers.error(new ChatTransportError("Chat connection interrupted; reconnecting"));
+        if (failures > 1) handlers.error(new ChatConnectionInterruptedError("Chat connection interrupted; reconnecting"));
         reconnectTimer = this.timers.setTimeout(connect, reconnectDelay(failures));
       };
     };

@@ -246,6 +246,105 @@ describe("chat API client", () => {
     stream.close();
   });
 
+  test("an idle successful reconnect resets inventory failure accounting", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const errors: string[] = [];
+    const recoveries: number[] = [];
+    const stream = client.inventoryStream({
+      invalidation: () => {},
+      error: error => errors.push(error.message),
+      recovered: () => recoveries.push(1),
+    });
+
+    sources[0]!.fail();
+    timers.runNext();
+    sources[1]!.fail();
+    timers.runNext();
+    expect(errors).toHaveLength(1);
+
+    // The replacement opens, and the workspace is idle — no inventory event
+    // follows. Recovery has to be observable from the open alone.
+    sources[2]!.open();
+    expect(recoveries).toHaveLength(1);
+
+    // A later interruption starts from the first-failure state: one second of
+    // backoff and no banner, rather than inheriting the earlier count.
+    sources[2]!.fail();
+    expect(timers.delays()).toEqual([1_000]);
+    expect(errors).toHaveLength(1);
+    stream.close();
+  });
+
+  test("an idle successful reconnect resets conversation-stream failure accounting", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const errors: string[] = [];
+    const recoveries: number[] = [];
+    const stream = client.stream("c1", "cursor", {
+      event: () => {},
+      resync: () => {},
+      error: error => errors.push(error.message),
+      recovered: () => recoveries.push(1),
+    });
+
+    sources[0]!.fail();
+    timers.runNext();
+    sources[1]!.fail();
+    timers.runNext();
+    expect(errors).toEqual(["Chat connection interrupted; reconnecting"]);
+
+    sources[2]!.open();
+    expect(recoveries).toHaveLength(1);
+
+    sources[2]!.fail();
+    expect(timers.delays()).toEqual([1_000]);
+    expect(errors).toHaveLength(1);
+    stream.close();
+  });
+
+  test("a superseded source's open neither resets accounting nor reports recovery", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const recoveries: number[] = [];
+    const stream = client.inventoryStream({
+      invalidation: () => {},
+      error: () => {},
+      recovered: () => recoveries.push(1),
+    });
+
+    sources[0]!.fail();
+    timers.runNext();
+    sources[1]!.fail();
+    timers.runNext();
+    // A late open from an already-replaced source proves nothing about the
+    // stream this client is actually holding.
+    sources[0]!.open();
+    expect(recoveries).toHaveLength(0);
+    sources[2]!.open();
+    expect(recoveries).toHaveLength(1);
+    stream.close();
+  });
+
+  test("a closed stream's open is ignored", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const recoveries: number[] = [];
+    const stream = client.stream("c1", "cursor", {
+      event: () => {},
+      resync: () => {},
+      error: () => {},
+      recovered: () => recoveries.push(1),
+    });
+    stream.close();
+    sources[0]!.open();
+    expect(recoveries).toHaveLength(0);
+  });
+
   test("inventory stream cleanup closes active sources and cancels reconnect timers", () => {
     const sources: FakeEventSource[] = [];
     const timers = new FakeTimers();
@@ -288,6 +387,7 @@ class FakeEventSource {
   addEventListener(type: string, listener: EventListener) { this.listeners.set(type, listener as (event: MessageEvent<string>) => void); }
   close() { this.closed = true; }
   fail() { this.onerror?.(new Event("error")); }
+  open() { this.listeners.get("open")?.({} as MessageEvent<string>); }
   emit(type: string, value: unknown, lastEventId = "") {
     this.listeners.get(type)?.({ data: JSON.stringify(value), lastEventId } as MessageEvent<string>);
   }

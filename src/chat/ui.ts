@@ -2,8 +2,9 @@ import { escapeHtml } from "../shared/html";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { registerBackInterceptor } from "../shell/history";
+import { createLifecycleRecovery, type LifecycleRecovery } from "../shell/recovery";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
-import { ChatApiClient, ChatTransportError, type ChatEventStream } from "./client";
+import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
 import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
@@ -167,6 +168,7 @@ export function initChat(api = new ChatApiClient()): void {
   const stagedConfigurations = new Map<string, ConversationConfiguration>();
   let configurationPicker: ChatConfigurationPickerController | null = null;
   let stream: ChatEventStream | null = null;
+  let chatLifecycle: LifecycleRecovery | null = null;
   let inventoryStream: ChatEventStream | null = null;
   let selectionGeneration = 0;
   let selectedConversationDeleted = false;
@@ -375,7 +377,7 @@ export function initChat(api = new ChatApiClient()): void {
     // as the textContent variant did — but element children survive; they
     // are removed explicitly where that is meant.
     let node: Text | null = null;
-    return (message: string, error = false) => {
+    const speak = (message: string, error = false) => {
       if (!target) return;
       if (!node || node.parentNode !== target) {
         node = target.ownerDocument.createTextNode("");
@@ -388,9 +390,33 @@ export function initChat(api = new ChatApiClient()): void {
       target.classList.toggle("is-error", error);
       target.hidden = !message && target.childElementCount === 0;
     };
+    // What the line is saying right now. A caller that owns a specific
+    // message needs this to check it is still the one being shown before
+    // taking it down.
+    return Object.assign(speak, { current: () => node?.textContent ?? "" });
   };
   const announce = announcerFor(state);
   const announceChild = announcerFor(drilldownState);
+
+  // Connection-interruption messaging has a single owner. The status line is
+  // shared with provider outages, validation refusals, and turn failures —
+  // all of which the user still has to act on — so a reconnect may not clear
+  // the line wholesale. It removes only the message it put there, and only
+  // while that message is still the one on screen.
+  let connectionInterruption: string | null = null;
+
+  const reportTransportError = (error: unknown) => {
+    const message = messageOf(error);
+    if (error instanceof ChatConnectionInterruptedError) connectionInterruption = message;
+    announce(message, true);
+  };
+
+  const clearConnectionInterruption = () => {
+    const owned = connectionInterruption;
+    if (owned === null) return;
+    connectionInterruption = null;
+    if (announce.current() === owned) announce("");
+  };
 
   const geometryOf = (scroller: HTMLElement, container: HTMLElement): AnchorGeometry => {
     const bounds = scroller.getBoundingClientRect();
@@ -1806,12 +1832,21 @@ export function initChat(api = new ChatApiClient()): void {
     announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
     anchor.restore(presentation.anchors[snapshot.conversation.id] ?? null);
     scheduleRender(false, false);
-    stream = api.stream(snapshot.conversation.id, snapshot.cursor, {
+    stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
+  };
+
+  // Opens the selected conversation's event stream at a cursor. Split out of
+  // snapshot installation so a lifecycle resume can replace a stale stream
+  // without reprojecting: replaying from the cursor the projection already
+  // holds keeps the timeline, its scroll anchor, and the composer draft
+  // exactly as the user left them.
+  const openConversationStream = (conversationId: string, cursor: string, token: number): ChatEventStream =>
+    api.stream(conversationId, cursor, {
       event: (event, cursor) => {
         if (!projection || token !== selectionGeneration) return;
         const result = applyChatEvent(projection, event, cursor);
         if (result.outcome === "gap" || result.outcome === "resync") {
-          recoverSelectedConversation(snapshot.conversation.id);
+          recoverSelectedConversation(conversationId);
           return;
         }
         projection = result.projection;
@@ -1819,7 +1854,7 @@ export function initChat(api = new ChatApiClient()): void {
         if (event.type === "conversation.status") {
           if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
           else if (isLiveConversationStatus(event.status)) setComposerError(null);
-          statusMessages.set(snapshot.conversation.id, event.message);
+          statusMessages.set(conversationId, event.message);
         }
         if (event.type === "conversation.updated") {
           conversations = conversations.map(conversation => conversation.id === event.conversation.id ? event.conversation : conversation);
@@ -1832,12 +1867,15 @@ export function initChat(api = new ChatApiClient()): void {
       },
       resync: () => {
         if (token !== selectionGeneration) return;
-        if (historyMutations.has(snapshot.conversation.id)) pendingHistoryResyncs.add(snapshot.conversation.id);
-        else recoverSelectedConversation(snapshot.conversation.id);
+        if (historyMutations.has(conversationId)) pendingHistoryResyncs.add(conversationId);
+        else recoverSelectedConversation(conversationId);
       },
-      error: error => { if (token === selectionGeneration) announce(error.message, true); },
+      error: error => { if (token === selectionGeneration) reportTransportError(error); },
+      // Transport is healthy again. Cursor replay and `resync` still own
+      // whether the projection is correct, so this clears the reconnect
+      // message and nothing else — no refetch, no reprojection.
+      recovered: () => { if (token === selectionGeneration) clearConnectionInterruption(); },
     });
-  };
 
   async function refreshSelectedConversation(id: string): Promise<boolean> {
     const token = selectionGeneration;
@@ -3218,19 +3256,28 @@ export function initChat(api = new ChatApiClient()): void {
   }) : null;
   observer?.observe(items);
   viewport.start();
-  window.addEventListener("pagehide", () => {
+  window.addEventListener("pagehide", event => {
+    // Drafts are saved either way — a frozen page can be discarded later
+    // without ever running code again.
+    flushSave();
+    // `persisted` means the page went into the back/forward cache: it is
+    // frozen, not finished, and a later `pageshow` restores this very surface.
+    // Tearing it down here would leave the restored page holding a disposed
+    // Chat that never resubscribes — the suspended-page case this recovery
+    // work exists to fix.
+    if ((event as PageTransitionEvent).persisted) return;
     disposed = true;
     stopConversationRefreshRecovery();
-    flushSave();
     stream?.close();
     inventoryStream?.close();
+    chatLifecycle?.dispose();
     child?.stream?.close();
     observer?.disconnect();
     surfaceObserver.disconnect();
     viewport.stop();
     configurationPicker?.destroy();
     if (workingTimer !== null) clearInterval(workingTimer);
-  }, { once: true });
+  });
 
   // Bootstrap is deferred until Chat is actually the active surface: status()
   // lazily launches the OpenCode server, and merely opening Preview, Files, or
@@ -3351,7 +3398,8 @@ export function initChat(api = new ChatApiClient()): void {
     try {
       inventoryStream = api.inventoryStream({
         invalidation: () => { void inventoryReconciler.request(); },
-        error: error => announce(error.message, true),
+        error: reportTransportError,
+        recovered: clearConnectionInterruption,
       });
     } catch (error) {
       announce(messageOf(error), true);
@@ -3556,8 +3604,29 @@ export function initChat(api = new ChatApiClient()): void {
       void bootstrap();
     }
   });
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && bootstrapped) void inventoryReconciler.request();
+  // A page that was frozen, backgrounded, or off the network missed whatever
+  // the streams would have delivered, and may be holding sockets that will
+  // never speak again. Recovery is: reconcile the authoritative inventory and
+  // replace both streams. Nothing here touches presentation — the selected
+  // conversation resumes from the cursor its projection already holds, so
+  // drafts, timeline content, and scroll position survive intact.
+  chatLifecycle = createLifecycleRecovery({
+    win: window,
+    doc: document,
+    discard: () => {},
+    recover: async () => {
+      if (disposed || !bootstrapped) return;
+      const inventory = inventoryReconciler.request();
+      inventoryStream?.close();
+      inventoryStream = null;
+      startInventoryStream();
+      const current = projection;
+      if (current && activeConversationId() === current.conversationId) {
+        stream?.close();
+        stream = openConversationStream(current.conversationId, current.cursor, selectionGeneration);
+      }
+      await inventory;
+    },
   });
   handleChatSurfaceState();
 }

@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { MetricsRegistry } from "../debug/metrics";
+import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
 import type { IgnoreMatcher } from "../ignore/engine";
 import { WORKSPACE_API_REVISION } from "../shared/version";
 import { resolveWatchRoots, scanRoots } from "./roots";
@@ -14,6 +16,7 @@ import {
   createRefreshScheduler,
   createStatePayload,
   createWatchSession,
+  DOCUMENT_KEEPALIVE_MS,
   REFRESH_DEBOUNCE_MS,
   REFRESH_MAX_WAIT_MS,
 } from "./watch-session";
@@ -54,6 +57,15 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   if (!predicate()) {
     throw new Error("condition not met within timeout");
   }
+}
+
+async function readSseFrame(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
+  const result = await Promise.race([
+    reader.read(),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SSE frame timeout")), 3000)),
+  ]);
+  if (result.done || !result.value) throw new Error("SSE stream ended");
+  return new TextDecoder().decode(result.value);
 }
 
 async function readSsePayload(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReturnType<typeof createStatePayload>> {
@@ -140,6 +152,124 @@ describe("watchSession scope", () => {
     } finally {
       await session.stop();
     }
+  });
+
+  test("an idle document stream emits keepalive comments and no state events", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-keepalive-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true, keepaliveIntervalMs: 20 },
+    );
+
+    try {
+      await session.start();
+      const reader = session.eventsResponse().body!.getReader();
+      const initial = await readSseFrame(reader);
+      expect(initial.startsWith("event: state")).toBe(true);
+
+      // Nothing on disk changes, so every subsequent frame must be a comment.
+      for (let index = 0; index < 3; index += 1) {
+        const frame = await readSseFrame(reader);
+        expect(frame).toBe(": keepalive\n\n");
+      }
+      await reader.cancel();
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("cancelling a document stream releases its subscriber and stops its keepalive", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-keepalive-cancel-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true, keepaliveIntervalMs: 10 },
+    );
+
+    try {
+      await session.start();
+      const reader = session.eventsResponse().body!.getReader();
+      await readSseFrame(reader);
+      expect(session.getSseSubscriberCount()).toBe(1);
+      await reader.cancel();
+      expect(session.getSseSubscriberCount()).toBe(0);
+      // A leaked interval would keep enqueueing into a released controller;
+      // the count staying at zero across several cadences proves it stopped.
+      await new Promise(resolve => setTimeout(resolve, 60));
+      expect(session.getSseSubscriberCount()).toBe(0);
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("stopping the session releases keepalive timers for every subscriber", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-keepalive-stop-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true, keepaliveIntervalMs: 10 },
+    );
+
+    await session.start();
+    const reader = session.eventsResponse().body!.getReader();
+    await readSseFrame(reader);
+    await session.stop();
+    expect(session.getSseSubscriberCount()).toBe(0);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(session.getSseSubscriberCount()).toBe(0);
+    await reader.cancel().catch(() => undefined);
+  });
+
+  test("document stream metrics move through open, reconnect, and release", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-stream-metrics-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+    const metrics = new MetricsRegistry();
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true, metrics },
+    );
+
+    try {
+      await session.start();
+      const first = session.eventsResponse().body!.getReader();
+      await readSseFrame(first);
+      expect(metrics.get(openedCounter("document"))).toBe(1);
+      expect(metrics.get(activeGauge("document"))).toBe(1);
+      expect(metrics.get(reconnectedCounter("document"))).toBe(0);
+
+      // The same client coming back after losing its stream.
+      const second = session.eventsResponse(undefined, { reconnect: true }).body!.getReader();
+      await readSseFrame(second);
+      expect(metrics.get(openedCounter("document"))).toBe(2);
+      expect(metrics.get(reconnectedCounter("document"))).toBe(1);
+      expect(metrics.get(activeGauge("document"))).toBe(2);
+
+      await first.cancel();
+      expect(metrics.get(closedCounter("document", "cancelled"))).toBe(1);
+      expect(metrics.get(activeGauge("document"))).toBe(1);
+
+      await session.stop();
+      // The workspace shutting the stream down is a completion, not a client
+      // cancellation — the distinction is the point of separate counters.
+      expect(metrics.get(closedCounter("document", "completed"))).toBe(1);
+      expect(metrics.get(activeGauge("document"))).toBe(0);
+      await second.cancel().catch(() => undefined);
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("the production keepalive cadence matches the Chat streams", () => {
+    expect(DOCUMENT_KEEPALIVE_MS).toBe(15_000);
   });
 
   test("canSetFileScope rejects unknown, ignored, secret-like, and binary document ids", async () => {
