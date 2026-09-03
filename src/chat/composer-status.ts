@@ -143,9 +143,14 @@ export function planHasRows(plan: PlanUtilization): boolean {
 // rest of the window is a plan, not a margin.
 export const PLAN_WARNING_UTILIZATION = 80;
 
-/** Warning when any reported window is at or past the threshold. */
+/**
+ * Warning when any reported window, or enabled extra usage, is at or past
+ * the threshold — the same meters the readout draws, so the collapsed chip
+ * never reads calm above a row the readout marks as a warning.
+ */
 export function planUtilizationLevel(plan: PlanUtilization): "warning" | "normal" {
-  const windows: Array<PlanUtilizationWindow | undefined> = [plan.fiveHour, plan.sevenDay, plan.sevenDayOpus, plan.sevenDaySonnet, plan.sevenDayOauthApps, ...(plan.modelScoped ?? [])];
+  const extra = plan.extraUsage?.enabled ? plan.extraUsage : undefined;
+  const windows: Array<PlanUtilizationWindow | undefined> = [plan.fiveHour, plan.sevenDay, plan.sevenDayOpus, plan.sevenDaySonnet, plan.sevenDayOauthApps, ...(plan.modelScoped ?? []), extra];
   return windows.some(window => window?.utilization !== undefined && window.utilization >= PLAN_WARNING_UTILIZATION) ? "warning" : "normal";
 }
 

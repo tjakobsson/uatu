@@ -2268,8 +2268,9 @@ function reversibleState(turns: ReversibleClaudeTurn[], boundaryIndex: number | 
  * `/usage` → everything the readout shows about the plan: the base
  * windows the composer summary reads, the per-model weekly windows, the
  * server-labelled model buckets, extra-usage credits, and the plan name.
- * Undefined when the login reports no windows at all (an API key), which
- * the caller states as an empty plan. Every field is read defensively: the
+ * Undefined when the login reports neither a window nor extra usage (an
+ * API key), which the caller states as an empty plan; extra usage alone is
+ * still a plan, since every time window is optional on the wire. Every field is read defensively: the
  * SDK marks this method experimental, and a shape change must cost a field,
  * not the report. `behaviors` is deliberately left behind (design D6).
  */
@@ -2290,8 +2291,8 @@ export function normalizePlanUtilization(raw: unknown): PlanUtilization | undefi
       return typeof label === "string" && label.trim() && window ? [{ label: label.trim(), ...window }] : [];
     })
     : [];
-  if (!fiveHour && !sevenDay && !sevenDayOpus && !sevenDaySonnet && !sevenDayOauthApps && modelScoped.length === 0) return undefined;
   const extraUsage = planExtraUsage(limits.extra_usage);
+  if (!fiveHour && !sevenDay && !sevenDayOpus && !sevenDaySonnet && !sevenDayOauthApps && modelScoped.length === 0 && !extraUsage) return undefined;
   return {
     ...(typeof record.subscription_type === "string" && record.subscription_type ? { subscription: record.subscription_type } : {}),
     ...(fiveHour ? { fiveHour } : {}),

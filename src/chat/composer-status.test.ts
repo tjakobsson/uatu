@@ -98,13 +98,17 @@ describe("rate-limit badge and plan utilization", () => {
     expect(planSummaryLabel({ plan: { extraUsage: { enabled: false } }, session })).toBe("$1.23 this conversation");
   });
 
-  test("the summary warns at 80% of any window, base or per-model", () => {
+  test("the summary warns at 80% of any window, base or per-model, or of enabled extra usage", () => {
     expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, sevenDay: { utilization: 79.9 } })).toBe("normal");
     expect(planUtilizationLevel({ fiveHour: { utilization: 80 } })).toBe("warning");
     expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, modelScoped: [{ label: "Fable", utilization: 83 }] })).toBe("warning");
     expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, sevenDayOpus: { utilization: 95 } })).toBe("warning");
-    // Extra usage is credits, not a window: it never trips the chip.
-    expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, extraUsage: { enabled: true, utilization: 99 } })).toBe("normal");
+    // Enabled extra usage is a meter the readout warns on, so the chip
+    // warns with it; disabled or unmeasured credits say nothing.
+    expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, extraUsage: { enabled: true, utilization: 99 } })).toBe("warning");
+    expect(planUtilizationLevel({ extraUsage: { enabled: true, utilization: 80 } })).toBe("warning");
+    expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, extraUsage: { enabled: false, utilization: 99 } })).toBe("normal");
+    expect(planUtilizationLevel({ fiveHour: { utilization: 9 }, extraUsage: { enabled: true, usedCredits: 95, monthlyLimit: 100 } })).toBe("normal");
     expect(planUtilizationLevel({})).toBe("normal");
   });
 

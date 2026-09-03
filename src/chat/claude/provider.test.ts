@@ -1353,6 +1353,38 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("an extra-usage-only read does not file the login as planless: windows on the next read of the same process still land", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    const query = queries[0]!;
+    query.getContextUsage = async () => ({ categories: [], totalTokens: 100, maxTokens: 200_000 });
+    let reads = 0;
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => {
+      reads += 1;
+      return {
+        session: {}, subscription_type: "max", rate_limits_available: true,
+        rate_limits: {
+          ...(reads > 1 ? { five_hour: { utilization: 37, resets_at: "2026-09-02T14:00:00.000Z" } } : {}),
+          extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" },
+        },
+      };
+    };
+    query.push({ type: "result", subtype: "success", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 1);
+    query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:09.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
+    const reports = events.filter(event => event.eventType === "context.reported").map(event => (event.updates[0] as { item: { plan?: unknown } }).item);
+    expect(reads).toBe(2);
+    const extraUsage = { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" };
+    expect(reports[0]!.plan).toEqual({ subscription: "max", extraUsage });
+    expect(reports[1]!.plan).toEqual({ subscription: "max", fiveHour: { utilization: 37, resetsAt: Date.parse("2026-09-02T14:00:00.000Z") }, extraUsage });
+    stop();
+    await provider.dispose();
+  });
+
   test("the chooser follows Claude Code's own title, and a UatuCode rename outranks it", async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-title-")));
     const workspace = path.join(root, "workspace");
@@ -3102,6 +3134,14 @@ describe("/usage normalization", () => {
     expect(normalizePlanUtilization({ subscription_type: "pro", rate_limits_available: true, rate_limits: {} })).toBeUndefined();
     expect(normalizePlanUtilization(null)).toBeUndefined();
     expect(normalizePlanUtilization("usage")).toBeUndefined();
+  });
+
+  test("extra usage alone is a plan: the credit row survives without any time window", () => {
+    const plan = normalizePlanUtilization({
+      session: {}, subscription_type: "max", rate_limits_available: true,
+      rate_limits: { extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" } },
+    });
+    expect(plan).toEqual({ subscription: "max", extraUsage: { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" } });
   });
 
   test("malformed fields cost the field, not the report", () => {
