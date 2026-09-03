@@ -389,7 +389,7 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
 /** The user-typed text of an entry, or null for tool results and non-text. */
 export function promptText(entry: TranscriptEntry): string | null {
   const content = entry.message.content;
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return foldCommandMarkup(content);
   if (!Array.isArray(content)) return null;
   const blocks = content.filter((block): block is { type: string; text?: unknown } =>
     Boolean(block) && typeof block === "object");
@@ -398,7 +398,70 @@ export function promptText(entry: TranscriptEntry): string | null {
     .filter(block => block.type === "text" && typeof block.text === "string")
     .map(block => block.text as string)
     .join("\n");
-  return text.length > 0 ? text : null;
+  return text.length > 0 ? foldCommandMarkup(text) : null;
+}
+
+/**
+ * A slash-command prompt as the person typed it. Claude Code stores such a
+ * prompt as markup — `<command-name>/x</command-name>` plus
+ * `<command-args>y</command-args>` and a `<command-message>` label — rather
+ * than the composer text; this folds it back to `/x y`.
+ *
+ * Only the generated envelope folds: the text, ignoring surrounding
+ * whitespace, opens with a command-message or command-name tag, ends with
+ * the command-args tag when there is one, and holds nothing but those tags.
+ * The name and label may come in either order (the store emits both). A
+ * prompt that merely quotes a tag inline is not a command and comes back
+ * unchanged, as does anything else that fails the shape.
+ *
+ * The arguments are free-form and may themselves quote tag-shaped text, so
+ * they are read as the outer envelope (first open tag to last close tag) and
+ * the name and label are looked up outside it.
+ */
+export function foldCommandMarkup(text: string): string {
+  const body = text.trim();
+  if (!body.startsWith("<command-message>") && !body.startsWith("<command-name>")) return text;
+  const args = outerSpan(body, "command-args");
+  if (args && args.end !== body.length) return text;
+  let outside = args ? cut(body, args) : body;
+  const name = innerSpan(outside, "command-name");
+  const command = name?.value.trim() ?? "";
+  if (!name || !command) return text;
+  outside = cut(outside, name);
+  const message = innerSpan(outside, "command-message");
+  if (message) outside = cut(outside, message);
+  // Anything left over means the tags were quoted, not generated.
+  if (outside.trim()) return text;
+  const argText = args?.value.trim() ?? "";
+  return argText ? `${command} ${argText}` : command;
+}
+
+type TagSpan = { start: number; end: number; value: string };
+
+/** The first `<tag>` through the first `</tag>` after it. */
+function innerSpan(text: string, tag: string): TagSpan | null {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return null;
+  const closeAt = text.indexOf(close, start + open.length);
+  if (closeAt < 0) return null;
+  return { start, end: closeAt + close.length, value: text.slice(start + open.length, closeAt) };
+}
+
+/** The first `<tag>` through the LAST `</tag>`: the outer envelope. */
+function outerSpan(text: string, tag: string): TagSpan | null {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return null;
+  const closeAt = text.lastIndexOf(close);
+  if (closeAt < start + open.length) return null;
+  return { start, end: closeAt + close.length, value: text.slice(start + open.length, closeAt) };
+}
+
+function cut(text: string, span: TagSpan): string {
+  return text.slice(0, span.start) + text.slice(span.end);
 }
 
 /** Stable per-file identity for a session id, mirroring the store layout. */
