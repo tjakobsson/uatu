@@ -454,6 +454,7 @@ export function shouldRefreshPreview(
 
   const previous = findDocument(previousRoots, selectedId);
   const next = findDocument(nextRoots, selectedId);
+  if (Boolean(previous) !== Boolean(next)) return true;
   return Boolean(previous && next && (
     previous.mtimeMs !== next.mtimeMs
     || previous.kind !== next.kind
@@ -466,6 +467,9 @@ export function nextSelectedDocumentId(
   changedId: string | null,
   followEnabled: boolean,
 ): string | null {
+  // Navigation intent survives index gaps and binary classification.
+  if (!followEnabled && currentId) return currentId;
+
   if (roots.length === 0 || flattenDocuments(roots).length === 0) {
     return null;
   }

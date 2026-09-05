@@ -36,7 +36,7 @@ import { refreshOutline } from "./outline";
 import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
-import { setPreviewMode } from "../shell/selection";
+import { getSelectedDestination, setPreviewMode } from "../shell/selection";
 import { createDocumentLoadGuard } from "./load-generation";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
@@ -399,7 +399,12 @@ export async function loadDocument(documentId: string) {
   // Skipping the /api/document fetch also avoids the misleading 4xx error
   // path that used to surface as "The selected file no longer exists."
   const doc = findDocumentById(documentId);
-  if (doc?.kind === "binary") {
+  if (!doc) {
+    renderUnavailableDocument(documentId);
+    return;
+  }
+  setPreviewMode({ kind: "document" });
+  if (doc.kind === "binary") {
     if (isViewableImageName(doc.name)) {
       renderImagePreview(doc);
     } else {
@@ -426,8 +431,7 @@ export async function loadDocument(documentId: string) {
 
   if (!isCurrent()) return;
   if (!response.ok) {
-    setPreviewMode({ kind: "empty" });
-    renderEmptyPreview("Document unavailable", "The selected file no longer exists.");
+    renderUnavailableDocument(documentId);
     return;
   }
 
@@ -435,4 +439,14 @@ export async function loadDocument(documentId: string) {
   if (!isCurrent()) return;
   rememberDocumentPayload(payload);
   await applyDocumentPayload(payload, isCurrent);
+}
+
+function renderUnavailableDocument(documentId: string): void {
+  const destination = getSelectedDestination();
+  setPreviewMode({ kind: "empty" });
+  renderEmptyPreview(destination?.name ?? "File unavailable", "File unavailable. It may have been removed or excluded from this workspace.");
+  previewPathElement.textContent = destination?.relativePath ?? documentId;
+  refreshOutline(null);
+  syncFileFactsStrip({ kind: "hidden" });
+  mountLayoutToolbar(false);
 }

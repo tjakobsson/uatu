@@ -71,9 +71,9 @@ describe("chooseSelectionForFileEvent — Rule C / Rule D", () => {
     expect(next).toBe("/tmp/docs/README.md");
   });
 
-  test("empty roots → null regardless of follow", () => {
+  test("empty roots preserve a manual destination but have no default", () => {
     expect(chooseSelectionForFileEvent([], null, null, true)).toBeNull();
-    expect(chooseSelectionForFileEvent([], "/some/id", "/other/id", false)).toBeNull();
+    expect(chooseSelectionForFileEvent([], "/some/id", "/other/id", false)).toBe("/some/id");
   });
 });
 
