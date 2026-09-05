@@ -4,6 +4,30 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.7.0](https://github.com/tjakobsson/uatu/compare/v0.6.2...v0.7.0) (2026-09-05)
+
+
+### Features
+
+* **chat:** add Claude Code as a first-class chat agent ([#317](https://github.com/tjakobsson/uatu/issues/317)) ([30fd9c9](https://github.com/tjakobsson/uatu/commit/30fd9c9bbfdce9ba8f32c8a3f219fd84e7e7cdd6))
+* **chat:** collapse the live activity tail behind a working line ([778dd69](https://github.com/tjakobsson/uatu/commit/778dd690145e92e847e0490a1db5974ddcbb6099))
+* **chat:** improve OpenCode interactions ([#312](https://github.com/tjakobsson/uatu/issues/312)) ([3270288](https://github.com/tjakobsson/uatu/commit/3270288db19babeff40cba5138c56c777ba0bc96))
+* **chat:** plain-words plan usage with a detail readout and a Usage pane ([65adf58](https://github.com/tjakobsson/uatu/commit/65adf58670d701641b988a5ef81a8ab9f6ece83f))
+* **chat:** polish Claude Code chat, phase 1 ([#325](https://github.com/tjakobsson/uatu/issues/325)) ([e7a02e8](https://github.com/tjakobsson/uatu/commit/e7a02e8dc3de37ad7a86c4e87c40769ae8ca408e))
+* **chat:** polish Claude Code chat, phase 2 ([#326](https://github.com/tjakobsson/uatu/issues/326)) ([d53fd76](https://github.com/tjakobsson/uatu/commit/d53fd769c15fa1d64ba802ad9444e7e38a9a6745))
+* **chat:** polish Claude Code chat, phase 3 ([#328](https://github.com/tjakobsson/uatu/issues/328)) ([17263f7](https://github.com/tjakobsson/uatu/commit/17263f75b1223026f13db1824916fc7292fe1a40))
+
+
+### Bug Fixes
+
+* **live:** keep document and Chat streams alive across mobile interruptions ([#334](https://github.com/tjakobsson/uatu/issues/334)) ([711faad](https://github.com/tjakobsson/uatu/commit/711faad09283a183a598398b0bed862a3c909f00))
+* preserve manual file selection during background updates ([#341](https://github.com/tjakobsson/uatu/issues/341)) ([b3bfef3](https://github.com/tjakobsson/uatu/commit/b3bfef34053660eb2367bfda13e4132d40508711))
+
+
+### Performance
+
+* **chat:** reduce retained transcript reveal and history read work ([#342](https://github.com/tjakobsson/uatu/issues/342)) ([c11823b](https://github.com/tjakobsson/uatu/commit/c11823bbe4e38b2afddb8080b37afdf65e942774))
+
 ## [0.6.2](https://github.com/tjakobsson/uatu/compare/v0.6.1...v0.6.2) (2026-08-28)
 
 
