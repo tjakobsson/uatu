@@ -25,6 +25,9 @@ export function createPreviewEngine(
     label?: string;
     revealSurface?: () => void;
     scrollRoot?: () => HTMLElement;
+    prepareIndex?: () => void;
+    prepareReveal?: (range: Range) => void;
+    includeClosedDetails?: boolean;
   } = {},
 ): FindEngine {
   let spans: TextSpan[] = [];
@@ -41,6 +44,7 @@ export function createPreviewEngine(
   const paint = (reveal: boolean): void => {
     paintMatches(ranges, currentIndex);
     if (reveal && currentIndex >= 0) {
+      config.prepareReveal?.(ranges[currentIndex]!);
       // Resolved per call rather than using the captured `shellElement`: the
       // shell stops being the scroller in touch mode and the stacked layout,
       // where scrolling it is a silent no-op.
@@ -60,13 +64,14 @@ export function createPreviewEngine(
     label: config.label ?? "document",
 
     run(query, options, opts) {
+      config.prepareIndex?.();
       // Where the reader currently is, so a re-run after a live reload lands
       // near it rather than snapping to the top of the document.
       const anchor = currentIndex >= 0 ? spans[currentIndex]?.start ?? null : null;
       // Indexing `#preview` covers split layouts for free: both panes are its
       // children, so their text concatenates in document order and matches
       // come out as one ordered sequence across the pair.
-      const index = buildTextIndex(previewElement);
+      const index = buildTextIndex(previewElement, config);
       const result = findMatches(index.text, query, options);
 
       if (!result.ok) {
@@ -121,6 +126,7 @@ export function createPreviewEngine(
       // it is the scrolling one — while the reveal targets the real scroller.
       shellElement.focus({ preventScroll: true });
       if (landing) {
+        config.prepareReveal?.(landing);
         revealRange(landing, config.scrollRoot?.() ?? previewScrollRoot());
       }
     },

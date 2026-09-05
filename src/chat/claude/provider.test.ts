@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -95,6 +95,38 @@ function collect(provider: ClaudeProvider): { events: NormalizedProviderEvent[];
   })();
   return { events, stop: () => abort.abort() };
 }
+
+test("verified Claude history avoids repeated processing and reconciles native file mutations", async () => {
+  const { provider, configDir, workspace, queries } = fixture();
+  const file = path.join(claudeProjectDir(workspace, configDir), "reuse-session.jsonl");
+  const row = (id: string, text: string) => JSON.stringify({ type: "user", uuid: id, parentUuid: null, isSidechain: false, timestamp: "2026-09-01T12:00:00Z", message: { role: "user", content: text } }) + "\n";
+  writeFileSync(file, row("one", "first") + row("two", "second"));
+  const previous = globalThis.__uatuChatPerformance;
+  globalThis.__uatuChatPerformance = { counts: {}, durations: {} };
+  try {
+    const first = await provider.listMessages("reuse-session", { limit: 1 });
+    const older = await provider.listMessages("reuse-session", { limit: 1, cursor: first.nextCursor });
+    expect(older.items).toMatchObject([{ text: "first" }]);
+    expect(globalThis.__uatuChatPerformance.counts["claude-read"]).toBe(1);
+    expect(globalThis.__uatuChatPerformance.counts["claude-normalize"]).toBe(1);
+    const appended = row("three", "third");
+    appendFileSync(file, appended.slice(0, 30));
+    expect((await provider.listMessages("reuse-session", { limit: 10 })).items).toHaveLength(2);
+    appendFileSync(file, appended.slice(30));
+    expect((await provider.listMessages("reuse-session", { limit: 10 })).items).toHaveLength(3);
+    await expect(provider.listMessages("reuse-session", { limit: 1, cursor: first.nextCursor })).rejects.toThrow("history changed");
+    writeFileSync(file, row("one", "edited"));
+    expect((await provider.listMessages("reuse-session", { limit: 10 })).items).toMatchObject([{ text: "edited" }]);
+    writeFileSync(file + ".replacement", row("replacement", "replaced"));
+    renameSync(file + ".replacement", file);
+    expect((await provider.listMessages("reuse-session", { limit: 10 })).items).toMatchObject([{ text: "replaced" }]);
+    writeFileSync(file, "");
+    expect((await provider.listMessages("reuse-session", { limit: 10 })).items).toEqual([]);
+    rmSync(file);
+    await expect(provider.listMessages("reuse-session", { limit: 10 })).rejects.toThrow("unknown Claude conversation");
+    expect(queries).toHaveLength(0);
+  } finally { globalThis.__uatuChatPerformance = previous; await provider.dispose(); }
+});
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
@@ -3172,7 +3204,9 @@ describe("ClaudeProvider sessions", () => {
     const newest = await provider.listMessages(storedId, { limit: 1 });
     expect(newest.items.map(item => item.id)).toEqual(["usage:a1"]);
     expect(newest.completeItems?.length).toBe(3);
-    expect(newest.nextCursor).toBe("2");
+    expect(newest.nextCursor).toEqual(expect.any(String));
+    const older = await provider.listMessages(storedId, { limit: 10, cursor: newest.nextCursor });
+    expect(older.items.map(item => item.id)).toEqual(["message:u1", "message:a1"]);
 
     await expect(provider.listMessages("33333333-4444-4555-8666-777777777777", { limit: 10 })).rejects.toThrow("unknown Claude conversation");
     await provider.dispose();

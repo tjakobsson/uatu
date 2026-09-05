@@ -2,12 +2,26 @@ import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
+import { measureChatWork } from "./performance";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
 import { isLiveConversationStatus, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
+const deferredBodies = new WeakMap<HTMLElement, () => void>();
+
+export function materializeChatActivity(root: HTMLElement): void {
+  for (const node of root.querySelectorAll<HTMLElement>("[data-chat-lazy]")) deferredBodies.get(node)?.();
+}
+
+export function revealChatMatch(range: Range): void {
+  let element = range.startContainer.parentElement;
+  while (element && element.id !== "chat-items" && element.id !== "chat-drilldown-items") {
+    if (element instanceof HTMLDetailsElement) element.open = true;
+    element = element.parentElement;
+  }
+}
 
 /**
  * Keyed incremental timeline rendering: one persistent DOM node per item id.
@@ -25,12 +39,19 @@ export class TimelineRenderer {
   // The owning agent's persistent-approval sentence, set by the surface from
   // the agent's declaration; a card renders whatever its agent declared.
   permissionScopeNote: string | undefined;
+  deferClosedActivity = false;
 
   // `turnStartedAt` is when the running turn began (the surface's per-
   // conversation clock): the working line states the elapsed time from it,
   // and stamps it on the node so the surface can tick the label between
   // renders. Absent for a settled conversation — nothing is working.
   render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true, allowRevert = false, turnStartedAt?: number): HTMLElement[] {
+    const finish = measureChatWork("transcript-render");
+    try { return this.renderTimeline(target, projection, expanded, allowSubagents, allowRevert, turnStartedAt); }
+    finally { finish(); }
+  }
+
+  private renderTimeline(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents: boolean, allowRevert: boolean, turnStartedAt?: number): HTMLElement[] {
     if (!projection) {
       this.reset();
       clearChildren(target);
@@ -110,7 +131,7 @@ export class TimelineRenderer {
         nodes.set(item.id, entry.node);
         continue;
       }
-      if (entry && entry.active === active && (item.type !== "question" || entry.variant === variant) && patchInPlace(entry, item, completedAssistant)) {
+      if (entry && !entry.node.hasAttribute("data-chat-lazy") && entry.active === active && (item.type !== "question" || entry.variant === variant) && patchInPlace(entry, item, completedAssistant)) {
         entry.variant = variant;
         nodes.set(item.id, entry.node);
         dirty.push(entry.node);
@@ -144,7 +165,22 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote));
+      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer);
+      const node = buildNode(markup(this.deferClosedActivity));
+      if (this.deferClosedActivity && node.matches("details.chat-activity:not([open])")) {
+        node.setAttribute("data-chat-lazy", "");
+        const materialize = () => {
+          if (!node.hasAttribute("data-chat-lazy")) return;
+          const complete = buildNode(markup(false));
+          for (const body of Array.from(complete.childNodes).slice(1)) node.append(body);
+          node.removeAttribute("data-chat-lazy");
+          deferredBodies.delete(node);
+          decorateFileLinks(node);
+          decorateAttachmentImages(node);
+        };
+        deferredBodies.set(node, materialize);
+        node.addEventListener("toggle", () => { if (node.hasAttribute("open")) materialize(); });
+      }
       if (completedAssistant) decorateAssistantCopyActions(node);
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
@@ -774,7 +810,7 @@ export class RevertedMessagesDockRenderer {
 
 type RequestOrigin = { conversationId: string; label: string };
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   if (item.type === "user_message") {
@@ -804,7 +840,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // place. (Running ones are filtered out above and listed by the composer.)
   if (item.type === "background_task") {
     const outcome = item.status === "completed" ? "completed" : item.status === "failed" ? "failed" : item.status === "stopped" ? "cancelled" : "running";
-    const body = `${item.summary ? `<pre class="chat-task-summary">${escapeHtml(item.summary)}</pre>` : ""}${item.toolUseId ? `<p class="chat-tool-meta">Started by the ${escapeHtml(item.taskType === "local_agent" ? "Agent" : "Bash")} step above.</p>` : ""}`;
+    const body = deferClosed && !open ? "" : `${item.summary ? `<pre class="chat-task-summary">${escapeHtml(item.summary)}</pre>` : ""}${item.toolUseId ? `<p class="chat-tool-meta">Started by the ${escapeHtml(item.taskType === "local_agent" ? "Agent" : "Bash")} step above.</p>` : ""}`;
     return activityShell(id, outcome, backgroundTaskLabel(item), item.description, body, open, false, readerClosed, stamp, item.status === "stopped" ? "stopped" : undefined);
   }
   if (item.type === "file_change") {
@@ -822,16 +858,17 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   }
   if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents, permissionScopeNote);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, origin, allowSubagents);
-  if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents);
+  if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents, deferClosed);
   // A command's text is the subject, not the label. As a label it lands in the
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
   // of truncating; "Shell" names the step and the command ellipsizes beside it.
   if (item.type === "command") {
-    return activityShell(id, item.status, "Shell", item.command, renderActivityOutput(item.output, item.status), open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, stamp);
+    const auto = autoOpen(item.status, item.output) && !readerClosed;
+    return activityShell(id, item.status, "Shell", item.command, deferClosed && !open && !auto ? "" : renderActivityOutput(item.output, item.status), open, auto, readerClosed, stamp);
   }
   // Reasoning has no streamed output to auto-open for; it opens only when the
   // reader says so.
-  return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, false, readerClosed, stamp);
+  return activityShell(id, item.status, reasoningLabel(item), undefined, deferClosed && !open ? "" : `<pre>${escapeHtml(item.text)}</pre>`, open, false, readerClosed, stamp);
 }
 
 function assistantMessageComplete(items: readonly ConversationItem[], index: number, status: ConversationStatus): boolean {
@@ -914,9 +951,9 @@ function renderActivityOutput(output: string | undefined, status: ActivityStatus
   return `<pre>${escapeHtml(preview)}</pre><details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary><pre>${escapeHtml(rest)}</pre></details>`;
 }
 
-function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: TodoSummary | undefined, allowSubagents: boolean): string {
+function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: TodoSummary | undefined, allowSubagents: boolean, deferClosed = false): string {
   const detail = describeToolDetail(item);
-  const body = toolBody(detail, item, allowSubagents);
+  const body = deferClosed && !open && !(autoOpen(item.status, item.output) && !readerClosed) ? "" : toolBody(detail, item, allowSubagents);
   // A todo update stays collapsed, but its summary reports what moved and to
   // which task — every todowrite call carries the whole list, so showing the
   // list each time reprints it verbatim on every tool call.

@@ -979,6 +979,7 @@ paths:
       operationId: workspaceGetChatConversation
       tags: [Chat]
       summary: Read a paginated normalized conversation snapshot
+      description: Older-page cursors refer to a history version. A 409 response requires a fresh snapshot without a cursor before paging again.
       parameters:
         - { name: cursor, in: query, schema: { type: string, maxLength: 2048 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
@@ -987,6 +988,7 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceUnavailable' }

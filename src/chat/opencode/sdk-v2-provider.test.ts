@@ -705,11 +705,45 @@ describe("history across both OpenCode message stores", () => {
     const newest = await provider.listMessages("ses_legacy", { limit: 2 });
     expect(newest.items.map(messageId)).toEqual(["msg_2", "msg_3"]);
     expect(newest.completeItems?.map(messageId)).toEqual(["msg_1", "msg_2", "msg_3"]);
-    expect(newest.nextCursor).toBe("1");
+    expect(newest.nextCursor).toEqual(expect.any(String));
 
     const older = await provider.listMessages("ses_legacy", { limit: 2, cursor: newest.nextCursor });
     expect(older.items.map(messageId)).toEqual(["msg_1"]);
     expect(older.nextCursor).toBeUndefined();
+  });
+
+  test("shares concurrent traversal, but rereads both stores and rejects obsolete page versions", async () => {
+    const native = [modern("msg_2", 2), modern("msg_3", 3)];
+    const legacy = [classic("msg_1", 1)];
+    let nativeReads = 0;
+    let legacyReads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const sdk = client([], legacy);
+    sdk.v2.session.messages = (async () => {
+      nativeReads++;
+      await gate;
+      return { data: { data: native, cursor: { next: null } } };
+    }) as unknown as typeof sdk.v2.session.messages;
+    sdk.session.messages = (async () => { legacyReads++; return { data: legacy }; }) as unknown as typeof sdk.session.messages;
+    const provider = new SdkV2Provider(sdk, "/workspace");
+    const a = provider.listMessages("ses_mixed", { limit: 1 });
+    const b = provider.listMessages("ses_mixed", { limit: 1 });
+    release();
+    const [first, second] = await Promise.all([a, b]);
+    expect(first).toEqual(second);
+    expect([nativeReads, legacyReads]).toEqual([1, 1]);
+    const older = await provider.listMessages("ses_mixed", { limit: 1, cursor: first.nextCursor });
+    expect(older.items.map(messageId)).toEqual(["msg_2"]);
+    expect([nativeReads, legacyReads]).toEqual([2, 2]);
+    // External classic-store edits have no stream invalidation or reliable revision.
+    legacy.push(classic("msg_4", 4));
+    await expect(provider.listMessages("ses_mixed", { limit: 1, cursor: first.nextCursor })).rejects.toThrow("Conversation history changed");
+    const fresh = await provider.listMessages("ses_mixed", { limit: 1 });
+    expect(fresh.items.map(messageId)).toEqual(["msg_4"]);
+    native.splice(0, native.length);
+    const truncated = await provider.listMessages("ses_mixed", { limit: 10 });
+    expect(truncated.items.map(messageId)).toEqual(["msg_1", "msg_4"]);
   });
 
   test("never combines order with a cursor, which OpenCode rejects", async () => {
@@ -899,7 +933,7 @@ describe("reversible history across both OpenCode stores", () => {
         model: { providerId: "openai", modelId: "visible" },
         mode: "build",
       });
-      expect(newest.nextCursor).toBe("1");
+      expect(newest.nextCursor).toEqual(expect.any(String));
       const older = await provider.listMessages(`ses_${store}`, { limit: 1, cursor: newest.nextCursor });
       expect(older.items.map(messageId)).toEqual(["msg_z"]);
       expect(older.nextCursor).toBeUndefined();

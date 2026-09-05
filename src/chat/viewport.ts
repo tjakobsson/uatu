@@ -38,7 +38,10 @@ export class ChatViewportController {
     document.documentElement.toggleAttribute("data-chat-keyboard", metrics.keyboardVisible);
     this.surface.style.setProperty("--chat-visual-top", `${top}px`);
     this.surface.style.setProperty("--chat-visual-height", `${metrics.height}px`);
-    if (this.anchor.isPinned()) this.timeline.scrollTop = Math.max(0, this.timeline.scrollHeight - this.timeline.clientHeight);
+    const root = document.documentElement;
+    const visible = document.visibilityState !== "hidden" && (root.getAttribute("data-ui-mode") === "touch"
+      ? root.getAttribute("data-active-tab") === "chat" : root.getAttribute("data-chat-panel") === "open");
+    if (visible && this.anchor.isPinned()) this.timeline.scrollTop = Math.max(0, this.timeline.scrollHeight - this.timeline.clientHeight);
   }
 }
 

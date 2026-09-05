@@ -96,14 +96,19 @@ function reconnectMarker(attempt: number, options: ChatStreamOptions): string {
 }
 
 export class ChatApiClient {
+  private startupReadMs = 65_000;
+  private readonly agentReady = new Map<string, boolean>();
   constructor(
     private readonly fetcher: FetchLike = (input, init) => fetch(input, init),
     private readonly eventSourceFactory: (url: string) => EventSource = url => new EventSource(url),
     private readonly timers: ChatClientTimers = defaultTimers,
+    private readonly readBudgets: { ordinaryMs?: number; startupMs?: number } = {},
   ) {}
 
-  status(): Promise<AgentChatStatus[]> {
-    return this.get(appUrl("/api/chat/status"), parseAgentChatStatuses);
+  async status(signal?: AbortSignal): Promise<AgentChatStatus[]> {
+    const statuses = await this.get(appUrl("/api/chat/status"), parseAgentChatStatuses, signal);
+    for (const status of statuses) this.agentReady.set(status.agent.id, status.availability.state === "ready");
+    return statuses;
   }
 
   // POST, not a safe method: retry spawns the named agent's process.
@@ -114,26 +119,26 @@ export class ChatApiClient {
     });
   }
 
-  async conversations(): Promise<ConversationSummary[]> {
-    const value = await this.get(appUrl("/api/chat/conversations"), value => value as { conversations?: unknown });
+  async conversations(signal?: AbortSignal): Promise<ConversationSummary[]> {
+    const value = await this.get(appUrl("/api/chat/conversations"), value => value as { conversations?: unknown }, signal);
     if (!Array.isArray(value.conversations)) throw new ChatTransportError("Chat returned an invalid conversation list");
     return value.conversations.map(parseConversationSummary);
   }
 
   async models(agentId: string): Promise<ChatModel[]> {
-    const value = await this.get(appUrl(`/api/chat/models?agent=${encodeURIComponent(agentId)}`), value => value as { models?: unknown });
+    const value = await this.get(appUrl(`/api/chat/models?agent=${encodeURIComponent(agentId)}`), value => value as { models?: unknown }, undefined, this.coldReadBudget());
     if (!Array.isArray(value.models)) throw new ChatTransportError("Chat returned an invalid model list");
     return value.models.map(parseChatModel);
   }
 
   async commands(agentId: string): Promise<ChatCommand[]> {
-    const value = await this.get(appUrl(`/api/chat/commands?agent=${encodeURIComponent(agentId)}`), value => value as { commands?: unknown });
+    const value = await this.get(appUrl(`/api/chat/commands?agent=${encodeURIComponent(agentId)}`), value => value as { commands?: unknown }, undefined, this.coldReadBudget());
     if (!Array.isArray(value.commands)) throw new ChatTransportError("Chat returned an invalid command list");
     return value.commands.map(parseChatCommand);
   }
 
   async modes(agentId: string): Promise<ChatMode[]> {
-    const value = await this.get(appUrl(`/api/chat/modes?agent=${encodeURIComponent(agentId)}`), value => value as { modes?: unknown });
+    const value = await this.get(appUrl(`/api/chat/modes?agent=${encodeURIComponent(agentId)}`), value => value as { modes?: unknown }, undefined, this.coldReadBudget());
     if (!Array.isArray(value.modes)) throw new ChatTransportError("Chat returned an invalid mode list");
     return value.modes.map(parseChatMode);
   }
@@ -142,10 +147,11 @@ export class ChatApiClient {
     return this.mutate(appUrl("/api/chat/conversations"), agentId ? { agentId } : {}, parseConversationSnapshot);
   }
 
-  snapshot(conversationId: string, cursor?: string): Promise<ConversationSnapshot> {
+  snapshot(conversationId: string, cursor?: string, signal?: AbortSignal): Promise<ConversationSnapshot> {
     const query = new URLSearchParams({ limit: "50" });
     if (cursor) query.set("cursor", cursor);
-    return this.get(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}?${query}`), parseConversationSnapshot);
+    const cold = this.agentReady.get(conversationId.split(":")[0]!) === false;
+    return this.get(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}?${query}`), parseConversationSnapshot, signal, cold ? this.coldReadBudget() : undefined);
   }
 
   prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
@@ -386,8 +392,20 @@ export class ChatApiClient {
     return { close };
   }
 
-  private async get<T>(path: string, parse: (value: unknown) => T): Promise<T> {
-    return this.request(path, undefined, parse);
+  private coldReadBudget(): number { return this.readBudgets.startupMs ?? this.startupReadMs; }
+
+  private async get<T>(path: string, parse: (value: unknown) => T, signal?: AbortSignal, timeoutMs = this.readBudgets.ordinaryMs ?? 30_000): Promise<T> {
+    const controller = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    const timer = setTimeout(() => controller.abort(new Error("Chat read timed out. Retry to read the conversation again.")), timeoutMs);
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(combined.reason);
+      if (combined.aborted) onAbort();
+      else combined.addEventListener("abort", onAbort, { once: true });
+    });
+    try { return await Promise.race([this.request(path, { signal: combined }, parse), aborted]); }
+    finally { clearTimeout(timer); combined.removeEventListener("abort", onAbort); }
   }
 
   private async mutate<T>(path: string, body: unknown, parse: (value: unknown) => T, method = "POST"): Promise<T> {
@@ -401,6 +419,8 @@ export class ChatApiClient {
     } catch (error) {
       throw new ChatTransportError(error instanceof Error ? error.message : "Chat request failed");
     }
+    const allowance = Number(response.headers.get("x-uatu-chat-startup-read-ms"));
+    if (Number.isFinite(allowance) && allowance > 0) this.startupReadMs = allowance;
     const value = await response.json().catch(() => null) as { error?: unknown } | null;
     if (!response.ok) {
       throw new ChatTransportError(typeof value?.error === "string" ? value.error : `Chat request failed (${response.status})`, response.status);

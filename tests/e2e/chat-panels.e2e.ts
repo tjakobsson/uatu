@@ -522,7 +522,8 @@ test.describe("chat panels and navigation", () => {
 
     await page.locator("#chat-conversation-select").selectOption(target.conversation.id);
     await expect(page.locator("#chat-context-usage")).toBeHidden();
-    await expect(page.locator("#chat-state")).toContainText("chat operation failed");
+    await expect(page.locator(".chat-read-error").filter({ visible: true })).toContainText("chat operation failed");
+    await expect(page.getByRole("button", { name: "Retry read" })).toBeVisible();
   });
 
   test("a new message's initial zero report does not reset known context usage", async ({ page, request }) => {

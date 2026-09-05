@@ -8,7 +8,29 @@ beforeAll(() => {
   (globalThis as Record<string, unknown>).document = dom.document;
 });
 
-const { QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, awaitingFirstResponse, formatElapsed, subagentEntries, workingLabel } = await import("./timeline-renderer");
+const { QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, materializeChatActivity, awaitingFirstResponse, formatElapsed, subagentEntries, workingLabel } = await import("./timeline-renderer");
+
+test("closed activity defers its body and find materializes current sanitized content", () => {
+  const previousFilter = Reflect.get(globalThis, "NodeFilter");
+  Reflect.set(globalThis, "NodeFilter", { SHOW_TEXT: 4 });
+  try {
+  const renderer = new TimelineRenderer();
+  renderer.deferClosedActivity = true;
+  const target = dom.document.createElement("div") as unknown as HTMLElement;
+  const tool: ConversationItem = { id: "lazy-tool", type: "tool", createdAt: 1, name: "read", status: "completed", input: '{"path":"src/chat/ui.ts"}', output: "Find this output <script>bad()</script>" };
+  renderer.render(target, projectionWith([tool]), new Set());
+  expect(target.querySelector("[data-chat-lazy]")).not.toBeNull();
+  expect(target.textContent).not.toContain("Find this output");
+  materializeChatActivity(target);
+  expect(target.textContent).toContain("Find this output");
+  expect(target.querySelector("script")).toBeNull();
+  expect(target.querySelector("[data-file-ref]")).not.toBeNull();
+  expect(target.querySelector("[data-chat-lazy]")).toBeNull();
+  const before = target.innerHTML;
+  materializeChatActivity(target);
+  expect(target.innerHTML).toBe(before);
+  } finally { Reflect.set(globalThis, "NodeFilter", previousFilter); }
+});
 
 function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjection> = {}): ChatProjection {
   return {

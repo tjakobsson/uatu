@@ -36,7 +36,7 @@ import {
   renderCommitPreview,
 } from "./url";
 
-export async function loadInitialState() {
+export async function loadInitialState(onWorkspaceReady?: () => void) {
   // Decode the requested URL path BEFORE fetching state so we can decide
   // whether to honor the server's defaultDocumentId or override with a
   // URL-derived doc selection (direct-link arrival, per design D3).
@@ -133,6 +133,10 @@ export async function loadInitialState() {
 
   syncFollowToggle();
   renderSidebar();
+  onWorkspaceReady?.();
+  connectEvents();
+  // Resume from the cursor even if the initial preview is still loading.
+  watchPageLifecycle();
 
   // Populate history.state with the document id so subsequent popstate
   // events have an unambiguous target without re-resolving the path each
@@ -152,20 +156,17 @@ export async function loadInitialState() {
   } else if (directLinkMessage) {
     renderEmptyPreview(directLinkMessage.title, directLinkMessage.body);
   } else if (appState.selectedId) {
-    await loadDocument(appState.selectedId);
-    if (initialHash) {
-      // The browser hasn't laid out the freshly-rendered preview yet — defer
-      // the scroll to the next frame so `scrollIntoView` has positions to
-      // work with. Mirrors the TOC click path's timing (which only fires
-      // after the preview is fully painted).
-      requestAnimationFrame(() => scrollToFragment(initialHash.slice(1)));
-    }
+    await loadDocument(appState.selectedId, () => {
+      if (initialHash) {
+        // The browser hasn't laid out the freshly-rendered preview yet — defer
+        // the scroll to the next frame so `scrollIntoView` has positions to
+        // work with. Mirrors the TOC click path's timing (which only fires
+        // after the preview is fully painted).
+        requestAnimationFrame(() => scrollToFragment(initialHash.slice(1)));
+      }
+    });
   }
 
-  connectEvents();
-  // A frozen or backgrounded page misses everything the stream would have
-  // delivered; the lifecycle watcher is what brings it back without a reload.
-  watchPageLifecycle();
   enablePersonalStatePersistence();
   // Restored/default values are read-only at boot: writing a full snapshot
   // here could overwrite newer field-level writes from another open client.

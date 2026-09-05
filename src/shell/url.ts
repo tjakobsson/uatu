@@ -4,6 +4,7 @@
 // activations.
 
 import { appPathname } from "../shared/app-url";
+import { deferHiddenPreview } from "../preview/deferred";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { renderCommitMessage } from "../preview/commit-message";
@@ -66,6 +67,9 @@ export function activateCommitPreview(params: CommitPreviewParams, options: { pu
 }
 
 export function renderCommitPreview(params: CommitPreviewParams) {
+  if (deferHiddenPreview(() => {
+    if (appState.previewMode.kind === "commit") renderCommitPreview(appState.previewMode);
+  })) return;
   const resolved = resolveCommitPreview(params);
   if (resolved.kind === "found") {
     renderCommitMessage(resolved.repository, resolved.commit);

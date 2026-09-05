@@ -121,6 +121,7 @@ describe("panel state transitions", () => {
     const attributes: Record<string, string> = {};
     const properties: Record<string, string> = {};
     Reflect.set(globalThis, "document", {
+      dispatchEvent: () => true,
       documentElement: {
         setAttribute: (name: string, value: string) => {
           attributes[name] = value;

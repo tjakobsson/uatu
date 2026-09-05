@@ -270,6 +270,20 @@ freeze. With `--debug`, `GET /debug/metrics` returns the live counters.
 
 ### Chat startup
 
+Chat history and inventory reads have a 30-second client deadline. Cold agent
+history and catalog reads allow the configured startup timeout plus 35 seconds
+for transport (65 seconds with the default startup setting). A failed read
+offers **Retry read**, which preserves the draft and issues only read requests.
+Conversation selection cancels obsolete reads. History can load while optional
+model, mode, and command catalogs are still pending.
+
+History reuse stays in memory, with an estimated 32 MiB and eight-conversation
+limit per provider. Claude verifies native file identity, timestamps, size, and
+normalization inputs before reusing parsed history. OpenCode's current API has
+no revision covering both history stores, so it shares concurrent reads and
+reconciles later reads against both stores. Changed older-page cursors require
+a fresh snapshot. No cache files are written to the workspace.
+
 Chat starts OpenCode lazily, waits for it to answer at all, then waits a
 shorter slice for it to report healthy. A cold OpenCode start on a slow
 filesystem can exceed the 30-second default; widen it with an environment

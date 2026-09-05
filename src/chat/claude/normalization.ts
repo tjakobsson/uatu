@@ -1,4 +1,5 @@
 import { boundedSet } from "../../shared/bounded-map";
+import { measureChatWork } from "../performance";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import type { ContextReportItem, ConversationItem, MessageAttachment, ModelSelection, TokenUsage } from "../types";
 import { foldCommandMarkup, type TranscriptEntry } from "./transcript";
@@ -456,6 +457,7 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
   items: ConversationItem[];
   accounting: Array<{ messageId: string; createdAt: number; usage?: TokenUsage; model?: string }>;
 } {
+  const finish = measureChatWork("claude-normalize");
   const memory = createClaudeEventMemory();
   // Stored history joins on the same catalog aliases as the live stream —
   // otherwise a resync would swap a translated model id for the raw one and
@@ -495,6 +497,7 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
     // The window-fill carrier for a stored assistant message rides its
     // updates, exactly as it does live — one producer for both sources.
   }
+  finish();
   return { items, accounting };
 }
 

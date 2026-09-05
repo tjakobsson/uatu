@@ -358,10 +358,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
       fakeChatAgent.restartProviderPump();
       return Response.json({ ok: true });
     case "delayNextInventoryList":
-      fakeChatAgent.delayNextInventoryList();
+      targetFake.delayNextInventoryList();
       return Response.json({ ok: true });
     case "releaseInventoryList":
-      fakeChatAgent.releaseInventoryList();
+      targetFake.releaseInventoryList();
       return Response.json({ ok: true });
     case "failPrompt":
       targetFake.failPrompt();

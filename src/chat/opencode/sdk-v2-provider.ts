@@ -6,6 +6,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../../shared/bounded-map";
+import { measureChatWork } from "../performance";
+import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../history-reuse";
 import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import type {
   NormalizedProviderEvent,
@@ -58,6 +60,7 @@ export const OPENCODE_PERMISSION_SCOPE_NOTE = "“Allow always” also covers la
 
 export class SdkV2Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
+  private readonly historyReuse = new HistoryReuse<ProviderMessage[]>();
 
   constructor(
     private readonly client: OpencodeClient,
@@ -288,7 +291,8 @@ export class SdkV2Provider implements ChatProvider {
     // session still names a boundary absent from that response, the returned
     // messages are the only visible history we can preserve safely.
     const visible = boundaryIndex >= 0 ? complete.slice(0, boundaryIndex) : complete;
-    const end = clampIndex(options.cursor, visible.length);
+    const version = historyVersion([visible, boundaryId]);
+    const end = historyPageEnd(options.cursor, version, visible.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const page = visible.slice(start, end);
     const accounting: StoredMessageAccounting[] = [];
@@ -302,29 +306,40 @@ export class SdkV2Provider implements ChatProvider {
       // Paged locally over a fully refetched merge (see allMessages), so the
       // complete transcript is free here — walkers use it instead of paging.
       completeItems: visible.flatMap(message => normalizeProviderMessage(message)),
-      nextCursor: start > 0 ? String(start) : undefined,
+      nextCursor: historyPageCursor(start, version),
     };
   }
 
   private async allMessages(sessionId: string): Promise<ProviderMessage[]> {
-    const byId = new Map<string, ProviderMessage>();
-    let cursor: string | undefined;
-    do {
-      // OpenCode rejects `order` combined with `cursor` — the cursor already
-      // encodes the direction, so it is only sent for the first page.
-      const page = unwrap(await this.client.v2.session.messages(
-        cursor ? { sessionID: sessionId, limit: 100, cursor } : { sessionID: sessionId, order: "asc", limit: 100 },
-      ));
-      for (const item of page.data as ProviderMessage[]) byId.set(messageIdentity(item), item);
-      cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
-    } while (cursor);
+    // The pinned SDK provides no revision covering both native and classic
+    // stores. Session timestamps cannot prove either store's content unchanged.
+    // Share concurrent traversals, then reconcile authoritatively on the next
+    // read. Never promote a TTL or a session timestamp into a history version.
+    return this.historyReuse.read(sessionId, undefined, () => this.readAllMessages(sessionId));
+  }
 
-    for (const item of await this.legacyMessages(sessionId)) {
-      const id = messageIdentity(item);
-      if (!byId.has(id)) byId.set(id, item);
-    }
+  private async readAllMessages(sessionId: string): Promise<ProviderMessage[]> {
+    const finish = measureChatWork("opencode-read");
+    try {
+      const byId = new Map<string, ProviderMessage>();
+      let cursor: string | undefined;
+      do {
+        // OpenCode rejects `order` combined with `cursor` — the cursor already
+        // encodes the direction, so it is only sent for the first page.
+        const page = unwrap(await this.client.v2.session.messages(
+          cursor ? { sessionID: sessionId, limit: 100, cursor } : { sessionID: sessionId, order: "asc", limit: 100 },
+        ));
+        for (const item of page.data as ProviderMessage[]) byId.set(messageIdentity(item), item);
+        cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
+      } while (cursor);
 
-    return [...byId.values()].sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right));
+      for (const item of await this.legacyMessages(sessionId)) {
+        const id = messageIdentity(item);
+        if (!byId.has(id)) byId.set(id, item);
+      }
+
+      return [...byId.values()].sort((left, right) => messageCreatedAt(left) - messageCreatedAt(right));
+    } finally { finish(); }
   }
 
   private async legacyMessages(sessionId: string): Promise<ProviderMessage[]> {
@@ -379,6 +394,7 @@ export class SdkV2Provider implements ChatProvider {
   }
 
   private async restoreThrough(sessionId: string, context: ReversibleHistoryContext, index: number): Promise<ReversibleHistoryResult> {
+    this.historyReuse.invalidate(sessionId);
     const next = context.turns[index + 1];
     if (next) {
       return this.stageRevert(sessionId, context, index + 1);
@@ -396,6 +412,7 @@ export class SdkV2Provider implements ChatProvider {
   }
 
   private async stageRevert(sessionId: string, context: ReversibleHistoryContext, index: number): Promise<ReversibleHistoryResult> {
+    this.historyReuse.invalidate(sessionId);
     const target = context.turns[index];
     if (!target) throw new ReversibleHistoryTargetError();
     if (context.compatibility) {
@@ -470,6 +487,7 @@ export class SdkV2Provider implements ChatProvider {
   }
 
   async *events(signal: AbortSignal): AsyncIterable<NormalizedProviderEvent> {
+    this.historyReuse.invalidate();
     const [native, classic] = await Promise.all([
       this.client.v2.event.subscribe({ signal }),
       this.client.event.subscribe({ directory: this.directory }, { signal }),
@@ -481,14 +499,22 @@ export class SdkV2Provider implements ChatProvider {
       // Normalization resolves every failure to an outcome, and anything that
       // still escapes must cost one event rather than ending the stream.
       try {
-        yield normalizeProviderEvent(event, memory);
+        const normalized = normalizeProviderEvent(event, memory);
+        this.historyReuse.invalidate(normalized.conversationId);
+        yield normalized;
       } catch {
         yield { updates: [], outcome: "unparseable", eventType: "" };
       }
     }
   }
 
+  async dispose(): Promise<void> {
+    this.historyReuse.dispose();
+    this.compatibilitySessions.clear();
+  }
+
   async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+    this.historyReuse.invalidate(sessionId);
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({
@@ -729,12 +755,6 @@ function messageCreatedAt(value: unknown): number {
   const message = value as { time?: { created?: unknown }; info?: { time?: { created?: unknown } } };
   const created = message?.time?.created ?? message?.info?.time?.created;
   return typeof created === "number" && Number.isFinite(created) ? created : 0;
-}
-
-function clampIndex(cursor: string | undefined, length: number): number {
-  if (!cursor) return length;
-  const parsed = Number(cursor);
-  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= length ? parsed : length;
 }
 
 function toSession(value: unknown): ProviderSession {

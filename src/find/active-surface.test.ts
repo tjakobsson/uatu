@@ -222,6 +222,7 @@ describe("a committed tab change claims its surface", () => {
     Reflect.set(globalThis, "document", {
       documentElement: { setAttribute: () => {} },
       addEventListener: () => {},
+      dispatchEvent: () => true,
     });
     Reflect.set(globalThis, "window", {
       localStorage: {

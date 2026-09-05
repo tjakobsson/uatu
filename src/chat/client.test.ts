@@ -10,6 +10,31 @@ afterEach(() => {
 });
 
 describe("chat API client", () => {
+  test("read deadlines release even fetchers and bodies that ignore cancellation", async () => {
+    let signal: AbortSignal | null | undefined;
+    const hanging = new ChatApiClient(async (_url, init) => {
+      signal = init?.signal;
+      return new Promise<Response>(() => {});
+    }, undefined, undefined, { ordinaryMs: 10 });
+    await expect(hanging.snapshot("opencode:test")).rejects.toThrow("timed out");
+    expect(signal?.aborted).toBe(true);
+    const body = new ChatApiClient(async () => new Response(new ReadableStream({ start() {} })), undefined, undefined, { ordinaryMs: 10 });
+    await expect(body.conversations()).rejects.toThrow("timed out");
+  });
+
+  test("cold reads honor the server allowance while superseded reads abort", async () => {
+    const client = new ChatApiClient(async url => {
+      if (String(url).endsWith("status")) return Response.json({ agents: [{ agent: { id: "opencode", name: "OpenCode" }, availability: { state: "idle" } }] }, { headers: { "x-uatu-chat-startup-read-ms": "100" } });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return Response.json(snapshot());
+    }, undefined, undefined, { ordinaryMs: 10 });
+    await client.status();
+    expect((await client.snapshot("opencode:test")).items).toEqual([]);
+    const abort = new AbortController();
+    const pending = client.snapshot("opencode:test", undefined, abort.signal);
+    abort.abort(new Error("Superseded read"));
+    await expect(pending).rejects.toThrow("Superseded read");
+  });
   test("routes status, models, inventory, snapshots, and mutations through appUrl", async () => {
     Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
     resetAppBasePathForTests();

@@ -31,6 +31,19 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const barVisible = () => host.querySelector(".uatu-loading-bar") !== null;
 
 describe("createLoadingSignal", () => {
+  test("only the current operation can settle or dismiss labelled feedback", async () => {
+    const signal = createLoadingSignal({ segment, barHost: host, busyHost: host, visibleLabel: true, showDelayMs: 10, minVisibleMs: 20 });
+    const first = signal.start("Loading conversation...");
+    await sleep(15);
+    const second = signal.start("Updating conversation...");
+    signal.settle(first);
+    signal.cancel(first);
+    expect(host.getAttribute("aria-busy")).toBe("true");
+    expect(host.querySelector(".uatu-loading-label")?.textContent).toBe("Updating conversation...");
+    signal.cancel(second);
+    expect(barVisible()).toBe(false);
+    expect(host.hasAttribute("aria-busy")).toBe(false);
+  });
   test("segment goes busy immediately on start and un-busies on settle", () => {
     const signal = createLoadingSignal({ segment, barHost: host, showDelayMs: 50, minVisibleMs: 50 });
 
