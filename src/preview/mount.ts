@@ -4,6 +4,7 @@
 // owns the entire render-on-load flow.
 
 import { appUrl } from "../shared/app-url";
+import { deferHiddenPreview } from "./deferred";
 import { contextualAppUrl } from "../shell/watch-context";
 import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
@@ -351,7 +352,16 @@ export async function renderSplitPayloads(
   });
 }
 
-export async function loadDocument(documentId: string) {
+export async function loadDocument(documentId: string, onPresented?: () => void) {
+  if (deferHiddenPreview(() => {
+    const current = appState.selectedId;
+    if (current && appState.previewMode.kind === "document") void loadDocument(current, current === documentId ? onPresented : undefined);
+  })) return;
+  await executeLoadDocument(documentId);
+  if (appState.selectedId === documentId) onPresented?.();
+}
+
+async function executeLoadDocument(documentId: string) {
   const requestedView = appState.viewMode;
   const requestedLayout = appState.viewLayout;
   const loadToken = documentLoadGuard.begin(documentId, requestedView, requestedLayout);

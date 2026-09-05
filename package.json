@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "bun run src/cli.ts serve",
     "bench:render": "bun run scripts/bench-render.ts",
+    "bench:chat": "bun run scripts/bench-chat.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check:licenses": "bun run src/shared/license-check.ts",

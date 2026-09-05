@@ -120,6 +120,7 @@ export function isChatPanelOpen(): boolean {
 }
 
 function applyChatPanelDom(): void {
+  document.dispatchEvent(new Event("uatu:before-surface-change"));
   const el = document.documentElement;
   el.setAttribute("data-chat-panel", isChatPanelOpen() ? "open" : "collapsed");
   el.style.setProperty("--chat-fraction", String(preference.fraction));

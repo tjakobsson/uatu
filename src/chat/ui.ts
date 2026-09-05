@@ -1,4 +1,6 @@
 import { escapeHtml } from "../shared/html";
+import { createLoadingSignal } from "../preview/loading-signal";
+import { measureChatWork } from "./performance";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { registerBackInterceptor } from "../shell/history";
@@ -152,6 +154,45 @@ export function initChat(api = new ChatApiClient()): void {
   const anchor = new TimelineAnchorController();
   const viewport = new ChatViewportController(surface, form, timeline, anchor);
   const renderer = new TimelineRenderer();
+  renderer.deferClosedActivity = true;
+  const readSignal = createLoadingSignal({ segment: null, barHost: timeline, busyHost: timeline, visibleLabel: true });
+  const readError = document.createElement("div");
+  readError.className = "chat-read-error";
+  readError.setAttribute("role", "alert");
+  readError.hidden = true;
+  surface.append(readError);
+  const showReadError = (container: HTMLElement, error: unknown, retry: () => void) => {
+    const message = document.createElement("span");
+    message.textContent = messageOf(error);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Retry read";
+    button.addEventListener("click", retry);
+    container.replaceChildren(message, button);
+    container.hidden = false;
+  };
+  let readLane: { controller: AbortController; token: number; label: string } | null = null;
+  const runConversationRead = async <T>(label: string, retry: () => void, read: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    readLane?.controller.abort();
+    const lane = { controller: new AbortController(), token: readSignal.start(label), label };
+    readLane = lane;
+    if (!chatSurfaceActive()) readSignal.cancel(lane.token);
+    readError.hidden = true;
+    readError.replaceChildren();
+    try {
+      const value = await read(lane.controller.signal);
+      return value;
+    } catch (error) {
+      if (readLane === lane && !lane.controller.signal.aborted) {
+        showReadError(readError, error, retry);
+      }
+      throw error;
+    } finally {
+      const settle = () => { if (readLane === lane) { readSignal.settle(lane.token); readLane = null; } };
+      if (chatSurfaceActive()) requestAnimationFrame(() => requestAnimationFrame(settle));
+      else settle();
+    }
+  };
   const queueDock = new QueueDockRenderer();
   const revertedDock = revertedShell && revertedLabel && revertedItems
     ? new RevertedMessagesDockRenderer(revertedShell, revertedLabel, revertedItems)
@@ -164,6 +205,8 @@ export function initChat(api = new ChatApiClient()): void {
   // swapped whenever the conversation's owning agent changes.
   type AgentCatalogs = { models: ChatModel[]; modes: ChatMode[]; commands: ChatCommand[]; commandInventoryAvailable: boolean };
   const agentCatalogs = new Map<string, AgentCatalogs>();
+  const agentCatalogLoads = new Map<string, Promise<AgentCatalogs>>();
+  let catalogLoading = false;
   let contextAgentId: string | undefined;
   let models: ChatModel[] = [];
   let modes: ChatMode[] = [];
@@ -200,11 +243,39 @@ export function initChat(api = new ChatApiClient()): void {
     label: string;
     projection: ChatProjection | null;
     stream: ChatEventStream | null;
+    read?: { controller: AbortController; token: number; label: string };
   };
   let child: Drilldown | null = null;
   let childGeneration = 0;
   const childRenderer = new TimelineRenderer();
+  childRenderer.deferClosedActivity = true;
   const childAnchor = new TimelineAnchorController();
+  const childReadSignal = drilldownTimeline ? createLoadingSignal({ segment: null, barHost: drilldownTimeline, busyHost: drilldownTimeline, visibleLabel: true }) : null;
+  const childReadError = document.createElement("div");
+  childReadError.className = "chat-read-error";
+  childReadError.setAttribute("role", "alert");
+  childReadError.hidden = true;
+  drilldown?.append(childReadError);
+  const runChildRead = async (owner: Drilldown, label: string, retry: () => void, load: (signal: AbortSignal) => Promise<void>) => {
+    owner.read?.controller.abort();
+    const read = { controller: new AbortController(), label, token: childReadSignal?.start(label) ?? 0 };
+    owner.read = read;
+    childReadError.hidden = true;
+    childReadError.replaceChildren();
+    if (!chatSurfaceActive()) childReadSignal?.cancel(read.token);
+    try { await load(read.controller.signal); }
+    catch (error) {
+      if (child === owner && owner.read === read && !read.controller.signal.aborted) {
+        showReadError(childReadError, error, retry);
+      }
+    } finally {
+      const settle = () => {
+        if (child === owner && owner.read === read) { childReadSignal?.settle(read.token); owner.read = undefined; }
+      };
+      if (chatSurfaceActive()) requestAnimationFrame(() => requestAnimationFrame(settle));
+      else settle();
+    }
+  };
   let releaseChildBack: (() => void) | null = null;
   // The identity of the history entry THIS session pushed for the open
   // drill-down, or null when none is on the stack. A unique value rather
@@ -241,6 +312,15 @@ export function initChat(api = new ChatApiClient()): void {
   });
   let rendering = false;
   let renderFrame: number | null = null;
+  let renderDirty = false;
+  let pendingNewContent = false;
+  let childRenderFrame: number | null = null;
+  let childRenderDirty = false;
+  let childNewContent = false;
+  let incrementalTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastTranscriptPaint = 0;
+  let childIncrementalTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastChildPaint = 0;
   let submitting = false;
   let cancelling = false;
   // Bumped on every main-projection snapshot install. queueRevision restarts
@@ -439,7 +519,9 @@ export function initChat(api = new ChatApiClient()): void {
       clientHeight: scroller.clientHeight,
       scrollHeight: scroller.scrollHeight,
       items: Array.from(container.querySelectorAll<HTMLElement>("[data-chat-item-id]")).map(element => {
+        const finish = measureChatWork("item-geometry");
         const rect = element.getBoundingClientRect();
+        finish();
         return { id: element.dataset.chatItemId!, top: rect.top - bounds.top, bottom: rect.bottom - bounds.top };
       // Members of a collapsed activity group are not rendered and report
       // zero-size rects; anchoring to one would pin the viewport to nothing.
@@ -1019,6 +1101,9 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const renderNow = (newContent: boolean) => {
+    if (!chatSurfaceActive()) { renderDirty = true; pendingNewContent ||= newContent; return; }
+    renderDirty = false;
+    lastTranscriptPaint = performance.now();
     rendering = true;
     // The card states the owning agent's own persistent-approval reach.
     renderer.permissionScopeNote = agent?.permissionScopeNote;
@@ -1045,14 +1130,28 @@ export function initChat(api = new ChatApiClient()): void {
     }
   };
 
-  const scheduleRender = (newContent = false, captureCurrent = true) => {
+  const scheduleRender = (newContent = false, captureCurrent = true, incremental = false) => {
+    renderDirty = true;
+    pendingNewContent ||= newContent;
+    if (!chatSurfaceActive()) { syncChatAttention(); return; }
+    const delay = incremental ? 50 - (performance.now() - lastTranscriptPaint) : 0;
+    if (delay > 0) {
+      if (incrementalTimer === null) incrementalTimer = setTimeout(() => {
+        incrementalTimer = null;
+        scheduleRender(false, captureCurrent);
+      }, delay);
+      return;
+    }
+    if (incrementalTimer !== null) { clearTimeout(incrementalTimer); incrementalTimer = null; }
     if (renderFrame !== null) return;
     // beforeMutation is a no-op while pinned — skipping the call skips the
     // full-geometry pass it would otherwise be handed for nothing.
     if (captureCurrent && !anchor.isPinned()) anchor.beforeMutation(geometry());
     renderFrame = requestAnimationFrame(() => {
       renderFrame = null;
-      renderNow(newContent);
+      const content = pendingNewContent;
+      pendingNewContent = false;
+      renderNow(content);
     });
   };
 
@@ -1080,6 +1179,7 @@ export function initChat(api = new ChatApiClient()): void {
   // label only — a full render for a clock would rebuild nothing and cost a
   // layout pass every second of every turn.
   const tickWorkingLines = () => {
+    if (!chatSurfaceActive()) return;
     for (const container of [items, drilldownItems]) {
       for (const line of container?.querySelectorAll<HTMLElement>(".chat-activity-group[data-working-since]") ?? []) {
         const label = line.querySelector(".chat-group-count");
@@ -1094,7 +1194,7 @@ export function initChat(api = new ChatApiClient()): void {
   // child's own status — so the parent's status alone cannot decide whether
   // the clock is needed. Re-evaluated wherever either status can change.
   const syncWorkingTimer = () => {
-    const working = isLiveConversationStatus(projection?.status) || isLiveConversationStatus(child?.projection?.status);
+    const working = chatSurfaceActive() && (isLiveConversationStatus(projection?.status) || isLiveConversationStatus(child?.projection?.status));
     if (working && workingTimer === null) workingTimer = setInterval(() => { syncRoutineStatus(); tickWorkingLines(); }, 1_000);
     if (!working && workingTimer !== null) {
       clearInterval(workingTimer);
@@ -1701,7 +1801,8 @@ export function initChat(api = new ChatApiClient()): void {
     sendLabel.textContent = action;
     send.setAttribute("aria-label", running ? "Cancel response" : "Send message");
     send.title = running ? "Cancel response" : "Send message";
-    configurationTrigger.disabled = submitting || !projection;
+    configurationTrigger.disabled = submitting || !projection || catalogLoading;
+    configurationTrigger.toggleAttribute("aria-busy", catalogLoading);
     syncHistoryControls();
     olderButton.hidden = !projection?.olderCursor;
     syncRoutineStatus();
@@ -1882,7 +1983,10 @@ export function initChat(api = new ChatApiClient()): void {
           if (chatTitle) chatTitle.textContent = displayConversationTitle(event.conversation);
           if (renameInput && renameForm && !renameForm.hidden && document.activeElement !== renameInput) renameInput.value = event.conversation.title;
         }
-        if (result.outcome === "applied") { announce(""); scheduleRender(true); }
+        if (result.outcome === "applied") {
+          announce("");
+          scheduleRender(true, true, event.type === "item.text_delta" || (event.type === "item.upsert" && event.item.type === "assistant_message" && event.item.completedAt === undefined && isLiveConversationStatus(projection.status)));
+        }
       },
       resync: () => {
         if (token !== selectionGeneration) return;
@@ -1901,22 +2005,25 @@ export function initChat(api = new ChatApiClient()): void {
     const current = projection;
     if (disposed || !current || current.conversationId !== id || activeConversationId() !== id) return false;
     try {
-      const snapshot = await api.snapshot(id);
-      if (disposed || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
-      const previousStream = stream;
-      installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
-      if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
-        stopConversationRefreshRecovery();
-      }
-      previousStream?.close();
-      return true;
+      return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id); }, async signal => {
+        const snapshot = await api.snapshot(id, undefined, signal);
+        if (signal.aborted || disposed || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
+        const previousStream = stream;
+        installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
+        if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
+          stopConversationRefreshRecovery();
+        }
+        previousStream?.close();
+        return true;
+      });
     } catch (error) {
-      if (token === selectionGeneration && activeConversationId() === id) announce(messageOf(error), true);
       return false;
     }
   }
 
   const selectConversation = async (id: string): Promise<boolean> => {
+    if (projection?.conversationId === id && stream && !historyRefreshRequired.has(id) && !selectedConversationDeleted) return true;
+    readLane?.controller.abort();
     stopConversationRefreshRecovery();
     selectedConversationDeleted = false;
     renderSelectedConversationDeleted(document, false);
@@ -1942,11 +2049,7 @@ export function initChat(api = new ChatApiClient()): void {
     // conversation). Remember the choice as the next creation's default.
     const owningAgentId = conversationAgentId(id);
     if (owningAgentId && owningAgentId !== contextAgentId) {
-      await applyAgentContext(owningAgentId);
-      // A newer selection may have completed while the catalog loaded; this
-      // stale call must not null its projection, restore its draft, or
-      // overwrite the agent preference on the way to the late token check.
-      if (token !== selectionGeneration) return false;
+      void applyAgentContext(owningAgentId);
     }
     if (owningAgentId) {
       presentation.lastAgentId = owningAgentId;
@@ -1955,6 +2058,7 @@ export function initChat(api = new ChatApiClient()): void {
     }
     save();
     projection = null;
+    scheduleRender(false, false);
     // Not a clear: the incoming conversation may hold a refusal that landed
     // while it was deselected, and it surfaces now.
     showComposerError(composerErrors.get(id) ?? null);
@@ -1963,19 +2067,20 @@ export function initChat(api = new ChatApiClient()): void {
     input.value = presentation.drafts[id] ?? "";
     autosize(input);
     renderAttachments();
-    announce("Loading conversation...");
+    announce("");
     syncControls();
     try {
-      const snapshot = await api.snapshot(id);
-      if (token !== selectionGeneration) return false;
-      installConversationSnapshot(snapshot, acceptedDrafts, token);
-      // The selection is settled; a ready agent stops polling, so this is
-      // the moment mid-session command discoveries reach the completion
-      // menu (background, after the chooser is done).
-      refreshBankedCommands(conversationAgentId(id));
-      return true;
+      return await runConversationRead("Loading conversation...", () => { void selectConversation(id); }, async signal => {
+        const snapshot = await api.snapshot(id, undefined, signal);
+        if (token !== selectionGeneration) return false;
+        installConversationSnapshot(snapshot, acceptedDrafts, token);
+        // The selection is settled; a ready agent stops polling, so this is
+        // the moment mid-session command discoveries reach the completion
+        // menu (background, after the chooser is done).
+        refreshBankedCommands(conversationAgentId(id));
+        return true;
+      });
     } catch (error) {
-      if (token === selectionGeneration) announce(messageOf(error), true);
       return false;
     }
   };
@@ -2341,26 +2446,45 @@ export function initChat(api = new ChatApiClient()): void {
   olderButton.addEventListener("click", async () => {
     if (!projection?.olderCursor) return;
     const current = projection;
+    let changedHistory = false;
     olderButton.disabled = true;
-    anchor.beforeMutation(geometry());
+    if (chatSurfaceActive()) anchor.beforeMutation(anchorGeometry());
     try {
-      const page = await api.snapshot(current.conversationId, current.olderCursor);
-      if (projection?.conversationId !== current.conversationId) return;
-      projection = prependSnapshot(projection, page);
-      const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
-      timeline.scrollTop = anchor.afterMutation(geometry());
-      for (const node of dirty) { decorateFileLinks(node); decorateAttachmentImages(node); }
-    } catch (error) { announce(messageOf(error), true); }
+      await runConversationRead("Loading older messages...", () => {
+        if (changedHistory) void refreshSelectedConversation(current.conversationId);
+        else olderButton.click();
+      }, async signal => {
+        const page = await api.snapshot(current.conversationId, current.olderCursor, signal).catch(error => {
+          changedHistory = error instanceof ChatTransportError && error.status === 409;
+          throw error;
+        });
+        if (signal.aborted || projection?.conversationId !== current.conversationId) return;
+        projection = prependSnapshot(projection, page);
+        if (!chatSurfaceActive()) { scheduleRender(false, false); return; }
+        const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
+        timeline.scrollTop = anchor.afterMutation(geometry());
+        for (const node of dirty) { decorateFileLinks(node); decorateAttachmentImages(node); }
+      });
+    } catch { /* The read lane owns its error and retry. */ }
     finally { olderButton.disabled = false; syncControls(); }
   });
 
+  let lastParentScrollTop = 0;
+  let lastChildScrollTop = 0;
   timeline.addEventListener("scroll", () => {
-    if (rendering) return;
+    if (rendering || !chatSurfaceActive()) return;
+    // Revealing an intrinsic-size placeholder can grow the scroll extent
+    // before ResizeObserver runs (notably in WebKit). That is not a reader
+    // scrolling upward; preserve pinning until an actual upward movement.
+    if (anchor.isPinned() && timeline.scrollTop >= lastParentScrollTop - 1) {
+      timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+    }
     // Cheap while pinned; the full pass runs only once actually unpinned.
     // The first tick that crosses the threshold captures no anchor (items
     // were not collected), which self-heals on the next tick — a transient
     // preferable to a forced layout on every scroll event of a long chat.
     anchor.observe(anchorGeometry());
+    lastParentScrollTop = timeline.scrollTop;
     if (projection) {
       const current = anchor.currentAnchor();
       if (current) presentation.anchors[projection.conversationId] = current;
@@ -2543,6 +2667,31 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const renderChild = (newContent: boolean) => {
+    childRenderDirty = true;
+    childNewContent ||= newContent;
+    if (!chatSurfaceActive()) { syncChatAttention(); return; }
+    const delay = newContent && isLiveConversationStatus(child?.projection?.status) ? 50 - (performance.now() - lastChildPaint) : 0;
+    if (delay > 0) {
+      if (childIncrementalTimer === null) childIncrementalTimer = setTimeout(() => {
+        childIncrementalTimer = null;
+        renderChild(false);
+      }, delay);
+      return;
+    }
+    if (childIncrementalTimer !== null) { clearTimeout(childIncrementalTimer); childIncrementalTimer = null; }
+    if (childRenderFrame !== null) return;
+    childRenderFrame = requestAnimationFrame(() => {
+      childRenderFrame = null;
+      if (!chatSurfaceActive()) return;
+      const content = childNewContent;
+      childNewContent = false;
+      childRenderDirty = false;
+      renderChildNow(content);
+    });
+  };
+
+  const renderChildNow = (newContent: boolean) => {
+    lastChildPaint = performance.now();
     if (!drilldownItems || !drilldownTimeline) return;
     if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
     childRenderer.permissionScopeNote = agent?.permissionScopeNote;
@@ -2599,9 +2748,13 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownHistoryToken = null;
     childGeneration += 1;
     open.stream?.close();
+    open.read?.controller.abort();
+    childReadSignal?.cancel();
+    childReadError.hidden = true;
     releaseChildBack?.();
     releaseChildBack = null;
-    if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
+    if (drilldownItems && chatSurfaceActive()) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
+    else childRenderDirty = true;
     syncWorkingTimer();
     if (drilldownOlder) {
       drilldownOlder.hidden = true;
@@ -2671,7 +2824,10 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownClosePending = false;
     const previous = child;
     previous?.stream?.close();
-    const next: Drilldown = { conversationId: id, label, projection: null, stream: null };
+    previous?.read?.controller.abort();
+    const retainedProjection = previous?.conversationId === id ? previous.projection : null;
+    const retainedAnchor = retainedProjection ? childAnchor.currentAnchor() : null;
+    const next: Drilldown = { conversationId: id, label, projection: retainedProjection, stream: null };
     const nested = previous !== null;
     child = next;
     // One entry per layer, in both chromes. Conditioning this on the ui mode
@@ -2714,7 +2870,8 @@ export function initChat(api = new ChatApiClient()): void {
     if (drilldownTitle) drilldownTitle.textContent = label;
     drilldown.hidden = false;
     surface.setAttribute("data-chat-drilldown", "open");
-    childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
+    if (!retainedProjection && chatSurfaceActive()) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
+    else childRenderDirty = true;
     // Hidden until this child's own first page says whether more exists —
     // otherwise a previous subagent's cursor would offer paging for a
     // transcript that has none.
@@ -2722,21 +2879,17 @@ export function initChat(api = new ChatApiClient()): void {
       drilldownOlder.hidden = true;
       drilldownOlder.disabled = false;
     }
-    childAnchor.restore(null);
-    announceChild("Loading transcript…");
+    childAnchor.restore(retainedAnchor);
+    announceChild("");
     drilldownBack?.focus();
-    void (async () => {
-      try {
-        const snapshot = await api.snapshot(id);
-        if (generation !== childGeneration || child !== next) return;
-        next.projection = projectionFromSnapshot(snapshot, []);
-        announceChild(snapshot.items.length ? "" : "This subagent has not reported anything yet.");
-        renderChild(false);
-        next.stream = openChildStream(next, id, label, snapshot.cursor, generation);
-      } catch (error) {
-        if (generation === childGeneration) announceChild(messageOf(error), true);
-      }
-    })();
+    void runChildRead(next, "Loading conversation...", () => openChildConversation(id, label), async signal => {
+      const snapshot = await api.snapshot(id, undefined, signal);
+      if (signal.aborted || generation !== childGeneration || child !== next) return;
+      next.projection = projectionFromSnapshot(snapshot, []);
+      announceChild(snapshot.items.length ? "" : "This subagent has not reported anything yet.");
+      renderChild(false);
+      next.stream = openChildStream(next, id, label, snapshot.cursor, generation);
+    });
   };
 
   // The same paging the parent timeline offers: a subagent's transcript is
@@ -2749,10 +2902,19 @@ export function initChat(api = new ChatApiClient()): void {
     drilldownOlder.disabled = true;
     childAnchor.beforeMutation(childGeometry());
     try {
-      const page = await api.snapshot(open.conversationId, open.projection.olderCursor);
-      if (generation !== childGeneration || child !== open || !open.projection) return;
-      open.projection = prependSnapshot(open.projection, page);
-      renderChild(false);
+      let changedHistory = false;
+      await runChildRead(open, "Loading older messages...", () => {
+        if (changedHistory) openChildConversation(open.conversationId, open.label);
+        else drilldownOlder.click();
+      }, async signal => {
+        const page = await api.snapshot(open.conversationId, open.projection!.olderCursor, signal).catch(error => {
+          changedHistory = error instanceof ChatTransportError && error.status === 409;
+          throw error;
+        });
+        if (signal.aborted || generation !== childGeneration || child !== open || !open.projection) return;
+        open.projection = prependSnapshot(open.projection, page);
+        renderChild(false);
+      });
     } catch (error) {
       if (generation === childGeneration && child === open) announceChild(messageOf(error), true);
     } finally {
@@ -2772,7 +2934,14 @@ export function initChat(api = new ChatApiClient()): void {
   if (drilldownItems && drilldownTimeline) {
     wireExpansionToggle(drilldownItems, drilldownTimeline, childAnchor, childGeometry);
     wireItemInteractions(drilldownItems, () => child?.projection ?? null);
-    drilldownTimeline.addEventListener("scroll", () => { childAnchor.observe(childAnchorGeometry()); }, { passive: true });
+    drilldownTimeline.addEventListener("scroll", () => {
+      if (!chatSurfaceActive()) return;
+      if (childAnchor.isPinned() && drilldownTimeline.scrollTop >= lastChildScrollTop - 1) {
+        drilldownTimeline.scrollTop = Math.max(0, drilldownTimeline.scrollHeight - drilldownTimeline.clientHeight);
+      }
+      childAnchor.observe(childAnchorGeometry());
+      lastChildScrollTop = drilldownTimeline.scrollTop;
+    }, { passive: true });
   }
 
   const closeCommandMenu = () => {
@@ -2820,7 +2989,8 @@ export function initChat(api = new ChatApiClient()): void {
 
   input.addEventListener("input", () => {
     autosize(input);
-    if (projection) { presentation.drafts[projection.conversationId] = input.value; save(); }
+    const id = activeConversationId();
+    if (id) { presentation.drafts[id] = input.value; save(); }
     syncControls();
     renderCommandMenu();
   });
@@ -3285,11 +3455,21 @@ export function initChat(api = new ChatApiClient()): void {
     submitting = false;
     syncControls();
   });
+  let resizeFrame: number | null = null;
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
-    if (anchor.isPinned()) timeline.scrollTop = anchor.afterMutation(geometry());
-    else if (anchor.currentAnchor()) timeline.scrollTop = anchor.afterMutation(geometry());
+    if (!chatSurfaceActive()) return;
+    if (resizeFrame !== null) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = null;
+      if (!chatSurfaceActive()) return;
+      const parentTop = anchor.afterMutation(anchorGeometry());
+      const childTop = child && drilldownTimeline ? childAnchor.afterMutation(childAnchorGeometry()) : undefined;
+      timeline.scrollTop = parentTop;
+      if (childTop !== undefined && drilldownTimeline) drilldownTimeline.scrollTop = childTop;
+    });
   }) : null;
   observer?.observe(items);
+  if (drilldownItems) observer?.observe(drilldownItems);
   viewport.start();
   window.addEventListener("pagehide", event => {
     // Drafts are saved either way — a frozen page can be discarded later
@@ -3307,8 +3487,19 @@ export function initChat(api = new ChatApiClient()): void {
     inventoryStream?.close();
     chatLifecycle?.dispose();
     child?.stream?.close();
+    child?.read?.controller.abort();
+    childReadSignal?.cancel();
     observer?.disconnect();
     surfaceObserver.disconnect();
+    document.removeEventListener("visibilitychange", handleChatSurfaceState);
+    document.removeEventListener("uatu:before-surface-change", captureSurfaceAnchors);
+    if (renderFrame !== null) cancelAnimationFrame(renderFrame);
+    if (childRenderFrame !== null) cancelAnimationFrame(childRenderFrame);
+    if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+    if (incrementalTimer !== null) clearTimeout(incrementalTimer);
+    if (childIncrementalTimer !== null) clearTimeout(childIncrementalTimer);
+    readLane?.controller.abort();
+    readSignal.cancel();
     viewport.stop();
     configurationPicker?.destroy();
     if (workingTimer !== null) clearInterval(workingTimer);
@@ -3322,6 +3513,7 @@ export function initChat(api = new ChatApiClient()): void {
   // it retries on the next Chat activation and on credential refresh.
   let bootstrapped = false;
   let bootstrapping = false;
+  let bootstrapRead: number | null = null;
 
   /**
    * Loads (or reuses) one agent's catalogs and installs them as the
@@ -3331,6 +3523,12 @@ export function initChat(api = new ChatApiClient()): void {
   const applyAgentContext = async (agentId: string | undefined): Promise<void> => {
     const status = agentStatusFor(agentId) ?? agentStatuses[0];
     contextAgentId = status?.agent.id;
+    models = [];
+    modes = [];
+    commands = [];
+    commandInventoryAvailable = false;
+    catalogLoading = Boolean(status && status.availability.state !== "unavailable");
+    configurationTrigger.disabled = catalogLoading || !projection;
     agent = status?.availability.state === "ready" ? status.availability.agent : undefined;
     nameAgent();
     applyCapabilities();
@@ -3345,29 +3543,36 @@ export function initChat(api = new ChatApiClient()): void {
       const chatAgent = agent;
       const has = (capability: ChatCapability) => chatAgent?.capabilities.includes(capability) ?? true;
       const wantsCommands = has("commands") || has("reversible-history");
-      const [nextModels, nextCommands, nextModes] = await Promise.all([
+      let loading = agentCatalogLoads.get(status.agent.id);
+      if (!loading) {
+      loading = Promise.all([
         has("models") ? api.models(status.agent.id).catch(() => [] as ChatModel[]) : Promise.resolve([] as ChatModel[]),
         wantsCommands ? api.commands(status.agent.id).then(list => ({ list, ok: true })).catch(() => ({ list: [] as ChatCommand[], ok: false })) : Promise.resolve({ list: [] as ChatCommand[], ok: true }),
         has("modes") ? api.modes(status.agent.id).catch(() => [] as ChatMode[]) : Promise.resolve([] as ChatMode[]),
-      ]);
+      ]).then(([nextModels, nextCommands, nextModes]) => ({ models: nextModels, modes: nextModes, commands: nextCommands.list, commandInventoryAvailable: nextCommands.ok }));
+      agentCatalogLoads.set(status.agent.id, loading);
+      void loading.finally(() => agentCatalogLoads.delete(status.agent.id));
+      }
+      catalogs = await loading;
       // The awaited fetch may resolve after the user moved to another
       // agent's conversation; installing these lists then would dress that
       // conversation in this agent's catalog (a Claude "Default" chip on an
       // OpenCode conversation).
       if (contextAgentId !== status.agent.id) return;
-      catalogs = { models: nextModels, modes: nextModes, commands: nextCommands.list, commandInventoryAvailable: nextCommands.ok };
       // A failed command read is not banked: the next context switch
       // retries. Neither is an empty list from an agent that declares the
       // capability — its inventory may simply not have hydrated yet, and
       // banking would hide every command for the rest of the page's life.
-      if (nextCommands.ok && (nextCommands.list.length > 0 || !has("commands"))) agentCatalogs.set(status.agent.id, catalogs);
+      if (catalogs.commandInventoryAvailable && (catalogs.commands.length > 0 || !has("commands"))) agentCatalogs.set(status.agent.id, catalogs);
     }
     models = catalogs.models;
     modes = catalogs.modes;
     commands = catalogs.commands;
     commandInventoryAvailable = catalogs.commandInventoryAvailable;
+    catalogLoading = false;
     form.hidden = false;
     renderConfiguration();
+    syncControls();
   };
 
   /**
@@ -3536,6 +3741,9 @@ export function initChat(api = new ChatApiClient()): void {
   const bootstrap = async () => {
     if (bootstrapped || bootstrapping) return;
     bootstrapping = true;
+    const initialRead = readSignal.start("Loading conversations...");
+    bootstrapRead = initialRead;
+    readError.hidden = true;
     try {
       agentStatuses = await api.status();
       // Every offered agent down at once is the only full takeover: with no
@@ -3578,8 +3786,7 @@ export function initChat(api = new ChatApiClient()): void {
       // pass must not replace it with this snapshot's newest entry.
       if (selectionGeneration === selectionAtStart) installInitialChooser();
       else patchChooser(presentation.selectedId ?? null);
-      await contextReady;
-      renderConfiguration();
+      void contextReady;
       bootstrapped = true;
       // The enumeration above probed every agent; the pre-probe snapshot
       // may still call a failed one usable, and the creation menu would
@@ -3610,21 +3817,54 @@ export function initChat(api = new ChatApiClient()): void {
         }
       }).catch(() => undefined);
       startInventoryStream();
-    } catch (error) { announce(messageOf(error), true); }
-    finally { bootstrapping = false; }
+    } catch (error) { showReadError(readError, error, () => { void bootstrap(); }); }
+    finally { bootstrapping = false; readSignal.settle(bootstrapRead ?? initialRead); bootstrapRead = null; }
   };
-  const chatSurfaceActive = () => {
+  function chatSurfaceActive() {
+    if (document.visibilityState === "hidden") return false;
     const root = document.documentElement;
     return root.getAttribute("data-ui-mode") === "touch"
       ? root.getAttribute("data-active-tab") === "chat"
       : root.getAttribute("data-chat-panel") === "open";
-  };
+  }
+  function syncChatAttention() {
+    const pending = [projection, child?.projection].some(source => source?.items.some(item =>
+      (item.type === "permission" || item.type === "question") && item.status === "pending"));
+    for (const control of [document.getElementById("touch-tab-chat"), document.getElementById("chat-expand")]) {
+      control?.toggleAttribute("data-badge", pending || (!chatSurfaceActive() && pendingNewContent));
+      if (pending) control?.setAttribute("aria-description", "Needs your answer");
+      else control?.removeAttribute("aria-description");
+    }
+  }
   let chatWasActive = false;
+  const captureSurfaceAnchors = () => {
+    if (!chatSurfaceActive()) return;
+    if (!anchor.isPinned()) anchor.beforeMutation(geometry());
+    if (child && !childAnchor.isPinned() && drilldownTimeline) childAnchor.beforeMutation(childGeometry());
+  };
+  document.addEventListener("uatu:before-surface-change", captureSurfaceAnchors);
   const handleChatSurfaceState = () => {
     const active = chatSurfaceActive();
     const becameActive = active && !chatWasActive;
     chatWasActive = active;
-    if (!active) return;
+    syncWorkingTimer();
+    syncChatAttention();
+    if (!active) {
+      readSignal.cancel();
+      childReadSignal?.cancel();
+      if (incrementalTimer !== null) { clearTimeout(incrementalTimer); incrementalTimer = null; }
+      if (childIncrementalTimer !== null) { clearTimeout(childIncrementalTimer); childIncrementalTimer = null; }
+      if (renderFrame !== null) { cancelAnimationFrame(renderFrame); renderFrame = null; }
+      if (childRenderFrame !== null) { cancelAnimationFrame(childRenderFrame); childRenderFrame = null; }
+      return;
+    }
+    if (becameActive) {
+      if (readLane) readLane.token = readSignal.start(readLane.label);
+      else if (bootstrapping) bootstrapRead = readSignal.start("Loading conversations...");
+      if (child?.read) child.read.token = childReadSignal?.start(child.read.label) ?? 0;
+      if (renderDirty) scheduleRender(false, false);
+      if (childRenderDirty) renderChild(false);
+    }
     if (!bootstrapped) void bootstrap();
     else if (becameActive) {
       startInventoryStream();
@@ -3633,6 +3873,7 @@ export function initChat(api = new ChatApiClient()): void {
   };
   const surfaceObserver = new MutationObserver(handleChatSurfaceState);
   surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-chat-panel", "data-active-tab", "data-ui-mode"] });
+  document.addEventListener("visibilitychange", handleChatSurfaceState);
   onWorkspaceCredentialRefresh(() => {
     if (bootstrapped) {
       startInventoryStream();

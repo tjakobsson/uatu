@@ -37,7 +37,8 @@ export const test = base.extend<{}, WorkerFixtures>({
       process.env.UATU_E2E_PORT = String(port);
       process.env.UATU_E2E_WORKSPACE = workspace;
 
-      const child = spawn("bun", ["run", "tests/e2e/server.ts"], {
+      const binary = process.env.UATU_E2E_BINARY;
+      const child = spawn(binary ?? "bun", binary ? [] : ["run", "tests/e2e/server.ts"], {
         env: {
           ...process.env,
           UATU_E2E_PORT: String(port),

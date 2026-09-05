@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../history-reuse";
 
 import type {
   ChatProvider,
@@ -279,6 +280,7 @@ export class ClaudeProvider implements ChatProvider {
   // before any session has run.
   private liveModels: ChatModel[] | null = null;
   private modelAliases = new Map<string, string>();
+  private readonly historyReuse = new HistoryReuse<ReturnType<typeof normalizeTranscriptEntries>>();
   private readonly catalogProbe: boolean;
   private hydration: Promise<void> | null = null;
   private probeFailedAt: number | null = null;
@@ -569,50 +571,60 @@ export class ClaudeProvider implements ChatProvider {
 
   async listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderHistoryPage> {
     await this.restoreDurableState();
-    // History joins model ids on the catalog aliases; hydrate them first so
-    // a cold read does not serve raw ids the gauge cannot match (no-op once
-    // the catalog is live).
-    await this.hydrateCatalog();
+    // A catalog can enrich later reads. Native history remains readable while
+    // the optional probe is pending; unresolved model readouts stay unknown.
     const child = parseSubagentId(sessionId);
     // Same confinement as getSession: no accepted parent, no child read.
     if (child && !(await this.getSession(child.parentSessionId))) {
       throw new Error(`unknown Claude subagent transcript: ${sessionId}`);
     }
-    let entries: Awaited<ReturnType<typeof readSessionTranscript>>["entries"] = [];
-    try {
-      entries = child
-        ? (await readSessionTranscript(subagentTranscriptPath(this.workspacePath, this.nativeId(child.parentSessionId), child.agentId, this.configDir))).entries
-        : (await readSessionTranscript(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir))).entries;
-    } catch {
-      // No transcript yet: a fresh conversation's history is empty. A child
-      // whose file is gone has nothing to show and no fallback.
-      if (child) throw new Error(`unknown Claude subagent transcript: ${sessionId}`);
-      if (!this.pending.has(sessionId) && !this.live.has(sessionId)) throw new Error(`unknown Claude conversation: ${sessionId}`);
+    const sourcePath = () => child
+      ? subagentTranscriptPath(this.workspacePath, this.nativeId(child.parentSessionId), child.agentId, this.configDir)
+      : sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir);
+    const signature = async () => {
+      const file = await fs.realpath(sourcePath());
+      const stat = await fs.stat(file, { bigint: true });
+      return historyVersion([file, stat.dev.toString(), stat.ino.toString(), stat.size.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString(),
+        sessionId, this.staged.get(sessionId)?.boundaryIndex, [...this.modelAliases]]);
+    };
+    let normalized: ReturnType<typeof normalizeTranscriptEntries> = { items: [], accounting: [] };
+    let version = "empty";
+    const deadline = Date.now() + 30_000;
+    while (true) {
+      try {
+        version = await signature();
+        normalized = await this.historyReuse.read(sessionId, version, async () => {
+          const { entries } = await readSessionTranscript(sourcePath());
+          let mainline = child ? entries : entries.filter(entry => !entry.isSidechain);
+          const staged = this.staged.get(sessionId);
+          if (staged) {
+            const boundary = reversibleTurns(mainline)[staged.boundaryIndex];
+            if (boundary) mainline = mainline.slice(0, boundary.entryIndex);
+          }
+          return normalizeTranscriptEntries(mainline, child ? undefined : sessionId, id => this.modelAliases.get(id) ?? id);
+        });
+        if (await signature() === version) break;
+        this.historyReuse.invalidate(sessionId);
+        if (Date.now() >= deadline) throw new Error("Claude transcript kept changing during the read. Retry the read.");
+      } catch (error) {
+        this.historyReuse.invalidate(sessionId);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (child) throw new Error(`unknown Claude subagent transcript: ${sessionId}`);
+        if (!this.pending.has(sessionId) && !this.live.has(sessionId)) throw new Error(`unknown Claude conversation: ${sessionId}`);
+        normalized = { items: [], accounting: [] };
+        version = "empty";
+        break;
+      }
     }
-    // A child transcript IS the sidechain; a parent's history excludes it.
-    let mainline = child ? entries : entries.filter(entry => !entry.isSidechain);
-    // A staged revert hides the boundary turn and everything after it.
-    const stagedState = this.staged.get(sessionId);
-    if (stagedState) {
-      const turns = reversibleTurns(mainline);
-      const boundary = turns[stagedState.boundaryIndex];
-      if (boundary) mainline = mainline.slice(0, boundary.entryIndex);
-    }
-    // The normalizer stamps child links with this parent identity; it must
-    // be the PUBLIC id — the fork is deliberately hidden and would refuse
-    // as a parent, while the child transcript lookup already redirects the
-    // public id to the fork's directory.
-    const { items, accounting } = normalizeTranscriptEntries(mainline, child ? undefined : sessionId, id => this.modelAliases.get(id) ?? id);
-    // Local paging over the fully read transcript, same shape as the
-    // OpenCode provider: cursor is the exclusive end index.
-    const end = clampIndex(options.cursor, items.length);
+    const { items, accounting } = normalized;
+    const end = historyPageEnd(options.cursor, version, items.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const ids = new Set(items.slice(start, end).map(item => item.id));
     return {
       items: items.slice(start, end),
       accounting: accounting.filter(entry => ids.has(`usage:${entry.messageId}`) || ids.has(`message:${entry.messageId}`)),
       completeItems: items,
-      nextCursor: start > 0 ? String(start) : undefined,
+      nextCursor: historyPageCursor(start, version),
     };
   }
 
@@ -912,6 +924,7 @@ export class ClaudeProvider implements ChatProvider {
    * the SDK shut the child down (leak test: no process outlives this).
    */
   async dispose(): Promise<void> {
+    this.historyReuse.dispose();
     this.disposed = true;
     for (const timer of this.titleRefreshTimers.values()) clearTimeout(timer);
     this.titleRefreshTimers.clear();
@@ -1202,6 +1215,7 @@ export class ClaudeProvider implements ChatProvider {
    * never claim).
    */
   private async stageBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, index: number): Promise<ReversibleHistoryResult> {
+    this.historyReuse.invalidate(sessionId);
     const target = context.turns[index]!;
     const session = await this.ensureLive(sessionId);
     if (!session.query.rewindFiles) throw new ReversibleHistoryTargetError();
@@ -1284,6 +1298,7 @@ export class ClaudeProvider implements ChatProvider {
 
   /** Terminal redo: every hidden turn returns and the tip's bytes come back. */
   private async clearBoundary(sessionId: string, context: { turns: ReversibleClaudeTurn[]; state: ReversibleHistoryState }, stagedState: { boundaryIndex: number; tipSnapshot: Map<string, SnapshotEntry> }): Promise<ReversibleHistoryResult> {
+    this.historyReuse.invalidate(sessionId);
     await this.restoreSnapshot(stagedState.tipSnapshot);
     this.staged.delete(sessionId);
     try {
@@ -2092,6 +2107,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   private emit(conversationId: string, normalized: Omit<NormalizedProviderEvent, "conversationId">): void {
+    this.historyReuse.invalidate(conversationId);
     this.events_.push({ ...normalized, conversationId });
   }
 
@@ -2191,13 +2207,6 @@ function deriveTitle(firstPrompt: string | null): string {
   const collapsed = (firstPrompt ?? "").replace(/\s+/g, " ").trim();
   if (!collapsed) return DEFAULT_TITLE;
   return collapsed.length > TITLE_LIMIT ? `${collapsed.slice(0, TITLE_LIMIT - 1)}…` : collapsed;
-}
-
-function clampIndex(cursor: string | undefined, length: number): number {
-  if (cursor === undefined) return length;
-  const parsed = Number.parseInt(cursor, 10);
-  if (Number.isNaN(parsed)) throw new Error("invalid history cursor");
-  return Math.max(0, Math.min(parsed, length));
 }
 
 /** The CLI's ModelInfo list → the shared model shape + resolved-id joins. */

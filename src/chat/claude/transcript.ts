@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fs, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { measureChatWork } from "../performance";
 
 /**
  * Read-only access to Claude Code's native session storage:
@@ -84,6 +85,8 @@ export type TranscriptReadResult = {
 };
 
 export async function readSessionTranscript(file: string): Promise<TranscriptReadResult> {
+  const finish = measureChatWork("claude-read");
+  try {
   const text = await fs.readFile(file, "utf8");
   const entries: TranscriptEntry[] = [];
   const skipped: Record<string, number> = {};
@@ -102,6 +105,7 @@ export async function readSessionTranscript(file: string): Promise<TranscriptRea
     else count(typeof (value as { type?: unknown })?.type === "string" ? (value as { type: string }).type : "");
   }
   return { entries, skipped };
+  } finally { finish(); }
 }
 
 function validateEntry(value: unknown): TranscriptEntry | null {

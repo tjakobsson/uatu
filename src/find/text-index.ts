@@ -93,7 +93,7 @@ function isSkippedElement(element: Element): boolean {
 // `#preview` with twelve characters of toolbar text and nothing else. Anything
 // inside the searched root is content the reader can see, whatever tree it
 // lives in.
-export function buildTextIndex(root: Node): TextIndex {
+export function buildTextIndex(root: Node, options: { includeClosedDetails?: boolean } = {}): TextIndex {
   const entries: TextIndexEntry[] = [];
   const shadowRoots: ShadowRoot[] = [];
   let text = "";
@@ -121,7 +121,7 @@ export function buildTextIndex(root: Node): TextIndex {
       if (block && text.length > 0 && !text.endsWith("\n")) {
         text += "\n";
       }
-      if (element.tagName === "DETAILS" && !element.hasAttribute("open")) {
+      if (element.tagName === "DETAILS" && !element.hasAttribute("open") && !options.includeClosedDetails) {
         // A closed `<details>` shows only its first `<summary>`; the rest of
         // the subtree exists in the DOM but not on screen, and a match there
         // would be reported yet never visible — and a project-search reveal

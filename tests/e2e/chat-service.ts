@@ -504,7 +504,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const existing = this.receipts.get(key) as { outcome: QuestionOutcome } | undefined;
     if (existing) return existing;
     const result = { outcome };
-    const item = this.items.get(id)!.get(`question:${interactionId}`);
+    const item = [...this.items.get(id)!.values()].find(item => item.type === "question" && item.requestId === interactionId);
     if (item?.type === "question") this.publishItem(id, { ...item, status: "resolved", outcome });
     this.receipts.set(key, result);
     return result;

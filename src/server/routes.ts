@@ -15,6 +15,8 @@ import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsuppor
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
+import { HistoryChangedError } from "../chat/history-reuse";
+import { resolveStartupTimeoutMs } from "../chat/opencode/opencode-service";
 import { ChatUnavailableError } from "../chat/service";
 import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome } from "../chat/types";
@@ -444,7 +446,10 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
   };
   const run = async (operation: () => Promise<unknown>, status = 200): Promise<Response> => {
     try {
-      return Response.json(await operation(), { status, headers: { "cache-control": "no-store" } });
+      return Response.json(await operation(), { status, headers: {
+        "cache-control": "no-store",
+        "x-uatu-chat-startup-read-ms": String((resolveStartupTimeoutMs(process.env) ?? 30_000) + 35_000),
+      } });
     } catch (error) {
       return normalizedChatError(error);
     }
@@ -996,6 +1001,7 @@ function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | 
 
 function normalizedChatError(error: unknown): Response {
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
+  if (error instanceof HistoryChangedError) return chatError(409, error.message);
   if (error instanceof UnknownAgentError) return chatError(404, error.message);
   if (error instanceof QueuedMessageNotHeldError) return chatError(409, error.message);
   if (error instanceof ChatQueueFullError) return chatError(429, error.message);

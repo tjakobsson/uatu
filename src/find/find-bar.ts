@@ -6,6 +6,7 @@
 // what keeps ⌘F feeling like one feature rather than two that share a key.
 
 import { appState } from "../shell/state";
+import { materializeChatActivity, revealChatMatch } from "../chat/timeline-renderer";
 import { findDocument } from "../shared/types";
 import type { FindEngine } from "./engine";
 import { clampSeed, describeStatus } from "./find-status";
@@ -72,6 +73,9 @@ const SEARCH_DEBOUNCE_MS = 120;
 
 const previewEngine = createPreviewEngine(previewElement, previewShellElement, previewFindSlot);
 const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFindSlotMaybe, {
+  prepareIndex: () => materializeChatActivity(chatItemsMaybe),
+  prepareReveal: revealChatMatch,
+  includeClosedDetails: true,
   label: "chat",
   revealSurface: () => {
     // Desktop: expand a collapsed panel so the search acts on something

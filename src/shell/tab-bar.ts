@@ -44,6 +44,7 @@ function writeActiveTabPreference(tab: TouchTab): void {
 // Stamp the active tab on <html> (surface CSS keys on it, alongside
 // data-ui-mode) and sync each tab button's aria-selected.
 function applyActiveTabToDom(): void {
+  document.dispatchEvent(new Event("uatu:before-surface-change"));
   document.documentElement.setAttribute("data-active-tab", appState.activeTab);
   for (const button of tabButtons) {
     button.setAttribute("aria-selected", button.dataset.tab === appState.activeTab ? "true" : "false");

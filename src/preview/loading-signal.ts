@@ -20,16 +20,20 @@ export type LoadingSignalOptions = {
   barHost: HTMLElement;
   showDelayMs?: number;
   minVisibleMs?: number;
+  label?: string;
+  visibleLabel?: boolean;
+  busyHost?: HTMLElement;
 };
 
 export type LoadingSignal = {
   // Mark work as started: segment goes busy now, bar appears after the
   // show delay if the work hasn't settled by then. Re-entrant — a second
   // start() while active keeps the existing timers/bar.
-  start(): void;
+  start(label?: string): number;
   // Mark work as finished (success or failure): segment un-busies now,
   // the bar honors its minimum visible window before disappearing.
-  settle(): void;
+  settle(operation?: number): void;
+  cancel(operation?: number): void;
 };
 
 export function createLoadingSignal(options: LoadingSignalOptions): LoadingSignal {
@@ -41,16 +45,25 @@ export function createLoadingSignal(options: LoadingSignalOptions): LoadingSigna
   let bar: HTMLElement | null = null;
   let shownAtMs = 0;
   let active = false;
+  let operation = 0;
+  let label = options.label ?? "Loading diff";
 
   const showBar = (): void => {
     if (bar) return;
     const wrapper = document.createElement("div");
     wrapper.className = "uatu-loading-bar";
     wrapper.setAttribute("role", "progressbar");
-    wrapper.setAttribute("aria-label", "Loading diff");
+    wrapper.setAttribute("aria-label", label);
     const fill = document.createElement("div");
     fill.className = "uatu-loading-bar-fill";
     wrapper.appendChild(fill);
+    if (options.visibleLabel) {
+      const text = document.createElement("span");
+      text.className = "uatu-loading-label";
+      text.setAttribute("role", "status");
+      text.textContent = label;
+      wrapper.appendChild(text);
+    }
     options.barHost.insertBefore(wrapper, options.barHost.firstChild);
     bar = wrapper;
     shownAtMs = Date.now();
@@ -62,7 +75,14 @@ export function createLoadingSignal(options: LoadingSignalOptions): LoadingSigna
   };
 
   return {
-    start(): void {
+    start(nextLabel?: string): number {
+      operation++;
+      label = nextLabel ?? options.label ?? "Loading diff";
+      if (bar) {
+        bar.setAttribute("aria-label", label);
+        const text = bar.querySelector(".uatu-loading-label");
+        if (text) text.textContent = label;
+      }
       active = true;
       if (hideTimer !== null) {
         // New work started while the previous bar was in its minimum
@@ -71,6 +91,7 @@ export function createLoadingSignal(options: LoadingSignalOptions): LoadingSigna
         hideTimer = null;
       }
       options.segment?.setAttribute("aria-busy", "true");
+      options.busyHost?.setAttribute("aria-busy", "true");
       options.segment?.classList.add("is-loading");
       if (bar === null && showTimer === null) {
         showTimer = setTimeout(() => {
@@ -78,15 +99,18 @@ export function createLoadingSignal(options: LoadingSignalOptions): LoadingSigna
           if (active) showBar();
         }, showDelayMs);
       }
+      return operation;
     },
 
-    settle(): void {
+    settle(owner?: number): void {
+      if (owner !== undefined && owner !== operation) return;
       active = false;
       if (showTimer !== null) {
         clearTimeout(showTimer);
         showTimer = null;
       }
       options.segment?.removeAttribute("aria-busy");
+      options.busyHost?.removeAttribute("aria-busy");
       options.segment?.classList.remove("is-loading");
       if (bar !== null && hideTimer === null) {
         const remainingMs = Math.max(0, minVisibleMs - (Date.now() - shownAtMs));
@@ -99,6 +123,18 @@ export function createLoadingSignal(options: LoadingSignalOptions): LoadingSigna
           }, remainingMs);
         }
       }
+    },
+    cancel(owner?: number): void {
+      if (owner !== undefined && owner !== operation) return;
+      operation++;
+      active = false;
+      if (showTimer !== null) clearTimeout(showTimer);
+      if (hideTimer !== null) clearTimeout(hideTimer);
+      showTimer = hideTimer = null;
+      options.segment?.removeAttribute("aria-busy");
+      options.segment?.classList.remove("is-loading");
+      options.busyHost?.removeAttribute("aria-busy");
+      removeBar();
     },
   };
 }

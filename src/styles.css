@@ -4519,6 +4519,30 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
   animation: uatu-loading-bar-slide 1.1s ease-in-out infinite;
 }
 
+.uatu-loading-label {
+  position: absolute;
+  top: 0.25rem;
+  inset-inline-end: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font-size: 0.8rem;
+}
+
+.chat-read-error {
+  position: absolute;
+  top: 5rem;
+  inset-inline: 0.75rem;
+  z-index: 4;
+  padding: 0.6rem;
+  border: 1px solid var(--attention);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.chat-read-error button { margin-inline-start: 0.5rem; }
+
 @keyframes uatu-loading-bar-slide {
   0% { background-position-x: -40%; }
   100% { background-position-x: 140%; }
@@ -5544,6 +5568,16 @@ body.is-resizing-chat .chat-resizer {
 
 .chat-item {
   margin: 0 0 1rem;
+}
+
+/* Let the browser skip distant bodies, using remembered heights as anchors.
+   Nodes stay in reading order for find, copy, selection and accessibility.
+   User actions extend outside their bubble; pending forms stay fully laid out. */
+.chat-assistant-message,
+.chat-activity,
+.chat-activity-group {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 100px;
 }
 
 .chat-user-message {

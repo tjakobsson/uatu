@@ -125,9 +125,9 @@ injectPwaLinks();
 unregisterLegacyServiceWorkers();
 attachPopstateHandler();
 
-void loadInitialState().then(async () => {
-  await waitForWorkspaceCredential();
-  initChat();
+void loadInitialState(() => {
+  void waitForWorkspaceCredential().then(() => initChat());
+}).then(() => {
   // Prewarm the diff renderer at idle once we know whether this is a
   // git-backed session — off the critical path, so the first Diff open
   // skips the library + highlighter stall.

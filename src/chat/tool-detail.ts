@@ -24,7 +24,38 @@ export type ToolDetail =
 // so the row stays legible and the whole command still lives in the body.
 const SUBJECT_LIMIT = 160;
 
-export function describeToolDetail(item: Pick<ToolItem, "name" | "input" | "output" | "childConversationId">): ToolDetail {
+type DetailInput = Pick<ToolItem, "name" | "input" | "output" | "childConversationId">;
+const detailCache = new Map<DetailInput, { source: DetailInput; detail: ToolDetail; bytes: number }>();
+let detailBytes = 0;
+const DETAIL_BYTE_LIMIT = 4 * 1024 * 1024;
+
+export function describeToolDetail(item: DetailInput): ToolDetail {
+  const existing = detailCache.get(item);
+  if (existing) {
+    detailCache.delete(item);
+    detailBytes -= existing.bytes;
+    if (existing.source.name === item.name && existing.source.input === item.input && existing.source.output === item.output && existing.source.childConversationId === item.childConversationId) {
+      detailCache.set(item, existing);
+      detailBytes += existing.bytes;
+      return existing.detail;
+    }
+  }
+  const detail = parseToolDetail(item);
+  const source = { name: item.name, input: item.input, output: item.output, childConversationId: item.childConversationId };
+  const bytes = 2 * (JSON.stringify(source).length + JSON.stringify(detail).length);
+  if (bytes <= DETAIL_BYTE_LIMIT) {
+    while (detailCache.size >= 256 || detailBytes + bytes > DETAIL_BYTE_LIMIT) {
+      const [key, entry] = detailCache.entries().next().value!;
+      detailCache.delete(key);
+      detailBytes -= entry.bytes;
+    }
+    detailCache.set(item, { source, detail, bytes });
+    detailBytes += bytes;
+  }
+  return detail;
+}
+
+function parseToolDetail(item: DetailInput): ToolDetail {
   const label = humanizeToolName(item.name);
   const input = parseInput(item.input);
   switch (item.name.toLowerCase()) {
