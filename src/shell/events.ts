@@ -186,7 +186,7 @@ function openDocumentStream(generation: number, context: { reconnect: boolean })
         forgetDocumentCache(appState.selectedId);
       }
       await loadDocument(appState.selectedId);
-      if (shouldReload && appState.selectedId === previousSelectedId) {
+      if (shouldReload && appState.selectedId === previousSelectedId && hasDocument(appState.roots, previousSelectedId)) {
         // In-place reload of the document being viewed (Rule D): surface the
         // otherwise-silent swap. A selection switch is a new document, not an
         // update of what the user was reading — no signal there.
@@ -195,7 +195,9 @@ function openDocumentStream(generation: number, context: { reconnect: boolean })
       return;
     }
 
-    if (!hasDocument(payload.roots, appState.selectedId)) {
+    if (appState.selectedId && !hasDocument(payload.roots, appState.selectedId)) {
+      await loadDocument(appState.selectedId);
+    } else if (!appState.selectedId) {
       renderEmptyPreview("No document selected", "Waiting for viewable files");
     }
   });
@@ -239,7 +241,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
         // Same signal the in-place reload gives on Rule D: the document the
         // user was reading changed under them, and the swap is otherwise
         // silent.
-        if (appState.selectedId === selectedId) signalActiveDocumentUpdated();
+        if (appState.selectedId === selectedId && hasDocument(appState.roots, selectedId)) signalActiveDocumentUpdated();
       });
     }
   },

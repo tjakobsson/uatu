@@ -57,6 +57,11 @@ let diffLoadGeneration = 0;
 
 export async function applyDiffForActiveDocument(documentId: string): Promise<void> {
   const generation = ++diffLoadGeneration;
+  const isCurrent = () => generation === diffLoadGeneration
+    && appState.previewMode.kind === "document"
+    && appState.selectedId === documentId
+    && appState.viewMode === "diff"
+    && Boolean(findDocumentById(documentId));
   // The signal starts on every invocation — even with a cached payload the
   // first Pierre-path render still waits on the library + highlighter load.
   // We do NOT clear #preview before content is in hand: the previous view
@@ -71,7 +76,7 @@ export async function applyDiffForActiveDocument(documentId: string): Promise<vo
     let payload = documentDiffCache.get(documentId);
     if (!payload) {
       const fetched = await fetchDocumentDiff(documentId);
-      if (!fetched) {
+      if (!fetched || !isCurrent()) {
         return;
       }
       documentDiffCache.set(documentId, fetched);
@@ -86,7 +91,7 @@ export async function applyDiffForActiveDocument(documentId: string): Promise<vo
       }
       payload = fetched;
     }
-    await renderDiffIntoPreview(documentId, payload);
+    await renderDiffIntoPreview(documentId, payload, isCurrent);
   } finally {
     // Generation-gated: only the newest invocation may settle, so a
     // superseded fetch finishing late (rapid file switching while Diff is
@@ -110,7 +115,18 @@ export async function fetchDocumentDiff(documentId: string): Promise<DocumentDif
   }
 }
 
-export async function renderDiffIntoPreview(documentId: string, payload: DocumentDiffPayload): Promise<void> {
+let diffRenderGeneration = 0;
+
+export async function renderDiffIntoPreview(
+  documentId: string,
+  payload: DocumentDiffPayload,
+  ownsLoad: () => boolean = () => true,
+): Promise<void> {
+  const generation = ++diffRenderGeneration;
+  const isCurrent = () => generation === diffRenderGeneration && ownsLoad()
+    && appState.previewMode.kind === "document"
+    && appState.selectedId === documentId && appState.viewMode === "diff"
+    && Boolean(findDocumentById(documentId));
   const doc = findDocumentById(documentId);
   const languageHint = doc ? extensionToLanguage(doc.name) : null;
 
@@ -126,13 +142,7 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
   // slow): the user may have selected another file or left the Diff view
   // meanwhile. Re-check before mutating the DOM so a stale invocation
   // cannot wipe the pane and render an outdated diff over the navigation.
-  if (
-    appState.previewMode.kind !== "document" ||
-    appState.selectedId !== documentId ||
-    appState.viewMode !== "diff"
-  ) {
-    return;
-  }
+  if (!isCurrent()) return;
 
   // Pin previewMode to document so the header chrome (path, title, pin/follow
   // controls) keeps treating this as a document preview.
@@ -180,6 +190,7 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
   // primary representation. A minimal kind-only stub built from
   // DocumentMeta lets `syncViewToggle` / `syncLayoutChooser` make the
   // correct visibility decisions without needing a real RenderedDocument.
+  if (!isCurrent()) return;
   const choicePayload = doc ? renderedDocumentStubFromMeta(doc) : null;
   syncViewToggle(choicePayload);
   syncLayoutChooser(choicePayload);

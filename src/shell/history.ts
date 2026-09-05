@@ -199,6 +199,7 @@ export function attachPopstateHandler() {
       setPreviewMode({ kind: "document" });
       renderSidebar();
       void loadDocument(requestedDoc.id).then(() => {
+        if (appState.selectedId !== requestedDoc.id || appState.previewMode.kind !== "document") return;
         if (window.location.hash) {
           scrollToFragment(window.location.hash.slice(1));
         }

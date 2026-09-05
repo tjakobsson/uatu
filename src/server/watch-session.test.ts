@@ -573,3 +573,90 @@ describe("createWatchSession watcher resilience", () => {
     }
   });
 });
+
+test("a slow scan cannot overlap a later refresh or publish after stop", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-ordered-"));
+  tempDirectories.push(dir);
+  const file = path.join(dir, "a.md");
+  await writeFile(file, "# A\n");
+  let calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const session = createWatchSession([{ kind: "dir", absolutePath: dir }], false, {
+    scan: async (...args) => {
+      const result = await scanRoots(...args);
+      result[0]!.docs[0]!.mtimeMs = ++calls;
+      if (calls === 2) await gate;
+      return result;
+    },
+  });
+  try {
+    await session.start();
+    const before = session.getStatePayload();
+    session._internalWatcher()!.emit("all", "change", file);
+    await waitUntil(() => calls === 2);
+    session._internalWatcher()!.emit("all", "change", file);
+    // Advance past the debounce while scan 2 is explicitly held open.
+    await new Promise(resolve => setTimeout(resolve, REFRESH_DEBOUNCE_MS * 2));
+    expect(calls).toBe(2);
+    await session.stop();
+    release();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(session.getRoots()).toEqual(before.roots);
+    expect(calls).toBe(2);
+  } finally {
+    release();
+    await session.stop();
+  }
+});
+
+test("repository failure retains the complete snapshot and drains later events to scoped subscribers", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-complete-"));
+  tempDirectories.push(dir);
+  const file = path.join(dir, "a.md");
+  await writeFile(file, "# A\n");
+  let scanCount = 0;
+  const repoGate = Promise.withResolvers<void>();
+  let collecting = false;
+  const session = createWatchSession([{ kind: "dir", absolutePath: dir }], false, {
+    scan: async (...args) => {
+      const roots = await scanRoots(...args);
+      roots[0]!.docs[0]!.mtimeMs = ++scanCount;
+      return roots;
+    },
+    collectRepositories: async (_entries, _roots, target) => {
+      if (scanCount === 2) {
+        collecting = true;
+        if (target === "base") throw new Error("controlled repository failure");
+        await repoGate.promise;
+      }
+      return [];
+    },
+  });
+  try {
+    await session.start();
+    const before = session.getStatePayload();
+    const context = { scope: { kind: "file" as const, documentId: file }, compareTarget: "last-commit" as const };
+    const pinned = session.eventsResponse(context).body!.getReader();
+    const folder = session.eventsResponse().body!.getReader();
+    await Promise.all([readSsePayload(pinned), readSsePayload(folder)]);
+    session._internalWatcher()!.emit("all", "change", file);
+    await waitUntil(() => collecting);
+    session._internalWatcher()!.emit("all", "change", file);
+    await new Promise(resolve => setTimeout(resolve, REFRESH_DEBOUNCE_MS * 2));
+    expect(scanCount).toBe(2);
+    expect(session.getStatePayload().roots).toEqual(before.roots);
+    repoGate.resolve();
+    const [scoped, unscoped] = await Promise.all([readSsePayload(pinned), readSsePayload(folder)]);
+    expect(scoped.scope).toEqual(context.scope);
+    expect(scoped.compareTarget).toBe("last-commit");
+    expect(unscoped.scope).toEqual({ kind: "folder" });
+    expect(scoped.roots[0]!.docs[0]!.mtimeMs).toBe(3);
+    expect(unscoped.roots).toEqual(session.getStatePayload().roots);
+    expect(unscoped.changedId).toBe(file);
+    await Promise.all([pinned.cancel(), folder.cancel()]);
+  } finally {
+    repoGate.resolve();
+    await session.stop();
+  }
+});

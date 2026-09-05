@@ -1,6 +1,7 @@
 // The live-reload engine: owns the chokidar watcher, the debounced rescan +
 // git-snapshot refresh cycle, contextual SSE subscribers, and terminal token.
 
+import { createRefreshQueue } from "./refresh-queue";
 import chokidar from "chokidar";
 import path from "node:path";
 import type { ReadableStreamDefaultController } from "node:stream/web";
@@ -101,6 +102,9 @@ export const DOCUMENT_KEEPALIVE_MS = 15_000;
 const KEEPALIVE_FRAME = ": keepalive\n\n";
 
 export type WatchSessionOptions = {
+  // Dependency seams for controlled refresh completion in watcher tests.
+  scan?: typeof scanRoots;
+  collectRepositories?: typeof collectRepositorySnapshots;
   usePolling?: boolean;
   respectGitignore?: boolean;
   terminalEnabled?: boolean;
@@ -255,6 +259,8 @@ export function createWatchSession(
   initialFollow: boolean,
   options: WatchSessionOptions = {},
 ) {
+  const scan = options.scan ?? scanRoots;
+  const collectRepositories = options.collectRepositories ?? collectRepositorySnapshots;
   const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
   const terminalEnabled = options.terminalEnabled ?? false;
   const terminalToken = createTerminalToken();
@@ -337,26 +343,27 @@ export function createWatchSession(
   const collectAllRepositorySnapshots = async (
     nextRoots: RootGroup[],
   ): Promise<Record<CompareTarget, RepositorySnapshot[]>> => {
-    const previous = repositoriesByTarget;
-    const [base, lastCommit] = await Promise.all([
-      collectRepositorySnapshots(entries, nextRoots, "base").catch(error => {
-        console.error(`uatu: failed to refresh base change data: ${error instanceof Error ? error.message : String(error)}`);
-        return previous.base;
-      }),
-      collectRepositorySnapshots(entries, nextRoots, "last-commit").catch(error => {
-        console.error(`uatu: failed to refresh last-commit change data: ${error instanceof Error ? error.message : String(error)}`);
-        return previous["last-commit"];
-      }),
+    const results = await Promise.allSettled([
+      collectRepositories(entries, nextRoots, "base"),
+      collectRepositories(entries, nextRoots, "last-commit"),
     ]);
-    return { base, "last-commit": lastCommit };
+    // Wait for both targets even when one fails, so the next refresh cannot
+    // overlap an unfinished collection. Publish neither target on failure.
+    const [base, lastCommit] = results;
+    if (base.status === "rejected") throw base.reason;
+    if (lastCommit.status === "rejected") throw lastCommit.reason;
+    return { base: base.value, "last-commit": lastCommit.value };
   };
+
+  let stopped = false;
 
   const refresh = async (changedId: string | null) => {
     metrics?.set("refresh.in_flight", 1);
     const startedAt = Date.now();
     try {
-      const nextRoots = await scanRoots(entries, { respectGitignore, matcherCache });
+      const nextRoots = await scan(entries, { respectGitignore, matcherCache });
       const nextRepositories = await collectAllRepositorySnapshots(nextRoots);
+      if (stopped) return;
       const nextFingerprint = createContextFingerprint(nextRoots, nextRepositories);
       const nextUnscopedFingerprint = hashCorpus(fingerprintRoots(nextRoots));
       const changedDoc = changedId ? findDocument(nextRoots, changedId) : undefined;
@@ -390,13 +397,15 @@ export function createWatchSession(
     }
   };
 
+  const refreshQueue = createRefreshQueue(refresh);
   const refreshScheduler = createRefreshScheduler(nextChangedId => {
-    void refresh(nextChangedId).catch(error => {
+    void refreshQueue.request(nextChangedId).catch(error => {
       console.error(`uatu: failed to refresh state: ${error instanceof Error ? error.message : String(error)}`);
     });
   });
 
   const scheduleRefresh = (changedId: string | null) => {
+    if (stopped) return;
     metrics?.inc("refresh.scheduled_total");
     refreshScheduler.schedule(changedId);
   };
@@ -458,20 +467,19 @@ export function createWatchSession(
       attachWatcherCrashGuard(watcher);
 
       await watcherReady;
-      const scanned = await scanRoots(entries, { respectGitignore, matcherCache });
-      unscopedRoots = scanned;
-      repositoriesByTarget = await collectAllRepositorySnapshots(scanned);
-      stateFingerprint = createContextFingerprint(scanned, repositoriesByTarget);
-      unscopedFingerprint = hashCorpus(fingerprintRoots(scanned));
+      await refreshQueue.request(null);
+      if (stopped) return;
       reconcileTimer = setInterval(() => {
         metrics?.inc("reconcile.ticks_total");
-        void refresh(null).catch(error => {
+        void refreshQueue.request(null).catch(error => {
           console.error(`uatu: failed to reconcile state: ${error instanceof Error ? error.message : String(error)}`);
         });
       }, 5000);
     },
     stop() {
+      stopped = true;
       refreshScheduler.cancel();
+      refreshQueue.stop();
 
       if (reconcileTimer) {
         clearInterval(reconcileTimer);

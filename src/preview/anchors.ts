@@ -205,6 +205,7 @@ export function initCrossDocAnchorHandler() {
     syncFollowToggle();
     renderSidebar();
     void loadDocument(doc.id).then(() => {
+        if (appState.selectedId !== doc.id || appState.previewMode.kind !== "document") return;
       if (resolved.hash) {
         scrollToFragment(resolved.hash.slice(1));
       }

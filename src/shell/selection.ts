@@ -8,12 +8,20 @@
 import { appState, type PreviewMode } from "./state";
 import { persistPersonalWorkspaceState } from "./personal-state";
 
+let selectedDestination: { id: string; name: string; relativePath: string } | null = null;
+
+export function getSelectedDestination() {
+  return selectedDestination;
+}
+
 export function setSelectedId(next: string | null): void {
+  if (next !== appState.selectedId) selectedDestination = null;
   appState.selectedId = next;
   if (next) {
     for (const root of appState.roots) {
       const document = root.docs.find(candidate => candidate.id === next);
       if (document) {
+        selectedDestination = { id: document.id, name: document.name, relativePath: document.relativePath };
         persistPersonalWorkspaceState({ documentPath: document.relativePath });
         break;
       }
