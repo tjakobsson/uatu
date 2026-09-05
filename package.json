@@ -3,7 +3,7 @@
   "version": "0.6.2",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "license": "MIT",
   "bin": {
     "uatu": "./src/cli.ts"
