@@ -45,6 +45,7 @@ describe("chat lifecycle recovery", () => {
     const snapshotCalls: string[] = [];
     const streams: { conversationId: string; cursor: string; closed: boolean }[] = [];
     const inventoryStreams: { closed: boolean }[] = [];
+    const streamsOpenAtInventoryFetch: { inventory: number; conversation: number }[] = [];
 
     const api = {
       status: async () => ([{
@@ -53,6 +54,11 @@ describe("chat lifecycle recovery", () => {
       }]),
       conversations: async () => {
         conversationCalls.push(Date.now());
+        // What the recovery had already done when it issued this fetch.
+        streamsOpenAtInventoryFetch.push({
+          inventory: inventoryStreams.filter(entry => !entry.closed).length,
+          conversation: streams.filter(entry => !entry.closed).length,
+        });
         return [conversation("one")];
       },
       commands: async () => [],
@@ -93,6 +99,13 @@ describe("chat lifecycle recovery", () => {
 
     await waitUntil(() => conversationCalls.length > inventoryCallsBefore && streams.length === 2);
 
+    // The streams being replaced were closed BEFORE the reconciliation fetch
+    // went out. Over HTTP/1.1 the browser's per-host connection budget is
+    // shared with every other hub tab; a fetch issued while the old streams
+    // still held their slots would queue behind them — the tab switch that
+    // triggered this recovery is exactly when that budget is tightest.
+    expect(streamsOpenAtInventoryFetch.at(-1)).toEqual({ inventory: 0, conversation: 0 });
+
     // Inventory reconciled from the server, and both streams were replaced.
     expect(inventoryStreams).toHaveLength(2);
     expect(inventoryStreams[0]!.closed).toBe(true);
@@ -111,7 +124,12 @@ describe("chat lifecycle recovery", () => {
     expect(snapshotCalls.length).toBe(snapshotCallsBefore);
     expect(document.querySelector("#chat-items")?.innerHTML ?? "").toBe(renderedBefore);
 
-    // A regained network connection recovers the same way.
+    // A regained network connection recovers the same way. The resume above
+    // is still awaiting its inventory fetch at this point — recovery
+    // dispatches that fetch before reopening streams, so the wait above was
+    // satisfied synchronously — and an overlapping signal is dropped by
+    // design (see createLifecycleRecovery). Let it settle first.
+    await Bun.sleep(20);
     const streamsAfterResume = streams.length;
     window.dispatchEvent(new Event("online"));
     await waitUntil(() => streams.length === streamsAfterResume + 1);
