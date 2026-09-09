@@ -154,6 +154,10 @@ describe("rate-limit badge and plan utilization", () => {
     expect(rows[6]).toMatchObject({ key: "extra-usage", utilization: 12.5, note: "$12.50 of $100.00" });
     expect(planName({ subscription: "max" })).toBe("Max plan");
     expect(planName({})).toBeUndefined();
+    // Credits read as money in the login's currency; a derived 0% is a
+    // figure, not a "?" (a Pro login with 85 € enabled and nothing spent).
+    const euro = planReadoutRows({ fiveHour: { utilization: 30 }, extraUsage: { enabled: true, usedCredits: 0, monthlyLimit: 85, utilization: 0, currency: "EUR" } }, now);
+    expect(euro[1]).toMatchObject({ key: "extra-usage", utilization: 0, note: "€0.00 of €85.00" });
     // A minimal report degrades to its two rows; disabled extra usage is not a row.
     expect(planReadoutRows({ fiveHour: { utilization: 1 }, sevenDay: { utilization: 2 }, extraUsage: { enabled: false } }, now).map(row => row.key)).toEqual(["session", "week"]);
     expect(planReadoutRows({}, now)).toEqual([]);

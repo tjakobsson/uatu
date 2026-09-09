@@ -2393,6 +2393,10 @@ function nonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function minorToMajor(amount: number | undefined): number | undefined {
+  return amount === undefined ? undefined : amount / 100;
+}
+
 function planWindow(value: unknown): PlanUtilizationWindow | undefined {
   if (!value || typeof value !== "object") return undefined;
   const entry = value as Record<string, unknown>;
@@ -2402,13 +2406,21 @@ function planWindow(value: unknown): PlanUtilizationWindow | undefined {
   return { ...(utilization === undefined ? {} : { utilization }), ...(Number.isNaN(resetsAt) ? {} : { resetsAt: Math.round(resetsAt) }) };
 }
 
+/**
+ * Extra-usage credits arrive in the currency's minor unit — the CLI builds
+ * the same shape from its own `spendLimitCents`/`usedCents` — so a plan
+ * with 85 € of credit reads `monthly_limit: 8500`. The readout speaks in
+ * major units. A null utilization on the wire is derived from the two
+ * amounts where the limit allows it, the way the CLI's own dialog does.
+ */
 function planExtraUsage(value: unknown): PlanExtraUsage | undefined {
   if (!value || typeof value !== "object") return undefined;
   const entry = value as Record<string, unknown>;
   if (typeof entry.is_enabled !== "boolean") return undefined;
-  const usedCredits = nonNegativeNumber(entry.used_credits);
-  const monthlyLimit = nonNegativeNumber(entry.monthly_limit);
-  const utilization = nonNegativeNumber(entry.utilization);
+  const usedCredits = minorToMajor(nonNegativeNumber(entry.used_credits));
+  const monthlyLimit = minorToMajor(nonNegativeNumber(entry.monthly_limit));
+  const utilization = nonNegativeNumber(entry.utilization)
+    ?? (usedCredits !== undefined && monthlyLimit !== undefined && monthlyLimit > 0 ? usedCredits / monthlyLimit * 100 : undefined);
   return {
     enabled: entry.is_enabled,
     ...(usedCredits === undefined ? {} : { usedCredits }),

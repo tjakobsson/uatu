@@ -351,7 +351,12 @@ conversation, the reported occupancy SHALL drop to the post-compaction
 figure and the timeline SHALL mark where compaction happened. Where the
 session can report its own context breakdown, that breakdown SHALL be
 offered as the expanded view and its total SHALL agree with the presented
-fill.
+fill. The window the fill is measured against SHALL be the one the session
+itself reports for the model once it has reported one; the catalog's figure
+for the model is the measure only before that. A catalog figure that the
+observed occupancy exceeds SHALL NOT be presented as a full window: the
+readout SHALL state the occupancy without a fill until the session reports
+its window.
 
 #### Scenario: A long turn does not exceed its window
 - **WHEN** a turn makes many model calls, each against a window that is 30% full
@@ -366,6 +371,16 @@ fill.
 - **WHEN** the user opens the context readout on a session that reports a breakdown
 - **THEN** it shows the session's categories (system prompt, tools, messages, memory, and so on)
 - **AND** their total matches the presented fill
+
+#### Scenario: The session's window beats the catalog's figure
+- **WHEN** the catalog lists a model with a 200k window and the session reports a 1M window for it
+- **THEN** a later call that occupies 212k tokens presents a fill of about 21%
+- **AND** the readout is not in its alert state
+
+#### Scenario: An occupancy beyond the catalog's figure is not a full window
+- **WHEN** no window has been reported for the model and a call occupies more tokens than the catalog's figure
+- **THEN** the readout states the occupancy without a percentage
+- **AND** it is not in its alert state
 
 ### Requirement: Background tasks are surfaced, stoppable, and wake the model
 When a Claude Code session starts a task in the background — a backgrounded
@@ -437,7 +452,9 @@ readout that states, for every window the login reports: its name, its
 percentage used, and when it resets, both as a clock time and relative to
 now. The readout SHALL name the plan, SHALL list per-model weekly windows
 and model-scoped buckets under the label the login reports for them, SHALL
-show extra-usage credits where the login has them enabled, and SHALL show
+show extra-usage credits where the login has them enabled — as amounts in
+the login's currency, whatever unit the wire counts them in, with the
+percentage used derived from the amounts where the login states none — and SHALL show
 this conversation's accumulated cost and per-model token totals where the
 agent reports them. A login that reports only the two base windows SHALL
 render the summary and readout with just those. For a login without plan
@@ -472,6 +489,11 @@ totals, with no plan name, windows, or sidebar control.
 - **WHEN** the reader activates the plan summary
 - **THEN** each reported window shows its name, percentage, and reset as a clock time and a relative time
 - **AND** the plan name is shown
+
+#### Scenario: Extra-usage credits read as money
+- **WHEN** a Pro login has 85 € of extra usage enabled, none of it spent, and states no percentage
+- **THEN** the readout's extra-usage row reads 0,00 € of 85,00 € (in the reader's locale)
+- **AND** its percentage reads 0%
 
 #### Scenario: Per-model windows appear under their own labels
 - **WHEN** the login reports a weekly Opus window and a model-scoped bucket labelled "Fable"

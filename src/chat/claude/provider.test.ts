@@ -1484,7 +1484,7 @@ describe("ClaudeProvider sessions", () => {
         session: {}, subscription_type: "max", rate_limits_available: true,
         rate_limits: {
           ...(reads > 1 ? { five_hour: { utilization: 37, resets_at: "2026-09-02T14:00:00.000Z" } } : {}),
-          extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" },
+          extra_usage: { is_enabled: true, monthly_limit: 10_000, used_credits: 1_250, utilization: 12.5, currency: "USD" },
         },
       };
     };
@@ -1909,8 +1909,9 @@ describe("ClaudeProvider sessions", () => {
 
   test("the live catalog replaces the manifest with real windows and effort levels", async () => {
     const { provider, queries } = fixture();
-    // Cold: the static fallback answers.
-    expect((await provider.listModels()).find(model => model.selection.modelId === "claude-opus-5")?.contextLimit).toBe(200_000);
+    // Cold: the static fallback answers (Opus 5 runs the enlarged window on its plain id).
+    expect((await provider.listModels()).find(model => model.selection.modelId === "claude-opus-5")?.contextLimit).toBe(1_000_000);
+    expect((await provider.listModels()).find(model => model.selection.modelId === "claude-sonnet-5")?.contextLimit).toBe(200_000);
 
     const session = await provider.createSession("x");
     const catalog = [
@@ -3238,7 +3239,7 @@ describe("/usage normalization", () => {
         { display_name: "", utilization: 1, resets_at: null },
         { utilization: 2 },
       ],
-      extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" },
+      extra_usage: { is_enabled: true, monthly_limit: 10_000, used_credits: 1_250, utilization: 12.5, currency: "USD" },
     },
     behaviors: { day: { request_count: 1 }, week: { request_count: 2 } },
   };
@@ -3278,10 +3279,32 @@ describe("/usage normalization", () => {
     expect(normalizePlanUtilization("usage")).toBeUndefined();
   });
 
+  test("extra-usage credits arrive in minor units and read in major ones; a null utilization is derived from the amounts", () => {
+    // A Pro login with 85 € of credit and nothing spent: the wire says 8500
+    // and 0, and no utilization (issue #347's companion report).
+    const plan = normalizePlanUtilization({
+      session: {}, subscription_type: "pro", rate_limits_available: true,
+      rate_limits: { five_hour: { utilization: 30, resets_at: null }, extra_usage: { is_enabled: true, monthly_limit: 8_500, used_credits: 0, utilization: null, currency: "EUR" } },
+    });
+    expect(plan!.extraUsage).toEqual({ enabled: true, usedCredits: 0, monthlyLimit: 85, utilization: 0, currency: "EUR" });
+    // Partly spent, no utilization on the wire: derived from the amounts.
+    expect(normalizePlanUtilization({
+      rate_limits_available: true, rate_limits: { extra_usage: { is_enabled: true, monthly_limit: 8_500, used_credits: 2_125, utilization: null } },
+    })!.extraUsage).toEqual({ enabled: true, usedCredits: 21.25, monthlyLimit: 85, utilization: 25 });
+    // The wire's own utilization stands when it states one; a zero limit
+    // (unlimited or unknown) derives nothing.
+    expect(normalizePlanUtilization({
+      rate_limits_available: true, rate_limits: { extra_usage: { is_enabled: true, monthly_limit: 8_500, used_credits: 2_125, utilization: 26 } },
+    })!.extraUsage!.utilization).toBe(26);
+    expect(normalizePlanUtilization({
+      rate_limits_available: true, rate_limits: { extra_usage: { is_enabled: true, monthly_limit: 0, used_credits: 500, utilization: null } },
+    })!.extraUsage).toEqual({ enabled: true, usedCredits: 5, monthlyLimit: 0 });
+  });
+
   test("extra usage alone is a plan: the credit row survives without any time window", () => {
     const plan = normalizePlanUtilization({
       session: {}, subscription_type: "max", rate_limits_available: true,
-      rate_limits: { extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 12.5, utilization: 12.5, currency: "USD" } },
+      rate_limits: { extra_usage: { is_enabled: true, monthly_limit: 10_000, used_credits: 1_250, utilization: 12.5, currency: "USD" } },
     });
     expect(plan).toEqual({ subscription: "max", extraUsage: { enabled: true, usedCredits: 12.5, monthlyLimit: 100, utilization: 12.5, currency: "USD" } });
   });
@@ -3294,7 +3317,7 @@ describe("/usage normalization", () => {
         seven_day: { utilization: "half", resets_at: 1_788_400_000 },
         seven_day_opus: "lots",
         model_scoped: "Fable",
-        extra_usage: { is_enabled: "yes", monthly_limit: 100 },
+        extra_usage: { is_enabled: "yes", monthly_limit: 10_000 },
       },
     });
     expect(plan).toEqual({ sevenDay: { resetsAt: 1_788_400_000_000 } });
