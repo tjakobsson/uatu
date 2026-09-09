@@ -267,9 +267,17 @@ function cancellableBody(
           return;
         }
         controller.enqueue(result.value);
-      } catch (error) {
+      } catch {
+        // The upstream failure is recorded through the diagnostic sink, which
+        // names only the transport class and status category. The browser
+        // gets a clean end-of-stream, never the error: EventSource treats an
+        // ended stream exactly like a dropped one (onerror, then reconnect),
+        // and the search client reads a stream that ends without `done` as
+        // cut off. Erroring the stream instead would make Bun print the raw
+        // fetch error to stderr — a source excerpt plus the child URL,
+        // brokered token included — which no sink can suppress.
         finish("failed");
-        controller.error(error);
+        controller.close();
       }
     },
     cancel(reason) {

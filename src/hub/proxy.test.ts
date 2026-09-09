@@ -312,6 +312,30 @@ describe("proxied stream diagnostics", () => {
     }
   });
 
+  test("a child that drops mid-stream is recorded as failed and the browser sees a clean end", async () => {
+    const records: ProxyStreamDiagnostic[] = [];
+    setProxyStreamDiagnostics(record => records.push(record));
+    const child = streamingChild();
+    try {
+      const response = await proxyHttp(new Request("http://hub.example/s/project/api/events"), child.session);
+      const reader = response.body!.getReader();
+      await reader.read();
+      expect(records).toHaveLength(0);
+
+      // The child resets every open connection. The record names the class
+      // and category only; the browser-facing stream ends instead of
+      // erroring, so nothing — no URL, no token — is thrown or printed.
+      child.server.stop(true);
+      const ending = await reader.read();
+      expect(ending.done).toBe(true);
+      await waitFor(() => records.length === 1);
+      expect(records).toEqual([{ transport: "document", outcome: "failed", status: "2xx" }]);
+    } finally {
+      setProxyStreamDiagnostics(null);
+      child.server.stop(true);
+    }
+  });
+
   test("non-stream routes produce no lifecycle records", async () => {
     const records: ProxyStreamDiagnostic[] = [];
     setProxyStreamDiagnostics(record => records.push(record));
