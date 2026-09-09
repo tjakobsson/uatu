@@ -93,6 +93,80 @@ const INTENTIONALLY_IGNORED = new Set([
   "user_message_replay",
 ]);
 
+/**
+ * The permission updates an "always" reply forwards, and nothing else: the
+ * SDK's session-destination suggestions, as a set. An approval uatu brokered
+ * must never outlive the session it was given in, so a suggestion bound for
+ * a settings file is dropped. Within the session the whole bundle goes:
+ * Claude Code's own "always allow" applies its suggestions together, and a
+ * bundle that adds an allow while removing or denying something else would
+ * leave a more permissive state if only the addition were applied. A
+ * suggestion this code cannot describe is dropped whole rather than
+ * forwarded unseen. `describeSessionScopedUpdates` renders exactly this
+ * list, so the confirmation can never diverge from the reply.
+ */
+export function sessionScopedSuggestions(suggestions: unknown[] | undefined): unknown[] {
+  return sessionScopedUpdates(suggestions).map(update => update.suggestion);
+}
+
+/** The forwarded updates, one line each, in Claude Code's own terms. */
+export function describeSessionScopedUpdates(suggestions: unknown[] | undefined): string[] {
+  return sessionScopedUpdates(suggestions).map(update => update.description);
+}
+
+// One pass keeps each forwarded suggestion with its description, so the
+// list the card shows and the list the reply sends cannot disagree.
+function sessionScopedUpdates(suggestions: unknown[] | undefined): Array<{ suggestion: unknown; description: string }> {
+  return (suggestions ?? []).flatMap(suggestion => {
+    const description = describeSessionScopedUpdate(suggestion);
+    return description === null ? [] : [{ suggestion, description }];
+  });
+}
+
+// One suggestion → one line in Claude Code's own terms: rules in its
+// permission-rule spelling (`Bash(git status:*)`, bare `Read`) under the
+// behavior they are added to, replaced in, or removed from; a working
+// directory granted or withdrawn; a mode switch. Null when the reply would
+// not forward it.
+function describeSessionScopedUpdate(suggestion: unknown): string | null {
+  if (!suggestion || typeof suggestion !== "object") return null;
+  const record = suggestion as Record<string, unknown>;
+  if (record.destination !== "session") return null;
+  if (record.type === "addRules" || record.type === "replaceRules" || record.type === "removeRules") {
+    const behavior = record.behavior === "allow" || record.behavior === "deny" || record.behavior === "ask" ? record.behavior : null;
+    if (!behavior) return null;
+    const rules = describeRules(record.rules);
+    if (!rules) return null;
+    const verb = record.type === "addRules" ? RULE_VERBS[behavior] : record.type === "replaceRules" ? `Replace ${behavior} rules with` : `Remove ${behavior} rule`;
+    return `${verb}: ${rules}`;
+  }
+  if (record.type === "addDirectories" || record.type === "removeDirectories") {
+    if (!Array.isArray(record.directories) || record.directories.length === 0) return null;
+    if (!record.directories.every(directory => typeof directory === "string" && directory.length > 0)) return null;
+    return `${record.type === "addDirectories" ? "Working directory" : "Withdraw working directory"}: ${(record.directories as string[]).join(", ")}`;
+  }
+  if (record.type === "setMode" && typeof record.mode === "string" && record.mode.length > 0) return `Permission mode: ${record.mode}`;
+  return null;
+}
+
+const RULE_VERBS = { allow: "Allow", deny: "Deny", ask: "Ask before" } as const;
+
+// Every rule must be describable, or the suggestion is not forwarded at all:
+// forwarding a rule the card could not show would break the promise that
+// the list is exactly what the reply installs.
+function describeRules(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const rules: string[] = [];
+  for (const rule of value) {
+    if (!rule || typeof rule !== "object") return null;
+    const { toolName, ruleContent } = rule as { toolName?: unknown; ruleContent?: unknown };
+    if (typeof toolName !== "string" || toolName.length === 0) return null;
+    if (ruleContent !== undefined && (typeof ruleContent !== "string" || ruleContent.length === 0)) return null;
+    rules.push(ruleContent === undefined ? toolName : `${toolName}(${ruleContent})`);
+  }
+  return rules.join(", ");
+}
+
 export function claudeModelSelection(modelId: string): ModelSelection {
   return { providerId: "anthropic", modelId };
 }

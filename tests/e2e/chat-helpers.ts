@@ -5,12 +5,19 @@
 
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { expect, type Page, type TestInfo } from "@playwright/test";
 
 /** Saves a screenshot into a change's screenshots folder when that folder
  *  exists (review reads the folder instead of running a session), else into
  *  the test's output directory, and attaches it to the report either way. */
+/** The screenshots folder of an OpenSpec change, where a change's UI
+ *  evidence is kept and reviewed. */
+export function changeScreenshotsDir(changeName: string): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes", changeName, "screenshots");
+}
+
 export async function captureScreenshot(page: Page, testInfo: TestInfo, screenshotsDir: string, name: string): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(150);

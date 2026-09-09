@@ -341,6 +341,13 @@ export type PermissionRequest = TimelineItemBase & {
   resources: string[];
   status: "pending" | "resolved";
   outcome?: PermissionOutcome;
+  // What the persistent approval will authorize, in the owning agent's own
+  // syntax (OpenCode's `git status *`, Claude Code's `Bash(git status:*)`),
+  // kept apart from `resources` because the two differ: the agent derives a
+  // reusable pattern from the request, and that pattern is what it installs.
+  // Empty means the agent supplied nothing reusable; absent means it did not
+  // say. Rendered verbatim. The client never derives scope from a resource.
+  alwaysPatterns?: string[];
   // A unified diff of the change a file-edit permission would apply, when the
   // agent attaches one (OpenCode puts it on the permission's `metadata.diff`).
   // Absent for a permission with nothing to show — a command, a fetch.

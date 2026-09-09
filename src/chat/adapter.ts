@@ -1826,6 +1826,7 @@ export class ChatAdapter {
         status: "pending" as const,
         // The recovered card must show what the live one would have —
         // this path exists for the reader who missed that event.
+        ...(request.alwaysPatterns === undefined ? {} : { alwaysPatterns: request.alwaysPatterns }),
         ...(request.diff === undefined ? {} : { diff: request.diff }),
         ...(request.plan === undefined ? {} : { plan: request.plan }),
         ...(request.choices === undefined ? {} : { choices: request.choices }),
@@ -2362,6 +2363,10 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
       ...incoming,
       action: incoming.action === "permission" ? current.action : incoming.action,
       resources: incoming.resources.length ? incoming.resources : current.resources,
+      // Same sparse rule: a second announcement without the agent's
+      // always-patterns (the v2 `save` is optional, a reply carries none)
+      // says nothing about them, and must not blank the ones already known.
+      ...(incoming.alwaysPatterns?.length ? {} : current.alwaysPatterns !== undefined ? { alwaysPatterns: current.alwaysPatterns } : {}),
       ...(reopened ? { status: "resolved" as const, outcome: current.outcome } : {}),
     };
   }

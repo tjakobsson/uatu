@@ -250,7 +250,7 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome", "diff", "plan", "choices", "choiceId"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "alwaysPatterns", "status", "outcome", "diff", "plan", "choices", "choiceId"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
@@ -259,6 +259,9 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   expectNonEmptyString(record.action, "permission action");
   // Empty is legitimate: a plan approval affects no named resource.
   expectStringArray(record.resources, "permission resources", record.plan === undefined);
+  // Empty is the agent saying it has nothing reusable to install; absent is
+  // an agent that did not say. Both are honest, so both are admitted.
+  if (record.alwaysPatterns !== undefined) expectStringArray(record.alwaysPatterns, "permission always patterns", false);
   expectOneOf(record.status, ["pending", "resolved"], "permission status");
   if (record.status === "pending" && record.outcome !== undefined) {
     throw new Error("pending permission must not have an outcome");

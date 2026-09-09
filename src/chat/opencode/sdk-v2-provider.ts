@@ -20,7 +20,7 @@ import type {
   ProviderSession,
   StoredMessageAccounting,
 } from "../provider";
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, permissionDiff, storedMessageUsage, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, pendingPermissionFields, storedMessageUsage, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
 import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../types";
 
 type Result<T> = { data?: T; error?: unknown };
@@ -649,20 +649,11 @@ export class SdkV2Provider implements ChatProvider {
       const requestId = typeof request.id === "string" ? request.id : undefined;
       const owner = typeof request.sessionID === "string" ? request.sessionID : undefined;
       if (!requestId || !owner) return [];
-      const action = typeof request.action === "string" ? request.action
-        : typeof request.permission === "string" ? request.permission : "permission";
-      const raw = Array.isArray(request.resources) ? request.resources
-        : Array.isArray(request.patterns) ? request.patterns : [];
-      return [{
-        requestId,
-        conversationId: owner,
-        action,
-        resources: raw.filter((item): item is string => typeof item === "string"),
-        // The same metadata.diff the live event carries — recovery is the
-        // path for a user who missed that event, and they are the one reader
-        // who must not approve an edit without being shown it.
-        ...permissionDiff(request),
-      }];
+      // The same fields the live event carries, diff and always-patterns
+      // included: recovery is the path for a user who missed that event, and
+      // they must not approve an edit unseen or confirm a scope unshown.
+      const fields = pendingPermissionFields(request);
+      return [{ requestId, conversationId: owner, ...fields, action: fields.action || "permission" }];
     });
   }
 

@@ -623,6 +623,72 @@ describe("both OpenCode event naming generations", () => {
     expect(plain).not.toHaveProperty("diff");
   });
 
+  // Captured live from the OpenCode 1.18.29 binary for a `git status --short`
+  // Bash call: the classic event names the command in `patterns` and the rule
+  // an "always" reply would install in `always`. The two differ, which is
+  // the whole reason the card carries both. The v2 shape follows the pinned
+  // schema (`packages/schema/src/permission.ts`): `resources` and optional
+  // `save`; the 1.18.29 v2 stream did not announce this request at all.
+  const liveClassicAsked = {
+    id: "evt_08710f4e500118Yk5JLSdunwMm",
+    type: "permission.asked",
+    properties: {
+      id: "per_08710f4e4001Yau4bCos7QJKz3",
+      sessionID: "ses_f78ef1234ffeVVXiXgdMrBHRDU",
+      permission: "bash",
+      patterns: ["git status --short"],
+      metadata: { command: "git status --short" },
+      always: ["git status *"],
+      tool: { messageID: "msg_08710ee860015HQM7qPhPSk1bV", callID: "call_32030879c1ef480e9cf4a819" },
+    },
+  };
+  const liveV2Asked = {
+    id: "evt_v2",
+    type: "permission.v2.asked",
+    data: { id: "per_08710f4e4001Yau4bCos7QJKz3", sessionID: "ses_f78ef1234ffeVVXiXgdMrBHRDU", action: "bash", resources: ["git status --short"], save: ["git status *"], metadata: { command: "git status --short" } },
+  };
+
+  test("a request carries the rule an always reply installs, apart from its command, under either generation", () => {
+    for (const asked of [liveClassicAsked, liveV2Asked]) {
+      const [item] = apply([asked]).items();
+      expect(item).toEqual(expect.objectContaining({
+        id: "permission:per_08710f4e4001Yau4bCos7QJKz3",
+        action: "bash",
+        resources: ["git status --short"],
+        alwaysPatterns: ["git status *"],
+        status: "pending",
+      }));
+    }
+    // Announced under both, the patterns are carried once.
+    const items = apply([liveClassicAsked, liveV2Asked]).items();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toEqual(expect.objectContaining({ alwaysPatterns: ["git status *"] }));
+    // Neither spelling present: nothing reusable, said as an empty list.
+    expect(apply([v2Asked]).items()[0]).toEqual(expect.objectContaining({ alwaysPatterns: [] }));
+  });
+
+  test("a later announcement without patterns keeps the ones already known", () => {
+    // The v2 schema's `save` is optional. A bridge that announces the same
+    // request twice, the second time without it, must not blank the rule.
+    const v2WithoutSave = { ...liveV2Asked, data: { ...liveV2Asked.data, save: undefined } };
+    const items = apply([liveClassicAsked, v2WithoutSave]).items();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toEqual(expect.objectContaining({ alwaysPatterns: ["git status *"] }));
+  });
+
+  test("empty strings never reach the client", () => {
+    const dirty = { ...liveClassicAsked, properties: { ...liveClassicAsked.properties, patterns: ["git status --short", ""], always: ["", "git status *"] } };
+    expect(apply([dirty]).items()[0]).toEqual(expect.objectContaining({ resources: ["git status --short"], alwaysPatterns: ["git status *"] }));
+  });
+
+  test("a reply keeps the ask's always patterns", () => {
+    const items = apply([
+      liveClassicAsked,
+      { id: "e3", type: "permission.replied", properties: { sessionID: "ses_f78ef1234ffeVVXiXgdMrBHRDU", requestID: "per_08710f4e4001Yau4bCos7QJKz3", reply: "always" } },
+    ]).items();
+    expect(items[0]).toEqual(expect.objectContaining({ status: "resolved", outcome: "approved-session", alwaysPatterns: ["git status *"] }));
+  });
+
   test("the same request under both generations settles as one entry, either order", () => {
     for (const order of [[v2Asked, classicAsked], [classicAsked, v2Asked]]) {
       const items = apply(order).items();

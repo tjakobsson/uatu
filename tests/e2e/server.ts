@@ -344,7 +344,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       fakeChatAgent.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, ...fakeChatAgent.inventoryStats() });
+      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, ...fakeChatAgent.inventoryStats() });
     case "inventoryInvalidate":
       fakeChatAgent.invalidateInventory();
       return Response.json({ ok: true });

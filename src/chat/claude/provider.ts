@@ -19,7 +19,7 @@ import type {
 import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
-import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection } from "./normalization";
+import { createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions } from "./normalization";
 import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
 /**
@@ -857,11 +857,11 @@ export class ClaudeProvider implements ChatProvider {
     // "Always" returns the SDK's own suggestions, but only those scoped to
     // the session: an approval uatu brokered must never outlive the session
     // it was given in (D5: map conservatively).
-    const updatedPermissions = reply === "always" ? sessionScopedSuggestions(pending.suggestions) : undefined;
+    const updatedPermissions = reply === "always" ? sessionScopedSuggestions(pending.suggestions) : [];
     pending.settle({
       behavior: "allow",
       updatedInput: pending.input,
-      ...(updatedPermissions && updatedPermissions.length > 0 ? { updatedPermissions } : {}),
+      ...(updatedPermissions.length > 0 ? { updatedPermissions } : {}),
     });
   }
 
@@ -894,6 +894,8 @@ export class ClaudeProvider implements ChatProvider {
           resources: item.resources,
           // A recovered plan card must still show the plan and its intent
           // choices — the reader this path exists for missed the live one.
+          // Likewise the rules an always reply would install.
+          ...(item.alwaysPatterns === undefined ? {} : { alwaysPatterns: item.alwaysPatterns }),
           ...(item.plan === undefined ? {} : { plan: item.plan }),
           ...(item.choices === undefined ? {} : { choices: item.choices }),
         };
@@ -1545,6 +1547,10 @@ export class ClaudeProvider implements ChatProvider {
           requestId,
           action: options.title ?? options.displayName ?? toolName,
           resources: permissionResources(input, options),
+          // What "Allow always" will forward, spelled as Claude Code rules,
+          // derived from the same filter the reply uses, so the card can
+          // never promise a rule the reply does not install.
+          alwaysPatterns: describeSessionScopedUpdates(options.suggestions),
           status: "pending",
         };
     return this.awaitInteraction<ClaudePermissionResult>(sessionId, {
@@ -2736,14 +2742,6 @@ function dialogQuestions(request: ClaudeUserDialogRequest): { intro: string; que
     }],
     result: () => ({ behavior: "cancelled" }),
   };
-}
-
-/** Only session-destination suggestions survive: never persist an allow. */
-function sessionScopedSuggestions(suggestions: unknown[] | undefined): unknown[] | undefined {
-  if (!suggestions) return undefined;
-  return suggestions.filter(suggestion =>
-    Boolean(suggestion) && typeof suggestion === "object"
-    && (suggestion as { destination?: unknown }).destination === "session");
 }
 
 /** AskUserQuestion input → the shared structured-question shape. */

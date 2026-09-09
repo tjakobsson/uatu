@@ -1774,8 +1774,9 @@ describe("ClaudeProvider sessions", () => {
     const query = queries[0]!;
 
     const suggestions = [
-      { type: "addRules", behavior: "allow", destination: "session", rules: [{ toolName: "Write" }] },
+      { type: "addRules", behavior: "allow", destination: "session", rules: [{ toolName: "Write", ruleContent: "/workspace/*" }] },
       { type: "addRules", behavior: "allow", destination: "userSettings", rules: [{ toolName: "Write" }] },
+      { type: "addRules", behavior: "deny", destination: "session", rules: [{ toolName: "Bash" }] },
     ];
     let result: unknown = null;
     const decision = query.input.options.canUseTool!("Write", { file_path: "/workspace/a.txt", content: "x" }, {
@@ -1792,18 +1793,25 @@ describe("ClaudeProvider sessions", () => {
       type: "permission",
       action: "Claude wants to write a.txt",
       resources: ["/workspace/a.txt"],
+      // The card lists what "always" will install, in Claude Code's rule
+      // syntax: every session-scoped update, the deny included, apart from
+      // the resource; the settings-bound one is neither listed nor sent.
+      alwaysPatterns: ["Allow: Write(/workspace/*)", "Deny: Bash"],
       status: "pending",
     }) });
-    expect(await provider.listPermissions!()).toEqual([expect.objectContaining({ requestId: "toolu_1", conversationId: session.id })]);
+    expect(await provider.listPermissions!()).toEqual([expect.objectContaining({ requestId: "toolu_1", conversationId: session.id, alwaysPatterns: ["Allow: Write(/workspace/*)", "Deny: Bash"] })]);
 
     await provider.replyPermission(session.id, "toolu_1", "always");
     await decision;
-    // Always maps to allow + the session-scoped suggestions only (D5).
+    // Always maps to allow + the session-scoped suggestions as a set (D5):
+    // the settings-bound rule is neither listed nor forwarded, and the
+    // forwarded set is exactly as long as the list the card showed.
     expect(result).toEqual({
       behavior: "allow",
       updatedInput: { file_path: "/workspace/a.txt", content: "x" },
-      updatedPermissions: [suggestions[0]],
+      updatedPermissions: [suggestions[0], suggestions[2]],
     });
+    expect((result as { updatedPermissions: unknown[] }).updatedPermissions).toHaveLength(2);
     expect(await provider.listPermissions!()).toEqual([]);
     stop();
     await provider.dispose();
@@ -1819,6 +1827,9 @@ describe("ClaudeProvider sessions", () => {
     const first = query.input.options.canUseTool!("Bash", { command: "ls" }, { signal, toolUseID: "t1", suggestions: [{ destination: "session" }] });
     await waitFor(() => provider.liveSessionCount() === 1 && true);
     await Bun.sleep(5);
+    // Nothing session-scoped worth forwarding: the card says so with an
+    // empty list rather than leaving the question open.
+    expect(await provider.listPermissions!()).toEqual([expect.objectContaining({ requestId: "t1", alwaysPatterns: [] })]);
     await provider.replyPermission(session.id, "t1", "once");
     expect(await first).toEqual({ behavior: "allow", updatedInput: { command: "ls" } });
 

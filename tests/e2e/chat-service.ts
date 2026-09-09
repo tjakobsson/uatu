@@ -488,15 +488,17 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const existing = this.receipts.get(key) as { outcome: PermissionOutcome } | undefined;
     if (existing) return existing;
     const result = { outcome };
-    this.permissionChoices.push({ interactionId, ...(choiceId ? { choiceId } : {}) });
+    this.permissionChoices.push({ interactionId, outcome, ...(choiceId ? { choiceId } : {}) });
     const item = this.items.get(id)!.get(`permission:${interactionId}`);
     if (item?.type === "permission") this.publishItem(id, { ...item, status: "resolved", outcome, ...(choiceId ? { choiceId } : {}) });
     this.receipts.set(key, result);
     return result;
   }
 
-  // What each permission reply carried, for spec assertions.
-  readonly permissionChoices: Array<{ interactionId: string; choiceId?: string }> = [];
+  // What each permission reply carried, for spec assertions, including the
+  // outcome, so a test can prove the persistent reply was sent exactly once
+  // and only after the confirmation step.
+  readonly permissionChoices: Array<{ interactionId: string; outcome: PermissionOutcome; choiceId?: string }> = [];
 
   async respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome) {
     this.require(id);
