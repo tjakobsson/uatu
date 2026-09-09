@@ -7,7 +7,7 @@ import { registerBackInterceptor } from "../shell/history";
 import { createLifecycleRecovery, type LifecycleRecovery } from "../shell/recovery";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
-import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
+import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type ScrollMovement } from "./anchor";
 import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
@@ -2471,6 +2471,8 @@ export function initChat(api = new ChatApiClient()): void {
 
   let lastParentScrollTop = 0;
   let lastChildScrollTop = 0;
+  // Sub-pixel jitter in a fractional scrollTop is not a movement either way.
+  const scrollMovement = (top: number, last: number): ScrollMovement => top < last - 0.5 ? "up" : top > last + 0.5 ? "down" : "none";
   timeline.addEventListener("scroll", () => {
     if (rendering || !chatSurfaceActive()) return;
     // Revealing an intrinsic-size placeholder can grow the scroll extent
@@ -2479,12 +2481,14 @@ export function initChat(api = new ChatApiClient()): void {
     if (anchor.isPinned() && timeline.scrollTop >= lastParentScrollTop - 1) {
       timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     }
-    // Cheap while pinned; the full pass runs only once actually unpinned.
-    // The first tick that unpins captures no anchor (items were not
-    // collected), which self-heals on the next tick — a transient preferable
-    // to a forced layout on every scroll event of a long chat. The direction
-    // rides along: an upward step is the reader leaving, whatever its size.
-    anchor.observe(anchorGeometry(), timeline.scrollTop < lastParentScrollTop);
+    // Cheap while pinned; the full pass runs once unpinned — and on the
+    // upward tick that unpins, since that tick must capture the anchor the
+    // position is saved under: a single wheel step followed by a reload has
+    // no later tick to heal a missing capture, and would come back pinned.
+    // Downward ticks while pinned stay extents-only, so a long chat pays no
+    // forced layout per scroll event of a streaming turn.
+    const movement = scrollMovement(timeline.scrollTop, lastParentScrollTop);
+    anchor.observe(movement === "up" ? geometry() : anchorGeometry(), movement);
     lastParentScrollTop = timeline.scrollTop;
     if (projection) {
       const current = anchor.currentAnchor();
@@ -2940,7 +2944,8 @@ export function initChat(api = new ChatApiClient()): void {
       if (childAnchor.isPinned() && drilldownTimeline.scrollTop >= lastChildScrollTop - 1) {
         drilldownTimeline.scrollTop = Math.max(0, drilldownTimeline.scrollHeight - drilldownTimeline.clientHeight);
       }
-      childAnchor.observe(childAnchorGeometry(), drilldownTimeline.scrollTop < lastChildScrollTop);
+      const movement = scrollMovement(drilldownTimeline.scrollTop, lastChildScrollTop);
+      childAnchor.observe(movement === "up" ? childGeometry() : childAnchorGeometry(), movement);
       lastChildScrollTop = drilldownTimeline.scrollTop;
     }, { passive: true });
   }

@@ -576,4 +576,28 @@ test.describe("timeline reading position", () => {
     await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
     await expect(page.locator("#chat-latest")).toBeHidden();
   });
+
+  test("a reading position saved just above the end survives a reload and the next update", async ({ page, request }) => {
+    const id = await seedLong(page, request);
+    const timeline = page.locator("#chat-timeline");
+    const distance = () => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
+    // Leave by less than the near-end threshold, then let the position save.
+    await timeline.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 30; el.dispatchEvent(new Event("scroll")); });
+    await expect.poll(distance).toBeGreaterThan(20);
+    await expect.poll(() => page.evaluate(() =>
+      Object.entries(localStorage).some(([key, value]) => key.endsWith(":chat-presentation") && /"anchors":\{"[^"]+":\{/.test(String(value))),
+    )).toBe(true);
+    await page.reload();
+    await openChatPanel(page);
+    await expect(page.locator("#chat-items")).toContainText("loaded message 27");
+    // The restore lands where the reader left, and its own scroll echo must
+    // not read as the reader arriving near the end.
+    await expect.poll(distance).toBeGreaterThan(20);
+    const restored = await distance();
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { id: "part:after-reload", type: "assistant_message", createdAt: 500, markdown: "After reload " + "content ".repeat(40) } });
+    await expect(page.locator("#chat-latest")).toBeVisible();
+    // The update landed below the reader: the distance grew by its height.
+    await expect.poll(distance).toBeGreaterThan(restored + 20);
+  });
 });
