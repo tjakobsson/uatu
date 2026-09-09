@@ -7,7 +7,7 @@ import { registerBackInterceptor } from "../shell/history";
 import { createLifecycleRecovery, type LifecycleRecovery } from "../shell/recovery";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
-import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
+import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type ScrollMovement } from "./anchor";
 import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
@@ -2471,19 +2471,27 @@ export function initChat(api = new ChatApiClient()): void {
 
   let lastParentScrollTop = 0;
   let lastChildScrollTop = 0;
+  // Sub-pixel jitter in a fractional scrollTop is not a movement either way.
+  const scrollMovement = (top: number, last: number): ScrollMovement => top < last - 0.5 ? "up" : top > last + 0.5 ? "down" : "none";
   timeline.addEventListener("scroll", () => {
     if (rendering || !chatSurfaceActive()) return;
+    // Classified from the position as it arrived, before any correction
+    // below moves it: a sub-pixel upward step judged after a snap to the
+    // end would read as no movement at all.
+    const movement = scrollMovement(timeline.scrollTop, lastParentScrollTop);
     // Revealing an intrinsic-size placeholder can grow the scroll extent
     // before ResizeObserver runs (notably in WebKit). That is not a reader
     // scrolling upward; preserve pinning until an actual upward movement.
-    if (anchor.isPinned() && timeline.scrollTop >= lastParentScrollTop - 1) {
+    if (anchor.isPinned() && movement !== "up") {
       timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     }
-    // Cheap while pinned; the full pass runs only once actually unpinned.
-    // The first tick that crosses the threshold captures no anchor (items
-    // were not collected), which self-heals on the next tick — a transient
-    // preferable to a forced layout on every scroll event of a long chat.
-    anchor.observe(anchorGeometry());
+    // Cheap while pinned; the full pass runs once unpinned — and on the
+    // upward tick that unpins, since that tick must capture the anchor the
+    // position is saved under: a single wheel step followed by a reload has
+    // no later tick to heal a missing capture, and would come back pinned.
+    // Downward ticks while pinned stay extents-only, so a long chat pays no
+    // forced layout per scroll event of a streaming turn.
+    anchor.observe(movement === "up" ? geometry() : anchorGeometry(), movement);
     lastParentScrollTop = timeline.scrollTop;
     if (projection) {
       const current = anchor.currentAnchor();
@@ -2936,10 +2944,11 @@ export function initChat(api = new ChatApiClient()): void {
     wireItemInteractions(drilldownItems, () => child?.projection ?? null);
     drilldownTimeline.addEventListener("scroll", () => {
       if (!chatSurfaceActive()) return;
-      if (childAnchor.isPinned() && drilldownTimeline.scrollTop >= lastChildScrollTop - 1) {
+      const movement = scrollMovement(drilldownTimeline.scrollTop, lastChildScrollTop);
+      if (childAnchor.isPinned() && movement !== "up") {
         drilldownTimeline.scrollTop = Math.max(0, drilldownTimeline.scrollHeight - drilldownTimeline.clientHeight);
       }
-      childAnchor.observe(childAnchorGeometry());
+      childAnchor.observe(movement === "up" ? childGeometry() : childAnchorGeometry(), movement);
       lastChildScrollTop = drilldownTimeline.scrollTop;
     }, { passive: true });
   }
@@ -3370,6 +3379,13 @@ export function initChat(api = new ChatApiClient()): void {
     renderAttachments();
     noteComposer("Sending...");
     syncControls();
+    // Sending says where the reader wants to be: at the exchange they just
+    // started. Pin to the end so the echo, and the reply that follows it,
+    // land in view — a reader who scrolled up to reread an earlier turn
+    // before pressing Enter is not asking to stay there while the answer
+    // arrives out of sight below the latest-content affordance.
+    timeline.scrollTop = anchor.jumpToLatest(extentsOf(timeline));
+    latestButton.hidden = true;
     scheduleRender(true);
     try {
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined);
