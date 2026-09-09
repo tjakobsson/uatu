@@ -1238,6 +1238,10 @@ describe("permission choices state the authority they grant", () => {
     expect([...stage.querySelectorAll(".chat-request-always code")].map(code => code.textContent)).toEqual(["git status *"]);
     expect([...host.querySelectorAll("[data-chat-item-id] > ul > li code")].map(code => code.textContent)).toEqual(["git status --short"]);
     expect(stage.querySelector(".chat-request-confirm-action")!.textContent).toBe("bash");
+    // Entries are called standing permissions, not match patterns: under
+    // Claude Code one can be a mode switch or a withdrawn directory.
+    expect(stage.querySelector(".chat-request-confirm-lead")!.textContent).toContain("standing permissions");
+    expect(stage.querySelector(".chat-request-confirm-lead")!.textContent).not.toContain("matching");
     expect(stage.querySelector(".chat-request-scope")!.textContent).toContain("until OpenCode restarts");
     expect(stage.querySelector("[data-permission-confirm]")!.textContent).toBe("Confirm");
     expect(stage.querySelector("[data-permission-cancel]")!.textContent).toBe("Cancel");

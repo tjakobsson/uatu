@@ -1174,8 +1174,11 @@ function renderPermissionActions(item: Extract<ConversationItem, { type: "permis
 // The confirmation stage. What it lists is the agent's own future-approval
 // scope, verbatim: a `git status --short` request whose agent installs
 // `git status *` shows `git status *`, and nothing here shortens the command
-// to guess at it. A sole wildcard is the whole permission, said so; no
-// pattern at all is said plainly rather than implied to be the command.
+// to guess at it. The lead line calls the entries standing permissions, not
+// match patterns, because under Claude Code an entry can be a mode switch
+// or a withdrawn directory as well as a rule. A sole wildcard is the whole
+// permission, said so; no pattern at all is said plainly rather than
+// implied to be the command.
 // The action is named on the title line, not woven into the sentence: under
 // OpenCode it is a category noun ("bash") but under Claude Code it is a
 // whole title ("Claude wants to edit hello.sh"), and only a label slot reads
@@ -1199,7 +1202,7 @@ function renderAlwaysConfirmation(item: Extract<ConversationItem, { type: "permi
   }
   const body = patterns.length === 1 && patterns[0] === "*"
     ? `<p class="chat-request-confirm-lead">Confirming allows <em>every</em> request under this permission, not only this one.</p>`
-    : `<p class="chat-request-confirm-lead">Confirming allows this request and every future request matching:</p><ul class="chat-request-always">${patterns.map(pattern => `<li><code>${escapeHtml(pattern)}</code></li>`).join("")}</ul>`;
+    : `<p class="chat-request-confirm-lead">Confirming allows this request and installs these standing permissions:</p><ul class="chat-request-always">${patterns.map(pattern => `<li><code>${escapeHtml(pattern)}</code></li>`).join("")}</ul>`;
   return confirmationShell(item, `${body}${scope}`);
 }
 
