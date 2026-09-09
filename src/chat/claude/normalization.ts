@@ -93,6 +93,51 @@ const INTENTIONALLY_IGNORED = new Set([
   "user_message_replay",
 ]);
 
+/**
+ * The permission updates an "always" reply forwards, and nothing else: the
+ * SDK's session-destination suggestions that add or replace an allow rule,
+ * add a working directory, or switch the mode. An approval uatu brokered
+ * must never outlive the session it was given in, so a suggestion bound for
+ * a settings file is dropped; so are deny rules and removals, which are not
+ * what a user choosing "Allow always" is agreeing to. `describeSessionScopedUpdates`
+ * renders exactly this list, so the confirmation can never diverge from
+ * the reply.
+ */
+export function sessionScopedSuggestions(suggestions: unknown[] | undefined): unknown[] | undefined {
+  if (!suggestions) return undefined;
+  return suggestions.filter(suggestion => describeSessionScopedUpdate(suggestion) !== null);
+}
+
+/** The forwarded updates, one line each, in Claude Code's own terms. */
+export function describeSessionScopedUpdates(suggestions: unknown[] | undefined): string[] {
+  return (sessionScopedSuggestions(suggestions) ?? []).map(suggestion => describeSessionScopedUpdate(suggestion)!);
+}
+
+// One suggestion → its Claude Code permission-rule spelling (`Bash(git status:*)`,
+// bare `Read`), a working-directory grant, or a mode switch. Null when the
+// reply would not forward it.
+function describeSessionScopedUpdate(suggestion: unknown): string | null {
+  if (!suggestion || typeof suggestion !== "object") return null;
+  const record = suggestion as Record<string, unknown>;
+  if (record.destination !== "session") return null;
+  if ((record.type === "addRules" || record.type === "replaceRules") && record.behavior === "allow") {
+    if (!Array.isArray(record.rules)) return null;
+    const rules = record.rules.flatMap(rule => {
+      if (!rule || typeof rule !== "object") return [];
+      const { toolName, ruleContent } = rule as { toolName?: unknown; ruleContent?: unknown };
+      if (typeof toolName !== "string" || toolName.length === 0) return [];
+      return [typeof ruleContent === "string" && ruleContent.length > 0 ? `${toolName}(${ruleContent})` : toolName];
+    });
+    return rules.length > 0 ? rules.join(", ") : null;
+  }
+  if (record.type === "addDirectories" && Array.isArray(record.directories)) {
+    const directories = record.directories.filter((directory): directory is string => typeof directory === "string" && directory.length > 0);
+    return directories.length > 0 ? `Working directory: ${directories.join(", ")}` : null;
+  }
+  if (record.type === "setMode" && typeof record.mode === "string" && record.mode.length > 0) return `Permission mode: ${record.mode}`;
+  return null;
+}
+
 export function claudeModelSelection(modelId: string): ModelSelection {
   return { providerId: "anthropic", modelId };
 }

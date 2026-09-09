@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import { openChatPanel } from "./chat-helpers";
+import { captureScreenshot, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<unknown> {
@@ -70,6 +70,8 @@ test.describe("multi-agent chat", () => {
     await expect(page.locator("#chat-context")).toContainText("Claude Code");
     await control(request, { action: "item", conversationId: seeded.conversation.id, item: {
       id: "permission:perm-c1", type: "permission", createdAt: 10, requestId: "perm-c1", action: "Claude wants to edit hello.sh", resources: ["/workspace/hello.sh"], status: "pending",
+      // What Claude Code's always reply installs, in its own rule syntax.
+      alwaysPatterns: ["Edit(/workspace/hello.sh)"],
       diff: "@@ -1 +1 @@\n-echo hello\n+echo Hello, world",
     } });
     const card = page.locator('[data-chat-item-id="permission:perm-c1"]');
@@ -84,13 +86,33 @@ test.describe("multi-agent chat", () => {
     await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
     await testInfo.attach("phase1-permission-card-claude", { path: target, contentType: "image/png" });
 
-    // The OpenCode-owned conversation keeps OpenCode's own sentence.
+    // The confirmation lists Claude Code's rule under Claude Code's own
+    // lifetime sentence, and again never names OpenCode.
+    await card.getByRole("button", { name: "Allow always" }).click();
+    const claudeStage = card.locator("[data-permission-confirming]");
+    await expect(claudeStage.locator(".chat-request-always code")).toHaveText(["Edit(/workspace/hello.sh)"]);
+    await expect(claudeStage.locator(".chat-request-scope")).toContainText("rest of this turn");
+    await expect(claudeStage).not.toContainText("OpenCode");
+    await page.setViewportSize({ width: 1400, height: 1000 });
+    const confirmShots = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/confirm-always-allow-scope/screenshots");
+    await captureScreenshot(page, testInfo, confirmShots, "after-confirmation-claude-desktop");
+    await claudeStage.getByRole("button", { name: "Cancel" }).click();
+    await expect(claudeStage).toBeHidden();
+
+    // The OpenCode-owned conversation keeps OpenCode's own sentence, and its
+    // confirmation lists OpenCode's own pattern.
     const opencode = await control(request, { action: "seed", title: "OpenCode permission", items: [] }) as { conversation: { id: string } };
     await page.locator("#chat-conversation-select").selectOption(opencode.conversation.id);
     await control(request, { action: "item", conversationId: opencode.conversation.id, item: {
-      id: "permission:perm-o1", type: "permission", createdAt: 10, requestId: "perm-o1", action: "run command", resources: ["bun test"], status: "pending",
+      id: "permission:perm-o1", type: "permission", createdAt: 10, requestId: "perm-o1", action: "bash", resources: ["bun test"], alwaysPatterns: ["bun test *"], status: "pending",
     } });
-    await expect(page.locator('[data-chat-item-id="permission:perm-o1"] .chat-request-scope')).toContainText("until OpenCode restarts");
+    const opencodeCard = page.locator('[data-chat-item-id="permission:perm-o1"]');
+    await expect(opencodeCard.locator(".chat-request-scope")).toContainText("until OpenCode restarts");
+    await opencodeCard.getByRole("button", { name: "Allow always" }).click();
+    const opencodeStage = opencodeCard.locator("[data-permission-confirming]");
+    await expect(opencodeStage.locator(".chat-request-always code")).toHaveText(["bun test *"]);
+    await expect(opencodeStage.locator(".chat-request-scope")).toContainText("until OpenCode restarts");
+    await expect(opencodeStage).not.toContainText("rest of this turn");
   });
 
   test("a single-agent workspace creates without offering a choice", async ({ page, request }) => {

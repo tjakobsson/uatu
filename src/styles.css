@@ -5167,6 +5167,41 @@ body.is-resizing-chat .chat-resizer {
   color: var(--text-subtle);
 }
 
+/* The "Allow always" confirmation stage: the same card, one step deeper.
+   Its pattern list is the rule the agent will install, set apart from the
+   resources above it by its own box, so the two are never read as one. */
+.chat-request-confirm {
+  margin: 0.55rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.5rem;
+  background: var(--surface-muted, transparent);
+}
+
+.chat-request-confirm-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.chat-request-confirm-action {
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+.chat-request-confirm-lead {
+  margin: 0.3rem 0 0;
+  line-height: 1.4;
+}
+
+.chat-request-confirm .chat-request-always {
+  margin: 0.35rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.chat-request-confirm .chat-request-actions {
+  margin-top: 0.55rem;
+}
+
 .chat-conversation-controls select,
 .chat-composer textarea,
 .chat-configuration-dialog input,

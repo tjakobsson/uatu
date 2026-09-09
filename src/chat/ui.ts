@@ -1100,6 +1100,17 @@ export function initChat(api = new ChatApiClient()): void {
     for (const button of revertedItems?.querySelectorAll<HTMLButtonElement>("[data-history-restore]") ?? []) button.disabled = historyBusy;
   };
 
+  // Focus to place once a timeline has painted. The "Allow always"
+  // confirmation stage is built by a render, so the button it should land
+  // on does not exist yet when the click that opens it is handled.
+  const focusAfterPaint = new Map<HTMLElement, string>();
+  const applyFocusAfterPaint = (container: HTMLElement) => {
+    const selector = focusAfterPaint.get(container);
+    if (!selector) return;
+    focusAfterPaint.delete(container);
+    container.querySelector<HTMLElement>(selector)?.focus();
+  };
+
   const renderNow = (newContent: boolean) => {
     if (!chatSurfaceActive()) { renderDirty = true; pendingNewContent ||= newContent; return; }
     renderDirty = false;
@@ -1128,6 +1139,7 @@ export function initChat(api = new ChatApiClient()): void {
       // this settles the tab strip and button state for its first step.
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
     }
+    applyFocusAfterPaint(items);
   };
 
   const scheduleRender = (newContent = false, captureCurrent = true, incremental = false) => {
@@ -2580,9 +2592,25 @@ export function initChat(api = new ChatApiClient()): void {
    * the parent's against the parent — which is what keeps the parent
    * answerable while a child is open.
    */
-  const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null) => {
+  const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null, stage: { renderer: TimelineRenderer; rerender: () => void }) => {
+    // "Allow always" is confirmed one step deeper, on the same card, where
+    // it shows the rule the agent will actually install. The stage is this
+    // timeline's own (the drill-down keeps its own renderer), and nothing
+    // reaches the server until Confirm.
+    const enterConfirmation = (itemId: string) => {
+      stage.renderer.confirming.add(itemId);
+      // Cancel is the safe landing for a step that exists to catch a slip;
+      // Confirm is one Tab away.
+      focusAfterPaint.set(container, `[data-chat-item-id="${CSS.escape(itemId)}"] [data-permission-cancel]`);
+      stage.rerender();
+    };
+    const leaveConfirmation = (itemId: string) => {
+      if (!stage.renderer.confirming.delete(itemId)) return;
+      focusAfterPaint.set(container, `[data-chat-item-id="${CSS.escape(itemId)}"] [data-permission-outcome="approved-session"]`);
+      stage.rerender();
+    };
     container.addEventListener("click", event => {
-      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-permission-choice], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
+      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-permission-choice], [data-permission-confirm], [data-permission-cancel], [data-question-reject], [data-open-conversation], [data-chat-copy], [data-history-revert]");
       if (!target) return;
       if (target instanceof HTMLButtonElement && target.dataset.chatCopy) {
         const text = target.closest("pre")?.querySelector(":scope > code")?.textContent;
@@ -2615,6 +2643,12 @@ export function initChat(api = new ChatApiClient()): void {
       if (item.type === "permission" && target.dataset.permissionChoice) {
         // A chosen intent is an approval; the id tells the agent which one.
         void resolvePermission(source, item.id, "approved-once", target.dataset.permissionChoice);
+      } else if (item.type === "permission" && target.dataset.permissionOutcome === "approved-session") {
+        enterConfirmation(item.id);
+      } else if (item.type === "permission" && target.dataset.permissionConfirm !== undefined) {
+        void resolvePermission(source, item.id, "approved-session");
+      } else if (item.type === "permission" && target.dataset.permissionCancel !== undefined) {
+        leaveConfirmation(item.id);
       } else if (item.type === "permission" && target.dataset.permissionOutcome) {
         void resolvePermission(source, item.id, target.dataset.permissionOutcome as PermissionOutcome);
       } else if (item.type === "question" && target.dataset.questionReject !== undefined) {
@@ -2622,6 +2656,16 @@ export function initChat(api = new ChatApiClient()): void {
       }
     });
     container.addEventListener("keydown", event => {
+      if (event.key === "Escape") {
+        // Escape inside the confirmation is Cancel, and stops here, so the
+        // surface's own Escape handling does not also close the drill-down.
+        const itemId = (event.target as Element).closest("[data-permission-confirming]")?.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId;
+        if (!itemId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        leaveConfirmation(itemId);
+        return;
+      }
       const target = (event.target as Element).closest<HTMLElement>("[role=button][data-file-ref]");
       if (target && (event.key === "Enter" || event.key === " ")) {
         event.preventDefault();
@@ -2716,6 +2760,7 @@ export function initChat(api = new ChatApiClient()): void {
       decorateAttachmentImages(node);
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
     }
+    applyFocusAfterPaint(drilldownItems);
   };
 
   /**
@@ -2938,10 +2983,10 @@ export function initChat(api = new ChatApiClient()): void {
   });
 
   wireExpansionToggle(items, timeline, anchor, geometry);
-  wireItemInteractions(items, () => projection);
+  wireItemInteractions(items, () => projection, { renderer, rerender: () => scheduleRender(false) });
   if (drilldownItems && drilldownTimeline) {
     wireExpansionToggle(drilldownItems, drilldownTimeline, childAnchor, childGeometry);
-    wireItemInteractions(drilldownItems, () => child?.projection ?? null);
+    wireItemInteractions(drilldownItems, () => child?.projection ?? null, { renderer: childRenderer, rerender: () => renderChild(false) });
     drilldownTimeline.addEventListener("scroll", () => {
       if (!chatSurfaceActive()) return;
       const movement = scrollMovement(drilldownTimeline.scrollTop, lastChildScrollTop);

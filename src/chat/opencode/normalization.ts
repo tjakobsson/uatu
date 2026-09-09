@@ -378,6 +378,10 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
     // `resources`→`patterns`, `save`→`always`). Both carry the same request id,
     // so mapping both onto `permission:<id>` makes the projection upsert the
     // dedupe — whichever arrives second merges into the same entry.
+    // `always`/`save` is what an "always" reply installs: `git status *` for
+    // a `git status --short` request (captured live from 1.18.29). It is
+    // carried apart from the request's own patterns so the card can show the
+    // user the rule they are about to grant rather than the command.
     case "permission.asked":
       return { conversationId, updates: [{ kind: "upsert", item: {
         id: `permission:${string(data.id, "permission id")}`,
@@ -387,6 +391,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
         requestId: string(data.id, "permission id"),
         action: text(data.permission),
         resources: stringArray(data.patterns),
+        alwaysPatterns: alwaysPatterns(data),
         status: "pending",
         ...permissionDiff(data),
       } }] };
@@ -411,6 +416,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
         requestId: string(data.id, "permission id"),
         action: text(data.action),
         resources: stringArray(data.resources),
+        alwaysPatterns: alwaysPatterns(data),
         status: "pending",
         ...permissionDiff(data),
       } }] };
@@ -884,6 +890,14 @@ export function normalizeQuestion(value: unknown): StructuredQuestion {
 
 function permissionOutcome(value: unknown): "approved-once" | "approved-session" | "rejected" {
   return value === "once" ? "approved-once" : value === "always" ? "approved-session" : "rejected";
+}
+
+// The patterns an "always" reply installs, under either generation's name:
+// the classic bridge calls them `always`, the v2 schema `save` (optional).
+// Missing on both is an empty list. OpenCode installs nothing then, and the
+// card should say so rather than guess. Exported for the pending-list path.
+export function alwaysPatterns(data: RecordValue): string[] {
+  return stringArray(data.always ?? data.save);
 }
 
 // The change a file-edit permission would apply, when the agent attaches one.

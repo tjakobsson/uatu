@@ -2433,7 +2433,9 @@ describe("pending permission recovery", () => {
     // The pump never saw this: OpenCode raised it while the stream was down.
     // The diff rides along — recovery exists for the reader who missed the
     // live announcement, who must not approve an edit without seeing it.
-    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], diff: "@@ -1 +1 @@\n-a\n+b" }];
+    // So does the rule an "always" reply would install: the recovered card
+    // confirms with the same scope the live one would have shown.
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], alwaysPatterns: ["review-*"], diff: "@@ -1 +1 @@\n-a\n+b" }];
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("local");
@@ -2442,6 +2444,7 @@ describe("pending permission recovery", () => {
       type: "permission",
       action: "skill",
       resources: ["review-code"],
+      alwaysPatterns: ["review-*"],
       status: "pending",
       diff: "@@ -1 +1 @@\n-a\n+b",
     })]);

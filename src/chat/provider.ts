@@ -17,7 +17,7 @@ export type PendingQuestion = {
 // `diff` is the change a file-edit permission would apply (OpenCode's
 // `metadata.diff`), carried through recovery so a card rebuilt after a missed
 // event shows the same change the live announcement would have.
-export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[]; diff?: string; plan?: string; choices?: PermissionChoice[] };
+export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[]; alwaysPatterns?: string[]; diff?: string; plan?: string; choices?: PermissionChoice[] };
 
 // One live background task the provider still holds, for a reader opening a
 // conversation whose live announcements they missed (spec: the state is

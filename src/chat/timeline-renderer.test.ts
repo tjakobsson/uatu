@@ -1219,6 +1219,83 @@ describe("permission choices state the authority they grant", () => {
     expect(host.querySelector(".chat-request-scope")!.textContent).toBe("Something else entirely.");
   });
 
+  test("the confirmation stage shows the agent's pattern apart from the resource, then Confirm and Cancel", () => {
+    const renderer = new TimelineRenderer();
+    renderer.permissionScopeNote = "“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.";
+    const host = target();
+    const shell: ConversationItem = { ...permission, action: "bash", resources: ["git status --short"], alwaysPatterns: ["git status *"] };
+    renderer.render(host, projectionWith([shell]), new Set());
+    // Not confirming: the generic pair, no stage.
+    expect(host.querySelector("[data-permission-confirming]")).toBeNull();
+    expect(host.querySelector('[data-permission-outcome="approved-session"]')).not.toBeNull();
+
+    renderer.confirming.add(shell.id);
+    renderer.render(host, projectionWith([shell]), new Set());
+    const stage = host.querySelector("[data-permission-confirming]")!;
+    expect(stage).not.toBeNull();
+    // The agent's pattern, not the command, is what will be allowed, and
+    // the command stays listed above it, apart from the pattern list.
+    expect([...stage.querySelectorAll(".chat-request-always code")].map(code => code.textContent)).toEqual(["git status *"]);
+    expect([...host.querySelectorAll("[data-chat-item-id] > ul > li code")].map(code => code.textContent)).toEqual(["git status --short"]);
+    expect(stage.querySelector(".chat-request-confirm-action")!.textContent).toBe("bash");
+    expect(stage.querySelector(".chat-request-scope")!.textContent).toContain("until OpenCode restarts");
+    expect(stage.querySelector("[data-permission-confirm]")!.textContent).toBe("Confirm");
+    expect(stage.querySelector("[data-permission-cancel]")!.textContent).toBe("Cancel");
+    // The generic pair is gone while confirming: nothing here replies.
+    expect(host.querySelector("[data-permission-outcome]")).toBeNull();
+
+    // Leaving the stage brings the pair back.
+    renderer.confirming.delete(shell.id);
+    renderer.render(host, projectionWith([shell]), new Set());
+    expect(host.querySelector("[data-permission-confirming]")).toBeNull();
+    expect(host.querySelector('[data-permission-outcome="approved-session"]')).not.toBeNull();
+  });
+
+  test("a sole wildcard names the whole permission; no pattern is said plainly", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const wildcard: ConversationItem = { ...permission, action: "webfetch", alwaysPatterns: ["*"] };
+    renderer.confirming.add(wildcard.id);
+    renderer.render(host, projectionWith([wildcard]), new Set());
+    const lead = host.querySelector(".chat-request-confirm-lead")!.textContent!;
+    expect(lead).toContain("every");
+    expect(lead).toContain("not only this one");
+    expect(host.querySelector(".chat-request-confirm-action")!.textContent).toBe("webfetch");
+    expect(host.querySelector(".chat-request-always")).toBeNull();
+
+    for (const item of [{ ...permission, alwaysPatterns: [] }, permission] as ConversationItem[]) {
+      const bare = new TimelineRenderer();
+      const bareHost = target();
+      bare.confirming.add(item.id);
+      bare.render(bareHost, projectionWith([item]), new Set());
+      const text = bareHost.querySelector(".chat-request-confirm-lead")!.textContent!;
+      expect(text).toContain("no reusable pattern");
+      expect(text).toContain("only this request");
+      expect(bareHost.querySelector(".chat-request-always")).toBeNull();
+    }
+  });
+
+  test("a card with agent intents never enters the stage, and a resolved or queued card leaves it", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const choices: ConversationItem = { ...permission, choices: [{ id: "implement", label: "Approve" }] };
+    renderer.confirming.add(choices.id);
+    renderer.render(host, projectionWith([choices]), new Set());
+    expect(host.querySelector("[data-permission-confirming]")).toBeNull();
+    expect(host.querySelector("[data-permission-choice]")).not.toBeNull();
+
+    renderer.confirming.add(permission.id);
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-session" }]), new Set());
+    expect(renderer.confirming.has(permission.id)).toBe(false);
+    expect(host.querySelector("[data-permission-confirming]")).toBeNull();
+    expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Allowed always");
+
+    // Queued behind a newer request: not answerable, so not confirming.
+    renderer.confirming.add(permission.id);
+    renderer.render(host, projectionWith([permission, { ...permission, id: "permission:p2", requestId: "p2", createdAt: 4 }]), new Set());
+    expect(renderer.confirming.has(permission.id)).toBe(false);
+  });
+
   test("an agent that declares no scope sentence gets no scope line, not another agent's", () => {
     const host = renderPending();
     expect(host.querySelector(".chat-request-scope")).toBeNull();

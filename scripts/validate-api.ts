@@ -116,6 +116,7 @@ export async function validateApi(): Promise<void> {
     "examples/sse/chat-event.json": "ChatEvent",
     "examples/sse/chat-configuration.json": "ChatEvent",
     "examples/sse/chat-conversation-updated.json": "ChatEvent",
+    "examples/sse/chat-permission.json": "ChatEvent",
     "examples/sse/chat-resync.json": "ChatResyncEvent",
     "examples/sse/chat-conversation-inventory.json": "ConversationInventoryEvent",
     "examples/ndjson/search-file.json": "SearchStreamItem",

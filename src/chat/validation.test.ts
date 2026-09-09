@@ -62,6 +62,17 @@ const items = [
 ] as const;
 
 describe("chat domain validation", () => {
+  test("a permission's future-approval patterns are optional strings", () => {
+    const permission = items[6];
+    // Present: the agent's own pattern beside the request's resource.
+    expect(parseConversationItem({ ...permission, alwaysPatterns: ["bun test *"] })).toBeDefined();
+    // Empty: the agent supplied nothing reusable. Absent: it did not say.
+    expect(parseConversationItem({ ...permission, alwaysPatterns: [] })).toBeDefined();
+    expect(parseConversationItem(permission)).toBeDefined();
+    expect(() => parseConversationItem({ ...permission, alwaysPatterns: [42] })).toThrow(/always patterns/);
+    expect(() => parseConversationItem({ ...permission, alwaysPatterns: "bun test *" })).toThrow(/always patterns/);
+  });
+
   test("accepts strict command metadata", () => {
     expect(parseChatCommand({ name: "review", description: "Review changes", argumentHint: "[focus]", kind: "skill" }))
       .toEqual(expect.objectContaining({ name: "review", kind: "skill" }));

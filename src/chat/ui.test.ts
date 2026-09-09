@@ -351,6 +351,88 @@ describe("chat reversible-history composer", () => {
   });
 });
 
+describe("chat permission confirmation", () => {
+  test("Allow always asks first; only Confirm replies, Cancel and Escape reply nothing", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selectedConversation = "";
+    Object.defineProperty(select, "value", {
+      configurable: true,
+      get: () => selectedConversation,
+      set: value => { selectedConversation = String(value); },
+    });
+    const permissionCalls: Array<{ conversationId: string; requestId: string; outcome: string }> = [];
+    const pending = {
+      id: "permission:p1", type: "permission" as const, createdAt: 2, requestId: "p1",
+      action: "bash", resources: ["git status --short"], alwaysPatterns: ["git status *"], status: "pending" as const,
+    };
+    const api = {
+      status: async () => ([{
+        agent: { id: "test", name: "Test" },
+        availability: {
+          state: "ready",
+          version: "test",
+          agent: { id: "test", name: "Test", capabilities: ["permissions"], permissionScopeNote: "“Allow always” lasts until the test ends." },
+        },
+      }]),
+      conversations: async () => [conversation("one")],
+      commands: async () => [],
+      snapshot: async (id: string) => ({ ...snapshot(id), items: [{ id: "message:u", type: "user_message", createdAt: 1, text: "status?" }, pending] }),
+      stream: () => ({ close() {} }),
+      inventoryStream: () => ({ close() {} }),
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+      permission: async (conversationId: string, requestId: string, _clientRequestId: string, outcome: string) => {
+        permissionCalls.push({ conversationId, requestId, outcome });
+        return { outcome };
+      },
+    } as unknown as ChatApiClient;
+
+    try {
+      const { initChat } = await import(`./ui.ts?permission-confirmation-ui-test=${Date.now()}`);
+      initChat(api);
+      const card = () => document.querySelector<HTMLElement>('[data-chat-item-id="permission:p1"]');
+      const always = () => card()?.querySelector<HTMLButtonElement>('[data-permission-outcome="approved-session"]') ?? null;
+      const stageOf = () => card()?.querySelector<HTMLElement>("[data-permission-confirming]") ?? null;
+      const click = (element: Element | null) => { element!.dispatchEvent(new Event("click", { bubbles: true })); };
+      await waitUntil(() => always() !== null, () => document.querySelector("#chat-state")?.textContent ?? "no card");
+
+      // Allow always opens the stage and sends nothing.
+      click(always());
+      await waitUntil(() => stageOf() !== null);
+      expect(permissionCalls).toEqual([]);
+      expect(always()).toBeNull();
+      expect([...stageOf()!.querySelectorAll(".chat-request-always code")].map(code => code.textContent)).toEqual(["git status *"]);
+      expect(stageOf()!.textContent).toContain("until the test ends");
+
+      // Cancel returns to the pending choices, still without a reply.
+      click(stageOf()!.querySelector("[data-permission-cancel]"));
+      await waitUntil(() => stageOf() === null && always() !== null);
+      expect(permissionCalls).toEqual([]);
+
+      // Escape inside the stage is Cancel.
+      click(always());
+      await waitUntil(() => stageOf() !== null);
+      stageOf()!.querySelector("[data-permission-cancel]")!.dispatchEvent(Object.assign(new Event("keydown", { bubbles: true, cancelable: true }), { key: "Escape" }));
+      await waitUntil(() => stageOf() === null && always() !== null);
+      expect(permissionCalls).toEqual([]);
+
+      // Confirm sends the persistent reply, exactly once.
+      click(always());
+      await waitUntil(() => stageOf() !== null);
+      click(stageOf()!.querySelector("[data-permission-confirm]"));
+      await waitUntil(() => permissionCalls.length === 1);
+      await Bun.sleep(5);
+      expect(permissionCalls).toEqual([{ conversationId: "one", requestId: "p1", outcome: "approved-session" }]);
+    } finally {
+      await Bun.sleep(20);
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+});
+
 afterAll(() => {
   for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
 });

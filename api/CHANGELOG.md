@@ -12,11 +12,12 @@ Compatibility: breaking (workspace)
 - `notice` items gained optional `code` (`rate-limit-warning`, `rate-limit-rejected`, `rate-limit-cleared`, `refusal-fallback`) and `resetsAt`, so a surface can react to a standing rate limit beyond showing the message.
 - `reasoning` items gained optional `label` for recalled context ("Recalled from memory") rendered in place of the model's own thinking.
 - `context_report` gained optional `plan` (`PlanUtilization`: five-hour and seven-day window utilization and reset times), reported only where the login has plan limits.
+- `permission` items gained optional `alwaysPatterns`: what the persistent approval will authorize, in the owning agent's own syntax, kept apart from `resources`. Empty means the agent supplied nothing reusable; absent means it did not say. Additive.
 - The `workspaceChat` streaming channel's event union reflects the same shapes.
 
 ### Migration
 
-Strict workspace Chat consumers must regenerate against workspace revision 14. Treat `retrying` and `compacting` as live statuses (offer Cancel, hold a new prompt), admit `code` and `resetsAt` on notices, `label` on reasoning items, and `plan` on context reports (an empty plan means the login reports no windows; an absent one means the report does not speak to the plan, so the previous plan stands). Clients that ignore the new fields keep working once their validators admit them; a client that maps unknown statuses to "working" needs no change.
+Strict workspace Chat consumers must regenerate against workspace revision 14. Treat `retrying` and `compacting` as live statuses (offer Cancel, hold a new prompt), admit `code` and `resetsAt` on notices, `label` on reasoning items, `alwaysPatterns` on permission items, and `plan` on context reports (an empty plan means the login reports no windows; an absent one means the report does not speak to the plan, so the previous plan stands). Clients that ignore the new fields keep working once their validators admit them; a client that maps unknown statuses to "working" needs no change.
 
 ## Hub 5 / Workspace 13 - Unreleased
 

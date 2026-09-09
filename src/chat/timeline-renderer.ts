@@ -39,6 +39,13 @@ export class TimelineRenderer {
   // The owning agent's persistent-approval sentence, set by the surface from
   // the agent's declaration; a card renders whatever its agent declared.
   permissionScopeNote: string | undefined;
+  // Permission cards the reader has moved into the "Allow always"
+  // confirmation stage. Owned by the surface, read here: the stage is a
+  // reader's choice the renderer is told about, not something to recover
+  // from the DOM it is about to replace. Ids leave the set on Confirm,
+  // Cancel, and Escape (the surface) and when the card stops being the
+  // answerable one (below). A request resolved elsewhere recedes as usual.
+  readonly confirming = new Set<string>();
   deferClosedActivity = false;
 
   // `turnStartedAt` is when the running turn began (the surface's per-
@@ -126,7 +133,11 @@ export class TimelineRenderer {
       // when a later user message is visible remains incomplete.
       const completedAssistant = item.type === "assistant_message"
         && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
-      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? ""].join("\u0001");
+      // Only an answerable pending permission can be confirming; anything
+      // else drops out so the set cannot hold a stale id.
+      if (this.confirming.has(item.id) && !(item.type === "permission" && item.status === "pending" && active)) this.confirming.delete(item.id);
+      const confirming = this.confirming.has(item.id);
+      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming)].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
@@ -165,7 +176,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer);
+      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer, confirming);
       const node = buildNode(markup(this.deferClosedActivity));
       if (this.deferClosedActivity && node.matches("details.chat-activity:not([open])")) {
         node.setAttribute("data-chat-lazy", "");
@@ -810,7 +821,7 @@ export class RevertedMessagesDockRenderer {
 
 type RequestOrigin = { conversationId: string; label: string };
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   if (item.type === "user_message") {
@@ -856,7 +867,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
     }).join("");
     return `<section class="chat-item chat-task-progress" data-chat-item-id="${id}"${stamp} aria-label="Task progress"><header class="chat-task-progress-header">Tasks <span class="chat-task-progress-count">${done}/${item.entries.length}</span></header><ol class="chat-task-list">${rows}</ol></section>`;
   }
-  if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents, permissionScopeNote);
+  if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents, permissionScopeNote, confirming);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, origin, allowSubagents);
   if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents, deferClosed);
   // A command's text is the subject, not the label. As a label it lands in the
@@ -1101,7 +1112,7 @@ function requestOrigin(origin: RequestOrigin | undefined, allowSubagents: boolea
   return `<p class="chat-request-origin">Requested by ${escapeHtml(origin.label)}. <button type="button" data-open-conversation="${escapeHtmlAttribute(origin.conversationId)}">Open transcript</button></p>`;
 }
 
-function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true, permissionScopeNote?: string): string {
+function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true, permissionScopeNote?: string, confirming = false): string {
   const pending = item.status === "pending";
   // `approved-session` is the transported value and stays; "Allow always" is
   // the human-facing text, because under every agent that offers it the
@@ -1118,10 +1129,17 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // Agent-provided approval intents replace the generic pair: each choice is
   // one approve button carrying its id, and Reject stays universal. The
   // always/session scope note applies only to the generic pair.
+  // "Allow always" does not reply: it opens the confirmation stage, which
+  // shows the rule the agent will actually install, its own patterns
+  // apart from the resources above, and the lifetime sentence, then asks
+  // again. Only Confirm sends the persistent reply. A card with agent
+  // intents has no generic pair and so no stage.
   const scope = permissionScopeNote ? `<p class="chat-request-scope">${escapeHtml(permissionScopeNote)}</p>` : "";
   const actions = item.choices?.length
     ? `<div class="chat-request-actions">${item.choices.map(choice => `<button type="button" data-permission-choice="${escapeHtmlAttribute(choice.id)}"${choice.description ? ` title="${escapeHtmlAttribute(choice.description)}"` : ""}>${escapeHtml(choice.label)}</button>`).join("")}<button type="button" data-permission-outcome="rejected">Reject</button></div>`
-    : `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div>${scope}`;
+    : confirming
+      ? renderAlwaysConfirmation(item, scope)
+      : `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div>${scope}`;
   const body = pending && active
     ? actions
     : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : "";
@@ -1134,6 +1152,25 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // is open — the user approves what they can read, not a summary line.
   const planPreview = pending && item.plan ? `<div class="chat-request-plan">${renderChatMarkdown(item.plan)}</div>` : "";
   return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${planPreview}${changePreview}${body}</details>`;
+}
+
+// The confirmation stage. What it lists is the agent's own future-approval
+// scope, verbatim: a `git status --short` request whose agent installs
+// `git status *` shows `git status *`, and nothing here shortens the command
+// to guess at it. A sole wildcard is the whole permission, said so; no
+// pattern at all is said plainly rather than implied to be the command.
+// The action is named on the title line, not woven into the sentence: under
+// OpenCode it is a category noun ("bash") but under Claude Code it is a
+// whole title ("Claude wants to edit hello.sh"), and only a label slot reads
+// well for both.
+function renderAlwaysConfirmation(item: Extract<ConversationItem, { type: "permission" }>, scope: string): string {
+  const patterns = item.alwaysPatterns ?? [];
+  const body = patterns.length === 1 && patterns[0] === "*"
+    ? `<p class="chat-request-confirm-lead">Confirming allows <em>every</em> request under this permission, not only this one.</p>`
+    : patterns.length === 0
+      ? `<p class="chat-request-confirm-lead">The agent reported no reusable pattern. Confirming allows only this request.</p>`
+      : `<p class="chat-request-confirm-lead">Confirming allows this request and every future request matching:</p><ul class="chat-request-always">${patterns.map(pattern => `<li><code>${escapeHtml(pattern)}</code></li>`).join("")}</ul>`;
+  return `<div class="chat-request-confirm" data-permission-confirming><p class="chat-request-confirm-title">Allow always? <strong class="chat-request-confirm-action">${escapeHtml(item.action)}</strong></p>${body}${scope}<div class="chat-request-actions"><button type="button" data-permission-confirm>Confirm</button><button type="button" data-permission-cancel>Cancel</button></div></div>`;
 }
 
 // The receded form's label — what was decided, in words, since the summary no

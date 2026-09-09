@@ -20,7 +20,7 @@ import type {
   ProviderSession,
   StoredMessageAccounting,
 } from "../provider";
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, permissionDiff, storedMessageUsage, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
+import { alwaysPatterns, createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, permissionDiff, storedMessageUsage, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
 import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../types";
 
 type Result<T> = { data?: T; error?: unknown };
@@ -658,6 +658,10 @@ export class SdkV2Provider implements ChatProvider {
         conversationId: owner,
         action,
         resources: raw.filter((item): item is string => typeof item === "string"),
+        // The rule an "always" reply installs, under either generation's
+        // spelling, so a recovered card confirms with the same scope the live
+        // one would have shown.
+        alwaysPatterns: alwaysPatterns(request),
         // The same metadata.diff the live event carries — recovery is the
         // path for a user who missed that event, and they are the one reader
         // who must not approve an edit without being shown it.

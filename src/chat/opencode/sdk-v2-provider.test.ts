@@ -536,17 +536,21 @@ describe("OpenCode v2 identity policy", () => {
     const client = {
       permission: {
         list: async () => ({ data: [
-          { id: "perm_edit", sessionID: "ses_a", action: "edit", resources: ["src/app.ts"], metadata: { diff: "@@ -1 +1 @@\n-old\n+new" } },
-          { id: "perm_cmd", sessionID: "ses_a", permission: "shell", patterns: ["bun test"] },
+          { id: "perm_edit", sessionID: "ses_a", action: "edit", resources: ["src/app.ts"], save: ["src/app.ts"], metadata: { diff: "@@ -1 +1 @@\n-old\n+new" } },
+          { id: "perm_cmd", sessionID: "ses_a", permission: "shell", patterns: ["bun test"], always: ["bun test *"] },
+          { id: "perm_bare", sessionID: "ses_a", permission: "skill", patterns: ["review-code"] },
         ] }),
       },
     } as unknown as OpencodeClient;
     const pending = await new SdkV2Provider(client, "/workspace").listPermissions();
     // The edit's diff rides along — a card rebuilt from this list is shown to
     // a reader who missed the live event, and they must see the same change.
+    // So does the rule an "always" reply installs, under either spelling,
+    // and its absence is an empty list, not a guess from the command.
     expect(pending).toEqual([
-      { requestId: "perm_edit", conversationId: "ses_a", action: "edit", resources: ["src/app.ts"], diff: "@@ -1 +1 @@\n-old\n+new" },
-      { requestId: "perm_cmd", conversationId: "ses_a", action: "shell", resources: ["bun test"] },
+      { requestId: "perm_edit", conversationId: "ses_a", action: "edit", resources: ["src/app.ts"], alwaysPatterns: ["src/app.ts"], diff: "@@ -1 +1 @@\n-old\n+new" },
+      { requestId: "perm_cmd", conversationId: "ses_a", action: "shell", resources: ["bun test"], alwaysPatterns: ["bun test *"] },
+      { requestId: "perm_bare", conversationId: "ses_a", action: "skill", resources: ["review-code"], alwaysPatterns: [] },
     ]);
   });
 
