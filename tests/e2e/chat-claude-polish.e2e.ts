@@ -128,6 +128,32 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await capture(page, testInfo, "phase1-meter-and-breakdown");
   });
 
+  test("the session's reported window beats the catalog's figure, and an occupancy beyond that figure is not a full window (#347)", async ({ page, request }, testInfo) => {
+    // The catalog guesses 200k for sonnet; the first call already occupies
+    // 212k, so the guess is wrong for this session and nothing is painted
+    // as full.
+    const id = await bootClaude(page, request, "Window from the session", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Read the whole tree" },
+      carrier("usage:a1", 2, "sonnet", 2, 212_895),
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const label = page.locator("#chat-context-usage-label");
+    const meter = page.locator("#chat-context-usage");
+    await expect(label).toHaveText("?");
+    await expect(meter).toHaveAttribute("data-fill", "unknown");
+    await expect(meter).toHaveAttribute("title", "212,897 tokens in the context window");
+    // The session states its window: 1M. The report and every later call
+    // measure against it, not the catalog.
+    await control(request, { action: "item", conversationId: id, item: { id: "context:report:1", type: "context_report", createdAt: 3, total: 213_000, max: 1_000_000, model: { providerId: "anthropic", modelId: "sonnet" } } });
+    await expect(label).toHaveText("21%");
+    await control(request, { action: "item", conversationId: id, item: carrier("usage:a2", 4, "sonnet", 2, 262_895) });
+    await expect(label).toHaveText("26%");
+    await expect(meter).toHaveAttribute("data-fill", "normal");
+    await expect(meter).toHaveAttribute("data-source", "usage");
+    await page.locator("#chat-context-usage > summary").click();
+    await expect(page.locator("#chat-context-usage-breakdown dd").nth(1)).toHaveText("1,000,000");
+    await capture(page, testInfo, "window-from-the-session");
+  });
+
   test("a compaction marker sits between two activity runs and the readout drops after it", async ({ page, request }, testInfo) => {
     const id = await bootClaude(page, request, "Compaction", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Audit the scripts" },

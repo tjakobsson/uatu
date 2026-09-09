@@ -6,17 +6,22 @@ import { claudeModelSelection } from "./normalization";
  * The Claude Code model manifest (D5): no catalog API exists before a session
  * runs, so the offered models and their effort levels are declared here and
  * maintained by hand. Effort tiers follow the SDK's own documentation of
- * which models accept `xhigh`/`max`; the 200k context window is the
- * published standard for these models.
+ * which models accept `xhigh`/`max`. Windows are what a session reports
+ * in its `modelUsage.contextWindow` when probed: Opus 5 runs the enlarged
+ * window on its plain id (probed 2026-09-09 on Max, reported on Pro in
+ * issue #347); the rest run the published 200k standard. Whatever stands
+ * here is a guess a session's own report overrides (context-readout.ts).
  */
 const FULL_EFFORT = ["low", "medium", "high", "xhigh", "max"] as const;
 const STANDARD_EFFORT = ["low", "medium", "high"] as const;
 
 export const CLAUDE_MODELS: ChatModel[] = [
-  { selection: claudeModelSelection("default"), provider: "Anthropic", name: "Default (recommended)", default: true, detail: "Claude Code's own model choice", variants: [...FULL_EFFORT], contextLimit: 200_000, imageInput: true },
+  // The CLI's default resolves to Opus 5 (probed 2026-09-09), so the
+  // sentinel row carries that window until the live catalog says otherwise.
+  { selection: claudeModelSelection("default"), provider: "Anthropic", name: "Default (recommended)", default: true, detail: "Claude Code's own model choice", variants: [...FULL_EFFORT], contextLimit: 1_000_000, imageInput: true },
   // Fable 5 runs the enlarged window (probed 2026-09-02), fallback or not.
   { selection: claudeModelSelection("claude-fable-5"), provider: "Anthropic", name: "Fable 5", variants: [...FULL_EFFORT], contextLimit: 1_000_000, imageInput: true },
-  { selection: claudeModelSelection("claude-opus-5"), provider: "Anthropic", name: "Opus 5", variants: [...FULL_EFFORT], contextLimit: 200_000, imageInput: true },
+  { selection: claudeModelSelection("claude-opus-5"), provider: "Anthropic", name: "Opus 5", variants: [...FULL_EFFORT], contextLimit: 1_000_000, imageInput: true },
   { selection: claudeModelSelection("claude-sonnet-5"), provider: "Anthropic", name: "Sonnet 5", variants: [...FULL_EFFORT], contextLimit: 200_000, imageInput: true },
   { selection: claudeModelSelection("claude-haiku-4-5-20251001"), provider: "Anthropic", name: "Haiku 4.5", variants: [...STANDARD_EFFORT], contextLimit: 200_000, imageInput: true },
 ];
@@ -74,13 +79,21 @@ export function findClaudeModel(modelId: string): ChatModel | undefined {
 }
 
 /**
- * The live ModelInfo carries no context-window field: the only wire signal
- * for the enlarged window is the "[1m]" variant marker somewhere in the
- * model id, and the published 200k standard is the base for everything
- * else.
+ * The live ModelInfo carries no context-window field, so a catalog row's
+ * window is derived from its ids: the "[1m]" variant marker anywhere in
+ * them means the enlarged window; failing that, the manifest's figure for
+ * the id (Opus 5 runs 1M on its plain id, issue #347); failing that, the
+ * published 200k standard. The "default" sentinel names no model of its
+ * own, so only its resolved id speaks for it.
  */
 export function claudeContextWindow(...ids: Array<string | undefined>): number {
-  return ids.some(id => id?.includes("[1m]")) ? 1_000_000 : 200_000;
+  if (ids.some(id => id?.includes("[1m]"))) return 1_000_000;
+  for (const id of ids) {
+    if (!id || id === "default") continue;
+    const known = findClaudeModel(stripWindowMarker(id))?.contextLimit;
+    if (known !== undefined) return known;
+  }
+  return 200_000;
 }
 
 /** "claude-opus-5[1m]" → "claude-opus-5": the id without its window marker. */

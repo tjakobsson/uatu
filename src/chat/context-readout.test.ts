@@ -79,6 +79,43 @@ describe("context readout source selection", () => {
     expect(contextReadout([other, later], models, undefined)!.limit).toBeUndefined();
   });
 
+  test("the session's own window beats the catalog's figure for the same model (#347)", () => {
+    // The catalog guessed 200k for the plain id; the session reported 1M.
+    // A carrier at 212k then reads as ~21%, not a red 100%.
+    const report: ConversationItem = { id: "context:report:1", type: "context_report", createdAt: 2, total: 40_000, max: 1_000_000, model: { providerId: "anthropic", modelId: "sonnet" } };
+    const later = carrier("usage:a2", 3, 2, 212_895);
+    const readout = contextReadout([report, later], models, undefined)!;
+    expect(readout.source).toBe(later);
+    expect(readout.limit).toBe(1_000_000);
+    expect(readout.fraction).toBeCloseTo(0.2129, 3);
+    expect(readout.rows.slice(0, 2)).toEqual([["In context", 212_897], ["Limit", 1_000_000]]);
+    // A compaction report without a window of its own measures against the
+    // session's stated window too, not the catalog's.
+    const compaction: ConversationItem = { id: "context:cb", type: "context_report", createdAt: 4, total: 20_000, model: { providerId: "anthropic", modelId: "sonnet" } };
+    expect(contextReadout([report, later, compaction], models, undefined)!.limit).toBe(1_000_000);
+  });
+
+  test("a catalog figure the occupancy exceeds is dropped rather than painted as full", () => {
+    // Nothing has reported a window yet and the carrier already exceeds
+    // the catalog's 200k: the figure is wrong for this session, so the
+    // readout states the occupancy alone (a "?" badge, no alert state).
+    const over = carrier("usage:a1", 1, 2, 212_895);
+    const readout = contextReadout([over], models, undefined)!;
+    expect(readout.used).toBe(212_897);
+    expect(readout.limit).toBeUndefined();
+    expect(readout.fraction).toBeUndefined();
+    expect(readout.rows).toEqual([["In context", 212_897], ["Input", 2], ["Cache read", 212_895], ["Output", 20]]);
+    // Within the figure, the catalog still measures.
+    expect(contextReadout([carrier("usage:a0", 0, 100, 99_900)], models, undefined)!.fraction).toBeCloseTo(0.5);
+    // The session's own statement of an over-full window is its word, and
+    // reads as full — a compaction boundary it has run past.
+    const overReport: ConversationItem = { id: "context:report:1", type: "context_report", createdAt: 2, total: 210_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" } };
+    expect(contextReadout([overReport], models, undefined)!.fraction).toBe(1);
+    // A carrier that exceeds a window the session stated is measured against
+    // it all the same, capped at full.
+    expect(contextReadout([overReport, carrier("usage:a3", 3, 2, 219_998)], models, undefined)!.fraction).toBe(1);
+  });
+
   test("an unknown model leaves the limit and fraction absent; nothing reported yields nothing", () => {
     const typed = carrier("usage:a1", 1, 100, 900, "claude-nope-1");
     const readout = contextReadout([typed], models, undefined)!;
