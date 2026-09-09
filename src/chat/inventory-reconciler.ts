@@ -66,14 +66,17 @@ export class SerializedInventoryReconciler {
     private readonly reportFailure: (error: unknown) => void,
   ) {}
 
+  // Dispatches the fetch before returning: `fetchInventory` has been called
+  // by the time the caller regains control. Lifecycle recovery relies on
+  // this — it closes the streams it is replacing, requests the inventory,
+  // and only then reopens streams, so the request is at the head of the
+  // browser's per-host connection queue rather than behind the replacements.
   request(): Promise<void> {
     if (this.running) {
       this.dirty = true;
       return this.running;
     }
-    this.running = Promise.resolve()
-      .then(() => this.drain())
-      .finally(() => { this.running = null; });
+    this.running = this.drain().finally(() => { this.running = null; });
     return this.running;
   }
 

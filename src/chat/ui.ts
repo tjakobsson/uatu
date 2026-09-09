@@ -3910,14 +3910,20 @@ export function initChat(api = new ChatApiClient()): void {
     discard: () => {},
     recover: async () => {
       if (disposed || !bootstrapped) return;
-      const inventory = inventoryReconciler.request();
+      // Close every stream this recovery replaces BEFORE asking for anything.
+      // Over HTTP/1.1 the browser holds six connections per host, shared by
+      // every tab on the hub, and the long-lived streams count against it.
+      // A fetch issued while the old streams still hold their slots queues
+      // behind them; the replacements then race it for the slots the closes
+      // free. Closing first, then fetching, then reopening puts the one
+      // request that must succeed at the head of the queue.
       inventoryStream?.close();
       inventoryStream = null;
-      startInventoryStream(true);
       const current = projection;
-      if (current && activeConversationId() === current.conversationId) {
+      const resumeConversation = current !== null && activeConversationId() === current.conversationId;
+      if (resumeConversation) {
         stream?.close();
-        stream = openConversationStream(current.conversationId, current.cursor, selectionGeneration, { resumed: true });
+        stream = null;
       }
       // An open subagent transcript owns its own stream, which the parent's
       // replacement does not touch. Left alone it stays half-dead and silently
@@ -3925,6 +3931,14 @@ export function initChat(api = new ChatApiClient()): void {
       const openChild = child;
       if (openChild?.projection) {
         openChild.stream?.close();
+        openChild.stream = null;
+      }
+      const inventory = inventoryReconciler.request();
+      startInventoryStream(true);
+      if (resumeConversation && current) {
+        stream = openConversationStream(current.conversationId, current.cursor, selectionGeneration, { resumed: true });
+      }
+      if (openChild?.projection) {
         openChild.stream = openChildStream(
           openChild,
           openChild.conversationId,

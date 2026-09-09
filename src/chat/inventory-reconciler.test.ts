@@ -73,6 +73,20 @@ describe("conversation inventory reconciliation", () => {
     expect([...tracker.unseenIds]).toEqual(["three"]);
   });
 
+  test("dispatches the fetch before request() returns", async () => {
+    let fetched = 0;
+    const reconciler = new SerializedInventoryReconciler(
+      async () => { fetched += 1; return []; },
+      () => undefined,
+      () => undefined,
+    );
+    // Recovery closes old streams, requests, then reopens streams — and
+    // needs the request on the wire before the replacements are created.
+    const pending = reconciler.request();
+    expect(fetched).toBe(1);
+    await pending;
+  });
+
   test("runs one request at a time with one dirty trailing request", async () => {
     const requests = [deferred<ConversationSummary[]>(), deferred<ConversationSummary[]>()];
     const applied: string[][] = [];
