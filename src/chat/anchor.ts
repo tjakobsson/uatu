@@ -13,8 +13,21 @@ export class TimelineAnchorController {
 
   constructor(private readonly endThreshold = 48) {}
 
-  observe(geometry: AnchorGeometry): void {
-    this.pinned = geometry.scrollHeight - geometry.clientHeight - geometry.scrollTop <= this.endThreshold;
+  /**
+   * Reads where the reader is after a scroll. Arriving near the end pins —
+   * anything within the threshold counts, so a reader who stops just short
+   * still follows the stream. Leaving is judged differently: `movedUp` says
+   * the scroll went upward, and any upward step unpins, however small. The
+   * threshold cannot apply on the way out — while a turn streams, a render
+   * lands every few frames, and each one drags a still-pinned viewport back
+   * to the end, so a reader nudging a trackpad never gets past 48px and
+   * feels every wheel tick reset. Only a decrease that still leaves the end
+   * in view stays pinned: that is the browser clamping scrollTop after the
+   * content shrank, not the reader leaving.
+   */
+  observe(geometry: AnchorGeometry, movedUp = false): void {
+    const distance = geometry.scrollHeight - geometry.clientHeight - geometry.scrollTop;
+    this.pinned = distance <= (movedUp ? 1 : this.endThreshold);
     if (this.pinned) {
       this.unseen = false;
       this.anchor = null;

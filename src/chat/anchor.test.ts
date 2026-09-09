@@ -18,6 +18,31 @@ describe("semantic timeline anchoring", () => {
     expect(controller.jumpToLatest(geometry(100, 800))).toBe(500);
   });
 
+  test("any upward step unpins, while arriving near the end pins", () => {
+    const controller = new TimelineAnchorController();
+    controller.observe(geometry(300));
+    expect(controller.isPinned()).toBe(true);
+    // Twelve pixels up is inside the near-end threshold, but it is the reader
+    // leaving: the next streamed frame must not pull them back.
+    controller.observe(geometry(288), true);
+    expect(controller.isPinned()).toBe(false);
+    expect(controller.afterMutation(geometry(288, 700), true)).toBe(288);
+    expect(controller.hasUnseen()).toBe(true);
+    // Coming back down to within the threshold follows the stream again.
+    controller.observe(geometry(360, 700));
+    expect(controller.isPinned()).toBe(true);
+    expect(controller.hasUnseen()).toBe(false);
+  });
+
+  test("a clamped decrease that keeps the end in view stays pinned", () => {
+    const controller = new TimelineAnchorController();
+    controller.observe(geometry(300));
+    // Content above the viewport shrank and the browser clamped scrollTop to
+    // the new maximum: the end is still in view, so nobody left.
+    controller.observe(geometry(250, 550), true);
+    expect(controller.isPinned()).toBe(true);
+  });
+
   test("restores a visible item offset across prepend and delayed resize", () => {
     const controller = new TimelineAnchorController();
     controller.observe(geometry(100, 700, [-20, 80, 180]));

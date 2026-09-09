@@ -2480,10 +2480,11 @@ export function initChat(api = new ChatApiClient()): void {
       timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     }
     // Cheap while pinned; the full pass runs only once actually unpinned.
-    // The first tick that crosses the threshold captures no anchor (items
-    // were not collected), which self-heals on the next tick — a transient
-    // preferable to a forced layout on every scroll event of a long chat.
-    anchor.observe(anchorGeometry());
+    // The first tick that unpins captures no anchor (items were not
+    // collected), which self-heals on the next tick — a transient preferable
+    // to a forced layout on every scroll event of a long chat. The direction
+    // rides along: an upward step is the reader leaving, whatever its size.
+    anchor.observe(anchorGeometry(), timeline.scrollTop < lastParentScrollTop);
     lastParentScrollTop = timeline.scrollTop;
     if (projection) {
       const current = anchor.currentAnchor();
@@ -2939,7 +2940,7 @@ export function initChat(api = new ChatApiClient()): void {
       if (childAnchor.isPinned() && drilldownTimeline.scrollTop >= lastChildScrollTop - 1) {
         drilldownTimeline.scrollTop = Math.max(0, drilldownTimeline.scrollHeight - drilldownTimeline.clientHeight);
       }
-      childAnchor.observe(childAnchorGeometry());
+      childAnchor.observe(childAnchorGeometry(), drilldownTimeline.scrollTop < lastChildScrollTop);
       lastChildScrollTop = drilldownTimeline.scrollTop;
     }, { passive: true });
   }
@@ -3370,6 +3371,13 @@ export function initChat(api = new ChatApiClient()): void {
     renderAttachments();
     noteComposer("Sending...");
     syncControls();
+    // Sending says where the reader wants to be: at the exchange they just
+    // started. Pin to the end so the echo, and the reply that follows it,
+    // land in view — a reader who scrolled up to reread an earlier turn
+    // before pressing Enter is not asking to stay there while the answer
+    // arrives out of sight below the latest-content affordance.
+    timeline.scrollTop = anchor.jumpToLatest(extentsOf(timeline));
+    latestButton.hidden = true;
     scheduleRender(true);
     try {
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined);

@@ -767,6 +767,14 @@ The Chat timeline SHALL remain pinned to the latest content only while the user 
 - **THEN** their visible content remains anchored
 - **AND** an affordance reports and navigates to unseen latest content
 
+#### Scenario: Any upward scroll leaves the end
+- **WHEN** the user scrolls upward by less than the near-end distance while content continues streaming
+- **THEN** the timeline is no longer pinned and the next update does not return it to the end
+
+#### Scenario: Sending returns the reader to the end
+- **WHEN** the user submits a message while scrolled above the end
+- **THEN** the timeline moves to the end so the sent message and the reply that follows are in view
+
 #### Scenario: Loading older history preserves the viewport
 - **WHEN** the user requests an older history page at the top of the loaded timeline
 - **THEN** the previously visible first item remains at the same visual offset after insertion

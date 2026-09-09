@@ -518,3 +518,62 @@ function elapsedSeconds(value: string | null): number {
   const match = /(?:·\s*)?(?:(\d+)m\s+)?(\d+)s/.exec(value ?? "");
   return match ? Number(match[1] ?? 0) * 60 + Number(match[2]) : -1;
 }
+
+test.describe("timeline reading position", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  const seedLong = async (page: Page, request: APIRequestContext): Promise<string> => {
+    const items: ConversationItem[] = Array.from({ length: 28 }, (_, index) => ({
+      id: `message:loaded-${index}`, type: "user_message", createdAt: index, text: `loaded message ${index} ${"content ".repeat(12)}`,
+    }));
+    const seeded = await control(request, { action: "seed", title: "Reading", items }) as { conversation: { id: string } };
+    await page.reload();
+    await openChatPanel(page);
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(seeded.conversation.id);
+    await expect(page.locator("#chat-items")).toContainText("loaded message 27");
+    return seeded.conversation.id;
+  };
+
+  test("a small upward wheel scroll during streaming is not pulled back to the end", async ({ page, request }) => {
+    const id = await seedLong(page, request);
+    const timeline = page.locator("#chat-timeline");
+    await timeline.evaluate(el => { el.scrollTop = el.scrollHeight; });
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { id: "part:stream", type: "assistant_message", createdAt: 500, markdown: "Streaming" } });
+    await expect(page.locator("#chat-items")).toContainText("Streaming");
+    await timeline.evaluate(el => {
+      (window as any).__scrollTops = [] as number[];
+      el.addEventListener("scroll", () => (window as any).__scrollTops.push(el.scrollTop));
+    });
+    await timeline.hover();
+    // Trackpad-sized steps, each well inside the 48px near-end threshold,
+    // while the turn keeps rendering underneath them.
+    const streaming = (async () => {
+      for (let index = 0; index < 30; index++) {
+        await control(request, { action: "delta", conversationId: id, itemId: "part:stream", delta: ` word${index}` });
+        await page.waitForTimeout(40);
+      }
+    })();
+    for (let index = 0; index < 20; index++) {
+      await page.mouse.wheel(0, -12);
+      await page.waitForTimeout(30);
+    }
+    await streaming;
+    const tops = await page.evaluate(() => (window as any).__scrollTops as number[]);
+    const pulledBack = tops.filter((top, index) => index > 0 && top > tops[index - 1]! + 1);
+    expect(pulledBack).toEqual([]);
+    expect(await timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(150);
+    await expect(page.locator("#chat-latest")).toBeVisible();
+  });
+
+  test("sending a message returns the reader to the end", async ({ page, request }) => {
+    await seedLong(page, request);
+    const timeline = page.locator("#chat-timeline");
+    await timeline.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 150; el.dispatchEvent(new Event("scroll")); });
+    await page.locator("#chat-input").fill("hello there");
+    await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-items")).toContainText("hello there");
+    await expect.poll(() => timeline.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
+    await expect(page.locator("#chat-latest")).toBeHidden();
+  });
+});
