@@ -429,7 +429,9 @@ A request's state SHALL be distinguishable without reading its body — whether 
 
 The surface SHALL report how many requests are outstanding across everything it is showing, and SHALL offer a way to reach an outstanding request without hunting for it.
 
-A choice that grants authority beyond the request being answered SHALL state the scope and lifetime of that authority where the choice is offered, so a user learns what they are granting before granting it rather than afterwards. In particular, OpenCode's persistent approval carries past the answered request into later conversations served by the same OpenCode instance and covers the request's saved pattern rather than only the resource displayed, and it is lost when that instance restarts. It MUST NOT be presented as limited to the current conversation, nor as outliving the OpenCode instance that granted it.
+A choice that grants authority beyond the request being answered SHALL state the scope and lifetime of that authority where the choice is offered, so a user learns what they are granting before granting it rather than afterwards. In particular, OpenCode's persistent approval carries past the answered request into later conversations served by the same OpenCode instance and covers the request's saved pattern rather than only the resource displayed, and it is lost when that instance restarts. It MUST NOT be presented as limited to the current conversation, nor as permanent, nor as outliving the OpenCode instance that granted it.
+
+Choosing the persistent approval SHALL NOT send a reply. It SHALL open a confirmation step on the same request that lists the future-approval patterns OpenCode supplied for that request, the patterns its persistent reply installs, verbatim and apart from the request's own resources, so the user can see where the two differ. The surface MUST NOT derive or shorten a pattern from the displayed command; a request whose patterns are unknown SHALL say so rather than present the command as the scope. The patterns SHALL be carried on the request wherever it is shown, including a request recovered from OpenCode's pending set after its live announcement was missed.
 
 A pending request SHALL remain discoverable and answerable even when the server did not observe its live announcement — because the event stream was interrupted, restarted, or the conversation was not being tracked at the time. Loading a conversation SHALL reconcile its unresolved requests against OpenCode's own pending set, so a request that OpenCode is still waiting on is never permanently invisible.
 
@@ -517,15 +519,27 @@ A pending request SHALL remain discoverable and answerable even when the server 
 - **THEN** the surface states that choosing it reaches beyond this conversation and beyond this exact request, and that it lasts until OpenCode restarts
 - **AND** it is not described as applying only to this conversation, nor as permanent
 
+#### Scenario: The confirmation shows OpenCode's pattern, not the command
+- **WHEN** OpenCode requests permission for `git status --short` and supplies `git status *` as its future-approval pattern, and the user chooses the persistent approval
+- **THEN** no reply is sent
+- **AND** the confirmation lists `git status *` as what will be allowed
+- **AND** the request's own resource `git status --short` remains visible apart from that list
+
 #### Scenario: Persistent approval is still sent as OpenCode's persistent reply
-- **WHEN** the user chooses persistent approval
+- **WHEN** the user confirms the persistent approval
 - **THEN** OpenCode receives its persistent-approval reply once for that request
 - **AND** the recorded outcome is unchanged from before this correction
+
+#### Scenario: Patterns are announced under either naming generation
+- **WHEN** OpenCode announces a request's future-approval patterns under its current or its legacy event name
+- **THEN** the request carries those patterns
+- **AND** a request announced under both carries them once
 
 #### Scenario: A request missed by the event stream is recovered on load
 - **WHEN** OpenCode raised a permission request while the server's event stream was interrupted, and the user then opens that conversation
 - **THEN** the pending request appears and can be answered
 - **AND** answering it resolves the request OpenCode is waiting on
+- **AND** its persistent approval confirms with the future-approval patterns OpenCode reports for it
 
 #### Scenario: Recovered and live announcements do not double up
 - **WHEN** a pending request is recovered on load and OpenCode also announces it over the event stream
@@ -1500,10 +1514,51 @@ Where an agent declares that it can run work in the background, Chat SHALL prese
 ### Requirement: Persistent-approval scope copy is the owning agent's
 When a permission card offers an approval that outlives the request, the sentence stating what that approval covers SHALL describe the owning agent's actual persistence semantics and SHALL name only that agent. Two agents with different semantics SHALL have different sentences.
 
+Choosing that approval SHALL open a confirmation step on the card rather than reply. The confirmation SHALL name the action being authorized, list each future-approval pattern the owning agent supplied, verbatim and in that agent's own syntax, visibly apart from the request's own resources, and state the approval's lifetime in the owning agent's terms. The list SHALL be what the agent supplied; the surface MUST NOT derive it from the displayed request. When the agent supplied a single wildcard covering the whole permission, the confirmation SHALL state that every request of that action will be allowed, naming the action. When the agent supplied no reusable pattern, the confirmation SHALL state that confirming covers only this request. The confirmation SHALL offer explicit Confirm and Cancel choices; only Confirm SHALL send the persistent reply, once. Cancel, and Escape while the confirmation has keyboard focus, SHALL return the card to its pending choices without sending any reply and without changing the request's state. When the confirmation opens, keyboard focus SHALL move into it. If the request resolves while the confirmation is open, the card SHALL recede as a resolved request does. The single-occurrence approval, rejection, and agent-provided approval intents SHALL be unaffected.
+
 #### Scenario: Each agent's card states its own reach
 - **WHEN** a permission card is shown for a conversation owned by a given agent
 - **THEN** its scope sentence describes that agent's persistent-approval lifetime
 - **AND** no other agent is named on the card
+
+#### Scenario: Choosing the persistent approval asks for confirmation
+- **WHEN** the user chooses the persistent approval on a pending request
+- **THEN** no reply is sent
+- **AND** the card shows the action, the agent-supplied patterns apart from the request's resources, the agent's lifetime sentence, and Confirm and Cancel
+
+#### Scenario: Confirm sends the persistent reply once
+- **WHEN** the user chooses Confirm on the confirmation
+- **THEN** the agent receives its persistent-approval reply exactly once
+- **AND** the card records the persistent approval as it did before this change
+
+#### Scenario: Cancel returns to the pending choices
+- **WHEN** the user chooses Cancel on the confirmation
+- **THEN** the card shows its pending choices again
+- **AND** no reply has been sent and the request is still pending
+
+#### Scenario: Escape cancels the confirmation
+- **WHEN** the confirmation has keyboard focus and the user presses Escape
+- **THEN** the card shows its pending choices again
+- **AND** no reply has been sent
+
+#### Scenario: A sole wildcard names the whole action
+- **WHEN** the agent's only future-approval pattern is a wildcard covering the whole permission
+- **THEN** the confirmation states that every request of that action will be allowed, naming the action
+- **AND** it does not present the wildcard as though it were one command
+
+#### Scenario: No reusable pattern is said plainly
+- **WHEN** the agent supplied no future-approval pattern for the request
+- **THEN** the confirmation states that confirming covers only this request
+- **AND** it does not present the displayed command as the pattern
+
+#### Scenario: A request resolved elsewhere closes its confirmation
+- **WHEN** the request resolves while its confirmation is open
+- **THEN** the card recedes as a resolved request
+- **AND** Confirm and Cancel are no longer offered
+
+#### Scenario: The other choices are unchanged
+- **WHEN** the user chooses the single-occurrence approval, rejection, or an agent-provided approval intent
+- **THEN** the reply is sent on that choice without a confirmation step
 
 ### Requirement: Timeline marks conversation compaction
 Where an agent reports that it compacted the conversation's context, Chat SHALL place a marker in the timeline at that point stating that compaction happened and, where reported, the before and after token figures. Content before the marker SHALL remain readable.
