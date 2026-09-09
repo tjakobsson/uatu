@@ -46,6 +46,11 @@ export class TimelineRenderer {
   // Cancel, and Escape (the surface) and when the card stops being the
   // answerable one (below). A request resolved elsewhere recedes as usual.
   readonly confirming = new Set<string>();
+  // A selector to focus inside the next painted timeline. The confirmation
+  // stage is built by a render, so the button it should land on does not
+  // exist yet when the click that opens it is handled; the surface sets
+  // this and consumes it after the paint.
+  focusAfterPaint: string | undefined;
   deferClosedActivity = false;
 
   // `turnStartedAt` is when the running turn began (the surface's per-
@@ -135,8 +140,8 @@ export class TimelineRenderer {
         && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
       // Only an answerable pending permission can be confirming; anything
       // else drops out so the set cannot hold a stale id.
-      if (this.confirming.has(item.id) && !(item.type === "permission" && item.status === "pending" && active)) this.confirming.delete(item.id);
-      const confirming = this.confirming.has(item.id);
+      const confirming = this.confirming.has(item.id) && item.type === "permission" && item.status === "pending" && active;
+      if (!confirming) this.confirming.delete(item.id);
       const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming)].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
@@ -305,6 +310,11 @@ export class TimelineRenderer {
     this.entries.clear();
     this.draftEntries.clear();
     this.groupEntries.clear();
+    // A confirmation left open belongs to the conversation that was showing;
+    // the next one starts every card at its pending choices, and a request
+    // id reused elsewhere must not inherit the stage.
+    this.confirming.clear();
+    this.focusAfterPaint = undefined;
     this.conversationId = null;
   }
 }
@@ -1134,14 +1144,8 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // apart from the resources above, and the lifetime sentence, then asks
   // again. Only Confirm sends the persistent reply. A card with agent
   // intents has no generic pair and so no stage.
-  const scope = permissionScopeNote ? `<p class="chat-request-scope">${escapeHtml(permissionScopeNote)}</p>` : "";
-  const actions = item.choices?.length
-    ? `<div class="chat-request-actions">${item.choices.map(choice => `<button type="button" data-permission-choice="${escapeHtmlAttribute(choice.id)}"${choice.description ? ` title="${escapeHtmlAttribute(choice.description)}"` : ""}>${escapeHtml(choice.label)}</button>`).join("")}<button type="button" data-permission-outcome="rejected">Reject</button></div>`
-    : confirming
-      ? renderAlwaysConfirmation(item, scope)
-      : `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div>${scope}`;
   const body = pending && active
-    ? actions
+    ? renderPermissionActions(item, permissionScopeNote, confirming)
     : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : "";
   const state = requestState(item.status, active);
   const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${escapeHtml(permissionOutcomeLabel(item.outcome, item))}</span>` : requestBadge(state);
@@ -1154,6 +1158,19 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${planPreview}${changePreview}${body}</details>`;
 }
 
+// The three shapes a pending card's choices take. Agent intents replace the
+// generic pair and carry no scope sentence (each intent says what it does);
+// the confirmation stage carries the sentence beside the pattern list; the
+// generic pair carries it underneath.
+function renderPermissionActions(item: Extract<ConversationItem, { type: "permission" }>, permissionScopeNote: string | undefined, confirming: boolean): string {
+  const scope = permissionScopeNote ? `<p class="chat-request-scope">${escapeHtml(permissionScopeNote)}</p>` : "";
+  if (item.choices?.length) {
+    return `<div class="chat-request-actions">${item.choices.map(choice => `<button type="button" data-permission-choice="${escapeHtmlAttribute(choice.id)}"${choice.description ? ` title="${escapeHtmlAttribute(choice.description)}"` : ""}>${escapeHtml(choice.label)}</button>`).join("")}<button type="button" data-permission-outcome="rejected">Reject</button></div>`;
+  }
+  if (confirming) return renderAlwaysConfirmation(item, scope);
+  return `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div>${scope}`;
+}
+
 // The confirmation stage. What it lists is the agent's own future-approval
 // scope, verbatim: a `git status --short` request whose agent installs
 // `git status *` shows `git status *`, and nothing here shortens the command
@@ -1163,14 +1180,24 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
 // OpenCode it is a category noun ("bash") but under Claude Code it is a
 // whole title ("Claude wants to edit hello.sh"), and only a label slot reads
 // well for both.
+// With nothing reusable to install, the reply is worth exactly one request,
+// so the lifetime sentence (which describes a standing rule) is left out
+// rather than contradicting the line above it. Under Claude Code this is the
+// common case: most "don't ask again" suggestions are bound for a settings
+// file and are never forwarded.
 function renderAlwaysConfirmation(item: Extract<ConversationItem, { type: "permission" }>, scope: string): string {
   const patterns = item.alwaysPatterns ?? [];
+  if (patterns.length === 0) {
+    return confirmationShell(item, `<p class="chat-request-confirm-lead">The agent reported no reusable pattern. Confirming allows only this request.</p>`);
+  }
   const body = patterns.length === 1 && patterns[0] === "*"
     ? `<p class="chat-request-confirm-lead">Confirming allows <em>every</em> request under this permission, not only this one.</p>`
-    : patterns.length === 0
-      ? `<p class="chat-request-confirm-lead">The agent reported no reusable pattern. Confirming allows only this request.</p>`
-      : `<p class="chat-request-confirm-lead">Confirming allows this request and every future request matching:</p><ul class="chat-request-always">${patterns.map(pattern => `<li><code>${escapeHtml(pattern)}</code></li>`).join("")}</ul>`;
-  return `<div class="chat-request-confirm" data-permission-confirming><p class="chat-request-confirm-title">Allow always? <strong class="chat-request-confirm-action">${escapeHtml(item.action)}</strong></p>${body}${scope}<div class="chat-request-actions"><button type="button" data-permission-confirm>Confirm</button><button type="button" data-permission-cancel>Cancel</button></div></div>`;
+    : `<p class="chat-request-confirm-lead">Confirming allows this request and every future request matching:</p><ul class="chat-request-always">${patterns.map(pattern => `<li><code>${escapeHtml(pattern)}</code></li>`).join("")}</ul>`;
+  return confirmationShell(item, `${body}${scope}`);
+}
+
+function confirmationShell(item: Extract<ConversationItem, { type: "permission" }>, body: string): string {
+  return `<div class="chat-request-confirm" data-permission-confirming><p class="chat-request-confirm-title">Allow always? <strong class="chat-request-confirm-action">${escapeHtml(item.action)}</strong></p>${body}<div class="chat-request-actions"><button type="button" data-permission-confirm>Confirm</button><button type="button" data-permission-cancel>Cancel</button></div></div>`;
 }
 
 // The receded form's label — what was decided, in words, since the summary no

@@ -1,17 +1,15 @@
 // Ten permissions in one turn left a user unable to tell which still needed
 // them. These assert the two things that answer "did I miss one?" — a count
 // that does not scroll away, and a way to reach the one you can act on.
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import type { ConversationItem, PermissionOutcome } from "../../src/chat/types";
-import { captureScreenshot, openChatPanel } from "./chat-helpers";
+import type { ConversationItem } from "../../src/chat/types";
+import { captureScreenshot, changeScreenshotsDir, openChatPanel } from "./chat-helpers";
+import type { FakeE2EChatService } from "./chat-service";
 import { expect, test } from "./fixtures";
 
 // Where the confirm-always-allow-scope change keeps its evidence.
-const CONFIRM_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/confirm-always-allow-scope/screenshots");
+const CONFIRM_SCREENSHOTS = changeScreenshotsDir("confirm-always-allow-scope");
 
 test("outstanding requests are counted, reachable, and clear at zero", async ({ page, request }) => {
   await request.post("/__e2e/reset");
@@ -145,7 +143,7 @@ test("a surfaced subagent request opens its transcript without changing the pare
 // `git status *`. These prove the reply waits for a confirmation that shows
 // the agent's own pattern, and that nothing else about the card changed.
 test.describe("Allow always asks for confirmation", () => {
-  type Replies = { permissionChoices: Array<{ interactionId: string; outcome: PermissionOutcome; choiceId?: string }> };
+  type Replies = { permissionChoices: FakeE2EChatService["permissionChoices"] };
   const replies = async (request: APIRequestContext) => (await request.post("/__e2e/chat", { data: { action: "stats" } }).then(r => r.json()) as Replies).permissionChoices;
   const publish = (request: APIRequestContext, conversationId: string, item: ConversationItem) =>
     request.post("/__e2e/chat", { data: { action: "item", conversationId, item } });
@@ -154,16 +152,22 @@ test.describe("Allow always asks for confirmation", () => {
     ...(alwaysPatterns ? { alwaysPatterns } : {}),
   });
 
-  async function boot(page: Page, request: APIRequestContext): Promise<string> {
+  // Desktop opens the side panel; touch mode reaches chat through its tab.
+  async function boot(page: Page, request: APIRequestContext, open: (page: Page, conversationId: string) => Promise<void> = openChatPanel): Promise<string> {
     await request.post("/__e2e/reset");
     const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
     const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "Status check", items: [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Is the tree clean?" },
     ] } }).then(r => r.json()) as { conversation: { id: string } };
     await page.goto(`/?t=${encodeURIComponent(token.token)}`);
-    await openChatPanel(page);
+    await open(page, seeded.conversation.id);
     return seeded.conversation.id;
   }
+  const openTouchChat = async (page: Page, conversationId: string) => {
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(conversationId);
+  };
 
   test("shows the agent's pattern apart from the command, and replies only on Confirm", async ({ page, request }, testInfo) => {
     await page.setViewportSize({ width: 1400, height: 1000 });
@@ -232,6 +236,7 @@ test.describe("Allow always asks for confirmation", () => {
     await expect(bare.locator(".chat-request-confirm-lead")).toContainText("no reusable pattern");
     await expect(bare.locator(".chat-request-confirm-lead")).toContainText("only this request");
     await expect(bare.locator(".chat-request-always")).toHaveCount(0);
+    await expect(bare.locator(".chat-request-scope")).toHaveCount(0);
     await captureScreenshot(page, testInfo, CONFIRM_SCREENSHOTS, "after-confirmation-no-pattern-desktop");
     expect(await replies(request)).toEqual([]);
   });
@@ -265,16 +270,8 @@ test.describe("Allow always asks for confirmation", () => {
     test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
     test("the stage fits the card in touch mode", async ({ page, request }, testInfo) => {
-      await request.post("/__e2e/reset");
-      const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "Status check", items: [
-        { id: "message:u1", type: "user_message", createdAt: 1, text: "Is the tree clean?" },
-      ] } }).then(r => r.json()) as { conversation: { id: string } };
-      const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
-      await page.goto(`/?t=${encodeURIComponent(token.token)}`);
-      await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
-      await page.locator("#touch-tab-chat").click();
-      await expect(page.locator("#chat-conversation-select")).toHaveValue(seeded.conversation.id);
-      await publish(request, seeded.conversation.id, shell("shell", 20, ["git status *"]));
+      const id = await boot(page, request, openTouchChat);
+      await publish(request, id, shell("shell", 20, ["git status *"]));
       const card = page.locator('[data-chat-item-id="permission:shell"]');
       await card.getByRole("button", { name: "Allow always" }).click();
       const stage = card.locator("[data-permission-confirming]");

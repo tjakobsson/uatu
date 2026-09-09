@@ -1100,14 +1100,12 @@ export function initChat(api = new ChatApiClient()): void {
     for (const button of revertedItems?.querySelectorAll<HTMLButtonElement>("[data-history-restore]") ?? []) button.disabled = historyBusy;
   };
 
-  // Focus to place once a timeline has painted. The "Allow always"
-  // confirmation stage is built by a render, so the button it should land
-  // on does not exist yet when the click that opens it is handled.
-  const focusAfterPaint = new Map<HTMLElement, string>();
-  const applyFocusAfterPaint = (container: HTMLElement) => {
-    const selector = focusAfterPaint.get(container);
+  // Focus a renderer asked for, once its timeline has painted (see
+  // TimelineRenderer.focusAfterPaint).
+  const applyFocusAfterPaint = (owner: TimelineRenderer, container: HTMLElement) => {
+    const selector = owner.focusAfterPaint;
     if (!selector) return;
-    focusAfterPaint.delete(container);
+    owner.focusAfterPaint = undefined;
     container.querySelector<HTMLElement>(selector)?.focus();
   };
 
@@ -1139,7 +1137,7 @@ export function initChat(api = new ChatApiClient()): void {
       // this settles the tab strip and button state for its first step.
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
     }
-    applyFocusAfterPaint(items);
+    applyFocusAfterPaint(renderer, items);
   };
 
   const scheduleRender = (newContent = false, captureCurrent = true, incremental = false) => {
@@ -2601,12 +2599,12 @@ export function initChat(api = new ChatApiClient()): void {
       stage.renderer.confirming.add(itemId);
       // Cancel is the safe landing for a step that exists to catch a slip;
       // Confirm is one Tab away.
-      focusAfterPaint.set(container, `[data-chat-item-id="${CSS.escape(itemId)}"] [data-permission-cancel]`);
+      stage.renderer.focusAfterPaint = `[data-chat-item-id="${CSS.escape(itemId)}"] [data-permission-cancel]`;
       stage.rerender();
     };
     const leaveConfirmation = (itemId: string) => {
       if (!stage.renderer.confirming.delete(itemId)) return;
-      focusAfterPaint.set(container, `[data-chat-item-id="${CSS.escape(itemId)}"] [data-permission-outcome="approved-session"]`);
+      stage.renderer.focusAfterPaint = `[data-chat-item-id="${CSS.escape(itemId)}"] [data-permission-outcome="approved-session"]`;
       stage.rerender();
     };
     container.addEventListener("click", event => {
@@ -2657,13 +2655,14 @@ export function initChat(api = new ChatApiClient()): void {
     });
     container.addEventListener("keydown", event => {
       if (event.key === "Escape") {
-        // Escape inside the confirmation is Cancel, and stops here, so the
-        // surface's own Escape handling does not also close the drill-down.
-        const itemId = (event.target as Element).closest("[data-permission-confirming]")?.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId;
-        if (!itemId) return;
+        // Escape inside the confirmation is Cancel, through the same button
+        // so one path resolves the card. It stops here, so the surface's own
+        // Escape handling does not also close the drill-down.
+        const cancel = (event.target as Element).closest("[data-permission-confirming]")?.querySelector<HTMLButtonElement>("[data-permission-cancel]");
+        if (!cancel) return;
         event.preventDefault();
         event.stopPropagation();
-        leaveConfirmation(itemId);
+        cancel.click();
         return;
       }
       const target = (event.target as Element).closest<HTMLElement>("[role=button][data-file-ref]");
@@ -2760,7 +2759,7 @@ export function initChat(api = new ChatApiClient()): void {
       decorateAttachmentImages(node);
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
     }
-    applyFocusAfterPaint(drilldownItems);
+    applyFocusAfterPaint(childRenderer, drilldownItems);
   };
 
   /**

@@ -667,6 +667,20 @@ describe("both OpenCode event naming generations", () => {
     expect(apply([v2Asked]).items()[0]).toEqual(expect.objectContaining({ alwaysPatterns: [] }));
   });
 
+  test("a later announcement without patterns keeps the ones already known", () => {
+    // The v2 schema's `save` is optional. A bridge that announces the same
+    // request twice, the second time without it, must not blank the rule.
+    const v2WithoutSave = { ...liveV2Asked, data: { ...liveV2Asked.data, save: undefined } };
+    const items = apply([liveClassicAsked, v2WithoutSave]).items();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toEqual(expect.objectContaining({ alwaysPatterns: ["git status *"] }));
+  });
+
+  test("empty strings never reach the client", () => {
+    const dirty = { ...liveClassicAsked, properties: { ...liveClassicAsked.properties, patterns: ["git status --short", ""], always: ["", "git status *"] } };
+    expect(apply([dirty]).items()[0]).toEqual(expect.objectContaining({ resources: ["git status --short"], alwaysPatterns: ["git status *"] }));
+  });
+
   test("a reply keeps the ask's always patterns", () => {
     const items = apply([
       liveClassicAsked,

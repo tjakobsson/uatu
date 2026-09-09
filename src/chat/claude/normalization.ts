@@ -103,14 +103,22 @@ const INTENTIONALLY_IGNORED = new Set([
  * renders exactly this list, so the confirmation can never diverge from
  * the reply.
  */
-export function sessionScopedSuggestions(suggestions: unknown[] | undefined): unknown[] | undefined {
-  if (!suggestions) return undefined;
-  return suggestions.filter(suggestion => describeSessionScopedUpdate(suggestion) !== null);
+export function sessionScopedSuggestions(suggestions: unknown[] | undefined): unknown[] {
+  return sessionScopedUpdates(suggestions).map(update => update.suggestion);
 }
 
 /** The forwarded updates, one line each, in Claude Code's own terms. */
 export function describeSessionScopedUpdates(suggestions: unknown[] | undefined): string[] {
-  return (sessionScopedSuggestions(suggestions) ?? []).map(suggestion => describeSessionScopedUpdate(suggestion)!);
+  return sessionScopedUpdates(suggestions).map(update => update.description);
+}
+
+// One pass keeps each forwarded suggestion with its description, so the
+// list the card shows and the list the reply sends cannot disagree.
+function sessionScopedUpdates(suggestions: unknown[] | undefined): Array<{ suggestion: unknown; description: string }> {
+  return (suggestions ?? []).flatMap(suggestion => {
+    const description = describeSessionScopedUpdate(suggestion);
+    return description === null ? [] : [{ suggestion, description }];
+  });
 }
 
 // One suggestion → its Claude Code permission-rule spelling (`Bash(git status:*)`,
@@ -121,14 +129,19 @@ function describeSessionScopedUpdate(suggestion: unknown): string | null {
   const record = suggestion as Record<string, unknown>;
   if (record.destination !== "session") return null;
   if ((record.type === "addRules" || record.type === "replaceRules") && record.behavior === "allow") {
-    if (!Array.isArray(record.rules)) return null;
-    const rules = record.rules.flatMap(rule => {
-      if (!rule || typeof rule !== "object") return [];
+    // Every rule must be describable, or the suggestion is not forwarded at
+    // all: forwarding a rule the card could not show would break the
+    // promise that the list is exactly what the reply installs.
+    if (!Array.isArray(record.rules) || record.rules.length === 0) return null;
+    const rules: string[] = [];
+    for (const rule of record.rules) {
+      if (!rule || typeof rule !== "object") return null;
       const { toolName, ruleContent } = rule as { toolName?: unknown; ruleContent?: unknown };
-      if (typeof toolName !== "string" || toolName.length === 0) return [];
-      return [typeof ruleContent === "string" && ruleContent.length > 0 ? `${toolName}(${ruleContent})` : toolName];
-    });
-    return rules.length > 0 ? rules.join(", ") : null;
+      if (typeof toolName !== "string" || toolName.length === 0) return null;
+      if (ruleContent !== undefined && (typeof ruleContent !== "string" || ruleContent.length === 0)) return null;
+      rules.push(ruleContent === undefined ? toolName : `${toolName}(${ruleContent})`);
+    }
+    return rules.join(", ");
   }
   if (record.type === "addDirectories" && Array.isArray(record.directories)) {
     const directories = record.directories.filter((directory): directory is string => typeof directory === "string" && directory.length > 0);

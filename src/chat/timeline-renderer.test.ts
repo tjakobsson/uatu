@@ -1255,6 +1255,8 @@ describe("permission choices state the authority they grant", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     const wildcard: ConversationItem = { ...permission, action: "webfetch", alwaysPatterns: ["*"] };
+    // A card enters the stage after it has painted, never before.
+    renderer.render(host, projectionWith([wildcard]), new Set());
     renderer.confirming.add(wildcard.id);
     renderer.render(host, projectionWith([wildcard]), new Set());
     const lead = host.querySelector(".chat-request-confirm-lead")!.textContent!;
@@ -1265,13 +1267,18 @@ describe("permission choices state the authority they grant", () => {
 
     for (const item of [{ ...permission, alwaysPatterns: [] }, permission] as ConversationItem[]) {
       const bare = new TimelineRenderer();
+      bare.permissionScopeNote = "“Allow always” also covers similar requests for the rest of this turn.";
       const bareHost = target();
+      bare.render(bareHost, projectionWith([item]), new Set());
       bare.confirming.add(item.id);
       bare.render(bareHost, projectionWith([item]), new Set());
       const text = bareHost.querySelector(".chat-request-confirm-lead")!.textContent!;
       expect(text).toContain("no reusable pattern");
       expect(text).toContain("only this request");
       expect(bareHost.querySelector(".chat-request-always")).toBeNull();
+      // No standing rule is installed, so the lifetime sentence would
+      // contradict the line above it; it is left out of the stage.
+      expect(bareHost.querySelector("[data-permission-confirming] .chat-request-scope")).toBeNull();
     }
   });
 
@@ -1279,6 +1286,7 @@ describe("permission choices state the authority they grant", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     const choices: ConversationItem = { ...permission, choices: [{ id: "implement", label: "Approve" }] };
+    renderer.render(host, projectionWith([choices]), new Set());
     renderer.confirming.add(choices.id);
     renderer.render(host, projectionWith([choices]), new Set());
     expect(host.querySelector("[data-permission-confirming]")).toBeNull();
@@ -1294,6 +1302,20 @@ describe("permission choices state the authority they grant", () => {
     renderer.confirming.add(permission.id);
     renderer.render(host, projectionWith([permission, { ...permission, id: "permission:p2", requestId: "p2", createdAt: 4 }]), new Set());
     expect(renderer.confirming.has(permission.id)).toBe(false);
+  });
+
+  test("switching conversations drops an open confirmation, so a reused id cannot inherit it", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([permission]), new Set());
+    renderer.confirming.add(permission.id);
+    renderer.render(host, projectionWith([permission]), new Set());
+    expect(host.querySelector("[data-permission-confirming]")).not.toBeNull();
+    // Another conversation with the same request id starts at its choices.
+    renderer.render(host, { ...projectionWith([permission]), conversationId: "elsewhere" }, new Set());
+    expect(renderer.confirming.size).toBe(0);
+    expect(host.querySelector("[data-permission-confirming]")).toBeNull();
+    expect(host.querySelector('[data-permission-outcome="approved-session"]')).not.toBeNull();
   });
 
   test("an agent that declares no scope sentence gets no scope line, not another agent's", () => {

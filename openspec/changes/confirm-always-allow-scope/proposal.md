@@ -29,6 +29,6 @@ _None._
 - `src/chat/claude/provider.ts` and `claude/normalization.ts`: derive display rules from the session-scoped suggestions the reply already forwards; carry them in `listPermissions`.
 - `src/chat/adapter.ts`: pending-permission seeding maps the field.
 - `src/chat/timeline-renderer.ts`, `src/chat/ui.ts`, `src/styles.css`: the confirmation stage, its client-side state, Escape handling, focus placement.
-- `api/openapi.yaml` (`PermissionItem`), `api/CHANGELOG.md`, `api/examples/`: additive contract change, no revision bump.
+- `api/openapi.yaml` (`PermissionItem`), `api/contract.json`, `api/CHANGELOG.md`, `api/examples/`: workspace API revision 15 (a new property on a closed item schema counts as breaking under the compatibility policy).
 - Tests: `opencode/normalization.test.ts`, `sdk-v2-provider.test.ts`, `claude/provider.test.ts`, `adapter.test.ts`, `validation.test.ts`, `timeline-renderer.test.ts`, `api/contract.test.ts`; e2e `tests/e2e/chat-requests.e2e.ts`, `chat-agents.e2e.ts`, and the fake in `tests/e2e/chat-service.ts`.
 - Both agents share the renderer, so the confirmation step appears for both.

@@ -857,11 +857,11 @@ export class ClaudeProvider implements ChatProvider {
     // "Always" returns the SDK's own suggestions, but only those scoped to
     // the session: an approval uatu brokered must never outlive the session
     // it was given in (D5: map conservatively).
-    const updatedPermissions = reply === "always" ? sessionScopedSuggestions(pending.suggestions) : undefined;
+    const updatedPermissions = reply === "always" ? sessionScopedSuggestions(pending.suggestions) : [];
     pending.settle({
       behavior: "allow",
       updatedInput: pending.input,
-      ...(updatedPermissions && updatedPermissions.length > 0 ? { updatedPermissions } : {}),
+      ...(updatedPermissions.length > 0 ? { updatedPermissions } : {}),
     });
   }
 

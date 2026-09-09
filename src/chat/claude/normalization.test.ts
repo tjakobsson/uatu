@@ -28,11 +28,15 @@ describe("Claude Code session-scoped permission updates", () => {
     expect(sessionScopedSuggestions(suggestions)).toEqual([suggestions[1]]);
   });
 
-  test("deny rules, removals, and malformed suggestions are dropped", () => {
+  test("deny rules, removals, and malformed suggestions are dropped whole", () => {
     const suggestions = [
       session({ type: "addRules", behavior: "deny", rules: [{ toolName: "Bash" }] }),
       session({ type: "removeRules", behavior: "allow", rules: [{ toolName: "Bash" }] }),
       session({ type: "addRules", behavior: "allow", rules: [] }),
+      // One bad rule drops the whole suggestion: the reply would otherwise
+      // forward a rule the card never showed.
+      session({ type: "addRules", behavior: "allow", rules: [{ toolName: "Bash", ruleContent: "git status:*" }, { toolName: 42 }] }),
+      session({ type: "addRules", behavior: "allow", rules: [{ toolName: "Bash", ruleContent: "" }] }),
       { destination: "session" },
       null,
       "addRules",
@@ -41,9 +45,9 @@ describe("Claude Code session-scoped permission updates", () => {
     expect(sessionScopedSuggestions(suggestions)).toEqual([]);
   });
 
-  test("no suggestions at all is an empty list, and stays undefined for the reply", () => {
+  test("no suggestions at all is an empty list for both", () => {
     expect(describeSessionScopedUpdates(undefined)).toEqual([]);
-    expect(sessionScopedSuggestions(undefined)).toBeUndefined();
+    expect(sessionScopedSuggestions(undefined)).toEqual([]);
   });
 
   test("the listed lines and the forwarded updates agree one to one", () => {
@@ -52,6 +56,6 @@ describe("Claude Code session-scoped permission updates", () => {
       { type: "addRules", behavior: "allow", destination: "projectSettings", rules: [{ toolName: "Bash", ruleContent: "bun test:*" }] },
       session({ type: "addDirectories", directories: ["/workspace"] }),
     ];
-    expect(describeSessionScopedUpdates(suggestions)).toHaveLength(sessionScopedSuggestions(suggestions)!.length);
+    expect(describeSessionScopedUpdates(suggestions)).toHaveLength(sessionScopedSuggestions(suggestions).length);
   });
 });

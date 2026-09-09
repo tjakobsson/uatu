@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import { captureScreenshot, openChatPanel } from "./chat-helpers";
+import { captureScreenshot, changeScreenshotsDir, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<unknown> {
@@ -94,8 +94,7 @@ test.describe("multi-agent chat", () => {
     await expect(claudeStage.locator(".chat-request-scope")).toContainText("rest of this turn");
     await expect(claudeStage).not.toContainText("OpenCode");
     await page.setViewportSize({ width: 1400, height: 1000 });
-    const confirmShots = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/confirm-always-allow-scope/screenshots");
-    await captureScreenshot(page, testInfo, confirmShots, "after-confirmation-claude-desktop");
+    await captureScreenshot(page, testInfo, changeScreenshotsDir("confirm-always-allow-scope"), "after-confirmation-claude-desktop");
     await claudeStage.getByRole("button", { name: "Cancel" }).click();
     await expect(claudeStage).toBeHidden();
 

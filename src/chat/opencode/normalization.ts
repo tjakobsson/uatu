@@ -383,17 +383,15 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
     // carried apart from the request's own patterns so the card can show the
     // user the rule they are about to grant rather than the command.
     case "permission.asked":
+    case "permission.v2.asked":
       return { conversationId, updates: [{ kind: "upsert", item: {
         id: `permission:${string(data.id, "permission id")}`,
         type: "permission",
         createdAt,
         conversationId,
         requestId: string(data.id, "permission id"),
-        action: text(data.permission),
-        resources: stringArray(data.patterns),
-        alwaysPatterns: alwaysPatterns(data),
+        ...pendingPermissionFields(data),
         status: "pending",
-        ...permissionDiff(data),
       } }] };
     case "permission.replied":
       return { conversationId, updates: [{ kind: "upsert", item: {
@@ -406,19 +404,6 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
         resources: [],
         status: "resolved",
         outcome: permissionOutcome(data.reply),
-      } }] };
-    case "permission.v2.asked":
-      return { conversationId, updates: [{ kind: "upsert", item: {
-        id: `permission:${string(data.id, "permission id")}`,
-        type: "permission",
-        createdAt,
-        conversationId,
-        requestId: string(data.id, "permission id"),
-        action: text(data.action),
-        resources: stringArray(data.resources),
-        alwaysPatterns: alwaysPatterns(data),
-        status: "pending",
-        ...permissionDiff(data),
       } }] };
     case "permission.v2.replied": {
       const requestId = string(data.requestID, "permission id");
@@ -892,12 +877,21 @@ function permissionOutcome(value: unknown): "approved-once" | "approved-session"
   return value === "once" ? "approved-once" : value === "always" ? "approved-session" : "rejected";
 }
 
-// The patterns an "always" reply installs, under either generation's name:
-// the classic bridge calls them `always`, the v2 schema `save` (optional).
-// Missing on both is an empty list. OpenCode installs nothing then, and the
-// card should say so rather than guess. Exported for the pending-list path.
-export function alwaysPatterns(data: RecordValue): string[] {
-  return stringArray(data.always ?? data.save);
+// What a pending permission carries, read from either generation's field
+// names (v2: action/resources/save; the classic bridge: permission/patterns/
+// always). One reader for the live events and the pending list, so a field
+// cannot land on one path and not the other. `alwaysPatterns` is what an
+// "always" reply installs; missing on both spellings is an empty list, since
+// OpenCode installs nothing then and the card should say so rather than guess.
+// Empty strings are dropped: the client validator refuses them, and a
+// server item the client cannot parse would loop the stream through resync.
+export function pendingPermissionFields(data: RecordValue): { action: string; resources: string[]; alwaysPatterns: string[]; diff?: string } {
+  return {
+    action: text(data.action ?? data.permission),
+    resources: stringArray(data.resources ?? data.patterns).filter(Boolean),
+    alwaysPatterns: stringArray(data.always ?? data.save).filter(Boolean),
+    ...permissionDiff(data),
+  };
 }
 
 // The change a file-edit permission would apply, when the agent attaches one.
