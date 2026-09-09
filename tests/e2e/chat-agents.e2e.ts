@@ -71,7 +71,7 @@ test.describe("multi-agent chat", () => {
     await control(request, { action: "item", conversationId: seeded.conversation.id, item: {
       id: "permission:perm-c1", type: "permission", createdAt: 10, requestId: "perm-c1", action: "Claude wants to edit hello.sh", resources: ["/workspace/hello.sh"], status: "pending",
       // What Claude Code's always reply installs, in its own rule syntax.
-      alwaysPatterns: ["Edit(/workspace/hello.sh)"],
+      alwaysPatterns: ["Allow: Edit(/workspace/hello.sh)"],
       diff: "@@ -1 +1 @@\n-echo hello\n+echo Hello, world",
     } });
     const card = page.locator('[data-chat-item-id="permission:perm-c1"]');
@@ -90,7 +90,7 @@ test.describe("multi-agent chat", () => {
     // lifetime sentence, and again never names OpenCode.
     await card.getByRole("button", { name: "Allow always" }).click();
     const claudeStage = card.locator("[data-permission-confirming]");
-    await expect(claudeStage.locator(".chat-request-always code")).toHaveText(["Edit(/workspace/hello.sh)"]);
+    await expect(claudeStage.locator(".chat-request-always code")).toHaveText(["Allow: Edit(/workspace/hello.sh)"]);
     await expect(claudeStage.locator(".chat-request-scope")).toContainText("rest of this turn");
     await expect(claudeStage).not.toContainText("OpenCode");
     await page.setViewportSize({ width: 1400, height: 1000 });

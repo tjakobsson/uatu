@@ -1265,21 +1265,29 @@ describe("permission choices state the authority they grant", () => {
     expect(host.querySelector(".chat-request-confirm-action")!.textContent).toBe("webfetch");
     expect(host.querySelector(".chat-request-always")).toBeNull();
 
-    for (const item of [{ ...permission, alwaysPatterns: [] }, permission] as ConversationItem[]) {
+    const stageFor = (item: ConversationItem) => {
       const bare = new TimelineRenderer();
       bare.permissionScopeNote = "“Allow always” also covers similar requests for the rest of this turn.";
       const bareHost = target();
       bare.render(bareHost, projectionWith([item]), new Set());
       bare.confirming.add(item.id);
       bare.render(bareHost, projectionWith([item]), new Set());
-      const text = bareHost.querySelector(".chat-request-confirm-lead")!.textContent!;
-      expect(text).toContain("no reusable pattern");
-      expect(text).toContain("only this request");
-      expect(bareHost.querySelector(".chat-request-always")).toBeNull();
-      // No standing rule is installed, so the lifetime sentence would
-      // contradict the line above it; it is left out of the stage.
-      expect(bareHost.querySelector("[data-permission-confirming] .chat-request-scope")).toBeNull();
-    }
+      return bareHost.querySelector<HTMLElement>("[data-permission-confirming]")!;
+    };
+    // Explicitly empty: nothing reusable is installed, so no lifetime
+    // sentence, which would contradict the line above it.
+    const empty = stageFor({ ...permission, alwaysPatterns: [] });
+    expect(empty.querySelector(".chat-request-confirm-lead")!.textContent).toContain("only this request");
+    expect(empty.querySelector(".chat-request-always")).toBeNull();
+    expect(empty.querySelector(".chat-request-scope")).toBeNull();
+    // Absent: the agent did not say, which is not the same as nothing. The
+    // stage says so and keeps the lifetime sentence, and never claims
+    // "only this request".
+    const unknown = stageFor(permission);
+    expect(unknown.querySelector(".chat-request-confirm-lead")!.textContent).toContain("did not report");
+    expect(unknown.textContent).not.toContain("only this request");
+    expect(unknown.querySelector(".chat-request-always")).toBeNull();
+    expect(unknown.querySelector(".chat-request-scope")).not.toBeNull();
   });
 
   test("a card with agent intents never enters the stage, and a resolved or queued card leaves it", () => {

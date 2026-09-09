@@ -7,32 +7,45 @@ import { describeSessionScopedUpdates, sessionScopedSuggestions } from "./normal
 describe("Claude Code session-scoped permission updates", () => {
   const session = (update: Record<string, unknown>) => ({ destination: "session", ...update });
 
-  test("allow rules render in Claude Code's rule syntax", () => {
+  test("rules render in Claude Code's rule syntax under the behavior they change", () => {
     expect(describeSessionScopedUpdates([
       session({ type: "addRules", behavior: "allow", rules: [{ toolName: "Bash", ruleContent: "git status:*" }] }),
       session({ type: "replaceRules", behavior: "allow", rules: [{ toolName: "Read" }, { toolName: "Edit", ruleContent: "src/**" }] }),
-    ])).toEqual(["Bash(git status:*)", "Read, Edit(src/**)"]);
+      // Restrictive updates in the same bundle are forwarded and said too:
+      // applying only the additions would leave a more permissive state
+      // than Claude Code's own "always allow" produces.
+      session({ type: "addRules", behavior: "deny", rules: [{ toolName: "Bash", ruleContent: "rm:*" }] }),
+      session({ type: "removeRules", behavior: "allow", rules: [{ toolName: "WebFetch" }] }),
+      session({ type: "addRules", behavior: "ask", rules: [{ toolName: "Write" }] }),
+    ])).toEqual([
+      "Allow: Bash(git status:*)",
+      "Replace allow rules with: Read, Edit(src/**)",
+      "Deny: Bash(rm:*)",
+      "Remove allow rule: WebFetch",
+      "Ask before: Write",
+    ]);
   });
 
-  test("directory grants and mode switches are said in words", () => {
+  test("directory grants, withdrawals, and mode switches are said in words", () => {
     expect(describeSessionScopedUpdates([
       session({ type: "addDirectories", directories: ["/tmp/work"] }),
+      session({ type: "removeDirectories", directories: ["/tmp/old"] }),
       session({ type: "setMode", mode: "acceptEdits" }),
-    ])).toEqual(["Working directory: /tmp/work", "Permission mode: acceptEdits"]);
+    ])).toEqual(["Working directory: /tmp/work", "Withdraw working directory: /tmp/old", "Permission mode: acceptEdits"]);
   });
 
   test("a suggestion bound for a settings file is neither listed nor forwarded", () => {
     const persisting = { type: "addRules", behavior: "allow", destination: "userSettings", rules: [{ toolName: "Write" }] };
     const suggestions = [persisting, session({ type: "addRules", behavior: "allow", rules: [{ toolName: "Write" }] })];
-    expect(describeSessionScopedUpdates(suggestions)).toEqual(["Write"]);
+    expect(describeSessionScopedUpdates(suggestions)).toEqual(["Allow: Write"]);
     expect(sessionScopedSuggestions(suggestions)).toEqual([suggestions[1]]);
   });
 
-  test("deny rules, removals, and malformed suggestions are dropped whole", () => {
+  test("malformed suggestions are dropped whole", () => {
     const suggestions = [
-      session({ type: "addRules", behavior: "deny", rules: [{ toolName: "Bash" }] }),
-      session({ type: "removeRules", behavior: "allow", rules: [{ toolName: "Bash" }] }),
       session({ type: "addRules", behavior: "allow", rules: [] }),
+      session({ type: "addRules", behavior: "sometimes", rules: [{ toolName: "Bash" }] }),
+      session({ type: "addDirectories", directories: [] }),
       // One bad rule drops the whole suggestion: the reply would otherwise
       // forward a rule the card never showed.
       session({ type: "addRules", behavior: "allow", rules: [{ toolName: "Bash", ruleContent: "git status:*" }, { toolName: 42 }] }),

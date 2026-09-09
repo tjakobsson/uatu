@@ -1794,23 +1794,24 @@ describe("ClaudeProvider sessions", () => {
       action: "Claude wants to write a.txt",
       resources: ["/workspace/a.txt"],
       // The card lists what "always" will install, in Claude Code's rule
-      // syntax. The session-scoped allow only, apart from the resource.
-      alwaysPatterns: ["Write(/workspace/*)"],
+      // syntax: every session-scoped update, the deny included, apart from
+      // the resource; the settings-bound one is neither listed nor sent.
+      alwaysPatterns: ["Allow: Write(/workspace/*)", "Deny: Bash"],
       status: "pending",
     }) });
-    expect(await provider.listPermissions!()).toEqual([expect.objectContaining({ requestId: "toolu_1", conversationId: session.id, alwaysPatterns: ["Write(/workspace/*)"] })]);
+    expect(await provider.listPermissions!()).toEqual([expect.objectContaining({ requestId: "toolu_1", conversationId: session.id, alwaysPatterns: ["Allow: Write(/workspace/*)", "Deny: Bash"] })]);
 
     await provider.replyPermission(session.id, "toolu_1", "always");
     await decision;
-    // Always maps to allow + the session-scoped allow suggestions only (D5):
-    // the settings-bound rule and the deny are neither listed nor forwarded,
-    // so the forwarded set is exactly as long as the list the card showed.
+    // Always maps to allow + the session-scoped suggestions as a set (D5):
+    // the settings-bound rule is neither listed nor forwarded, and the
+    // forwarded set is exactly as long as the list the card showed.
     expect(result).toEqual({
       behavior: "allow",
       updatedInput: { file_path: "/workspace/a.txt", content: "x" },
-      updatedPermissions: [suggestions[0]],
+      updatedPermissions: [suggestions[0], suggestions[2]],
     });
-    expect((result as { updatedPermissions: unknown[] }).updatedPermissions).toHaveLength(1);
+    expect((result as { updatedPermissions: unknown[] }).updatedPermissions).toHaveLength(2);
     expect(await provider.listPermissions!()).toEqual([]);
     stop();
     await provider.dispose();

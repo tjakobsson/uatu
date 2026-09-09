@@ -1186,7 +1186,14 @@ function renderPermissionActions(item: Extract<ConversationItem, { type: "permis
 // common case: most "don't ask again" suggestions are bound for a settings
 // file and are never forwarded.
 function renderAlwaysConfirmation(item: Extract<ConversationItem, { type: "permission" }>, scope: string): string {
-  const patterns = item.alwaysPatterns ?? [];
+  const patterns = item.alwaysPatterns;
+  // Absent is not empty: the agent did not say what a standing approval
+  // covers (an item from before this field, a provider that does not speak
+  // to it), so the reply may well install something. Say that, and keep the
+  // lifetime sentence, rather than promise "only this request".
+  if (patterns === undefined) {
+    return confirmationShell(item, `<p class="chat-request-confirm-lead">The agent did not report which patterns this would allow.</p>${scope}`);
+  }
   if (patterns.length === 0) {
     return confirmationShell(item, `<p class="chat-request-confirm-lead">The agent reported no reusable pattern. Confirming allows only this request.</p>`);
   }
