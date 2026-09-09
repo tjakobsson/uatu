@@ -2475,10 +2475,14 @@ export function initChat(api = new ChatApiClient()): void {
   const scrollMovement = (top: number, last: number): ScrollMovement => top < last - 0.5 ? "up" : top > last + 0.5 ? "down" : "none";
   timeline.addEventListener("scroll", () => {
     if (rendering || !chatSurfaceActive()) return;
+    // Classified from the position as it arrived, before any correction
+    // below moves it: a sub-pixel upward step judged after a snap to the
+    // end would read as no movement at all.
+    const movement = scrollMovement(timeline.scrollTop, lastParentScrollTop);
     // Revealing an intrinsic-size placeholder can grow the scroll extent
     // before ResizeObserver runs (notably in WebKit). That is not a reader
     // scrolling upward; preserve pinning until an actual upward movement.
-    if (anchor.isPinned() && timeline.scrollTop >= lastParentScrollTop - 1) {
+    if (anchor.isPinned() && movement !== "up") {
       timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     }
     // Cheap while pinned; the full pass runs once unpinned — and on the
@@ -2487,7 +2491,6 @@ export function initChat(api = new ChatApiClient()): void {
     // no later tick to heal a missing capture, and would come back pinned.
     // Downward ticks while pinned stay extents-only, so a long chat pays no
     // forced layout per scroll event of a streaming turn.
-    const movement = scrollMovement(timeline.scrollTop, lastParentScrollTop);
     anchor.observe(movement === "up" ? geometry() : anchorGeometry(), movement);
     lastParentScrollTop = timeline.scrollTop;
     if (projection) {
@@ -2941,10 +2944,10 @@ export function initChat(api = new ChatApiClient()): void {
     wireItemInteractions(drilldownItems, () => child?.projection ?? null);
     drilldownTimeline.addEventListener("scroll", () => {
       if (!chatSurfaceActive()) return;
-      if (childAnchor.isPinned() && drilldownTimeline.scrollTop >= lastChildScrollTop - 1) {
+      const movement = scrollMovement(drilldownTimeline.scrollTop, lastChildScrollTop);
+      if (childAnchor.isPinned() && movement !== "up") {
         drilldownTimeline.scrollTop = Math.max(0, drilldownTimeline.scrollHeight - drilldownTimeline.clientHeight);
       }
-      const movement = scrollMovement(drilldownTimeline.scrollTop, lastChildScrollTop);
       childAnchor.observe(movement === "up" ? childGeometry() : childAnchorGeometry(), movement);
       lastChildScrollTop = drilldownTimeline.scrollTop;
     }, { passive: true });
