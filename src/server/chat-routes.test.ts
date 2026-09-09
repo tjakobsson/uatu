@@ -312,6 +312,7 @@ describe("workspace chat routes", () => {
     };
     const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", {}, { conversationId: "opencode:local" }) as never);
     const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
 
     for (let index = 0; index < 3; index += 1) {
       const frame = new TextDecoder().decode((await reader.read()).value);
@@ -320,6 +321,31 @@ describe("workspace chat routes", () => {
       // reconnect would resume from.
       expect(frame).not.toContain("id:");
     }
+    await reader.cancel();
+  });
+
+  test("an idle conversation stream opens at once instead of after the first keepalive", async () => {
+    const service = new FakeChatService();
+    // A keepalive far longer than the test: if the opening frame waited for
+    // it, the read below would not return in time. The response headers
+    // leave with the first chunk, so this is what puts the EventSource in
+    // OPEN for a conversation where nothing is happening.
+    const handler = routes(service, "/", 5_000)["/api/chat/conversations/:conversationId/events"] as {
+      GET(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", {}, { conversationId: "opencode:local" }) as never);
+    const reader = response.body!.getReader();
+    const startedAt = performance.now();
+    const first = await Promise.race([
+      reader.read().then(result => new TextDecoder().decode(result.value)),
+      Bun.sleep(1_000).then(() => "nothing within 1s"),
+    ]);
+    expect(first).toBe(": open\n\n");
+    expect(performance.now() - startedAt).toBeLessThan(500);
+    // A comment: no `event:` for a listener to fire on, no `id:` to move the
+    // replay cursor a reconnect would resume from.
+    expect(first).not.toContain("event:");
+    expect(first).not.toContain("id:");
     await reader.cancel();
   });
 
@@ -357,6 +383,14 @@ describe("workspace chat routes", () => {
     expect(metrics.get(openedCounter("chat-conversation"))).toBe(3);
     expect(metrics.get(reconnectedCounter("chat-conversation"))).toBe(1);
 
+    // A stream is pulled as its client reads it. These two clients read past
+    // the opening comment to the resync their unknown cursor earns, which is
+    // where the stream ends of its own accord; the fresh one never reads past
+    // the opening comment, so its ending below is the client's.
+    for (const reader of [navigated, resumed]) {
+      await reader.read();
+      await reader.read();
+    }
     await inventoryReader.cancel();
     await fresh.cancel();
     await navigated.cancel();
@@ -715,6 +749,8 @@ describe("workspace chat routes", () => {
     expect(response.headers.get("cache-control")).toBe("no-cache, no-transform");
     expect(response.headers.get("x-accel-buffering")).toBe("no");
     const reader = response.body!.getReader();
+    // The opening comment flushes the headers; the retained event follows.
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
     const first = await reader.read();
     const frame = new TextDecoder().decode(first.value);
     expect(frame).toContain("event: chat");

@@ -644,6 +644,16 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           // an unbounded queue inside the ReadableStream for as long as an
           // active agent kept publishing.
           const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              // The response headers leave with the first chunk, not before.
+              // A conversation with nothing happening would otherwise hold
+              // the browser's EventSource in CONNECTING for a whole keepalive
+              // interval on every open: no `open` event, so the reconnect
+              // message could not clear, and a socket held for nothing. The
+              // document and inventory streams open on a real first frame;
+              // this one has none to send, so it sends a comment.
+              controller.enqueue(encoder.encode(": open\n\n"));
+            },
             async pull(controller) {
               try {
                 while (!abort.signal.aborted) {
