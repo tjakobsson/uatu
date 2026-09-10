@@ -13,6 +13,7 @@
 
 import { expect, test } from "./fixtures";
 import { waitForPreviewToSettle } from "./fixtures";
+import { keepNavigationOpen } from "./navigation-helpers";
 import { treeRow } from "./tree-helpers";
 
 // iPhone 13 Pro portrait, same emulation as mobile.e2e.ts: hasTouch + isMobile
@@ -64,6 +65,10 @@ async function bootTouch(
   request: import("@playwright/test").APIRequestContext,
 ): Promise<void> {
   await request.post("/__e2e/reset", { data: { extras: FIXTURES } });
+  // Scroll geometry here is measured against the navigation, so the bar has to
+  // stay put. navigation-overlay.e2e.ts owns the idle policy itself. This must
+  // precede the navigation below, which is why it lives in the boot helper.
+  await keepNavigationOpen(page);
   await page.goto("/");
   await page.evaluate(() => {
     try {
@@ -226,7 +231,14 @@ test("opening a different document lands at the top of the page", async ({ page 
   await page.evaluate(() => window.scrollTo({ top: 1500 }));
   await expect.poll(() => pageScrollY(page)).toBeGreaterThan(1000);
 
-  await page.locator("#preview a", { hasText: "Onward to the second document" }).click();
+  // This link is the document's last element, so it always sits in the bottom
+  // strip that the floating navigation and the persistent Preview controls
+  // occupy, and it cannot be scrolled clear of them. Activate it from the
+  // keyboard: the same in-preview navigation, without hit-testing through an
+  // overlay. What this test asserts — the scroll reset below — is unchanged.
+  const link = page.locator("#preview a", { hasText: "Onward to the second document" });
+  await link.focus();
+  await page.keyboard.press("Enter");
   await expect(page.locator("#preview-title")).toHaveText("Second Document");
   await waitForPreviewToSettle(page);
 
@@ -237,6 +249,7 @@ test("⌘F from the Files tab brings Preview forward before mounting the bar", a
   // #191: the bar used to mount inside the hidden preview while native find
   // stayed suppressed, so the shortcut did nothing at all.
   await openTallDoc(page);
+  if (await page.locator("#navigation-handle").isVisible()) await page.locator("#navigation-handle").click();
   await page.locator("#touch-tab-files").click();
   await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
 
@@ -333,6 +346,7 @@ test("switching UI mode mid-session keeps every scroll path working", async ({ p
 
   // Switch to desktop mode WITHOUT reloading. The toggle lives in the sidebar
   // chrome, which in touch mode renders inside the Files tab.
+  if (await page.locator("#navigation-handle").isVisible()) await page.locator("#navigation-handle").click();
   await page.locator("#touch-tab-files").click();
   await page.locator("#ui-mode-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");

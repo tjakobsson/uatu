@@ -21,6 +21,7 @@ import {
   commitPreviewParamsFromUrl,
 } from "./url";
 import { previewScrollRoot } from "./preview-scroll-root";
+import { dispatchMobileHistory, writeMobileHistory } from "../hub/mobile/coordinator-context";
 
 // Local query for the preview body. We can't import this from `../app`
 // without widening the type to `HTMLElement | null` for consumers — the
@@ -43,10 +44,10 @@ export function buildDocumentPath(relativePath: string): string {
 // must not grow the back stack.
 export function pushSelection(documentId: string, relativePath: string) {
   const url = buildDocumentPath(relativePath);
-  if (window.location.pathname === url) {
+  if (window.location.pathname === url && window.history.state?.documentId === documentId) {
     return;
   }
-  window.history.pushState({ documentId }, "", url);
+  if (!writeMobileHistory({ documentId }, url, false)) window.history.pushState({ documentId }, "", url);
 }
 
 export function buildCommitPreviewPath(repositoryId: string, sha: string): string {
@@ -62,7 +63,7 @@ export function pushCommitPreview(repositoryId: string, sha: string) {
   if (currentPath === nextPath) {
     return;
   }
-  window.history.pushState({ commitRepositoryId: repositoryId, commitSha: sha }, "", nextPath);
+  if (!writeMobileHistory({ commitRepositoryId: repositoryId, commitSha: sha }, nextPath, false)) window.history.pushState({ commitRepositoryId: repositoryId, commitSha: sha }, "", nextPath);
 }
 
 // Replace the current history entry with a new selection. Used for follow-mode
@@ -71,9 +72,9 @@ export function pushCommitPreview(repositoryId: string, sha: string) {
 // subsequent popstate resolution — the initial entry has `state === null`
 // until we set it). The hash is preserved on the boot path so a deep link
 // like `/guides/setup.md#installation` still scrolls to the named heading.
-export function replaceSelection(documentId: string, relativePath: string) {
-  const url = buildDocumentPath(relativePath) + window.location.hash;
-  window.history.replaceState({ documentId }, "", url);
+export function replaceSelection(documentId: string, relativePath: string, hash = window.location.hash) {
+  const url = buildDocumentPath(relativePath) + hash;
+  if (!writeMobileHistory({ documentId }, url, true)) window.history.replaceState({ documentId }, "", url);
 }
 
 export function scrollToFragment(rawId: string) {
@@ -102,7 +103,8 @@ function cssEscape(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
-function isSameDocumentHashOnlyNavigation(): boolean {
+function isSameDocumentHashOnlyNavigation(destinationId?: string): boolean {
+  if (destinationId && destinationId !== appState.selectedId) return false;
   if (!appState.selectedId) {
     return false;
   }
@@ -143,6 +145,7 @@ export function registerBackInterceptor(interceptor: BackInterceptor): () => voi
 
 export function attachPopstateHandler() {
   window.addEventListener("popstate", event => {
+    if (dispatchMobileHistory(event)) return;
     // Topmost layer first — the most recently registered is the one on screen.
     for (const interceptor of [...backInterceptors].reverse()) {
       if (interceptor(event)) return;
@@ -151,7 +154,8 @@ export function attachPopstateHandler() {
     // (e.g. a TOC entry) which pushed a `#fragment` history entry, then hit
     // back. Pathname is unchanged so we MUST NOT reload the document, and we
     // MUST NOT disable follow mode — TOC navigation is not a document switch.
-    if (isSameDocumentHashOnlyNavigation()) {
+    const historyId = typeof event.state?.documentId === "string" ? event.state.documentId as string : undefined;
+    if (isSameDocumentHashOnlyNavigation(historyId)) {
       if (window.location.hash) {
         scrollToFragment(window.location.hash.slice(1));
       } else {
@@ -193,8 +197,9 @@ export function attachPopstateHandler() {
       return;
     }
 
-    const requestedDoc = findDocumentByRelativePath(urlRelativePath);
-    if (requestedDoc && requestedDoc.kind !== "binary") {
+    const requestedDoc = historyId ? findDocumentById(historyId) : findDocumentByRelativePath(urlRelativePath);
+    if (requestedDoc && requestedDoc.relativePath === urlRelativePath
+      && (appState.scope.kind === "folder" || requestedDoc.id === appState.scope.documentId)) {
       setSelectedId(requestedDoc.id);
       setPreviewMode({ kind: "document" });
       renderSidebar();
@@ -219,6 +224,11 @@ export function attachPopstateHandler() {
       return;
     }
 
+    // Reaching here means the recorded identity is not in the current corpus.
+    // The anti-substitution guarantee is already delivered above, where a
+    // recorded id is resolved by id alone and never by path, so an
+    // identically named file in another root cannot stand in for it. A
+    // vanished target is simply not found.
     setSelectedId(null);
     setPreviewMode({ kind: "empty" });
     renderSidebar();

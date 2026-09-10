@@ -273,6 +273,17 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         }
       },
     },
+    [p("/api/document/resource")]: {
+      GET: async (request: Request) => {
+        const context = requestContext(request);
+        if (context instanceof Response) return context;
+        const params = new URL(request.url).searchParams;
+        const id = params.get("id");
+        const rootId = params.get("rootId");
+        if (!id || !rootId) return Response.json({ error: "missing document or root id" }, { status: 400 });
+        return getSession().getDocumentResource(rootId, id, context);
+      },
+    },
     [p("/api/document/diff")]: {
       GET: async (request: Request) => {
         const url = new URL(request.url);

@@ -12,6 +12,9 @@ import { Buffer } from "node:buffer";
 
 import { escapeHtml } from "../shared/html";
 import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, SCP_REMOTE_PATTERN } from "./credential-context";
+import { HUB_MOBILE_STYLE } from "./mobile-presentation";
+import { createReturnNavigation } from "./return-navigation";
+import { navigationPreferencesClientSource } from "./navigation-preferences-client";
 
 // Inline the brand SVG (the file ships a fixed navy fill; the dark-scheme
 // retint below only reaches presentation attributes when the markup is
@@ -390,7 +393,7 @@ function page(title: string, body: string): string {
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="icon" type="image/png" sizes="192x192" href="/hub-assets/icon-192.png" />
 <title>${escapeHtml(title)}</title>
-<style>${SHARED_STYLE}</style>
+<style>${SHARED_STYLE}${HUB_MOBILE_STYLE}</style>
 </head>
 <body>
 <main>
@@ -418,6 +421,11 @@ function authenticatedChrome(current: AuthenticatedPage): string {
   ${link("clone", "/clone", "Add workspace")}
   ${link("settings", "/settings", "Settings")}
   <form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>
+</nav>
+<nav class="hub-mobile-nav" aria-label="Mobile Hub">
+  <button id="hub-return" type="button" hidden></button>
+  ${link("dashboard", "/", "Hub")}
+  ${link("settings", "/settings", "Settings")}
 </nav>`;
 }
 
@@ -449,7 +457,8 @@ export function loginPage(options: { error?: string; next?: string } = {}): stri
     </label>
     <div><button type="submit" class="primary">Sign in</button></div>
   </form>
-</section>`,
+</section>
+<script>try { sessionStorage.removeItem("uatu.hub.return.v1"); } catch {}</script>`,
   );
 }
 
@@ -655,8 +664,19 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
 <section class="pane">
   <div class="pane-header"><h2>Workspaces</h2></div>
   <div id="workspaces"><p class="empty">Loading…</p></div>
-</section>`;
-  const settings = `${credentials}<section class="pane">
+</section>
+<a class="hub-mobile-only hub-add-action" href="/clone">Add Workspace<small>Existing folder, new project, or clone</small></a>`;
+  const settings = `<section class="pane hub-mobile-only">
+  <div class="pane-header"><h2>Navigation on this device</h2></div>
+  <div class="form-stack" id="navigation-preferences">
+    <label>Handle side<select id="navigation-side"><option value="left">Left</option><option value="right">Right</option></select></label>
+    <label>Handle vertical position<input id="navigation-position" type="range" min="0" max="1" step="0.01" /></label>
+    <label>Navigation auto-hide<select id="navigation-auto-hide"><option value="true">After seven idle seconds</option><option value="false">Keep Open until dismissed</option></select></label>
+    <label>Preview File Controls side<select id="navigation-preview-side"><option value="left">Left</option><option value="right">Right</option></select></label>
+    <button id="navigation-reset" type="button">Reset handle placement</button>
+    <p class="row-detail">Shared across workspaces and tabs on this Hub in this browser. Other devices and Hub origins are independent.</p>
+  </div>
+</section>${credentials}<section class="pane">
   <div class="pane-header"><h2>Workspace defaults</h2></div>
   <form id="workspace-defaults-form" class="form-stack">
     <p id="workspace-defaults-status" class="row-detail" style="margin: 0;">Loading…</p>
@@ -674,7 +694,8 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
 <section class="pane">
   <div class="pane-header"><h2>Devices</h2></div>
   <div id="devices"><p class="empty">Loading…</p></div>
-</section>`;
+</section>
+<form class="sign-out hub-mobile-only" method="post" action="/logout"><button type="submit">Sign out</button></form>`;
   const content = pageName === "dashboard" ? dashboard : pageName === "clone" ? addFolder : settings;
   return page(
     pageName === "dashboard" ? "UatuCode Hub" : `UatuCode Hub — ${pageName === "clone" ? "Add workspace" : "Settings"}`,
@@ -682,12 +703,124 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
 <div data-hub-page="${pageName}">
 <p id="hub-version" class="hub-version"></p>
 <p id="action-error" class="error-text" hidden></p>
+<h2 class="hub-mobile-only hub-page-title">${pageName === "dashboard" ? "Workspaces" : pageName === "clone" ? "Add Workspace" : "Settings"}</h2>
 ${content}
 </div>
 <script>
 const pageMode = document.querySelector("[data-hub-page]").dataset.hubPage;
 const errorEl = document.getElementById("action-error");
 const sharedUidDismissalKey = ${sharedUidDismissalKey};
+document.addEventListener("input", event => {
+  const field = event.target;
+  if (!(field instanceof HTMLElement) || field.matches('input[type="password"], input[type="file"], textarea')) return;
+  const form = field.closest("form");
+  if (form) form.dataset.dirty = "true";
+});
+document.addEventListener("change", event => {
+  const field = event.target;
+  if (field instanceof HTMLSelectElement) field.closest("form")?.setAttribute("data-dirty", "true");
+});
+document.addEventListener("reset", event => { event.target.removeAttribute("data-dirty"); }, true);
+function discardTask(dialog) {
+  const dirty = dialog.querySelector("form[data-dirty]");
+  if (!dirty) return true;
+  if (!confirm("Discard changes? Choose Cancel to keep editing.")) return false;
+  dirty.removeAttribute("data-dirty");
+  return true;
+}
+document.addEventListener("cancel", event => {
+  if (!discardTask(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
+document.addEventListener("click", event => {
+  const button = event.target.closest?.("button");
+  const dialog = button?.closest("dialog");
+  if (dialog && button.textContent === "Cancel" && !discardTask(dialog)) {
+    event.preventDefault(); event.stopImmediatePropagation();
+  }
+  const link = event.target.closest?.("a[href]");
+  if (link && !link.getAttribute("href").startsWith("#") && document.querySelector("form[data-dirty]")) {
+    if (!confirm("Leave this page and discard unsaved changes? Choose Cancel to keep editing.")) event.preventDefault();
+    else for (const form of document.querySelectorAll("form[data-dirty]")) form.removeAttribute("data-dirty");
+  }
+}, true);
+window.addEventListener("beforeunload", event => {
+  if (!document.querySelector("form[data-dirty]")) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+for (const dialog of document.querySelectorAll("dialog")) dialog.addEventListener("close", () => {
+  dialog.querySelector("form")?.removeAttribute("data-dirty");
+});
+matchMedia("(pointer: coarse)").addEventListener("change", event => {
+  for (const details of document.querySelectorAll(".row-secondary")) details.open = !event.matches;
+});
+let restoredHubScroll = false;
+function restoreHubScroll() {
+  if (restoredHubScroll) return;
+  restoredHubScroll = true;
+  try {
+    const y = Number(sessionStorage.getItem("uatu.hub.scroll.v1:" + location.pathname));
+    if (Number.isFinite(y) && y >= 0) requestAnimationFrame(() => scrollTo(0, y));
+  } catch {}
+}
+window.addEventListener("pagehide", () => {
+  try { sessionStorage.setItem("uatu.hub.scroll.v1:" + location.pathname, String(scrollY)); } catch {}
+});
+const returnButton = document.getElementById("hub-return");
+const returnNavigation = (${createReturnNavigation.toString()})({
+  fetch: (url, init) => window.fetch(url, init),
+  storage: () => sessionStorage,
+  changed: (workspace, workspaces) => {
+    returnButton.hidden = !workspace;
+    returnButton.textContent = "";
+    if (!workspace) return;
+    const label = workspace.displayName || workspace.id;
+    const duplicate = workspaces.filter(item => (item.displayName || item.id) === label).length > 1;
+    returnButton.textContent = "Return to " + label + (duplicate ? " · " + (workspace.path || workspace.id) : "") + (workspace.running ? "" : " (stopped)");
+  },
+});
+async function hubFetch(url, init) {
+  const response = await window.fetch(url, init);
+  if (response.status === 401) returnNavigation.invalidate();
+  return response;
+}
+returnButton.onclick = async () => {
+  const workspace = returnNavigation.current() || await returnNavigation.validate();
+  if (!workspace) return;
+  if (workspace.running) openSession(workspace.id);
+  else await startRegisteredWorkspace(workspace, returnButton, document.getElementById("return-error"));
+};
+const returnError = document.createElement("p");
+returnError.id = "return-error";
+returnError.className = "local-error";
+returnError.setAttribute("role", "alert");
+returnError.hidden = true;
+document.querySelector("[data-hub-page]").prepend(returnError);
+document.addEventListener("submit", event => {
+  if (event.target instanceof HTMLFormElement && new URL(event.target.action).pathname === "/logout") returnNavigation.invalidate();
+}, true);
+const mobileNav = document.querySelector(".hub-mobile-nav");
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--hub-nav-height", mobileNav.getBoundingClientRect().height + "px");
+}).observe(mobileNav);
+window.addEventListener("pagehide", () => returnNavigation.suspend());
+window.addEventListener("pageshow", event => {
+  for (const overlay of document.querySelectorAll(".nav-overlay")) overlay.remove();
+  if (event.persisted) {
+    returnButton.disabled = false;
+    uiBusy = 0;
+  }
+  void returnNavigation.validate();
+});
+void returnNavigation.validate();
+setInterval(() => {
+  // Desktop hides the Return control entirely, so polling there costs two
+  // authenticated round-trips every five seconds to update something nobody
+  // can see. offsetParent is null exactly when it is not laid out, which is
+  // the condition we care about.
+  if (document.hidden || returnButton.offsetParent === null) return;
+  void returnNavigation.validate();
+}, 5000);
 function initSharedUidAdvisory() {
   const advisories = [...document.querySelectorAll("[data-shared-uid-warning]")];
   let dismissed = false;
@@ -707,7 +840,7 @@ function showError(message) {
   errorEl.hidden = !message;
 }
 async function api(path, body) {
-  const response = await fetch(path, {
+  const response = await hubFetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
@@ -742,8 +875,9 @@ function el(tag, className, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
-function row({ title, href, titleClick, path, detail, live, chip, chipWarn, button, buttons }) {
+function row({ id, title, href, titleClick, path, detail, live, chip, chipWarn, button, buttons }) {
   const div = el("div", "row");
+  if (id) div.dataset.rowId = id;
   if (live !== undefined) {
     const dot = el("span", "indicator-dot" + (live ? " is-live" : ""));
     div.appendChild(dot);
@@ -768,12 +902,27 @@ function row({ title, href, titleClick, path, detail, live, chip, chipWarn, butt
   div.appendChild(main);
   const specs = buttons ?? (button ? [button] : []);
   const actions = el("div", "row-actions");
+  const secondary = el("details", "row-secondary");
+  // The same action nodes are exposed inline on desktop and grouped on touch.
+  secondary.open = !matchMedia("(pointer: coarse)").matches;
+  const more = el("summary", null, "More actions");
+  more.dataset.rowAction = "more";
+  more.setAttribute("aria-label", "More actions for " + title);
+  secondary.appendChild(more);
+  const secondaryActions = el("div", "row-secondary-actions");
+  secondary.appendChild(secondaryActions);
   for (const spec of specs) {
     const action = el("button", spec.className || null, spec.label);
+    action.dataset.rowAction = spec.label;
+    if (spec.mobileOnly) action.classList.add("hub-mobile-only");
     if (spec.ariaLabel) action.setAttribute("aria-label", spec.ariaLabel);
     action.onclick = () => spec.onClick(action);
-    actions.appendChild(action);
+    if (/^(Open|Start|Add workspace)$/.test(spec.label)) {
+      action.classList.add("row-primary");
+      actions.appendChild(action);
+    } else secondaryActions.appendChild(action);
   }
+  if (secondaryActions.childElementCount) actions.appendChild(secondary);
   if (specs.length) div.appendChild(actions);
   return div;
 }
@@ -798,12 +947,24 @@ async function withBusy(button, busyLabel, action) {
   }
 }
 function renderInto(container, rows, emptyText) {
+  const expanded = new Map([...container.querySelectorAll("[data-row-id]")]
+    .map(item => [item.dataset.rowId, item.querySelector(".row-secondary")?.open]));
+  const focused = container.contains(document.activeElement) ? document.activeElement : null;
+  const focusedId = focused?.closest("[data-row-id]")?.dataset.rowId;
+  const focusedAction = focused?.dataset.rowAction;
   container.replaceChildren();
   if (rows.length === 0) {
     container.appendChild(el("p", "empty", emptyText));
     return;
   }
-  for (const r of rows) container.appendChild(r);
+  for (const r of rows) {
+    const secondary = r.querySelector(".row-secondary");
+    if (secondary && expanded.has(r.dataset.rowId)) secondary.open = expanded.get(r.dataset.rowId);
+    container.appendChild(r);
+    if (focusedId && r.dataset.rowId === focusedId && focusedAction) {
+      [...r.querySelectorAll("[data-row-action]")].find(action => action.dataset.rowAction === focusedAction)?.focus({ preventScroll: true });
+    }
+  }
 }
 let credentialCatalog = [];
 let dashboardWorkspaces = [];
@@ -888,7 +1049,7 @@ function makeReadiness(results) {
   return container;
 }
 async function copyPublicKey(credential, status) {
-  const response = await fetch(credentialPath + "/" + encodeURIComponent(credential.id) + "/public-key");
+  const response = await hubFetch(credentialPath + "/" + encodeURIComponent(credential.id) + "/public-key");
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || "public key could not be loaded");
   if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("Clipboard access is unavailable; use a browser that permits clipboard writes.");
@@ -1013,7 +1174,12 @@ function workspaceAssignmentEntries(workspaceId) {
 }
 function workspaceAssignmentForm(actionError) {
   const form = el("form", "inline-form assignment-add workspace-assignment-form");
-  form.appendChild(el("h4", null, "Assign workspace credentials"));
+  form.appendChild(el("h4", null, "Workspace credential defaults"));
+  const intentLabel = el("label", null, "Intent");
+  const intent = document.createElement("select");
+  intent.append(new Option("Edit current defaults", "edit"), new Option("Assign new defaults (replace selected roles)", "assign"));
+  intentLabel.appendChild(intent);
+  form.appendChild(intentLabel);
   const workspaceLabel = el("label", null, "Workspace");
   const workspace = document.createElement("select");
   for (const item of dashboardWorkspaces) workspace.appendChild(new Option((item.displayName || item.id) + " · " + item.path, item.id));
@@ -1021,16 +1187,10 @@ function workspaceAssignmentForm(actionError) {
   const authenticationLabel = el("label", null, "🔑 Authentication");
   const authentication = document.createElement("select");
   authentication.appendChild(new Option("Do not change", ""));
-  for (const credential of credentialCatalog.filter(item => item.enabled && credentialSupportsRole(item, "authentication"))) {
-    authentication.appendChild(new Option(credential.name, credential.id));
-  }
   authenticationLabel.appendChild(authentication);
   const signingLabel = el("label", null, "✎ Signing");
   const signing = document.createElement("select");
   signing.appendChild(new Option("Do not change", ""));
-  for (const credential of credentialCatalog.filter(item => item.enabled && credentialSupportsRole(item, "signing"))) {
-    signing.appendChild(new Option(credential.name, credential.id));
-  }
   signingLabel.appendChild(signing);
   const hostLabel = el("label", null, "Authentication host");
   const host = document.createElement("input");
@@ -1047,8 +1207,42 @@ function workspaceAssignmentForm(actionError) {
     if (selected?.type === "token") host.value = selected.metadata.host;
     else if (selected && !host.value.trim()) host.value = "github.com";
   };
+  const initialize = () => {
+    const entries = workspaceAssignmentEntries(workspace.value);
+    const auth = entries.filter(entry => entry.assignment.role === "authentication");
+    const selected = auth.find(entry => entry.assignment.host === host.value.trim()) || auth[0];
+    authentication.value = intent.value === "edit" ? selected?.credential.id || "" : "";
+    signing.value = intent.value === "edit" ? entries.find(entry => entry.assignment.role === "signing")?.credential.id || "" : "";
+    if (intent.value === "edit" && selected) host.value = selected.assignment.host;
+    updateHost();
+  };
+  workspace.onchange = initialize;
+  intent.onchange = initialize;
+  host.onchange = () => {
+    if (intent.value !== "edit") return;
+    authentication.value = workspaceAssignmentEntries(workspace.value).find(entry => entry.assignment.role === "authentication" && entry.assignment.host === host.value.trim())?.credential.id || "";
+    updateHost();
+  };
   authentication.onchange = updateHost;
-  updateHost();
+  form.refreshChoices = () => {
+    for (const [select, role] of [[authentication, "authentication"], [signing, "signing"]]) {
+      const selectedId = select.value;
+      select.replaceChildren(new Option("Do not change", ""));
+      for (const credential of credentialCatalog.filter(item => credentialSupportsRole(item, role))) {
+        const option = new Option(credential.name + (credential.enabled ? "" : " (disabled)"), credential.id);
+        option.disabled = !credential.enabled;
+        select.appendChild(option);
+      }
+      if (selectedId && ![...select.options].some(option => option.value === selectedId)) {
+        const missing = new Option("Unavailable credential (choose a replacement)", selectedId);
+        missing.disabled = true;
+        select.appendChild(missing);
+      }
+      select.value = selectedId;
+    }
+    if (!form.hasAttribute("data-dirty")) initialize();
+  };
+  form.refreshChoices();
   form.onsubmit = async event => {
     event.preventDefault();
     setLocalError(actionError, "");
@@ -1060,12 +1254,27 @@ function workspaceAssignmentForm(actionError) {
       setLocalError(actionError, "Enter a provider host for authentication.");
       return;
     }
+    const current = workspaceAssignmentEntries(workspace.value);
+    const changeAuthentication = Boolean(authentication.value) && !current.some(entry => entry.credential.id === authentication.value && entry.assignment.role === "authentication" && entry.assignment.host === host.value.trim());
+    const changeSigning = Boolean(signing.value) && !current.some(entry => entry.credential.id === signing.value && entry.assignment.role === "signing");
+    if (!changeAuthentication && !changeSigning) {
+      setLocalError(actionError, "No changes to the current defaults.");
+      return;
+    }
+    if (!confirm("Review defaults for " + workspaceName(workspace.value) + ": "
+      + (changeAuthentication ? "authentication on " + host.value.trim() + " becomes " + authentication.selectedOptions[0].textContent + ". " : "")
+      + (changeSigning ? "signing becomes " + signing.selectedOptions[0].textContent + ". " : "")
+      + "Selected credentials replace the current defaults. Apply?")) {
+      button.focus();
+      return;
+    }
     await withBusy(button, "Assigning…", async () => {
       try {
         await api("/api/hub/workspaces/" + encodeURIComponent(workspace.value) + "/credential-assignments", {
-          ...(authentication.value ? { authentication: { credentialId: authentication.value, host: host.value.trim() } } : {}),
-          ...(signing.value ? { signing: { credentialId: signing.value } } : {}),
+          ...(changeAuthentication ? { authentication: { credentialId: authentication.value, host: host.value.trim() } } : {}),
+          ...(changeSigning ? { signing: { credentialId: signing.value } } : {}),
         });
+        form.removeAttribute("data-dirty");
         await Promise.all([loadSettingsState(), loadCredentials()]);
       } catch (error) {
         try { await Promise.all([loadSettingsState(), loadCredentials()]); } catch {}
@@ -1099,10 +1308,13 @@ async function removeWorkspaceAssignment(entry, workspace, button, actionError) 
 function renderWorkspaceAssignments() {
   const container = document.getElementById("workspace-credential-assignments");
   if (!container) return;
+  const draft = container.querySelector(".workspace-assignment-form");
+  draft?.refreshChoices();
+  const focused = draft?.contains(document.activeElement) ? document.activeElement : null;
+  const actionError = container.querySelector(":scope > .local-error") || el("p", "local-error");
   container.replaceChildren();
-  const actionError = el("p", "local-error");
   actionError.setAttribute("role", "alert");
-  actionError.hidden = true;
+  if (!actionError.textContent) actionError.hidden = true;
   if (!dashboardWorkspaces.length) {
     container.appendChild(el("p", "empty", "No workspaces available."));
     return;
@@ -1133,7 +1345,8 @@ function renderWorkspaceAssignments() {
     assignmentRow.appendChild(assignmentMain);
     list.appendChild(assignmentRow);
   }
-  container.append(list, workspaceAssignmentForm(actionError), actionError);
+  container.append(list, draft || workspaceAssignmentForm(actionError), actionError);
+  focused?.focus({ preventScroll: true });
 }
 async function credentialAction(id, action, body, button, busyLabel, errorTarget) {
   setLocalError(errorTarget, "");
@@ -1146,7 +1359,7 @@ async function credentialAction(id, action, body, button, busyLabel, errorTarget
 }
 async function loadSettingsState() {
   try {
-    const response = await fetch("/api/hub/state");
+    const response = await hubFetch("/api/hub/state");
     if (!response.ok) throw new Error("Hub state could not be loaded.");
     const state = await response.json();
     dashboardWorkspaces = state.workspaces || [];
@@ -1155,7 +1368,7 @@ async function loadSettingsState() {
 }
 async function loadCredentials() {
   try {
-    const response = await fetch(credentialPath);
+    const response = await hubFetch(credentialPath);
     if (!response.ok) throw new Error("Credentials could not be loaded.");
     const payload = await response.json();
     credentialCatalog = payload.credentials || [];
@@ -1164,7 +1377,7 @@ async function loadCredentials() {
   } catch (error) { showError(error.message); }
 }
 async function loadDashboardCredentials() {
-  const response = await fetch(credentialPath);
+  const response = await hubFetch(credentialPath);
   if (!response.ok) throw new Error("Credentials could not be loaded.");
   const payload = await response.json();
   credentialCatalog = payload.credentials || [];
@@ -1177,20 +1390,34 @@ function renderCredentialCatalog() {
       if (card.open) openCredentialIds.add(card.dataset.credentialId);
       else openCredentialIds.delete(card.dataset.credentialId);
     }
+    const drafts = new Map([...container.querySelectorAll("details[data-credential-id]")]
+      .filter(card => card.querySelector("form[data-dirty]"))
+      .map(card => [card.dataset.credentialId, card]));
     container.replaceChildren();
     if (!credentialCatalog.length) container.appendChild(el("p", "empty", "No Hub credentials. Generate or import one below."));
-    else for (const credential of credentialCatalog) container.appendChild(credentialCard(credential));
+    else for (const credential of credentialCatalog) container.appendChild(drafts.get(credential.id) || credentialCard(credential));
     renderWorkspaceAssignments();
 }
 async function loadTools() {
   try {
-    const response = await fetch(toolPath);
+    const response = await hubFetch(toolPath);
     if (!response.ok) throw new Error("Credential tools could not be loaded.");
     const payload = await response.json();
     const container = document.getElementById("credential-tools");
+    const drafts = new Map([...container.querySelectorAll("[data-tool]")]
+      .filter(item => item.querySelector("form[data-dirty]"))
+      .map(item => [item.dataset.tool, item]));
+    const focused = document.activeElement;
     container.replaceChildren();
     for (const tool of payload.tools || []) {
+      if (drafts.has(tool.tool)) {
+        const draft = drafts.get(tool.tool);
+        draft.querySelector(".tool-results").textContent = (tool.path || "Not found") + (tool.version ? " · " + tool.version : "") + " · " + readinessSummary(tool.results);
+        container.appendChild(draft);
+        continue;
+      }
       const item = el("div", "row tool-row");
+      item.dataset.tool = tool.tool;
       const controls = el("div", "tool-controls");
       controls.appendChild(el("strong", null, tool.tool));
       controls.appendChild(el("div", "tool-results", (tool.path || "Not found") + (tool.version ? " · " + tool.version : "") + " · " + readinessSummary(tool.results)));
@@ -1213,14 +1440,14 @@ async function loadTools() {
         setLocalError(toolError, "");
         if (!input.value.trim()) { setLocalError(toolError, "Enter an absolute executable path."); return; }
         await withBusy(save, "Saving…", async () => {
-          try { await api(toolPath + "/" + encodeURIComponent(tool.tool), { path: input.value.trim() }); input.value = ""; await loadTools(); }
+          try { await api(toolPath + "/" + encodeURIComponent(tool.tool), { path: input.value.trim() }); input.value = ""; form.removeAttribute("data-dirty"); await loadTools(); }
           catch (error) { setLocalError(toolError, error.message); }
         });
       };
       clear.onclick = async () => {
         setLocalError(toolError, "");
         await withBusy(clear, "Clearing…", async () => {
-          try { await api(toolPath + "/" + encodeURIComponent(tool.tool), { path: null }); await loadTools(); }
+          try { await api(toolPath + "/" + encodeURIComponent(tool.tool), { path: null }); form.removeAttribute("data-dirty"); await loadTools(); }
           catch (error) { setLocalError(toolError, error.message); }
         });
       };
@@ -1235,6 +1462,7 @@ async function loadTools() {
       item.appendChild(controls);
       container.appendChild(item);
     }
+    if (focused?.isConnected && container.contains(focused)) focused.focus({ preventScroll: true });
   } catch (error) { showError(error.message); }
 }
 function sessionUrl(id) { return "/s/" + encodeURIComponent(id) + "/"; }
@@ -1243,12 +1471,15 @@ function sessionUrl(id) { return "/s/" + encodeURIComponent(id) + "/"; }
 function openSession(id) {
   const overlay = el("div", "nav-overlay");
   overlay.appendChild(el("div", "nav-overlay-spinner"));
-  overlay.appendChild(el("div", "nav-overlay-label", "Opening " + id + "…"));
+  overlay.setAttribute("role", "status");
+  overlay.appendChild(el("div", "nav-overlay-label", "Opening " + workspaceName(id) + "…"));
   document.body.appendChild(overlay);
   location.href = sessionUrl(id);
 }
 function unlockCredentialsDialog(title, summary, confirmLabel, credentials, refresh) {
   return new Promise(resolve => {
+    const trigger = document.activeElement;
+    let finished = false;
     const dialog = el("dialog", "credential-dialog");
     const header = el("div", "pane-header");
     header.appendChild(el("h2", null, title));
@@ -1277,8 +1508,12 @@ function unlockCredentialsDialog(title, summary, confirmLabel, credentials, refr
     dialog.append(header, form);
     document.body.appendChild(dialog);
     const finish = value => {
+      if (finished) return;
+      finished = true;
+      for (const field of fields) field.input.value = "";
       dialog.close();
       dialog.remove();
+      if (trigger?.isConnected) trigger.focus({ preventScroll: true });
       resolve(value);
     };
     cancel.onclick = () => finish(false);
@@ -1289,11 +1524,13 @@ function unlockCredentialsDialog(title, summary, confirmLabel, credentials, refr
       await withBusy(unlock, "Unlocking…", async () => {
         try {
           for (const field of fields) {
+            if (finished) return;
             const passphrase = field.input.value;
             field.input.value = "";
             await api(credentialPath + "/" + encodeURIComponent(field.credential.id) + "/unlock", { passphrase });
           }
           await refresh();
+          if (finished) return;
           finish(true);
         } catch (error) { setLocalError(errorTarget, error.message); }
       });
@@ -1332,17 +1569,24 @@ function workspaceById(id) {
 // directory browser's Start rows. On success the button STAYS busy — the
 // overlay owns the screen until the session page replaces us.
 async function startRegisteredWorkspace(w, button, errorTarget) {
+  if (button.disabled) return;
   if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(
     'No credentials are assigned to "' + workspaceLabel(w) + '". Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?'
   )) return;
   const target = errorTarget || actionErrorFor(button);
   setLocalError(target, "");
-  if (!(await prepareWorkspaceResume(w, target))) return;
   uiBusy += 1;
   const original = button.textContent;
   button.disabled = true;
-  button.textContent = "Starting…";
+  button.textContent = "Checking credentials…";
   try {
+    if (!(await prepareWorkspaceResume(w, target))) {
+      uiBusy -= 1;
+      button.disabled = false;
+      button.textContent = original;
+      return;
+    }
+    button.textContent = "Starting…";
     await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/start");
     // uiBusy stays held: the page is navigating away and any repaint now
     // would flash idle controls under the overlay.
@@ -1425,7 +1669,7 @@ function childFolderPath(parent, name) {
   return parent + (parent.endsWith("/") || parent.endsWith("\\\\") ? "" : separator) + name;
 }
 async function refreshWorkspaceState() {
-  const response = await fetch("/api/hub/state");
+  const response = await hubFetch("/api/hub/state");
   if (!response.ok) return;
   const state = await response.json();
   dashboardWorkspaces = state.workspaces || [];
@@ -1493,7 +1737,7 @@ async function loadBrowser({ fallbackToParent = false } = {}) {
   let listing;
   try {
     const query = browsePath === null ? "" : "?path=" + encodeURIComponent(browsePath);
-    const response = await fetch("/api/hub/browse" + query);
+    const response = await hubFetch("/api/hub/browse" + query);
     if (!response.ok) {
       if (fallbackToParent && response.status === 404 && browseParent) {
         browsePath = browseParent;
@@ -1530,6 +1774,7 @@ async function loadBrowser({ fallbackToParent = false } = {}) {
     // registered stopped ones Start (through the credential-aware flow),
     // running ones Open. Filesystem actions keep explicit folder nouns.
     rows.push(row({
+      id: folder,
       title: dir.name,
       titleClick: () => { browsePath = folder; loadBrowser(); },
       detail: registered && dir.displayName && dir.displayName !== dir.name ? 'workspace "' + dir.displayName + '"' : undefined,
@@ -1560,16 +1805,18 @@ async function loadBrowser({ fallbackToParent = false } = {}) {
     }));
   }
   renderInto(document.getElementById("browser"), rows, "No subfolders here.");
+  restoreHubScroll();
   return true;
 }
 async function refresh(force) {
   if (!force && uiBusy > 0) return;
   let state;
   try {
-    const stateResponse = await fetch("/api/hub/state");
-    if (!stateResponse.ok) return;
+    const stateResponse = await hubFetch("/api/hub/state");
+    if (!stateResponse.ok) throw new Error("Hub state could not be loaded. Retrying on the next refresh.");
     state = await stateResponse.json();
-  } catch { return; }
+  } catch (error) { showError(error.message || "Hub state could not be loaded. Retrying on the next refresh."); return; }
+  errorEl.hidden = true;
 
   document.getElementById("hub-version").textContent = state.version || "";
   dashboardWorkspaces = state.workspaces || [];
@@ -1578,12 +1825,14 @@ async function refresh(force) {
   renderInto(
     document.getElementById("sessions"),
     running.map(w => row({
+      id: w.id,
       title: workspaceLabel(w),
       href: sessionUrl(w.id),
       path: w.path,
       detail: credentialAssignmentSummary(w.credentialAssignments) + " · " + shellSummary(w.shells),
       live: true,
       buttons: [
+        { label: "Open", mobileOnly: true, ariaLabel: "Open " + workspaceLabel(w), onClick: () => openSession(w.id) },
         {
           label: "Rename workspace",
           ariaLabel: "Rename workspace " + workspaceLabel(w),
@@ -1610,6 +1859,7 @@ async function refresh(force) {
   const stopped = state.workspaces.filter(w => !w.running);
   const rows = [
     ...stopped.map(w => row({
+      id: w.id,
       title: workspaceLabel(w),
       path: w.path,
       detail: credentialAssignmentSummary(w.credentialAssignments),
@@ -1647,6 +1897,7 @@ async function refresh(force) {
     rows,
     "No stopped workspaces — use Add workspace to configure one.",
   );
+  restoreHubScroll();
 }
 // The device-session list: every active session of the signed-in user,
 // with per-session revocation. Revoking the current session IS sign-out and
@@ -1657,11 +1908,12 @@ async function refresh(force) {
 async function loadDevices() {
   let listing;
   try {
-    const response = await fetch("/api/hub/sessions");
+    const response = await hubFetch("/api/hub/sessions");
     if (!response.ok) return;
     listing = await response.json();
   } catch { return; }
   const rows = listing.sessions.map(s => row({
+    id: s.handle,
     title: s.deviceLabel,
     chip: s.current ? "this device" : undefined,
     detail: "signed in " + new Date(s.issuedAt * 1000).toLocaleString(),
@@ -1670,6 +1922,7 @@ async function loadDevices() {
           label: "Sign out",
           className: "danger",
           onClick: () => {
+            returnNavigation.invalidate();
             const form = document.createElement("form");
             form.method = "post";
             form.action = "/logout";
@@ -1694,6 +1947,7 @@ async function loadDevices() {
         },
   }));
   renderInto(document.getElementById("devices"), rows, "No active sessions.");
+  restoreHubScroll();
 }
 function initClonePage() {
 initSharedUidAdvisory();
@@ -1727,7 +1981,8 @@ const cloneActionError = document.getElementById("clone-action-error");
 const cloneSubmit = cloneForm.querySelector("button");
 const cloneOutputLimit = 64 * 1024;
 const cloneJobStorageKey = "uatu.activeCloneJob";
-let cloneJobId = sessionStorage.getItem(cloneJobStorageKey);
+let cloneJobId = null;
+try { cloneJobId = sessionStorage.getItem(cloneJobStorageKey); } catch {}
 let cloneEvents = null;
 let cloneBusy = false;
 let clonePromptText = "";
@@ -1745,6 +2000,7 @@ newFolderForm.onsubmit = async event => {
     try {
       await api("/api/hub/folders/create", { parent: browsePath, name });
       newFolderName.value = "";
+      newFolderForm.removeAttribute("data-dirty");
       await refreshAfterFolderMutation();
     } catch (error) {
       setLocalError(newFolderError, 'Could not create "' + name + '": ' + error.message);
@@ -1796,7 +2052,7 @@ renameFolderForm.onsubmit = async event => {
 
 async function loadCloneCredentials() {
   try {
-    const response = await fetch(credentialPath);
+    const response = await hubFetch(credentialPath);
     if (!response.ok) return;
     const payload = await response.json();
     credentialCatalog = payload.credentials || [];
@@ -2159,7 +2415,7 @@ function closeCloneEvents() {
 function clearCloneState() {
   closeCloneEvents();
   cloneJobId = null;
-  sessionStorage.removeItem(cloneJobStorageKey);
+  try { sessionStorage.removeItem(cloneJobStorageKey); } catch {}
   setCloneActive(false);
   if (cloneBusy) {
     cloneBusy = false;
@@ -2173,6 +2429,7 @@ function clearCloneState() {
 // fresh empty form and the job's events carry no form values, so a failure
 // after a reload starts blank.
 function resetCloneForm() {
+  cloneForm.removeAttribute("data-dirty");
   document.getElementById("clone-url").value = "";
   document.getElementById("clone-folder-name").value = "";
   cloneDisplayName.value = "";
@@ -2233,28 +2490,31 @@ function connectCloneEvents() {
   const events = new EventSource("/api/hub/clone-jobs/" + encodeURIComponent(jobId) + "/events");
   cloneEvents = events;
   events.addEventListener("output", event => {
+    if (cloneJobId !== jobId) return;
     const payload = parseCloneEvent(event);
     const data = payload.data || payload;
     appendCloneOutput(data.text || data.output || "");
   });
   events.addEventListener("phase", event => {
+    if (cloneJobId !== jobId) return;
     const payload = parseCloneEvent(event);
     const data = payload.data || payload;
     setClonePhase(data.phase, data.label);
   });
   events.addEventListener("result", event => {
+    if (cloneJobId !== jobId) return;
     const payload = parseCloneEvent(event);
     finishClone(payload.data || payload);
   });
   // Accept typed JSON on the default SSE message event as well as named SSE
   // events; the payload contract remains identical in both transports.
-  events.onmessage = event => handleCloneEvent(parseCloneEvent(event));
+  events.onmessage = event => { if (cloneJobId === jobId) handleCloneEvent(parseCloneEvent(event)); };
   events.onopen = () => { if (cloneJobId === jobId) setClonePhase(null, clonePhase.textContent === "Reconnecting…" ? "Connected." : clonePhase.textContent); };
   events.onerror = async () => {
     if (cloneJobId !== jobId) return;
     setClonePhase(null, "Reconnecting…");
     try {
-      const response = await fetch("/api/hub/clone-jobs/" + encodeURIComponent(jobId) + "/events", { method: "HEAD" });
+      const response = await hubFetch("/api/hub/clone-jobs/" + encodeURIComponent(jobId) + "/events", { method: "HEAD" });
       if (response.status === 404 && cloneJobId === jobId) {
         clearCloneState();
         setClonePhase(null, "Previous clone job is no longer available.");
@@ -2264,6 +2524,7 @@ function connectCloneEvents() {
 }
 cloneForm.onsubmit = async event => {
   event.preventDefault();
+  if (cloneBusy || cloneJobId) return;
   setLocalError(cloneFormError, "");
   const input = document.getElementById("clone-url");
   const folderNameInput = document.getElementById("clone-folder-name");
@@ -2271,9 +2532,24 @@ cloneForm.onsubmit = async event => {
   const folderName = folderNameInput.value.trim();
   const selectedCredential = credentialCatalog.find(item => item.id === cloneCredential.value);
   if (!url) return;
+  if (!browsePath) {
+    setLocalError(cloneFormError, "The destination folder is not loaded yet. Wait for the folder browser or resolve its error, then try again.");
+    return;
+  }
+  // Freeze the authorized non-secret request before any unlock/refresh can
+  // rebuild credential choices. A deleted credential must fail, not be omitted.
+  const retainedCredential = credentialCatalog.find(item => item.id === cloneRetainedAuth.value);
+  const signingCredential = credentialCatalog.find(item => item.id === cloneSigning.value);
+  const request = { url, dest: browsePath, folderName, start: cloneStartAfter.checked };
+  const displayName = cloneDisplayName.value.trim();
+  if (displayName) request.displayName = displayName;
+  if (selectedCredential) request.credentialId = selectedCredential.id;
+  if (retainedCredential) request.retainedAuthentication = [{ credentialId: retainedCredential.id, host: retainedHostFor(retainedCredential) }];
+  if (cloneSigning.value) request.signing = cloneSigning.value;
   const button = event.target.querySelector("button");
   uiBusy += 1;
   cloneBusy = true;
+  setCloneActive(true);
   button.disabled = true;
   document.getElementById("clone-url").disabled = true;
   folderNameInput.disabled = true;
@@ -2293,9 +2569,7 @@ cloneForm.onsubmit = async event => {
       await api(credentialPath + "/" + encodeURIComponent(selectedCredential.id) + "/unlock", { passphrase });
       await loadCloneCredentials();
     }
-    const retainedCredential = credentialCatalog.find(item => item.id === cloneRetainedAuth.value);
-    const signingCredential = credentialCatalog.find(item => item.id === cloneSigning.value);
-    if (cloneStartAfter.checked) {
+    if (request.start) {
       // A requested start resolves the retained and signing credentials at
       // session launch; a locked one would turn the finished clone into a
       // deterministic start failure, so they go through the masked unlock
@@ -2313,18 +2587,11 @@ cloneForm.onsubmit = async event => {
         throw new Error("start after clone needs the selected workspace credentials unlocked");
       }
     }
-    const request = { url, dest: browsePath, folderName, start: cloneStartAfter.checked };
-    const displayName = cloneDisplayName.value.trim();
-    if (displayName) request.displayName = displayName;
-    if (selectedCredential) request.credentialId = selectedCredential.id;
-    if (retainedCredential) {
-      request.retainedAuthentication = [{ credentialId: retainedCredential.id, host: retainedHostFor(retainedCredential) }];
-    }
-    if (cloneSigning.value) request.signing = cloneSigning.value;
     const result = await api("/api/hub/clone-jobs", request);
     cloneJobId = result.jobId;
     if (!cloneJobId) throw new Error("clone job did not return an id");
-    sessionStorage.setItem(cloneJobStorageKey, cloneJobId);
+    cloneForm.removeAttribute("data-dirty");
+    try { sessionStorage.setItem(cloneJobStorageKey, cloneJobId); } catch {}
     button.textContent = "Clone";
     setCloneActive(true);
     connectCloneEvents();
@@ -2420,7 +2687,7 @@ function describeWorkspaceDefaults(state) {
 async function loadWorkspaceDefaults() {
   const status = document.getElementById("workspace-defaults-status");
   try {
-    const response = await fetch("/api/hub/settings/workspace-defaults");
+    const response = await hubFetch("/api/hub/settings/workspace-defaults");
     if (!response.ok) {
       status.textContent = "Workspace defaults are unavailable.";
       return;
@@ -2450,6 +2717,7 @@ function initWorkspaceDefaults() {
     await withBusy(button, "Saving…", async () => {
       try {
         await api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: value });
+        form.removeAttribute("data-dirty");
         input.dataset.autofilled = "true";
         await loadWorkspaceDefaults();
       } catch (error) { setLocalError(errorTarget, error.message); }
@@ -2469,6 +2737,26 @@ function initWorkspaceDefaults() {
   loadWorkspaceDefaults();
 }
 function initSettingsPage() {
+  {
+    ${navigationPreferencesClientSource}
+    const side = document.getElementById("navigation-side");
+    const position = document.getElementById("navigation-position");
+    const autoHide = document.getElementById("navigation-auto-hide");
+    const previewSide = document.getElementById("navigation-preview-side");
+    const render = preferences => {
+      side.value = preferences.side;
+      position.value = String(preferences.position);
+      autoHide.value = String(preferences.autoHide);
+      previewSide.value = preferences.previewSide;
+    };
+    render(getNavigationPreferences());
+    onNavigationPreferencesChange(render);
+    side.onchange = () => setNavigationPreferences({ side: side.value });
+    position.oninput = () => setNavigationPreferences({ position: Number(position.value) });
+    autoHide.onchange = () => setNavigationPreferences({ autoHide: autoHide.value === "true" });
+    previewSide.onchange = () => setNavigationPreferences({ previewSide: previewSide.value });
+    document.getElementById("navigation-reset").onclick = () => setNavigationPreferences({ side: defaults.side, position: defaults.position });
+  }
   initSharedUidAdvisory();
   initWorkspaceDefaults();
   for (const reveal of document.querySelectorAll("[data-reveal-secret]")) {

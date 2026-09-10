@@ -1,0 +1,151 @@
+{
+  "capturedAt": "2026-09-10T15:08:44.179Z",
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "scale": "css",
+  "fixture": "mixed synthetic credentials; no real keys/providers/PTY",
+  "keyboard": "Static browser viewport; no physical software keyboard claimed",
+  "screenshotScope": "Viewport screenshots; nested scrolling is not expanded by fullPage. Credential actions are reached by real scrolling, not DOM/CSS hiding.",
+  "engines": [
+    {
+      "engine": "chromium",
+      "checks": [
+        {
+          "label": "Default direct actions present",
+          "pass": true
+        },
+        {
+          "label": "No More, troubleshooting, details or raw diagnostics by default",
+          "pass": true
+        },
+        {
+          "label": "Delete confirmation centered alertdialog",
+          "pass": true
+        },
+        {
+          "label": "Check results appear on request only",
+          "pass": true
+        },
+        {
+          "label": "Diagnostic report exposes all 14 rows",
+          "pass": true
+        },
+        {
+          "label": "Unlock full page with header Cancel/Unlock and no modal chrome",
+          "pass": true
+        },
+        {
+          "label": "Unlock fields fit viewport",
+          "pass": true
+        },
+        {
+          "label": "Preferences full page Save/Cancel",
+          "pass": true
+        }
+      ],
+      "captures": [
+        "chromium-credential-actions.png",
+        "chromium-delete-confirmation.png",
+        "chromium-unlock-fullpage.png",
+        "chromium-preferences-fullpage.png"
+      ],
+      "version": "153.0.8010.12",
+      "defaultText": "Back\nCredential\n\nLoading credential…",
+      "diagnostics": [
+        {
+          "layer": "binary",
+          "status": "ready",
+          "text": "Passed\nssh: Software available (simulated; no executable probed)."
+        },
+        {
+          "layer": "binary",
+          "status": "ready",
+          "text": "Passed\nssh-agent: Software available (simulated; no executable probed)."
+        },
+        {
+          "layer": "binary",
+          "status": "ready",
+          "text": "Passed\nssh-add: Software available (simulated; no executable probed)."
+        },
+        {
+          "layer": "binary",
+          "status": "ready",
+          "text": "Passed\nssh-keygen: Software available (simulated; no executable probed)."
+        },
+        {
+          "layer": "version",
+          "status": "ready",
+          "text": "Passed\nssh: Version is compatible (simulated)."
+        },
+        {
+          "layer": "version",
+          "status": "ready",
+          "text": "Passed\nssh-agent: Version is compatible (simulated)."
+        },
+        {
+          "layer": "version",
+          "status": "ready",
+          "text": "Passed\nssh-add: Version is compatible (simulated)."
+        },
+        {
+          "layer": "version",
+          "status": "ready",
+          "text": "Passed\nssh-keygen: Version is compatible (simulated)."
+        },
+        {
+          "layer": "runtime",
+          "status": "ready",
+          "text": "Passed\nssh: Local operation ready (simulated; no process launched)."
+        },
+        {
+          "layer": "runtime",
+          "status": "ready",
+          "text": "Passed\nssh-agent: Local operation ready (simulated; no process launched)."
+        },
+        {
+          "layer": "runtime",
+          "status": "ready",
+          "text": "Passed\nssh-add: Local operation ready (simulated; no process launched)."
+        },
+        {
+          "layer": "runtime",
+          "status": "ready",
+          "text": "Passed\nssh-keygen: Local operation ready (simulated; no process launched)."
+        },
+        {
+          "layer": "credential",
+          "status": "ready",
+          "text": "Passed\nSynthetic credential available."
+        },
+        {
+          "layer": "capability",
+          "status": "ready",
+          "text": "Passed\nUnprotected SSH key is available in the synthetic agent."
+        }
+      ],
+      "status": "completed"
+    },
+    {
+      "engine": "webkit",
+      "checks": [
+        {
+          "label": "Default direct actions present",
+          "pass": true
+        },
+        {
+          "label": "No More, troubleshooting, details or raw diagnostics by default",
+          "pass": true
+        }
+      ],
+      "captures": [
+        "webkit-credential-actions.png"
+      ],
+      "version": "26.6",
+      "defaultText": "Back\nCredential\n\nLoading credential…",
+      "status": "failed/stalled; no retry",
+      "error": "TimeoutError: click: Timeout 5000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('.mh-flow-page').locator('[data-flow=\"delete\"]')\u001b[22m\n\u001b[2m    - locator resolved to <button type=\"button\" data-flow=\"delete\" class=\"mh-text-action mh-destructive\">Delete credential</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m    - element is visible, enabled and stable\u001b[22m\n\u001b[2m    - scrolling into view if needed\u001b[22m\n\u001b[2m    - done scrolling\u001b[22m\n\u001b[2m    - performing click action\u001b[22m\n"
+    }
+  ]
+}

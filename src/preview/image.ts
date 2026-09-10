@@ -3,7 +3,6 @@
 // from `app.ts` so the preview/ feature folder owns this thin renderer.
 
 import { closeMermaidViewer } from "./mermaid-viewer";
-import { escapeHtmlAttribute } from "../shared/html";
 import type { DocumentMeta } from "../shared/types";
 import {
   clearPreviewType,
@@ -12,6 +11,8 @@ import {
   setPreviewBase,
 } from "./header";
 import { hideViewToggle } from "./view-mode";
+import { appUrl } from "../shared/app-url";
+import { contextualAppUrl } from "../shell/watch-context";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -46,7 +47,27 @@ export function isViewableImageName(name: string): boolean {
   return false;
 }
 
-export function renderImagePreview(doc: DocumentMeta): void {
+export async function renderImagePreview(doc: DocumentMeta, isCurrent: () => boolean = () => true): Promise<void> {
+  const image = new Image();
+  image.alt = doc.name;
+  const loaded = new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("image unavailable"));
+  });
+  image.src = contextualAppUrl(appUrl(`/api/document/resource?id=${encodeURIComponent(doc.id)}&rootId=${encodeURIComponent(doc.rootId)}`));
+  try {
+    await loaded;
+  } catch (error) {
+    // Decoding the image off-document keeps a half-loaded frame from flashing,
+    // but it also means a failure would otherwise leave the *previous*
+    // document mounted under this document's identity. Land the destination
+    // explicitly before rethrowing, so every mode shows the failure rather
+    // than silently showing the wrong file. The recovery affordance is
+    // touch-only; desktop at least sees the truthful empty state.
+    if (isCurrent()) renderImageUnavailable(doc);
+    throw error;
+  }
+  if (!isCurrent()) return;
   closeMermaidViewer();
   setPreviewBase(doc.relativePath);
   previewTitleElement.textContent = doc.name;
@@ -54,13 +75,21 @@ export function renderImagePreview(doc: DocumentMeta): void {
   clearPreviewType();
   hideViewToggle();
   previewElement.classList.remove("empty");
-  // The browser resolves `./<name>` via the per-document `<base href>` set by
-  // setPreviewBase, which already points at the document's directory under
-  // the watched root — the same path the static-file fallback knows how to
-  // serve. Encoded for safety against names with spaces / special chars.
-  // encodeURIComponent (not encodeURI) — doc.name is a bare filename with no
-  // path separators to preserve, and we MUST encode `#` and `?` so filenames
-  // like `screenshot#2.png` aren't truncated by the URL parser into a path
-  // ending at `screenshot` plus a `#2.png` fragment.
-  previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" src="./${encodeURIComponent(doc.name)}"></div>`;
+  const container = document.createElement("div");
+  container.className = "image-preview";
+  container.append(image);
+  previewElement.replaceChildren(container);
+}
+
+function renderImageUnavailable(doc: DocumentMeta): void {
+  closeMermaidViewer();
+  setPreviewBase(doc.relativePath);
+  previewTitleElement.textContent = doc.name;
+  previewPathElement.textContent = doc.relativePath;
+  clearPreviewType();
+  hideViewToggle();
+  previewElement.classList.add("empty");
+  previewElement.replaceChildren(
+    Object.assign(document.createElement("p"), { textContent: "This image could not be loaded." }),
+  );
 }

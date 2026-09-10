@@ -15,18 +15,20 @@ import { treeRow } from "./tree-helpers";
 const BASE_PORT = Number.parseInt(process.env.UATU_E2E_BASE_PORT ?? "4173", 10);
 
 type WorkerFixtures = {
+  productionServer: boolean;
   /** The port the worker's dedicated server is listening on. */
   serverPort: number;
 };
 
 export const test = base.extend<{}, WorkerFixtures>({
+  productionServer: [false, { scope: "worker", option: true }],
   serverPort: [
-    async ({}, use, workerInfo) => {
+    async ({ productionServer }, use, workerInfo) => {
       const port = BASE_PORT + workerInfo.workerIndex;
       const workspace = path.resolve(
         process.cwd(),
         ".e2e",
-        `watch-docs-w${workerInfo.workerIndex}`,
+        `${process.env.UATU_E2E_WORKSPACE_PREFIX ?? "watch-docs"}-w${workerInfo.workerIndex}`,
       );
 
       // CRITICAL: set env on the WORKER PROCESS too. `workspacePath()` is
@@ -41,6 +43,7 @@ export const test = base.extend<{}, WorkerFixtures>({
       const child = spawn(binary ?? "bun", binary ? [] : ["run", "tests/e2e/server.ts"], {
         env: {
           ...process.env,
+          ...(productionServer ? { NODE_ENV: "production" } : {}),
           UATU_E2E_PORT: String(port),
           UATU_E2E_WORKSPACE: workspace,
         },

@@ -1,4 +1,5 @@
 import { test, expect } from "./fixtures";
+import { showSurface } from "./navigation-helpers";
 import { installClipboardMock, readClipboardMock } from "./chat-helpers";
 import { chatWorkload } from "../fixtures/chat-performance";
 
@@ -12,14 +13,14 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     const { token } = await request.get("/__e2e/terminal-token").then(r => r.json());
     await page.addInitScript(() => { globalThis.__uatuChatPerformance = { counts: {}, durations: {} }; });
     await page.goto(`/?t=${encodeURIComponent(token)}`);
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     await expect(page.locator('[data-chat-item-id="bench:49"]')).toBeVisible();
     await page.locator("#chat-input").fill("Retain this draft");
     await page.locator("#chat-input").blur();
     await page.locator("#chat-timeline").evaluate(el => { el.scrollTop = 300; });
     await page.waitForTimeout(100);
     const beforeTop = await page.locator("#chat-timeline").evaluate(el => el.scrollTop);
-    await page.locator("#touch-tab-files").click();
+    await showSurface(page, "files");
     await page.waitForTimeout(100);
     const before = await page.evaluate(() => structuredClone(globalThis.__uatuChatPerformance));
     for (let i = 0; i < 8; i++) await request.post("/__e2e/chat", { data: { action: "item", conversationId: snapshot.conversation.id,
@@ -35,7 +36,7 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     expect(after?.counts["transcript-render"]).toBe(before?.counts["transcript-render"]);
     expect(after?.counts["item-geometry"]).toBe(before?.counts["item-geometry"]);
     await expect(page.locator("#touch-tab-chat")).toHaveAttribute("data-badge", "");
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     await expect(page.locator('[data-chat-item-id="hidden-update"]')).toContainText("Hidden update 7");
     await expect(page.locator("#chat-input")).toHaveValue("Retain this draft");
     expect(Math.abs(await page.locator("#chat-timeline").evaluate(el => el.scrollTop) - beforeTop)).toBeLessThan(3);
@@ -48,7 +49,7 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     const { token } = await request.get("/__e2e/terminal-token").then(r => r.json());
     await page.addInitScript(() => { globalThis.__uatuChatPerformance = { counts: {}, durations: {} }; });
     await page.goto(`/?t=${encodeURIComponent(token)}`);
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     await expect(page.locator('[data-chat-item-id="bench:49"]')).toBeVisible();
     await page.waitForTimeout(100);
     const before = await page.evaluate(() => globalThis.__uatuChatPerformance?.counts["item-geometry"] ?? 0);
@@ -109,12 +110,12 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     });
     try {
       await page.goto(`/?t=${encodeURIComponent(token)}`);
-      await page.locator("#touch-tab-chat").click();
+      await showSurface(page, "chat");
       await expect(page.locator(".chat-read-error").filter({ visible: true })).toContainText("History list unavailable");
       await page.getByRole("button", { name: "Retry read" }).click();
       await expect(page.locator(".uatu-loading-label")).toHaveText("Loading conversations...");
-      await page.locator("#touch-tab-files").click();
-      await page.locator("#touch-tab-chat").click();
+      await showSurface(page, "files");
+      await showSurface(page, "chat");
       await expect(page.locator(".uatu-loading-label")).toHaveText("Loading conversations...");
       releaseInventory();
       await expect(page.locator(".chat-read-error").filter({ visible: true })).toContainText("History unavailable");
@@ -150,7 +151,7 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     const snapshot = await request.post("/__e2e/chat", { data: { action: "seed", agent, items } }).then(r => r.json());
     const { token } = await request.get("/__e2e/terminal-token").then(r => r.json());
     await page.goto(`/?t=${encodeURIComponent(token)}`);
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     await expect(page.locator('[data-chat-item-id="bench:499"]')).toBeVisible();
     await page.locator("#chat-timeline").focus();
     await page.keyboard.press("ControlOrMeta+f");
@@ -187,7 +188,7 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     await answer.locator("[data-file-ref]").click();
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
     await expect(page.locator("#preview")).toContainText("README");
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     const order = await page.locator("#chat-items [data-chat-item-id]").evaluateAll(nodes => nodes.map(node => node.getAttribute("data-chat-item-id")));
     expect(order.indexOf("bench:2")).toBeLessThan(order.indexOf("bench:499"));
     const question = page.locator('[data-chat-item-id="bench:499"]');
@@ -210,20 +211,20 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     const { token } = await request.get("/__e2e/terminal-token").then(r => r.json());
     await page.addInitScript(() => { globalThis.__uatuChatPerformance = { counts: {}, durations: {} }; });
     await page.goto(`/?t=${encodeURIComponent(token)}`);
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     await page.locator("#chat-subagents summary").click();
     await page.getByRole("button", { name: "explore · Review renderer" }).click();
     await expect(page.locator('[data-chat-item-id="child:49"]')).toBeVisible();
     await page.locator("#chat-drilldown-timeline").evaluate(el => { el.scrollTop = 250; });
     await page.waitForTimeout(100);
     const top = await page.locator("#chat-drilldown-timeline").evaluate(el => el.scrollTop);
-    await page.locator("#touch-tab-files").click();
+    await showSurface(page, "files");
     const before = await page.evaluate(() => globalThis.__uatuChatPerformance?.counts["transcript-render"]);
     for (let i = 0; i < 5; i++) await request.post("/__e2e/chat", { data: { action: "item", conversationId: child.conversation.id,
       item: { id: "child:late", type: "assistant_message", createdAt: Date.now(), markdown: `Child update ${i}` } } });
     await page.waitForTimeout(150);
     expect(await page.evaluate(() => globalThis.__uatuChatPerformance?.counts["transcript-render"])).toBe(before);
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     await expect(page.locator('[data-chat-item-id="child:late"]')).toContainText("Child update 4");
     expect(Math.abs(await page.locator("#chat-drilldown-timeline").evaluate(el => el.scrollTop) - top)).toBeLessThan(3);
     await page.locator("#chat-drilldown-back").click();

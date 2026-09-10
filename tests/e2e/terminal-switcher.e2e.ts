@@ -5,6 +5,7 @@
 // keybar is coarse-pointer-gated and the single-pane rule is UI-mode-gated.
 
 import { expect, test } from "./fixtures";
+import { showSurface } from "./navigation-helpers";
 
 async function bootTouchTerminal(
   page: import("@playwright/test").Page,
@@ -70,7 +71,7 @@ test.describe("touch terminal switcher", () => {
 
     // Opening the Terminal tab auto-attaches all three, but only the active
     // one is on screen — three slivers on a tablet would be unusable.
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(3, { timeout: 10000 });
     await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
     await expect(page.locator(".terminal-pane[data-active]")).toHaveAttribute(
@@ -115,7 +116,7 @@ test.describe("touch terminal switcher", () => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 3);
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(3, { timeout: 10000 });
     await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
 
@@ -148,7 +149,7 @@ test.describe("touch terminal switcher", () => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 1);
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
 
     await page.locator(switchKey).click();
@@ -176,14 +177,14 @@ test.describe("touch terminal switcher", () => {
     const page2 = await context.newPage();
     await page2.goto("/");
     await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
-    await page2.locator("#touch-tab-terminal").click();
+    await showSurface(page2, "terminal");
     await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
       timeout: 10000,
     });
 
     // Window 1 opens its terminal: nothing detached to claim, so the touch
     // decision surface is the switcher — never the desktop chooser.
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator("#terminal-switcher")).toBeVisible({ timeout: 10000 });
     await expect(page.locator(".terminal-picker")).toHaveCount(0);
     await expect(page.locator(".terminal-pane")).toHaveCount(0);
@@ -214,7 +215,7 @@ test.describe("touch terminal switcher", () => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 1);
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
 
     await page.locator(switchKey).click();
@@ -237,7 +238,7 @@ test.describe("touch terminal switcher", () => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 1);
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
     await page.locator(switchKey).click();
     await expect(page.locator("#terminal-switcher")).toBeVisible();
@@ -246,7 +247,7 @@ test.describe("touch terminal switcher", () => {
     // exactly why the sheet has to be dismissed explicitly. Left open it is
     // invisible but still live: it would swallow Escape from the surface the
     // user is actually looking at, and reappear on the way back.
-    await page.locator("#touch-tab-preview").click();
+    await showSurface(page, "preview");
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
     await expect(page.locator("#terminal-switcher")).toBeHidden();
 
@@ -256,7 +257,7 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
 
     // Returning to the terminal shows the terminal, not the sheet.
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "terminal");
     await expect(page.locator("#terminal-switcher")).toBeHidden();
     await expect(page.locator(".terminal-pane")).toHaveCount(1);
@@ -270,14 +271,14 @@ test.describe("touch terminal switcher", () => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 1);
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
 
     // Enter desktop layout through Files. Desktop normalizes back to the
     // selected main surface (Preview), rather than persisting Files.
     // The keybar is coarse-pointer-gated, not mode-gated, so the switcher is
     // still reachable from the docked desktop terminal.
-    await page.locator("#touch-tab-files").click();
+    await showSurface(page, "files");
     await page.locator("#ui-mode-toggle").click();
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
     await page.locator(switchKey).click();
@@ -291,7 +292,7 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
 
     // Returning to the terminal shows the terminal, not a stale sheet.
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "terminal");
     await expect(page.locator("#terminal-switcher")).toBeHidden();
     await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
@@ -321,7 +322,7 @@ test.describe("touch terminal switcher", () => {
     await cdp.send("Network.setBypassServiceWorker", { bypass: true });
     await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
 
     // Hold the NEXT inventory read server-side (the pass-through service
@@ -373,7 +374,7 @@ test.describe("touch terminal switcher", () => {
     const [staged] = await stageSessions(page, 1);
 
     // Window 1 attaches the session.
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
     await expect(page.locator(".terminal-pane")).toHaveAttribute("data-session-id", staged!);
 
@@ -382,7 +383,7 @@ test.describe("touch terminal switcher", () => {
     const page2 = await context.newPage();
     await page2.goto("/");
     await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
-    await page2.locator("#touch-tab-terminal").click();
+    await showSurface(page2, "terminal");
     await expect(page2.locator("#terminal-switcher")).toBeVisible({ timeout: 10000 });
     await page2
       .locator('.terminal-switcher-row[data-state="attached-elsewhere"] .terminal-switcher-takeover')
@@ -424,7 +425,7 @@ test.describe("touch terminal switcher", () => {
     const staged = await stageSessions(page, 2);
     const victim = staged[0]!;
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(2, { timeout: 10000 });
     // Both attachments must be live before window 2 reads inventory: a pane
     // exists before its socket does, and a session still reported detached
@@ -447,7 +448,7 @@ test.describe("touch terminal switcher", () => {
     const page2 = await context.newPage();
     await page2.goto("/");
     await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
-    await page2.locator("#touch-tab-terminal").click();
+    await showSurface(page2, "terminal");
     await expect(page2.locator("#terminal-switcher")).toBeVisible({ timeout: 10000 });
     await page2
       .locator(`.terminal-switcher-row[data-session-id="${victim}"] .terminal-switcher-takeover`)
@@ -493,7 +494,7 @@ test.describe("touch terminal switcher", () => {
     const staged = await stageSessions(page, 2);
 
     // Window 1 holds both; the newest is the active one.
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(2, { timeout: 10000 });
     await expect(page.locator(".terminal-pane[data-active]")).toHaveAttribute(
       "data-session-id",
@@ -518,7 +519,7 @@ test.describe("touch terminal switcher", () => {
     const page2 = await context.newPage();
     await page2.goto("/");
     await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
-    await page2.locator("#touch-tab-terminal").click();
+    await showSurface(page2, "terminal");
     await expect(page2.locator("#terminal-switcher")).toBeVisible({ timeout: 10000 });
     await page2
       .locator(`.terminal-switcher-row[data-session-id="${staged[1]!}"] .terminal-switcher-takeover`)
@@ -563,7 +564,7 @@ test.describe("touch terminal switcher", () => {
     // session and are never stamped active. A one-pane-at-a-time rule keyed on
     // `data-active` alone would hide them, leaving a blank Terminal tab at the
     // one moment the user needs a way back in.
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-auth")).toBeVisible({ timeout: 10000 });
     await expect(page.locator(".terminal-auth-heading")).toHaveText("Reconnect to uatu");
     await expect(page.locator(".terminal-auth-input")).toBeVisible();
@@ -573,13 +574,13 @@ test.describe("touch terminal switcher", () => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 2);
 
-    await page.locator("#touch-tab-terminal").click();
+    await showSurface(page, "terminal");
     await expect(page.locator(".terminal-pane")).toHaveCount(2, { timeout: 10000 });
     await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
 
     // Single-pane rendering is presentation only: the stored panes are all
     // still attached and desktop mode shows the split.
-    await page.locator("#touch-tab-files").click();
+    await showSurface(page, "files");
     await page.locator("#ui-mode-toggle").click();
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
     await expect(page.locator(".terminal-pane")).toHaveCount(2);

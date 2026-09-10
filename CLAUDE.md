@@ -41,12 +41,15 @@ src/
 │                   follow-rules, state, storage, freshness (client/server
 │                   build-identity handshake), ui-mode (per-device
 │                   touch/desktop mode on <html>), tab-bar (touch mode's
-│                   bottom Files/Preview/Terminal tabs) — the app-wide
-│                   chrome and the appState singleton
+│                   floating Files/Preview/Chat/Terminal navigation, its
+│                   edge handle and idle policy), navigation-preferences
+│                   (per-device placement/auto-hide, hub- or base-path
+│                   scoped) — the app-wide chrome and the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
 │                   chooser, layout (split/stacked), diff view,
 │                   mermaid trigger, anchors, image/binary fallbacks,
-│                   metadata card, code-block decorations
+│                   metadata card, code-block decorations, file-navigation
+│                   + file-siblings (touch mode's Files/Previous/Next pill)
 ├── sidebar/        the left pane — tree-view, panes
 │                   shell/render, change-overview, git-log, files-filter,
 │                   search-pane (⇧⌘F project search: pane + result model +

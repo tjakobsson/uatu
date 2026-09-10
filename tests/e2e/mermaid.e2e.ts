@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import { showSurface } from "./navigation-helpers";
 import type { Page } from "@playwright/test";
 import { promises as fs } from "node:fs";
 
@@ -92,9 +93,9 @@ test.describe("lazy rendering where the page scrolls", () => {
       await page.reload();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
 
-      await page.locator("#touch-tab-files").click();
+      await showSurface(page, "files");
       await treeRow(page, "many-diagrams.md").click();
-      await page.locator("#touch-tab-preview").click();
+      await showSurface(page, "preview");
       await expect(page.locator("#preview-title")).toHaveText("Many Diagrams");
       await expect(page.locator("#preview .mermaid")).toHaveCount(DIAGRAMS);
 
@@ -210,7 +211,7 @@ test.describe("lazy rendering where the page scrolls", () => {
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
 
       // Start in desktop mode so the observer roots at the shell.
-      await page.locator("#touch-tab-files").click();
+      await showSurface(page, "files");
       await page.locator("#ui-mode-toggle").click();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
 
@@ -239,7 +240,7 @@ test.describe("lazy rendering where the page scrolls", () => {
 
       await page.locator("#ui-mode-toggle").click();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
-      await page.locator("#touch-tab-preview").click();
+      await showSurface(page, "preview");
       // Give a stale observer every chance to fire its batch.
       await page.waitForTimeout(1500);
 

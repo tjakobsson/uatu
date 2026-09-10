@@ -11,6 +11,43 @@
 // this file is allowlisted in shared/app-url-discipline.test.ts.
 
 import { appBasePath } from "../shared/app-url";
+import { workspaceForeground } from "../hub/mobile/coordinator-context";
+import { createReturnNavigation } from "../hub/return-navigation";
+import { confirmNavigationHubScope } from "./navigation-preferences";
+
+let hubAvailable = false;
+const availabilityListeners = new Set<(available: boolean) => void>();
+let invalidateReturn = () => {};
+let authenticationEpoch = 0;
+
+function clearHubAuthentication(): void {
+  authenticationEpoch++;
+  invalidateReturn();
+  setHubAvailable(false);
+}
+
+/** The authenticated mobile backend already validated this origin. Establish
+ * that context before lazy workspace boot; do not wait on the legacy probe. */
+export function confirmAuthenticatedHubContext(): void {
+  authenticationEpoch++;
+  setHubAvailable(true);
+  confirmNavigationHubScope();
+}
+
+export function invalidateAuthenticatedHubContext(): void { clearHubAuthentication(); }
+
+export function isHubAvailable(): boolean { return hubAvailable; }
+
+export function onHubAvailabilityChange(listener: (available: boolean) => void): () => void {
+  availabilityListeners.add(listener);
+  return () => { availabilityListeners.delete(listener); };
+}
+
+function setHubAvailable(available: boolean): void {
+  if (hubAvailable === available) return;
+  hubAvailable = available;
+  for (const listener of availabilityListeners) listener(available);
+}
 
 export type HubWorkspaceSummary = {
   id: string;
@@ -101,6 +138,7 @@ export function startFailureNeedsHubUnlock(message: string): boolean {
 }
 
 export function submitHubSignOut(doc: Document): void {
+  clearHubAuthentication();
   const form = doc.createElement("form");
   form.method = "post";
   form.action = "/logout";
@@ -138,12 +176,18 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
 }
 
 async function fetchHubState(): Promise<HubStateSummary | null> {
+  const generation = authenticationEpoch;
   try {
     const response = await fetch("/api/hub/state");
+    if (generation !== authenticationEpoch) return null;
+    if (response.status === 401) {
+      clearHubAuthentication();
+    }
     if (!response.ok) {
       return null;
     }
-    return parseHubState(await response.json());
+    const state = parseHubState(await response.json());
+    return generation === authenticationEpoch ? state : null;
   } catch {
     return null;
   }
@@ -164,6 +208,18 @@ export function initHubNav(): void {
   }
 
   let latest: HubWorkspaceSummary[] = [];
+  const returnNavigation = createReturnNavigation({
+    fetch: async (url, init) => {
+      const generation = authenticationEpoch;
+      const response = await fetch(url, init);
+      if (response.status === 401 && generation === authenticationEpoch) clearHubAuthentication();
+      return response;
+    },
+    storage: () => sessionStorage,
+    changed: () => {},
+  });
+  invalidateReturn = () => returnNavigation.invalidate();
+  window.addEventListener("pagehide", () => returnNavigation.suspend());
 
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
   const updateChip = () => {
@@ -269,66 +325,85 @@ export function initHubNav(): void {
     menu.hidden = true;
   };
 
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted) return;
+    void returnNavigation.validate();
+    void fetchHubState().then(fresh => {
+      if (fresh !== null) {
+        latest = fresh.workspaces;
+        setHubAvailable(true);
+        confirmNavigationHubScope();
+        control.hidden = false;
+        updateChip();
+        if (!latest.some(workspace => workspace.id === currentId && workspace.running)) {
+          // History is navigation, never Start. The existing route owns recovery.
+          window.location.reload();
+        }
+      } else {
+        latest = [];
+        updateChip();
+      }
+    });
+  });
+
   // One probe decides hub-ness; only a hub origin answers this at the root.
-  void fetchHubState().then(state => {
+  const probe = fetchHubState();
+  // This best-effort session binding cannot delay the switcher or surfaces.
+  void returnNavigation.validate(currentId, probe);
+  void probe.then(state => {
     if (state === null) {
       return;
     }
     latest = state.workspaces;
+    if (!latest.some(workspace => workspace.id === currentId && workspace.running)) {
+      // A normal HTTP-cache history load may not be a BFCache restoration.
+      // It still needs the existing route's unavailable page, never Start.
+      window.location.reload();
+      return;
+    }
+    setHubAvailable(true);
+    confirmNavigationHubScope();
     updateChip();
     control.hidden = false;
+  });
 
-    // A back/forward-cache restore revives this page exactly as it was —
-    // possibly for a session that was stopped in the meantime. Re-fetch so
-    // the chip tells the truth before the user opens the menu.
-    window.addEventListener("pageshow", event => {
-      if (!event.persisted) {
-        return;
-      }
-      void fetchHubState().then(fresh => {
-        if (fresh !== null) {
-          latest = fresh.workspaces;
-          updateChip();
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") === "true";
+    if (expanded) {
+      close();
+      return;
+    }
+    renderMenu();
+    toggle.setAttribute("aria-expanded", "true");
+    menu.hidden = false;
+    // Refresh in the background so the open menu reflects sessions
+    // started or stopped elsewhere; re-render only while still open.
+    void fetchHubState().then(fresh => {
+      if (fresh !== null) {
+        latest = fresh.workspaces;
+        updateChip();
+        if (!menu.hidden) {
+          renderMenu();
         }
-      });
+      }
     });
+  });
 
-    toggle.addEventListener("click", () => {
-      const expanded = toggle.getAttribute("aria-expanded") === "true";
-      if (expanded) {
-        close();
-        return;
-      }
-      renderMenu();
-      toggle.setAttribute("aria-expanded", "true");
-      menu.hidden = false;
-      // Refresh in the background so the open menu reflects sessions
-      // started or stopped elsewhere; re-render only while still open.
-      void fetchHubState().then(fresh => {
-        if (fresh !== null) {
-          latest = fresh.workspaces;
-          updateChip();
-          if (!menu.hidden) {
-            renderMenu();
-          }
-        }
-      });
-    });
+  document.addEventListener("click", event => {
+    if (!workspaceForeground()) return;
+    if (menu.hidden) {
+      return;
+    }
+    if (event.target instanceof Node && !control.contains(event.target)) {
+      close();
+    }
+  });
 
-    document.addEventListener("click", event => {
-      if (menu.hidden) {
-        return;
-      }
-      if (event.target instanceof Node && !control.contains(event.target)) {
-        close();
-      }
-    });
-
-    document.addEventListener("keydown", event => {
-      if (event.key === "Escape" && !menu.hidden) {
-        close();
-        toggle.focus();
-      }
-    });
+  document.addEventListener("keydown", event => {
+    if (!workspaceForeground()) return;
+    if (event.key === "Escape" && !menu.hidden) {
+      close();
+      toggle.focus();
+    }
   });
 }

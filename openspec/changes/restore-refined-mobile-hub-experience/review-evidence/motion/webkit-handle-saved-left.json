@@ -1,0 +1,51 @@
+{
+  "backend": "synthetic",
+  "browser": "webkit",
+  "saved": {
+    "side": "left",
+    "position": 0.72,
+    "autoHide": false,
+    "previewSide": "right"
+  },
+  "measurements": [
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "rect": {
+        "x": 0,
+        "y": 572.46875,
+        "width": 44,
+        "height": 44
+      },
+      "unchangedStoredRatio": 0.72
+    },
+    {
+      "viewport": {
+        "width": 320,
+        "height": 740
+      },
+      "rect": {
+        "x": 0,
+        "y": 497.59375,
+        "width": 44,
+        "height": 44
+      },
+      "unchangedStoredRatio": 0.72
+    },
+    {
+      "viewport": {
+        "width": 844,
+        "height": 390
+      },
+      "rect": {
+        "x": 0,
+        "y": 245.59375,
+        "width": 44,
+        "height": 44
+      },
+      "unchangedStoredRatio": 0.72
+    }
+  ]
+}

@@ -64,6 +64,12 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue;
     headers.set(name, value);
   }
+  // Retire previously cached documents too: a 304 could otherwise reuse old
+  // HTML without ever receiving the corrected document policy below.
+  if (request.headers.get("sec-fetch-dest") === "document" || /\btext\/html\b/i.test(request.headers.get("accept") ?? "")) {
+    headers.delete("if-none-match");
+    headers.delete("if-modified-since");
+  }
   headers.set("host", `${session.endpoint.hostname}:${session.endpoint.port}`);
   // Identity encoding from the child: the loopback hop gains nothing from
   // compression, and an unencoded upstream body means its Content-Length
@@ -146,6 +152,13 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
     if (lower === "content-encoding") continue;
     if (lower === "content-length" && upstreamEncoded) continue;
     headers.set(name, value);
+  }
+  // Workspace HTML is authenticated, live navigation state, just like the
+  // Hub's own pages. History must consult the Hub after a stop/forget even
+  // when Back interrupted boot before the workspace bundle could execute.
+  // Keep asset caching and incremental streams unchanged.
+  if (/^text\/html(?:\s*;|$)/i.test(headers.get("content-type") ?? "")) {
+    headers.set("cache-control", "no-store");
   }
   // Compress compressible bodies for the browser-facing hop. The loopback
   // hop stays identity (above), but the hub→browser leg often crosses a

@@ -15,6 +15,7 @@
 import fs from "node:fs/promises";
 
 import { expect, test } from "./fixtures";
+import { showSurface } from "./navigation-helpers";
 import { waitForPreviewToSettle } from "./fixtures";
 import { treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
@@ -70,7 +71,7 @@ async function boot(page: Page, request: Request): Promise<void> {
 }
 
 async function openFixtureDoc(page: Page): Promise<void> {
-  await page.locator("#touch-tab-files").click();
+  await showSurface(page, "files");
   await treeRow(page, "outline-doc.md").click();
   await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
   await expect(page.locator("#preview-title")).toHaveText("Outline Fixture");
@@ -227,7 +228,7 @@ test.describe("phone width resolves to the sheet", () => {
     // module's own open state, which `setOpen` writes. The tab-scoped CSS can
     // hide the panel, but it cannot touch this attribute — so a pass here means
     // the dismissal ran, not that something merely became invisible.
-    await page.locator("#touch-tab-files").click();
+    await showSurface(page, "files");
     await treeRow(page, "outline-two.md").click();
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
     await expect(page.locator("#preview-title")).toHaveText("Second Fixture");
@@ -400,7 +401,13 @@ test.describe("tablet width keeps the rail", () => {
     await page.locator("#outline-toggle").click();
     await expectPresentation(page, "rail");
 
-    await page.locator("#preview a", { hasText: "Onward to the second fixture" }).click();
+    // The persistent Preview controls float over the document's bottom-left
+    // strip and swallow pointer events there, which is where this link sits.
+    // Activate it from the keyboard: the same in-preview navigation, without
+    // hit-testing through an overlay. The assertions are unchanged.
+    const onward = page.locator("#preview a", { hasText: "Onward to the second fixture" });
+    await onward.focus();
+    await page.keyboard.press("Enter");
     await expect(page.locator("#preview-title")).toHaveText("Second Fixture");
 
     await expect(page.locator("#outline-toggle")).toHaveAttribute("aria-pressed", "true");
@@ -563,7 +570,7 @@ test.describe("crossing the threshold", () => {
     await expectPresentation(page, "rail");
 
     // Follow on, from the Files surface that owns the chip.
-    await page.locator("#touch-tab-files").click();
+    await showSurface(page, "files");
     const follow = page.locator("#follow-toggle");
     if ((await follow.getAttribute("aria-pressed")) !== "true") {
       await follow.click();
@@ -582,7 +589,7 @@ test.describe("crossing the threshold", () => {
     );
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
 
-    await page.locator("#touch-tab-preview").click();
+    await showSurface(page, "preview");
     await expect(page.locator("#preview-title")).toHaveText("Second Fixture");
 
     // Phone width means a sheet, and the document changed — so it must not be

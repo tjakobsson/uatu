@@ -55,9 +55,9 @@ function loadingSignal(): LoadingSignal {
 // state out from under the request the user is actually waiting on.
 let diffLoadGeneration = 0;
 
-export async function applyDiffForActiveDocument(documentId: string): Promise<void> {
+export async function applyDiffForActiveDocument(documentId: string, ownsLoad?: () => boolean): Promise<void> {
   const generation = ++diffLoadGeneration;
-  const isCurrent = () => generation === diffLoadGeneration
+  const isCurrent = () => (ownsLoad?.() ?? true) && generation === diffLoadGeneration
     && appState.previewMode.kind === "document"
     && appState.selectedId === documentId
     && appState.viewMode === "diff"
@@ -76,6 +76,7 @@ export async function applyDiffForActiveDocument(documentId: string): Promise<vo
     let payload = documentDiffCache.get(documentId);
     if (!payload) {
       const fetched = await fetchDocumentDiff(documentId);
+      if (!fetched && isCurrent() && ownsLoad) throw new Error("document diff failed");
       if (!fetched || !isCurrent()) {
         return;
       }

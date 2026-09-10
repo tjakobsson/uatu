@@ -19,6 +19,7 @@
 // file-event module reaches the setter OR the tab.
 
 import { appState, type ActiveSurface, type TouchTab } from "../shell/state";
+import { workspaceForeground } from "../hub/mobile/coordinator-context";
 import { onActiveTabChange } from "../shell/tab-bar";
 import { uiMode } from "../shell/ui-mode";
 
@@ -132,6 +133,7 @@ export function setActiveSurface(next: ActiveSurface): void {
 // surface leave the current one in place: clicking a resizer or the window
 // chrome is not a statement about where you are working.
 export function noteInteraction(target: EventTarget | null): void {
+  if (!workspaceForeground()) return;
   const next = resolveSurfaceFromTarget(target);
   if (next !== null && next !== appState.activeSurface) {
     setActiveSurface(next);

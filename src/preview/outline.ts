@@ -16,6 +16,7 @@
 // once at boot.
 
 import { appUrl } from "../shared/app-url";
+import { workspaceForeground } from "../hub/mobile/coordinator-context";
 import { writeClipboardText } from "../shared/clipboard";
 import type { ViewMode } from "../shared/types";
 import { contextualAppUrl } from "../shell/watch-context";
@@ -785,6 +786,7 @@ export function initOutline(): void {
   });
   copySourceButton.addEventListener("click", () => void handleCopySource());
   document.addEventListener("keydown", event => {
+    if (!workspaceForeground()) return;
     if (event.key === "Escape" && open) {
       setOpen(false);
       outlineToggleButton.focus();

@@ -33,6 +33,7 @@ import {
 } from "../shared/watch-context";
 import { StreamLifecycleMetrics, type StreamOutcome } from "../debug/stream-metrics";
 import { DEFAULT_RESPECT_GITIGNORE, scanRoots, type WatchEntry } from "./roots";
+import { documentResourceResponse } from "./static-files";
 
 export const BUILD_SUMMARY: BuildSummary = {
   version: BUILD.version,
@@ -499,6 +500,11 @@ export function createWatchSession(
     },
     getRoots(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
       return applyScope(unscopedRoots, normalizeContext(context).scope);
+    },
+    getDocumentResource(rootId: string, documentId: string, context: WatchContext) {
+      // Do not let stale-pin normalization turn a resource request into a widening operation.
+      const scope = constrainedDocumentId ? { kind: "file" as const, documentId: constrainedDocumentId } : context.scope;
+      return documentResourceResponse(applyScope(unscopedRoots, scope), scope, rootId, documentId, respectGitignore);
     },
     getUnscopedRoots() {
       return unscopedRoots;

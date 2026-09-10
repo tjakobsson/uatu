@@ -16,6 +16,24 @@ function deferred(): Deferred {
 }
 
 describe("createDocumentLoadGuard", () => {
+  test("reports pending, timeout, exact retry, and supersession through one generation", () => {
+    const guard = createDocumentLoadGuard();
+    const statuses: string[] = [];
+    const unsubscribe = guard.subscribe(() => statuses.push(guard.state().status));
+    const first = guard.begin("image#1.png", "rendered", "single");
+    guard.settle(first, "timeout");
+    expect(guard.state()).toEqual({ documentId: "image#1.png", status: "timeout" });
+    const retry = guard.begin("image#1.png", "rendered", "single");
+    guard.settle(first, "ready");
+    expect(guard.state().status).toBe("pending-selection");
+    guard.settle(retry, "missing-target");
+    const next = guard.begin("next.md", "source", "single");
+    guard.settle(retry, "load-error");
+    guard.settle(next, "ready");
+    unsubscribe();
+    guard.begin("ignored", "source", "single");
+    expect(statuses).toEqual(["pending-selection", "timeout", "pending-selection", "missing-target", "pending-selection", "ready"]);
+  });
   test("rejects an older selection response that finishes last", async () => {
     const guard = createDocumentLoadGuard();
     let selectedId = "README.md";

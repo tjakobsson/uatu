@@ -8,6 +8,7 @@
 // renders instead of a reload loop.
 
 import type { BuildSummary } from "../shared/types";
+import { workspaceOverlayHost } from "../hub/mobile/coordinator-context";
 import { BUNDLED_WEB_REVISION, BUILD } from "../shared/version";
 
 export type FreshnessDecision = "in-sync" | "reload" | "notice";
@@ -126,7 +127,7 @@ function showStaleClientNotice(server: BuildSummary | undefined): void {
   });
 
   notice.append(message, action);
-  document.body.appendChild(notice);
+  workspaceOverlayHost().appendChild(notice);
 }
 
 function removeStaleClientNotice(): void {

@@ -2,6 +2,18 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 14 - Additive Image Resources (Unreleased)
+
+Compatibility: additive (workspace)
+
+### Changes
+
+- Added `workspaceGetDocumentResource`: `GET /s/{workspaceId}/api/document/resource?id=...&rootId=...` reads an indexed image by exact identity within the current scope, with containment and ignore checks. It does not widen stale pins or change ordinary static links.
+
+### Migration
+
+None. Existing routes and payloads are unchanged. Clients needing unambiguous multi-root images can use the new operation; older servers return 404.
+
 ## Hub 5 / Workspace 14 - Unreleased
 
 Compatibility: breaking (workspace)

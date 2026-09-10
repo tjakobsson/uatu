@@ -9,6 +9,28 @@ import path from "node:path";
 
 import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
 import { DEFAULT_RESPECT_GITIGNORE, shouldDenyPath, type WatchEntry } from "./roots";
+import type { RootGroup, Scope } from "../shared/types";
+
+export async function documentResourceResponse(roots: readonly RootGroup[], scope: Scope, rootId: string, documentId: string, respectGitignore: boolean): Promise<Response> {
+  const missing = () => Response.json({ error: "document resource not found" }, { status: 404 });
+  if (scope.kind === "file" && scope.documentId !== documentId) return missing();
+  const matches = roots.filter(root => root.id === rootId);
+  if (matches.length !== 1) return missing();
+  const root = matches[0]!;
+  const documents = root.docs.filter(doc => doc.id === documentId && doc.rootId === rootId);
+  if (documents.length !== 1) return missing();
+  const doc = documents[0]!;
+  if (!/\.(png|jpe?g|gif|webp|svg|ico|avif|bmp)$/i.test(doc.name)) {
+    return Response.json({ error: "document resource is not an image" }, { status: 415 });
+  }
+  // Resolve only inside the indexed root, rechecking ignore and realpath containment.
+  const resolved = await resolveStaticFileRequest(`/${doc.relativePath.split("/").map(encodeURIComponent).join("/")}`, [{ kind: "dir", absolutePath: root.path }], { respectGitignore });
+  if (resolved.status !== "found" || path.resolve(root.path, doc.relativePath) !== path.resolve(doc.id)) return missing();
+  return new Response(Bun.file(resolved.filePath), { headers: {
+    "cache-control": "no-cache", "x-content-type-options": "nosniff",
+    "content-security-policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+  } });
+}
 
 export type StaticFileResolution = { status: "found"; filePath: string } | { status: "not-found" };
 

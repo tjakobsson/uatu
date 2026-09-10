@@ -7,6 +7,7 @@
 // tree click.
 
 import { detectIsMac } from "../terminal/clipboard";
+import { workspaceForeground } from "../hub/mobile/coordinator-context";
 import { getActiveSurface } from "./active-surface";
 import type { FindEngine } from "./engine";
 import {
@@ -113,6 +114,7 @@ export function initFindShortcuts(): void {
   document.addEventListener(
     "keydown",
     event => {
+      if (!workspaceForeground()) return;
       if (!hasPrimaryModifier(event) || event.altKey) {
         return;
       }
@@ -156,6 +158,7 @@ export function initFindShortcuts(): void {
   // Escape closes find from anywhere, including when focus has already moved
   // back into the document.
   document.addEventListener("keydown", event => {
+    if (!workspaceForeground()) return;
     if (event.key === "Escape" && isFindBarOpen()) {
       closeFindBar();
     }
@@ -188,6 +191,7 @@ declare global {
 function installHostBridge(): void {
   window.__uatuFind = {
     open() {
+      if (!workspaceForeground()) return;
       const engine = activeEngine();
       if (engine) {
         openFindBar(engine);
@@ -196,14 +200,17 @@ function installHostBridge(): void {
     // ⇧⌘F. Separate from `open` because the two are different features, not
     // one feature with a modifier: the host must not have to know that.
     search() {
+      if (!workspaceForeground()) return;
       projectSearch?.(seedFromSelection());
     },
     step(delta: number) {
+      if (!workspaceForeground()) return;
       if (isFindBarOpen()) {
         step(delta);
       }
     },
     close() {
+      if (!workspaceForeground()) return;
       closeFindBar();
     },
   };

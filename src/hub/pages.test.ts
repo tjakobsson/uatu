@@ -79,6 +79,7 @@ function cloneFinishFunction(html: string) {
     };
     const opened: string[] = [];
     const handler = new Function(
+      "cloneForm",
       "document",
       "cloneDisplayName",
       "cloneCredential",
@@ -97,6 +98,7 @@ function cloneFinishFunction(html: string) {
       "refreshWorkspaceState",
       `let cloneNameTouched = true;\n${reset}\n${finish}\nreturn finishClone;`,
     )(
+      { removeAttribute: () => {} },
       { getElementById: (id: string) => (id === "clone-url" ? form.url : form.folderName) },
       form.displayName,
       form.credential,
@@ -191,7 +193,7 @@ describe("clone page", () => {
   test("fetches credentials independently and preserves clone reconnect behavior", () => {
     const html = htmlFor.clone();
     expect(html).toContain("async function loadCloneCredentials()");
-    expect(html).toContain("const response = await fetch(credentialPath)");
+    expect(html).toContain("const response = await hubFetch(credentialPath)");
     expect(html).not.toContain("updateCloneCredentials();\n}");
     expect(html).toContain('api("/api/hub/clone-jobs"');
     expect(html).toContain('new EventSource("/api/hub/clone-jobs/"');

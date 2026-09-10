@@ -1,6 +1,7 @@
 schemaVersion: 1
 pathModel: hub-origin
 operations:
+  - { operationId: workspaceGetDocumentResource, domain: workspace, method: GET, path: "/s/{workspaceId}/api/document/resource", childPath: /api/document/resource, auth: hubSession, requestMediaTypes: [], responseMediaTypes: ["image/*", application/json, text/plain, text/html], statuses: [200, 400, 401, 403, 404, 415, 502, 503], payloadTypes: [Error], runtime: src/server/routes.ts }
   - { operationId: hubLogin, domain: hub, method: POST, path: /login, auth: none, requestMediaTypes: [application/json], responseMediaTypes: [application/json], statuses: [200, 400, 401, 403, 429], payloadTypes: [NativeLoginRequest, NativeLoginResponse, Error], runtime: src/hub/server.ts }
   - { operationId: hubLogout, domain: hub, method: POST, path: /logout, auth: hubSession, requestMediaTypes: [], responseMediaTypes: [application/json], statuses: [200, 403], payloadTypes: [RevocationResult, Error], runtime: src/hub/server.ts }
   - { operationId: hubGetState, domain: hub, method: GET, path: /api/hub/state, auth: hubSession, requestMediaTypes: [], responseMediaTypes: [application/json], statuses: [200, 401], payloadTypes: [HubState, Error], runtime: src/hub/server.ts }

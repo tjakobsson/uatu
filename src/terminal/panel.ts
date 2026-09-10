@@ -5,6 +5,7 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { appUrl } from "../shared/app-url";
+import { workspaceForeground, onWorkspaceForegroundChange } from "../hub/mobile/coordinator-context";
 import { mountTerminalPanel, persistTerminalToken, type TerminalPanelHandle } from "./client";
 import { initTerminalKeybar, selectionSheetKeyRoute } from "./keybar";
 import { pasteToActiveTerminal } from "./panel-paste";
@@ -75,8 +76,19 @@ const SWITCHER_STATE_COPY: Record<SwitcherRowState, string> = {
 
 let terminalSetupRan = false;
 
-const sessionStorageRef: StorageLike = presentationSessionStorage() ?? window.sessionStorage;
-const localStorageRef: StorageLike = presentationLocalStorage() ?? window.localStorage;
+function memoryStorage(): StorageLike {
+  const values = new Map<string, string>();
+  return {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: key => { values.delete(key); },
+  };
+}
+
+// A denied browser getter must not be retried outside the storage owner's
+// guard. These separate fallbacks live only in this workspace document.
+const sessionStorageRef: StorageLike = presentationSessionStorage() ?? memoryStorage();
+const localStorageRef: StorageLike = presentationLocalStorage() ?? memoryStorage();
 
 function readTerminalVisiblePreference(): boolean {
   return readTerminalVisiblePreferenceShared(sessionStorageRef);
@@ -113,6 +125,7 @@ function touchTerminalActive(): boolean {
 // that consumes input on the terminal's behalf, or paints into it, has to ask
 // this rather than the attribute.
 function terminalSurfaceShowing(panel: HTMLElement): boolean {
+  if (!workspaceForeground()) return false;
   if (panel.hasAttribute("hidden")) return false;
   return !touchModeNow() || activeTab() === "terminal";
 }
@@ -548,6 +561,7 @@ export function setupTerminalPanel(
   }
 
   function fitAll() {
+    if (!workspaceForeground()) return;
     for (const entry of panes.values()) {
       try {
         entry.handle.fit();
@@ -654,7 +668,7 @@ export function setupTerminalPanel(
       // Badge the Terminal tab when PTY output arrives while another touch
       // tab is active; activating the tab clears it (tab-change wiring).
       onOutput: () => {
-        if (touchModeNow() && activeTab() !== "terminal") {
+        if (touchModeNow() && (!workspaceForeground() || activeTab() !== "terminal")) {
           setTerminalTabBadge(true);
         }
       },
@@ -906,7 +920,7 @@ export function setupTerminalPanel(
     form.append(input, submit);
     wrap.append(heading, help, form, status);
     panesContainer!.append(wrap);
-    requestAnimationFrame(() => input.focus());
+    requestAnimationFrame(() => { if (workspaceForeground()) input.focus(); });
 
     form.addEventListener("submit", async event => {
       event.preventDefault();
@@ -1114,7 +1128,7 @@ export function setupTerminalPanel(
 
     wrap.append(heading, list, fresh);
     panesContainer!.appendChild(wrap);
-    requestAnimationFrame(() => fresh.focus());
+    requestAnimationFrame(() => { if (workspaceForeground()) fresh.focus(); });
   }
 
   // ------------- Touch terminal switcher -------------
@@ -1510,14 +1524,14 @@ export function setupTerminalPanel(
     modalPreviousFocus = (document.activeElement as HTMLElement) ?? null;
     modalAcceptHandler = onAccept;
     modal!.removeAttribute("hidden");
-    requestAnimationFrame(() => (modalCancel as HTMLButtonElement).focus());
+    requestAnimationFrame(() => { if (workspaceForeground()) (modalCancel as HTMLButtonElement).focus(); });
   }
 
   function closeConfirmModal(accepted: boolean) {
     modal!.setAttribute("hidden", "");
     const handler = modalAcceptHandler;
     modalAcceptHandler = null;
-    if (modalPreviousFocus && document.contains(modalPreviousFocus)) {
+    if (workspaceForeground() && modalPreviousFocus && document.contains(modalPreviousFocus)) {
       modalPreviousFocus.focus();
     }
     modalPreviousFocus = null;
@@ -1807,6 +1821,7 @@ export function setupTerminalPanel(
     "keydown",
     event => {
       if (event.altKey) return;
+      if (!workspaceForeground()) return;
       if (event.key === "`" || event.key === "´") {
         if (!event.ctrlKey && !event.metaKey) return;
         if (event.shiftKey) {
@@ -1920,9 +1935,18 @@ export function setupTerminalPanel(
   // crosses the width breakpoint), so users who resize mid-session don't
   // get stuck with an unusable layout.
   window.addEventListener("resize", () => {
+    if (!workspaceForeground()) return;
     applyDockToDom();
     applyDisplayModeToDom();
     fitAll();
+  });
+  onWorkspaceForegroundChange(() => {
+    if (workspaceForeground()) requestAnimationFrame(() => { if (workspaceForeground()) fitAll(); });
+    else {
+      dismissSwitcher();
+      closeConfirmModal(false);
+      for (const pane of panes.values()) pane.handle.dismissSelectionSheet();
+    }
   });
 
   // Touch tab switching (touch-tab-navigation). The PTY-preserving contract

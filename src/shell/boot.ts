@@ -36,15 +36,19 @@ import {
   renderCommitPreview,
 } from "./url";
 
+import { workspaceInitialUrl } from "../hub/mobile/coordinator-context";
+
 export async function loadInitialState(onWorkspaceReady?: () => void) {
   // Decode the requested URL path BEFORE fetching state so we can decide
   // whether to honor the server's defaultDocumentId or override with a
   // URL-derived doc selection (direct-link arrival, per design D3).
-  const urlRelativePath = appDocumentRelativePath(window.location.pathname);
+  const initialUrl = workspaceInitialUrl();
+  const urlRelativePath = appDocumentRelativePath(initialUrl.pathname);
   // Capture the hash before our own `replaceSelection` (below) overwrites
   // the URL with a hashless version — otherwise the post-load fragment
   // scroll has nothing to scroll to.
-  const initialHash = window.location.hash;
+  const initialHash = initialUrl.hash;
+  const initialCommitPreview = commitPreviewParamsFromUrl(initialUrl);
   const hasExplicitRoute = Boolean(urlRelativePath || initialHash);
 
   // Before any rendering: the tracker sets the theme-color meta for the
@@ -76,8 +80,6 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
 
   let directLinkMessage: { title: string; body: string } | null = null;
   let explicitDocumentPath: string | null = null;
-  const initialCommitPreview = commitPreviewParamsFromUrl();
-
   if (initialCommitPreview) {
     setFollowEnabled(false);
     setSelectedId(null);
@@ -144,7 +146,7 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   if (appState.previewMode.kind === "document" && appState.selectedId) {
     const selected = findDocumentById(appState.selectedId);
     if (selected) {
-      replaceSelection(appState.selectedId, selected.relativePath);
+      replaceSelection(appState.selectedId, selected.relativePath, initialHash);
     }
   }
 

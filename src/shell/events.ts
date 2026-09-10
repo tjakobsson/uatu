@@ -27,6 +27,7 @@ import { setSelectedId } from "./selection";
 import { appState } from "./state";
 import { renderCommitPreview } from "./url";
 import { contextualAppUrl, setClientScope } from "./watch-context";
+import { setCorpusStatus } from "./corpus-status";
 
 // Recovery for this stream is owned by `createLiveChannel`, not by the
 // browser. Native `EventSource` retry is unbounded in the one case that
@@ -40,7 +41,10 @@ import { contextualAppUrl, setClientScope } from "./watch-context";
 let channel: LiveChannel | null = null;
 
 function documentChannel(): LiveChannel {
-  channel ??= createLiveChannel({ open: openDocumentStream, onStatus: applyChannelStatus });
+  channel ??= createLiveChannel({ open: openDocumentStream, onStatus: status => {
+    applyChannelStatus(status);
+    if (status === "reconnecting") setCorpusStatus("index-error");
+  } });
   return channel;
 }
 
@@ -69,6 +73,7 @@ export function applyServerSnapshot(payload: StatePayload): void {
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.
   applyProjectIdentity(payload.roots);
+  setCorpusStatus("ready");
 }
 
 // `resumed` says this replaces a stream the client believes it lost, which is
@@ -152,6 +157,10 @@ function openDocumentStream(generation: number, context: { reconnect: boolean })
       renderCommitPreview(previewMode);
       return;
     }
+    if (previewMode.kind === "empty" && !previousSelectedId && !appState.followEnabled) {
+      renderSidebar();
+      return;
+    }
 
     // Rule C/D selection decision (see follow-mode capability).
     setSelectedId(chooseSelectionForFileEvent(
@@ -212,7 +221,7 @@ function openDocumentStream(generation: number, context: { reconnect: boolean })
 // whichever route delivered that state.
 const stateReconciler = createStateReconciler<StatePayload>({
   fetchState: async () => {
-    const response = await fetch(contextualAppUrl(appUrl("/api/state")));
+    const response = await fetch(contextualAppUrl(appUrl("/api/state")), { signal: AbortSignal.timeout(10_000) });
     if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
     return (await response.json()) as StatePayload;
   },
@@ -266,8 +275,14 @@ const stateReconciler = createStateReconciler<StatePayload>({
 // stream connects, its own first frame is the newer state and this payload is
 // correctly discarded.
 async function reconcileDocumentState(options: { resumed?: boolean } = {}): Promise<void> {
+  setCorpusStatus("loading");
   connectEvents(options);
-  await stateReconciler.reconcile();
+  try {
+    await stateReconciler.reconcile();
+  } catch (error) {
+    setCorpusStatus("index-error");
+    throw error;
+  }
 }
 
 export async function refreshServerStateForContext(): Promise<void> {

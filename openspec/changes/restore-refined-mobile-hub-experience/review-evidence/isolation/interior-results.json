@@ -1,0 +1,128 @@
+[
+  {
+    "browser": "chromium",
+    "version": "153.0.8010.12",
+    "comparison": {
+      "comparable": true,
+      "width": 358,
+      "height": 164,
+      "changedPixels": 0,
+      "changedFraction": 0,
+      "maximumChannelDelta": 0
+    },
+    "signatures": [
+      {
+        "text": "Synthetic review documentNo live workspace was read.",
+        "tag": "ARTICLE",
+        "className": "preview markdown-body",
+        "width": 358,
+        "height": 162.59375,
+        "font": "16px / 24px -apple-system, \"system-ui\", \"Segoe UI\", \"Noto Sans\", Helvetica, Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\"",
+        "color": "rgb(31, 35, 40)",
+        "background": "rgb(255, 255, 255)",
+        "padding": "15px",
+        "border": "1px solid rgb(230, 234, 239)",
+        "children": [
+          {
+            "tag": "H1",
+            "text": "Synthetic review document",
+            "font": "600 32px / 40px -apple-system, \"system-ui\", \"Segoe UI\", \"Noto Sans\", Helvetica, Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\""
+          },
+          {
+            "tag": "P",
+            "text": "No live workspace was read.",
+            "font": "16px / 24px -apple-system, \"system-ui\", \"Segoe UI\", \"Noto Sans\", Helvetica, Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\""
+          }
+        ]
+      },
+      {
+        "text": "Synthetic review documentNo live workspace was read.",
+        "tag": "ARTICLE",
+        "className": "preview markdown-body",
+        "width": 358,
+        "height": 162.59375,
+        "font": "16px / 24px -apple-system, \"system-ui\", \"Segoe UI\", \"Noto Sans\", Helvetica, Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\"",
+        "color": "rgb(31, 35, 40)",
+        "background": "rgb(255, 255, 255)",
+        "padding": "15px",
+        "border": "1px solid rgb(230, 234, 239)",
+        "children": [
+          {
+            "tag": "H1",
+            "text": "Synthetic review document",
+            "font": "600 32px / 40px -apple-system, \"system-ui\", \"Segoe UI\", \"Noto Sans\", Helvetica, Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\""
+          },
+          {
+            "tag": "P",
+            "text": "No live workspace was read.",
+            "font": "16px / 24px -apple-system, \"system-ui\", \"Segoe UI\", \"Noto Sans\", Helvetica, Arial, sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\""
+          }
+        ]
+      }
+    ],
+    "scope": "Preview document interior, same current source/data/font/viewport; not prechange pixel equivalence or Chat/Terminal interior coverage"
+  },
+  {
+    "browser": "webkit",
+    "version": "26.6",
+    "comparison": {
+      "comparable": true,
+      "width": 358,
+      "height": 164,
+      "changedPixels": 0,
+      "changedFraction": 0,
+      "maximumChannelDelta": 0
+    },
+    "signatures": [
+      {
+        "text": "Synthetic review documentNo live workspace was read.",
+        "tag": "ARTICLE",
+        "className": "preview markdown-body",
+        "width": 358,
+        "height": 162.59375,
+        "font": "16px / 24px -apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji",
+        "color": "rgb(31, 35, 40)",
+        "background": "rgb(255, 255, 255)",
+        "padding": "15px",
+        "border": "1px solid rgb(230, 234, 239)",
+        "children": [
+          {
+            "tag": "H1",
+            "text": "Synthetic review document",
+            "font": "600 32px / 40px -apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji"
+          },
+          {
+            "tag": "P",
+            "text": "No live workspace was read.",
+            "font": "16px / 24px -apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji"
+          }
+        ]
+      },
+      {
+        "text": "Synthetic review documentNo live workspace was read.",
+        "tag": "ARTICLE",
+        "className": "preview markdown-body",
+        "width": 358,
+        "height": 162.59375,
+        "font": "16px / 24px -apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji",
+        "color": "rgb(31, 35, 40)",
+        "background": "rgb(255, 255, 255)",
+        "padding": "15px",
+        "border": "1px solid rgb(230, 234, 239)",
+        "children": [
+          {
+            "tag": "H1",
+            "text": "Synthetic review document",
+            "font": "600 32px / 40px -apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji"
+          },
+          {
+            "tag": "P",
+            "text": "No live workspace was read.",
+            "font": "16px / 24px -apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji"
+          }
+        ]
+      }
+    ],
+    "scope": "Preview document interior, same current source/data/font/viewport; not prechange pixel equivalence or Chat/Terminal interior coverage"
+  }
+]

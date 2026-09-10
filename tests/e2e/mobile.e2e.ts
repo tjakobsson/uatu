@@ -10,6 +10,7 @@ import fs from "node:fs/promises";
 
 import { expect, test } from "./fixtures";
 import { waitForPreviewToSettle } from "./fixtures";
+import { keepNavigationOpen } from "./navigation-helpers";
 import { treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
 import {
@@ -42,6 +43,7 @@ async function touchBeforeEach(
   request: import("@playwright/test").APIRequestContext,
 ): Promise<void> {
   await request.post("/__e2e/reset");
+  await keepNavigationOpen(page);
   await page.goto("/");
   await page.evaluate(() => {
     try {
@@ -65,9 +67,22 @@ async function touchBeforeEach(
     await page.locator("#follow-toggle").click();
   }
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  if (await page.locator("#navigation-handle").isVisible()) await page.locator("#navigation-handle").click();
   await page.locator("#touch-tab-preview").click();
   await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
   await page.waitForTimeout(75);
+}
+
+// A freshly spawned shell can swallow or garble keystrokes sent before it has
+// drawn its prompt, so every typing site waits for non-whitespace output first.
+async function waitForPrompt(page: import("@playwright/test").Page): Promise<void> {
+  await expect
+    .poll(
+      async () => (await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents())
+        .some(text => text.trim().length > 0),
+      { timeout: 10_000, message: "shell prompt must render before typing" },
+    )
+    .toBe(true);
 }
 
 // Terminal-backed tests need the cookie flow from /?t=<token>; mirrors the
@@ -79,6 +94,7 @@ async function terminalBeforeEach(
 ): Promise<void> {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await request.post("/__e2e/reset");
+  await keepNavigationOpen(page);
   const tokenResp = await request.get("/__e2e/terminal-token");
   const tokenBody = await tokenResp.json();
   if (!tokenBody.enabled) {
@@ -124,12 +140,18 @@ test.describe("touch tab navigation", () => {
     await expect(page.locator(".preview-shell")).toBeVisible();
     // One surface at a time: the sidebar is not rendered on the Preview tab.
     await expect(page.locator(".sidebar")).toBeHidden();
-    // The bar sits at the viewport's bottom edge.
-    const barBox = await page.locator("#touch-tab-bar").boundingBox();
-    expect(barBox?.width ?? 0).toBeGreaterThanOrEqual(389);
-    expect((barBox?.y ?? 0) + (barBox?.height ?? 0)).toBeGreaterThanOrEqual(843);
-    // The bar carries only the four surface tabs — no mode control.
-    await expect(page.locator("#touch-tab-bar button")).toHaveCount(4);
+    // The bar is an inset pill near the viewport's bottom edge, not a
+    // full-bleed strip (design/hub-mobile/screenshots-refined/33-keep-navigation-open.png).
+    const barBox = (await page.locator("#touch-tab-bar").boundingBox())!;
+    expect(barBox.x).toBeGreaterThanOrEqual(8);
+    expect(barBox.x + barBox.width).toBeLessThanOrEqual(382);
+    expect(barBox.y + barBox.height).toBeLessThanOrEqual(844);
+    expect(barBox.y + barBox.height).toBeGreaterThanOrEqual(800);
+    // Four surface tabs plus the close control. Hub is an anchor and is only
+    // shown under a Hub; no mode control and no Preferences button.
+    await expect(page.locator("#touch-tab-bar [role=tab]")).toHaveCount(4);
+    await expect(page.locator("#touch-tab-bar button")).toHaveCount(5);
+    await expect(page.locator("#navigation-hub")).toBeHidden();
     // Desktop-only chrome stays gone in touch mode.
     await expect(page.locator("#terminal-toggle")).toBeHidden();
   });
@@ -283,12 +305,16 @@ test.describe("touch terminal tab", () => {
     await expect(panel).toHaveAttribute("data-display", "fullscreen");
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
 
-    // Whole viewport above the tab bar: no sidebar or preview reachable.
-    const box = await panel.boundingBox();
-    const barBox = await page.locator("#touch-tab-bar").boundingBox();
-    expect(box?.width ?? 0).toBeGreaterThanOrEqual(389);
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(700);
-    expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual((barBox?.y ?? 0) + 1);
+    // The surface fills the viewport and the bar floats over it; the design
+    // reserves no gutter (screenshots-refined/10-terminal-expanded.png, and
+    // navigation-overlay.e2e.ts asserts the same for .app-shell padding).
+    const box = (await panel.boundingBox())!;
+    const barBox = (await page.locator("#touch-tab-bar").boundingBox())!;
+    expect(box.width).toBeGreaterThanOrEqual(389);
+    expect(box.height).toBeGreaterThanOrEqual(700);
+    expect(box.y + box.height).toBeGreaterThanOrEqual(843);
+    expect(barBox.y).toBeGreaterThan(box.y);
+    expect(barBox.y + barBox.height).toBeLessThanOrEqual(box.y + box.height);
     await expect(page.locator(".preview-shell")).toBeHidden();
     await expect
       .poll(async () => page.evaluate(() => getComputedStyle(document.body).overflow))
@@ -314,12 +340,13 @@ test.describe("touch terminal tab", () => {
     await page.evaluate(() => {
       document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
     });
+    await waitForPrompt(page);
     await page.keyboard.type('echo "tab-roundtrip-$((6*7))"');
     await page.keyboard.press("Enter");
     await expect.poll(async () => {
       const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
       return rows.some(text => text.includes("tab-roundtrip-42"));
-    }, { timeout: 5000 }).toBe(true);
+    }, { timeout: 15_000 }).toBe(true);
 
     // Switch away: the surface hides, the panel is NOT torn down (no hidden
     // attribute — minimize semantics), the PTY stays attached.
@@ -335,7 +362,7 @@ test.describe("touch terminal tab", () => {
     await expect.poll(async () => {
       const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
       return rows.some(text => text.includes("tab-roundtrip-42"));
-    }, { timeout: 5000 }).toBe(true);
+    }, { timeout: 15_000 }).toBe(true);
   });
 
   test("leaving fullscreen routes to the Preview tab, never a minimized strip", async ({ page }) => {
@@ -362,6 +389,7 @@ test.describe("touch terminal tab", () => {
     await page.evaluate(() => {
       document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
     });
+    await waitForPrompt(page);
     await page.keyboard.type("sleep 1 && echo badge-ping");
     await page.keyboard.press("Enter");
     await page.locator("#touch-tab-preview").click();
@@ -407,6 +435,7 @@ test.describe("touch terminal tab", () => {
     await page.evaluate(() => {
       document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
     });
+    await waitForPrompt(page);
     await page.keyboard.type("seq 1 80; printf '%0500d\\n' 0; printf 'snapshot-%s-ready\\n' sheet; sleep 1 && printf 'sheet-%s-marker\\n' later");
     await page.keyboard.press("Enter");
     await expect.poll(() => host.locator(".xterm").textContent()).toContain("snapshot-sheet-ready");

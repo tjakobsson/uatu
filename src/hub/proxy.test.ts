@@ -32,6 +32,44 @@ describe("isCompressibleType", () => {
   });
 });
 
+test("Hub workspace HTML is not stored while assets and API caching remain unchanged", async () => {
+  const html = "<!doctype html><title>Workspace</title>" + " ".repeat(2000);
+  const forwarded: Headers[] = [];
+  const child = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    forwarded.push(request.headers);
+    const type = new URL(request.url).pathname.endsWith(".js") ? "text/javascript" : new URL(request.url).pathname.endsWith("/api/state") ? "application/json" : "text/html; charset=utf-8";
+    return new Response(type.startsWith("text/html") ? html : "{}", { headers: { "content-type": type, "cache-control": "public, max-age=3600", "etag": '"version"' } });
+  } });
+  const session: RunningSession = { workspaceId: "project", basePath: "/s/project/", endpoint: { hostname: "127.0.0.1", port: child.port! }, token: "child-secret", exited: new Promise(() => {}), async stop() {} };
+  try {
+    // The policy belongs only to the authenticated Hub hop, not plain serve.
+    const direct = await fetch(`http://127.0.0.1:${child.port}/s/project/`);
+    expect(direct.headers.get("cache-control")).toBe("public, max-age=3600");
+    await direct.text();
+    for (const encoding of ["identity", "gzip"]) {
+      const response = await proxyHttp(new Request("http://hub.example/s/project/docs/guide.md", { headers: { "accept-encoding": encoding } }), session);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      expect(new TextDecoder().decode(encoding === "gzip" ? Bun.gunzipSync(bytes) : bytes)).toBe(html);
+    }
+    for (const path of ["app.js", "api/state"]) {
+      const response = await proxyHttp(new Request(`http://hub.example/s/project/${path}`), session);
+      expect(response.headers.get("cache-control")).toBe("public, max-age=3600");
+      expect(await response.text()).toBe("{}");
+    }
+    const navigationHeaders: Record<string, string>[] = [{ accept: "text/html" }, { "sec-fetch-dest": "document" }];
+    for (const documentHeaders of navigationHeaders) {
+      const response = await proxyHttp(new Request("http://hub.example/s/project/", { headers: { ...documentHeaders, "if-none-match": '"old"', "if-modified-since": "Wed, 01 Jan 2025 00:00:00 GMT" } }), session);
+      await response.text();
+      expect(forwarded.at(-1)!.has("if-none-match")).toBe(false);
+      expect(forwarded.at(-1)!.has("if-modified-since")).toBe(false);
+    }
+    const asset = await proxyHttp(new Request("http://hub.example/s/project/app.js", { headers: { "if-none-match": '"asset"' } }), session);
+    await asset.text();
+    expect(forwarded.at(-1)!.get("if-none-match")).toBe('"asset"');
+  } finally { await child.stop(true); }
+});
+
 describe("sendableCloseCode", () => {
   test("passes app codes through and maps report-only codes to 1000", () => {
     expect(sendableCloseCode(4001)).toBe(4001);

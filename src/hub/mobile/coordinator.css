@@ -1,0 +1,77 @@
+/* Never transform the workspace ancestor: Preview scrolls the document and
+   its siblings are viewport-fixed. A transformed ancestor would silently make
+   their containing block the long document instead of the viewport. Relative
+   left moves normal-flow content without altering its layout allocation; fixed
+   surfaces travel independently. The one foreground signal owns every target. */
+.mh-coordinator-workspace {
+  position: relative;
+  min-height: 100vh;
+  z-index: 1001;
+  left: 0;
+  transition: left 240ms cubic-bezier(.22, .61, .36, 1);
+}
+html[data-workspace-foreground="false"] .mh-coordinator-workspace {
+  left: 100%;
+}
+/* Clip only this travel allocation, not html/body. `clip` does not create a
+   scroller: long Preview content continues to scroll the original document. */
+.mh-coordinator-frame { overflow-x: clip; overflow-y: visible; }
+/* Carry the existing body canvas with the moving workspace. Inherit through
+   the frame rather than introducing another light/dark palette. */
+.mh-coordinator-frame, .mh-coordinator-workspace { background: inherit; }
+/* Retain real surface geometry during boot without presenting unpopulated
+   counters, partial controls, or an interactive workspace. */
+.mh-coordinator-workspace[data-workspace-loading] { opacity: 0; }
+.mh-coordinator-loading {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  position: fixed;
+  inset: 0;
+  z-index: 1002;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--surface, #fff);
+  color: var(--text-strong, #24242a);
+}
+.mh-coordinator-loading[hidden] { display: none; }
+.mh-coordinator-loading button {
+  min-height: 44px;
+  padding: 8px 0;
+  font: inherit;
+  color: var(--accent, #0969da);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+}
+.mh-coordinator-loading h1 { font-size: 1.3rem; margin-top: 32px; }
+.mh-coordinator-workspace :where(.sidebar, .chat-surface, .terminal-panel, .touch-tab-bar, .navigation-handle, #preview-file-navigation, .uatu-outline) {
+  translate: none;
+  transition: translate 240ms cubic-bezier(.22, .61, .36, 1);
+}
+html[data-workspace-foreground="false"] .mh-coordinator-workspace :where(.sidebar, .chat-surface, .terminal-panel, .touch-tab-bar, .navigation-handle, #preview-file-navigation, .uatu-outline) {
+  translate: 100vw;
+}
+/* The selector's local fade remains separate, at its final bottom position. */
+html[data-ui-mode="touch"] .mh-coordinator-workspace .touch-tab-bar {
+  transition: opacity 280ms ease, translate 240ms cubic-bezier(.22, .61, .36, 1);
+}
+html[data-ui-mode="touch"] .mh-coordinator-workspace .touch-tab-bar[data-open="true"] {
+  transition-duration: 180ms, 240ms;
+}
+.mh-coordinator-hub {
+  visibility: hidden;
+  transition: visibility 0s linear 240ms;
+}
+html[data-workspace-foreground="false"] .mh-coordinator-hub {
+  visibility: visible;
+  transition-delay: 0s;
+}
+/* Revocation is not a cosmetic detour. Never animate protected pixels away. */
+.mh-coordinator-workspace[data-access-invalidated] {
+  visibility: hidden;
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mh-coordinator-workspace, .mh-coordinator-hub,
+  html[data-ui-mode="touch"] .mh-coordinator-workspace :is(.sidebar, .chat-surface, .terminal-panel, .touch-tab-bar, .navigation-handle, #preview-file-navigation, .uatu-outline) { transition: none; }
+}

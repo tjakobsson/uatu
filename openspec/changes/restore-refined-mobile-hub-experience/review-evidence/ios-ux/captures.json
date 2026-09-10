@@ -1,0 +1,27 @@
+{
+  "capturedBy": "Playwright Chromium, synthetic backend",
+  "viewport": {
+    "width": 390,
+    "height": 664
+  },
+  "screenshotScale": "device (3 output pixels per CSS pixel)",
+  "approval": "not approved; user authorized review publication with verification incomplete",
+  "note": "Only folder has a fresh before/after pair. The latest readiness browser case failed during page creation; no fresh after image is claimed.",
+  "records": [
+    {
+      "name": "folder-before.png",
+      "source": "tests/mobile-hub-review/evidence/ios-ux-red-final-1/ios-ux.e2e.ts-RED-folder-b-a2ce5-not-per-folder-action-cards/A02-folder-cards.png",
+      "sha256": "876e3483f83e191bb4ca6385344edea021e20013f0a3d57cf03d45e8cee9fa40"
+    },
+    {
+      "name": "folder-after.png",
+      "source": "tests/mobile-hub-review/evidence/ios-ux-smoke-current/ios-ux.e2e.ts-RED-folder-b-a2ce5-not-per-folder-action-cards/A02-folder-cards.png",
+      "sha256": "d03f27e53010a1f23015b2c511ba5952dfc7df8a6d642510ab423e7b7f9024dc"
+    },
+    {
+      "name": "readiness-before.png",
+      "source": "tests/mobile-hub-review/evidence/ios-ux-red-final-1/ios-ux.e2e.ts-RED-credenti-38df2-and-progressive-diagnostics/S04-flat-readiness.png",
+      "sha256": "fa6e1fb2783d62297430685cba2823aed5af12779c20b6ebe6ca5f24585c19a8"
+    }
+  ]
+}

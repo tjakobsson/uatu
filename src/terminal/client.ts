@@ -1,4 +1,5 @@
 import { appUrl } from "../shared/app-url";
+import { workspaceForeground } from "../hub/mobile/coordinator-context";
 import { Terminal, type IBuffer, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -75,7 +76,9 @@ export function captureTerminalToken(): string | null {
     const url = new URL(window.location.href);
     const fromUrl = url.searchParams.get("t");
     if (fromUrl) {
-      window.sessionStorage.setItem(TERMINAL_TOKEN_KEY, fromUrl);
+      try { window.sessionStorage.setItem(TERMINAL_TOKEN_KEY, fromUrl); } catch {
+        // Storage is optional; denial must not skip the existing cookie promotion.
+      }
       // Promote the URL token into a same-origin auth cookie. Fire-and-forget
       // — failures aren't fatal because the in-memory token is still in
       // sessionStorage and ?t= still works for this tab.
@@ -350,6 +353,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   // lastCols/lastRows and socket); the font-size setter calls it so a grid
   // change without a container resize still reaches the PTY.
   let syncPtySize: (() => void) | null = null;
+  let resumeGeometry: (() => void) | null = null;
 
   function dismissSelectionSheet(restoreFocus = true): boolean {
     if (!selectionSheet) return false;
@@ -368,11 +372,12 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     window.scrollTo(0, transcriptPreviousScrollY);
     document.dispatchEvent(new Event("uatu:terminal-selection-change"));
-    if (restoreFocus) term?.focus();
+    if (restoreFocus && workspaceForeground()) term?.focus();
     return true;
   }
 
   function showSelectionSheet(): boolean {
+    if (!workspaceForeground()) return false;
     if (!term?.element) return false;
     if (selectionSheet) return true;
 
@@ -577,6 +582,8 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
 
     function openXtermNow(): void {
+      if (!workspaceForeground()) return;
+      if (!options.container.clientWidth || !options.container.clientHeight) return;
       if (!term || !fit || openDone) return;
       openDone = true;
       try {
@@ -596,7 +603,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
           sendAttachReady();
         }
         // Honor a focus requested before the terminal could take it.
-        if (pendingFocus) {
+        if (pendingFocus && workspaceForeground()) {
           pendingFocus = false;
           term.focus();
         }
@@ -705,6 +712,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
 
     const encoder = new TextEncoder();
     term.onData(data => {
+      // Keep parser-generated protocol replies flowing while the workspace is
+      // parked. Foreground gating belongs at user-input/focus owners, not this
+      // shared output lane (xterm also emits device/status responses here).
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
       const output = applyTerminalInputTransform(data, options.transformInput, semanticPasteActive);
       socket.send(encoder.encode(output));
@@ -876,6 +886,8 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     // change alters the grid without touching the container, so the
     // observer alone would leave the PTY rendering for the old dimensions.
     syncPtySize = () => {
+      if (!workspaceForeground()) return;
+      if (!options.container.clientWidth || !options.container.clientHeight) return;
       if (!term || !fit || !openDone) return;
       try {
         fit.fit();
@@ -891,6 +903,8 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         }
       }
     };
+
+    resumeGeometry = () => { openXtermNow(); syncPtySize?.(); };
 
     // Re-fit and notify the server whenever the panel height changes.
     // This SAME observer also drives the initial xterm open: the first
@@ -1075,6 +1089,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     touchScrollAbort?.abort();
     touchScrollAbort = null;
     syncPtySize = null;
+    resumeGeometry = null;
     dismissSelectionSheet(false);
     try {
       resizeObserver?.disconnect();
@@ -1208,6 +1223,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   }
 
   function fitNow(): void {
+    if (!workspaceForeground()) return;
+    if (!options.container.clientWidth || !options.container.clientHeight) return;
+    if (resumeGeometry) { resumeGeometry(); return; }
     if (!fit) return;
     try {
       fit.fit();
@@ -1217,6 +1235,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   }
 
   function focusNow(): void {
+    if (!workspaceForeground()) return;
     // Focus is a promise, not a moment: xterm can only take focus after
     // term.open() runs, and open happens on the first ResizeObserver tick —
     // an unpredictable time after attach() (WS connect, layout, session

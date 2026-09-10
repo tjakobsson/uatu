@@ -34,7 +34,8 @@ describe("chat shell accessibility", () => {
 
   test("exposes exactly four ordered touch tabs with selection semantics", () => {
     const bar = document.querySelector("#touch-tab-bar");
-    expect(bar?.getAttribute("role")).toBe("tablist");
+    expect(bar?.querySelector('[role="tablist"]')).not.toBeNull();
+    expect(bar?.querySelector('[role="tablist"] #navigation-hub')).toBeNull();
     const tabs = Array.from(bar?.querySelectorAll('[role="tab"]') ?? []);
     expect(tabs.map(tab => tab.getAttribute("data-tab"))).toEqual(["files", "preview", "chat", "terminal"]);
     expect(tabs.every(tab => tab.hasAttribute("aria-selected"))).toBe(true);

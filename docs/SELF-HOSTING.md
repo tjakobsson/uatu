@@ -501,6 +501,18 @@ tail -f /tmp/uatu-hub.log
   an automatic cross-client attachment.
 - **Stopping a session** from the dashboard terminates its shells — the
   dashboard asks for confirmation naming the workspace.
+- **On a phone or tablet**, the workspace presents one surface at a time —
+  Files, Preview, Chat, Terminal — behind a floating navigation bar that also
+  carries a **Hub** link back to the dashboard. The bar tucks itself away after
+  a few idle seconds, leaving a handle at the screen edge; drag the handle to
+  either side, or turn on **Keep Open** to stop it hiding. Those preferences,
+  along with which side the Preview file controls sit on, live in the
+  dashboard's **Settings** page and apply to that browser on that device only —
+  they are never shared between devices, and they do not touch workspace state.
+- **Returning to the hub** from a workspace validates the session first, so a
+  revoked or expired login lands on the sign-in page rather than a stale
+  dashboard. Navigating back never starts, stops, or substitutes a workspace;
+  session lifetimes are unchanged by anything in the navigation UI.
 - **Login lockout**: five failed attempts per minute per address; wait a
   minute. Revoke a single device from the dashboard's Devices pane; rotate
   everyone's sessions by deleting `sessions.json` in the state dir.

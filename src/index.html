@@ -1078,7 +1078,22 @@
          bottom edge, safe-area padded; the software keyboard simply covers
          it (platform convention). Hidden entirely in desktop mode via CSS
          keyed on data-ui-mode. -->
-    <nav id="touch-tab-bar" class="touch-tab-bar" role="tablist" aria-label="App surfaces">
+    <button id="navigation-handle" class="navigation-handle" inert type="button" aria-label="Open workspace navigation" aria-controls="touch-tab-bar" aria-expanded="true" aria-describedby="navigation-handle-help"><span aria-hidden="true"><svg viewBox="0 0 16 20"><path d="m6 6 4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></button>
+    <span id="navigation-handle-help" class="sr-only">Drag to either edge. Arrow keys move the handle; Home resets its position. Press and hold, or use the context-menu key, for navigation preferences.</span>
+    <span id="navigation-chat-attention" class="sr-only">Chat has new activity or needs your response.</span>
+    <nav id="touch-tab-bar" class="touch-tab-bar" inert aria-label="Workspace navigation" data-open="true">
+      <button id="navigation-close" class="navigation-action navigation-close" type="button" aria-label="Close workspace navigation">
+        <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+      </button>
+      <a id="navigation-hub" class="navigation-action" hidden>
+        <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" d="M2.5 2.5h4.25v4.25H2.5zM9.25 2.5h4.25v4.25H9.25zM2.5 9.25h4.25v4.25H2.5zM9.25 9.25h4.25v4.25H9.25z" />
+        </svg>
+        <span class="touch-tab-label">Hub</span>
+      </a>
+      <div class="navigation-surfaces" role="tablist" aria-label="App surfaces">
       <button
         id="touch-tab-files"
         class="touch-tab"
@@ -1112,10 +1127,10 @@
             stroke="currentColor"
             stroke-width="1.3"
             stroke-linejoin="round"
-            d="M3.5 1.75h6L12.5 4.75v9.5h-9Zm6 0v3h3"
+            d="M2 2h12v12H2zM2 5h12M4 3.5h.1M6 3.5h.1"
           />
-          <line x1="5.5" y1="8" x2="10.5" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
-          <line x1="5.5" y1="10.75" x2="10.5" y2="10.75" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          <line x1="4" y1="8" x2="12" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          <line x1="4" y1="10.75" x2="9" y2="10.75" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
         </svg>
         <span class="touch-tab-label">Preview</span>
       </button>
@@ -1148,13 +1163,30 @@
             stroke-width="1.3"
             stroke-linecap="round"
             stroke-linejoin="round"
-            d="M2 3h12v10H2zM4.25 6.25 6.5 8.5l-2.25 2.25M8.5 10.75h3.25"
+            d="m4 3.5 4 4.5-4 4.5M9.5 12.5H14"
           />
         </svg>
         <span class="touch-tab-label">Terminal</span>
         <span class="touch-tab-badge" aria-hidden="true"></span>
       </button>
+      </div>
     </nav>
+    <dialog id="navigation-preferences-dialog" class="navigation-preferences-dialog" aria-labelledby="navigation-preferences-title">
+      <div class="navigation-sheet-grabber" aria-hidden="true"></div>
+      <h2 id="navigation-preferences-title">Navigation</h2>
+      <div class="navigation-sheet-body">
+        <p class="navigation-sheet-group">Placement</p>
+        <label>Handle side <select id="navigation-side"><option value="left">Left</option><option value="right">Right</option></select></label>
+        <label>Handle position <input id="navigation-position" type="range" min="0" max="100" step="any"></label>
+        <label>Preview control side <select id="navigation-preview-side"><option value="left">Left</option><option value="right">Right</option></select></label>
+        <label class="navigation-sheet-toggle"><input id="navigation-keep-open" type="checkbox"> Keep Open</label>
+        <p class="navigation-sheet-note">Back to Files stays visible in Preview. Direction arrows hide when the directory
+        contains just one file. Keep Open holds the navigation open until you dismiss it.</p>
+        <p class="navigation-sheet-note">This device only. Previous and Next follow the Files ordering within the current
+        directory; they do not wrap at the ends.</p>
+      </div>
+      <form method="dialog" class="navigation-sheet-actions"><button type="submit">Done</button></form>
+    </dialog>
 
     <div
       id="terminal-confirm"

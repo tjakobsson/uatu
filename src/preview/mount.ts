@@ -38,7 +38,8 @@ import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
 import { getSelectedDestination, setPreviewMode } from "../shell/selection";
-import { createDocumentLoadGuard } from "./load-generation";
+import { createDocumentLoadGuard, type DocumentLoadToken } from "./load-generation";
+import { currentWatchContext } from "../shell/watch-context";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -82,6 +83,8 @@ const previewShellElement: HTMLElement = previewShellElementMaybe;
 // yank them back to the top).
 let lastLoadedDocumentId: string | null = null;
 const documentLoadGuard = createDocumentLoadGuard();
+export const documentLoadState = documentLoadGuard.state;
+export const onDocumentLoadChange = documentLoadGuard.subscribe;
 const alwaysCurrent = () => true;
 
 // `DocumentDiffPayload` is imported from `./document-diff-view` (above) so
@@ -115,12 +118,14 @@ export async function applyDocumentPayload(
   payload: RenderedDocument,
   isCurrent?: () => boolean,
 ): Promise<void> {
+  let ownedToken: DocumentLoadToken | undefined;
   if (!isCurrent) {
     const loadToken = documentLoadGuard.begin(
       payload.id,
       appState.viewMode,
       appState.viewLayout,
     );
+    ownedToken = loadToken;
     isCurrent = () => documentLoadGuard.isCurrent(
       loadToken,
       appState.selectedId,
@@ -153,6 +158,7 @@ export async function applyDocumentPayload(
   if (!isCurrent()) return;
   syncViewToggle(payload);
   syncLayoutChooser(payload);
+  if (ownedToken) documentLoadGuard.settle(ownedToken, "ready");
   // The previous document's content (and any selection within it) was just
   // replaced. Re-evaluate so the pane reflects the new state instead of a
   // stale capture from the prior document.
@@ -358,19 +364,23 @@ export async function loadDocument(documentId: string, onPresented?: () => void)
     if (current && appState.previewMode.kind === "document") void loadDocument(current, current === documentId ? onPresented : undefined);
   })) return;
   await executeLoadDocument(documentId);
-  if (appState.selectedId === documentId) onPresented?.();
+  if (appState.selectedId === documentId && documentLoadState().status === "ready") onPresented?.();
 }
 
 async function executeLoadDocument(documentId: string) {
   const requestedView = appState.viewMode;
   const requestedLayout = appState.viewLayout;
   const loadToken = documentLoadGuard.begin(documentId, requestedView, requestedLayout);
-  const isCurrent = () => documentLoadGuard.isCurrent(
+  const context = JSON.stringify(currentWatchContext());
+  let expired = false;
+  const isCurrent = () => !expired && appState.previewMode.kind !== "commit"
+    && context === JSON.stringify(currentWatchContext()) && documentLoadGuard.isCurrent(
     loadToken,
     appState.selectedId,
     appState.viewMode,
     appState.viewLayout,
   );
+  const run = async () => {
   // A document *switch* (different id than what's currently mounted) resets
   // the preview scroll to the top so the user lands at the beginning of the
   // new doc. An in-place *refresh* (same id, e.g. file-watcher reload of the
@@ -411,12 +421,13 @@ async function executeLoadDocument(documentId: string) {
   const doc = findDocumentById(documentId);
   if (!doc) {
     renderUnavailableDocument(documentId);
+    documentLoadGuard.settle(loadToken, "missing-target");
     return;
   }
   setPreviewMode({ kind: "document" });
   if (doc.kind === "binary") {
     if (isViewableImageName(doc.name)) {
-      renderImagePreview(doc);
+      await renderImagePreview(doc, isCurrent);
     } else {
       renderBinaryUnavailable(doc);
     }
@@ -427,7 +438,7 @@ async function executeLoadDocument(documentId: string) {
   // own endpoint and renderer. The /api/document fetch is skipped for now;
   // toggling out of Diff will lazy-load the rendered/source view on demand.
   if (appState.viewMode === "diff") {
-    await applyDiffForActiveDocument(documentId);
+    await applyDiffForActiveDocument(documentId, isCurrent);
     return;
   }
 
@@ -442,6 +453,7 @@ async function executeLoadDocument(documentId: string) {
   if (!isCurrent()) return;
   if (!response.ok) {
     renderUnavailableDocument(documentId);
+    documentLoadGuard.settle(loadToken, response.status === 404 ? "missing-target" : "load-error");
     return;
   }
 
@@ -449,6 +461,21 @@ async function executeLoadDocument(documentId: string) {
   if (!isCurrent()) return;
   rememberDocumentPayload(payload);
   await applyDocumentPayload(payload, isCurrent);
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([run(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("document timeout")), 10_000);
+    })]);
+    if (isCurrent() && documentLoadState().status === "pending-selection") documentLoadGuard.settle(loadToken, "ready");
+  } catch (error) {
+    if (isCurrent()) {
+      expired = true;
+      documentLoadGuard.settle(loadToken, error instanceof Error && error.message === "document timeout" ? "timeout" : "load-error");
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function renderUnavailableDocument(documentId: string): void {

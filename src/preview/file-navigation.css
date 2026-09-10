@@ -1,0 +1,126 @@
+/* Preview file navigation: a translucent pill of controls pinned above the
+   navigation selector, with a recovery card stacked above it. Geometry (the
+   custom properties and the max-width/height caps) is measured in
+   file-navigation.ts; this file only describes appearance and flow. */
+#preview-file-navigation {
+  --preview-nav-clearance: 10px;
+  position: fixed;
+  z-index: 90;
+  bottom: calc(var(--preview-nav-bottom, 0px) + max(var(--preview-nav-clearance), env(safe-area-inset-bottom)));
+  left: calc(var(--preview-nav-left, 0px) + max(12px, env(safe-area-inset-left)));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: max-content;
+  box-sizing: border-box;
+  font-size: 0.8125rem;
+}
+html:has(#touch-tab-bar[data-open="true"]:not([hidden])) #preview-file-navigation { --preview-nav-clearance: 12px; }
+#preview-file-navigation[hidden] { display: none; }
+#preview-file-navigation[data-side="right"] {
+  left: auto;
+  right: calc(var(--preview-nav-right, 0px) + max(12px, env(safe-area-inset-right)));
+  align-items: flex-end;
+}
+
+.preview-nav-pill {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 4px 6px;
+  overflow: auto;
+  border: 1px solid rgb(255 255 255 / 65%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 76%);
+  color: #123049;
+  backdrop-filter: blur(24px) saturate(1.3);
+  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 45%), 0 5px 18px rgb(35 39 62 / 9%);
+}
+
+.preview-nav-files, .preview-nav-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.preview-nav-arrow { font-size: 0; line-height: 1; }
+.preview-nav-arrow::before { content: ""; width: 7px; height: 7px; border: solid currentColor; border-width: 0 1.7px 1.7px 0; transform: rotate(135deg); }
+.preview-nav-arrow:last-child::before { transform: rotate(-45deg); }
+.preview-nav-files[hidden], .preview-nav-arrow[hidden] { display: none; }
+.preview-nav-files:focus-visible, .preview-nav-arrow:focus-visible,
+.preview-nav-retry:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.preview-nav-arrow:disabled { color: #c5cbd2; cursor: default; }
+/* A boundary is a normal resting state, not a fault: keep it legible but
+   clearly inert rather than styling it like an error. */
+.preview-nav-arrow[data-boundary="true"] { color: #c5cbd2; }
+
+.preview-nav-divider {
+  flex: none;
+  width: 1px;
+  align-self: stretch;
+  margin-inline: 2px;
+  background: #dce2e8;
+}
+.preview-nav-divider[hidden] { display: none; }
+
+.preview-nav-alert {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  max-width: 100%;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid #b8791b;
+  border-radius: 14px;
+  background: rgb(255 255 255 / 96%);
+  color: #34465b;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 4px 14px rgb(35 39 62 / 12%);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+.preview-nav-alert[hidden] { display: none; }
+.preview-nav-alert[data-tone="progress"] { border-color: #767676; }
+#preview-file-navigation-status { overflow-wrap: anywhere; }
+.preview-nav-retry {
+  flex: none;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 0.25rem;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.preview-nav-retry[hidden] { display: none; }
+
+@media (prefers-color-scheme: dark) {
+  .preview-nav-pill, .preview-nav-alert { background: rgb(30 30 38 / 85%); color: #f5f5f5; }
+  .preview-nav-pill { border-color: rgb(255 255 255 / 25%); box-shadow: inset 0 0 0 1px rgb(255 255 255 / 8%), 0 5px 18px rgb(0 0 0 / 20%); }
+  .preview-nav-arrow:disabled { color: #919191; }
+  .preview-nav-arrow[data-boundary="true"] { color: #aaa; }
+  .preview-nav-divider { background: #4a4a4a; }
+  .preview-nav-alert { border-color: #d7a12b; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .preview-nav-pill, .preview-nav-alert { background: Canvas; color: CanvasText; border-color: CanvasText; backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@media (forced-colors: active) {
+  .preview-nav-pill, .preview-nav-alert { background: Canvas; color: CanvasText; border: 1px solid CanvasText; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .preview-nav-arrow:disabled { color: GrayText; }
+  .preview-nav-divider { background: CanvasText; }
+}

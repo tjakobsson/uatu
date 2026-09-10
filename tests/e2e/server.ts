@@ -51,6 +51,7 @@ import type { ChatCapability, ChatModel, ConversationConfiguration, Conversation
 let terminalSessionsDelay: { ms: number; armed: boolean; pending: boolean } | null = null;
 
 let activeFilePath: string | null = null;
+let activeRootPaths: string[] | null = null;
 let activeRespectGitignore = true;
 let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
@@ -157,6 +158,7 @@ const terminalServer = terminalEnabled
 async function handleE2EReset(request: Request): Promise<Response> {
   let body: {
     file?: string;
+    roots?: string[];
     extras?: Record<string, string>;
     dirty?: Record<string, string>;
     git?: boolean;
@@ -192,6 +194,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
 
   await watchSession.stop();
   activeFilePath = typeof body.file === "string" ? body.file : null;
+  activeRootPaths = Array.isArray(body.roots) ? body.roots : null;
   activeRespectGitignore =
     typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
   activeFollow = typeof body.follow === "boolean" ? body.follow : true;
@@ -517,7 +520,7 @@ async function createSession(options: { resetWorkspace: boolean }) {
   }
   const entryPaths = activeFilePath
     ? [`${activeWorkspaceRoot}/${activeFilePath}`]
-    : [activeWorkspaceRoot];
+    : activeRootPaths?.map(root => path.join(activeWorkspaceRoot, root)) ?? [activeWorkspaceRoot];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
   const session = createWatchSession(entries, activeFollow, {

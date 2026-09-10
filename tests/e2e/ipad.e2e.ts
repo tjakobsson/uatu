@@ -7,6 +7,7 @@
 // see any of this chrome.
 
 import { expect, test } from "./fixtures";
+import { keepNavigationOpen } from "./navigation-helpers";
 import { treeRow } from "./tree-helpers";
 import { expectStageTransform, readStageTransform } from "./transform-helpers";
 
@@ -25,6 +26,7 @@ async function bootClean(
   request: import("@playwright/test").APIRequestContext,
 ): Promise<void> {
   await request.post("/__e2e/reset");
+  await keepNavigationOpen(page);
   await page.goto("/");
   await page.evaluate(() => {
     try {
@@ -56,7 +58,7 @@ test.describe("iPad touch mode", () => {
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
     // The bar carries only the four surface tabs; the mode switch lives
     // in the sidebar header, i.e. the Files tab's surface.
-    await expect(page.locator("#touch-tab-bar button")).toHaveCount(4);
+    await expect(page.locator("#touch-tab-bar [role=tab]")).toHaveCount(4);
     // One surface at a time applies on iPad exactly as on phones.
     await expect(page.locator(".sidebar")).toBeHidden();
     await expect(page.locator(".preview-shell")).toBeVisible();

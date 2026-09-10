@@ -1,0 +1,51 @@
+{
+  "backend": "synthetic",
+  "browser": "chromium",
+  "roundTripsPerSurface": 2,
+  "owners": [
+    {
+      "surface": "files",
+      "retainedScroll": 210,
+      "units": "CSS pixels",
+      "scroller": {
+        "id": "",
+        "className": "",
+        "height": 201,
+        "scrollHeight": 3030
+      }
+    },
+    {
+      "surface": "preview",
+      "retainedScroll": 210,
+      "units": "CSS pixels",
+      "scroller": {
+        "id": "",
+        "className": "",
+        "height": 664,
+        "scrollHeight": 12406
+      }
+    },
+    {
+      "surface": "chat",
+      "retainedScroll": 244,
+      "units": "CSS pixels",
+      "scroller": {
+        "id": "chat-timeline",
+        "className": "chat-timeline",
+        "height": 495,
+        "scrollHeight": 4941
+      }
+    },
+    {
+      "surface": "terminal",
+      "retainedScroll": 8,
+      "units": "buffer lines",
+      "scroller": {
+        "id": "",
+        "className": "terminal xterm xterm-dom-renderer-owner-1 focus",
+        "height": 584,
+        "scrollHeight": 584
+      }
+    }
+  ]
+}

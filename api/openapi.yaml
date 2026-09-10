@@ -776,6 +776,42 @@ paths:
         '415': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
+  /s/{workspaceId}/api/document/resource:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
+    get:
+      operationId: workspaceGetDocumentResource
+      tags: [Workspace]
+      summary: Read an indexed image by exact root and document identity
+      description: >-
+        Returns PNG, JPEG, GIF, WebP, SVG, ICO, AVIF or BMP image bytes for an
+        indexed destination in the effective client scope. Both identities must
+        match the current index. File pins (including stale pins) and CLI file
+        constraints are never widened. Ignore rules and realpath containment are
+        rechecked at resource resolution. SVG responses are sandboxed. Ordinary
+        relative-path static links retain their existing behavior.
+      parameters:
+        - { name: id, in: query, required: true, schema: { type: string, minLength: 1 } }
+        - { name: rootId, in: query, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        '200':
+          description: Image bytes, with no-cache, nosniff and sandbox headers
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/gif: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+            image/svg+xml: { schema: { type: string, format: binary } }
+            image/x-icon: { schema: { type: string, format: binary } }
+            image/vnd.microsoft.icon: { schema: { type: string, format: binary } }
+            image/avif: { schema: { type: string, format: binary } }
+            image/bmp: { schema: { type: string, format: binary } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/document/diff:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
     get:

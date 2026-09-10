@@ -4,6 +4,8 @@ import {
   chipLabel,
   chipDotClass,
   parseHubState,
+  isHubAvailable,
+  onHubAvailabilityChange,
   sortHubWorkspaces,
   startFailureNeedsHubUnlock,
   submitHubSignOut,
@@ -15,6 +17,16 @@ import {
 function summary(id: string, running: boolean, displayName = id, path = "/src/" + id) {
   return { id, displayName, path, running };
 }
+
+test("Hub availability defaults false and subscription does not probe or block", () => {
+  expect(isHubAvailable()).toBe(false);
+  const values: boolean[] = [];
+  const unsubscribe = onHubAvailabilityChange(value => values.push(value));
+  expect(values).toEqual([]);
+  unsubscribe();
+  unsubscribe();
+  expect(isHubAvailable()).toBe(false);
+});
 
 describe("workspaceIdFromBasePath", () => {
   test("extracts the id from a hub-shaped base path", () => {

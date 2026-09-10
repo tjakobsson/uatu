@@ -1,4 +1,5 @@
 import { escapeHtml } from "../shared/html";
+import { workspaceForeground } from "../hub/mobile/coordinator-context";
 import { createLoadingSignal } from "../preview/loading-signal";
 import { measureChatWork } from "./performance";
 import { appState } from "../shell/state";
@@ -2282,9 +2283,11 @@ export function initChat(api = new ChatApiClient()): void {
         resolve(value);
       };
       const onOutside = (event: Event) => {
+        if (!workspaceForeground()) return;
         if (!menu.contains(event.target as Node)) finish(null);
       };
       const onKey = (event: KeyboardEvent) => {
+        if (!workspaceForeground()) return;
         if (event.key === "Escape") finish(null);
       };
       for (const status of agentStatuses) {
@@ -3064,7 +3067,7 @@ export function initChat(api = new ChatApiClient()): void {
     autosize(input);
     renderAttachments();
     syncControls();
-    input.focus();
+    if (workspaceForeground()) input.focus();
     return unavailable.length;
   };
 
@@ -3821,6 +3824,7 @@ export function initChat(api = new ChatApiClient()): void {
     finally { bootstrapping = false; readSignal.settle(bootstrapRead ?? initialRead); bootstrapRead = null; }
   };
   function chatSurfaceActive() {
+    if (!workspaceForeground()) return false;
     if (document.visibilityState === "hidden") return false;
     const root = document.documentElement;
     return root.getAttribute("data-ui-mode") === "touch"
@@ -3872,7 +3876,7 @@ export function initChat(api = new ChatApiClient()): void {
     }
   };
   const surfaceObserver = new MutationObserver(handleChatSurfaceState);
-  surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-chat-panel", "data-active-tab", "data-ui-mode"] });
+  surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-chat-panel", "data-active-tab", "data-ui-mode", "data-workspace-foreground"] });
   document.addEventListener("visibilitychange", handleChatSurfaceState);
   onWorkspaceCredentialRefresh(() => {
     if (bootstrapped) {

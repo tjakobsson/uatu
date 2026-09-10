@@ -6,6 +6,7 @@
 // what keeps ⌘F feeling like one feature rather than two that share a key.
 
 import { appState } from "../shell/state";
+import { workspaceForeground } from "../hub/mobile/coordinator-context";
 import { materializeChatActivity, revealChatMatch } from "../chat/timeline-renderer";
 import { findDocument } from "../shared/types";
 import type { FindEngine } from "./engine";
@@ -257,7 +258,7 @@ export function openFindBar(target: FindEngine): void {
   if (seed.length > 0) {
     queryInput.value = seed;
   }
-  queryInput.focus();
+  if (workspaceForeground()) queryInput.focus();
   queryInput.select();
   run(true);
 }
@@ -293,7 +294,7 @@ export function closeFindBar(): void {
   render();
   // Hand focus back to the surface at the position the reader was left at, so
   // Space and PageDown keep working instead of falling through to the body.
-  closing?.focusSurface();
+  if (workspaceForeground()) closing?.focusSurface();
 }
 
 // Relocate the bar onto the surface being searched, and say which one that is.

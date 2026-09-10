@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 import type { StatePayload } from "../../src/shared/types";
 import { expect, test, showGitLogPane } from "./fixtures";
+import { showSurface } from "./navigation-helpers";
 import { revealTreeRow, treeRow } from "./tree-helpers";
 
 // Drive real shell/tree reducers with complete, ordered snapshots. File reads
@@ -31,7 +32,7 @@ async function deliver(page: Page, state: StatePayload) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 async function files(page: Page, touch: boolean) {
-  if (touch) await page.locator("#touch-tab-files").click();
+  if (touch) await showSurface(page, "files");
 }
 async function identity(page: Page, path: string, url: string) {
   await expect(page).toHaveURL(url);

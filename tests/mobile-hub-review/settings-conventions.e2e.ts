@@ -1,0 +1,56 @@
+import { expect, test } from "@playwright/test";
+import { activeTask } from './navigation';
+
+test("Settings keeps grouped Add Credential and accessible two-choice preferences", async ({ page, request }) => {
+  await request.post("/review/reset", { data: { scenario: "mixed" } });
+  await page.goto("/settings");
+  await expect(page.locator('.mh-group [data-action="add-credential"]')).toHaveCount(1);
+  await expect(page.locator(".mh-overview-toolbar")).toHaveCount(0);
+  await page.locator('[data-action="preview-side"]').click();
+  const sheet = activeTask(page);
+  await expect(sheet.locator("select")).toHaveCount(0);
+  await expect(sheet.getByRole("radio")).toHaveCount(2);
+  await sheet.getByRole("radio", { name: "Right", exact: true }).check();
+  await sheet.locator('header').getByRole("button", { name: "Save", exact: true }).click();
+  await page.locator('[data-action="preview-side"]').click();
+  await expect(sheet.getByRole("radio", { name: "Right", exact: true })).toBeChecked();
+  await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator('[data-action="auto-hide"]').click();
+  await expect(sheet.getByRole("radio")).toHaveCount(2);
+  await expect(sheet.locator("select")).toHaveCount(0);
+  await sheet.getByRole("radio", { name: "Until I close it", exact: true }).check();
+  await sheet.locator('header').getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator('[data-action="auto-hide"]')).toContainText("Until I close it");
+  await page.locator('[data-action="handle"]').click();
+  await expect(sheet.locator('.mh-range-endpoints')).toHaveText("TopBottom");
+  await expect(sheet.getByRole("slider", { name: "Vertical position" })).toBeVisible();
+  await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.goto("/settings?detail=credential&id=ssh-locked");
+  const heading = page.locator('.mh-object-detail .mh-flow-header h1');
+  await expect(heading).toBeVisible();
+  expect(await heading.evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(26, 0);
+  const longName = "VeryLongUnbrokenWorkspaceName".repeat(10);
+  await heading.evaluate((el, name) => { el.textContent = name; }, longName);
+  await expect(heading).toHaveText(longName);
+  expect(await heading.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+});
+
+test("Default Folder has top Back and a compact grouped current path instead of bottom Edit and More", async ({ page, request }) => {
+  await request.post("/review/reset", { data: { scenario: "mixed" } });
+  expect((await request.post("/review/backend/setDefaultFolder", { data: ["/synthetic/existing"] })).ok()).toBe(true);
+  await page.goto("/settings?detail=default-folder");
+  const flow = page.locator(".mh-flow-page");
+  await expect(flow.locator('.mh-group [data-flow="edit"]')).toHaveCount(1);
+  await expect(flow.locator('.mh-flow-header [data-flow="flow-back"]')).toBeVisible();
+  await expect(flow.locator('.mh-flow-toolbar, [data-flow="more"]')).toHaveCount(0);
+  await expect(flow).toContainText("Shared by everyone using this Hub. Existing workspaces aren’t moved.");
+  await flow.locator('[data-flow="edit"]').click();
+  await expect(page.getByLabel("Folder path")).not.toHaveValue("");
+  await expect(activeTask(page).getByRole("button", { name: "Choose folder", exact: true })).toHaveCount(1);
+  await page.getByRole("button", { name: "Use Hub home folder", exact: true }).click();
+  await expect(page.getByLabel("Folder path")).toHaveValue("");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(flow.locator("input")).toHaveCount(0);
+  await flow.locator('[data-flow="edit"]').click();
+  await expect(page.getByLabel("Folder path")).not.toHaveValue("");
+});

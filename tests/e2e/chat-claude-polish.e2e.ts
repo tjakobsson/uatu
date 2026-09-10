@@ -17,6 +17,7 @@ import { withMoreModels } from "../../src/chat/claude/models";
 import type { ChatModel, ConversationItem } from "../../src/chat/types";
 import { openChatConfiguration, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
+import { showSurface } from "./navigation-helpers";
 
 const CHANGE_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/polish-claude-code-chat/screenshots");
 // The plan-usage readout landed as its own change; its evidence goes to its
@@ -618,7 +619,7 @@ test.describe("Claude Code plan readout at phone width", () => {
     const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
     await page.goto(`/?t=${encodeURIComponent(token.token)}`);
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
-    await page.locator("#touch-tab-chat").click();
+    await showSurface(page, "chat");
     await expect(page.locator("#chat-surface")).toBeVisible();
     await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
     const summary = page.locator("#chat-plan-usage-summary");
@@ -636,7 +637,7 @@ test.describe("Claude Code plan readout at phone width", () => {
 
     // A live switch to the desktop layout puts the sidebar beside the chat
     // and the still-open readout gains its pin; switching back retires it.
-    await page.locator("#touch-tab-files").click();
+    await showSurface(page, "files");
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.locator("#ui-mode-toggle").click();
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");

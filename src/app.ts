@@ -20,9 +20,10 @@ import { initFindBar } from "./find/find-bar";
 import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initUiMode } from "./shell/ui-mode";
-import { initTabBar } from "./shell/tab-bar";
+import { initTabBar, navigationWorkspaceReady } from "./shell/tab-bar";
 import { initChatPanel } from "./chat/surface";
 import { initChat } from "./chat/ui";
+import { initPreviewFileNavigation } from "./preview/file-navigation";
 
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base");
@@ -93,6 +94,7 @@ if (
 initUiMode();
 initTabBar();
 initChatPanel();
+initPreviewFileNavigation();
 
 initActiveSurfaceTracking();
 initFindBar();
@@ -125,7 +127,8 @@ injectPwaLinks();
 unregisterLegacyServiceWorkers();
 attachPopstateHandler();
 
-void loadInitialState(() => {
+export const workspaceReady = loadInitialState(() => {
+  navigationWorkspaceReady();
   void waitForWorkspaceCredential().then(() => initChat());
 }).then(() => {
   // Prewarm the diff renderer at idle once we know whether this is a

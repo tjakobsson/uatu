@@ -1,0 +1,22 @@
+{
+  "backend": "synthetic",
+  "browser": "chromium",
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "normalizedPosition": 0.72,
+  "target": {
+    "x": 0,
+    "y": 572.46875,
+    "width": 44,
+    "height": 44
+  },
+  "visualFace": {
+    "x": 0,
+    "y": 574.46875,
+    "width": 26,
+    "height": 40
+  },
+  "referenceVisualTopApprox": 588
+}

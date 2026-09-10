@@ -9,10 +9,26 @@ export type DocumentLoadToken = {
 
 export function createDocumentLoadGuard() {
   let latestGeneration = 0;
+  let state: { documentId: string | null; status: "idle" | "pending-selection" | "ready" | "load-error" | "timeout" | "missing-target" } = { documentId: null, status: "idle" };
+  const listeners = new Set<() => void>();
+  const notify = () => { for (const listener of listeners) listener(); };
 
   return {
+    state: () => state,
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    settle(token: DocumentLoadToken, status: typeof state.status): void {
+      if (token.generation !== latestGeneration) return;
+      state = { documentId: token.documentId, status };
+      notify();
+    },
     begin(documentId: string, view: ViewMode, layout: ViewLayout): DocumentLoadToken {
-      return { generation: ++latestGeneration, documentId, view, layout };
+      const token = { generation: ++latestGeneration, documentId, view, layout };
+      state = { documentId, status: "pending-selection" };
+      notify();
+      return token;
     },
     isCurrent(
       token: DocumentLoadToken,

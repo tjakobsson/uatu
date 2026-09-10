@@ -39,6 +39,13 @@ import {
   parseSse,
 } from "../../tests/contracts/contract-harness";
 
+// Smallest valid 1x1 PNG; the root-qualified resource operation only needs
+// real image bytes to serve through the proxy.
+const PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.ts");
 const openApi = await loadContract(path.join(REPO_ROOT, "api", "openapi.yaml"));
@@ -88,6 +95,9 @@ beforeAll(async () => {
   execFileSync("mkdir", ["-p", workspace]);
   execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
   await writeFile(path.join(workspace, "README.md"), "# Hub Test\n\nfirst body\n");
+  // An indexed image gives the root-qualified resource operation a real
+  // destination. Named so it sorts after README.md in the document order.
+  await writeFile(path.join(workspace, "zz-pixel.png"), PIXEL_PNG);
 
   const config: HubConfig = {
     port: 0 as number,
@@ -793,9 +803,11 @@ describe("hub end to end", () => {
 
     const shell = await fetch(`${origin}/s/myproject/`, { headers: { cookie, accept: "text/html" } });
     expect(shell.status).toBe(200);
-    // client-freshness: the proxy must preserve the child's no-cache on the
-    // shell HTML, and the hub's own dashboard HTML must revalidate too.
-    expect(shell.headers.get("cache-control")).toBe("no-cache");
+    // client-freshness: proxied shell HTML must revalidate with `no-cache` or
+    // stricter, and the hub's own dashboard HTML must revalidate too. The
+    // proxy upgrades workspace HTML to `no-store` so a stopped or forgotten
+    // workspace can never be restored from cache after an interrupted boot.
+    expect(["no-cache", "no-store"]).toContain(shell.headers.get("cache-control") ?? "");
     const html = await shell.text();
     expect(html).toContain('name="uatu-base-path"');
     expect(html).toContain("/s/myproject/");
@@ -2801,6 +2813,49 @@ describe("hub end to end", () => {
     expect(diff.status).toBe(200);
     await assertContract("GET", "/s/{workspaceId}/api/document/diff", diff);
 
+    // Root-qualified image resources: identity travels through the proxy, so a
+    // sibling root can never satisfy a request for another root's image.
+    const rootId = (statePayload as unknown as { roots: { id: string; docs: { id: string; name: string }[] }[] }).roots[0]!.id;
+    const imageDoc = (statePayload as unknown as { roots: { docs: { id: string; name: string }[] }[] })
+      .roots.flatMap(root => root.docs).find(doc => doc.name === "zz-pixel.png");
+    expect(imageDoc).toBeDefined();
+    const resourceUrl = (query: string) => `${origin}/s/myproject/api/document/resource?${query}`;
+
+    const image = await fetch(
+      resourceUrl(`id=${encodeURIComponent(imageDoc!.id)}&rootId=${encodeURIComponent(rootId)}`),
+      { headers: { cookie } },
+    );
+    expect(image.status).toBe(200);
+    expect(image.headers.get("content-type")).toContain("image/png");
+    expect(image.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(new Uint8Array(await image.clone().arrayBuffer())).toEqual(new Uint8Array(PIXEL_PNG));
+    await assertContract("GET", "/s/{workspaceId}/api/document/resource", image);
+
+    const missingIds = await fetch(resourceUrl("id=only-one"), { headers: { cookie } });
+    expect(missingIds.status).toBe(400);
+    await assertContract("GET", "/s/{workspaceId}/api/document/resource", missingIds);
+
+    const unknownDocument = await fetch(
+      resourceUrl(`id=no-such-document&rootId=${encodeURIComponent(rootId)}`),
+      { headers: { cookie } },
+    );
+    expect(unknownDocument.status).toBe(404);
+    await assertContract("GET", "/s/{workspaceId}/api/document/resource", unknownDocument);
+
+    // A real document id paired with a foreign root id must not resolve.
+    const wrongRoot = await fetch(
+      resourceUrl(`id=${encodeURIComponent(imageDoc!.id)}&rootId=not-a-root`),
+      { headers: { cookie } },
+    );
+    expect(wrongRoot.status).toBe(404);
+
+    // A non-image indexed document is not a resource destination.
+    const notAnImage = await fetch(
+      resourceUrl(`id=${encodeURIComponent(documentId!)}&rootId=${encodeURIComponent(rootId)}`),
+      { headers: { cookie } },
+    );
+    expect([404, 415]).toContain(notAnImage.status);
+
     const personal = await fetch(`${origin}/s/myproject/api/personal-state`, { headers: { cookie } });
     expect(personal.status).toBe(200);
     await assertContract("GET", "/s/{workspaceId}/api/personal-state", personal);
@@ -2931,7 +2986,9 @@ describe("hub end to end", () => {
     const text = await response.text();
     expect(text).not.toContain("OPENCODE_SERVER_PASSWORD");
     expect(text).not.toMatch(/127\.0\.0\.1:\d+/);
-  });
+    // Retry spawns an agent process, which routinely exceeds the 5s default
+    // once the whole `test:api` set is competing for the machine.
+  }, 30_000);
 
   test("workspace folder names with edge whitespace round-trip exactly", async () => {
     const spaced = path.join(tempRoot, "workspaces", " padded ");

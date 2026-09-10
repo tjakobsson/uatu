@@ -380,6 +380,40 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 
 The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.
 
+## Touch navigation
+
+In touch mode (`html[data-ui-mode="touch"]`) the app presents one surface at a
+time and reaches the others through a floating navigation bar. The design
+reference for this UI is `design/hub-mobile/screenshots-refined/`.
+
+| Aspect | Behavior |
+|---|---|
+| Bar contents | One row: close, an optional **Hub** destination, then the four surface tabs — Files, Preview, Chat, Terminal |
+| Hub destination | Shown only when the session is served behind a hub; links to the hub dashboard, where Settings lives |
+| Placement | A floating inset pill near the bottom edge. It **overlays** the surface and reserves no layout gutter, so surfaces use the whole viewport |
+| Idle policy | Auto-hides after seven idle seconds, collapsing to a draggable edge handle. `Keep Open` suppresses this |
+| Handle | Drag to either edge to reposition; arrow keys move it, `Home` resets it |
+| Preferences | Handle side/position, auto-hide, and Preview control side. Under a hub: **Settings**. Standalone: hold the handle (500ms), or use `contextmenu` / the `ContextMenu` / `Shift+F10` keys |
+| Preference scope | Per device *and* per session origin. A hub shares one key across its workspaces (`uatu:navigation:v1:hub`); a standalone session scopes to its base path (`uatu:presentation:v1:<base>:navigation`). Only the authenticated hub owner may promote to hub scope |
+| Preview file controls | A persistent pill — **Files**, then Previous/Next arrows — in the Preview surface. Arrows hide for a single-file directory and disable at the ends; they never wrap |
+
+Because the bar floats, it covers a strip of the surface beneath it while open.
+Two consequences matter when working here:
+
+- **Scroll reveals** must not land under it. `src/shell/tab-bar.ts` publishes the
+  covered height as `--navigation-occluded`, and the scrollports consume it as
+  `scroll-padding-bottom`. This keeps reveals clear without reintroducing the
+  gutter the design removed.
+- **Pointer events** in that strip go to the bar, not the document. Tests that
+  need to activate content underneath should dismiss the navigation first or
+  activate the target from the keyboard.
+
+A closed bar fades to `opacity: 0` rather than unmounting, so `data-open` — not
+visibility — is the reliable signal for whether it is reachable.
+`tests/e2e/navigation-helpers.ts` wraps both concerns for suites that share the
+bar without owning it; `tests/e2e/navigation-overlay.e2e.ts` owns the policy
+itself.
+
 ## Find and the active surface
 
 ⌘F is owned by the page, not the host. No engine — not Chrome, not

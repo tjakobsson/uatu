@@ -1,7 +1,9 @@
 // Fullscreen Mermaid diagram viewer.
 // Mouse: drag-pan, cursor-anchored wheel zoom, double-click to fit.
 // Touch: one-finger pan, two-finger midpoint-anchored pinch, double-tap to fit.
-// Mounted once on document.body so it survives preview re-renders.
+// Mounted once outside preview content so it survives preview re-renders.
+
+import { workspaceForeground, workspaceOverlayHost, onWorkspaceForegroundChange } from "../hub/mobile/coordinator-context";
 
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 8;
@@ -105,7 +107,7 @@ function createViewer(): ViewerInternals {
     internals.returnFocusTo = null;
     stage.replaceChildren();
     if (target && document.body.contains(target)) {
-      target.focus();
+      if (workspaceForeground()) target.focus();
     }
   });
 
@@ -357,7 +359,8 @@ function createViewer(): ViewerInternals {
     fitToViewport(internals);
   });
 
-  document.body.appendChild(dialog);
+  workspaceOverlayHost().appendChild(dialog);
+  onWorkspaceForegroundChange(() => { if (!workspaceForeground() && dialog.open) dialog.close(); });
   return internals;
 }
 
@@ -372,6 +375,7 @@ function makeToolbarButton(label: string, glyph: string, extraClass?: string): H
 }
 
 function openViewer(internals: ViewerInternals, options: OpenViewerOptions): void {
+  if (!workspaceForeground()) return;
   const clone = options.svg.cloneNode(true) as SVGElement;
   // Re-namespace ids in the clone so internal `url(#x)` and `href="#x"`
   // references resolve to elements inside the clone, not to (possibly

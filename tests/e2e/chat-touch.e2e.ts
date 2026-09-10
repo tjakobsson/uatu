@@ -3,6 +3,7 @@ import type { APIRequestContext, Page } from "@playwright/test";
 import type { ConversationItem } from "../../src/chat/types";
 import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
 import { expect, test } from "./fixtures";
+import { showSurface } from "./navigation-helpers";
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -52,10 +53,13 @@ test("keeps workspace identity above full-width conversation controls", async ({
 test("four tabs preserve chat state and keyboard navigation", async ({ page, request }) => {
   await boot(page, request);
   await expect(page.locator("#touch-tab-bar [role=tab]")).toHaveCount(4);
-  await expect(page.locator("#touch-tab-bar .touch-tab-label")).toHaveText(["Files", "Preview", "Chat", "Terminal"]);
+  // Scope to the surface tabs: the bar also carries a Hub destination, which
+  // is an anchor rather than a tab and is absent outside a Hub.
+  await expect(page.locator("#touch-tab-bar [role=tab] .touch-tab-label")).toHaveText(["Files", "Preview", "Chat", "Terminal"]);
   await page.locator("#chat-input").fill("persistent touch draft");
   await expect(page.locator("#touch-tab-bar")).toBeHidden();
   await page.locator("#chat-input").blur();
+  await page.locator("#navigation-handle").click();
   await expect(page.locator("#touch-tab-bar")).toBeVisible();
   for (const tab of ["files", "preview", "chat"] as const) {
     await page.locator(`#touch-tab-${tab}`).click();
@@ -175,9 +179,14 @@ test("a subagent transcript pushes as a screen and the back gesture pops it", as
   const drilldown = page.locator("#chat-drilldown");
   await expect(drilldown).toBeVisible();
   await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
-  // A layer within the Chat tab, not a way out of it: the tab bar is still
-  // there and Chat is still the selected tab.
-  await expect(page.locator("#touch-tab-bar")).toBeVisible();
+  // A layer within the Chat tab, not a way out of it: the navigation is still
+  // there and Chat is still the selected tab. The bar idles away on its own
+  // timer, so reopen it before asserting it is present rather than racing it.
+  const navigation = page.locator("#touch-tab-bar");
+  if (await navigation.getAttribute("data-open") !== "true") {
+    await page.locator("#navigation-handle").click();
+  }
+  await expect(navigation).toBeVisible();
   await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-selected", "true");
   // The picker is behind the pushed screen and still on the parent — a
   // subagent is never one of its entries.
@@ -266,6 +275,7 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
     Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
   });
   await boot(page, request);
+  await page.locator("#navigation-close").click();
   await openChatConfiguration(page);
   await expect(page.locator("#chat-configuration-done")).toBeFocused();
   await expect(page.locator("#chat-configuration-search")).not.toBeFocused();
@@ -274,11 +284,10 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
   const closedKeyboardBounds = await page.evaluate(() => {
     const dialog = document.querySelector("#chat-configuration-dialog")!.getBoundingClientRect();
     const surface = document.querySelector("#chat-surface")!.getBoundingClientRect();
-    const tabs = document.querySelector("#touch-tab-bar")!.getBoundingClientRect();
-    return { dialogBottom: dialog.bottom, surfaceBottom: surface.bottom, tabTop: tabs.top };
+    return { dialogBottom: dialog.bottom, surfaceBottom: surface.bottom, viewportBottom: window.visualViewport!.height };
   });
   expect(closedKeyboardBounds.dialogBottom).toBeLessThanOrEqual(closedKeyboardBounds.surfaceBottom + 1);
-  expect(closedKeyboardBounds.dialogBottom).toBeLessThanOrEqual(closedKeyboardBounds.tabTop + 1);
+  expect(closedKeyboardBounds.dialogBottom).toBeLessThanOrEqual(closedKeyboardBounds.viewportBottom + 1);
   await page.locator("#chat-configuration-search").focus();
   await page.evaluate(() => {
     const viewport = window.visualViewport as VisualViewport & { height: number };
@@ -419,7 +428,8 @@ test("rotation and live mode switching retain Chat without remounting", async ({
   await page.setViewportSize({ width: 844, height: 390 });
   await expect(page.locator("#chat-input")).toHaveValue("rotation draft");
   await page.locator("#chat-input").blur();
-  await page.locator("#touch-tab-files").click();
+  // Typing dismisses the navigation, so reopen it before reaching for a tab.
+  await showSurface(page, "files");
   // A desktop-capable viewport before escaping touch mode: below the 900px
   // stacked breakpoint the chat panel's viewport guard keeps it collapsed,
   // so the split needs iPad-landscape room to present.

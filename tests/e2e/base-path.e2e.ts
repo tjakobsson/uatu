@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 
+import { openNavigationPreferences } from "./navigation-helpers";
 import { revealTreeRow, treeRow } from "./tree-helpers";
 
 const BASE_PATH = "/s/e2e/";
@@ -89,6 +90,34 @@ test("the SPA boots under the prefix and loads state", async ({ page }) => {
   // The tree rendered from /s/e2e/api/state.
   await revealTreeRow(page, "README.md");
   await expect(treeRow(page, "README.md")).toBeVisible();
+});
+
+test.describe("standalone touch navigation under a Hub-shaped prefix", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  test("does not expose Hub and keeps navigation preferences base-path local", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("uatu:navigation:v1:hub", JSON.stringify({ side: "right", autoHide: false }));
+      localStorage.setItem("uatu:presentation:v1:%2Fs%2Fother%2F:navigation", JSON.stringify({ side: "right", autoHide: false }));
+    });
+    const url = new URL(sessionUrl);
+    url.pathname += "README.md";
+    await page.goto(url.href);
+    await expect(page.locator("#preview")).toContainText("Base Path");
+    await expect(page.locator("#navigation-hub")).toBeHidden();
+    await expect(page.locator("#hub-switcher")).toBeHidden();
+    // The bar carries no Preferences button; hold the handle to open the sheet.
+    await openNavigationPreferences(page);
+    await expect(page.locator("#navigation-side")).toHaveValue("left");
+    await expect(page.locator("#navigation-keep-open")).not.toBeChecked();
+    await page.locator("#navigation-side").selectOption("right");
+    await page.locator("#navigation-keep-open").check();
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await openNavigationPreferences(page);
+    await expect(page.locator("#navigation-side")).toHaveValue("right");
+    await expect(page.locator("#navigation-keep-open")).toBeChecked();
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("uatu:presentation:v1:%2Fs%2Fe2e%2F:navigation")!))).toMatchObject({ side: "right", autoHide: false });
+  });
 });
 
 test("selecting a document produces a prefixed pushState URL and deep links resolve", async ({ page }) => {

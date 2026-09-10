@@ -25,8 +25,7 @@ export type CommitPreviewResolution =
   | { kind: "missing-repository"; repositoryId: string; sha: string }
   | { kind: "missing-commit"; repository: RepositorySnapshot; sha: string };
 
-export function commitPreviewParamsFromUrl(): CommitPreviewParams | null {
-  const url = new URL(window.location.href);
+export function commitPreviewParamsFromUrl(url = new URL(window.location.href)): CommitPreviewParams | null {
   if (appPathname(url.pathname) !== "/") {
     return null;
   }
