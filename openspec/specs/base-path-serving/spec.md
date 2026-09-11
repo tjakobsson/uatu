@@ -7,7 +7,7 @@ Make a session child relocatable under a configured path prefix: every route, as
 ## Requirements
 
 ### Requirement: A serve session is relocatable under a configured base path
-A session child SHALL accept a base path prefix and serve the entire session under it: the HTML shell, static assets, every `/api/*` endpoint (including the SSE event stream and the terminal WebSocket upgrade), the PWA manifest and service worker, and document routes. When a base path is configured, the server SHALL treat requests outside the prefix as not found, and every URL the server or SPA emits — fetches, `EventSource` and WebSocket URLs, pushState document URLs, asset references, anchor targets — SHALL carry the prefix. The base path SHALL reach the SPA via a server-injected boot value in the served HTML, not via client-side inference from `location`.
+A session child SHALL accept a base path prefix and serve the entire session under it: the HTML shell, static assets, every `/api/*` endpoint (including the SSE event stream and the terminal WebSocket upgrade), the PWA manifest and service worker, and document routes. When a base path is configured, the server SHALL treat requests outside the prefix as not found, and every URL the server or SPA emits — fetches, WebSocket URLs, pushState document URLs, asset references, anchor targets — SHALL carry the prefix. The one exception is live delivery: the session's event route is served under the prefix for the hub to subscribe to, while the SPA opens its single live stream at the hub origin (`/api/hub/live`, see `hub-live-stream`) rather than a prefixed `EventSource` URL. The base path SHALL reach the SPA via a server-injected boot value in the served HTML, not via client-side inference from `location`.
 
 #### Scenario: API and documents serve under the prefix
 - **WHEN** the server runs with base path `/s/uatu/` and a client requests `/s/uatu/api/state`
@@ -19,8 +19,8 @@ A session child SHALL accept a base path prefix and serve the entire session und
 - **THEN** the server responds 404 — including for the root, which must not leak the unrelocated bundle shell
 
 #### Scenario: Live reload and terminal work under the prefix
-- **WHEN** the server runs with base path `/s/uatu/` and the SPA is loaded
-- **THEN** the SSE connection is established to `/s/uatu/api/events` and file events update the UI
+- **WHEN** the server runs with base path `/s/uatu/` and the SPA is loaded through the hub
+- **THEN** the session's internal event route answers at `/s/uatu/api/events`, where the hub subscribes to it, and file events reach the page over the hub's live stream at `/api/hub/live`
 - **AND** a terminal pane connects its WebSocket under `/s/uatu/api/terminal`
 
 #### Scenario: Stylesheet asset references relocate with the page
