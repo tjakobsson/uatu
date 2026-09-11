@@ -139,7 +139,9 @@ type Subscriber = {
   // on every `data` written to it.
   cursor: string | undefined;
   // Receives fan-out. False while pending (upstream not live) or while a
-  // conversation catch-up is in flight.
+  // conversation catch-up is in flight. A catch-up that ends while the
+  // upstream is not live leaves the subscriber pending at the cursor it
+  // reached; the upstream's recovery attaches it from there.
   live: boolean;
   // Conversation: fan-out skips events at or before this (same generation)
   // — the subscriber already holds them from its snapshot or catch-up.
@@ -527,24 +529,44 @@ export class LiveBroker {
     const controller = new AbortController();
     subscriber.catchUp = controller;
     const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}`;
+    const release = () => {
+      subscriber.catchUp = null;
+      if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
+      controller.abort();
+    };
+    // The child's verdict on the cursor, or a replay that died under a live
+    // upstream: the subscriber takes a fresh snapshot.
     const finishWithResync = (data?: unknown) => {
       if (controller.signal.aborted || subscriber.detached) return;
-      subscriber.catchUp = null;
-      controller.abort();
+      release();
       subscriber.sink.write(this.envelope(subscriber, data === undefined ? { kind: "resync" } : { kind: "resync", data }, upstream.head || subscriber.cursor || ""));
       this.detach(subscriber);
+    };
+    // The replay ended (or was refused) without reaching the shared
+    // upstream. Under a live upstream that is a failure of its own. Under
+    // one that is down it is the same outage: the subscriber was told
+    // `unavailable` and keeps its progress, and recovery resumes the
+    // catch-up from the cursor it reached. A resync would send the page to
+    // a child that cannot answer.
+    const finishWithoutMerging = () => {
+      if (controller.signal.aborted || subscriber.detached) return;
+      if (upstream.state !== "live") {
+        release();
+        return;
+      }
+      finishWithResync();
     };
     void (async () => {
       let response: Response;
       try {
         response = await this.source.open({ workspaceId: upstream.workspaceId, path, signal: controller.signal });
       } catch {
-        finishWithResync();
+        finishWithoutMerging();
         return;
       }
       if (!response.ok || !response.body) {
         await response.body?.cancel().catch(() => undefined);
-        finishWithResync();
+        finishWithoutMerging();
         return;
       }
       const parser = new SseFrameParser();
@@ -563,9 +585,7 @@ export class LiveBroker {
             if (frame.event !== "chat" || frame.id === undefined) continue;
             this.emitData(subscriber, parseJson(frame.data), frame.id);
             if (this.mergeCatchUp(upstream, subscriber, frame.id)) {
-              subscriber.catchUp = null;
-              if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
-              controller.abort();
+              release();
               await reader.cancel().catch(() => undefined);
               return;
             }
@@ -574,15 +594,19 @@ export class LiveBroker {
       } catch {
         // Aborted by the merge, a detach, or a dead child — decided below.
       }
-      // Ended without merging: the child's stream never ends on its own, so
-      // this is a failure; the subscriber takes a fresh snapshot.
-      finishWithResync();
+      // Ended without merging: the child's stream never ends on its own.
+      finishWithoutMerging();
     })();
   }
 
   // After forwarding a caught-up event with `cursor`: has the subscriber
-  // reached the shared upstream? Then replay what the buffer holds beyond
-  // it, skip anything the fan-out will repeat, and go live.
+  // reached the shared upstream? Then the catch-up is over. Under a live
+  // upstream, replay what the buffer holds beyond the cursor, skip anything
+  // the fan-out will repeat, and go live. Under one that failed or is
+  // reopening, the subscriber stays pending at that cursor: `becomeLive`
+  // attaches it through the normal path, which replays what it is owed and
+  // sends its `ready`. Going live here would tell the page the stream had
+  // recovered when nothing is live, and recovery would pass it over.
   private mergeCatchUp(upstream: Upstream, subscriber: Subscriber, cursor: string): boolean {
     const at = decodeReplayCursor(cursor);
     if (!at) return false;
@@ -590,6 +614,8 @@ export class LiveBroker {
     const buffered = upstream.buffer.some(entry => entry.cursor === cursor);
     const reached = buffered || (reference !== null && reference.generation === at.generation && at.sequence >= reference.sequence);
     if (!reached) return false;
+    if (upstream.state !== "live") return true;
+    subscriber.notifiedUnavailable = false;
     subscriber.live = true;
     this.replayFromBuffer(upstream, subscriber, at);
     this.emitSignal(subscriber, { kind: "ready" }, upstream);
@@ -836,6 +862,9 @@ export class LiveBroker {
       this.metrics.failed(upstream.topic);
       recordUpstreamFailure({ topic: upstream.topic, status });
     }
+    // A catch-up in flight is left to run: it forwards to its subscriber
+    // alone and settles into the pending state (mergeCatchUp,
+    // finishWithoutMerging) when it ends, for recovery to finish.
     for (const subscriber of [...upstream.subscribers]) this.signalUnavailable(upstream, subscriber);
     this.scheduleRetry(upstream);
   }

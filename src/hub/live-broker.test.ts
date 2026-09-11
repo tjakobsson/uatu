@@ -595,6 +595,108 @@ describe("failure and child exit (2.3)", () => {
   });
 });
 
+describe("a shared upstream failing during a conversation catch-up", () => {
+  // A shared conversation upstream at head 6 with a live watcher, and a
+  // second subscriber behind the buffer whose child replay has delivered
+  // event 2 when the shared upstream ends: both are told `unavailable`, the
+  // replay stays readable. Each test stages what happens next. The retry
+  // reopens from the head; the test decides when that reopen goes live.
+  async function failDuringCatchUp() {
+    const child = fakeSource();
+    const live = broker(child.source, { retryMinMs: 20, retryMaxMs: 40 });
+    const watcher = sink();
+    live.subscribe(watcher, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 3) });
+    await waitFor(() => child.opened.length === 1, "shared upstream");
+    const shared = child.opened[0]!;
+    shared.push(": open\n\n");
+    for (let sequence = 4; sequence <= 6; sequence += 1) shared.push(chatFrame("g1", sequence));
+    await waitFor(() => watcher.envelopes.length === 4, "watcher live at 6");
+
+    const behind = sink();
+    live.subscribe(behind, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 1) });
+    const replayPath = `?cursor=${encodeURIComponent(cursorOf("g1", 1))}`;
+    await waitFor(() => child.byPath(replayPath).length === 1, "child replay for the lagging subscriber");
+    const replay = child.byPath(replayPath)[0]!;
+    replay.push(chatFrame("g1", 2));
+    await waitFor(() => behind.envelopes.length === 1, "first caught-up event");
+
+    shared.end();
+    await waitFor(() => kinds(behind.envelopes).includes("unavailable") && kinds(watcher.envelopes).includes("unavailable"), "unavailable on both");
+    expect(replay.cancelled).toBe(false);
+    const reopened = () => child.byPath(`?cursor=${encodeURIComponent(cursorOf("g1", 6))}`)[0];
+    const dataCursors = (envelopes: LiveEnvelope[]) => envelopes.filter(e => e.event.kind === "data").map(e => e.cursor);
+    return { child, live, watcher, behind, replay, reopened, dataCursors };
+  }
+
+  test("a catch-up reaching the shared upstream while it is down ends without ready, and the subscriber is not live", async () => {
+    const { behind, replay, reopened, dataCursors } = await failDuringCatchUp();
+    replay.push(chatFrame("g1", 3) + chatFrame("g1", 4));
+    await waitFor(() => replay.cancelled, "catch-up merged and released");
+    // Past the retry: it reopens from the head but nothing has made it live.
+    await waitFor(() => reopened() !== undefined, "retry from the head");
+    await Bun.sleep(30);
+    expect(kinds(behind.envelopes)).toEqual(["data", "unavailable", "data", "data"]);
+    expect(dataCursors(behind.envelopes)).toEqual([2, 3, 4].map(sequence => cursorOf("g1", sequence)));
+  });
+
+  test("recovery attaches that subscriber: the owed events in order, ready once, then live", async () => {
+    const { behind, watcher, replay, reopened, dataCursors } = await failDuringCatchUp();
+    replay.push(chatFrame("g1", 3) + chatFrame("g1", 4));
+    await waitFor(() => replay.cancelled, "catch-up merged and released");
+    await waitFor(() => reopened() !== undefined, "retry from the head");
+    expect(kinds(behind.envelopes)).not.toContain("ready");
+
+    reopened()!.push(": open\n\n");
+    await waitFor(() => kinds(behind.envelopes).includes("ready"), "ready on recovery");
+    reopened()!.push(chatFrame("g1", 7));
+    await waitFor(() => behind.envelopes.at(-1)?.cursor === cursorOf("g1", 7), "live after recovery");
+    expect(kinds(behind.envelopes)).toEqual(["data", "unavailable", "data", "data", "data", "data", "ready", "data"]);
+    expect(dataCursors(behind.envelopes)).toEqual([2, 3, 4, 5, 6, 7].map(sequence => cursorOf("g1", sequence)));
+    expect(kinds(watcher.envelopes)).toEqual(["ready", "data", "data", "data", "unavailable", "ready", "data"]);
+  });
+
+  test("a catch-up that dies while the shared upstream is down keeps the subscriber pending; recovery resumes it from its progress", async () => {
+    const { child, behind, replay, reopened, dataCursors } = await failDuringCatchUp();
+    // The child's replay ends with the same outage. Not a resync: the page
+    // was told the stream is unavailable and waits for its recovery.
+    replay.end();
+    await waitFor(() => reopened() !== undefined, "retry from the head");
+    await Bun.sleep(30);
+    expect(kinds(behind.envelopes)).toEqual(["data", "unavailable"]);
+
+    reopened()!.push(": open\n\n");
+    const resumedPath = `?cursor=${encodeURIComponent(cursorOf("g1", 2))}`;
+    await waitFor(() => child.byPath(resumedPath).length === 1, "catch-up resumed from the last caught-up cursor");
+    expect(kinds(behind.envelopes)).not.toContain("ready");
+    child.byPath(resumedPath)[0]!.push(chatFrame("g1", 3) + chatFrame("g1", 4));
+    await waitFor(() => kinds(behind.envelopes).includes("ready"), "merged and ready");
+    reopened()!.push(chatFrame("g1", 7));
+    await waitFor(() => behind.envelopes.at(-1)?.cursor === cursorOf("g1", 7), "live after recovery");
+    expect(kinds(behind.envelopes)).toEqual(["data", "unavailable", "data", "data", "data", "data", "ready", "data"]);
+    expect(dataCursors(behind.envelopes)).toEqual([2, 3, 4, 5, 6, 7].map(sequence => cursorOf("g1", sequence)));
+    expect(kinds(behind.envelopes)).not.toContain("resync");
+  });
+
+  test("a catch-up that merges after the upstream recovered goes live once, and a later failure is signalled again", async () => {
+    const { behind, replay, reopened, dataCursors } = await failDuringCatchUp();
+    await waitFor(() => reopened() !== undefined, "retry from the head");
+    reopened()!.push(": open\n\n");
+    await Bun.sleep(30);
+    // Recovery leaves the catch-up to finish; the subscriber is not ready yet.
+    expect(kinds(behind.envelopes)).toEqual(["data", "unavailable"]);
+
+    replay.push(chatFrame("g1", 3) + chatFrame("g1", 4));
+    await waitFor(() => kinds(behind.envelopes).includes("ready"), "merged and ready");
+    expect(kinds(behind.envelopes)).toEqual(["data", "unavailable", "data", "data", "data", "data", "ready"]);
+    expect(dataCursors(behind.envelopes)).toEqual([2, 3, 4, 5, 6].map(sequence => cursorOf("g1", sequence)));
+
+    reopened()!.end();
+    await waitFor(() => kinds(behind.envelopes).at(-1) === "unavailable", "second outage signalled");
+    expect(kinds(behind.envelopes).filter(kind => kind === "ready")).toHaveLength(1);
+    expect(kinds(behind.envelopes).filter(kind => kind === "unavailable")).toHaveLength(2);
+  });
+});
+
 describe("activity (2.4)", () => {
   test("a stopped workspace reports not running, an unreachable child not running, and extra fields are dropped", async () => {
     const child = fakeSource({
