@@ -59,7 +59,6 @@ they do not certify this corrected version. Task 9.6 is still open.
 
 | Decision / version | Record |
 |---|---|
-| Candidate product URL | `[PRIVATE_REVIEW_ORIGIN_REDACTED]/` — user confirmed phone access |
 | Source version / dirty-tree description | Uncommitted frontend implementation over preserved dirty baseline; no clean-Git or released-version claim. |
 | Served frontend content fingerprint | `sha256:dc2b6253b6434c9bb194ef49e58ccbfff7c2080f64da27acb96199db3177b996` — navigation and preview recovery |
 | Evidence snapshot identity | `/review/evidence/manifest.json` supplies snapshot time and individual SHA-256 values, separate from frontend fingerprint. |
@@ -88,8 +87,9 @@ they do not certify this corrected version. Task 9.6 is still open.
 
 ## Procedure
 
-Local readiness, served version, final rerun and URL delivery are recorded.
-Remote/phone readiness is confirmed. The user then explicitly states approve/reject/request changes for
+Historical local readiness, served version, final rerun and handoff delivery are recorded.
+Historical phone access confirmed connectivity only; private access details have
+been removed (see `handoff.md`). The user then explicitly states approve/reject/request changes for
 that version and names each accepted exception. Record their words and date;
 do not infer approval from silence, test results or merely opening the URL.
 Changed served bytes require a new fingerprint and clear review-version scope.
@@ -97,5 +97,3 @@ Changed served bytes require a new fingerprint and clear review-version scope.
 Until then leave **8.3 unchecked**. Tasks 7.1, 7.4, 9.6, 10.4 and 11.4 retain their
 separate pending criteria. Even frontend approval is a stop: seek separate live
 integration authorization, with production-facing delta specs still unmerged.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

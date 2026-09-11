@@ -1,4 +1,4 @@
-# Prepared review hosting (not launched)
+# Local review hosting and optional remote configuration
 
 ## Scoped lifecycle utility (preferred)
 
@@ -12,12 +12,16 @@ bun tests/mobile-hub-review/manage.ts stop
 bun tests/mobile-hub-review/manage.ts restart
 ```
 
-`start` and `restart` default to backend 4703 and the exact public origin below.
-Both accept `--port 4703 --public-origin [PRIVATE_REVIEW_ORIGIN_REDACTED]`.
-The manager deliberately does not inherit hosting environment defaults. Other
-commands operate only on the owned runtime record and accept no routing options.
-Restart requires a verified existing instance; start is the operation for an
-absent one. Wait for E2E to release 4703 before using either.
+With no hosting flags or scoped environment variables, `start` listens only on
+`127.0.0.1:4703` and reports `http://127.0.0.1:4703`. There is no default remote
+origin. Both `start` and `restart` accept `--port N` and `--public-origin ORIGIN`,
+or `UATU_MOBILE_REVIEW_PORT` and `UATU_MOBILE_REVIEW_PUBLIC_ORIGIN`; flags win.
+An unconfigured restart preserves the verified existing record's port and optional
+origin, including older remote records. Explicit settings override only the given
+fields and are validated before stopping. Other commands operate only on the owned
+runtime record and accept no routing options or environment routing overrides.
+Restart requires a verified existing instance; use start for an absent one.
+Wait for any E2E owner to release the chosen port before launching.
 
 The preexisting `runtime/` holds ignored `server.json`, `server.log`, and a
 short-lived exclusive `manage.lock`. Start exclusively creates its record,
@@ -50,37 +54,39 @@ Test-only listener remains hard-bound to `127.0.0.1`. No live Hub authentication
 cookie reads/writes, proxying, request logging or forwarded-header trust is added.
 The public Host must be preserved by the HTTPS proxy. If Origin is present it
 must match that Host's configured origin, not merely another allowed host.
-This is a synthetic tailnet review, not an authenticated production service.
+This is a synthetic review, not an authenticated production service.
 
 Existing backend/HTTPS pairs 4700/443, 4701/8443 and 4702/8444 are reserved.
-The desired new pair is 4703/8445, with exact public origin
-`[PRIVATE_REVIEW_ORIGIN_REDACTED]`.
-The lead must wait for the current E2E owner of 4703 to finish and recheck port
-availability before launching. No Tailscale configuration was changed here.
+Remote review is opt-in: supply an exact canonical tailnet HTTPS origin with a
+dedicated nonreserved port at runtime. Keep actual hostnames and review URLs in
+local ignored runtime material, never committed documentation or defaults.
+Configuring an origin only allows its Host/Origin; it does not configure a proxy,
+expose a listener, or authorize Tailscale changes. Recheck port availability first.
 
 From the repository root, foreground launch (builds fresh frontend/evidence):
 
 ```sh
-bun tests/mobile-hub-review/server.ts --port 4703 --public-origin [PRIVATE_REVIEW_ORIGIN_REDACTED]
+bun tests/mobile-hub-review/server.ts --port 4703
 ```
 
 Only these two flags are accepted. Equivalent scoped environment variables are
 `UATU_MOBILE_REVIEW_PORT` and `UATU_MOBILE_REVIEW_PUBLIC_ORIGIN`; flags win.
-Port 0 supports ephemeral unit checks. There is no host/bind/proxy option.
+Port 0 supports foreground ephemeral unit checks; the manager requires a nonzero
+port. There is no host/bind/proxy option.
 
-For a lead-owned background launch, after verifying the runtime directory exists:
+For an explicitly authorized remote launch, set `REVIEW_PUBLIC_ORIGIN` locally to
+the exact intended HTTPS origin, then pass it without committing its value:
 
 ```sh
-nohup bun tests/mobile-hub-review/server.ts --port 4703 --public-origin [PRIVATE_REVIEW_ORIGIN_REDACTED] > tests/mobile-hub-review/runtime/server.log 2>&1 &
-review_pid=$!
-printf '%s\n' "$review_pid" > tests/mobile-hub-review/runtime/server.pid
+bun tests/mobile-hub-review/manage.ts start --public-origin "$REVIEW_PUBLIC_ORIGIN"
 ```
 
-Runtime output is ignored. Keep the launching shell's `review_pid`; inspect
-`ps -p "$review_pid" -o pid=,command=` before `kill -TERM "$review_pid"`.
-Never use a generic process-name/port kill or blindly reuse a stale PID file.
-Restart means stop this verified process, then repeat the exact launch command.
-SIGTERM/SIGINT close only this server and its synthetic resources.
+Runtime output is ignored and may contain local routing details; redact it before
+sharing. Prefer the manager's verified stop/restart operations. Never use a generic
+process-name/port kill or blindly reuse a stale PID file. SIGTERM/SIGINT close only
+this server and its synthetic resources. To switch an existing remote reviewer to
+local-only, stop it with the manager, unset the scoped public-origin environment
+variable, then start without a public-origin flag.
 
 Reset only this backend:
 
@@ -105,5 +111,3 @@ No persistent listener, Tailscale exposure, dependency installation or live Hub
 operation is part of this preparation. Remote HTTPS/WebSocket checks and actual
 phone safe areas, keyboard, gestures and physical interaction remain unvalidated;
 browser emulation is not physical access or user approval.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

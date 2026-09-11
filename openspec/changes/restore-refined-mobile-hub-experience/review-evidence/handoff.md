@@ -5,7 +5,12 @@ synthetic management/Chat/Terminal protocols only. This is neither live-backend
 validation nor visual/interaction approval. No archive/spec sync or live rollout
 is authorized by these documents or tests.
 
-## Review access (delivered and phone-confirmed 2026-09-10)
+## Local review access (historical phone connectivity confirmed 2026-09-10)
+
+Privacy cleanup: private review access details and machine-specific exposure
+commands have been removed from these review documents. Edited documents are
+not byte-identical to their original captures; historical results, fingerprints
+and approval gates remain historical records, not fresh verification.
 
 **Current candidate:** [creation exit, Session Security and preview recovery](navigation-recovery/verification.md).
 Cancel creation returns to Add Workspace; Devices is inside Session Security.
@@ -17,15 +22,14 @@ The checkpoint `b5d5f30` is the last requested commit/push. Direct actions,
 single Devices entry, deliberate field entry and cold-loading safeguards remain.
 No visual approval or verification waiver is inferred; older captures are historical.
 
-- Product: `[PRIVATE_REVIEW_ORIGIN_REDACTED]/`
-- Separate controller: `[PRIVATE_REVIEW_ORIGIN_REDACTED]/review/controller`
-- Evidence: `[PRIVATE_REVIEW_ORIGIN_REDACTED]/review/evidence`
+- Local-only reviewer: `http://127.0.0.1:4703` when explicitly started.
+  Product `/`, separate controller `/review/controller`, evidence `/review/evidence`.
 - Simulation login: **reviewer / review-only**. Use only disposable opaque key,
   token/passphrase text and harmless Chat Files; never personal secrets.
-- Loopback 4703 is running and Tailscale HTTPS 8445 is configured. Existing
-  443/8443/8444 proxy mappings are unchanged. User confirmed **“It opens”** on
-  their phone, explicitly as connectivity only, not visual approval. This host's
-  self-TLS timeout on both 8445 and existing 443 remains a local diagnostic limit.
+- Historically, the user confirmed **“It opens”** on their phone, explicitly as
+  connectivity only, not visual approval. Other services were unchanged. The
+  self-TLS timeout on both the review and existing HTTPS endpoint remains a
+  historical local diagnostic limit, not a current remote-access claim.
 
 | Served-version field | Status |
 |---|---|
@@ -55,20 +59,14 @@ bun tests/mobile-hub-review/manage.ts stop
 bun tests/mobile-hub-review/manage.ts restart
 ```
 
-Start/restart default to loopback **4703** and the exact public origin above;
-restart requires a verified existing instance. Manager verifies ownership,
+Start defaults to local-only `127.0.0.1:4703`, with no default remote origin.
+An unconfigured restart preserves the verified instance's existing port and
+optional origin; it does not silently change an existing remote setup. Manager verifies ownership,
 startup identity and fingerprint; do not use generic process kills or overwrite
 stale runtime records. Reset affects only this synthetic model, not live state.
-Tailscale configuration was added after inspecting existing mappings. Restore
-only this endpoint after stopping exposure, or remove only it:
-
-```sh
-tailscale serve --bg --https=8445 http://127.0.0.1:4703
-tailscale serve --https=8445 off
-```
-
-Never `tailscale serve reset`; leave existing **4700/443, 4701/8443, 4702/8444**
-untouched. See `tests/mobile-hub-review/hosting.md` for exact origin/host checks,
+An optional public origin requires explicit local runtime configuration; no
+private or default remote origin is published here. Leave other services and
+proxy mappings untouched. See `tests/mobile-hub-review/hosting.md` for origin/host checks,
 allowlisted evidence and lifecycle failure handling. This handoff does not
 itself authorize live integration or changes to the other endpoints.
 
@@ -112,5 +110,3 @@ Responsive: **1102 pass, 0 fail, 0 untested, 1 unsupported**
   **8.3 waits only for the user's explicit served-version approval**. Stop there.
   Even approval requires separately authorized live integration tasks before
   real API/security/routing work, production rollout, spec sync or archive.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

@@ -9,9 +9,11 @@ not live authentication, cryptography, Git, filesystem, provider or PTY behavior
 
 ## Entry, fixture and controller
 
-Candidate origin: `[PRIVATE_REVIEW_ORIGIN_REDACTED]`.
+Local-only reviewer: `http://127.0.0.1:4703` when explicitly started.
 Product `/`, separate `/review/controller`, evidence `/review/evidence`.
-**Not yet exposed or remotely verified in this record.** See `handoff.md`.
+Private review access details were removed. This scenario record predates the
+connectivity-only phone confirmation in `handoff.md`; it does not verify current
+remote access. An optional public origin requires explicit local runtime configuration.
 Simulation login is **reviewer / review-only**. Use disposable opaque key text,
 passphrases and tokens only (for example `disposable-review-only`). Generated
 public strings say `SYNTHETIC-PUBLIC-ONLY` and are unusable keys. No secret is
@@ -172,5 +174,3 @@ Tests below are under `tests/mobile-hub-review/` unless stated otherwise.
    services or authorization correctness is certified. Full final browser rerun
    after cross-workspace expansion and remote access/version capture await lead
    update. **User approval and accepted exceptions remain entirely pending.**
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

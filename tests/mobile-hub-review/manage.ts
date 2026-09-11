@@ -6,8 +6,16 @@ import { reviewHostingOptions } from "./hosting";
 const runtime = new URL("./runtime/", import.meta.url);
 const recordPath = new URL("server.json", runtime);
 const serverPath = new URL("./server.ts", import.meta.url).pathname;
-export const defaultPublicOrigin = "https://review-fixture.example-tailnet.ts.net:8445";
-export type Ownership = { schema: 1; pid: number; instanceId: string; port: number; publicOrigin: string; processIdentity: string; fingerprint: string };
+export type Ownership = { schema: 1; pid: number; instanceId: string; port: number; publicOrigin?: string; processIdentity: string; fingerprint: string };
+type Hosting = ReturnType<typeof reviewHostingOptions>;
+
+export function hostingArgs(options: Hosting): string[] {
+  return ["--port", String(options.port), ...(options.publicOrigin === undefined ? [] : ["--public-origin", options.publicOrigin])];
+}
+
+export function hostingUrl(options: Hosting): string {
+  return options.publicOrigin ?? `http://127.0.0.1:${options.port}`;
+}
 
 export async function processIdentity(pid: number): Promise<string> {
   if (!Number.isSafeInteger(pid) || pid <= 1) throw new Error("Unsafe PID");
@@ -26,8 +34,8 @@ export async function readHealth(port: number): Promise<any> {
 
 export async function verifyOwned(record: Ownership, inspect = processIdentity, health = readHealth): Promise<void> {
   if (record.schema !== 1 || !/^[a-f0-9-]{36}$/.test(record.instanceId) || !/^sha256:[a-f0-9]{64}$/.test(record.fingerprint)) throw new Error("Invalid ownership record");
-  reviewHostingOptions(["--port", String(record.port), "--public-origin", record.publicOrigin], {});
-  if (!record.processIdentity.endsWith(` ${process.execPath} ${serverPath} --port ${record.port} --public-origin ${record.publicOrigin}`)) throw new Error("Unexpected startup command");
+  const options = managedHostingOptions(hostingArgs({ port: record.port, publicOrigin: record.publicOrigin }), {});
+  if (!record.processIdentity.endsWith(` ${process.execPath} ${serverPath} ${hostingArgs(options).join(" ")}`)) throw new Error("Unexpected startup command");
   if (await inspect(record.pid) !== record.processIdentity) throw new Error("PID/startup identity mismatch; refusing operation");
   const result = await health(record.port);
   if (result.status !== "ready" || result.backend !== "synthetic" || result.assembly !== "same-document-mobile" || result.pid !== record.pid || result.instanceId !== record.instanceId || result.version?.fingerprint !== record.fingerprint) throw new Error("Instance/build identity mismatch; refusing operation");
@@ -39,14 +47,14 @@ async function load(): Promise<Ownership> {
   return JSON.parse(await readFile(recordPath, "utf8"));
 }
 
-export function managedHostingOptions(args: string[]) {
-  const options = reviewHostingOptions(args, { UATU_MOBILE_REVIEW_PORT: "4703", UATU_MOBILE_REVIEW_PUBLIC_ORIGIN: defaultPublicOrigin });
+export function managedHostingOptions(args: string[], env: Record<string, string | undefined> = process.env) {
+  const options = reviewHostingOptions(args, env);
   if (!options.port) throw new Error("Managed listener requires an explicit nonzero port");
   return options;
 }
 
 async function start(args: string[]) {
-  const options = managedHostingOptions(args);
+  const options = managedHostingOptions(args, {});
   await assertFreePort(options.port);
   // Exclusive ownership record: never overwrite another launcher or stale PID.
   const file = await open(recordPath, "wx", 0o600);
@@ -55,9 +63,9 @@ async function start(args: string[]) {
     const log = await open(new URL("server.log", runtime), "a", 0o600);
     const instanceId = crypto.randomUUID();
     try {
-      child = spawn(process.execPath, [serverPath, "--port", String(options.port), "--public-origin", options.publicOrigin!], {
+      child = spawn(process.execPath, [serverPath, ...hostingArgs(options)], {
         detached: true, stdio: ["ignore", log.fd, log.fd],
-        env: { ...process.env, UATU_MOBILE_REVIEW_INSTANCE_ID: instanceId },
+        env: { ...process.env, UATU_MOBILE_REVIEW_PUBLIC_ORIGIN: options.publicOrigin, UATU_MOBILE_REVIEW_INSTANCE_ID: instanceId },
       });
     } finally { await log.close(); }
     let spawnError: Error | undefined;
@@ -69,11 +77,11 @@ async function start(args: string[]) {
       try {
         const health = await readHealth(options.port);
         if (health.instanceId === instanceId && health.pid === child.pid) {
-          const record: Ownership = { schema: 1, pid: child.pid!, instanceId, port: options.port, publicOrigin: options.publicOrigin!, processIdentity: await processIdentity(child.pid!), fingerprint: health.version?.fingerprint };
+          const record: Ownership = { schema: 1, pid: child.pid!, instanceId, port: options.port, publicOrigin: options.publicOrigin, processIdentity: await processIdentity(child.pid!), fingerprint: health.version?.fingerprint };
           await verifyOwned(record);
           await file.truncate(0); await file.write(JSON.stringify(record, null, 2), 0, "utf8"); await file.sync();
           child.unref();
-          console.info(JSON.stringify({ ...record, url: options.publicOrigin, evidence: `${options.publicOrigin}/review/evidence` }, null, 2));
+          console.info(JSON.stringify({ ...record, url: hostingUrl(options), evidence: `${hostingUrl(options)}/review/evidence` }, null, 2));
           return;
         }
       } catch { /* bounded startup wait; never kill an unverified PID */ }
@@ -83,8 +91,8 @@ async function start(args: string[]) {
   } finally { child?.unref(); await file.close(); }
 }
 
-async function stop() {
-  const record = await load();
+async function stop(owned?: Ownership) {
+  const record = owned ?? await load();
   await verifyOwned(record);
   process.kill(record.pid, "SIGTERM");
   for (let attempt = 0; attempt < 80; attempt++) {
@@ -96,6 +104,21 @@ async function stop() {
   throw new Error("Graceful stop not confirmed; record retained, no escalation");
 }
 
+// Injectable lifecycle keeps restart ordering testable without signalling real PIDs.
+export async function restartOwned<T>(args: string[], env: Record<string, string | undefined>, lifecycle: {
+  load(): Promise<Ownership>; verify(record: Ownership): Promise<void>;
+  stop(record: Ownership): Promise<void>; start(args: string[]): Promise<T>;
+}): Promise<T> {
+  const record = await lifecycle.load();
+  await lifecycle.verify(record);
+  const options = managedHostingOptions(args, {
+    UATU_MOBILE_REVIEW_PORT: env.UATU_MOBILE_REVIEW_PORT ?? String(record.port),
+    UATU_MOBILE_REVIEW_PUBLIC_ORIGIN: env.UATU_MOBILE_REVIEW_PUBLIC_ORIGIN ?? record.publicOrigin,
+  });
+  await lifecycle.stop(record);
+  return lifecycle.start(hostingArgs(options));
+}
+
 export async function manage(args: string[]) {
   const [command, ...options] = args;
   if (!["start", "stop", "restart", "reset", "status"].includes(command ?? "")) throw new Error("Usage: bun tests/mobile-hub-review/manage.ts start|stop|restart|reset|status [--port N --public-origin ORIGIN]");
@@ -104,9 +127,9 @@ export async function manage(args: string[]) {
   const lockPath = new URL("manage.lock", runtime);
   const lock = await open(lockPath, "wx", 0o600);
   try {
-    if (command === "start") return await start(options);
+    if (command === "start") return await start(hostingArgs(managedHostingOptions(options)));
     if (command === "stop") return await stop();
-    if (command === "restart") { managedHostingOptions(options); await stop(); return await start(options); }
+    if (command === "restart") return await restartOwned(options, process.env, { load, verify: verifyOwned, stop, start });
     const record = await load(); await verifyOwned(record);
     if (command === "status") { console.info(JSON.stringify(await readHealth(record.port), null, 2)); return; }
     const response = await fetch(`http://127.0.0.1:${record.port}/review/reset`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scenario: "mixed" }), signal: AbortSignal.timeout(1500), redirect: "error" });

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { reviewHostingOptions, validatePublicOrigin } from "./hosting";
 import { buildEvidenceAssets, evidenceSelection } from "./hosting-evidence";
 
+// Synthetic parser fixture only, never a default or a live review address.
 const origin = "https://review-fixture.example-tailnet.ts.net:8445";
 test("hosting configuration is explicit, dedicated, canonical and loopback-only", () => {
   expect(reviewHostingOptions([], {})).toEqual({ port: 4703, publicOrigin: undefined });

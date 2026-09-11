@@ -52,7 +52,7 @@ variants remain rejected. Red HTTP and real-browser tests preceded both repairs.
   `sha256:1aedc5d3e794349e4bcafb05309e303ea3dfff1185dfd1894104ff7f3e10f55b`.
 - Uncommitted correction after the requested **b5d5f30** checkpoint. Fingerprints
   identify asset bytes, not a clean Git revision, model state or human approval.
-- Review: `[PRIVATE_REVIEW_ORIGIN_REDACTED]/`.
+- Private review access details removed; local-only review instructions: `../handoff.md`.
   Simulation login **reviewer / review-only**; never enter real credentials.
 
 ## Final verification
@@ -97,5 +97,3 @@ All browser results are local browser emulation, not physical iPhone/VoiceOver
 certification. Existing full-app/golden/historical-interior and user-approval gates
 remain open. No dependency installation, new live backend integration, spec sync,
 archive or second commit/push is implied by publishing this correction.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

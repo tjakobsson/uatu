@@ -91,7 +91,8 @@ not this new action placement.
 
 ## Review this version
 
-Refresh <[PRIVATE_REVIEW_ORIGIN_REDACTED]/> after the
+Private review access details have been removed; see `handoff.md` for local-only access.
+Refresh the locally started reviewer after the
 isolated restart. Simulation login remains **reviewer / review-only**; never
 enter personal secrets. Existing Hub/test/reference endpoints remain unchanged.
 
@@ -99,5 +100,3 @@ Please review folder traversal/Back, a locked credential and Technical details,
 tool options, Default Folder browsing, a long-form validation error, and Clone
 review/unlock/cancellation. Report awkward wording, inaccessible controls or
 unexpected navigation. No visual/interaction approval is recorded yet.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

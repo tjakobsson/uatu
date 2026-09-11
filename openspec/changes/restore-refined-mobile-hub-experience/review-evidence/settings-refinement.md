@@ -86,10 +86,9 @@ historical, not the current Settings control placement.
 
 ## Review boundary
 
-Reload <[PRIVATE_REVIEW_ORIGIN_REDACTED]/> for this version.
+Reload the locally started reviewer for this version (see `handoff.md`).
+Private review access details have been removed.
 Simulation login remains **reviewer / review-only**. Existing live Hub, test and
 reference endpoints are untouched. No real credentials, Git/clone, provider,
 PTY, public API, dependency, commit, spec-sync or archive work is authorized by
 this review. Visual and interaction approval remain explicitly pending.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

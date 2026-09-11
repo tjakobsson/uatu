@@ -84,10 +84,9 @@ approved goldens.
 
 ## Review
 
-Reload <[PRIVATE_REVIEW_ORIGIN_REDACTED]/>. Check a credential's
+Private review access details have been removed; see `handoff.md` for local-only access.
+Reload the locally started reviewer. Check a credential's
 direct actions, unlocking, a preference editor, a destructive confirmation, and
 explicit Check Results/report navigation. The controller remains separate at
 `/review/controller`; simulation login is **reviewer / review-only**. Never enter
 real secrets. Approval remains pending for this exact served version.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

@@ -51,7 +51,7 @@ not a claim about live workspace contents.
 - Uncommitted refinement after `b7d51f7`, the previously requested fork checkpoint.
   Fingerprints identify served asset bytes, not Git cleanliness, live backend
   correctness, synthetic model state, or visual approval.
-- Product URL: `[PRIVATE_REVIEW_ORIGIN_REDACTED]/`.
+- Private review access details removed; local-only review instructions: `../handoff.md`.
   Use only simulation credentials **reviewer / review-only**.
 
 ## Verification
@@ -110,5 +110,3 @@ Repository status confirms no edits to workspace interior/chrome owners; scoped
 continuity tests are not a substitute for every lifecycle/accessibility scenario.
 Live operations, full diff/search/provider coverage and approval remain outside
 this pass. No real backend rollout, spec sync, archive or new commit/push is implied.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.

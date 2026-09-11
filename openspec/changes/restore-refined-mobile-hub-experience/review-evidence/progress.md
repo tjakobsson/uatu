@@ -1,5 +1,10 @@
 # Frontend implementation progress
 
+Privacy cleanup: machine-specific exposure commands were removed. Historical
+process/instance identifiers, run results and fingerprints below are retained as
+verification facts, not current runtime instructions. See `handoff.md` for
+local-only access and the notice about edited evidence documents.
+
 ## 2026-09-11 — creation exit, Security and preview recovery published
 
 First committed/pushed the prior candidate as **b5d5f30** on
@@ -260,9 +265,9 @@ Final lead run: `bun test ./src/hub/mobile ./tests/mobile-hub-review` **202 pass
 An earlier full-run discovery error in the Bun-only responsive runner was fixed
 by making it inert on import; the final run includes that discovery correction.
 
-`manage.ts start` launched owned loopback 4703. `tailscale serve --bg --https=8445
-http://127.0.0.1:4703` added only that mapping; prior 443/8443/8444 JSON entries
-are unchanged. `served-smoke.ts http://127.0.0.1:4703` passed against the running
+`manage.ts start` launched owned loopback 4703. Historical HTTPS exposure added
+only the review mapping; prior mappings were unchanged. The machine-specific
+exposure command has been removed. `served-smoke.ts http://127.0.0.1:4703` passed against the running
 instance in both browsers (controller, dashboard, HTTP/SSE, real Terminal
 WebSocket, Settings sheet, same-document Return and evidence).
 

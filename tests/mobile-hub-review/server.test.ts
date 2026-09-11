@@ -73,6 +73,20 @@ test("configured public Host requires its exact origin and never trusts forwarde
   } finally { review.stop(); }
 });
 
+test("unconfigured listener allows only loopback Host and same-origin requests", async () => {
+  const review = await startReviewServer({ port: 0, assets: new Map() });
+  const syntheticOrigin = "https://review-fixture.example-tailnet.ts.net:8445";
+  try {
+    const rejectedHeaders: Record<string, string>[] = [
+      { Host: new URL(syntheticOrigin).host },
+      { Origin: syntheticOrigin },
+      { "Sec-Fetch-Site": "cross-site" },
+    ];
+    for (const headers of rejectedHeaders) expect((await fetch(`${review.url}/review/health`, { headers })).status).toBe(403);
+    expect((await fetch(`${review.url}/review/health`, { headers: { Origin: review.url } })).status).toBe(200);
+  } finally { review.stop(); }
+});
+
 test("controller advertises explicit facts and exposes fenced attempt expiry via named controls", async () => {
   const review = await startReviewServer({ port: 0, assets: new Map() });
   const post = (path: string, value: unknown) => fetch(`${review.url}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });

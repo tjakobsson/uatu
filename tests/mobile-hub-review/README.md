@@ -30,6 +30,15 @@ Host checks, no CORS/proxy and a same-origin CSP prevent fallback to live servic
 Unknown operations/routes fail closed. Missing-route logs retain bounded method/
 contract labels, never supplied URL, header, body or secret text.
 
+For managed background hosting, use `bun tests/mobile-hub-review/manage.ts start`:
+with no hosting configuration it is local-only on `127.0.0.1:4703`. Remote origin
+allowlisting requires an explicit runtime `--public-origin` or
+`UATU_MOBILE_REVIEW_PUBLIC_ORIGIN`; there is no committed public address. Keep
+actual routing details local and redact runtime output before sharing. An
+unconfigured `restart` preserves the verified existing port/origin (including
+older ownership records); `status`, `reset`, and `stop` use that record, not current
+environment settings. See [hosting.md](hosting.md) for lifecycle and security rules.
+
 ## Assembly and controls
 
 `startReviewServer({ port?, assets? })` returns `{ url, synthetic, protocols, stop }`.
@@ -166,3 +175,10 @@ Focused checks (disposable loopback **4731**, never the published 4703 reviewer)
 UATU_REVIEW_PICKER_EVIDENCE="openspec/changes/restore-refined-mobile-hub-experience/review-evidence/preview-refinement/folder-picker" UATU_REVIEW_PREVIEW_EVIDENCE="openspec/changes/restore-refined-mobile-hub-experience/review-evidence/preview-refinement/previews" bunx --no-install playwright test --config tests/mobile-hub-review/preview-refinement.config.ts
 bunx --no-install playwright test --config tests/mobile-hub-review/preview-boundary.config.ts
 ```
+# Public report privacy
+
+Raw Playwright JSON may include personal absolute checkout paths. Before retaining
+or publishing a report, replace its checkout prefix with `<REPO_ROOT>` and run
+`bun test tests/mobile-hub-review/privacy.test.ts`. Keep the remaining report data,
+including results and failures, intact. Raw reports belong in ignored local output;
+do not assume running the JSON reporter produces publication-safe content.

@@ -99,9 +99,8 @@ open; previous full-suite counts are not inherited.
 
 ## Review
 
-Refresh <[PRIVATE_REVIEW_ORIGIN_REDACTED]/>. Simulation
+Private review access details have been removed; see `handoff.md` for local-only access.
+Refresh the locally started reviewer. Simulation
 login remains **reviewer / review-only**. The controller and evidence remain
 separate from the product viewport. No live Hub/backend integration, production
 operations, dependency installation, spec sync or archive was performed.
-
-> Privacy redaction: concrete private review endpoints have been removed; the placeholders above are not live URLs. Historical measurements and outcomes are unchanged.
