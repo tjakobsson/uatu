@@ -215,9 +215,13 @@ export function mountMobileCoordinator(options: {
     if (!view.hasTask || workspaceForeground() || taskContextUrl !== location.href) return false;
     restoringTaskHistory = true;
     try {
-      if (view.cancelTaskFromHistory() === "blocked") {
+      const result = view.cancelTaskFromHistory();
+      if (result === "blocked" || view.hasTask) {
         // Back already landed on the workflow's safe base entry. Restore the
         // pending entry synchronously, retaining its exact DOM/operation owner.
+        // Nested picker/review Back may instead restore an editor. That live
+        // draft still owns a task entry; its next Back must land on the safe
+        // base detail rather than skip Add Workspace (or its other caller).
         // No history.forward() promise may race the eventual result/navigation.
         taskHistory.open({ route: currentRoute, scroll: history.state?.mobileHub?.scroll });
       }

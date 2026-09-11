@@ -200,10 +200,11 @@ test("detail history addresses safe frontend identity and managing B retains A",
   await page.goBack();
   await expect(page.locator("#mobile-hub-root h1:visible")).toHaveText("Workspaces");
   await page.locator('[data-action="settings"]').click();
-  await page.locator('[data-action="devices"]').click();
+  await page.locator('[data-action="security"]').click();
+  await page.locator('[data-flow="devices"]').click();
   await expect(page).toHaveURL(/\/settings\?detail=devices$/);
   await page.goBack();
-  await expect(page.locator("#mobile-hub-root h1:visible")).toHaveText("Settings");
+  await expect(page.locator("#mobile-hub-root h1:visible")).toHaveText("Session Security");
   await page.goForward();
   await expect(page.locator("#mobile-hub-root h1:visible")).toHaveText("Devices");
   await page.locator('[data-action="return"]').click();

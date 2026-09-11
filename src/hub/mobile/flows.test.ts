@@ -78,18 +78,32 @@ function harness(overrides: Partial<MobileHubBackend> = {}) {
   return { root, ui, click, chooseKey, input, set, calls, opens, region, invalidate: (e: Invalidation) => invalidate(e), stream: (e: CloneStreamEvent) => stream(e), mutations: (name: string) => calls.filter(c => c.operation === name) };
 }
 
-test("Create Workspace keeps one prominent configure command after canceling its editor", async () => {
+test("canceling creation returns to Add Workspace without a redundant configure page", async () => {
   const h = harness(); await h.ui.ready;
   h.ui.showDetail({ kind: "add-workspace" }); await settle();
   h.click("create"); await settle(); h.click("cancel-sheet");
-  expect(h.region().querySelectorAll('[data-flow="edit"]')).toHaveLength(1);
-  expect(h.region().querySelector('[data-flow="edit"]')?.textContent).toBe("Configure new workspace");
-  expect(h.region().querySelector('[data-flow="edit"]')?.classList.contains("mh-commit")).toBe(true);
-  expect(h.region().querySelectorAll(".mh-commit")).toHaveLength(1);
+  expect(h.region().querySelector("h1")?.textContent).toBe("Add Workspace");
+  expect(h.root.textContent).not.toContain("Configure new workspace");
   expect(h.region().querySelector("input")).toBeNull();
-  h.click("edit");
+  h.click("create"); await settle();
   expect(h.input("parent").value).toBe("/projects");
   expect(h.region().querySelector('[data-flow="browse"]')?.classList.contains("mh-commit")).toBe(false);
+  expect(h.calls.some(call => /^(create|configure)/.test(call.operation))).toBe(false);
+});
+
+test("creation loading Cancel rejects late completion and read failures remain cancelable", async () => {
+  let release!: (result: ReadResult<{ configured: string; configuredAvailable: boolean; effective: string }>) => void;
+  let loading = false;
+  const h = harness({ readDefaultFolder: () => loading ? new Promise(resolve => { release = resolve; }) : Promise.resolve(available({ configured: "/projects", configuredAvailable: true, effective: "/projects" })) });
+  await h.ui.ready; loading = true;
+  h.ui.showDetail({ kind: "add-workspace" }); h.click("create");
+  expect(h.region().textContent).toContain("Loading default folder"); h.click("cancel-sheet");
+  release(available({ configured: "/late", configuredAvailable: true, effective: "/late" })); await settle();
+  expect(h.region().querySelector("h1")?.textContent).toBe("Add Workspace");
+  expect(h.region().querySelector("input")).toBeNull();
+  h.click("create"); release({ status: "unavailable", problem: { kind: "unavailable", message: "Folder service unavailable" } }); await settle();
+  expect(h.region().textContent).toContain("Folder service unavailable");
+  h.click("cancel-sheet"); expect(h.region().querySelector("h1")?.textContent).toBe("Add Workspace");
   expect(h.calls.some(call => /^(create|configure)/.test(call.operation))).toBe(false);
 });
 
@@ -317,13 +331,30 @@ describe("assignment, workspace and account flows", () => {
     expect([...h.region().querySelectorAll("h1,h2")].filter(el => el.textContent === "Atlas")).toHaveLength(1);
     for (const key of ["edit-auth-a-0", "edit-auth-a-1", "remove-a-0", "remove-a-1", "remove-a-2", "edit-a", "new-a"]) expect(h.region().querySelectorAll(`[data-flow="${key}"]`)).toHaveLength(1);
   });
-  test("Devices has one Settings navigation entry, not a second Security command; same-name sessions remain distinct", async () => {
+  test("Devices has one Session Security entry and contextual Back; same-name sessions remain distinct", async () => {
     const h = harness({ readDevices: async () => available([{ handle: "one", deviceLabel: "Phone", issuedAt: 1, current: false }, { handle: "two", deviceLabel: "Phone", issuedAt: 2, current: true }]) }); await h.ui.ready;
-    h.ui.show("settings"); await settle(); expect(h.root.querySelectorAll('[data-action="devices"]')).toHaveLength(1);
-    h.ui.showDetail({ kind: "security" }); await settle(); expect(h.region().querySelector('[data-flow="devices"]')).toBeNull();
+    h.ui.show("settings"); await settle(); expect(h.root.querySelectorAll('[data-action="devices"]')).toHaveLength(0);
+    h.ui.showDetail({ kind: "security" }); await settle(); expect(h.region().querySelectorAll('[data-flow="devices"]')).toHaveLength(1);
+    expect(h.region().querySelector('[data-flow="devices"]')?.textContent).toContain("2");
     expect(h.region().querySelectorAll('[data-flow="signout"]')).toHaveLength(1); expect(h.region().querySelector("[data-shared-uid]")).toBeNull();
     expect(h.region().textContent).toContain("Shared Hub account policy"); expect(h.region().textContent).toContain("Login and sessions");
-    h.ui.showDetail({ kind: "devices" }); await settle(); expect(h.region().querySelectorAll('[data-flow^="device-"]')).toHaveLength(2);
+    h.click("devices"); await settle(); expect(h.region().querySelectorAll('[data-flow^="device-"]')).toHaveLength(2);
+    h.click("flow-back"); await settle(); expect(h.region().querySelector("h1")?.textContent).toBe("Session Security");
+    expect(h.mutations("revokeDevice")).toHaveLength(0); expect(h.mutations("signOut")).toHaveLength(0);
+  });
+  test("Security device count distinguishes loading, zero and unavailable; direct failed Devices returns to Security", async () => {
+    let release!: (value: Awaited<ReturnType<MobileHubBackend["readDevices"]>>) => void;
+    const h = harness({ readDevices: () => new Promise(resolve => { release = resolve; }) }); await h.ui.ready;
+    h.ui.showDetail({ kind: "security" });
+    expect(h.region().querySelector('[data-flow="devices"]')?.textContent).toContain("Loading…");
+    release(available([])); await settle();
+    expect(h.region().querySelector('[data-flow="devices"]')?.textContent).toContain("0 device sessions");
+    expect(h.region().querySelector('[data-flow="devices"]')?.getAttribute("aria-label")).toBe("Devices, 0 device sessions");
+    h.ui.showDetail({ kind: "security" }); release({ status: "unavailable", problem: { kind: "unavailable", message: "No connection" } }); await settle();
+    expect(h.region().querySelector('[data-flow="devices"]')?.textContent).toContain("Unavailable");
+    h.ui.showDetail({ kind: "devices" }); release({ status: "unavailable", problem: { kind: "unavailable", message: "No connection" } }); await settle();
+    expect(h.region().querySelector('[data-flow="flow-back"]')?.textContent).toContain("Back to Session Security");
+    h.click("flow-back"); expect(h.region().querySelector("h1")?.textContent).toBe("Session Security");
   });
   test("Stop and Forget confirmation produce distinct effects and named outcomes", async () => {
     let running = true;

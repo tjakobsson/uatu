@@ -100,8 +100,9 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   } else {
     setFollowEnabled(false);
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
-    if (requestedDoc && requestedDoc.kind !== "binary") {
-      // Direct link to a known non-binary doc — force follow off (Rule
+    if (requestedDoc) {
+      // Direct link to any indexed file, including images/binary fallbacks.
+      // loadDocument owns the representation; force follow off (Rule
       // "URL direct links force OFF on boot") and override the
       // server-provided default selection.
       setSelectedId(requestedDoc.id);

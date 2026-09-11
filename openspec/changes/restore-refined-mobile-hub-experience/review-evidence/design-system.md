@@ -8,6 +8,10 @@ and **composed empty states**, used by actual Hub flows and the reference catalo
 See [preview-refinement/verification.md](preview-refinement/verification.md) for
 current evidence and limits; the read-only picker remains separate from management.
 
+Latest behavior/publication: [navigation-recovery/verification.md](navigation-recovery/verification.md).
+Creation Cancel exits to Add Workspace (no Configure landing page); Devices lives
+inside Session Security. Shared control recipes and workspace visuals are unchanged.
+
 ## Use it
 
 - Interactive reference: **`/review/design-system`**
@@ -46,10 +50,10 @@ the reviewer's stored dismissal. Use dummy values only.
 ## Identity
 
 Product frontend:
-`sha256:49845329baf12c14a8da54b584cfb43c3f6c8152189a10adda6c0dfcbbd7c239`
+`sha256:dc2b6253b6434c9bb194ef49e58ccbfff7c2080f64da27acb96199db3177b996`
 
 Independent reference build (including the usage guide):
-`sha256:3f0423af7bc88fb972af6e0553d8db50ec8fecc33c2f77489acb668e1d173a22`
+`sha256:1aedc5d3e794349e4bcafb05309e303ea3dfff1185dfd1894104ff7f3e10f55b`
 
 The reference manifest at `/review/design-system/manifest.json` reports its own
 identity. It does not alter the workspace asset fingerprint or imply approval.
@@ -58,7 +62,7 @@ directory listing, source-map exposure or request-derived filesystem read.
 
 ## Verification
 
-- Focused product/review suite: **393 passed, 0 failed; 4851 assertions**.
+- Current focused product/review/preview/boot suite: **437 passed, 0 failed; 5151 assertions**.
 - Product and review-runtime TypeScript checks: **passed**.
 - Tests enforce shared implementation identity, escaping, distinct semantic
   roles, native switch/radio drafts, token completeness, root scoping, one base

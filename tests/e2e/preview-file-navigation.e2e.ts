@@ -17,6 +17,21 @@ async function boot(page: Page, url = "/nav/.first.md") {
 
 test.beforeEach(async ({ request }) => { await request.post("/__e2e/reset", { data: { extras, follow: false } }); });
 
+test("explicit binary URLs and reload select indexed images or the binary fallback", async ({ page }) => {
+  for (const path of ["nav/b #?.svg", "nav/d.bin"]) {
+    await page.goto(`/${path.split("/").map(encodeURIComponent).join("/")}`);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(page.locator("#preview-path")).toHaveText(path);
+      await expect(overlay(page)).toBeVisible();
+      if (path.endsWith(".svg")) await expect(page.locator("#preview .image-preview img")).toBeVisible();
+      else await expect(page.locator("#preview")).toContainText("isn't viewable");
+      await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+      expect(await page.evaluate(() => history.state.documentId)).toBeTruthy();
+      if (attempt === 0) await page.reload();
+    }
+  }
+});
+
 test("mixed siblings, boundaries, reserved image URLs, history and Back to the same tree", async ({ page }) => {
   await boot(page);
   await expect(overlay(page).getByRole("button", { name: "Previous file (first file)", exact: true })).toBeDisabled();

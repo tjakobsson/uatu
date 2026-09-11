@@ -47,7 +47,7 @@ for (const typed of [false, true]) test(`an after-effect old unauthorized respon
     await route.fulfill(typed ? { status: 200, contentType: "application/json", body: JSON.stringify({ status: "unavailable", problem: { kind: "unauthorized", message: "Obsolete session" } }) } : { status: 401, body: "Old session" });
     released = true;
   });
-  await page.goto("/settings"); await expect.poll(() => arrived).toBe(true);
+  await page.goto("/settings?detail=security"); await expect.poll(() => arrived).toBe(true);
   await request.post("/review/control/invalidateAuthentication", { data: [] });
   await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
   await page.getByLabel("Username", { exact: true }).fill("reviewer");
@@ -57,6 +57,7 @@ for (const typed of [false, true]) test(`an after-effect old unauthorized respon
   release(); await expect.poll(() => released).toBe(true); await page.waitForTimeout(200);
   await expect(page.getByRole("heading", { name: "Sign in required" })).toHaveCount(0);
   await page.locator('[data-action="settings"]').click();
-  await page.locator('[data-action="devices"]').click();
+  await page.locator('[data-action="security"]').click();
+  await page.locator('[data-flow="devices"]').click();
   await expect(page.locator(".mh-flow-page")).toContainText("Synthetic browser");
 });

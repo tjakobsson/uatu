@@ -1,9 +1,13 @@
 import type { StatePayload } from "../../src/shared/types";
 import { renderMarkdownToHtml, renderCodeAsHtml } from "../../src/render/markdown";
 import { renderAsciidocToHtml } from "../../src/render/asciidoc";
+import { languageForName } from "../../src/document/languages";
 
 /** Literal, memory-only examples. Never resolve a fixture name against disk. */
 export const previewExamples = [
+  { path: "examples/operations/brief.md", kind: "markdown", source: "# Expedition brief\n\nA synthetic mixed-format navigation example.\n" },
+  { path: "examples/operations/config.ts", kind: "text", source: 'export const expedition = { station: "cove", synthetic: true };\n' },
+  { path: "examples/operations/notes.txt", kind: "text", source: "Synthetic observation notes.\nNo live workspace was read.\n" },
   { path: "examples/START-HERE.md", kind: "markdown", source: `---
 title: Preview field guide
 author: Synthetic reviewer
@@ -205,16 +209,27 @@ printf '%s\\n' 'synthetic example'
 export const previewImagePath = "/examples/media/coast.svg";
 export const previewImage = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-label="Synthetic coastal landscape"><rect width="960" height="480" fill="#d9edf4"/><circle cx="770" cy="100" r="48" fill="#f7c768"/><path d="M0 320 220 90 450 320 620 170 850 340H0" fill="#587b79"/><path d="m155 160 65-70 80 105-75-25-30 20z" fill="#f4f2e9"/><path d="M0 320Q240 280 480 335T960 310V480H0" fill="#427b9e"/><path d="M0 405Q220 325 420 420T960 400V480H0" fill="#d9bd8d"/><text x="40" y="455" font-family="sans-serif" font-size="24" fill="#263f4a">SYNTHETIC COAST · LOCAL PREVIEW EXAMPLE</text></svg>`;
 
+export const previewResources = new Map<string, { body: string; type: string }>([
+  [previewImagePath.slice(1), { body: previewImage, type: "image/svg+xml" }],
+  ["examples/operations/map.svg", { body: previewImage, type: "image/svg+xml" }],
+  ["examples/operations/sample.bin", { body: "\0SYNTHETIC\0", type: "application/octet-stream" }],
+]);
+
 export function addPreviewExamples(base: StatePayload): StatePayload {
   const state = structuredClone(base);
   const root = state.roots[0]!;
   root.docs.push(...previewExamples.map(example => ({ id: example.path, rootId: root.id, name: example.path.split("/").pop()!, relativePath: example.path, mtimeMs: state.generatedAt, kind: example.kind })));
+  root.docs.push(...[...previewResources.keys()].map(path => ({ id: path, rootId: root.id, name: path.split("/").pop()!, relativePath: path, mtimeMs: state.generatedAt, kind: "binary" as const })));
   return state;
 }
 
 export async function renderPreviewExample(id: string, view: "source" | "rendered") {
   const example = previewExamples.find(example => example.path === id);
   if (!example) return null;
+  if (example.kind === "text") {
+    const language = languageForName(example.path) ?? "text";
+    return { id, title: example.path.split("/").pop()!, path: example.path, kind: example.kind, language, view, html: renderCodeAsHtml(example.source, language) };
+  }
   const rendered = example.kind === "markdown" ? renderMarkdownToHtml(example.source) : await renderAsciidocToHtml(example.source);
   return { id, title: example.path.split("/").pop()!, path: example.path, kind: example.kind, language: example.kind, view, html: view === "source" ? renderCodeAsHtml(example.source, example.kind) : rendered.html, metadata: rendered.metadata };
 }

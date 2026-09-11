@@ -16,6 +16,8 @@ test("long-content/commit fixture is opt-in and reset restores the original prot
   expect(corpus).toEqual(original);
   protocols.reset();
   expect(protocols.documentPathAllowed("/note-001.md")).toBe(false);
-  expect(await read("/api/state")).toEqual(original);
+  const reset = await read("/api/state");
+  expect(reset.generatedAt).toBeGreaterThan(expanded.generatedAt);
+  expect({ ...reset, generatedAt: original.generatedAt }).toEqual(original);
   expect((await read("/api/document?id=readme")).html).not.toContain("Continuity section 79");
 });

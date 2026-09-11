@@ -277,6 +277,34 @@ transition/retention behavior remain as before. Only synthetic content expands
 inside the workspace. Native UIKit guidance is adapted to the Web, not imported
 as a new framework or claimed as native Apple certification.
 
+### Creation exit, Security hierarchy and preview freshness (2026-09-11)
+
+At the user's request, commit/push the current refinement before these corrections
+(`b5d5f30`). Canceling the whole creation flow returns directly to Add Workspace;
+remove the redundant Configure new workspace landing page. Loading cancellation
+must reject late responses, while nested picker Cancel and review Back keep the
+creation draft and its correct history entry.
+
+Session Security now owns the one Devices navigation entry and its truthful count.
+Keep direct safe device routes, contextual Back to Session Security, and existing
+revoke/sign-out confirmations. This supersedes the previous overview placement.
+
+The reported preview error is a synthetic freshness-contract defect: repeated
+HTTP/SSE `generatedAt` values are rejected after channel replacement. Keep the
+production reconciler and file pill unchanged; emit monotonic snapshots without
+changing file mtimes or resetting the freshness watermark. Verify same-directory
+Previous/Next across Markdown, AsciiDoc, source/text, image and binary entries,
+including first/last boundaries and failure/Retry recovery. Do not filter by
+format, bypass index readiness, hide errors or cross the parent-directory boundary.
+This functional repair does not authorize a workspace-interior redesign.
+
+Browser verification also found an existing product boot restriction that rejected
+explicit indexed binary URLs. Remove only that exclusion: the existing document
+loader already owns image rendering and unsupported-file fallback. Keep unknown
+paths, saved/default selection and follow behavior unchanged. Synthetic image
+resources use the production Accept-negotiation helper for HTML navigation versus
+embedded bytes, reject query/encoded variants, and remain explicitly allowlisted.
+
 - **Large Hub module extraction** -> move by reviewed vertical slice, keep existing desktop rendering active, reuse domain semantics, and require local ownership rather than copying the global inline controller.
 - **Global workspace assumptions survive hiding** -> test input isolation, cached request base, URL dispatch, visibility/resize callbacks and scroll preservation on all four real surfaces before broad UI work.
 - **Mock conceals an integration mismatch** -> use existing types/protocols, fail unhandled calls, retain operation logs and explicit future contract gaps; no claim of live backend correctness.

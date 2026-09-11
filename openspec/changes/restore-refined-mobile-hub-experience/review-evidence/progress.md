@@ -1,5 +1,42 @@
 # Frontend implementation progress
 
+## 2026-09-11 — creation exit, Security and preview recovery published
+
+First committed/pushed the prior candidate as **b5d5f30** on
+`fork/design/hub-mobile-navigation`, verifying the remote SHA before new work.
+Then removed the canceled-creation landing page, moved Devices inside Session
+Security, and repaired synthetic snapshot freshness. Browser testing also proved
+and repaired an explicit binary-URL exclusion in product boot and image content
+negotiation in the reviewer. No workspace visual/chrome redesign was performed.
+
+Verification: **437 tests / 5151 assertions**, both typechecks, whitespace and strict
+OpenSpec validation pass. **48/48** Chromium/WebKit recovery/flow/preview cases,
+**9/9** normal-server Chromium preview regressions (47.3s), and **4/4** retained
+workspace boundary cases (18.8s) pass without retries/skips. The normal E2E suite
+uses isolated test files and a test PTY; the published reviewer remains synthetic.
+See `navigation-recovery/verification.md` for commands, red→green evidence, mixed
+formats, screenshot inspection and still-open full-app/physical-device gates.
+
+Scoped restart replaced only review PID **55321** with **44776**, instance
+**4e89adc5-d29f-4a9d-9087-395bb99418e7**, on loopback 4703 / HTTPS 8445.
+Frontend asset fingerprint:
+`sha256:dc2b6253b6434c9bb194ef49e58ccbfff7c2080f64da27acb96199db3177b996`.
+Independent reference fingerprint:
+`sha256:1aedc5d3e794349e4bcafb05309e303ea3dfff1185dfd1894104ff7f3e10f55b`.
+Evidence snapshot: **2026-09-11T14:30:12.928Z**.
+
+Local HTTP verifies product, Add Workspace, Security/Devices, AsciiDoc destination,
+reference/guide and new evidence routes. Two served snapshots increase their
+watermark while root/file metadata remains identical. Image Accept negotiation
+returns HTML for navigation and SVG for embedded use. All **60** selected artifacts
+(56 PNGs, three reports and verification record) match manifest sizes/hashes;
+served reports contain exactly 48, 9 and 4 passes with no unexpected/flaky/skipped
+cases. Existing Tailscale mappings and other services were left unchanged.
+
+**68/74 tasks complete.** Remaining: 7.1, 7.4, 8.3, 9.6, 10.4 and 11.4.
+The correction remains uncommitted after the requested pre-work checkpoint.
+No new dependencies, live Hub integration, spec sync, archive or visual approval.
+
 ## 2026-09-11 — preview examples and Hub controls published
 
 After the user-approved scope clarification, added six linked synthetic

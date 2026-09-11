@@ -5,9 +5,16 @@ Passing tests, reference normalization approval and approved additive frontend
 contracts do not approve the served visual/interaction design. No exceptions or
 omissions listed here have been accepted by the user.
 
-## Current candidate — preview examples and recognizable Hub controls
+## Current candidate — creation exit, Session Security and preview recovery
 
-**Latest refinement:** [preview-refinement/verification.md](preview-refinement/verification.md).
+**Latest correction:** [navigation-recovery/verification.md](navigation-recovery/verification.md).
+The user requested the previous candidate be committed/pushed first (`b5d5f30`),
+then requested direct cancellation to Add Workspace, Devices under Session Security,
+and working same-directory arrows across file formats. The synthetic freshness
+contract and explicit binary-URL boot selection are repaired. Scope authorization
+is not visual approval; broader verification and human gates remain open.
+
+**Previous refinement:** [preview-refinement/verification.md](preview-refinement/verification.md).
 The user approved the scope after clarifying workspace interiors, not the finished
 visual result. Added synthetic Markdown/AsciiDoc examples use the actual previews;
 shared Hub button hierarchy and composed empty states leave workspace interior
@@ -54,7 +61,7 @@ they do not certify this corrected version. Task 9.6 is still open.
 |---|---|
 | Candidate product URL | `[PRIVATE_REVIEW_ORIGIN_REDACTED]/` — user confirmed phone access |
 | Source version / dirty-tree description | Uncommitted frontend implementation over preserved dirty baseline; no clean-Git or released-version claim. |
-| Served frontend content fingerprint | `sha256:49845329baf12c14a8da54b584cfb43c3f6c8152189a10adda6c0dfcbbd7c239` — preview examples and Hub controls |
+| Served frontend content fingerprint | `sha256:dc2b6253b6434c9bb194ef49e58ccbfff7c2080f64da27acb96199db3177b996` — navigation and preview recovery |
 | Evidence snapshot identity | `/review/evidence/manifest.json` supplies snapshot time and individual SHA-256 values, separate from frontend fingerprint. |
 | Remote access / handoff delivery timestamp | URLs delivered 2026-09-10. Local two-engine smoke passed; user answered “It opens” to the explicitly connectivity-only phone question. No design approval inferred. |
 | Reviewer / approval timestamp | AWAITING USER |

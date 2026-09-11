@@ -132,7 +132,7 @@ env.task("Rename workspace", field("name", "Display name", workspace.displayName
 `action` is for immediate commands; the owning flow supplies confirmation when needed.
 
 Commands use explicit `primary`, `secondary` (default), or `destructive` hierarchy:
-`action("configure", "Configure new workspace", "primary")`. Existing Boolean
+`action("review", "Review changes", "primary")`. Existing Boolean
 destructive arguments remain compatible. A flow's `primaryAction` promotes the
 same button in place; promotion does not depend on a bottom toolbar. Prefer one
 prominent action, with filled accent background and contrasting label. Secondary
@@ -161,6 +161,10 @@ only on the absence of subfolders, and never duplicate Choose within the message
 - Mark invalid fields and explain the error; never convey state by color alone.
 - Read-only metadata and hidden-view enrichment do not acquire mutation ownership.
 - Full-page forms, long values, 200% text and constrained viewports must remain usable.
+- Canceling a whole creation task returns to Add Workspace; do not add a redundant
+  configure landing page. Nested picker Cancel and review Back keep the draft and
+  its task-history ownership. Devices has one entry inside Session Security, with
+  contextual Back and a truthful count, not a duplicate Settings overview entry.
 
 ## Adding a pattern
 

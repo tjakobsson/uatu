@@ -132,22 +132,33 @@ export function createWorkspaceFlows(env: FlowEnvironment, start: (workspace: Wo
     editor();
   }
   function devices() {
-    env.page("Devices", text("Loading devices…"));
+    const back = () => env.navigate({ kind: "security" });
+    env.page("Devices", text("Loading devices…"), { "flow-back": back }, { backLabel: "Back to Session Security" });
     void env.read(() => backend.readDevices(), devices => {
-      const actions: Record<string, () => unknown> = {};
+      const actions: Record<string, () => unknown> = { "flow-back": back };
       const rows = devices.map((d, i) => {
         const name = d.deviceLabel || "Unnamed device";
         actions[`revoke-${i}`] = () => env.confirm("Revoke session?", text(`${name} · Issued ${new Date(d.issuedAt).toLocaleString()}. ${d.current ? "This signs you out on this device." : "This device will need to sign in again."} It does not stop workspaces.`), { label: "Revoke", run: root => env.mutate(() => backend.revokeDevice(d.handle), result => { env.sheet.close(); if (result.current) env.authLost(); else { env.changed(); env.navigate({ kind: "devices" }); } }, root) });
         actions[`device-${i}`] = actions[`revoke-${i}`]!;
         return listRow(`device-${i}`, name, `${d.current ? "Current session" : "Other session"} · Issued ${new Date(d.issuedAt).toLocaleDateString()} · Review revocation`);
       }).join("");
-      env.page("Devices", rows ? group("Sessions", rows) : emptyState("device", "No device sessions", "There are no device sessions available to manage."), actions);
+      env.page("Devices", rows ? group("Sessions", rows) : emptyState("device", "No device sessions", "There are no device sessions available to manage."), actions, { backLabel: "Back to Session Security" });
     }, devices);
   }
   function security() {
-    env.page("Session Security", group("Login and sessions", infoRows([{ label: "Access policy", value: "Hub login sessions authorize access to this Hub." }, { label: "Revocation", value: "Use Devices in Settings to require a device to sign in again." }, { label: "Workspace sessions", value: "Sign-out and revocation do not stop workspaces." }])) + group("Shared Hub account policy", infoRows([{ label: "Workspace credentials", value: "All workspaces run as the same Hub OS user.", detail: "Credential assignments configure normal tools, not isolation. Processes using that OS account can inspect runtime files, reach shared agents, and use credentials assigned elsewhere." }])) + group("Account", action("signout", "Sign out", true)), {
+    const page = env.page("Session Security", group("Login and sessions", infoRows([{ label: "Access policy", value: "Hub login sessions authorize access to this Hub." }, { label: "Revocation", value: "Use Devices below to require a device to sign in again." }, { label: "Workspace sessions", value: "Sign-out and revocation do not stop workspaces." }])) + group("Shared Hub account policy", infoRows([{ label: "Workspace credentials", value: "All workspaces run as the same Hub OS user.", detail: "Credential assignments configure normal tools, not isolation. Processes using that OS account can inspect runtime files, reach shared agents, and use credentials assigned elsewhere." }])) + group("Account", listRow("devices", "Devices", "Loading…", "device") + action("signout", "Sign out", true)), {
+      devices: () => env.navigate({ kind: "devices" }),
       signout: () => env.confirm("Sign out?", text("You will need to sign in again. Workspaces are not stopped."), { label: "Sign out", run: root => env.mutate(() => backend.signOut(), () => env.authLost(), root) }),
     }, { primaryAction: "signout" });
+    const count = page.querySelector<HTMLElement>('[data-flow="devices"] small')!;
+    const setCount = (label: string) => { count.textContent = label; count.closest("button")!.setAttribute("aria-label", `Devices, ${label}`); };
+    // The count belongs to this exact Security page, including while its
+    // sign-out confirmation is open. Detached pages cannot replay late reads.
+    void backend.readDevices().then(result => {
+      if (!count.isConnected) return;
+      if (result.status === "available") setCount(`${result.value.length} device session${result.value.length === 1 ? "" : "s"}`);
+      else { setCount("Unavailable"); if (result.problem.kind === "unauthorized") env.authLost(); }
+    }).catch(() => { if (count.isConnected) setCount("Unavailable"); });
   }
   return { workspace, assignments, devices, security };
 }

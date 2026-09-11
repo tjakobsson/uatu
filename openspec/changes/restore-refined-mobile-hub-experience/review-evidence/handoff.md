@@ -7,13 +7,13 @@ is authorized by these documents or tests.
 
 ## Review access (delivered and phone-confirmed 2026-09-10)
 
-**Current candidate:** [preview examples and Hub controls](preview-refinement/verification.md),
-building on the [shared design system](design-system.md). Open Atlas → Files →
-examples → START-HERE.md. Commands have explicit button hierarchy, and verified
-empty collections have icon/title/explanation. Workspace interiors/chrome and
-Hub↔workspace transition/retention remain unchanged.
+**Current candidate:** [creation exit, Session Security and preview recovery](navigation-recovery/verification.md).
+Cancel creation returns to Add Workspace; Devices is inside Session Security.
+Open Atlas → Files → examples → operations to try mixed-format sibling arrows,
+or START-HERE.md for the linked preview tour. Workspace visuals/chrome remain
+unchanged; functional boot and nested-task history corrections are verified.
 Interactive reference: `/review/design-system`; guide: `/review/design-system/guide`.
-The checkpoint `b7d51f7` is the last requested commit/push. Direct actions,
+The checkpoint `b5d5f30` is the last requested commit/push. Direct actions,
 single Devices entry, deliberate field entry and cold-loading safeguards remain.
 No visual approval or verification waiver is inferred; older captures are historical.
 
@@ -30,13 +30,13 @@ No visual approval or verification waiver is inferred; older captures are histor
 | Served-version field | Status |
 |---|---|
 | Source version / dirty-tree description | Uncommitted implementation atop preserved dirty baseline; fingerprint identifies served frontend bytes, not a clean Git revision. |
-| Frontend content fingerprint (`sha256:…`) | `sha256:49845329baf12c14a8da54b584cfb43c3f6c8152189a10adda6c0dfcbbd7c239` |
+| Frontend content fingerprint (`sha256:…`) | `sha256:dc2b6253b6434c9bb194ef49e58ccbfff7c2080f64da27acb96199db3177b996` |
 | Instance id / owned PID | Use `bun tests/mobile-hub-review/manage.ts status` for the current owned process and instance; they change on scoped restart. |
 | Evidence manifest hash/snapshot time | Served `/review/evidence/manifest.json` records snapshot time and per-file SHA-256; it is separate from frontend fingerprint and approval. |
 | Earlier local HTTP / SSE / WebSocket | Historical two-engine `served-smoke.ts` pass; not a fresh transport matrix for the picker candidate. |
 | Remote HTTPS / phone | User confirmed Workspaces opens on the phone on 2026-09-10. No physical interaction/accessibility or visual approval inferred. |
 | Earlier pre-correction full matrix | **172 passed**, Chromium/WebKit, before the iOS correction; not a pass for the current candidate. |
-| Current candidate verification | **393 tests / 4851 assertions**, both typechecks pass; focused preview/controls/picker **20/20** Chromium/WebKit, boundary **4/4** Chromium/WebKit, reference **3/3** Chromium and **48** layout combinations. Broader current full-app integration remains incomplete. |
+| Current candidate verification | **437 tests / 5151 assertions**, both typechecks pass; focused recovery/flow/preview **48/48** Chromium/WebKit, boundary **4/4** Chromium/WebKit, normal E2E preview regression **9/9** Chromium. Broader current full-app integration remains incomplete. |
 | User visual/interaction decision and explicit exceptions | **AWAITING USER REVIEW** |
 
 Content fingerprint identifies served asset bytes, not Git cleanliness or user

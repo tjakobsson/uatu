@@ -1,4 +1,4 @@
-import type { FolderListing, OnboardingOutcome } from "./backend";
+import type { FolderListing, OnboardingOutcome, ReadResult } from "./backend";
 import { normalizeProviderHost, type PublicCredentialDto } from "../credential-types";
 import type { AuthenticationSelection } from "../onboarding";
 import { absolute, action, check, checked, displayName, field, folderName, group, infoRows, listRow, select, text, value, type FlowEnvironment } from "./flow-ui";
@@ -77,13 +77,25 @@ export function createOnboardingFlows(env: FlowEnvironment) {
     env.task(`Review ${title}`, group("Workspace", infoRows([{ label: "Display name", value: draft.displayName }, { label: "Parent folder", value: path.slice(0, path.lastIndexOf("/")) || "/", mono: true }, { label: "Folder name", value: path.split("/").at(-1) || "/", mono: true }, { label: "Folder path", value: path, mono: true }])) + group("Setup", infoRows([{ label: "Git initialization", value: draft.init ? "Authorized" : "Not requested; existing repository required" }, { label: "Start", value: draft.start ? "Start after configuration" : "Register stopped; do not start" }])) + configurationFacts(catalog, draft.authentication, draft.signing) + (draft.start && !draft.authentication.length && !draft.signing ? text("No credentials are assigned. Git authentication and signing may be unavailable, but the workspace can still start.") : ""), { label: draft.start ? "Add and start" : "Add stopped", run: root => env.mutate(call, outcome, root) }, {}, back, { cancelLabel: "Back to edit" });
   }
   function newWorkspace(parent?: string) {
-    env.page("Create Workspace", text("Loading default folder and credentials…"));
-    void env.read(() => backend.readDefaultFolder(), defaults => {
-      void env.read(() => backend.readCredentials(), catalog => {
+    // Creation is one ephemeral task over Add Workspace, including its reads.
+    // Closing its loading/editor nodes invalidates continuations without adding
+    // a callback-only page that diverges from the task history's safe base URL.
+    env.task("Create Workspace", text("Loading default folder and credentials…"), undefined, {}, undefined, { cancelLabel: "Cancel" });
+    const read = async <T,>(call: () => Promise<ReadResult<T>>, success: (value: T) => void) => {
+      const current = env.current();
+      const failed = (message: string) => env.task("Create Workspace", text(message), { label: "Retry", run: () => newWorkspace(parent) });
+      try {
+        const result = await call(); if (!current()) return;
+        if (result.status === "available") success(result.value);
+        else if (result.problem.kind === "unauthorized") env.authLost();
+        else failed(result.problem.kind === "rate-limited" ? `${result.problem.message} Retry after ${result.problem.retryAfterSeconds} seconds.` : result.problem.message);
+      } catch { if (current()) failed("This information could not be loaded."); }
+    };
+    void read(() => backend.readDefaultFolder(), defaults => {
+      void read(() => backend.readCredentials(), catalog => {
         let draft: ConfigurationDraft = { displayName: "", folderName: "", authentication: [], signing: "", start: false, init: false };
         let destination = parent ?? defaults.effective;
         const editor = () => {
-          env.page("Create Workspace", text(defaults.configured && !defaults.configuredAvailable ? `Saved default unavailable; using ${defaults.effective}. You can browse elsewhere.` : `Parent: ${destination}`) + action("edit", "Configure new workspace"), { edit: editor }, { primaryAction: "edit" });
           const task = env.task("Create Workspace", text("Creates a new folder and initializes Git. This is different from creating an empty folder.") + technicalField("parent", "Parent folder", destination) + action("browse", "Browse elsewhere") + technicalField("folderName", "New folder name", draft.folderName) + field("displayName", "Workspace display name", draft.displayName) + configurationFields(catalog, draft) + check("init", "Create the folder and initialize Git", draft.init), { label: "Review", run: root => {
             destination = absolute(value(root, "parent"));
             draft = { ...readConfiguration(root, catalog, draft), folderName: folderName(value(root, "folderName")), displayName: displayName(value(root, "displayName")), init: checked(root, "init") };
@@ -95,10 +107,11 @@ export function createOnboardingFlows(env: FlowEnvironment) {
             env.sheet.close();
             browse(destination.startsWith("/") ? destination : defaults.effective, selected => { destination = selected; editor(); }, editor);
           } }); bindAuthenticationHost(task, catalog);
+          if (defaults.configured && !defaults.configuredAvailable) task.querySelector(".mh-sheet-body")?.insertAdjacentHTML("afterbegin", text(`Saved default unavailable; using ${defaults.effective}. You can browse elsewhere.`));
         };
         editor();
-      }, () => newWorkspace(parent));
-    }, () => newWorkspace(parent));
+      });
+    });
   }
   function browse(path?: string, choose?: (path: string) => void, cancel: () => void = add) {
     if (choose) { pickFolder(path, choose, cancel); return; }
@@ -123,7 +136,7 @@ export function createOnboardingFlows(env: FlowEnvironment) {
         elsewhere: () => env.task("Browse elsewhere", technicalField("path", "Absolute folder path", listing.path), { label: "Browse", run: root => { const path = absolute(value(root, "path")); env.sheet.close(); browse(path, choose, cancel); } }, {}, () => browse(listing.path, choose, cancel)),
         choose: () => { ++browseGeneration; return loadConfiguration(listing); },
         create: () => emptyFolder(listing.path, choose, cancel),
-        workspace: () => newWorkspace(listing.path),
+        workspace: () => { env.navigate({ kind: "add-workspace" }); newWorkspace(listing.path); },
         rename: () => folderActions(listing.path, "rename", choose, cancel),
         remove: () => folderActions(listing.path, "remove", choose, cancel),
       };

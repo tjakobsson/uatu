@@ -1,4 +1,4 @@
-import type { CredentialFacts, DeviceView, HubIdentity, KeyTarget, LoadState, MobileHubBackend, WorkspaceView } from "./backend";
+import type { CredentialFacts, HubIdentity, KeyTarget, LoadState, MobileHubBackend, WorkspaceView } from "./backend";
 import type { PublicCredentialDto } from "../credential-types";
 import type { DefaultWorkspaceParentState } from "../preferences";
 import { escapeHtml as esc } from "../../shared/html";
@@ -44,7 +44,6 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
   let credentials: LoadState<PublicCredentialDto[]> = { status: "loading" };
   const credentialFacts = new Map<string, LoadState<CredentialFacts>>();
   let defaultFolder: LoadState<DefaultWorkspaceParentState> = { status: "loading" };
-  let devices: LoadState<DeviceView[]> = { status: "loading" };
   let target: MobileHubReturnTarget | null = null;
   let targetUnavailable = false;
   let generation = 0;
@@ -175,9 +174,8 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
     const prefs = getNavigationPreferences();
     const folderValue = defaultFolder.status === "ready" ? defaultFolder.value.effective.split("/").filter(Boolean).at(-1) || "/" : defaultFolder.status === "loading" ? "Loading…" : "Unavailable";
     const folderNotice = defaultFolder.status === "ready" && defaultFolder.value.configured && !defaultFolder.value.configuredAvailable ? "Saved folder unavailable; using fallback" : "";
-    const deviceCount = devices.status === "ready" ? String(devices.value.length) : devices.status === "loading" ? "Loading…" : "Unavailable";
     const catalog = `<div data-credential-catalog>${credentialCatalog()}</div>`;
-    return `<h1>Settings</h1>${identity ? button("identity", `<img src="${esc(appUrl("/assets/uatu-logo.svg"))}" alt=""/><span><strong>${esc(identity.user)}</strong><small>${esc(identity.host)}</small><small class="mh-running">● Connected</small></span>`, "mh-identity") + advisory(identity.user) : ""}${section("Credentials", `${catalog}${button("add-credential", "Add Credential", "mh-text-action")}`)}${note("Secure access for your workspaces. Stored only on this hub.")}${section("Workspaces", destination("default-folder", "Default Folder", "folder", folderNotice, folderValue, "blue") + destination("preview-side", "Preview File Controls", "preview", "Placement on this device", prefs.previewSide === "left" ? "Left" : "Right") + destination("auto-hide", "Navigation Auto-hide", "hub", "", prefs.autoHide ? "After 7 seconds" : "Until I close it"))}${section("Account", destination("devices", "Devices", "device", "", deviceCount) + destination("security", "Session Security", "shield", "", "", "purple"))}${section("More settings", destination("handle", "Navigation Handle", "hub", "Side and vertical placement") + destination("tools", "Credential Tools", "key") + destination("assignments", "Workspace Assignments", "folder"))}`;
+    return `<h1>Settings</h1>${identity ? button("identity", `<img src="${esc(appUrl("/assets/uatu-logo.svg"))}" alt=""/><span><strong>${esc(identity.user)}</strong><small>${esc(identity.host)}</small><small class="mh-running">● Connected</small></span>`, "mh-identity") + advisory(identity.user) : ""}${section("Credentials", `${catalog}${button("add-credential", "Add Credential", "mh-text-action")}`)}${note("Secure access for your workspaces. Stored only on this hub.")}${section("Workspaces", destination("default-folder", "Default Folder", "folder", folderNotice, folderValue, "blue") + destination("preview-side", "Preview File Controls", "preview", "Placement on this device", prefs.previewSide === "left" ? "Left" : "Right") + destination("auto-hide", "Navigation Auto-hide", "hub", "", prefs.autoHide ? "After 7 seconds" : "Until I close it"))}${section("Account", destination("security", "Session Security", "shield", "", "", "purple"))}${section("More settings", destination("handle", "Navigation Handle", "hub", "Side and vertical placement") + destination("tools", "Credential Tools", "key") + destination("assignments", "Workspace Assignments", "folder"))}`;
   }
   function render() {
     if (disposed) return;
@@ -350,7 +348,7 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
     if (trigger && page.contains(trigger)) overviewTriggerAction = trigger.dataset.action;
   };
   const backdrop = (event: Event) => { if ((event.target as HTMLElement).classList.contains("mh-confirmation-backdrop")) cancelSheet(); };
-  function resetProtectedState() { generation++; credentialFacts.clear(); retryAt = 0; clearTimeout(loginTimer); loginTimer = undefined; loginError = ""; flows.invalidate(); requestedDetail = undefined; loginBusy = false; identity = null; authenticatedUser = null; target = null; workspaces = { status: "loading" }; credentials = { status: "loading" }; devices = { status: "loading" }; defaultFolder = { status: "loading" }; closeSheet(false); }
+  function resetProtectedState() { generation++; credentialFacts.clear(); retryAt = 0; clearTimeout(loginTimer); loginTimer = undefined; loginError = ""; flows.invalidate(); requestedDetail = undefined; loginBusy = false; identity = null; authenticatedUser = null; target = null; workspaces = { status: "loading" }; credentials = { status: "loading" }; defaultFolder = { status: "loading" }; closeSheet(false); }
   function invalidateAuthentication() { resetProtectedState(); signedOut = true; render(); callbacks.authenticationLost?.(); }
   function login() {
     return `<h1>Sign in required</h1>${note("Sign in to access this hub.")}<form class="mh-login">${flowField("user", "Username", loginUser, "text", 'autocomplete="username" required')}${flowField("password", "Password", "", "password", 'autocomplete="current-password" required')}${flowField("device", "Device label (optional)", loginDevice, "text", 'autocomplete="off"')}<p role="alert" class="mh-sheet-error">${esc(loginError)}</p><button type="submit" class="mh-commit" ${loginBusy || Date.now() < retryAt ? "disabled" : ""}>${loginBusy ? "Signing in…" : "Sign in"}</button></form>`;
@@ -421,7 +419,6 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
           }
         }),
         load(() => backend.readDefaultFolder(), value => { defaultFolder = value; }),
-        load(() => backend.readDevices(), value => { devices = value; }),
       ]);
     } catch { if (current()) { if (flows.detail) requestedDetail = flows.detail; closeSheet(false); flows.leave(); identity = null; workspaces = { status: "unavailable", problem: { kind: "unavailable", message: "Could not connect to this hub." } }; loginError = "Could not connect to this hub."; render(); } }
   }

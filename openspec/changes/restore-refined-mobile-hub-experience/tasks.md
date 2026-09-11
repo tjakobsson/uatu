@@ -118,6 +118,13 @@ requirements are implemented and verified.
 - [x] 15.3 Apply shared primary/secondary/destructive buttons and composed empty states across applicable mobile Hub flows; verify the Configure new workspace caller, truthful folder-only empty copy, loading/error distinction, accessibility states and no operation/ownership changes.
 - [x] 15.4 Verify current focused cross-engine workflows and retained workspace boundaries, publish the isolated review with new evidence/identity, and leave the existing full-app and human approval gates open.
 
+## 16. Creation exit, Session Security and preview sibling recovery
+
+- [x] 16.1 Commit and push the existing preview/control refinement to the fork before beginning the new corrections, excluding unrelated deletions, private state and raw run artifacts.
+- [x] 16.2 Remove the canceled-creation landing page and make Add Workspace the safe exit; move the sole Devices entry into Session Security while preserving counts, direct routes, nested drafts, history and authorization semantics.
+- [x] 16.3 Reproduce the screenshot's stale file-index failure and repair the synthetic freshness contract; verify same-directory arrows across all represented file kinds, boundaries, retries, reset/resume and canonical workspace request scope without redesigning the workspace.
+- [x] 16.4 Run current focused cross-engine and retention regressions, retain new evidence and publish only the isolated reviewer for renewed user review; preserve older full-app/approval gates.
+
 ### Historical reconciliation checkpoint — 2026-09-10
 
 **31/36 complete; 7.1, 7.4, 8.1, 8.2, 8.3 remain pending.** See

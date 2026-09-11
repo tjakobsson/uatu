@@ -27,6 +27,7 @@ function harness() {
   const backend = {
     readWorkspaces: async () => ({ status: "available", value: [workspace] }),
     readCredentials: async () => ({ status: "available", value: [credential] }),
+    readDevices: async () => ({ status: "available", value: [] }),
     assignWorkspace: async () => { writes++; return { status: "completed", value: undefined }; },
   } as unknown as MobileHubBackend;
   const { env } = createFlowEnvironment(page, backend, {

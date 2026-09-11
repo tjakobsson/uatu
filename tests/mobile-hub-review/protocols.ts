@@ -4,7 +4,7 @@ import { FIXTURE_TIME } from "./backend";
 import { continuityCorpus, continuityDocument, continuityConversation } from "./continuity-fixture";
 import { createChatProtocolModel } from "./chat-protocol-model";
 import { createTerminalProtocolModel } from "./terminal-protocol-model";
-import { addPreviewExamples, renderPreviewExample } from "./preview-corpus";
+import { addPreviewExamples, renderPreviewExample, previewResources } from "./preview-corpus";
 
 export const conversationId = "review:conversation-1";
 export const terminalId = "11111111-1111-4111-8111-111111111111";
@@ -30,6 +30,11 @@ export function createWorkspaceProtocols() {
   let conversation = structuredClone(initialConversation);
   let expandedCorpus: StatePayload | null = null;
   const currentCorpus = () => expandedCorpus ?? corpus;
+  // The real client orders HTTP snapshots against SSE frames by generatedAt.
+  // Keep fixture mtimes fixed, but emit fresh snapshots even within one ms or
+  // after reset. Reset must not rewind the freshness watermark of an open page.
+  let generatedAt = FIXTURE_TIME;
+  const stateSnapshot = () => ({ ...currentCorpus(), generatedAt: generatedAt = Math.max(Date.now(), generatedAt + 1) });
   const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const chatStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const uploads = new Set<(response: Response) => void>();
@@ -65,6 +70,7 @@ export function createWorkspaceProtocols() {
       const path = url.pathname;
       const queries: Record<string, string[]> = {
         "/api/state": ["compareTarget", "scope"], "/api/events": ["compareTarget", "scope", "reconnect"], "/api/document": ["compareTarget", "scope", "id", "view"],
+        "/api/document/resource": ["compareTarget", "scope", "id", "rootId"],
         "/api/chat/models": ["agent"], "/api/chat/commands": ["agent"], "/api/chat/modes": ["agent"], "/api/chat/conversations/events": ["reconnect"],
         [`/api/chat/conversations/${encodeURIComponent(conversationId)}`]: ["limit"],
         [`/api/chat/conversations/${encodeURIComponent(conversationId)}/events`]: ["cursor", "reconnect"],
@@ -84,13 +90,19 @@ export function createWorkspaceProtocols() {
         return sse(request, chat.replay(id, url.searchParams.get("cursor")), false, id);
       }
       if (request.method === "GET") {
-        if (path === "/api/state") return json(currentCorpus());
+        if (path === "/api/state") return json(stateSnapshot());
         if (path === "/api/personal-state") return json({ version: 1 });
-        if (path === "/api/events") return sse(request, `event: state\ndata: ${JSON.stringify(currentCorpus())}\n\n`);
+        if (path === "/api/events") return sse(request, `event: state\ndata: ${JSON.stringify(stateSnapshot())}\n\n`);
+        if (path === "/api/document/resource") {
+          const document = currentCorpus().roots.flatMap(root => root.docs).find(doc => doc.id === url.searchParams.get("id") && doc.rootId === url.searchParams.get("rootId"));
+          const resource = document && previewResources.get(document.relativePath);
+          return resource ? new Response(resource.body, { headers: { "Content-Type": resource.type } }) : json({ error: "Unknown synthetic resource" }, 404);
+        }
         if (path === "/api/document") {
           const document = currentCorpus().roots.flatMap(root => root.docs).find(doc => doc.id === url.searchParams.get("id"));
           if (!document || !["rendered", "source"].includes(url.searchParams.get("view") ?? "rendered")) return json({ error: "Unknown synthetic document/view" }, 404);
           const view = url.searchParams.get("view") ?? "rendered";
+          if (document.kind === "binary") return json({ error: "Binary files use the resource or unavailable preview" }, 415);
           const example = await renderPreviewExample(document.id, view as "rendered" | "source");
           if (example) return json(example);
           if (expandedCorpus) return json({ id: document.id, title: "Synthetic review document", path: document.relativePath, kind: "markdown", view, language: "markdown", html: view === "rendered" ? continuityDocument : '<pre class="uatu-source-pre"><code># Synthetic continuity document</code></pre>' });

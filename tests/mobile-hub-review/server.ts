@@ -6,7 +6,8 @@ import { frontendFingerprint } from "./hosting-identity";
 import { buildDesignSystemAssets, designSystemPrefix } from "./design-system-assets";
 import { createSyntheticBackend, type Scenario } from "./backend";
 import { createWorkspaceProtocols, terminalId } from "./protocols";
-import { previewImage, previewImagePath } from "./preview-corpus";
+import { previewResources } from "./preview-corpus";
+import { prefersHtmlNavigation } from "../../src/server/navigation";
 import { controller, controllerScript, scenarios, controls, dispatchControl } from "./controller";
 import { reviewMethods, deserializeReviewValue, createReviewPersonalState, type ReviewMethod } from "./transport";
 
@@ -216,12 +217,20 @@ export async function startReviewServer(options: { port?: number; assets?: Revie
         }
         const response = await protocols.handle(request, url);
         if (response) { for (const socket of sockets) if (socket.data.workspaceId === workspaceId && !protocols.terminal.has(socket.data.sessionId)) socket.close(1000, "Synthetic terminal deleted"); for (const [key, value] of Object.entries(headers)) response.headers.set(key, value); return response; }
-      } else if (url.search && !["/", "/settings", "/clone"].includes(url.pathname) && !protocols.documentPathAllowed(url.pathname)) return reply("Unexpected review query", 400);
+      } else if (url.search && (previewResources.has(url.pathname.slice(1)) || (!["/", "/settings", "/clone"].includes(url.pathname) && !protocols.documentPathAllowed(url.pathname)))) return reply("Unexpected review query", 400);
       if (request.method === "GET") {
-        if (url.pathname === previewImagePath && !url.search) {
+        const resource = previewResources.get(url.pathname.slice(1));
+        if (resource) {
           if (!synthetic.snapshot().authenticated) return reply("Synthetic session signed out", 401);
           if (!workspaceAvailable()) return reply("Synthetic workspace stopped or missing", 409);
-          return reply(previewImage, 200, "image/svg+xml");
+          // Same negotiation as production: document navigation/reload mounts
+          // the workspace; embedded images fetch literal allowlisted bytes.
+          // The workspace image viewer uses /api/document/resource instead.
+          if (!prefersHtmlNavigation(request)) {
+            const response = reply(resource.body, 200, resource.type);
+            response.headers.set("Vary", "Accept");
+            return response;
+          }
         }
         const evidence = options.evidenceAssets?.get(url.pathname);
         if (evidence) return reply(evidence.body, 200, evidence.type);
@@ -234,7 +243,9 @@ export async function startReviewServer(options: { port?: number; assets?: Revie
         if (asset) {
           if (asset === assets.get("/index.html")) {
             const html = typeof asset.body === "string" ? asset.body : await asset.body.text();
-            return reply(html.replace('<meta charset="utf-8"', `<meta name="uatu-review-workspace" content="${workspaceId}"><meta name="uatu-base-path" content="/s/${workspaceId}/"><meta charset="utf-8"`), 200, asset.type);
+            const response = reply(html.replace('<meta charset="utf-8"', `<meta name="uatu-review-workspace" content="${workspaceId}"><meta name="uatu-base-path" content="/s/${workspaceId}/"><meta charset="utf-8"`), 200, asset.type);
+            if (resource) response.headers.set("Vary", "Accept");
+            return response;
           }
           return reply(asset.body, 200, asset.type);
         }
