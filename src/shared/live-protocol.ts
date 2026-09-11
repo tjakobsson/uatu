@@ -46,8 +46,11 @@
 //   three improves by repeating the request: the client reconnects, and the
 //   new stream presents the whole set in `subs`. A 5xx or a request that got
 //   no answer is retried with backoff a bounded number of times, then also
-//   escalates to a reconnect. A client validates what it sends with the
-//   parsers below, so a subscription the hub would refuse is never sent.
+//   escalates to a reconnect. A client aborts a request still unanswered
+//   after 10 s and counts it as one that got no answer, since the stream
+//   can outlive the network path the POST was sent over. A client validates
+//   what it sends with the parsers below, so a subscription the hub would
+//   refuse is never sent.
 //
 //   `add` of a key already subscribed REPLACES it (re-attach from the new
 //   cursor) — the resync path: snapshot, then `add` with the snapshot

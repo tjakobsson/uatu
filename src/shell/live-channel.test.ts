@@ -9,6 +9,7 @@ import {
   type LiveSubscription,
 } from "../shared/live-protocol";
 import {
+  CONTROL_TIMEOUT_MS,
   createLiveChannel,
   reconnectDelay,
   RECONNECT_MAX_DELAY_MS,
@@ -55,7 +56,9 @@ function createHarness(options: { ws?: string | null; activity?: boolean } = {})
   const statuses: LiveChannelStatus[] = [];
   const posts: RecordedPost[] = [];
   const postStatuses: number[] = [];
-  const holds: (() => Promise<void>)[] = [];
+  // Each control request's abort signal, parallel to `posts`.
+  const signals: (AbortSignal | undefined)[] = [];
+  const holds: (() => Promise<number | undefined>)[] = [];
   const scheduled: { delay: number; run: () => void; id: number }[] = [];
   let nextTimerId = 1;
 
@@ -77,8 +80,11 @@ function createHarness(options: { ws?: string | null; activity?: boolean } = {})
     timers,
     fetcher: async (url, init) => {
       posts.push({ url, body: JSON.parse(String(init?.body)) });
-      await holds.shift()?.();
-      const status = postStatuses.shift() ?? 200;
+      signals.push(init?.signal ?? undefined);
+      // A held request ignores its abort signal and answers only when
+      // released, like a response already on the wire when the client gave up.
+      const held = await holds.shift()?.();
+      const status = held ?? postStatuses.shift() ?? 200;
       // 0 stands for a network failure: the request never gets an answer.
       if (status === 0) throw new TypeError("network error");
       return new Response(JSON.stringify(status === 200 ? { ok: true } : { error: "nope" }), { status });
@@ -124,15 +130,19 @@ function createHarness(options: { ws?: string | null; activity?: boolean } = {})
     statuses,
     posts,
     postStatuses,
+    signals,
     scheduled,
     latest: () => sources.at(-1)!,
-    // Holds the next control request open until the returned release runs.
+    // Holds the next control request open until the returned release runs,
+    // then answers with the given status (0: network error), or the next
+    // queued one. Never released, the request never answers.
     holdNextPost() {
-      let release!: () => void;
-      const gate = new Promise<void>(resolve => { release = resolve; });
+      let release!: (status?: number) => void;
+      const gate = new Promise<number | undefined>(resolve => { release = resolve; });
       holds.push(() => gate);
       return release;
     },
+    delays: () => scheduled.map(entry => entry.delay),
     // Fires exactly the pending timer, mirroring a real timer firing once.
     runPendingTimer() {
       const entry = scheduled.shift();
@@ -604,6 +614,153 @@ describe("createLiveChannel — subscription control", () => {
     expect(h.scheduled.map(entry => entry.delay)).toEqual([2_000]);
     expect(h.sources).toHaveLength(1);
     expect(h.sources[0]!.closed).toBe(false);
+  });
+
+  test("a control request that never answers times out like a network error, and the third timeout escalates to a reconnect", async () => {
+    const h = createHarness();
+    const conversation = recorder();
+    h.channel.subscribe({ topic: "document", key: "k" }, {});
+    h.channel.connect();
+    h.latest().hello();
+    // The network path is gone while the stream still looks open: no POST
+    // ever answers.
+    h.holdNextPost();
+    h.holdNextPost();
+    h.holdNextPost();
+    h.channel.subscribe({ topic: "conversation", key: "c1" }, conversation.consumer, { cursor: "c1-1" });
+    await settle();
+    expect(h.posts).toHaveLength(1);
+    expect(h.delays()).toEqual([CONTROL_TIMEOUT_MS]);
+
+    // Timed out: the request is aborted and retried on the same schedule as
+    // a network error.
+    expect(h.runPendingTimer()).toBe(CONTROL_TIMEOUT_MS);
+    expect(h.signals[0]!.aborted).toBe(true);
+    expect(h.delays()).toEqual([1_000]);
+    h.runPendingTimer();
+    await settle();
+    expect(h.posts).toHaveLength(2);
+    expect(h.signals[1]!.aborted).toBe(false);
+
+    expect(h.runPendingTimer()).toBe(CONTROL_TIMEOUT_MS);
+    expect(h.signals[1]!.aborted).toBe(true);
+    expect(h.delays()).toEqual([2_000]);
+    h.runPendingTimer();
+    await settle();
+    expect(h.posts).toHaveLength(3);
+    expect(h.sources[0]!.closed).toBe(false);
+
+    // Third timeout in a row: the stream is lost to the change.
+    expect(h.runPendingTimer()).toBe(CONTROL_TIMEOUT_MS);
+    expect(h.signals[2]!.aborted).toBe(true);
+    const change: RecordedPost["body"] = { add: [{ topic: "conversation", key: "c1", cursor: "c1-1" }] };
+    expect(h.posts.map(post => post.body)).toEqual([change, change, change]);
+    expect(h.sources[0]!.closed).toBe(true);
+    expect(h.statuses.at(-1)).toBe("reconnecting");
+    expect(h.delays()).toEqual([1_000]);
+    expect(conversation.calls).toEqual(["dropped 1"]);
+    h.runPendingTimer();
+    await settle();
+    expect(h.posts).toHaveLength(3);
+    expect(h.subs(h.latest())).toEqual([
+      { topic: "document", key: "k" },
+      { topic: "conversation", key: "c1", cursor: "c1-1" },
+    ]);
+  });
+
+  test("a change queued behind a hung control request is sent once that request times out", async () => {
+    const h = createHarness();
+    h.channel.connect();
+    h.latest().hello("s1");
+    h.holdNextPost();
+    h.channel.subscribe({ topic: "conversation", key: "a" }, {});
+    await settle();
+    h.channel.subscribe({ topic: "conversation", key: "b" }, {});
+    await settle();
+    expect(h.posts).toHaveLength(1);
+
+    // The timeout releases the queue: the retry carries the timed-out change
+    // and the one queued behind it.
+    h.runPendingTimer();
+    expect(h.delays()).toEqual([1_000]);
+    h.runPendingTimer();
+    await settle();
+    expect(h.posts.map(post => post.body)).toEqual([
+      { add: [{ topic: "conversation", key: "a" }] },
+      { add: [{ topic: "conversation", key: "b" }, { topic: "conversation", key: "a" }] },
+    ]);
+    expect(h.delays()).toEqual([]);
+
+    // Nothing is left in flight: the next change goes out at once.
+    h.channel.subscribe({ topic: "conversation", key: "c" }, {});
+    await settle();
+    expect(h.posts.at(-1)!.body).toEqual({ add: [{ topic: "conversation", key: "c" }] });
+    expect(h.sources).toHaveLength(1);
+  });
+
+  // 0 stands for a network error.
+  test.each([200, 500, 0])("a %d answering after its request timed out is ignored", async lateStatus => {
+    const h = createHarness();
+    h.channel.connect();
+    h.latest().hello();
+    const answer = h.holdNextPost();
+    h.channel.subscribe({ topic: "conversation", key: "a" }, {});
+    await settle();
+    h.runPendingTimer();
+    expect(h.delays()).toEqual([1_000]);
+
+    answer(lateStatus);
+    await settle();
+    // Neither sent early nor rescheduled.
+    expect(h.posts).toHaveLength(1);
+    expect(h.delays()).toEqual([1_000]);
+
+    // The timeout counted as the first failure, and the late answer changed
+    // nothing: a late failure would make this the third (a reconnect), and a
+    // late success would reset the count (a 1 s retry).
+    h.postStatuses.push(500);
+    h.runPendingTimer();
+    await settle();
+    expect(h.posts).toHaveLength(2);
+    expect(h.delays()).toEqual([2_000]);
+    expect(h.sources).toHaveLength(1);
+    expect(h.sources[0]!.closed).toBe(false);
+  });
+
+  test.each([
+    { name: "a stream error", act: (h: ReturnType<typeof createHarness>) => { h.latest().fail(); h.runPendingTimer(); }, reopens: true },
+    { name: "a reconnect", act: (h: ReturnType<typeof createHarness>) => h.channel.connect({ resumed: true }), reopens: true },
+    { name: "a background release", act: (h: ReturnType<typeof createHarness>) => { h.channel.suspend(); h.channel.connect({ resumed: true }); }, reopens: true },
+    { name: "disposal", act: (h: ReturnType<typeof createHarness>) => h.channel.dispose(), reopens: false },
+  ])("$name aborts the control request in flight", async ({ act, reopens }) => {
+    const h = createHarness();
+    h.channel.connect();
+    h.latest().hello("s1");
+    const answer = h.holdNextPost();
+    h.channel.subscribe({ topic: "conversation", key: "a" }, {});
+    await settle();
+    expect(h.signals[0]!.aborted).toBe(false);
+
+    act(h);
+    expect(h.signals[0]!.aborted).toBe(true);
+    // Its timeout goes with it.
+    expect(h.delays()).not.toContain(CONTROL_TIMEOUT_MS);
+
+    answer(200);
+    await settle();
+    expect(h.posts).toHaveLength(1);
+    if (!reopens) {
+      expect(h.delays()).toEqual([]);
+      return;
+    }
+    // The replacement presents the change itself, and its own control route
+    // is free at once.
+    expect(h.subs(h.latest())).toEqual([{ topic: "conversation", key: "a" }]);
+    h.latest().hello("s2");
+    h.channel.subscribe({ topic: "conversation", key: "b" }, {});
+    await settle();
+    expect(h.posts).toHaveLength(2);
+    expect(h.posts[1]).toEqual({ url: "/api/hub/live/s2/subscriptions", body: { add: [{ topic: "conversation", key: "b" }] } });
   });
 
   test("a subscription the protocol refuses is dropped locally and told unavailable, never sent", async () => {

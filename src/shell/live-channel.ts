@@ -27,11 +27,11 @@
 //     added over the control route once `hello` arrives.
 //   - Control failures. A 400, 403, or 404 means the stream cannot take the
 //     change, and repeating the request cannot help, so the stream is
-//     treated as lost and the reconnect presents the whole set. A 5xx or a
-//     request with no answer is retried with backoff, and escalates to a
-//     reconnect after CONTROL_MAX_ATTEMPTS. A subscription the protocol
-//     refuses is never sent (see `refuse`): it would make every reconnect
-//     fail too.
+//     treated as lost and the reconnect presents the whole set. A 5xx, a
+//     network error, or a request unanswered after CONTROL_TIMEOUT_MS is
+//     retried with backoff, and escalates to a reconnect after
+//     CONTROL_MAX_ATTEMPTS. A subscription the protocol refuses is never
+//     sent (see `refuse`): it would make every reconnect fail too.
 //
 // The channel deliberately does NOT treat an open socket as success. Whether
 // the stream counts as connected is the document consumer's decision,
@@ -85,6 +85,12 @@ export function reconnectDelay(consecutiveFailures: number): number {
 // Consecutive failed attempts at a control change (5xx, or no answer) before
 // the channel stops retrying against this stream and reconnects instead.
 export const CONTROL_MAX_ATTEMPTS = 3;
+
+// How long a control request may go unanswered before it is aborted and
+// counted as a failure. The hub answers a control change in milliseconds,
+// so a request this old is lost, typically to a network path that went
+// away while the stream still looked open.
+export const CONTROL_TIMEOUT_MS = 10_000;
 
 // The longest connect URL the channel builds. `subs` rides the query string,
 // and common proxies refuse a request line past about 8 KB (Bun.serve itself
@@ -208,6 +214,13 @@ function subscriptionOf(entry: Entry): LiveSubscription {
   return entry.cursor ? { ...entry.key, cursor: entry.cursor } : { ...entry.key };
 }
 
+// One control request in flight: aborted when it times out or its stream is
+// replaced, and settled at most once.
+type ControlRequest = {
+  controller: AbortController;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 function messageData(event: Event): string {
   const data = (event as MessageEvent<unknown>).data;
   return typeof data === "string" ? data : "";
@@ -230,9 +243,10 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
   // whose desired state has changed since the stream last heard about them.
   let presented = new Map<string, LiveSubscriptionKey>();
   const dirty = new Set<string>();
-  // Generation of the control request in flight, 0 when none. A reply from
-  // a request bound to a superseded stream is ignored.
-  let controlInFlight = 0;
+  // The control request in flight, null when none. Only this request's
+  // first outcome (its answer, or its timeout) counts; an answer from a
+  // request that timed out or whose stream was replaced is ignored.
+  let control: ControlRequest | null = null;
   let flushQueued = false;
   // Consecutive retryable failures of the current control change.
   let controlFailures = 0;
@@ -265,6 +279,25 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     }
   };
 
+  // Takes `request`'s outcome if it is still the one in flight, and frees
+  // the control route for the next change.
+  const settleControl = (request: ControlRequest): boolean => {
+    if (control !== request || disposed) return false;
+    timers.clearTimeout(request.timeout);
+    control = null;
+    return true;
+  };
+
+  // The stream the request was bound to is gone or being replaced; the next
+  // stream presents the whole set, so the request's outcome is moot.
+  const abortControl = () => {
+    const request = control;
+    if (request === null) return;
+    control = null;
+    timers.clearTimeout(request.timeout);
+    request.controller.abort();
+  };
+
   const scheduleReconnect = () => {
     // One pending attempt at a time: an `error` burst (some browsers fire it
     // more than once as a socket tears down) must not fan out into a storm of
@@ -288,7 +321,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     failed.close();
     if (source === failed) source = null;
     streamId = null;
-    controlInFlight = 0;
+    abortControl();
     controlFailures = 0;
     cancelControlRetry();
     recovering = true;
@@ -331,7 +364,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
   const flushControl = () => {
     // A failed request's changes wait for their retry timer; anything made
     // meanwhile is merged into that retry rather than overtaking it.
-    if (disposed || streamId === null || controlInFlight !== 0 || controlRetryTimer !== null || dirty.size === 0) return;
+    if (disposed || streamId === null || control !== null || controlRetryTimer !== null || dirty.size === 0) return;
     const add: LiveSubscription[] = [];
     const remove: LiveSubscriptionKey[] = [];
     for (const id of dirty) {
@@ -351,29 +384,10 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     const change: LiveSubscriptionChange = {};
     if (add.length > 0) change.add = add;
     if (remove.length > 0) change.remove = remove;
-    const attempt = generation;
     const current = source;
-    controlInFlight = attempt;
-    void options.fetcher(liveSubscriptionsPath(streamId), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(change),
-    }).then(response => {
-      if (attempt !== generation || disposed) return;
-      if (!response.ok && !retryableControlStatus(response.status)) {
-        // 404: the hub has ended this stream. 403: it belongs to another hub
-        // session. 400: it cannot take this change. The same request would
-        // fail the same way, so the stream is lost to the change. The next
-        // connect presents the whole set, so nothing is re-queued.
-        if (current) lost(current);
-        return;
-      }
-      if (!response.ok) throw new Error(`subscription change failed: ${response.status}`);
-      controlFailures = 0;
-      for (const subscription of add) presented.set(liveSubscriptionId(subscription), keyOf(subscription));
-      for (const key of remove) presented.delete(liveSubscriptionId(key));
-    }).catch(() => {
-      if (attempt !== generation || disposed) return;
+    // A retryable failure: a 5xx, 408 or 429, a network error, or no answer
+    // within CONTROL_TIMEOUT_MS.
+    const failed = () => {
       controlFailures += 1;
       if (controlFailures >= CONTROL_MAX_ATTEMPTS) {
         // The stream keeps failing this change. Stop retrying against it;
@@ -391,11 +405,45 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
           flushControl();
         }, reconnectDelay(controlFailures));
       }
-    }).finally(() => {
-      if (controlInFlight === attempt) {
-        controlInFlight = 0;
+    };
+    // An EventSource can stay open over a network path that has silently
+    // gone, and a POST over it may never settle. Without a bound, the
+    // attempt limit is never reached and every later change waits forever.
+    const request: ControlRequest = {
+      controller: new AbortController(),
+      timeout: timers.setTimeout(() => {
+        if (!settleControl(request)) return;
+        request.controller.abort();
+        failed();
+      }, CONTROL_TIMEOUT_MS),
+    };
+    control = request;
+    void options.fetcher(liveSubscriptionsPath(streamId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(change),
+      signal: request.controller.signal,
+    }).then(response => {
+      if (!settleControl(request)) return;
+      if (response.ok) {
+        controlFailures = 0;
+        for (const subscription of add) presented.set(liveSubscriptionId(subscription), keyOf(subscription));
+        for (const key of remove) presented.delete(liveSubscriptionId(key));
+        // Whatever changed while this request was in flight.
         flushControl();
+        return;
       }
+      if (retryableControlStatus(response.status)) {
+        failed();
+        return;
+      }
+      // 404: the hub has ended this stream. 403: it belongs to another hub
+      // session. 400: it cannot take this change. The same request would
+      // fail the same way, so the stream is lost to the change. The next
+      // connect presents the whole set, so nothing is re-queued.
+      if (current) lost(current);
+    }, () => {
+      if (settleControl(request)) failed();
     });
   };
 
@@ -440,7 +488,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     source?.close();
     source = null;
     streamId = null;
-    controlInFlight = 0;
+    abortControl();
     controlFailures = 0;
     dirty.clear();
     latestActivity.clear();
@@ -592,7 +640,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
       source?.close();
       source = null;
       streamId = null;
-      controlInFlight = 0;
+      abortControl();
       // Anything the closed source still delivers is from a superseded
       // attempt, and the next connect is a replacement, not a first connect.
       generation += 1;
@@ -604,6 +652,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
       recovering = false;
       cancelPendingReconnect();
       cancelControlRetry();
+      abortControl();
       source?.close();
       source = null;
       streamId = null;
