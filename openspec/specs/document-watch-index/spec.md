@@ -217,7 +217,7 @@ For any request path that does not match a known API or built-in asset route, th
 - **AND** request handling continues without an uncaught exception
 
 ### Requirement: Respect `.gitignore` by default with an opt-out
-The system SHALL read `.gitignore` at each watch root by default and apply its patterns to filter the indexed file set. The system SHALL provide two ways to opt out of this behavior: a per-session CLI flag `--no-gitignore` on the `uatu watch` command, and a per-project setting `ignore.respectGitignore: false` in the watch root's `.uatu.json`. When both are present, the CLI flag wins for the duration of that session. The hardcoded directory denylist (`node_modules`, `.git`, `dist`, `build`, etc.) MUST continue to apply regardless of either opt-out. Files filtered by `.gitignore` MUST NOT appear in the sidebar tree and MUST NOT be eligible for follow mode. When the session is honoring `.gitignore`, filtering SHALL reflect the current on-disk contents of `.gitignore`: edits made mid-session MUST take effect on the next refresh without requiring the session to be restarted.
+The system SHALL read `.gitignore` at each watch root by default and apply its patterns to filter the indexed file set. The system SHALL provide two ways to opt out of this behavior: a per-session CLI flag `--no-gitignore` on the session child's `serve` command, and a per-project setting `ignore.respectGitignore: false` in the watch root's `.uatu.json`. When both are present, the CLI flag wins for the duration of that session. The hardcoded directory denylist (`node_modules`, `.git`, `dist`, `build`, etc.) MUST continue to apply regardless of either opt-out. Files filtered by `.gitignore` MUST NOT appear in the sidebar tree and MUST NOT be eligible for follow mode. When the session is honoring `.gitignore`, filtering SHALL reflect the current on-disk contents of `.gitignore`: edits made mid-session MUST take effect on the next refresh without requiring the session to be restarted.
 
 #### Scenario: `.gitignore` patterns hide files by default
 - **WHEN** the watch root's `.gitignore` excludes `*.log`
@@ -225,7 +225,7 @@ The system SHALL read `.gitignore` at each watch root by default and apply its p
 - **THEN** the sidebar tree does not list `debug.log`
 
 #### Scenario: `--no-gitignore` exposes gitignored files
-- **WHEN** the watch session is started with `uatu watch . --no-gitignore`
+- **WHEN** a session child is started with `. --no-gitignore`
 - **AND** the watch root's `.gitignore` excludes `*.log`
 - **AND** the watch root contains `debug.log`
 - **THEN** the sidebar tree lists `debug.log`
@@ -240,7 +240,7 @@ The system SHALL read `.gitignore` at each watch root by default and apply its p
 
 #### Scenario: CLI flag wins over the .uatu.json setting
 - **WHEN** the watch root's `.uatu.json` sets `ignore.respectGitignore: true`
-- **AND** the session is started with `uatu watch . --no-gitignore`
+- **AND** the session child is started with `. --no-gitignore`
 - **THEN** `.gitignore` is NOT honored for the duration of the session
 
 #### Scenario: Editing `.gitignore` at runtime reapplies the new patterns
@@ -312,17 +312,22 @@ When a suspended page resumes, a hidden page becomes visible, or the browser rep
 - **AND** a stale recovery completion cannot replace the newer channel or state
 
 ### Requirement: Live stream lifecycles remain isolated and releasable
-Each client's document and Chat streaming requests SHALL have an independent lifecycle through the Hub proxy. Disconnecting, suspending, or reconnecting one client MUST NOT close or delay another client's established streams. When a downstream client abandons a proxied stream, the Hub MUST cancel the corresponding child request and the child MUST release its subscription within a bounded period. Stream lifecycle diagnostics SHALL distinguish opens, successful recovery, downstream cancellation, and upstream failure by transport class without recording event payloads, credentials, or sensitive query values.
+Each client's document and Chat streaming requests SHALL have an independent lifecycle through the Hub proxy. Disconnecting, suspending, or reconnecting one client MUST NOT close or delay another client's established streams. When a downstream client abandons a stream, the Hub MUST detach that client from its live broker. For each upstream topic whose final subscriber was that client, the Hub MUST cancel the child request after a short linger, and the child MUST release its subscription within a bounded period. Upstream topics that other clients still subscribe to MUST stay open and keep delivering to those clients. No child subscription may outlive its last client. Stream lifecycle diagnostics SHALL distinguish opens, successful recovery, downstream cancellation, and upstream failure by transport class without recording event payloads, credentials, or sensitive query values.
 
 #### Scenario: One client reconnects while another remains live
 - **WHEN** two clients subscribe to the same running workspace and one client's transport is interrupted
 - **THEN** the interrupted client can reconnect independently
 - **AND** the other client's document and Chat streams continue without interruption
 
-#### Scenario: Downstream cancellation reaches the child
-- **WHEN** a client closes or abandons a stream proxied through the Hub
-- **THEN** the matching child-side request is canceled within a bounded period
-- **AND** the child no longer counts it as a live subscription
+#### Scenario: One client leaving keeps the shared upstream
+- **WHEN** two clients subscribe to the same workspace topic through the Hub and one of them closes or abandons its stream
+- **THEN** the Hub detaches that client from its broker
+- **AND** the child keeps the one shared subscription, and the other client's stream continues without interruption
+
+#### Scenario: The final subscriber's cancellation reaches the child
+- **WHEN** the last client subscribed to a workspace topic closes or abandons its stream
+- **THEN** after a short linger the Hub cancels the matching child-side request
+- **AND** within a bounded period the child no longer counts it as a live subscription
 
 #### Scenario: Diagnostics omit streamed content and secrets
 - **WHEN** the system records a stream open, recovery, cancellation, or failure

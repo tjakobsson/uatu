@@ -150,7 +150,7 @@ The authenticated `/clone` page SHALL show live terminal output and current phas
 - **THEN** the clone page reports completion and navigates to the workspace's stable session URL
 
 ### Requirement: Hub-served sessions expose hub navigation
-When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace by its display name, whose menu links to the hub dashboard and to every registered workspace by display name with running or stopped state and offers a sign-out entry. Duplicate display names SHALL be disambiguated with path or stable-id detail. Outside a hub, including plain `uatu serve` and a bare `--base-path` invocation, the affordance MUST stay hidden. The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
+When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace by its display name, whose menu links to the hub dashboard and to every registered workspace by display name with running or stopped state and offers a sign-out entry. Duplicate display names SHALL be disambiguated with path or stable-id detail. Outside a hub, including a source-run session child at the default base path or under a bare `--base-path`, the affordance MUST stay hidden. The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
 
 #### Scenario: Switching workspaces from inside a session
 - **WHEN** a user inside a hub-served session opens the workspace switcher
@@ -162,7 +162,7 @@ When the SPA is served through a hub (a hub-session-shaped base path AND the hub
 - **THEN** the switcher provides path or stable-id detail that distinguishes them without requiring names to be unique
 
 #### Scenario: No hub affordance outside a hub
-- **WHEN** the SPA runs under plain `uatu serve` or under a base path with no hub answering at the origin root
+- **WHEN** the SPA runs under a source-run session child or under a base path with no hub answering at the origin root
 - **THEN** the workspace switcher is not shown
 
 ### Requirement: The workspace switcher chip reflects real session state

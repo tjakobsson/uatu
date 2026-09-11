@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Make a `uatu serve` session relocatable under a configured path prefix: every route, asset, API endpoint, and client-emitted URL carries the base path so a session can be hosted under a prefix (for example behind the hub's reverse proxy at `/s/<id>/`) without breaking live reload, the terminal, the PWA, or document routing — while the default base path `/` preserves today's behavior byte-for-byte.
+Make a session child relocatable under a configured path prefix: every route, asset, API endpoint, and client-emitted URL carries the base path so a session can be hosted under a prefix (for example behind the hub's reverse proxy at `/s/<id>/`) without breaking live reload, the terminal, the PWA, or document routing — while the default base path `/` preserves today's behavior byte-for-byte.
 
 ## Requirements
 
 ### Requirement: A serve session is relocatable under a configured base path
-`uatu serve` SHALL accept a base path prefix and serve the entire session under it: the HTML shell, static assets, every `/api/*` endpoint (including the SSE event stream and the terminal WebSocket upgrade), the PWA manifest and service worker, and document routes. When a base path is configured, the server SHALL treat requests outside the prefix as not found, and every URL the server or SPA emits — fetches, `EventSource` and WebSocket URLs, pushState document URLs, asset references, anchor targets — SHALL carry the prefix. The base path SHALL reach the SPA via a server-injected boot value in the served HTML, not via client-side inference from `location`.
+A session child SHALL accept a base path prefix and serve the entire session under it: the HTML shell, static assets, every `/api/*` endpoint (including the SSE event stream and the terminal WebSocket upgrade), the PWA manifest and service worker, and document routes. When a base path is configured, the server SHALL treat requests outside the prefix as not found, and every URL the server or SPA emits — fetches, `EventSource` and WebSocket URLs, pushState document URLs, asset references, anchor targets — SHALL carry the prefix. The base path SHALL reach the SPA via a server-injected boot value in the served HTML, not via client-side inference from `location`.
 
 #### Scenario: API and documents serve under the prefix
 - **WHEN** the server runs with base path `/s/uatu/` and a client requests `/s/uatu/api/state`
@@ -32,7 +32,7 @@ Make a `uatu serve` session relocatable under a configured path prefix: every ro
 The base path SHALL default to `/`, and at that default the served URLs, routes, cookies, service-worker scope, and startup output SHALL be byte-for-byte identical to behavior before this capability existed, so local development, the e2e harness, and the desktop wrapper are unaffected.
 
 #### Scenario: Default invocation is unchanged
-- **WHEN** `uatu serve <folder>` runs without a base path argument
+- **WHEN** a session child is started with `<folder>` and no `--base-path`
 - **THEN** the session serves at `/` with identical routes and URLs as before this capability
 
 ### Requirement: Client URL construction flows through one prefix-aware helper

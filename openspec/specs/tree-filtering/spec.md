@@ -34,7 +34,7 @@ The system SHALL read the watch root's `.uatu.json` at session start and apply p
 - **AND** every other `.log` file remains hidden
 
 #### Scenario: Single-file watch roots ignore `ignore.exclude`
-- **WHEN** the watch session is started with `uatu watch script.py`
+- **WHEN** a session child is started with `script.py`
 - **AND** a `.uatu.json` with an `ignore.exclude` field exists in `script.py`'s directory
 - **THEN** that `ignore.exclude` does not affect the session
 - **AND** the watched file is shown in the sidebar regardless of the exclude patterns
@@ -117,7 +117,7 @@ the file.
 - **THEN** the non-git repository snapshot carries the parse warning and the Change Overview displays it
 
 #### Scenario: A single-file watch root produces no config warnings
-- **WHEN** the watch session is started with `uatu serve script.py` and a malformed `.uatu.json` exists in `script.py`'s directory
+- **WHEN** a session child is started with `script.py` and a malformed `.uatu.json` exists in `script.py`'s directory
 - **THEN** the session's config warnings are empty, matching the engine's rule that single-file roots read no ignore configuration
 
 #### Scenario: A missing `.uatu.json` produces no warning
