@@ -3609,14 +3609,15 @@ describe("image-only prompts reach the provider", () => {
 describe("workspace activity summary", () => {
   function activityAdapter(options: { maxProjections?: number } = {}) {
     let changes = 0;
+    const provider = new FakeProvider();
     const adapter = new ChatAdapter({
-      provider: new FakeProvider(),
+      provider,
       workspacePath: process.cwd(),
       generation: "activity",
       onActivityChange: () => { changes += 1; },
       ...options,
     });
-    return { adapter, changes: () => changes };
+    return { adapter, provider, changes: () => changes };
   }
 
   function permission(requestId: string, status: "pending" | "resolved" = "pending"): ConversationItem {
@@ -3696,5 +3697,86 @@ describe("workspace activity summary", () => {
     recreated.apply({ kind: "upsert", item: { ...permission("p1", "resolved"), resources: [] } as ConversationItem });
     expect(recreated.has("permission:p1")).toBe(false);
     expect(adapter.activity().awaiting).toBe(false);
+  });
+
+  // Once a conversation leaves the workspace, requireSession rejects its later
+  // events, so nothing else would ever settle its turn or its request.
+  for (const leave of ["moved out of the workspace", "deleted"] as const) {
+    for (const [kind, request] of [["permission", permission("p1")], ["question", question("q1")]] as const) {
+      test(`a running conversation with a pending ${kind} stops counting once ${leave}`, async () => {
+        const { adapter, provider, changes } = activityAdapter();
+        const local = fixtureSession("a");
+        provider.sessions = [local];
+        const pump = adapter.startEventPump();
+        adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
+        adapter.projectionForTests("a").apply({ kind: "upsert", item: request });
+        expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+        const before = changes();
+
+        if (leave === "deleted") {
+          provider.sessions = [];
+          provider.eventQueue.push({ type: "session.deleted", data: { info: local } });
+        } else {
+          const moved = fixtureSession("a", `${process.cwd()}-moved`);
+          provider.sessions = [moved];
+          provider.eventQueue.push({ type: "session.updated", data: { info: moved } });
+        }
+        await waitUntil(() => changes() > before);
+        await Bun.sleep(20);
+        expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+        expect(changes() - before).toBe(1);
+
+        if (leave === "moved out of the workspace") {
+          // Moving back re-derives activity from new events; the request the
+          // move-out forgot is not resurrected from the retained timeline.
+          provider.sessions = [local];
+          provider.eventQueue.push({ type: "session.updated", data: { info: local } });
+          provider.eventQueue.push({ type: "session.status", data: { sessionID: "a", status: { type: "busy" } } });
+          await waitUntil(() => adapter.activity().working);
+          expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+          expect(changes() - before).toBe(2);
+        }
+
+        await adapter.dispose();
+        await pump;
+      });
+    }
+  }
+
+  test("any lookup that finds a conversation outside the workspace forgets its activity", async () => {
+    for (const lookup of [
+      (adapter: ChatAdapter) => adapter.listConversations(),
+      (adapter: ChatAdapter) => adapter.getConversation("a").catch(() => undefined),
+    ]) {
+      const { adapter, provider, changes } = activityAdapter();
+      adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
+      adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1") });
+      const before = changes();
+      provider.sessions = [fixtureSession("a", `${process.cwd()}-moved`)];
+      await lookup(adapter);
+      expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+      expect(changes() - before).toBe(1);
+    }
+  });
+
+  test("a conversation that stays in the workspace keeps its activity through lifecycle updates", async () => {
+    const { adapter, provider, changes } = activityAdapter();
+    const local = fixtureSession("a");
+    provider.sessions = [local];
+    const pump = adapter.startEventPump();
+    adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1") });
+    const before = changes();
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...local, title: "Renamed" } } });
+    await expectInventorySignal(inventory);
+    await adapter.listConversations();
+    await adapter.getConversation("a");
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(changes()).toBe(before);
+    inventory.cancel();
+    await adapter.dispose();
+    await pump;
   });
 });

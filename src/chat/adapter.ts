@@ -665,6 +665,23 @@ export class ChatAdapter {
     this.activityMayHaveChanged();
   }
 
+  // A conversation that is deleted or has left the workspace can neither work
+  // nor wait on the user here: requireSession rejects its later events, so
+  // nothing else would ever settle its adapter-level records. If it returns,
+  // its activity is re-derived from new events.
+  private forgetActivity(conversationId: string): void {
+    this.liveTurns.delete(conversationId);
+    this.forgetInteractions(conversationId);
+  }
+
+  // The adapter's only workspace classification. Every path that learns a
+  // conversation lies outside the workspace forgets its activity here.
+  private async isInWorkspace(session: Pick<ProviderSession, "id" | "directory">): Promise<boolean> {
+    const inWorkspace = await isSessionInWorkspace(session.directory, this.workspacePath);
+    if (!inWorkspace) this.forgetActivity(session.id);
+    return inWorkspace;
+  }
+
   startEventPump(): Promise<void> {
     if (this.disposed) return Promise.resolve();
     if (this.pumpPromise) return this.pumpPromise;
@@ -2014,7 +2031,7 @@ export class ChatAdapter {
     // "skip this frame" but must restart on transport errors, and the API
     // routes should answer 500, not 404, when the provider is unreachable.
     const session = await this.provider.getSession(id);
-    if (!session || !await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
+    if (!session || !await this.isInWorkspace(session)) throw new ConversationNotFoundError();
     return session;
   }
 
@@ -2025,7 +2042,7 @@ export class ChatAdapter {
     const parentId = session.parentId ?? null;
     boundedSet(this.sessionParents, session.id, parentId, INVENTORY_SESSION_LIMIT);
     return {
-      inWorkspace: await isSessionInWorkspace(session.directory, this.workspacePath),
+      inWorkspace: await this.isInWorkspace(session),
       parentId,
       title: session.title,
       deleted,
@@ -2042,13 +2059,11 @@ export class ChatAdapter {
   }
 
   private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<void> {
-    if (lifecycle.kind === "deleted") this.cancelRevertReconciliation(lifecycle.id);
-    // A deleted conversation can neither work nor wait on the user; its
-    // adapter-level records would otherwise keep the activity summary lit.
     if (lifecycle.kind === "deleted") {
-      this.liveTurns.delete(lifecycle.id);
-      this.forgetInteractions(lifecycle.id);
+      this.cancelRevertReconciliation(lifecycle.id);
+      this.forgetActivity(lifecycle.id);
     }
+    // Classification forgets the activity of a session outside the workspace.
     const next = await this.classifyInventorySession(lifecycle, lifecycle.kind === "deleted");
     if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
     const previous = this.inventorySessions.get(lifecycle.id);
