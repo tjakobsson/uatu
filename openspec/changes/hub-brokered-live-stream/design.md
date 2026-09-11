@@ -53,6 +53,8 @@ A hub-side broker holds `Map<upstreamKey, { fetch, subscribers, lastCursor, buff
 
 Two bounds keep this true when upstreams fail or clients fall behind. A subscriber joining a failed upstream is told at once and shares the attempt that failed; it brings the next retry forward to the retry floor rather than retrying itself, so tabs joining one after another never each restart a failing child request. And at most one child replay (catch-up) runs per upstream: a second subscriber behind the buffer while it runs takes a topic-scoped resync — one short snapshot request from its client — instead of a long-lived child request of its own.
 
+The hub must also know where each shared conversation stream begins. A stream opened from a subscriber's cursor starts there; one opened without a cursor starts at the child's then-head, which the child names in the `open` event its conversation stream begins with. A later subscriber whose cursor is older than that start is caught up by a child replay; skipping it to ready would silently lose the events in between. Without a named start (a child that did not send one), the subscriber is caught up too.
+
 ### D5 — Activity is computed at the hub from a small child endpoint
 
 Each child gains an additive internal endpoint that streams a workspace activity summary: `{ working: boolean, awaiting: boolean }` derived from live conversation statuses and pending interactions across agents. The hub subscribes to it for every running workspace the user may access (refcounted like any topic, but keyed by user rather than by tab) and merges with its own session state (`running`) into the `activity` topic. The summary carries no identifiers beyond the workspace id.

@@ -110,6 +110,11 @@ export function childConversationEventsPath(conversationId: string): string {
 // one immediately), 15 s keepalives.
 export const CHILD_ACTIVITY_PATH = "/api/activity";
 export const CHILD_ACTIVITY_EVENT = "activity";
+// The child's conversation stream opens with this event, whose data names
+// the cursor its live events follow: `{ "cursor": "<replay cursor>" }`. A
+// subscriber that asked for no cursor — the hub's broker opening a shared
+// stream — learns where the stream begins from it.
+export const CHILD_CONVERSATION_OPEN_EVENT = "open";
 
 export function liveSubscriptionsPath(streamId: string): string {
   return `${LIVE_STREAM_PATH}/${encodeURIComponent(streamId)}/subscriptions`;

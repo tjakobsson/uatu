@@ -35,7 +35,7 @@ import {
 import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
 import { joinBasePath, stripBasePath } from "../shared/base-path";
-import { CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
+import { CHILD_CONVERSATION_OPEN_EVENT, CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
 import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { renderDocument } from "./render-dispatch";
@@ -708,7 +708,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         const onAbort = () => abort.abort();
         request.signal.addEventListener("abort", onAbort, { once: true });
         try {
-          const { events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal });
+          const { snapshot, events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal });
           const encoder = new TextEncoder();
           const iterator = events[Symbol.asyncIterator]();
           let pending = iterator.next();
@@ -734,14 +734,14 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           // active agent kept publishing.
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
-              // The response headers leave with the first chunk, not before.
-              // A conversation with nothing happening would otherwise hold
-              // the browser's EventSource in CONNECTING for a whole keepalive
-              // interval on every open: no `open` event, so the reconnect
-              // message could not clear, and a socket held for nothing. The
-              // document and inventory streams open on a real first frame;
-              // this one has none to send, so it sends a comment.
-              controller.enqueue(encoder.encode(": open\n\n"));
+              // The response headers leave with the first chunk, not before, so the
+              // stream opens at once with an `open` event rather than waiting for a
+              // conversation event or the first keepalive. Its data names the cursor
+              // live events follow from: a subscriber that asked for no cursor — the
+              // hub's broker opening a shared stream — learns where the stream begins,
+              // so it can catch up a later subscriber whose cursor is older instead of
+              // skipping it past the gap.
+              controller.enqueue(encoder.encode(`event: ${CHILD_CONVERSATION_OPEN_EVENT}\ndata: ${JSON.stringify({ cursor: snapshot.cursor })}\n\n`));
             },
             async pull(controller) {
               try {

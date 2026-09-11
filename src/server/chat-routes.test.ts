@@ -15,6 +15,9 @@ import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 
 const TOKEN = "chat-test-token";
+// The conversation route opens with an `open` event naming the cursor its
+// live events follow, never a chat event and never an `id:` line.
+const CONVERSATION_OPEN_FRAME = /^event: open\ndata: \{"cursor":"[^"]+"\}\n\n$/;
 
 class FakeChatService implements WorkspaceChatService {
   readonly conversation: ConversationSummary = { id: "local", title: "Local", createdAt: 1, updatedAt: 1, status: "idle" };
@@ -334,7 +337,7 @@ describe("workspace chat routes", () => {
     };
     const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", {}, { conversationId: "opencode:local" }) as never);
     const reader = response.body!.getReader();
-    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
+    expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
 
     for (let index = 0; index < 3; index += 1) {
       const frame = new TextDecoder().decode((await reader.read()).value);
@@ -362,11 +365,11 @@ describe("workspace chat routes", () => {
       reader.read().then(result => new TextDecoder().decode(result.value)),
       Bun.sleep(1_000).then(() => "nothing within 1s"),
     ]);
-    expect(first).toBe(": open\n\n");
+    expect(first).toMatch(CONVERSATION_OPEN_FRAME);
     expect(performance.now() - startedAt).toBeLessThan(500);
-    // A comment: no `event:` for a listener to fire on, no `id:` to move the
+    // Not a chat event for a listener to fire on, and no `id:` to move the
     // replay cursor a reconnect would resume from.
-    expect(first).not.toContain("event:");
+    expect(first).not.toContain("event: chat");
     expect(first).not.toContain("id:");
     await reader.cancel();
   });
@@ -774,7 +777,7 @@ describe("workspace chat routes", () => {
     expect(response.headers.get("x-accel-buffering")).toBe("no");
     const reader = response.body!.getReader();
     // The opening comment flushes the headers; the retained event follows.
-    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
+    expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
     const first = await reader.read();
     const frame = new TextDecoder().decode(first.value);
     expect(frame).toContain("event: chat");

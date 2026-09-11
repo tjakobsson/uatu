@@ -46,6 +46,7 @@ import {
   type LiveSubscription,
   type LiveTopic,
   type WorkspaceActivity,
+  CHILD_CONVERSATION_OPEN_EVENT,
 } from "../shared/live-protocol";
 import { SseFrameParser, type SseFrame } from "./live-sse";
 import { statusCategoryOf, type ProxyStatusCategory } from "./proxy";
@@ -486,14 +487,10 @@ export class LiveBroker {
       this.emitSignal(subscriber, { kind: "ready" }, upstream);
       return;
     }
-    if (!origin) {
-      // Opened without a cursor at the child's then-head; a cursor cannot be
-      // placed against it. Treat the presented cursor as current.
-      subscriber.skip = cursor;
-      subscriber.live = true;
-      this.emitSignal(subscriber, { kind: "ready" }, upstream);
-      return;
-    }
+    // Behind the origin, from another generation, or with no origin known
+    // (a child that did not name where its stream begins): the shared stream
+    // cannot deliver what lies between this cursor and its start, so the
+    // child replays it. Marking it ready here would skip the gap silently.
     this.catchUp(upstream, subscriber);
   }
 
@@ -771,6 +768,15 @@ export class LiveBroker {
           upstream.subscribers.clear();
           this.drop(upstream, true);
           return true;
+        }
+        if (frame.event === CHILD_CONVERSATION_OPEN_EVENT) {
+          // Where a stream opened without a cursor begins. A stream opened
+          // from a cursor already knows, and the child replays from it.
+          if (!upstream.head && !upstream.originCursor) {
+            const cursor = (data as { cursor?: unknown } | undefined)?.cursor;
+            if (typeof cursor === "string" && cursor.length > 0) upstream.originCursor = cursor;
+          }
+          return false;
         }
         if (frame.event !== "chat" || frame.id === undefined) return false;
         upstream.head = frame.id;

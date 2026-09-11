@@ -334,6 +334,49 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     expect(new Set(behind.envelopes.filter(e => e.event.kind === "data").map(e => e.cursor)).size).toBe(6);
   });
 
+  test("a joiner with an older cursor on a stream opened without one is caught up to where the stream began", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const opener = sink();
+    live.subscribe(opener, "ws", { topic: "conversation", key: "c" });
+    await waitFor(() => child.opened.length === 1, "shared upstream");
+    const shared = child.opened[0]!;
+    expect(shared.path).not.toContain("cursor=");
+    // The child names where its stream begins.
+    shared.push(`event: open\ndata: ${JSON.stringify({ cursor: cursorOf("g1", 5) })}\n\n`);
+    await waitFor(() => kinds(opener.envelopes).includes("ready"), "opener ready");
+
+    // A tab restored with an older cursor joins before any event arrives.
+    const joiner = sink();
+    live.subscribe(joiner, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 2) });
+    const replayPath = `?cursor=${encodeURIComponent(cursorOf("g1", 2))}`;
+    await waitFor(() => child.byPath(replayPath).length === 1, "replay from the joiner's cursor");
+    const replay = child.byPath(replayPath)[0]!;
+    for (let sequence = 3; sequence <= 5; sequence += 1) replay.push(chatFrame("g1", sequence));
+    await waitFor(() => kinds(joiner.envelopes).includes("ready"), "merged at the stream's start");
+
+    shared.push(chatFrame("g1", 6));
+    await waitFor(() => joiner.envelopes.filter(e => e.event.kind === "data").length === 4, "live after merge");
+    expect(joiner.envelopes.filter(e => e.event.kind === "data").map(e => e.cursor)).toEqual([3, 4, 5, 6].map(sequence => cursorOf("g1", sequence)));
+    expect(replay.cancelled).toBe(true);
+  });
+
+  test("with no starting cursor from the child, a joiner is caught up rather than skipped past the gap", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    live.subscribe(sink(), "ws", { topic: "conversation", key: "c" });
+    await waitFor(() => child.opened.length === 1, "shared upstream");
+    child.opened[0]!.push(": open\n\n");
+    const joiner = sink();
+    live.subscribe(joiner, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 2) });
+    const replayPath = `?cursor=${encodeURIComponent(cursorOf("g1", 2))}`;
+    await waitFor(() => child.byPath(replayPath).length === 1, "replay opened");
+    expect(kinds(joiner.envelopes)).not.toContain("ready");
+    child.byPath(replayPath)[0]!.push(chatFrame("g1", 3));
+    await waitFor(() => joiner.envelopes.length === 1, "replayed event");
+    expect(joiner.envelopes[0]!.cursor).toBe(cursorOf("g1", 3));
+  });
+
   test("a second subscriber behind the buffer while a child replay runs takes a resync instead of its own replay", async () => {
     let replays = 0;
     const child = fakeSource({
