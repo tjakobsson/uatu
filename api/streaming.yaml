@@ -2,19 +2,117 @@ $schema: https://json-schema.org/draft/2020-12/schema
 schemaVersion: 1
 title: UatuCode streaming protocol contract
 channels:
-  workspaceState:
+  live:
     transport: sse
-    operationId: workspaceStreamState
-    path: /s/{workspaceId}/api/events
+    operationId: hubStreamLive
+    controlOperationId: hubUpdateLiveSubscriptions
+    path: /api/hub/live
     mediaType: text/event-stream
     authentication: hubSession
     events:
-      - { name: state, dataSchema: WorkspaceState, replayId: none }
+      - { name: hello, dataSchema: LiveHello, replayId: none }
+      - { name: live, dataSchema: LiveEnvelope, replayId: none }
+    topics:
+      document:
+        domain: workspace
+        key: LiveDocumentKey
+        dataSchema: WorkspaceState
+        cursor: hub
+        description: Each data event is a complete workspace state snapshot for the subscribed watch context.
+      inventory:
+        domain: workspace
+        dataSchema: ConversationInventoryEvent
+        cursor: hub
+        description: >-
+          The workspace's conversation inventory changed. Invalidations may
+          collapse into one event. Read the inventory after `ready` and again
+          on every data event.
+      conversation:
+        domain: workspace
+        key: LiveConversationKey
+        dataSchema: ChatEvent
+        resyncDataSchema: ChatResyncEvent
+        cursor: workspace
+        description: >-
+          One conversation's ordered events. Resuming from a retained cursor
+          replays later events in sequence before live ones, and replay is
+          byte-bounded per conversation. `conversation.configuration`
+          publishes a newly effective model, mode, or variant after prompt
+          acceptance or an agent-side change. `conversation.updated` publishes
+          summary changes such as a persisted rename. `conversation.queue`
+          restates the workspace-held message queue after a message is held,
+          removed, or delivered, so every client shows the same queue at the
+          same point in the stream. All three are ordered, replayable,
+          idempotent projections of conversation state. A resync never
+          arrives as a data event. It arrives as a `resync` signal carrying
+          the workspace's resync event.
+      activity:
+        domain: hub
+        dataSchema: WorkspaceActivity
+        cursor: hub
+        subscription: activity query parameter
+        description: >-
+          One summary per workspace the caller may access when the stream
+          opens, then one whenever a workspace's facts change. The envelope's
+          `ws` names the workspace described, which need not be the stream's
+          own. A workspace whose child does not answer reports not running.
+          The summary carries no content, titles, paths, or per-conversation
+          detail.
+    signals:
+      ready: >-
+        The subscription is attached to a live upstream, and the Hub has
+        written any replay owed to it.
+      resync: >-
+        The presented cursor is not replayable, or the workspace said so. The
+        subscription stays detached until the client takes a fresh snapshot
+        and adds it again with the snapshot's cursor. It says nothing about
+        other subscriptions. For the conversation topic, `data` carries the
+        workspace's resync event.
+      unavailable: >-
+        The upstream failed or the workspace child exited. The Hub retries
+        while subscribers remain, and on recovery sends `ready` plus fresh
+        data where the topic needs it.
+    bounds: { maxSubscriptions: 16, maxKeyUtf8Bytes: 4096, maxCursorUtf8Bytes: 1024, maxWorkspaceIdUtf8Bytes: 256, keepaliveSeconds: 15 }
     lifecycle:
-      initialEvent: state
-      reconnection: Browser EventSource retry is supported; the stream sends a fresh complete state snapshot after reconnect.
-      completion: Open until client cancellation, server shutdown, or transport failure.
-      errors: HTTP errors occur before stream start; no in-band error event exists.
+      initialEvent: hello
+      open: >-
+        The response writes an `: open` comment frame at once, so headers and
+        first bytes arrive before any event exists. Exactly one `hello` event
+        follows, carrying the stream id.
+      subscriptions: >-
+        The `subs` query parameter sets the initial subscriptions. Later
+        changes go to hubUpdateLiveSubscriptions with the stream id from
+        `hello`, sent with the same Hub session. Subscribing never opens
+        another connection. `subs` rides the query string, and proxies
+        commonly refuse a request line past about 8 KB, so a client whose set
+        would exceed that presents part of it in `subs` and adds the rest
+        after `hello`, from the same cursors.
+      cursors: >-
+        Cursors are opaque and scoped to one subscription. A client advances
+        a subscription's cursor only on `data` events. Signals carry the
+        current cursor unchanged, possibly empty. Subscriptions resume and
+        resync independently.
+      replay: >-
+        To reconnect, open a new stream that presents in `subs` the last
+        cursor applied for every subscription it resumes. The Hub replays each
+        subscription from its cursor in order before live events, or sends it
+        a `resync` signal when the cursor is not replayable. The SSE `id`
+        field and `Last-Event-ID` are not used.
+      keepalive: >-
+        A `: keepalive` comment frame every 15 seconds while idle. It carries
+        no envelope and advances no cursor.
+      reconnection: >-
+        After a transport error the client reconnects the one stream with
+        bounded backoff, presenting every retained cursor.
+      cancellation: >-
+        Client disconnect or stream cancellation releases the stream's
+        subscriptions. The Hub releases an upstream within a bounded period
+        after its last subscriber leaves.
+      completion: >-
+        Open until client cancellation, Hub shutdown, or transport failure.
+        Upstream failures and workspace exits arrive as signals and never end
+        the stream.
+      errors: HTTP 400, 401, and 404 occur before the stream starts. There is no in-band error event.
   cloneJobEvents:
     transport: sse
     operationId: hubStreamCloneJobEvents
@@ -30,91 +128,6 @@ channels:
       replayLimit: Output retention is byte-bounded; phase and result events remain replayable while the job is retained.
       reconnection: A result event closes the stream. Reconnecting within the job retention window replays retained events — including the terminal result — and then closes again.
       errors: Unknown or non-owned jobs return HTTP 404 before stream start; no in-band error event exists.
-  workspaceSearch:
-    transport: ndjson
-    operationId: workspaceSearch
-    path: /s/{workspaceId}/api/search
-    mediaType: application/x-ndjson
-    authentication: hubSession
-    itemSchema: SearchStreamItem
-    lifecycle:
-      completion: A done item is emitted after a completed or bounded sweep and is the final item.
-      cancellation: Client disconnect or stream cancellation aborts the sweep and may end without a done item.
-      errors: Invalid patterns return HTTP 400 JSON before streaming. An internal mid-stream failure closes the stream without an error item.
-  workspaceChat:
-    transport: sse
-    operationId: workspaceStreamChatEvents
-    path: /s/{workspaceId}/api/chat/conversations/{conversationId}/events
-    mediaType: text/event-stream
-    authentication: hubSession
-    events:
-      - { name: chat, dataSchema: ChatEvent, replayId: cursor }
-      - { name: resync, dataSchema: ChatResyncEvent, replayId: cursor, terminal: true }
-    lifecycle:
-      replay: Send an opaque cursor query parameter or Last-Event-ID; retained later events are replayed in sequence before live events.
-      replayLimit: Replay is byte-bounded independently for each conversation.
-      updates: A `conversation.configuration` ChatEvent publishes a newly effective model, mode, or variant after prompt acceptance or an agent-side change. A `conversation.updated` ChatEvent publishes summary changes such as a persisted rename. A `conversation.queue` ChatEvent restates the workspace-held message queue after a message is held, removed, or delivered, so every client presents the same queue at the same point in the stream. All are ordered, replayable, and idempotent projections of conversation state.
-      reconnection: A generation mismatch, invalid cursor, or retention gap emits one typed resync event and closes; fetch a fresh snapshot before reconnecting.
-      keepalive: Comment frames may be sent while no chat event is available.
-      cancellation: Client disconnect or stream cancellation removes the subscriber.
-      errors: Authentication, unavailable chat, and unknown or foreign conversations return HTTP errors before stream start.
-  workspaceChatConversationInventory:
-    transport: sse
-    operationId: workspaceStreamChatConversationInventory
-    path: /s/{workspaceId}/api/chat/conversations/events
-    mediaType: text/event-stream
-    authentication: hubSession
-    events:
-      - { name: inventory, dataSchema: ConversationInventoryEvent, replayId: none }
-    lifecycle:
-      initialEvent: inventory
-      coalescing: Each subscriber holds at most one pending inventory signal; repeated invalidations may collapse into that signal.
-      reconnection: Every connection emits a fresh inventory event after subscription so clients can refetch the complete authoritative list and repair missed changes.
-      keepalive: Comment frames may be sent while no inventory event is available.
-      cancellation: Client disconnect or stream cancellation removes the subscriber.
-      errors: Authentication and unavailable chat return HTTP errors before stream start; no in-band error event exists.
-  terminal:
-    transport: websocket
-    operationId: workspaceAttachTerminal
-    path: /s/{workspaceId}/api/terminal
-    authentication: hubSession
-    handshake:
-      requiredQuery: [sessionId]
-      optionalQuery: [takeover]
-      requiredHeaders: [Upgrade]
-      optionalHeaders: [Origin]
-      successStatus: 101
-      failureStatuses: [400, 401, 403, 404, 409, 500, 503]
-      proxyBehavior: >-
-        The Hub validates authentication and Origin (when present) before
-        accepting the upgrade, but does not preflight the workspace child:
-        on a genuine upgrade it accepts the public connection first and then
-        opens its own socket to the child. Session-level failures — invalid
-        or unknown sessionId (400/404), an already-attached session without
-        takeover (409) — therefore surface on an accepted upgrade as a
-        post-upgrade close (code 1011 upstream error, or the child's mapped
-        close code), not as an HTTP failure status. The 400/404/409 HTTP
-        statuses remain observable only for non-upgrade requests to this
-        path, which proxy through as plain HTTP.
-    clientFrames:
-      binary: { schema: BinaryPtyData, meaning: UTF-8 bytes written to the PTY after attach completes. }
-      textJson: { schemas: [TerminalAttachReady, TerminalResize] }
-    serverFrames:
-      binary: { schema: BinaryPtyData, meaning: Serialized terminal snapshot followed by live PTY output bytes. }
-      textJson: { schemas: [TerminalExit] }
-    lifecycle:
-      attach: Client must send attach-ready with dimensions. The server sends a binary snapshot and then marks the socket attached.
-      resize: Accepted only from the attached holder. Dimensions below 1 are clamped up to 1; frames with non-integer dimensions or values above 1000 are silently ignored in full, never clamped down.
-      takeover: takeover=1 may claim an attached session. Ownership changes only after snapshot delivery; the prior holder closes with 4410.
-      detach: Any client close except 4001 detaches and preserves the PTY. Close 4001 terminates it.
-      exit: Server sends TerminalExit then closes with 1000 when the shell exits.
-    closeCodes:
-      - { code: 1000, name: normalShellExit, sender: server, terminal: true }
-      - { code: 1011, name: attachFailed, sender: server, terminal: false }
-      - { code: 4001, name: userTerminate, sender: client, terminal: true }
-      - { code: 4404, name: unknownSession, sender: server, terminal: false }
-      - { code: 4409, name: sessionCollision, sender: server, terminal: false }
-      - { code: 4410, name: sessionTaken, sender: server, terminal: false }
 schemas:
   WorkspaceState:
     description: Same schema as openapi.yaml#/components/schemas/WorkspaceState.
@@ -122,6 +135,36 @@ schemas:
   ChatEvent: { $ref: ./openapi.yaml#/components/schemas/ChatEvent }
   ChatResyncEvent: { $ref: ./openapi.yaml#/components/schemas/ChatResyncEvent }
   ConversationInventoryEvent: { $ref: ./openapi.yaml#/components/schemas/ConversationInventoryEvent }
+  LiveHello:
+    type: object
+    required: [streamId]
+    properties:
+      streamId: { type: string, minLength: 1, description: Unguessable id that binds subscription changes to this stream. }
+    additionalProperties: false
+  LiveEnvelope:
+    type: object
+    required: [ws, topic, cursor, event]
+    properties:
+      ws: { type: string, minLength: 1, description: "The workspace the event belongs to. For the activity topic, the workspace the summary describes, which may be any workspace the caller may access." }
+      topic: { enum: [document, inventory, conversation, activity] }
+      key: { type: string, description: "The subscription key. The watch context for document and the conversation id for conversation. Absent for inventory and activity." }
+      cursor: { type: string, description: "The subscription's cursor. It advances only on data events." }
+      event: { $ref: '#/schemas/LiveEvent' }
+    additionalProperties: false
+  LiveEvent:
+    oneOf:
+      - { type: object, required: [kind, data], properties: { kind: { const: data }, data: { description: "The topic's payload. Its schema is the topic's dataSchema in channels.live.topics." } }, additionalProperties: false }
+      - { type: object, required: [kind], properties: { kind: { const: ready } }, additionalProperties: false }
+      - { type: object, required: [kind], properties: { kind: { const: resync }, data: { description: "Present for the conversation topic when the workspace sent a resync event. Its schema is topics.conversation.resyncDataSchema." } }, additionalProperties: false }
+      - { type: object, required: [kind], properties: { kind: { const: unavailable } }, additionalProperties: false }
+  WorkspaceActivity:
+    type: object
+    required: [running, working, awaiting]
+    properties:
+      running: { type: boolean, description: The workspace's session is running and its child answers. }
+      working: { type: boolean, description: An agent conversation is working. Always false when not running. }
+      awaiting: { type: boolean, description: A permission request or question awaits the user. Always false when not running. }
+    additionalProperties: false
   CloneOutput:
     type: object
     required: [output]
@@ -137,33 +180,3 @@ schemas:
       - { type: object, required: [status, workspaceId, target, running], properties: { status: { const: succeeded }, workspaceId: { type: string }, target: { type: string }, running: { type: boolean, description: "false = the registered workspace finished stopped (the default); true = an explicitly requested start succeeded." } }, additionalProperties: false }
       - { type: object, required: [status, target, error], properties: { status: { enum: [clone-failed, register-failed, start-failed, cleanup-failed] }, target: { type: string }, error: { type: string }, workspaceId: { type: string, description: "Present on start-failed when the configuration committed and the stopped workspace was preserved." } }, additionalProperties: false }
       - { type: object, required: [status, target], properties: { status: { enum: [cancelled, timed-out] }, target: { type: string }, reason: { enum: [inactivity, lifetime] } }, additionalProperties: false }
-  SearchStreamItem:
-    oneOf:
-      - { $ref: '#/schemas/SearchFile' }
-      - { $ref: '#/schemas/SearchExpensive' }
-      - { $ref: '#/schemas/SearchOversized' }
-      - { $ref: '#/schemas/SearchDone' }
-  SearchFile:
-    type: object
-    required: [kind, result]
-    properties:
-      kind: { const: file }
-      result:
-        type: object
-        required: [documentId, relativePath, rootId, matches]
-        properties:
-          documentId: { type: string }
-          relativePath: { type: string }
-          rootId: { type: string }
-          matches:
-            type: array
-            items: { type: object, required: [line, text, start, end, ordinal, literalTotal], properties: { line: { type: integer, minimum: 1 }, text: { type: string }, start: { type: integer, minimum: 0 }, end: { type: integer, minimum: 1 }, ordinal: { type: integer, minimum: 0 }, literalTotal: { type: integer, minimum: 1 } }, additionalProperties: false }
-        additionalProperties: false
-    additionalProperties: false
-  SearchExpensive: { type: object, required: [kind, relativePath], properties: { kind: { const: expensive }, relativePath: { type: string } }, additionalProperties: false }
-  SearchOversized: { type: object, required: [kind, relativePath], properties: { kind: { const: oversized }, relativePath: { type: string } }, additionalProperties: false }
-  SearchDone: { type: object, required: [kind, truncated, filesSearched, totalMatches], properties: { kind: { const: done }, truncated: { type: boolean }, filesSearched: { type: integer, minimum: 0 }, totalMatches: { type: integer, minimum: 0 }, abandoned: { type: boolean } }, additionalProperties: false }
-  TerminalAttachReady: { type: object, required: [type, cols, rows], properties: { type: { const: attach-ready }, cols: { type: integer, minimum: 1, maximum: 1000 }, rows: { type: integer, minimum: 1, maximum: 1000 } }, additionalProperties: false }
-  TerminalResize: { type: object, required: [type, cols, rows], properties: { type: { const: resize }, cols: { type: integer, minimum: 1, maximum: 1000 }, rows: { type: integer, minimum: 1, maximum: 1000 } }, additionalProperties: false }
-  TerminalExit: { type: object, required: [type, exitCode, signal], properties: { type: { const: exit }, exitCode: { type: integer, description: "Always an integer; signal death is reported as exitCode 0 with the signal number set." }, signal: { type: [integer, 'null'] } }, additionalProperties: false }
-  BinaryPtyData: { type: string, contentEncoding: base64, description: Arbitrary non-empty binary frame. Validation operates on frame type and bytes rather than JSON decoding. }

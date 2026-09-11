@@ -35,6 +35,7 @@ import {
 import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
 import { joinBasePath, stripBasePath } from "../shared/base-path";
+import { CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
 import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { renderDocument } from "./render-dispatch";
@@ -456,6 +457,86 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
   };
 
   return {
+    // Internal hub-to-child protocol (hub-brokered-live-stream D5): the
+    // workspace's activity summary for the hub's cross-workspace badge —
+    // whether any conversation is working and whether any interaction awaits
+    // the user, across every agent. Two booleans and nothing else: no id,
+    // title, or count crosses here. The current summary is sent at once, then
+    // again only when it changes. No stream metrics: the hub's broker holds
+    // one of these per workspace and owns that picture.
+    [p(CHILD_ACTIVITY_PATH)]: {
+      GET: async (request: Request) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const abort = new AbortController();
+        const onAbort = () => abort.abort();
+        if (request.signal.aborted) abort.abort();
+        else request.signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          const changes = await deps.chatService.subscribeActivity({ signal: abort.signal });
+          const encoder = new TextEncoder();
+          let pending: Promise<IteratorResult<void>> | null = null;
+          let sent: string | null = null;
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            changes.cancel();
+            request.signal.removeEventListener("abort", onAbort);
+          };
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              // Headers leave with the first chunk (#350), so open at once
+              // rather than when the first summary is computed.
+              controller.enqueue(encoder.encode(": open\n\n"));
+            },
+            async pull(controller) {
+              try {
+                // The subscription opens with a tick, so the first pull sends
+                // the current summary; a later tick that leaves it unchanged
+                // sends nothing and waits again.
+                while (!abort.signal.aborted) {
+                  pending ??= changes.next();
+                  const result = await nextChatEvent(pending, keepaliveMs);
+                  if (result === "keepalive") {
+                    controller.enqueue(encoder.encode(": keepalive\n\n"));
+                    return;
+                  }
+                  pending = null;
+                  if (result.done) break;
+                  const summary = await deps.chatService.activity();
+                  // Rebuilt field by field, never spread: the wire shape is
+                  // exactly these two booleans whatever a service returns.
+                  const data = JSON.stringify({ working: summary.working === true, awaiting: summary.awaiting === true });
+                  if (data === sent) continue;
+                  sent = data;
+                  controller.enqueue(encoder.encode(`event: ${CHILD_ACTIVITY_EVENT}\ndata: ${data}\n\n`));
+                  return;
+                }
+              } catch {
+                // Cancellation closes the transport without an in-band error.
+              }
+              finish();
+              try { controller.close(); } catch { /* consumer cancelled */ }
+            },
+            cancel() {
+              abort.abort();
+              finish();
+            },
+          }, { highWaterMark: 0 });
+          return new Response(stream, {
+            headers: {
+              "cache-control": "no-store, no-transform",
+              "content-type": "text/event-stream; charset=utf-8",
+              "x-accel-buffering": "no",
+            },
+          });
+        } catch (error) {
+          request.signal.removeEventListener("abort", onAbort);
+          return normalizedChatError(error);
+        }
+      },
+    },
     [p("/api/chat/status")]: {
       GET: async (request: Request) => authenticated(request) ?? run(async () => ({
         agents: await deps.chatService.status(),
@@ -538,6 +619,14 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
             request.signal.removeEventListener("abort", onAbort);
           };
           const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              // Headers leave with the first chunk, not before. With no change to
+              // report, an idle workspace would hold this stream in CONNECTING for
+              // a whole keepalive interval, and the hub broker subscribing to it
+              // could not tell a live upstream from a stalled one. Same fix as the
+              // conversation route below: open with a comment.
+              controller.enqueue(encoder.encode(": open\n\n"));
+            },
             async pull(controller) {
               try {
                 pending ??= iterator.next();

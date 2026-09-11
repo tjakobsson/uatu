@@ -13,4 +13,4 @@ Human documentation:
 - Product and guides: https://tjakobsson.github.io/uatu/
 - Searchable API reference: https://tjakobsson.github.io/uatu/docs/api/
 
-OpenAPI governs HTTP wire details. The streaming contract governs SSE, NDJSON, and WebSocket behavior. Metadata and changelog govern revision selection and migration. Contract metadata reports the `sourceCommit` it was built from.
+OpenAPI governs HTTP wire details. The streaming contract governs the Server-Sent Events channels: the brokered live stream and clone job events. Metadata and changelog govern revision selection and migration. Contract metadata reports the `sourceCommit` it was built from.

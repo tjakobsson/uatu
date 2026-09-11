@@ -3605,3 +3605,96 @@ describe("image-only prompts reach the provider", () => {
     await expect(adapter.prompt("session2", "r2", "")).rejects.toThrow("prompt must not be empty");
   });
 });
+
+describe("workspace activity summary", () => {
+  function activityAdapter(options: { maxProjections?: number } = {}) {
+    let changes = 0;
+    const adapter = new ChatAdapter({
+      provider: new FakeProvider(),
+      workspacePath: process.cwd(),
+      generation: "activity",
+      onActivityChange: () => { changes += 1; },
+      ...options,
+    });
+    return { adapter, changes: () => changes };
+  }
+
+  function permission(requestId: string, status: "pending" | "resolved" = "pending"): ConversationItem {
+    return {
+      id: `permission:${requestId}`,
+      type: "permission",
+      createdAt: 1,
+      requestId,
+      action: "edit",
+      resources: ["README.md"],
+      status,
+      ...(status === "resolved" ? { outcome: "approved-once" as const } : {}),
+    };
+  }
+
+  function question(requestId: string): ConversationItem {
+    return {
+      id: `question:${requestId}`,
+      type: "question",
+      createdAt: 1,
+      requestId,
+      questions: [{ prompt: "Proceed?", header: "Proceed", options: [], multiple: false, allowFreeForm: true }],
+      status: "pending",
+    };
+  }
+
+  test("a turn in flight in any conversation is working, and only a change of the summary is reported", () => {
+    const { adapter, changes } = activityAdapter();
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    adapter.projectionForTests("a").apply({ kind: "status", status: "running" });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(changes()).toBe(1);
+    // A second live turn, and the first ending while the second runs, leave
+    // the summary where it was.
+    adapter.projectionForTests("b").apply({ kind: "status", status: "compacting" });
+    adapter.projectionForTests("a").apply({ kind: "status", status: "completed" });
+    expect(adapter.activity()).toEqual({ working: true, awaiting: false });
+    expect(changes()).toBe(1);
+    // Background work alone is not a turn in flight.
+    adapter.projectionForTests("b").apply({ kind: "status", status: "background" });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(changes()).toBe(2);
+  });
+
+  test("a pending permission or question awaits the user until it settles or is withdrawn", () => {
+    const { adapter, changes } = activityAdapter();
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1") });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: true });
+    expect(changes()).toBe(1);
+    adapter.projectionForTests("b").apply({ kind: "upsert", item: question("q1") });
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1", "resolved") });
+    expect(adapter.activity().awaiting).toBe(true);
+    expect(changes()).toBe(1);
+    adapter.projectionForTests("b").apply({ kind: "remove", itemId: "question:q1" });
+    expect(adapter.activity()).toEqual({ working: false, awaiting: false });
+    expect(changes()).toBe(2);
+    // A resync rewrite rebuilds the timeline from history, which carries no
+    // requests: what it drops no longer counts.
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p2") });
+    expect(adapter.activity().awaiting).toBe(true);
+    adapter.projectionForTests("a").replace([]);
+    expect(adapter.activity().awaiting).toBe(false);
+  });
+
+  test("a waiting request outlives its conversation's eviction and clears on a content-less resolution", () => {
+    const { adapter } = activityAdapter({ maxProjections: 1 });
+    adapter.projectionForTests("a").apply({ kind: "upsert", item: permission("p1") });
+    // Opening another conversation evicts the quiet one — and a conversation
+    // blocked on the user is exactly the quiet one.
+    adapter.projectionForTests("b");
+    const recreated = adapter.projectionForTests("a");
+    expect(recreated.has("permission:p1")).toBe(false);
+    expect(adapter.activity().awaiting).toBe(true);
+    // The classic reply event carries no action or resources, so the fresh
+    // projection drops it for lack of content — but it still settles the
+    // request.
+    recreated.apply({ kind: "upsert", item: { ...permission("p1", "resolved"), resources: [] } as ConversationItem });
+    expect(recreated.has("permission:p1")).toBe(false);
+    expect(adapter.activity().awaiting).toBe(false);
+  });
+});

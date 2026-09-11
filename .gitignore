@@ -4,6 +4,8 @@ dist/
 playwright-report/
 test-results/
 .astro/
+# Local scratch: dev hub state (dev/hub.json), benchmark and screenshot runs
+.local/
 *.bun-build
 
 # macOS Finder metadata

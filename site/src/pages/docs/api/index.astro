@@ -9,7 +9,7 @@ const { operations, schemas } = readApiReference();
 const tags = [...new Set(operations.flatMap(operation => operation.tags))].sort();
 ---
 
-<SiteLayout title="API reference" description="Search the generated UatuCode Hub and workspace OpenAPI reference.">
+<SiteLayout title="API reference" description="Search the generated UatuCode Hub OpenAPI reference.">
   <section class="api-intro">
     <p class="eyebrow">CANONICAL HTTP SURFACE</p>
     <h1>API reference</h1>

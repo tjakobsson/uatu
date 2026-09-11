@@ -1,4 +1,6 @@
 import { appUrl } from "../shared/app-url";
+import { liveChannel } from "../shell/live";
+import type { LiveChannel } from "../shell/live-channel";
 import type {
   AgentChatStatus,
   ChatMode,
@@ -51,57 +53,44 @@ type StreamHandlers = {
   event: (event: ChatEvent, cursor: string) => void;
   resync: (reason?: ChatEvent & { type: "resync" }) => void;
   error: (error: ChatTransportError) => void;
-  // The stream opened. Only transport is proven: cursor replay and the
-  // `resync` event still own whether the projection is correct.
+  // The topic is attached and live again. Only transport is proven: cursor
+  // replay and the `resync` signal still own whether the projection is
+  // correct.
   recovered?: () => void;
 };
 
 type InventoryStreamHandlers = {
   invalidation: (event: ConversationInventoryEvent) => void;
   error: (error: ChatTransportError) => void;
-  // The stream opened. Transport is healthy again; nothing about the
-  // conversation projection is implied.
+  // The topic is attached and live again. Transport is healthy; nothing
+  // about the conversation projection is implied.
   recovered?: () => void;
 };
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-type ChatClientTimers = {
-  setTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout>;
-  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
-};
-
-const RECONNECT_BASE_DELAY_MS = 1_000;
-const MAX_RECONNECT_DELAY_MS = 15_000;
-const defaultTimers: ChatClientTimers = {
-  setTimeout: (callback, delay) => setTimeout(callback, delay),
-  clearTimeout: timer => clearTimeout(timer),
-};
-
-function reconnectDelay(failures: number): number {
-  return Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (failures - 1), MAX_RECONNECT_DELAY_MS);
-}
-
 export type ChatEventStream = { close(): void };
 
-// Whether this stream is resuming one the client lost. A replay cursor cannot
-// stand in for it: the first stream after a snapshot carries the snapshot's
-// cursor and is an ordinary handoff, not a recovery.
-export type ChatStreamOptions = { resumed?: boolean };
+const CONVERSATION_INTERRUPTED = "Chat connection interrupted; reconnecting";
+const INVENTORY_INTERRUPTED = "Chat inventory connection interrupted; reconnecting";
 
-// The client's own retries are recoveries by definition; the first attempt is
-// one only if the caller says the stream it replaces was lost.
-function reconnectMarker(attempt: number, options: ChatStreamOptions): string {
-  return attempt > 0 || options.resumed === true ? "1" : "0";
-}
-
+// Chat's live delivery rides the page's one brokered stream
+// (shell/live-channel.ts) as `inventory` and `conversation` topics. The
+// handler shapes below are what the chat surface has always consumed; the
+// transport underneath is a subscription on the shared channel, so selecting
+// a conversation or opening a subagent transcript never opens a connection.
+//
+// Status ownership: topic signals are chat-surface status only. The first
+// drop of the stream stays silent (the channel reconnects on its own); an
+// outage that persists past one reconnect, or the hub reporting the topic
+// unavailable, raises the interruption message, and the topic's `ready`
+// takes it down — never the shell indicator.
 export class ChatApiClient {
   private startupReadMs = 65_000;
   private readonly agentReady = new Map<string, boolean>();
   constructor(
     private readonly fetcher: FetchLike = (input, init) => fetch(input, init),
-    private readonly eventSourceFactory: (url: string) => EventSource = url => new EventSource(url),
-    private readonly timers: ChatClientTimers = defaultTimers,
+    private readonly live: () => LiveChannel = liveChannel,
     private readonly readBudgets: { ordinaryMs?: number; startupMs?: number } = {},
   ) {}
 
@@ -269,126 +258,89 @@ export class ChatApiClient {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/tasks/${encodeURIComponent(taskId)}/stop`), { requestId }, value => value);
   }
 
-  inventoryStream(handlers: InventoryStreamHandlers, options: ChatStreamOptions = {}): ChatEventStream {
+  inventoryStream(handlers: InventoryStreamHandlers): ChatEventStream {
     let closed = false;
-    let source: EventSource | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let failures = 0;
-    let attempt = 0;
-
-    const connect = () => {
-      if (closed) return;
-      const query = new URLSearchParams({ reconnect: reconnectMarker(attempt, options) });
-      attempt += 1;
-      const nextSource = this.eventSourceFactory(appUrl(`/api/chat/conversations/events?${query}`));
-      source = nextSource;
-      // A successful open is the proof of transport recovery. Waiting for an
-      // inventory event instead would leave an idle workspace — one where no
-      // conversation is changing — reporting "reconnecting" indefinitely, and
-      // would make the next interruption inherit an inflated failure count.
-      nextSource.addEventListener("open", (() => {
-        if (source !== nextSource || closed) return;
-        failures = 0;
-        handlers.recovered?.();
-      }) as EventListener);
-      nextSource.addEventListener("inventory", ((raw: MessageEvent<string>) => {
+    const subscription = this.live().subscribe({ topic: "inventory" }, {
+      data: raw => {
+        if (closed) return;
         let event: ConversationInventoryEvent;
         try {
-          event = parseConversationInventoryEvent(JSON.parse(raw.data));
+          event = parseConversationInventoryEvent(raw);
         } catch (error) {
           handlers.error(new ChatTransportError(error instanceof Error ? error.message : "Invalid conversation inventory event"));
           return;
         }
-        failures = 0;
         handlers.invalidation(event);
-      }) as EventListener);
-      nextSource.onerror = () => {
-        if (source !== nextSource) return;
-        nextSource.close();
-        source = null;
+      },
+      ready: () => { if (!closed) handlers.recovered?.(); },
+      // The inventory is an invalidation tick with no history: a resync is
+      // one more reason to re-read it, and the topic re-attaches from now.
+      resync: () => {
         if (closed) return;
-        failures += 1;
-        if (failures > 1) handlers.error(new ChatConnectionInterruptedError("Chat inventory connection interrupted; reconnecting"));
-        if (closed) return;
-        reconnectTimer = this.timers.setTimeout(() => {
-          reconnectTimer = null;
-          connect();
-        }, reconnectDelay(failures));
-      };
+        handlers.invalidation({ type: "conversation.inventory" });
+        subscription.resubscribe();
+      },
+      unavailable: () => { if (!closed) handlers.error(new ChatConnectionInterruptedError(INVENTORY_INTERRUPTED)); },
+      dropped: drops => { if (!closed && drops > 1) handlers.error(new ChatConnectionInterruptedError(INVENTORY_INTERRUPTED)); },
+    });
+    return {
+      close() {
+        closed = true;
+        subscription.close();
+      },
     };
-    const close = () => {
-      closed = true;
-      source?.close();
-      source = null;
-      if (reconnectTimer !== null) {
-        this.timers.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-    };
-    connect();
-    return { close };
   }
 
-  stream(conversationId: string, cursor: string, handlers: StreamHandlers, options: ChatStreamOptions = {}): ChatEventStream {
+  stream(conversationId: string, cursor: string, handlers: StreamHandlers): ChatEventStream {
     let closed = false;
-    let source: EventSource | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let lastCursor = cursor;
-    let failures = 0;
-    let attempt = 0;
-
-    const connect = () => {
-      if (closed) return;
-      const query = new URLSearchParams();
-      if (lastCursor) query.set("cursor", lastCursor);
-      query.set("reconnect", reconnectMarker(attempt, options));
-      attempt += 1;
-      source = this.eventSourceFactory(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/events?${query}`));
-      const receive = (raw: MessageEvent<string>) => {
+    const close = () => {
+      closed = true;
+      subscription.close();
+    };
+    const resyncReason = (raw: unknown): (ChatEvent & { type: "resync" }) | undefined => {
+      if (raw === undefined) return undefined;
+      try {
+        const event = parseChatEvent(raw);
+        return event.type === "resync" ? event : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const subscription = this.live().subscribe({ topic: "conversation", key: conversationId }, {
+      data: (raw, eventCursor) => {
+        if (closed) return;
+        let event: ChatEvent;
         try {
-          const event = parseChatEvent(JSON.parse(raw.data));
-          failures = 0;
-          if (raw.lastEventId) lastCursor = raw.lastEventId;
-          if (event.type === "resync") {
-            handlers.resync(event);
-            close();
-          } else {
-            handlers.event(event, lastCursor);
-          }
+          event = parseChatEvent(raw);
         } catch (error) {
           // A malformed event means this projection can no longer be trusted;
-          // drop the stream and ask the owner to reload from a snapshot.
+          // drop the subscription and ask the owner to reload from a snapshot.
           handlers.error(new ChatTransportError(error instanceof Error ? error.message : "Invalid chat event"));
           close();
           handlers.resync();
+          return;
         }
-      };
-      const opened = source;
-      opened.addEventListener("open", (() => {
-        if (source !== opened || closed) return;
-        failures = 0;
-        handlers.recovered?.();
-      }) as EventListener);
-      source.addEventListener("chat", receive as EventListener);
-      source.addEventListener("resync", receive as EventListener);
-      source.onerror = () => {
-        source?.close();
-        source = null;
+        if (event.type === "resync") {
+          close();
+          handlers.resync(event);
+          return;
+        }
+        handlers.event(event, eventCursor);
+      },
+      // The cursor is not replayable for this conversation only. The owner
+      // takes a fresh snapshot and subscribes again from its cursor; until
+      // then nothing for this key is wanted.
+      resync: raw => {
         if (closed) return;
-        failures += 1;
-        // The first drop retries silently; a banner only appears once the
-        // outage persists past one reconnect attempt.
-        if (failures > 1) handlers.error(new ChatConnectionInterruptedError("Chat connection interrupted; reconnecting"));
-        reconnectTimer = this.timers.setTimeout(connect, reconnectDelay(failures));
-      };
-    };
-    const close = () => {
-      closed = true;
-      source?.close();
-      source = null;
-      if (reconnectTimer !== null) this.timers.clearTimeout(reconnectTimer);
-    };
-    connect();
+        close();
+        handlers.resync(resyncReason(raw));
+      },
+      ready: () => { if (!closed) handlers.recovered?.(); },
+      unavailable: () => { if (!closed) handlers.error(new ChatConnectionInterruptedError(CONVERSATION_INTERRUPTED)); },
+      // The first drop retries silently; a banner only appears once the
+      // outage persists past one reconnect attempt.
+      dropped: drops => { if (!closed && drops > 1) handlers.error(new ChatConnectionInterruptedError(CONVERSATION_INTERRUPTED)); },
+    }, { cursor });
     return { close };
   }
 

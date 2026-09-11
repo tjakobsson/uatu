@@ -2,15 +2,26 @@
 // served through a uatu hub (base path /s/<id>/, hub APIs answering at the
 // origin root), the sidebar header grows a chip naming the current
 // workspace whose dropdown links to the hub dashboard and to every other
-// workspace. Everywhere else — local `uatu serve`, the desktop wrapper, the
-// e2e harness — the probe fails or the base path is "/", and the control
-// stays hidden with zero cost beyond one fetch in hub-shaped sessions.
+// workspace. Everywhere else — the desktop wrapper, the e2e harness — the
+// probe fails or the base path is "/", and the control stays hidden with
+// zero cost beyond one fetch in hub-shaped sessions.
+//
+// The chip and menu are live: the brokered stream's `activity` topic
+// (shell/live-channel.ts) says, for every workspace the user may access,
+// whether its session is running, whether an agent is working in it, and
+// whether an interaction awaits the user. The collapsed chip carries a badge
+// while another workspace is waiting on the user, distinct from mere agent
+// activity; the open menu names each workspace's state and updates in place.
+// Nothing here reveals conversation content or titles — the topic carries
+// three booleans and a workspace id.
 //
 // The hub API URLs here are deliberately origin-rooted, NOT appUrl()-based:
 // they belong to the hub (outside the session's base path), which is why
 // this file is allowlisted in shared/app-url-discipline.test.ts.
 
-import { appBasePath } from "../shared/app-url";
+import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
+import type { WorkspaceActivity } from "../shared/live-protocol";
+import { liveChannel } from "./live";
 
 export type HubWorkspaceSummary = {
   id: string;
@@ -37,19 +48,72 @@ export function workspaceMenuDetail(
   return workspace.path || workspace.id;
 }
 
-// Extracts the workspace id from a hub-shaped base path ("/s/uatu/" →
-// "uatu"). Null for the default "/" and for prefixes that are not
-// hub-session-shaped.
-export function workspaceIdFromBasePath(basePath: string): string | null {
-  const match = /^\/s\/([^/]+)\/$/.exec(basePath);
-  if (!match) {
-    return null;
+// The base-path parser lives with the URL chokepoint (the live channel keys
+// its stream by the same id); re-exported so the switcher's callers and
+// tests keep one import.
+export { workspaceIdFromBasePath };
+
+// Live facts per workspace, from the activity topic. Absent means "not
+// reported yet": the hub state list still says whether it runs.
+export type WorkspaceActivityMap = ReadonlyMap<string, WorkspaceActivity>;
+
+// Folds an activity update into the hub state list: `running` is the fact
+// the two sources share, and the chip's dot reads the list. Unknown
+// workspaces are left to the caller (a refetch of the list adds them).
+export function applyWorkspaceActivity(
+  workspaces: HubWorkspaceSummary[],
+  ws: string,
+  activity: WorkspaceActivity,
+): HubWorkspaceSummary[] {
+  return workspaces.map(workspace => (
+    workspace.id === ws && workspace.running !== activity.running
+      ? { ...workspace, running: activity.running }
+      : workspace
+  ));
+}
+
+// What the collapsed chip's badge says about OTHER workspaces. Awaiting
+// outranks working: a question the user has to answer is the thing worth a
+// glance; agents merely busy elsewhere are a quieter note.
+export type SwitcherBadge =
+  | { kind: "awaiting"; count: number }
+  | { kind: "working"; count: number }
+  | null;
+
+export function switcherBadge(activity: WorkspaceActivityMap, currentId: string | null): SwitcherBadge {
+  let awaiting = 0;
+  let working = 0;
+  for (const [ws, facts] of activity) {
+    if (ws === currentId || !facts.running) continue;
+    if (facts.awaiting) awaiting += 1;
+    else if (facts.working) working += 1;
   }
-  try {
-    return decodeURIComponent(match[1]!);
-  } catch {
-    return null;
-  }
+  if (awaiting > 0) return { kind: "awaiting", count: awaiting };
+  if (working > 0) return { kind: "working", count: working };
+  return null;
+}
+
+// The badge's spoken form — the chip's accessible name and tooltip carry it,
+// so the state is never colour alone.
+export function switcherBadgeLabel(badge: SwitcherBadge): string {
+  if (badge === null) return "";
+  const plural = badge.count === 1 ? "workspace" : "workspaces";
+  return badge.kind === "awaiting"
+    ? `${badge.count} ${plural} awaiting your reply`
+    : `Agents working in ${badge.count} ${plural}`;
+}
+
+// A menu entry's state text. Running and idle needs no word — the live dot
+// says it — so the column only speaks when there is something to say.
+export type WorkspaceMenuState = { text: string; tone: "stopped" | "working" | "awaiting" } | null;
+
+export function workspaceMenuState(workspace: HubWorkspaceSummary, activity: WorkspaceActivityMap): WorkspaceMenuState {
+  if (!workspace.running) return { text: "stopped", tone: "stopped" };
+  const facts = activity.get(workspace.id);
+  if (!facts?.running) return null;
+  if (facts.awaiting) return { text: "awaiting you", tone: "awaiting" };
+  if (facts.working) return { text: "working", tone: "working" };
+  return null;
 }
 
 // The chip's indicator class for the current workspace. Live only when the
@@ -164,13 +228,27 @@ export function initHubNav(): void {
   }
 
   let latest: HubWorkspaceSummary[] = [];
+  const activity = new Map<string, WorkspaceActivity>();
 
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
+  const chipBadge = toggle.querySelector<HTMLSpanElement>("#hub-activity-badge");
+  const baseToggleLabel = toggle.getAttribute("aria-label") ?? "Switch workspace or open the hub dashboard";
   const updateChip = () => {
     label.textContent = chipLabel(latest, currentId);
     if (chipDot) {
       chipDot.className = chipDotClass(latest, currentId);
     }
+    const badge = switcherBadge(activity, currentId);
+    const spoken = switcherBadgeLabel(badge);
+    if (chipBadge) {
+      chipBadge.hidden = badge === null;
+      chipBadge.className = `hub-activity-badge${badge ? ` is-${badge.kind}` : ""}`;
+      chipBadge.textContent = badge?.kind === "awaiting" ? String(badge.count) : "";
+    }
+    // The button's own name is what assistive technology reads; the badge
+    // is decoration over it.
+    toggle.setAttribute("aria-label", spoken ? `${baseToggleLabel}. ${spoken}.` : baseToggleLabel);
+    toggle.title = spoken ? `${baseToggleLabel} — ${spoken}` : baseToggleLabel;
   };
 
   const renderMenu = () => {
@@ -211,11 +289,15 @@ export function initHubNav(): void {
         detailSpan.textContent = detail;
         item.appendChild(detailSpan);
       }
-      if (!workspace.running) {
+      const menuState = workspaceMenuState(workspace, activity);
+      if (menuState !== null) {
         const state = document.createElement("span");
-        state.className = "hub-menu-state";
-        state.textContent = "stopped";
+        state.className = `hub-menu-state is-${menuState.tone}`;
+        state.textContent = menuState.text;
         item.appendChild(state);
+      }
+      if (!workspace.running) {
+        const state = item.querySelector<HTMLSpanElement>(".hub-menu-state.is-stopped")!;
         // A stopped target's session URL answers 503; Start it instead of
         // navigating into an unavailable page. Only a successful start
         // navigates.
@@ -277,6 +359,34 @@ export function initHubNav(): void {
     latest = state.workspaces;
     updateChip();
     control.hidden = false;
+
+    // Live facts from the stream. The channel replays the latest facts per
+    // workspace as this registers, so the snapshot the hub sent while the
+    // probe was in flight is not lost. A workspace the list does not know
+    // (one registered since the probe) triggers a list refresh; the activity
+    // is kept meanwhile so the badge is right as soon as the entry exists.
+    let refreshPending = false;
+    liveChannel().onActivity((ws, facts) => {
+      activity.set(ws, facts);
+      latest = applyWorkspaceActivity(latest, ws, facts);
+      updateChip();
+      if (!menu.hidden) {
+        renderMenu();
+      }
+      if (!refreshPending && !latest.some(workspace => workspace.id === ws)) {
+        refreshPending = true;
+        void fetchHubState().then(fresh => {
+          refreshPending = false;
+          if (fresh !== null) {
+            latest = fresh.workspaces;
+            updateChip();
+            if (!menu.hidden) {
+              renderMenu();
+            }
+          }
+        });
+      }
+    });
 
     // A back/forward-cache restore revives this page exactly as it was —
     // possibly for a session that was stopped in the meantime. Re-fetch so

@@ -4,7 +4,7 @@ import { expect, test } from "./fixtures";
 import { workspacePath } from "./config";
 import { treeRow } from "./tree-helpers";
 
-test("a stale file pin widens its SSE URL and stays wide after recreation", async ({
+test("a stale file pin widens its document subscription and stays wide after recreation", async ({
   page,
   request,
 }) => {
@@ -27,10 +27,19 @@ test("a stale file pin widens its SSE URL and stays wide after recreation", asyn
     };
   }, pinnedPath);
 
+  // The document topic's key is the watch context; it is presented in the
+  // live stream's `subs` on connect and in a subscription change afterwards.
   const eventScopes: string[] = [];
+  const scopeOfKey = (key: string) => new URLSearchParams(key).get("scope") ?? "folder";
   page.on("request", outgoing => {
     const url = new URL(outgoing.url());
-    if (url.pathname === "/api/events") eventScopes.push(url.searchParams.get("scope") ?? "folder");
+    if (url.pathname === "/api/hub/live") {
+      const subs = JSON.parse(url.searchParams.get("subs") ?? "[]") as { topic: string; key?: string }[];
+      for (const sub of subs) if (sub.topic === "document") eventScopes.push(scopeOfKey(sub.key ?? ""));
+    } else if (url.pathname.startsWith("/api/hub/live/") && outgoing.method() === "POST") {
+      const change = JSON.parse(outgoing.postData() ?? "{}") as { add?: { topic: string; key?: string }[] };
+      for (const sub of change.add ?? []) if (sub.topic === "document") eventScopes.push(scopeOfKey(sub.key ?? ""));
+    }
   });
 
   await page.goto("/");

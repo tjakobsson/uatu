@@ -39,8 +39,22 @@ const HOP_BY_HOP = new Set([
   "host",
 ]);
 
-function childOrigin(session: RunningSession): string {
+export function childOrigin(session: RunningSession): string {
   return `http://${session.endpoint.hostname}:${session.endpoint.port}`;
+}
+
+// Headers for a request the HUB ITSELF originates against a child (the live
+// broker's upstream subscriptions): the same loopback shaping a proxied
+// browser request gets, without a browser request to copy from. The child's
+// localhost origin gate sees its own origin; identity encoding keeps the
+// child's SSE bytes as-is.
+export function childRequestHeaders(session: RunningSession): Headers {
+  const headers = new Headers();
+  headers.set("host", `${session.endpoint.hostname}:${session.endpoint.port}`);
+  headers.set("accept", "text/event-stream");
+  headers.set("accept-encoding", "identity");
+  headers.set("origin", childOrigin(session));
+  return headers;
 }
 
 // Builds the child-side URL for a proxied request: same (prefixed) path and
@@ -192,9 +206,12 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
 export type StreamOutcome = "completed" | "cancelled" | "failed";
 
 // The transport classes the hub can name. Derived from the route shape alone,
-// never from the workspace id, the conversation id, the query string, or any
-// header — so the set is closed and a diagnostic cannot leak an identifier.
-export const PROXY_TRANSPORT_CLASSES = ["document", "chat-conversation", "chat-inventory", "search", "other"] as const;
+// never from the workspace id, the query string, or any header — so the set
+// is closed and a diagnostic cannot leak an identifier. Live streams are no
+// longer proxied (the hub refuses the per-stream SSE routes and brokers
+// `/api/hub/live` instead — see live-broker.ts), so the only proxied stream
+// left to diagnose is the NDJSON search feed.
+export const PROXY_TRANSPORT_CLASSES = ["search", "other"] as const;
 export type ProxyTransportClass = (typeof PROXY_TRANSPORT_CLASSES)[number];
 
 // Status is recorded as a category, not a code, and `unreachable` covers a
@@ -209,9 +226,6 @@ export type ProxyStreamDiagnostic = {
 };
 
 export function classifyProxyTransport(pathname: string): ProxyTransportClass {
-  if (pathname.endsWith("/api/events")) return "document";
-  if (pathname.endsWith("/api/chat/conversations/events")) return "chat-inventory";
-  if (/\/api\/chat\/conversations\/[^/]+\/events$/.test(pathname)) return "chat-conversation";
   if (pathname.endsWith("/api/search")) return "search";
   return "other";
 }

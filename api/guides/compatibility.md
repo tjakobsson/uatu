@@ -2,7 +2,9 @@
 
 UatuCode separates product identity from wire compatibility. A version or commit identifies a build; `hubApiRevision` and `workspaceApiRevision` identify incompatible public API generations. The bundled web-client freshness revision is unrelated to native-client compatibility.
 
-Record the revision pair used to generate or validate a client. At connection time, fetch authenticated Hub state and compare both reported public revisions with the pinned [contract metadata](../contract.json). Each workspace entry also reports its own `workspaceApiRevision` — the revision spoken by that workspace's child — which equals the top-level value for the local backend but may diverge for backends running children of other builds; per-workspace integrations should compare the per-entry value. A direct workspace client compares the workspace revision reported by workspace state.
+`hubApiRevision` covers the Hub's operations and the envelopes of its streams. `workspaceApiRevision` covers the workspace payloads the live stream forwards: `WorkspaceState` on the document topic, `ConversationInventoryEvent` on the inventory topic, and `ChatEvent` and `ChatResyncEvent` on the conversation topic. Since workspace revision 16 the routes under `/s/{workspaceId}/` are internal, and no public revision describes them.
+
+Record the revision pair used to generate or validate a client. At connection time, fetch authenticated Hub state and compare both reported public revisions with the pinned [contract metadata](../contract.json). Each workspace entry also reports the `workspaceApiRevision` its child speaks. It equals the top-level value for the local backend but may differ for backends running children of other builds, so a client reading one workspace's live payloads should compare the per-entry value.
 
 Equal revisions mean the published wire contract is the intended baseline. A higher server revision requires checking the [API changelog](../CHANGELOG.md) and comparing your recorded copy of the contract with the current publication. Additive changes can occur without a revision increase, so clients must ignore unknown optional object fields where schemas permit them.
 

@@ -1,0 +1,16 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "payments-api",
+    "topic": "activity",
+    "cursor": "12",
+    "event": {
+      "kind": "data",
+      "data": {
+        "running": true,
+        "working": false,
+        "awaiting": true
+      }
+    }
+  }
+}

@@ -493,3 +493,41 @@ describe("LazyChatService", () => {
     await service.dispose();
   });
 });
+
+describe("workspace activity", () => {
+  test("reads the current adapter without starting the runtime, and ticks as the adapter comes and goes", async () => {
+    let providerCalls = 0;
+    const built: ChatAdapter[] = [];
+    const service = new LazyChatService({
+      workspacePath: "/workspace",
+      runtime: fixtureRuntime(),
+      createProvider: () => { providerCalls += 1; return provider(); },
+      createAdapter: options => {
+        const adapter = new ChatAdapter({ ...options, generation: "test" });
+        built.push(adapter);
+        return adapter;
+      },
+    });
+    const changes = await service.subscribeActivity();
+    expect((await changes.next()).done).toBe(false);
+    expect(await service.activity()).toEqual({ working: false, awaiting: false });
+    // Watching the summary starts nothing: the hub watches every running
+    // workspace, and watching must not spawn an agent.
+    expect(providerCalls).toBe(0);
+    expect(await service.status()).toEqual({ state: "idle" });
+
+    await service.listConversations();
+    expect((await changes.next()).done).toBe(false);
+    built.at(-1)!.projectionForTests("conversation").apply({ kind: "status", status: "running" });
+    expect((await changes.next()).done).toBe(false);
+    expect(await service.activity()).toEqual({ working: true, awaiting: false });
+
+    // A retry retires the adapter, and its turn with it.
+    await service.retry();
+    expect((await changes.next()).done).toBe(false);
+    expect(await service.activity()).toEqual({ working: false, awaiting: false });
+
+    await service.dispose();
+    expect((await changes.next()).done).toBe(true);
+  });
+});

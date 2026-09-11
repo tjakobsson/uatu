@@ -49,12 +49,17 @@ import {
   type BridgeData,
   type UpgradableServer,
 } from "./proxy";
+import { LiveBroker } from "./live-broker";
+import { LiveEndpoint } from "./live-endpoint";
+import { createHubUpstreamSource } from "./live-source";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
 import { OnboardingError, resolveOnboardingAssignments, type WorkspaceOnboardingCoordinator } from "./onboarding";
 import { HubPreferencesError, type HubPreferencesStore } from "./preferences";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import type { SessionManager } from "./sessions";
 import type { TerminalSessionInfo } from "../terminal/server";
+import { MetricsRegistry } from "../debug/metrics";
+import { LIVE_STREAM_PATH } from "../shared/live-protocol";
 import type { HubApiCompatibility } from "../shared/types";
 import {
   BUILD,
@@ -77,6 +82,11 @@ export type HubDeps = {
   cloneCredentials?: CloneCredentialResolver;
   credentialApi?: CredentialApiServices;
   gitCommand?: () => string;
+  // The brokered live stream. startHubServer assembles them when absent;
+  // a handler built directly gets its own pair.
+  live?: LiveEndpoint;
+  liveBroker?: LiveBroker;
+  metrics?: MetricsRegistry;
 };
 
 type HubServer = UpgradableServer & {
@@ -84,6 +94,11 @@ type HubServer = UpgradableServer & {
 };
 
 const SESSION_PATH = /^\/s\/([^/]+)(\/|$)/;
+const LIVE_SUBSCRIPTIONS_PATH = /^\/api\/hub\/live\/([^/]+)\/subscriptions$/;
+// The child's per-stream SSE routes are the internal hub↔child protocol the
+// broker subscribes to; through the hub they are refused, never proxied.
+// `/api/activity` is internal too (the activity summary the broker reads).
+const REFUSED_CHILD_STREAM_SUFFIXES = /^\/api\/(events|activity|chat\/conversations\/(events|[^/]+\/events))$/;
 const CREDENTIAL_PATH = "/api/hub/credentials";
 const CREDENTIAL_TOOL_PATH = "/api/hub/credential-tools";
 
@@ -173,6 +188,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     credentials: deps.cloneCredentials,
     reservations: deps.reservations,
   });
+  const { live } = assembleLive(deps);
   const limiter = new LoginRateLimiter();
   const credentialLimiter = new CredentialOperationRateLimiter();
   const credentialApi = deps.credentialApi ? new CredentialApi(deps.credentialApi) : null;
@@ -1232,6 +1248,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       // the cookie — logout is idempotent.
       if (presented) {
         await sessionStore.revoke(presented.id);
+        live.endStreamsForSession(presented.id);
       }
       if (presented?.transport === "bearer") {
         return json(200, { revoked: true });
@@ -1304,6 +1321,41 @@ export function createHubFetchHandler(deps: HubDeps) {
       return json(401, { error: "authentication required" }, NO_STORE_HEADERS);
     }
 
+    // The brokered live stream (design D2/D3): one SSE connection per page,
+    // authenticated exactly as everything below the gate is; subscription
+    // changes are cookie-CSRF-checked state changes bound to the stream and
+    // to this session. The GET is origin-checked like the proxied /s/
+    // routes it replaced: SameSite=Lax attaches the cookie to a same-site
+    // cross-origin GET (another port on this host), and an open stream
+    // makes the hub open upstreams, which can spawn agent runtimes. A
+    // same-origin EventSource sends no Origin and passes.
+    if (pathname === LIVE_STREAM_PATH && request.method === "GET") {
+      if (!csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      // `ws` is required (api/openapi.yaml): absent is a malformed request,
+      // not an unknown workspace. The generic endpoint leaves the absent
+      // case to its resolver because the e2e harness serves one fixed
+      // workspace without it.
+      if (!url.searchParams.has("ws")) {
+        return json(400, { error: "workspace id required" }, NO_STORE_HEADERS);
+      }
+      return live.openStream(request, { user: session.user, sessionId: session.sessionId });
+    }
+    const liveSubscriptions = LIVE_SUBSCRIPTIONS_PATH.exec(pathname);
+    if (liveSubscriptions && request.method === "POST") {
+      if (!csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      let streamId: string;
+      try {
+        streamId = decodeURIComponent(liveSubscriptions[1]!);
+      } catch {
+        return json(400, { error: "malformed stream id" }, NO_STORE_HEADERS);
+      }
+      return live.changeSubscriptions(request, streamId, { user: session.user, sessionId: session.sessionId });
+    }
+
     // Proxied session traffic. Validate the browser's origin BEFORE any
     // rewriting: SameSite=Lax still attaches the cookie on same-site
     // cross-origin requests (another port, a sibling subdomain), and the
@@ -1357,6 +1409,15 @@ export function createHubFetchHandler(deps: HubDeps) {
           }
           return json(500, { error: "failed to persist personal state" });
         }
+      }
+      if (REFUSED_CHILD_STREAM_SUFFIXES.test(suffix)) {
+        // Gone, not proxied: no request reaches the child for these. The
+        // body names the replacement so an old client or integration knows
+        // where to go.
+        return json(410, {
+          error: `${suffix} is not served through the hub; live updates are delivered by the brokered stream at ${LIVE_STREAM_PATH}`,
+          replacement: LIVE_STREAM_PATH,
+        }, NO_STORE_HEADERS);
       }
       const running = sessions.get(workspaceId);
       if (!running) {
@@ -1581,6 +1642,7 @@ export function createHubFetchHandler(deps: HubDeps) {
           return json(404, { error: "unknown session" });
         }
         await sessionStore.revoke(record.id);
+        live.endStreamsForSession(record.id);
         const current = record.id === session.sessionId;
         if (current && session.transport === "cookie") {
           return json(200, { revoked: true, current }, {
@@ -1779,6 +1841,27 @@ export function createHubFetchHandler(deps: HubDeps) {
   };
 }
 
+// The live broker and its endpoint over the hub's own session table and
+// registry. Every configured user may access every registered workspace, so
+// the workspace resolver is registry membership alone.
+function assembleLive(deps: HubDeps): { live: LiveEndpoint; liveBroker: LiveBroker } {
+  const metrics = deps.metrics ?? new MetricsRegistry();
+  const liveBroker = deps.liveBroker ?? new LiveBroker(
+    createHubUpstreamSource({ sessions: deps.sessions, registry: deps.registry }),
+    { metrics },
+  );
+  const live = deps.live ?? new LiveEndpoint({
+    broker: liveBroker,
+    resolveWorkspace: requested => requested !== null && deps.registry.byId(requested) ? requested : null,
+    principalStillValid: principal => {
+      const record = deps.sessionStore.resolve(principal.sessionId);
+      return record !== null && deps.config.users.some(user => user.name === record.user);
+    },
+    metrics,
+  });
+  return { live, liveBroker };
+}
+
 // Starts the hub's Bun.serve with TLS when configured and the WebSocket
 // bridge handlers wired.
 export function startHubServer(deps: HubDeps) {
@@ -1789,7 +1872,8 @@ export function startHubServer(deps: HubDeps) {
     credentials: deps.cloneCredentials,
     reservations: deps.reservations,
   });
-  const handler = createHubFetchHandler({ ...deps, cloneJobs });
+  const { live, liveBroker } = assembleLive(deps);
+  const handler = createHubFetchHandler({ ...deps, cloneJobs, live, liveBroker });
   const server = Bun.serve<BridgeData>({
     hostname: deps.config.host,
     port: deps.config.port,
@@ -1811,5 +1895,5 @@ export function startHubServer(deps: HubDeps) {
       },
     },
   });
-  return Object.assign(server, { cloneJobs });
+  return Object.assign(server, { cloneJobs, live, liveBroker });
 }

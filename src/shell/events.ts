@@ -1,7 +1,8 @@
-// Live event stream — opens the /api/events EventSource and dispatches each
-// `state` payload back into the app. The reducer logic for build-freshness
-// checking, follow-mode auto-switching, and on-disk-change reloads lives in
-// here, intentionally close to its trigger (the SSE message).
+// Live document state — the `document` topic consumer on the page's one
+// brokered live channel (see `shell/live.ts`). Each `state` payload is
+// dispatched back into the app from here. The reducer logic for
+// build-freshness checking, follow-mode auto-switching, and on-disk-change
+// reloads lives in here, intentionally close to its trigger (the envelope).
 
 import { chooseSelectionForFileEvent } from "./follow";
 import { checkBuildFreshness } from "./freshness";
@@ -18,30 +19,49 @@ import {
   type StatePayload,
 } from "../shared/types";
 import { applyChannelStatus } from "./connection";
-import { createLiveChannel, type LiveChannel } from "./live-channel";
-import { createLifecycleRecovery, createStateReconciler, type LifecycleRecovery } from "./recovery";
+import type { LiveSubscriptionHandle, LiveTopicConsumer } from "./live-channel";
+import { liveChannel, registerRecoveryWork } from "./live";
+import { createStateReconciler } from "./recovery";
 import { renderBuildBadge } from "./connection";
 import { appUrl } from "../shared/app-url";
+import { documentContextKey } from "../shared/live-protocol";
+import { applyWatchContext } from "../shared/watch-context";
 import { replaceSelection } from "./history";
 import { setSelectedId } from "./selection";
 import { appState } from "./state";
 import { renderCommitPreview } from "./url";
-import { contextualAppUrl, setClientScope } from "./watch-context";
+import { contextualAppUrl, currentWatchContext, setClientScope } from "./watch-context";
 
-// Recovery for this stream is owned by `createLiveChannel`, not by the
-// browser. Native `EventSource` retry is unbounded in the one case that
-// matters — a mobile device whose network path vanished leaves the source in
-// `CONNECTING` with no error and no timeout, so the app sits on
-// "Reconnecting" forever and never observes the server again (the
-// client-freshness handshake rides the reconnect's first state payload). The
-// channel closes each failed source and reopens on a capped-backoff schedule
-// of its own, and it treats a generation as connected only once that
-// generation's authoritative state has been applied below.
-let channel: LiveChannel | null = null;
+// The page's document subscription. Transport recovery belongs to the
+// channel (`shell/live-channel.ts`): it closes each failed stream and reopens
+// on a capped-backoff schedule of its own, presenting this topic's retained
+// cursor so a reconnect resumes rather than restarts. What this module owns
+// is the indicator's truth: a generation counts as connected only once it
+// has proven the page's state current — the first applied `state` payload,
+// or the topic's `ready` when the page already holds state at the presented
+// cursor and nothing newer exists to deliver.
+let documentSubscription: LiveSubscriptionHandle | null = null;
+// Whether the current subscription has delivered state (or found the page's
+// state current). Reset on every new subscription: a fresh one, with no
+// cursor, owes a snapshot before `ready` can mean anything.
+let documentStateHeld = false;
+let installed = false;
 
-function documentChannel(): LiveChannel {
-  channel ??= createLiveChannel({ open: openDocumentStream, onStatus: applyChannelStatus });
-  return channel;
+// The document topic's key: the current watch context (compare target and
+// scope) as the canonical query the hub appends to the child's route.
+function documentKey(): string {
+  const url = applyWatchContext(new URL("http://uatu.invalid/"), currentWatchContext());
+  return documentContextKey(url.searchParams);
+}
+
+// Replaces the document subscription with one for the current context. No
+// cursor is presented, so the hub delivers a fresh snapshot. Not a recovery:
+// the transport is untouched — a scope widening, a compare-target change, or
+// the server normalizing an invalid pin all land here.
+function subscribeDocument(): void {
+  documentSubscription?.close();
+  documentStateHeld = false;
+  documentSubscription = liveChannel().subscribe({ topic: "document", key: documentKey() }, documentConsumer);
 }
 
 function scopesEqual(left: StatePayload["scope"], right: StatePayload["scope"]): boolean {
@@ -71,138 +91,139 @@ export function applyServerSnapshot(payload: StatePayload): void {
   applyProjectIdentity(payload.roots);
 }
 
-// `resumed` says this replaces a stream the client believes it lost, which is
-// what makes it a recovery. A scope widening, a compare-target change, or the
-// server normalizing an invalid pin all replace the stream too, and counting
-// those as recoveries would make the diagnostic meaningless.
-export function connectEvents(options: { resumed?: boolean } = {}) {
-  documentChannel().connect(options);
+// Boot's entry point: subscribes the document topic for the current context
+// and opens the page's one live stream. Wake-up recovery is the channel's
+// (`shell/live.ts`); this module registers the state fetch it needs.
+export function connectEvents() {
+  if (!installed) {
+    installed = true;
+    liveChannel().onStatus(applyChannelStatus);
+    registerRecoveryWork(() => stateReconciler.reconcile());
+  }
+  subscribeDocument();
+  liveChannel().connect();
 }
 
-// Tears down the live channel for good. Called when the page is being
-// discarded: a retry cycle outliving the page would keep firing timers
-// against a document that is on its way out.
-export function disconnectEvents() {
-  channel?.dispose();
-  channel = null;
-  lifecycle?.dispose();
-  lifecycle = null;
-}
+const documentConsumer: LiveTopicConsumer = {
+  data: (data, _cursor, generation) => { void applyDocumentFrame(data as StatePayload, generation); },
+  // Nothing newer than the presented cursor exists: the state this page
+  // holds IS current, and the indicator can say so without a payload.
+  ready: generation => {
+    if (documentStateHeld) liveChannel().confirm(generation);
+  },
+  // The cursor is not replayable. A fresh subscription delivers a snapshot,
+  // which confirms the generation on arrival.
+  resync: () => subscribeDocument(),
+  // The workspace child is gone or unreachable; the hub retries and sends
+  // `ready` (and fresh state) on recovery. Until then the page's state is
+  // not proven current.
+  unavailable: generation => liveChannel().invalidate(generation),
+};
 
-function openDocumentStream(generation: number, context: { reconnect: boolean }): EventSource {
-  // A bare marker so the workspace can count recoveries apart from first
-  // connects. Nothing about the connection that was lost travels with it.
-  const url = new URL(contextualAppUrl(appUrl("/api/events")), window.location.href);
-  if (context.reconnect) url.searchParams.set("reconnect", "1");
-  const events = new EventSource(`${url.pathname}${url.search}`);
+async function applyDocumentFrame(payload: StatePayload, generation: number): Promise<void> {
+  // A payload from a superseded attempt describes a connection this client
+  // has already replaced; applying it could overwrite newer state.
+  if (!liveChannel().isCurrent(generation)) return;
+  documentStateHeld = true;
+  // A frame the server produced before state this client has already applied
+  // — the initial frame of a stream opened just before a reconciliation
+  // fetch answered, typically. Applying it would put back the older roots,
+  // repositories, and scope. The transport is still proven live, so the
+  // channel is confirmed either way.
+  if (!stateReconciler.acceptFrame(payload.generatedAt)) {
+    liveChannel().confirm(generation);
+    return;
+  }
+  const previousSelectedId = appState.selectedId;
+  const previousScope = appState.scope;
+  const shouldReload = shouldRefreshPreview(
+    previousSelectedId,
+    payload.changedId,
+    appState.roots,
+    payload.roots,
+  );
 
-  events.addEventListener("state", async event => {
-    // A payload from a superseded attempt describes a connection this client
-    // has already replaced; applying it could overwrite newer state.
-    if (!documentChannel().isCurrent(generation)) return;
-    const payload = JSON.parse((event as MessageEvent<string>).data) as StatePayload;
-    // A frame the server produced before state this client has already applied
-    // — the initial frame of a stream opened just before a reconciliation
-    // fetch answered, typically. Applying it would put back the older roots,
-    // repositories, and scope. The transport is still proven live, so the
-    // channel is confirmed either way.
-    if (!stateReconciler.acceptFrame(payload.generatedAt)) {
-      documentChannel().confirm(generation);
-      return;
-    }
-    const previousSelectedId = appState.selectedId;
-    const previousScope = appState.scope;
-    const shouldReload = shouldRefreshPreview(
-      previousSelectedId,
-      payload.changedId,
-      appState.roots,
-      payload.roots,
-    );
+  applyServerSnapshot(payload);
+  // Transport is only proven once this generation's authoritative state has
+  // been applied — an open socket that never delivers state is exactly the
+  // half-dead connection the indicator must not call `Connected`.
+  liveChannel().confirm(generation);
+  if (!scopesEqual(previousScope, payload.scope)) {
+    // The subscription is keyed by context. Replace it after server-side
+    // normalization so a later reconnect cannot revive a deleted file pin
+    // that this client has already widened away from. Not a recovery: the
+    // transport never failed, the server changed the context.
+    subscribeDocument();
+  }
+  syncStateGeneration(payload.generatedAt);
 
-    applyServerSnapshot(payload);
-    // Transport is only proven once this generation's authoritative state has
-    // been applied — an open socket that never delivers state is exactly the
-    // half-dead connection the indicator must not call `Connected`.
-    documentChannel().confirm(generation);
-    if (!scopesEqual(previousScope, payload.scope)) {
-      // EventSource automatically reconnects its original URL. Replace it
-      // after server-side normalization so a later reconnect cannot revive a
-      // deleted file pin that this client has already widened away from. Not a
-      // recovery: the transport never failed, the server changed the context.
-      connectEvents();
-    }
-    syncStateGeneration(payload.generatedAt);
+  // A watched file changed, so displayed search results captured line
+  // numbers that may no longer hold. Mark them rather than re-running: in a
+  // watched repository that would be a query storm, and rows would jump
+  // under the reader's cursor while they are reading them. The pane checks
+  // the id against its rows — a change to an unlisted file proves nothing
+  // about the results. This must precede the preview-mode returns below:
+  // the Search pane is visible in those modes too, and its results go stale
+  // the same way there.
+  if (payload.changedId) {
+    markSearchResultsStale(payload.changedId);
+  }
 
-    // A watched file changed, so displayed search results captured line
-    // numbers that may no longer hold. Mark them rather than re-running: in a
-    // watched repository that would be a query storm, and rows would jump
-    // under the reader's cursor while they are reading them. The pane checks
-    // the id against its rows — a change to an unlisted file proves nothing
-    // about the results. This must precede the preview-mode returns below:
-    // the Search pane is visible in those modes too, and its results go stale
-    // the same way there.
-    if (payload.changedId) {
-      markSearchResultsStale(payload.changedId);
-    }
-
-    // Local snapshot so the discriminant narrowing survives into the closure.
-    const previewMode = appState.previewMode;
-    if (previewMode.kind === "commit") {
-      renderSidebar();
-      renderCommitPreview(previewMode);
-      return;
-    }
-
-    // Rule C/D selection decision (see follow-mode capability).
-    setSelectedId(chooseSelectionForFileEvent(
-      payload.roots,
-      previousSelectedId,
-      payload.changedId,
-      appState.followEnabled,
-    ));
-
-    // Reveal the newly-selected file only when selection actually changed —
-    // so a user-closed ancestor isn't re-opened by unrelated state updates.
-    if (appState.selectedId && appState.selectedId !== previousSelectedId) {
-      // Server-driven selection change (follow auto-switch, or current doc
-      // was deleted and we fell back to the default). The URL must follow
-      // what's on screen, but we use replaceState — pushing here would
-      // pollute the back stack with file-change-driven entries the user
-      // never asked for.
-      const switched = findDocumentById(appState.selectedId);
-      if (switched) {
-        replaceSelection(appState.selectedId, switched.relativePath);
-      }
-    }
-
+  // Local snapshot so the discriminant narrowing survives into the closure.
+  const previewMode = appState.previewMode;
+  if (previewMode.kind === "commit") {
     renderSidebar();
+    renderCommitPreview(previewMode);
+    return;
+  }
 
-    if (
-      appState.selectedId &&
-      (shouldReload || appState.selectedId !== previousSelectedId)
-    ) {
-      if (shouldReload) {
-        // The file changed on disk — any cached payload is now stale.
-        forgetDocumentCache(appState.selectedId);
-      }
-      await loadDocument(appState.selectedId);
-      if (shouldReload && appState.selectedId === previousSelectedId && hasDocument(appState.roots, previousSelectedId)) {
-        // In-place reload of the document being viewed (Rule D): surface the
-        // otherwise-silent swap. A selection switch is a new document, not an
-        // update of what the user was reading — no signal there.
-        signalActiveDocumentUpdated();
-      }
-      return;
+  // Rule C/D selection decision (see follow-mode capability).
+  setSelectedId(chooseSelectionForFileEvent(
+    payload.roots,
+    previousSelectedId,
+    payload.changedId,
+    appState.followEnabled,
+  ));
+
+  // Reveal the newly-selected file only when selection actually changed —
+  // so a user-closed ancestor isn't re-opened by unrelated state updates.
+  if (appState.selectedId && appState.selectedId !== previousSelectedId) {
+    // Server-driven selection change (follow auto-switch, or current doc
+    // was deleted and we fell back to the default). The URL must follow
+    // what's on screen, but we use replaceState — pushing here would
+    // pollute the back stack with file-change-driven entries the user
+    // never asked for.
+    const switched = findDocumentById(appState.selectedId);
+    if (switched) {
+      replaceSelection(appState.selectedId, switched.relativePath);
     }
+  }
 
-    if (appState.selectedId && !hasDocument(payload.roots, appState.selectedId)) {
-      await loadDocument(appState.selectedId);
-    } else if (!appState.selectedId) {
-      renderEmptyPreview("No document selected", "Waiting for viewable files");
+  renderSidebar();
+
+  if (
+    appState.selectedId &&
+    (shouldReload || appState.selectedId !== previousSelectedId)
+  ) {
+    if (shouldReload) {
+      // The file changed on disk — any cached payload is now stale.
+      forgetDocumentCache(appState.selectedId);
     }
-  });
+    await loadDocument(appState.selectedId);
+    if (shouldReload && appState.selectedId === previousSelectedId && hasDocument(appState.roots, previousSelectedId)) {
+      // In-place reload of the document being viewed (Rule D): surface the
+      // otherwise-silent swap. A selection switch is a new document, not an
+      // update of what the user was reading — no signal there.
+      signalActiveDocumentUpdated();
+    }
+    return;
+  }
 
-  return events;
+  if (appState.selectedId && !hasDocument(payload.roots, appState.selectedId)) {
+    await loadDocument(appState.selectedId);
+  } else if (!appState.selectedId) {
+    renderEmptyPreview("No document selected", "Waiting for viewable files");
+  }
 }
 
 // The one path that converges this client on authoritative state and a fresh
@@ -247,47 +268,23 @@ const stateReconciler = createStateReconciler<StatePayload>({
   },
 });
 
-// Reconcile authoritative state AND ensure a current channel.
+// A context change, not a recovery — the caller moved the scope or the
+// compare target and the transport was never in doubt. Reconciles
+// authoritative state AND replaces the document subscription.
 //
-// The channel is superseded FIRST, and there is no `await` between the
-// caller's context change and this call, so the stream being replaced cannot
-// deliver anything more. That ordering matters twice over:
-//
-//   - The old stream carries the context the client has just moved away from
-//     (a file pin the caller is widening, an old compare target). A frame from
-//     it would reinstate that context — and, being newer by the server's own
-//     clock, would also discard the payload this fetch is about to bring back,
-//     leaving the session on the context the user asked to leave.
-//   - The stream this page holds may be the half-dead one that prompted a
-//     wake-up. Replacing it must not depend on the fetch succeeding: only a
-//     fresh attempt can error and hand recovery to the channel's retry cycle.
+// The subscription is replaced FIRST, and there is no `await` between the
+// caller's context change and this call, so the topic being replaced cannot
+// deliver anything more: it carries the context the client has just moved
+// away from (a file pin the caller is widening, an old compare target), and
+// a frame from it would reinstate that context — and, being newer by the
+// server's own clock, would also discard the payload this fetch is about to
+// bring back, leaving the session on the context the user asked to leave.
 //
 // The fetch is then a fallback rather than the primary path — when the fresh
-// stream connects, its own first frame is the newer state and this payload is
-// correctly discarded.
-async function reconcileDocumentState(options: { resumed?: boolean } = {}): Promise<void> {
-  connectEvents(options);
-  await stateReconciler.reconcile();
-}
-
+// subscription's snapshot arrives, it is the newer state and this payload is
+// correctly discarded. (A wake-up goes through `shell/live.ts` instead: it
+// reconnects the one channel, then runs the reconcile registered above.)
 export async function refreshServerStateForContext(): Promise<void> {
-  // A context change, not a recovery — the caller moved the scope or the
-  // compare target and the transport was never in doubt.
-  await reconcileDocumentState();
-}
-
-// Installed once, by boot. `pageshow` from the back/forward cache, a return
-// to the foreground, and a regained network connection all mean the same
-// thing — this page has been out of touch and cannot trust what it holds.
-let lifecycle: LifecycleRecovery | null = null;
-
-export function watchPageLifecycle(): void {
-  lifecycle ??= createLifecycleRecovery({
-    win: window,
-    doc: document,
-    // A wake-up IS a recovery: the stream this page holds may have died
-    // silently while it was suspended or off the network.
-    recover: () => reconcileDocumentState({ resumed: true }),
-    discard: disconnectEvents,
-  });
+  subscribeDocument();
+  await stateReconciler.reconcile();
 }

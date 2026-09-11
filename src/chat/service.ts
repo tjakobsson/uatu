@@ -1,11 +1,12 @@
 import { ChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
 import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode/opencode-service";
-import type { ConversationInventorySubscription } from "./inventory-broadcaster";
+import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
 import { createSdkV2Provider } from "./opencode/sdk-v2-provider";
 import type { ChatProvider } from "./provider";
 import type { ReplaySubscription } from "./replay";
 import type {
+  ChatActivity,
   ChatMode,
   ChatAvailability,
   ChatCommand,
@@ -28,6 +29,19 @@ export interface WorkspaceChatService {
   commands(): Promise<ChatCommand[]>;
   listConversations(): Promise<ConversationSummary[]>;
   subscribeInventory(options?: { signal?: AbortSignal }): Promise<ConversationInventorySubscription>;
+  /**
+   * This agent's slice of the workspace activity summary: any turn in flight,
+   * any interaction awaiting the user. MUST NOT start the runtime — the hub
+   * watches it for every running workspace, and watching must not spawn an
+   * agent. An agent that has not started is idle.
+   */
+  activity(): Promise<ChatActivity>;
+  /**
+   * One-bit change ticks for activity(): an initial tick, then one per
+   * change, coalesced while unread. Consumers re-read activity() on each.
+   * Like activity(), subscribing starts nothing.
+   */
+  subscribeActivity(options?: { signal?: AbortSignal }): Promise<ConversationInventorySubscription>;
   createConversation(): Promise<ConversationSnapshot>;
   history(id: string, options?: { cursor?: string; limit?: number }): Promise<ConversationSnapshot>;
   subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }): Promise<{
@@ -113,6 +127,9 @@ export class LazyChatService implements WorkspaceChatService {
   private adapter: ChatAdapter | null = null;
   private retryPromise: Promise<ChatAvailability> | null = null;
   private disposed = false;
+  // Outlives any one adapter: a watcher stays attached while the adapter is
+  // built, retried, or replaced — and each of those is itself a change.
+  private readonly activityChanges = new ConversationInventoryBroadcaster();
 
   constructor(options: LazyChatServiceOptions) {
     this.workspacePath = options.workspacePath;
@@ -186,6 +203,7 @@ export class LazyChatService implements WorkspaceChatService {
     const pendingBuild = this.adapterPromise;
     this.adapterPromise = null;
     this.adapter = null;
+    this.activityChanges.invalidate();
     await previous?.dispose().catch(() => undefined);
     if (pendingBuild) await pendingBuild.then(adapter => adapter.dispose()).catch(() => undefined);
     // A full restart, not a bare runtime retry: an adapter-level failure
@@ -201,6 +219,7 @@ export class LazyChatService implements WorkspaceChatService {
     const stray = this.adapter as ChatAdapter | null;
     this.adapterPromise = null;
     this.adapter = null;
+    if (stray) this.activityChanges.invalidate();
     await stray?.dispose().catch(() => undefined);
     return this.ensureReady();
   }
@@ -210,6 +229,10 @@ export class LazyChatService implements WorkspaceChatService {
   async modes() { return (await this.requireAdapter()).modes(); }
   async commands() { return (await this.requireAdapter()).commands(); }
   async subscribeInventory(options: { signal?: AbortSignal } = {}) { return (await this.requireAdapter()).subscribeInventory(options.signal); }
+  // The current adapter only, never requireAdapter(): reading activity must
+  // not start the runtime. No adapter means nothing can be working or waiting.
+  async activity(): Promise<ChatActivity> { return this.adapter?.activity() ?? { working: false, awaiting: false }; }
+  async subscribeActivity(options: { signal?: AbortSignal } = {}) { return this.activityChanges.subscribe(options.signal); }
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
@@ -238,6 +261,7 @@ export class LazyChatService implements WorkspaceChatService {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.activityChanges.dispose();
     const runtimeDisposal = this.runtime.dispose();
     // Shutdown can race the first ensureAdapter: the promise may own a
     // provider mid-probe while this.adapter is still null. Join it and
@@ -276,6 +300,9 @@ export class LazyChatService implements WorkspaceChatService {
         workspacePath: this.workspacePath,
         resolveAttachment: id => this.attachmentStore.resolve(id),
         metrics: this.metrics,
+        // A retired adapter's late tick is harmless: it only prompts a re-read
+        // of the current adapter.
+        onActivityChange: () => this.activityChanges.invalidate(),
       });
       // Shutdown or a retry may have superseded this build while the probe
       // ran; a stale build retires itself instead of publishing.
@@ -284,6 +311,7 @@ export class LazyChatService implements WorkspaceChatService {
         throw new ChatUnavailableError();
       }
       this.adapter = adapter;
+      this.activityChanges.invalidate();
       this.superviseEventPump(adapter);
       return adapter;
     })();

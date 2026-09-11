@@ -549,7 +549,14 @@ export async function runHub(options: RunHubOptions): Promise<void> {
       // credential operation could otherwise restart the SSH agent after
       // shutdown observed it stopped, orphaning its socket past exit.
       return await shutdownHub({
-        stopServer: () => server.stop(true),
+        stopServer: () => {
+          // End brokered client streams and abort their child upstreams
+          // before the socket-level stop, so the cancellation reaches the
+          // children the runtime is about to stop.
+          server.live.endAll();
+          server.liveBroker.dispose();
+          server.stop(true);
+        },
         stateLease,
         cloneJobs: server.cloneJobs,
         credentialTools,

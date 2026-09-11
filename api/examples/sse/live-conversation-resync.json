@@ -1,0 +1,19 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "conversation",
+    "key": "opencode:conversation-1",
+    "cursor": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0xIiwicyI6NH0",
+    "event": {
+      "kind": "resync",
+      "data": {
+        "generation": "generation-2",
+        "sequence": 0,
+        "conversationId": "opencode:conversation-1",
+        "type": "resync",
+        "reason": "generation-changed"
+      }
+    }
+  }
+}

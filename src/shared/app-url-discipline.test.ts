@@ -22,6 +22,9 @@ const ALLOWED_FILES = new Set([
   // Hub-level URLs are origin-rooted on purpose: the hub's API lives
   // OUTSIDE the session's base path, so appUrl() must not touch them.
   "src/shell/hub-nav.ts",
+  // The brokered live stream is a hub route too (design D2): the protocol
+  // module names it and the child routes the hub subscribes to.
+  "src/shared/live-protocol.ts",
   // The legacy-worker cleanup MATCHES a historical script path rather than
   // building a URL to request, and it has to match it at the origin root as
   // well as under the base path — appUrl() can only produce the latter.

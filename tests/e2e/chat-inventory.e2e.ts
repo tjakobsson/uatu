@@ -81,15 +81,23 @@ async function stageAttachment(page: Page): Promise<void> {
   await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
 }
 
+// Counts `inventory` topic frames as the page's one live stream delivers
+// them: the channel listens for `live` envelopes, so the wrapper reads each
+// envelope's topic rather than an event type of its own.
 async function installInventoryFrameCounter(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const state = window as typeof window & { __e2eInventoryFrames?: number };
     state.__e2eInventoryFrames = 0;
     const addEventListener = EventSource.prototype.addEventListener;
     EventSource.prototype.addEventListener = function(type, listener, options) {
-      if (type !== "inventory" || !listener) return addEventListener.call(this, type, listener, options);
+      if (type !== "live" || !listener) return addEventListener.call(this, type, listener, options);
       const wrapped: EventListener = event => {
-        state.__e2eInventoryFrames = (state.__e2eInventoryFrames ?? 0) + 1;
+        try {
+          const envelope = JSON.parse((event as MessageEvent<string>).data) as { topic?: string; event?: { kind?: string } };
+          if (envelope.topic === "inventory" && envelope.event?.kind === "data") {
+            state.__e2eInventoryFrames = (state.__e2eInventoryFrames ?? 0) + 1;
+          }
+        } catch { /* not an envelope; the channel drops it too */ }
         if (typeof listener === "function") listener.call(this, event);
         else listener.handleEvent(event);
       };

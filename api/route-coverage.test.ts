@@ -1,41 +1,57 @@
 import { expect, test } from "bun:test";
 
 import { readYaml } from "../scripts/validate-api";
+import {
+  CHILD_ACTIVITY_PATH,
+  CHILD_DOCUMENT_EVENTS_PATH,
+  CHILD_INVENTORY_EVENTS_PATH,
+  childConversationEventsPath,
+} from "../src/shared/live-protocol";
 
 type Operation = { operationId: string; domain: "hub" | "workspace"; method: string; path: string; childPath?: string; runtime: string };
-type Exclusion = { id: string; path?: string; pathPattern?: string };
+type Exclusion = { id: string; scope?: string; path?: string; pathPattern?: string; condition?: string };
 
 const root = new URL("../", import.meta.url);
 
-test("workspace route table and fallback routes are classified", async () => {
+// An exclusion classifies a path explicitly when it names the path or a
+// prefix pattern covering it. Conditional entries (unmatched navigation, the
+// browser form variants) and the method catch-all describe fallbacks rather
+// than routes, so they classify nothing here.
+function explicitlyExcludes(exclusion: Exclusion, path: string): boolean {
+  if (exclusion.condition !== undefined || exclusion.pathPattern === "*") return false;
+  if (exclusion.path === path) return true;
+  return exclusion.pathPattern?.endsWith("*") === true && path.startsWith(exclusion.pathPattern.slice(0, -1));
+}
+
+test("every workspace child route is an explicit internal exclusion", async () => {
   const [source, sessionsSource, inventory, excluded] = await Promise.all([
     Bun.file(new URL("src/server/routes.ts", root)).text(),
     Bun.file(new URL("src/terminal/sessions-route.ts", root)).text(),
     readYaml<{ operations: Operation[] }>("api/operations.yaml"),
     readYaml<{ exclusions: Exclusion[] }>("api/exclusions.yaml"),
   ]);
-  const publicChildPaths = new Set(inventory.operations.filter(item => item.domain === "workspace").map(item => item.childPath ?? item.path));
-  for (const path of ["/api/state", "/api/document", "/api/document/diff", "/api/events", "/api/search", "/api/chat/status", "/api/chat/models", "/api/chat/commands", "/api/chat/conversations", "/api/chat/conversations/events", "/api/chat/conversations/{conversationId}", "/api/chat/conversations/{conversationId}/events", "/api/chat/conversations/{conversationId}/prompts", "/api/chat/conversations/{conversationId}/undo", "/api/chat/conversations/{conversationId}/redo", "/api/chat/conversations/{conversationId}/cancel", "/api/chat/conversations/{conversationId}/permissions/{interactionId}", "/api/chat/conversations/{conversationId}/questions/{interactionId}", "/api/auth", "/api/terminal", "/api/terminal/sessions", "/api/terminal/sessions/{terminalSessionId}"]) {
-    expect(publicChildPaths.has(path)).toBe(true);
-  }
-  for (const marker of ["p(\"/api/state\")", "p(\"/api/document\")", "p(\"/api/document/diff\")", "p(\"/api/events\")", "p(\"/api/search\")", "p(\"/api/chat/status\")", "p(\"/api/chat/models\")", "p(\"/api/chat/commands\")", "p(\"/api/chat/conversations\")", "p(\"/api/chat/conversations/events\")", 'requestUrl.pathname === "/api/terminal"', 'requestUrl.pathname === "/api/auth"']) {
-    expect(source).toContain(marker);
-  }
-  expect(sessionsSource).toContain('const SESSIONS_PATH = "/api/terminal/sessions"');
-  for (const id of ["workspace-assets", "workspace-manifest", "workspace-debug", "workspace-terminal-cookie-auth", "e2e-reset", "e2e-terminal-token", "e2e-personal-state", "direct-child-api"]) {
+  // The workspace API left the public contract at workspace revision 16.
+  expect(inventory.operations.filter(item => item.domain === "workspace").map(item => item.operationId)).toEqual([]);
+  for (const id of ["workspace-api", "direct-child-api", "workspace-assets", "workspace-manifest", "workspace-debug", "workspace-terminal-cookie-auth", "e2e-reset", "e2e-terminal-token", "e2e-chat", "e2e-personal-state"]) {
     expect(excluded.exclusions.some(item => item.id === id)).toBe(true);
   }
+  const candidates = excluded.exclusions.filter(item => item.scope !== "hub");
+  // A child route is reachable through the Hub at /s/{workspaceId}<path>.
+  // Test helpers exist only on the e2e harness's direct listener, so they
+  // classify by their direct path.
+  const classified = (path: string) => {
+    const template = path.replace(/:([A-Za-z0-9_]+)/g, "{$1}");
+    return candidates.some(item => explicitlyExcludes(item, template) || explicitlyExcludes(item, `/s/{workspaceId}${template}`));
+  };
   const literalRoutes = [...source.matchAll(/p\("([^"]+)"\)/g)].map(match => match[1]!);
-  const classified = (path: string) =>
-    publicChildPaths.has(path.replace(/:([A-Za-z0-9_]+)/g, "{$1}"))
-    || path.startsWith("/assets/")
-    || path === "/manifest.webmanifest"
-    || path === "/debug/metrics"
-    || path.startsWith("/__e2e/")
-    || path === "/api/personal-state";
+  expect(literalRoutes.length).toBeGreaterThan(0);
   expect(literalRoutes.filter(path => !classified(path))).toEqual([]);
+  // Routes registered through a shared constant escape the literal sweep.
+  // Each one must be known here and classified below.
+  const constantRoutes = [...source.matchAll(/p\(([A-Z][A-Z0-9_]*)\)/g)].map(match => match[1]!);
+  expect(constantRoutes.filter(name => name !== "CHILD_ACTIVITY_PATH")).toEqual([]);
   // The fetch fallback dispatches on requestUrl.pathname comparisons rather
-  // than p("...") literals — sweep those too, so a new fallback branch cannot
+  // than p("...") literals. Sweep those too, so a new fallback branch cannot
   // escape both the contract and the exclusion list unnoticed.
   const fallbackPaths = [
     ...[...source.matchAll(/requestUrl\.pathname === "([^"]+)"/g)].map(match => match[1]!),
@@ -43,6 +59,19 @@ test("workspace route table and fallback routes are classified", async () => {
   ].filter(path => path.startsWith("/"));
   expect(fallbackPaths.length).toBeGreaterThan(0);
   expect(fallbackPaths.filter(path => !classified(path) && !classified(`${path}/`))).toEqual([]);
+  expect(sessionsSource).toContain('const SESSIONS_PATH = "/api/terminal/sessions"');
+  expect(classified("/api/terminal/sessions")).toBe(true);
+  expect(classified("/api/terminal/sessions/{terminalSessionId}")).toBe(true);
+  // The SSE routes the Hub's live broker subscribes to, and the workspace
+  // activity stream, are hub-to-child protocol. They must exist and be
+  // classified like every other child route.
+  for (const marker of ['p("/api/events")', 'p("/api/chat/conversations/events")', 'p("/api/chat/conversations/:conversationId/events")']) {
+    expect(source).toContain(marker);
+  }
+  expect(source.includes(`p(${JSON.stringify(CHILD_ACTIVITY_PATH)})`) || source.includes("p(CHILD_ACTIVITY_PATH)")).toBe(true);
+  for (const path of [CHILD_DOCUMENT_EVENTS_PATH, CHILD_INVENTORY_EVENTS_PATH, childConversationEventsPath("sample"), CHILD_ACTIVITY_PATH]) {
+    expect(classified(path)).toBe(true);
+  }
 });
 
 test("Hub dispatch families are public or explicitly excluded", async () => {
@@ -72,6 +101,8 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubProbeCloneJobEvents", "cloneJobEvents"],
     ["hubSendCloneJobInput", "cloneJobAction"],
     ["hubCancelCloneJob", "cloneJobAction"],
+    ["hubStreamLive", "pathname === LIVE_STREAM_PATH"],
+    ["hubUpdateLiveSubscriptions", "LIVE_SUBSCRIPTIONS_PATH.exec(pathname)"],
     ["hubStartWorkspace", "const action ="],
     ["hubStopWorkspace", "const action ="],
     ["hubForgetWorkspace", "const forget ="],
@@ -109,11 +140,12 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
   );
   expect(exactPaths.filter(path => !publicPaths.has(path) && !excludedPaths.has(path) && !matchesExcludedPattern(path))).toEqual([]);
   // Regex dispatch families: every /^\/api\/hub\/.../ route regex in the hub
-  // handler must match at least one documented hub path (with placeholders
+  // handler, inline or bound to a constant, must match at least one documented hub path (with placeholders
   // substituted), so a new regex family cannot ship undocumented — and every
   // templated inventory path must be reachable through some swept regex.
   const routeRegexes = [
     ...[...source.matchAll(/(\/\^\\\/api\\\/hub\\\/.*?\$\/)\.exec\(/g)].map(match => new RegExp(match[1]!.slice(1, -1))),
+    ...[...source.matchAll(/=\s*(\/\^\\\/api\\\/hub\\\/.*?\$\/);/g)].map(match => new RegExp(match[1]!.slice(1, -1))),
     /^\/api\/hub\/credentials\/[^/]+\/public-key$/,
     /^\/api\/hub\/credential-tools\/[^/]+(?:\/test)?$/,
     /^\/api\/hub\/credentials\/[^/]+\/(?:unlock|lock|enable|disable|assign|unassign|test|delete)$/,

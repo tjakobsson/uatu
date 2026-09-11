@@ -1,15 +1,24 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { parseHTML } from "linkedom";
 
+import { resetAppBasePathForTests } from "../shared/app-url";
+import { createLiveChannel, type LiveChannel } from "./live-channel";
+import { installLiveChannelForTests } from "./live";
 import {
+  applyWorkspaceActivity,
   chipLabel,
   chipDotClass,
+  initHubNav,
   parseHubState,
   sortHubWorkspaces,
   startFailureNeedsHubUnlock,
   submitHubSignOut,
+  switcherBadge,
+  switcherBadgeLabel,
   workspaceIdFromBasePath,
   workspaceMenuDetail,
   workspaceMenuLabel,
+  workspaceMenuState,
 } from "./hub-nav";
 
 function summary(id: string, running: boolean, displayName = id, path = "/src/" + id) {
@@ -179,5 +188,204 @@ describe("submitHubSignOut", () => {
     expect(form.hidden).toBe(true);
     expect(appended).toEqual([form]);
     expect(form.submitted).toBe(true);
+  });
+});
+
+describe("switcher activity", () => {
+  const facts = (running: boolean, working = false, awaiting = false) => ({ running, working, awaiting });
+
+  test("a question in another workspace badges the chip; agents merely working are a quieter note; the current workspace never counts", () => {
+    const activity = new Map([
+      ["uatu", facts(true, true, true)],
+      ["two", facts(true, true, false)],
+      ["three", facts(true, false, false)],
+    ]);
+    expect(switcherBadge(activity, "uatu")).toEqual({ kind: "working", count: 1 });
+    activity.set("three", facts(true, true, true));
+    expect(switcherBadge(activity, "uatu")).toEqual({ kind: "awaiting", count: 1 });
+    // Answered from any device: the badge clears back to the quieter note.
+    activity.set("three", facts(true, true, false));
+    expect(switcherBadge(activity, "uatu")).toEqual({ kind: "working", count: 2 });
+    activity.set("two", facts(true, false, false));
+    activity.set("three", facts(false, true, true));
+    expect(switcherBadge(activity, "uatu")).toBeNull();
+  });
+
+  test("the badge is spoken, never colour alone", () => {
+    expect(switcherBadgeLabel({ kind: "awaiting", count: 1 })).toBe("1 workspace awaiting your reply");
+    expect(switcherBadgeLabel({ kind: "awaiting", count: 2 })).toBe("2 workspaces awaiting your reply");
+    expect(switcherBadgeLabel({ kind: "working", count: 1 })).toBe("Agents working in 1 workspace");
+    expect(switcherBadgeLabel(null)).toBe("");
+  });
+
+  test("menu entries name stopped, awaiting, and working; idle running entries stay quiet", () => {
+    const activity = new Map([["a", facts(true, true, true)], ["b", facts(true, true, false)], ["c", facts(true)]]);
+    expect(workspaceMenuState(summary("a", true), activity)).toEqual({ text: "awaiting you", tone: "awaiting" });
+    expect(workspaceMenuState(summary("b", true), activity)).toEqual({ text: "working", tone: "working" });
+    expect(workspaceMenuState(summary("c", true), activity)).toBeNull();
+    expect(workspaceMenuState(summary("d", true), activity)).toBeNull();
+    expect(workspaceMenuState(summary("a", false), activity)).toEqual({ text: "stopped", tone: "stopped" });
+  });
+
+  test("an activity update folds its running fact into the hub list without touching other entries", () => {
+    const list = [summary("uatu", true), summary("two", false)];
+    const updated = applyWorkspaceActivity(list, "two", facts(true, true, false));
+    expect(updated.map(workspace => workspace.running)).toEqual([true, true]);
+    expect(updated[0]).toBe(list[0]);
+    expect(applyWorkspaceActivity(list, "unknown", facts(true))).toEqual(list);
+  });
+});
+
+describe("initHubNav with the live activity topic", () => {
+  const savedGlobals = new Map<string, unknown>();
+  const setGlobal = (key: string, value: unknown) => {
+    if (!savedGlobals.has(key)) savedGlobals.set(key, Reflect.get(globalThis, key));
+    Reflect.set(globalThis, key, value);
+  };
+
+  afterEach(() => {
+    installLiveChannelForTests(null);
+    for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
+    savedGlobals.clear();
+    resetAppBasePathForTests();
+  });
+
+  test("a question elsewhere badges the chip and names the workspace in the open menu; answering clears it", async () => {
+    const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
+    const { document, window } = parseHTML(html);
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", "/s/uatu/");
+    document.head.appendChild(meta);
+    setGlobal("document", document);
+    setGlobal("window", window);
+    setGlobal("Node", (window as unknown as Record<string, unknown>).Node);
+    resetAppBasePathForTests();
+
+    let stateFetches = 0;
+    const workspaces: unknown[] = [
+      { id: "uatu", displayName: "Uatu", path: "/src/uatu", running: true },
+      { id: "two", displayName: "Payments", path: "/src/two", running: true },
+    ];
+    setGlobal("fetch", async (url: string) => {
+      if (url === "/api/hub/state") {
+        stateFetches += 1;
+        return Response.json({ workspaces });
+      }
+      return Response.json({ error: "unexpected" }, { status: 404 });
+    });
+    let deliver: ((ws: string, activity: { running: boolean; working: boolean; awaiting: boolean }) => void) | null = null;
+    installLiveChannelForTests({
+      onActivity(listener: typeof deliver) { deliver = listener; return () => {}; },
+    } as unknown as LiveChannel);
+
+    initHubNav();
+    const control = document.querySelector<HTMLElement>("#hub-control")!;
+    const toggle = document.querySelector<HTMLButtonElement>("#hub-toggle")!;
+    const badge = document.querySelector<HTMLElement>("#hub-activity-badge")!;
+    const menu = document.querySelector<HTMLElement>("#hub-menu")!;
+    for (let attempt = 0; attempt < 100 && control.hidden; attempt += 1) await Bun.sleep(1);
+    expect(control.hidden).toBe(false);
+    expect(badge.hidden).toBe(true);
+    expect(deliver).not.toBeNull();
+
+    // An agent in Payments asks the user a question.
+    deliver!("two", { running: true, working: true, awaiting: true });
+    expect(badge.hidden).toBe(false);
+    expect(badge.className).toBe("hub-activity-badge is-awaiting");
+    expect(badge.textContent).toBe("1");
+    expect(toggle.getAttribute("aria-label")).toContain("1 workspace awaiting your reply");
+    expect(toggle.title).toContain("1 workspace awaiting your reply");
+
+    // The open menu names it, and keeps up without being reopened.
+    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    expect(menu.hidden).toBe(false);
+    const entryState = () => [...menu.querySelectorAll<HTMLElement>(".hub-menu-item")]
+      .find(item => item.textContent?.includes("Payments"))
+      ?.querySelector<HTMLElement>(".hub-menu-state")?.textContent ?? null;
+    expect(entryState()).toBe("awaiting you");
+    // No conversation content or title reaches the menu.
+    expect(menu.textContent).not.toContain("question");
+
+    // Answered from another device: the badge falls back to the quieter
+    // working note, then clears once the agent goes idle.
+    deliver!("two", { running: true, working: true, awaiting: false });
+    expect(badge.className).toBe("hub-activity-badge is-working");
+    expect(badge.textContent).toBe("");
+    expect(toggle.getAttribute("aria-label")).toContain("Agents working in 1 workspace");
+    expect(entryState()).toBe("working");
+    deliver!("two", { running: true, working: false, awaiting: false });
+    expect(badge.hidden).toBe(true);
+    expect(toggle.getAttribute("aria-label")).toBe("Switch workspace or open the hub dashboard");
+    expect(entryState()).toBeNull();
+
+    // The current workspace stopping elsewhere turns the chip's dot off.
+    const chipDot = toggle.querySelector<HTMLElement>(".indicator-dot")!;
+    expect(chipDot.className).toBe("indicator-dot is-live");
+    deliver!("uatu", { running: false, working: false, awaiting: false });
+    expect(chipDot.className).toBe("indicator-dot");
+
+    // A workspace the list does not know yet: the list is refetched.
+    const fetchesBefore = stateFetches;
+    workspaces.push({ id: "three", displayName: "New", path: "/src/three", running: true });
+    deliver!("three", { running: true, working: false, awaiting: true });
+    expect(badge.className).toBe("hub-activity-badge is-awaiting");
+    for (let attempt = 0; attempt < 100 && stateFetches === fetchesBefore; attempt += 1) await Bun.sleep(1);
+    expect(stateFetches).toBe(fetchesBefore + 1);
+  });
+
+  test("activity the stream delivered before the hub probe answered still badges the chip", async () => {
+    const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
+    const { document, window } = parseHTML(html);
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", "/s/uatu/");
+    document.head.appendChild(meta);
+    setGlobal("document", document);
+    setGlobal("window", window);
+    setGlobal("Node", (window as unknown as Record<string, unknown>).Node);
+    resetAppBasePathForTests();
+
+    // The hub probe is held until the stream has already sent its snapshot.
+    let answerState!: () => void;
+    const stateHeld = new Promise<void>(resolve => { answerState = resolve; });
+    setGlobal("fetch", async (url: string) => {
+      if (url === "/api/hub/state") {
+        await stateHeld;
+        return Response.json({ workspaces: [
+          { id: "uatu", displayName: "Uatu", path: "/src/uatu", running: true },
+          { id: "two", displayName: "Payments", path: "/src/two", running: true },
+        ] });
+      }
+      return Response.json({ error: "unexpected" }, { status: 404 });
+    });
+    let live: ((data: string) => void) | null = null;
+    const channel = createLiveChannel({
+      ws: "uatu",
+      activity: true,
+      fetcher: async () => Response.json({ ok: true }),
+      openSource: () => ({
+        addEventListener(type, listener) {
+          if (type === "live") live = data => listener({ type, data } as unknown as Event);
+        },
+        close() {},
+      }),
+    });
+    installLiveChannelForTests(channel);
+    channel.connect();
+
+    initHubNav();
+    // The per-workspace snapshot the hub sends once, as the stream opens.
+    live!(JSON.stringify({ ws: "two", topic: "activity", cursor: "a1", event: { kind: "data", data: { running: true, working: true, awaiting: true } } }));
+    answerState();
+
+    const control = document.querySelector<HTMLElement>("#hub-control")!;
+    const badge = document.querySelector<HTMLElement>("#hub-activity-badge")!;
+    for (let attempt = 0; attempt < 100 && control.hidden; attempt += 1) await Bun.sleep(1);
+    expect(control.hidden).toBe(false);
+    expect(badge.hidden).toBe(false);
+    expect(badge.className).toBe("hub-activity-badge is-awaiting");
+    expect(badge.textContent).toBe("1");
+    channel.dispose();
   });
 });

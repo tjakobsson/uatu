@@ -363,17 +363,24 @@ function streamingChannelDomain(channel: JsonObject): ApiDomain {
   return String(channel.path ?? "").startsWith("/s/") ? "workspace" : "hub";
 }
 
-// Schema names a channel references, keyed by wire direction. Channels name
-// schemas as plain strings (dataSchema/itemSchema/frames), and the bodies
-// live in the document's top-level schemas block.
-function channelSchemaDirections(channel: JsonObject): Map<string, Direction> {
-  const result = new Map<string, Direction>();
-  const note = (value: unknown, direction: Direction) => {
-    if (typeof value === "string") {
-      // A schema referenced in both directions keeps "response": strict old
-      // validators make it the more conservative side for every rule.
-      result.set(value, result.get(value) === "response" ? "response" : direction);
-    }
+type SchemaUse = { name: string; direction: Direction; domain: ApiDomain };
+
+// Schemas a channel references, with the wire direction and the domain that
+// owns each one. Channels name schemas as plain strings (dataSchema,
+// itemSchema, frames), and the bodies live in the document's top-level
+// schemas block. A multiplexed channel also names one payload schema per
+// topic, with the domain that owns the payload. The Hub's live stream is a
+// Hub channel, yet the conversation events it forwards belong to the
+// workspace, so a ChatEvent break still has to move the workspace revision.
+function channelSchemaUses(channel: JsonObject, channelDomain: ApiDomain): SchemaUse[] {
+  const uses = new Map<string, SchemaUse>();
+  const note = (value: unknown, direction: Direction, domain: ApiDomain = channelDomain) => {
+    if (typeof value !== "string") return;
+    const id = `${domain} ${value}`;
+    // A schema referenced in both directions keeps "response": strict old
+    // validators make it the more conservative side for every rule.
+    const prior = uses.get(id);
+    uses.set(id, { name: value, domain, direction: prior?.direction === "response" ? "response" : direction });
   };
   const frames = (framesValue: unknown, direction: Direction) => {
     const framesObject = object(framesValue);
@@ -384,7 +391,13 @@ function channelSchemaDirections(channel: JsonObject): Map<string, Direction> {
   note(channel.itemSchema, "response");
   frames(channel.clientFrames, "request");
   frames(channel.serverFrames, "response");
-  return result;
+  for (const topicValue of Object.values(object(channel.topics))) {
+    const topic = object(topicValue);
+    const domain: ApiDomain = topic.domain === "hub" || topic.domain === "workspace" ? topic.domain : channelDomain;
+    note(topic.dataSchema, "response", domain);
+    note(topic.resyncDataSchema, "response", domain);
+  }
+  return [...uses.values()];
 }
 
 export function compareStreamingContracts(base: JsonObject, proposed: JsonObject, baseOpenapi: JsonObject = {}, proposedOpenapi: JsonObject = {}): CompatibilityResult {
@@ -411,22 +424,22 @@ export function compareStreamingContracts(base: JsonObject, proposed: JsonObject
     }
     // The channel body only names its schemas — compare the referenced
     // schema bodies too, or a wire break in the schemas block ships unseen.
-    for (const [schemaName, direction] of channelSchemaDirections(channel)) {
+    for (const { name: schemaName, direction, domain: owner } of channelSchemaUses(channel, domain)) {
       const before = resolveSchema(schemaName, base, baseSchemas, baseOpenapi);
       const after = resolveSchema(schemaName, proposed, proposedSchemas, proposedOpenapi);
       if (before === undefined) continue;
       if (after === undefined) {
-        changed.add(domain);
-        breaking[domain].push(`streaming channel ${name}: schema ${schemaName} removed`);
+        changed.add(owner);
+        breaking[owner].push(`streaming channel ${name}: schema ${schemaName} removed`);
         continue;
       }
       const failures: string[] = [];
       compareSchemas(`streaming channel ${name}: schema ${schemaName}`, before, after, direction, failures);
       if (failures.length > 0) {
-        changed.add(domain);
-        breaking[domain].push(...failures);
+        changed.add(owner);
+        breaking[owner].push(...failures);
       } else if (stable(resolveRefs(baseSchemas[schemaName], base, baseOpenapi)) !== stable(resolveRefs(proposedSchemas[schemaName], proposed, proposedOpenapi))) {
-        changed.add(domain);
+        changed.add(owner);
       }
     }
   }

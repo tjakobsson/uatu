@@ -92,7 +92,7 @@ describe("proxied stream cancellation", () => {
   test("a downstream body cancel releases the child's stream", async () => {
     const child = streamingChild();
     try {
-      const response = await proxyHttp(new Request("http://hub.example/s/project/api/events"), child.session);
+      const response = await proxyHttp(new Request("http://hub.example/s/project/api/search"), child.session);
       const reader = response.body!.getReader();
       expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: state");
 
@@ -109,7 +109,7 @@ describe("proxied stream cancellation", () => {
     try {
       const controller = new AbortController();
       const response = await proxyHttp(
-        new Request("http://hub.example/s/project/api/events", { signal: controller.signal }),
+        new Request("http://hub.example/s/project/api/search", { signal: controller.signal }),
         child.session,
       );
       const reader = response.body!.getReader();
@@ -131,13 +131,13 @@ describe("proxied stream cancellation", () => {
       const controller = new AbortController();
       controller.abort();
       const response = await proxyHttp(
-        new Request("http://hub.example/s/project/api/events", { signal: controller.signal }),
+        new Request("http://hub.example/s/project/api/search", { signal: controller.signal }),
         child.session,
       );
       if (response.status === 200) await response.body!.cancel();
       // An abandonment that beat us to the child is still an abandonment, not
       // an unreachable workspace.
-      expect(records).toEqual([{ transport: "document", outcome: "cancelled", status: "unreachable" }]);
+      expect(records).toEqual([{ transport: "search", outcome: "cancelled", status: "unreachable" }]);
     } finally {
       setProxyStreamDiagnostics(null);
       await child.server.stop(true);
@@ -149,7 +149,7 @@ describe("proxied stream cancellation", () => {
     try {
       const controller = new AbortController();
       controller.abort();
-      const request = new Request("http://hub.example/s/project/api/events", { signal: controller.signal });
+      const request = new Request("http://hub.example/s/project/api/search", { signal: controller.signal });
       const response = await proxyHttp(request, child.session);
       // Either the fetch never happened (502) or it was aborted immediately;
       // what must not happen is a child subscription outliving the caller.
@@ -164,7 +164,7 @@ describe("proxied stream cancellation", () => {
   test("normal upstream completion is not treated as a cancellation", async () => {
     const child = streamingChild();
     try {
-      const response = await proxyHttp(new Request("http://hub.example/s/project/api/events?finite=1"), child.session);
+      const response = await proxyHttp(new Request("http://hub.example/s/project/api/search?finite=1"), child.session);
       const reader = response.body!.getReader();
       expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: state");
       expect((await reader.read()).done).toBe(true);
@@ -188,7 +188,7 @@ describe("proxied stream cancellation", () => {
     };
     const controller = new AbortController();
     const response = await proxyHttp(
-      new Request("http://hub.example/s/project/api/events", { signal: controller.signal }),
+      new Request("http://hub.example/s/project/api/search", { signal: controller.signal }),
       session,
     );
     expect(response.status).toBe(502);
@@ -202,7 +202,7 @@ describe("proxied stream cancellation", () => {
     try {
       const controller = new AbortController();
       const response = await proxyHttp(
-        new Request("http://hub.example/s/project/api/events?finite=1", { signal: controller.signal }),
+        new Request("http://hub.example/s/project/api/search?finite=1", { signal: controller.signal }),
         child.session,
       );
       const reader = response.body!.getReader();
@@ -229,11 +229,14 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 
 describe("proxied stream diagnostics", () => {
   test("classifies stream routes by shape, never by identifier", () => {
-    expect(classifyProxyTransport("/s/my-project/api/events")).toBe("document");
-    expect(classifyProxyTransport("/s/my-project/api/chat/conversations/events")).toBe("chat-inventory");
-    expect(classifyProxyTransport("/s/my-project/api/chat/conversations/opencode:local/events")).toBe("chat-conversation");
     expect(classifyProxyTransport("/s/my-project/api/search")).toBe("search");
+    expect(classifyProxyTransport("/s/other-project/api/search")).toBe("search");
     expect(classifyProxyTransport("/s/my-project/assets/chunk-abc.js")).toBe("other");
+    // Live SSE routes are no longer proxied at all (the hub refuses them and
+    // brokers /api/hub/live instead), so they have no proxied stream class.
+    expect(classifyProxyTransport("/s/my-project/api/events")).toBe("other");
+    expect(classifyProxyTransport("/s/my-project/api/chat/conversations/events")).toBe("other");
+    expect(classifyProxyTransport("/s/my-project/api/chat/conversations/opencode:local/events")).toBe("other");
     // Two different workspaces and two different conversations collapse to
     // the same two class names — the cardinality does not grow with traffic.
     expect(classifyProxyTransport("/s/other/api/chat/conversations/claude:xyz/events"))
@@ -254,7 +257,7 @@ describe("proxied stream diagnostics", () => {
     const child = streamingChild();
     try {
       const response = await proxyHttp(
-        new Request("http://hub.example/s/project/api/events?t=browser-value&secret=hunter2", {
+        new Request("http://hub.example/s/project/api/search?t=browser-value&secret=hunter2", {
           headers: { cookie: "uatu_hub=session-cookie", authorization: "Bearer user-token" },
         }),
         child.session,
@@ -265,7 +268,7 @@ describe("proxied stream diagnostics", () => {
 
       await reader.cancel();
       await waitFor(() => records.length === 1);
-      expect(records[0]).toEqual({ transport: "document", outcome: "cancelled", status: "2xx" });
+      expect(records[0]).toEqual({ transport: "search", outcome: "cancelled", status: "2xx" });
 
       // Nothing from the request survives into the record: no URL, no query
       // value, no cookie, no authorization header, no brokered child token,
@@ -278,7 +281,7 @@ describe("proxied stream diagnostics", () => {
         "user-token",
         "child-secret",
         "event: state",
-        "/s/project/api/events",
+        "/s/project/api/search",
       ]) {
         expect(serialized).not.toContain(forbidden);
       }
@@ -304,9 +307,9 @@ describe("proxied stream diagnostics", () => {
         exited: new Promise(() => undefined),
         async stop() {},
       };
-      const response = await proxyHttp(new Request("http://hub.example/s/project/api/events"), session);
+      const response = await proxyHttp(new Request("http://hub.example/s/project/api/search"), session);
       expect(response.status).toBe(502);
-      expect(records).toEqual([{ transport: "document", outcome: "failed", status: "unreachable" }]);
+      expect(records).toEqual([{ transport: "search", outcome: "failed", status: "unreachable" }]);
     } finally {
       setProxyStreamDiagnostics(null);
     }
@@ -317,7 +320,7 @@ describe("proxied stream diagnostics", () => {
     setProxyStreamDiagnostics(record => records.push(record));
     const child = streamingChild();
     try {
-      const response = await proxyHttp(new Request("http://hub.example/s/project/api/events"), child.session);
+      const response = await proxyHttp(new Request("http://hub.example/s/project/api/search"), child.session);
       const reader = response.body!.getReader();
       await reader.read();
       expect(records).toHaveLength(0);
@@ -329,7 +332,7 @@ describe("proxied stream diagnostics", () => {
       const ending = await reader.read();
       expect(ending.done).toBe(true);
       await waitFor(() => records.length === 1);
-      expect(records).toEqual([{ transport: "document", outcome: "failed", status: "2xx" }]);
+      expect(records).toEqual([{ transport: "search", outcome: "failed", status: "2xx" }]);
     } finally {
       setProxyStreamDiagnostics(null);
       child.server.stop(true);
@@ -367,7 +370,7 @@ describe("proxied stream diagnostics", () => {
     setProxyStreamDiagnostics(() => { throw new Error("sink exploded"); });
     const child = streamingChild();
     try {
-      const response = await proxyHttp(new Request("http://hub.example/s/project/api/events?finite=1"), child.session);
+      const response = await proxyHttp(new Request("http://hub.example/s/project/api/search?finite=1"), child.session);
       const reader = response.body!.getReader();
       expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: state");
       expect((await reader.read()).done).toBe(true);

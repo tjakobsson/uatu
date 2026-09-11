@@ -23,9 +23,9 @@
 
 ---
 
-`uatu` is a local watch UI for following what an AI coding agent is doing in
-a codebase. Point it at a directory, open the browser UI it prints, and it
-keeps a pleasant preview in sync with changing files. Flip the **Follow**
+`uatu` is a watch UI for following what an AI coding agent is doing in a
+codebase. Run the hub, add a folder from its dashboard, and uatu keeps a
+preview in sync with the files as they change. Flip the **Follow**
 switch on to jump to whichever file just changed; flip it off and click a
 file to stay there — the file you're viewing still reloads in place when it
 changes on disk. Today it's a live preview and file browser; over time it
@@ -37,13 +37,13 @@ cognitive debt.
 - Markdown / AsciiDoc rendering with unified metadata cards for frontmatter and AsciiDoc header attributes
 - Mermaid diagrams (fenced and `[source,mermaid]`) with a fullscreen pan/zoom viewer
 - Syntax highlighting for source files, plus per-file copy-to-clipboard on every code block
-- Cross-document `.md`/`.adoc` link navigation; live reload over SSE
+- Cross-document `.md`/`.adoc` link navigation; live reload over one server-sent-events stream per tab, however many panes are open
 - **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved compare base via [`@pierre/diffs`](https://diffs.com/)
 - **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
 - Whole-repo browsing with `.uatu.json ignore.exclude` and `.gitignore` filtering on top of built-in defaults
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
-- Git preflight by default (`--force` to bypass for non-git folders); single-file or multi-root scope
+- Git-aware workspaces: adding a folder outside a repository offers `git init`
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
 - Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
 - Installable as a PWA so TUI editor shortcuts (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach the embedded terminal
@@ -125,9 +125,9 @@ terminal feature gracefully).
 
 ```bash
 bun install
-bun run src/cli.ts serve testdata/watch-docs   # run from source
-bun run build && ./dist/uatu serve .            # standalone binary
-bun link                                        # expose `uatu` on PATH
+bun run dev                        # dev hub on testdata/watch-docs (see dev/README.md)
+bun run build && ./dist/uatu hub   # standalone binary
+bun link                           # expose `uatu` on PATH
 ```
 
 Windows is pending Bun's upstream PTY work — the terminal stays hidden there;
@@ -135,71 +135,58 @@ everything else works. Release binaries are darwin/linux only for now.
 
 ## Usage
 
-**`uatu hub` is the way to run uatu** — see [the hub section](#the-hub-how-you-run-uatu-uatu-hub)
-below. Direct `uatu serve` still works but is deprecated as a public
-command and prints a one-line warning; it lives on as the internal session
-child the hub spawns, and will be removed as a public command in a future
-release.
+uatu runs as a hub. `uatu hub` starts a daemon that serves a login-gated
+dashboard on one port, runs one session per workspace folder, and serves
+each session under `<host>/s/<workspace-id>/`. Run it on your own machine or
+on one you own elsewhere. Every session has the full app (live preview,
+change overview, detachable terminals, chat), in any browser, in an iPad
+that installs the hub as a PWA, or in UatuCode Desktop.
+
+To start a hub on your own machine, hash a password first. The command reads
+it from stdin, never from its arguments; run it bare to type the password at a
+prompt instead:
 
 ```bash
-uatu [serve] [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
+printf '%s' 'a-password' | uatu hub hash-password   # prints an $argon2id$… hash
 ```
 
-`serve` is the default command — `uatu docs` and `uatu serve docs` are
-equivalent, and a bare `uatu` serves the current directory. `uatu watch`
-is a deprecated alias for `serve`.
+Save the hash as a user in `~/.config/uatu/hub.json`:
+
+```json
+{ "users": [{ "name": "you", "passwordHash": "$argon2id$…" }] }
+```
+
+Then run the hub and open the URL it prints (`http://127.0.0.1:4700/` by
+default):
 
 ```bash
-uatu serve .
-uatu serve docs notes --no-open
-uatu serve . --no-follow
-uatu serve README.md                        # single-file scope
-uatu serve ~/Downloads/docs --force         # non-git, slow indexing
+uatu hub
 ```
 
-To scope a session to a single file, pass that file's path directly:
-`uatu serve README.md`. The Follow switch is then disabled because there's
-nothing else to follow.
+Sign in and choose **Add Folder** to pick any folder on the machine, or clone
+a repository into one. Each folder becomes a workspace with a stable URL.
 
-The server binds to `127.0.0.1:4711` by default and scans upward if the port
-is taken; pass `--port 0` for an ephemeral port. **Breaking from earlier
-versions:** the default changed from 4312 to 4711 to keep PWA install
-identity stable across launches. Pass `--port 4312` to keep old behavior.
-
-`--base-path <PREFIX>` serves the whole session under an absolute path
-prefix (default `/`). It exists for supervisors that mount several sessions
-under one origin — most notably the hub below — and is rarely useful by
-hand.
-
-## The hub: how you run uatu (`uatu hub`)
-
-`uatu hub` runs the session server — on your own machine or one you own
-elsewhere: one port serving a login-gated dashboard, one supervised session
-child per workspace, every session reverse-proxied under
-`<host>/s/<workspace-id>/`. Sessions keep the full uatu experience —
-live preview, change overview, detachable terminals — reachable from any
-browser (including an iPad that installs the hub as a PWA) and from
-UatuCode Desktop.
-
-```bash
-printf '%s' 'a-password' | uatu hub hash-password   # → paste into hub.json
-uatu hub --config ~/.config/uatu/hub.json
+```text
+uatu hub [--config <PATH>] [--port <PORT>] [--exit-on-stdin-close]
+uatu hub hash-password
 ```
 
-Login is required on every interface, localhost included — the config needs
-at least one user (starting without one prints the exact bootstrap steps).
-Sessions are server-side records: signing out, or revoking a device from
-the dashboard's Devices pane, kills that session immediately for every
-client holding it. Workspaces are folders you add from the dashboard's
-directory browser (with a `git init` offer for non-repos) or clone into a
-browsed destination. Terminal sessions detach and reattach across
-connectivity blips — a shell (or an agent running in it) keeps working
-while your train is in a tunnel.
+Login is required on every interface, localhost included. A hub started
+without a configured user prints these steps and exits. Sessions are
+server-side records, so signing out, or revoking a device from the
+dashboard's Devices pane, ends that session at once for every client holding
+it. Terminal sessions detach and reattach across connectivity blips: a shell,
+or an agent running in it, keeps working while your train is in a tunnel.
 
-The full operator guide — trust model (hub users share the daemon's OS
-user; no isolation), config reference, certificate walkthroughs (mkcert,
-`tailscale cert`, `tailscale serve`), and systemd/launchd service
-definitions — is in [docs/SELF-HOSTING.md](./docs/SELF-HOSTING.md).
+[docs/SELF-HOSTING.md](./docs/SELF-HOSTING.md) is the full guide. It covers
+the trust model (hub users share the daemon's OS user, with no isolation
+between them), the config reference, certificates (mkcert, `tailscale cert`,
+`tailscale serve`), and systemd and launchd service definitions.
+
+**`uatu serve` is gone.** It was deprecated in v0.5.0 and is now removed,
+along with the `watch` alias and the bare `uatu <path>` form. Each of them
+prints the steps above and exits with an error. Add the folder to a hub
+instead.
 
 ## Configuration: `.uatu.json`
 
@@ -234,14 +221,13 @@ renamed / untracked) is surfaced as ambient row annotations on the tree.
 
 ## Security posture of the terminal
 
-The terminal endpoint accepts shell input, so it ships with a stricter
-envelope than the rest of uatu:
+The terminal endpoint accepts shell input, so it gets a stricter envelope
+than the rest of uatu:
 
-- **Localhost binding only** — server binds `127.0.0.1`, never `0.0.0.0`. This holds even under the hub: remote access always terminates at the hub's authenticated HTTPS listener, and session children remain loopback-only
-- **Per-server token** — 32-byte token minted at startup, required for the WS upgrade. Restarting rotates it; the URL with the token lands in stdout and may persist in logs — treat as a short-lived credential
-- **Origin allowlist** — rejects upgrade unless the `Origin` hostname is `127.0.0.1` or `localhost` AND its port matches the request's `Host` header. Matching against `Host` (not the listen port) means port-mapped setups — a container publishing 4711→4712, an SSH forward — work with zero configuration, while pages served from any *other* localhost port stay blocked. One documented failure mode: a reverse proxy that rewrites the `Host` header makes the browser's `Origin` mismatch it, and the terminal refuses the connection — the pane then shows an explicit "blocked for this address" notice (the `GET /api/auth` probe answers 403: valid credentials, rejected origin) rather than a misleading re-auth prompt
-- **HttpOnly cookie** — `?t=<token>` mints a `uatu_term_<port>` HttpOnly + SameSite=Strict cookie (named for the port the browser used, so several uatu instances on different ports hold independent credentials) so PWA launches re-auth without pasting; rotates with the in-memory token
-- **Write-only OSC 52 clipboard bridge** — TUIs that own the mouse (Claude Code, opencode) copy selections by emitting OSC 52 up the PTY; uatu bridges the sequence to the browser's clipboard, which is the *host* clipboard even when the uatu server runs in a container. Read queries (`ESC ] 52 ; c ; ?`) are never answered, so nothing in the terminal can read your clipboard; decoded payloads are capped at 100 KB. Every accepted write shows a "Copied N characters" toast, so a hostile escape sequence can't poison your clipboard silently. On browsers that require a user gesture for clipboard writes (Firefox, Safari), a blocked write degrades to a Copy-button toast instead of being lost
+- **Loopback-only children.** Each workspace's session child binds `127.0.0.1`, never `0.0.0.0`, and nothing on the network can reach it. Remote access always ends at the hub's authenticated HTTPS listener.
+- **Per-session token.** Each child mints a 32-byte token at startup, and the terminal's WebSocket upgrade requires it. The hub reads the token from the child's startup output and attaches it to proxied requests itself, so it never reaches a browser. Restarting the workspace rotates it.
+- **Origin checks at both hops.** The hub compares the browser's `Origin` with the `Host` it receives and refuses a mismatch, so a reverse proxy in front of it must pass `Host` through unchanged (see [SELF-HOSTING](./docs/SELF-HOSTING.md)). It then forwards loopback-shaped `Host` and `Origin` headers, and the child's own allowlist (`127.0.0.1` or `localhost` on the port the request arrived at) holds unchanged.
+- **Write-only OSC 52 clipboard bridge.** TUIs that own the mouse (Claude Code, opencode) copy selections by emitting OSC 52 up the PTY. uatu bridges the sequence to the browser's clipboard, which is the clipboard of the machine running the browser, not the hub. Read queries (`ESC ] 52 ; c ; ?`) are never answered, so nothing in the terminal can read your clipboard, and decoded payloads are capped at 100 KB. Every accepted write shows a "Copied N characters" toast, so a hostile escape sequence can't poison your clipboard silently. On browsers that require a user gesture for clipboard writes (Firefox, Safari), a blocked write turns into a Copy-button toast instead of being lost.
 
 **Safari 17+** blocks page-accessible Nerd Fonts (anti-fingerprinting), so
 terminal prompts using Powerline glyphs show TOFU squares there. Chrome /
@@ -249,24 +235,26 @@ Edge / Brave or "Add to Dock" works around it.
 
 ## Watchdog and freeze recovery
 
-`uatu serve` runs a sibling watchdog subprocess by default. If the parent's
-1Hz heartbeat stops advancing for `--watchdog-timeout=<ms>` (default 30 000)
-worth of consecutive watchdog checks — for example because the JS event loop
-is wedged on a native fsevents deadlock — the watchdog captures a forensic
-dump and force-kills the parent
+Every session child runs a sibling watchdog subprocess. If the child's 1Hz
+heartbeat stops advancing for 30 seconds' worth of consecutive watchdog
+checks, for example because the JS event loop is wedged on a native fsevents
+deadlock, the watchdog captures a forensic dump and force-kills the child
 (see [issue #40](https://github.com/tjakobsson/uatu/issues/40)). Staleness is
 counted in watchdog checks rather than wall-clock time, so a laptop sleeping
 past the timeout does not trigger a false kill on wake.
 
+The hub builds its children's command lines itself, so these settings reach
+sessions through the hub's environment:
+
 ```bash
-uatu serve --debug                  # also writes 1Hz NDJSON metrics (or UATU_DEBUG=1)
-uatu serve --watchdog-timeout=60000
-uatu serve --no-watchdog            # escape hatch
+UATU_DEBUG=1 uatu hub                      # also write 1Hz NDJSON metrics for every session
+UATU_HEARTBEAT_TIMEOUT_MS=60000 uatu hub   # staleness threshold (default 30000)
 ```
 
 Diagnostic files live under `$XDG_CACHE_HOME/uatu/` (or `~/.cache/uatu/`):
 heartbeat, snapshot, optional debug ring-buffer, and forensic dumps on
-freeze. With `--debug`, `GET /debug/metrics` returns the live counters.
+freeze. With `UATU_DEBUG` set, `GET /s/<workspace-id>/debug/metrics` returns
+a session's live counters.
 
 ### Chat startup
 
@@ -286,12 +274,11 @@ a fresh snapshot. No cache files are written to the workspace.
 
 Chat starts OpenCode lazily, waits for it to answer at all, then waits a
 shorter slice for it to report healthy. A cold OpenCode start on a slow
-filesystem can exceed the 30-second default; widen it with an environment
-variable rather than a flag, because the hub builds its session children's
-argv itself and a flag cannot reach a hub-hosted workspace:
+filesystem can exceed the 30-second default. Widen it on the hub, which
+passes its environment to every session:
 
 ```bash
-UATU_OPENCODE_STARTUP_TIMEOUT_MS=60000 uatu serve   # or: … uatu hub
+UATU_OPENCODE_STARTUP_TIMEOUT_MS=60000 uatu hub
 ```
 
 An empty, non-numeric, or non-positive value is ignored and the default

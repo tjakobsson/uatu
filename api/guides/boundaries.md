@@ -1,9 +1,9 @@
 # Hub and workspace boundaries
 
-The Hub is the public compatibility entry point. It owns identity, registered workspaces, device sessions, clone jobs, and workspace process lifecycle. Workspace APIs own documents, repository state, search, personal workspace state, and terminal sessions.
+The Hub API is UatuCode's public API. The Hub owns identity, registered workspaces, device sessions, credentials, clone jobs, workspace process lifecycle, and the live stream. The [OpenAPI document](../openapi.yaml) describes all of it, and `hubApiRevision` versions it.
 
-Clients normally reach a workspace through the Hub at `/s/{workspaceId}/`. Keep that prefix when resolving paths from the OpenAPI contract. `workspaceId` is a stable Hub identifier, not a filesystem path, display name, or process ID.
+The Hub runs each workspace as a child process on a loopback port and proxies it under `/s/{workspaceId}/`. The routes under that prefix cover documents, search, chat, terminals, and personal state. They are the internal protocol between the Hub, the child, and the web client that ships in the same build, so they change with that build and have no public revision. [exclusions.yaml](../exclusions.yaml) lists them so that none disappears silently. Do not build a client on them.
 
-Authentication is established with the Hub and brokered to proxied workspace requests. Do not send internal workspace credentials directly or assume a workspace listens on a publicly reachable port.
+Workspace updates reach public clients through the Hub's live stream, `GET /api/hub/live`. A client subscribes to one workspace's document state, its conversation inventory, and the conversations it follows. It can also ask for an activity summary of every workspace it may access: whether each one is running, whether an agent is working, and whether anything awaits the user. The document, inventory, and conversation payloads come from the workspace, so `workspaceApiRevision` versions them.
 
-The combined [OpenAPI document](../openapi.yaml) describes both domains. Operation tags and operation ID prefixes indicate ownership; the separate Hub and workspace revisions indicate which domain changed incompatibly.
+`workspaceId` is a stable Hub identifier, not a filesystem path, display name, or process ID. Authentication happens at the Hub. Never pass a Hub session to a workspace process, and do not assume a workspace listens on a reachable port.

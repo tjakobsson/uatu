@@ -2,7 +2,7 @@
 
 `uatu hub` turns a machine you own — a homelab box, a spare Mac mini, a VPS —
 into a session server: it serves a dashboard over one HTTPS port, supervises
-one `uatu serve` child per workspace, and reverse-proxies every session under
+one session child per workspace, and reverse-proxies every session under
 `https://<your-host>/s/<workspace-id>/`. Any browser is a client; an iPad can
 install the hub as a PWA and every session lives inside it, and UatuCode
 Desktop is a native hub client — Add Hub… on its splash screen signs in and
@@ -12,6 +12,42 @@ way to run uatu, and every client authenticates the same way.
 This document is the operator runbook: the trust model, the config
 reference, certificate walkthroughs (mkcert and both tailscale shapes), and
 service definitions for systemd and launchd.
+
+## Quick start
+
+A hub on your own machine takes four steps.
+
+1. Hash a password. The command reads it from stdin, never from its
+   arguments, and prompts for it when run bare in a terminal:
+
+   ```sh
+   printf '%s' 'your-password-here' | uatu hub hash-password
+   ```
+
+2. Save the printed `$argon2id$…` string as a user in
+   `~/.config/uatu/hub.json` (or `$XDG_CONFIG_HOME/uatu/hub.json`):
+
+   ```json
+   { "users": [{ "name": "you", "passwordHash": "$argon2id$…" }] }
+   ```
+
+3. Start the hub. It listens on `http://127.0.0.1:4700/` and prints that URL:
+
+   ```sh
+   uatu hub
+   ```
+
+4. Open the URL, sign in, and choose **Add Folder**. The folder becomes a
+   workspace, and its session opens at `/s/<workspace-id>/`.
+
+To reach the hub from other devices, give it a certificate
+([Certificates](#certificates--three-worked-paths)) and run it as a
+service ([Running as a service](#running-as-a-service)). Read the trust
+model below before you add anyone else as a user.
+
+`uatu serve`, deprecated since v0.5.0, has been removed. Running it (or the
+old `watch` alias, or a bare `uatu <path>`) prints these steps and exits
+with an error.
 
 ## The trust model — read this first
 
@@ -80,8 +116,9 @@ to `$XDG_CONFIG_HOME/uatu/hub.json` (usually `~/.config/uatu/hub.json`):
 | `users` | — | Required, non-empty. Password hashes only — generate with `uatu hub hash-password`. |
 | `stateDir` | `~/.local/state/uatu-hub` | Workspace registry, personal workspace state, and the session store (secret-bearing files are created owner-only) |
 
-Generate a password hash (read from stdin so it never lands in shell
-history):
+Generate a password hash. The command reads the password from stdin, never
+from its arguments; run `uatu hub hash-password` bare to type it at a prompt
+instead of leaving it in shell history:
 
 ```sh
 printf '%s' 'your-password-here' | uatu hub hash-password
@@ -413,7 +450,7 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        # WebSockets (the terminal) and SSE (live reload).
+        # WebSockets (the terminal) and SSE (the live stream).
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_buffering off;

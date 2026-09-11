@@ -1,0 +1,14 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "inventory",
+    "cursor": "7",
+    "event": {
+      "kind": "data",
+      "data": {
+        "type": "conversation.inventory"
+      }
+    }
+  }
+}

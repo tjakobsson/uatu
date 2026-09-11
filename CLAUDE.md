@@ -15,7 +15,8 @@ after the running app's region or a coherent domain.
 ```
 src/
 ├── app.ts          SPA entry — DOM queries, init calls, event wiring
-├── cli.ts          CLI entry — `uatu serve ...` + Bun.serve assembly
+├── cli.ts          CLI entry — `uatu hub` dispatch + the session child the
+│                   hub spawns (internal `serve`) + its Bun.serve assembly
 ├── styles.d.ts     CSS module type declarations
 ├── index.html, styles.css, assets/, assets/fonts/
 │                   (the bundled Hack Nerd Font Mono lives here — it's
@@ -37,7 +38,9 @@ src/
 │                   working in, tracked from interaction, NOT from DOM focus),
 │                   the shared find bar and its pluggable engines (preview and
 │                   terminal), text indexing, matching, and highlight painting
-├── shell/          boot, events, history, url, connection, pwa, follow,
+├── shell/          boot, events, live-channel + live (the page's one
+│                   brokered live stream and its lifecycle recovery),
+│                   history, url, connection, pwa, follow,
 │                   follow-rules, state, storage, freshness (client/server
 │                   build-identity handshake), ui-mode (per-device
 │                   touch/desktop mode on <html>), tab-bar (touch mode's
@@ -54,8 +57,9 @@ src/
 │                   renders fullscreen as the Files tab
 ├── terminal/       the embedded xterm panel — client + server +
 │                   auth + pty + pane-state + panel UI
-├── cli/            CLI domain — parse (flags + usage text) and output
-│                   (TTY banner + indexing status); cli.ts imports these
+├── cli/            CLI domain — parse (flags, usage text, and the refusal
+│                   a user-shaped `serve` gets) and output (TTY banner +
+│                   indexing status); cli.ts imports these
 ├── server/         routes (single source of truth for the HTTP route
 │                   table + the shared fetch fallback), watch-session
 │                   (live-reload engine), roots (resolution + scanning),
@@ -71,7 +75,9 @@ src/
 ├── hub/            `uatu hub` — self-hostable session server: config,
 │                   state-dir, registry (stable workspace slugs), backend
 │                   (SessionBackend seam + local-process impl), proxy
-│                   (HTTP/SSE/WS + token brokering), auth (users + the
+│                   (HTTP/WS + token brokering), live-broker (refcounted
+│                   child-topic subscriptions fanned out to every page's
+│                   one `/api/hub/live` stream), auth (users + the
 │                   server-side session store, one id over cookie/bearer
 │                   transports + rate limit + CSRF), pages, server, main
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
@@ -102,6 +108,10 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
 - **Cross-cutting helpers** like `escapeHtml` live in `src/shared/`.
   Don't reach into `app.ts` for them — that path has caused
   circular-import TDZ bugs.
+- **`serve` is internal.** Users run `uatu hub`; a user-shaped `uatu serve`
+  prints the hub bootstrap steps and exits non-zero. `serve` is reached only
+  by the hub's spawn (`--exit-on-stdin-close`) and by source runs
+  (`bun run src/cli.ts serve …`, e.g. `tests/e2e/base-path.e2e.ts`).
 - **Client URLs go through `appUrl()`** (`src/shared/app-url.ts`) — never a
   root-relative `/api`/`/assets` literal; `shared/app-url-discipline.test.ts`
   enforces it. This is what makes a session relocatable under
@@ -141,7 +151,8 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
 
 ## Commands
 
-- `bun run dev` — local watch on `testdata/watch-docs`
+- `bun run dev` — dev hub at `http://127.0.0.1:4702/` (`dev/hub.json`, user
+  `dev` / password `dev`) with `testdata/watch-docs` registered and opened
 - `bun test` — unit suite (~18s)
 - When developing Uatu inside a Hub-managed workspace, credential tests may
   discover Uatu's projected Git/SSH wrappers. Use a clean tool environment for

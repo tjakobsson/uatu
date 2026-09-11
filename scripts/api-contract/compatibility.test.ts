@@ -354,6 +354,37 @@ describe("API compatibility policy", () => {
     expect(result.breaking.workspace.some(item => item.includes("schema WorkspaceState") && item.includes("changed type"))).toBe(true);
   });
 
+  test("multiplexed topic payloads count against the domain that owns them", () => {
+    const streaming = {
+      channels: {
+        live: {
+          path: "/api/hub/live",
+          events: [{ name: "live", dataSchema: "LiveEnvelope" }],
+          topics: {
+            conversation: { domain: "workspace", dataSchema: "ChatEvent" },
+            activity: { domain: "hub", dataSchema: "WorkspaceActivity" },
+          },
+        },
+      },
+      schemas: {
+        LiveEnvelope: { type: "object", required: ["topic"], properties: { topic: { enum: ["conversation", "activity"] } }, additionalProperties: false },
+        ChatEvent: { $ref: "./openapi.yaml#/components/schemas/ChatEvent" },
+        WorkspaceActivity: { type: "object", required: ["running"], properties: { running: { type: "boolean" } }, additionalProperties: false },
+      },
+    };
+    const openapi = (types: string[]) => ({ components: { schemas: { ChatEvent: { type: "object", required: ["type"], properties: { type: { enum: types } }, additionalProperties: false } } } });
+    const payload = compareStreamingContracts(streaming, structuredClone(streaming), openapi(["conversation.status"]), openapi(["conversation.status", "conversation.queue"]));
+    expect(payload.changedDomains).toEqual(["workspace"]);
+    expect(payload.breaking.hub).toEqual([]);
+    expect(payload.breaking.workspace.some(item => item.includes("schema ChatEvent") && item.includes("conversation.queue"))).toBe(true);
+
+    const activity = structuredClone(streaming);
+    activity.schemas.WorkspaceActivity.properties.running.type = "string";
+    const hubPayload = compareStreamingContracts(streaming, activity);
+    expect(hubPayload.breaking.workspace).toEqual([]);
+    expect(hubPayload.breaking.hub.some(item => item.includes("schema WorkspaceActivity"))).toBe(true);
+  });
+
   test("inventory wire-field mutations and removals are breaking; additions are changed", () => {
     const inventory = (entries: Record<string, unknown>[]) => ({ operations: entries });
     const entry = { operationId: "hubGetState", domain: "hub", method: "GET", path: "/api/hub/state", auth: "hubSession", statuses: [200, 401], requestMediaTypes: [], responseMediaTypes: ["application/json"] };

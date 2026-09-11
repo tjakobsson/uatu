@@ -12,12 +12,12 @@ The onboarding flow:
 1. Authenticate with the Hub and fetch Hub state.
 2. Configure an existing folder (`hubConfigureWorkspace`), create a new repository (`hubCreateConfiguredWorkspace`), or create a clone job for a remote repository. Each accepts a display name, credential selections, and an explicit `start` intent that defaults to false — for example `{ "path": "/src/payments-service", "displayName": "Payments API", "start": false }`. The response is a stopped workspace whose registration and requested credential assignments committed as one result. A failed explicitly requested start still commits the configuration; check `startError` and offer retry rather than treating the workspace as absent.
 3. Start the workspace when a session is needed and observe Hub state until it is ready.
-4. Call workspace operations through `/s/{workspaceId}/`.
+4. Open the workspace in a browser at `/s/{workspaceId}/`, or follow it on the live stream by subscribing to its document and conversation topics.
 5. Stop a workspace when it no longer needs a process. Forget it only when its Hub registration should be removed.
 
 The legacy registration operation (`hubCreateWorkspace`) remains a compatibility shorthand with its historical start-by-default behavior; new clients should prefer the configure and create operations.
 
-Start and stop are lifecycle operations and may complete asynchronously. Drive UI from subsequent state responses or the Hub state stream rather than assuming a successful request means the process is already ready or stopped.
+Start and stop are lifecycle operations and may complete asynchronously. Drive UI from later Hub state responses or the live stream's activity topic, not from the fact that a request succeeded.
 
 Forgetting a workspace is different from deleting repository content, and renaming a workspace (display name) is different from renaming its folder. Follow the operation description and response schema in [openapi.yaml](../openapi.yaml); never infer destructive filesystem behavior from a label in client UI.
 

@@ -5,15 +5,21 @@ import { revealTreeRow, treeRow } from "./tree-helpers";
 
 // Drive real shell/tree reducers with complete, ordered snapshots. File reads
 // still use the server; only delivery timing and index membership are controlled.
+// The page's one live stream (`/api/hub/live`) is replaced with a controllable
+// source that delivers `document` topic envelopes for the key the page
+// subscribed with; every other request goes to the real server.
 async function installStream(page: Page) {
   await page.addInitScript(() => {
     const Native = window.EventSource;
     class Controlled extends EventTarget {
       static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
       readyState = 1;
+      documentKey = "";
       constructor(url: string | URL, options?: EventSourceInit) {
         super();
-        if (!String(url).includes("/api/events")) return new Native(url, options) as unknown as Controlled;
+        if (!String(url).includes("/api/hub/live")) return new Native(url, options) as unknown as Controlled;
+        const subs = JSON.parse(new URL(String(url), location.origin).searchParams.get("subs") ?? "[]") as { topic: string; key?: string }[];
+        this.documentKey = subs.find(sub => sub.topic === "document")?.key ?? "";
         (window as any).__documentStream = this;
       }
       close() { this.readyState = 2; }
@@ -26,7 +32,9 @@ async function deliver(page: Page, state: StatePayload) {
   await page.evaluate(state => {
     state.generatedAt = Math.max(Date.now(), ((window as any).__stamp ?? 0) + 1);
     (window as any).__stamp = state.generatedAt;
-    (window as any).__documentStream.dispatchEvent(new MessageEvent("state", { data: JSON.stringify(state) }));
+    const stream = (window as any).__documentStream;
+    const envelope = { ws: "e2e", topic: "document", key: stream.documentKey, cursor: String(state.generatedAt), event: { kind: "data", data: state } };
+    stream.dispatchEvent(new MessageEvent("live", { data: JSON.stringify(envelope) }));
   }, state);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }

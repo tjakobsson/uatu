@@ -1,0 +1,26 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "conversation",
+    "key": "opencode:conversation-1",
+    "cursor": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0xIiwicyI6Mn0",
+    "event": {
+      "kind": "data",
+      "data": {
+        "generation": "generation-1",
+        "sequence": 2,
+        "conversationId": "opencode:conversation-1",
+        "type": "conversation.configuration",
+        "configuration": {
+          "model": {
+            "providerId": "anthropic",
+            "modelId": "claude-sonnet"
+          },
+          "mode": "build",
+          "variant": "high"
+        }
+      }
+    }
+  }
+}

@@ -6,6 +6,8 @@ The public documentation root is <https://tjakobsson.github.io/uatu/>. The machi
 
 Consumers should read `contract.json` first — it reports the API revision pair, stability, and the `sourceCommit` it was built from — then follow migration guidance in the API changelog. `llms.txt` at the site root links every artifact.
 
+The contract covers the Hub API. `exclusions.yaml` lists every internal route family, including the workspace API under `/s/{workspaceId}/`, so the route coverage check can tell a deliberate omission from a forgotten one.
+
 ## How it publishes
 
 `.github/workflows/pages.yml` runs on every push to `main` (and on `workflow_dispatch`). It validates the contract, builds the site with Astro, checks the built output's content and links, and deploys `site/dist` to GitHub Pages. There is exactly one publication path and one contract: the site is the complete build output of one commit, so no deployment depends on state left behind by an earlier one.

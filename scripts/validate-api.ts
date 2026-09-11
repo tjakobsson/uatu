@@ -1,5 +1,6 @@
 import Ajv2020, { type AnySchema } from "ajv/dist/2020";
 import addFormats from "ajv-formats";
+import { readdir } from "node:fs/promises";
 import { parse } from "yaml";
 
 const root = new URL("../", import.meta.url);
@@ -90,17 +91,22 @@ export function validateOpenApiExamples(document: OpenApi): void {
   }
 }
 
+type Streaming = {
+  schemas: Record<string, AnySchema>;
+  channels: Record<string, { topics?: Record<string, { dataSchema?: string; resyncDataSchema?: string }> }>;
+};
+
 export async function validateApi(): Promise<void> {
   const [metadata, metadataSchema, openapi, streaming] = await Promise.all([
     readJson<Record<string, unknown>>("api/contract.json"),
     readJson<AnySchema>("api/contract.schema.json"),
     readYaml<OpenApi>("api/openapi.yaml"),
-    readYaml<{ schemas: Record<string, AnySchema> }>("api/streaming.yaml"),
+    readYaml<Streaming>("api/streaming.yaml"),
   ]);
   assertValid(createAjv(), metadataSchema, metadata, "contract metadata");
   validateOpenApiExamples(openapi);
 
-  const streamSchemas = {
+  const streamSchemas: Record<string, AnySchema> = {
     ...structuredClone(openapi.components.schemas),
     ...structuredClone(streaming.schemas),
     WorkspaceState: openapi.components.schemas.WorkspaceState!,
@@ -108,27 +114,49 @@ export async function validateApi(): Promise<void> {
     ChatResyncEvent: openapi.components.schemas.ChatResyncEvent!,
     ConversationInventoryEvent: openapi.components.schemas.ConversationInventoryEvent!,
   };
+  const validate = (schemaName: string, value: unknown, label: string) => {
+    const schema = streamSchemas[schemaName];
+    if (!schema) throw new Error(`${label}: no schema named ${schemaName}`);
+    assertValid(createAjv(), schemaForAjv(schema, streamSchemas), value, label);
+  };
+  const topics = streaming.channels.live?.topics ?? {};
+  for (const [topic, definition] of Object.entries(topics)) {
+    for (const name of [definition.dataSchema, definition.resyncDataSchema]) {
+      if (name !== undefined && !streamSchemas[name]) throw new Error(`streaming.yaml live topic ${topic}: unknown schema ${name}`);
+    }
+  }
   const fixtureSchemas: Record<string, string> = {
-    "examples/sse/workspace-state.json": "WorkspaceState",
     "examples/sse/clone-phase.json": "ClonePhase",
     "examples/sse/clone-output.json": "CloneOutput",
     "examples/sse/clone-result.json": "CloneResult",
-    "examples/sse/chat-event.json": "ChatEvent",
-    "examples/sse/chat-configuration.json": "ChatEvent",
-    "examples/sse/chat-conversation-updated.json": "ChatEvent",
-    "examples/sse/chat-permission.json": "ChatEvent",
-    "examples/sse/chat-resync.json": "ChatResyncEvent",
-    "examples/sse/chat-conversation-inventory.json": "ConversationInventoryEvent",
-    "examples/ndjson/search-file.json": "SearchStreamItem",
-    "examples/ndjson/search-done.json": "SearchStreamItem",
-    "examples/websocket/attach-ready.json": "TerminalAttachReady",
-    "examples/websocket/resize.json": "TerminalResize",
-    "examples/websocket/exit.json": "TerminalExit",
+    "examples/sse/live-hello.json": "LiveHello",
   };
-  for (const [relativePath, schemaName] of Object.entries(fixtureSchemas)) {
+  // Every example is validated. One without a registered schema fails
+  // instead of going unchecked.
+  const fixtures = (await readdir(new URL("examples/", apiUrl), { recursive: true }))
+    .filter(name => name.endsWith(".json"))
+    .map(name => `examples/${name}`)
+    .sort();
+  if (fixtures.length === 0) throw new Error("api/examples: no examples found");
+  for (const relativePath of fixtures) {
     const fixture = await Bun.file(new URL(relativePath, apiUrl)).json() as Record<string, unknown>;
-    const value = "data" in fixture && relativePath.startsWith("examples/sse/") ? fixture.data : fixture;
-    assertValid(createAjv(), schemaForAjv(streamSchemas[schemaName], streamSchemas), value, relativePath);
+    const sse = relativePath.startsWith("examples/sse/");
+    const value = sse && "data" in fixture ? fixture.data : fixture;
+    if (sse && fixture.event === "live") {
+      // A live frame validates twice: the envelope, then its payload against
+      // the schema the topic names in channels.live.topics.
+      validate("LiveEnvelope", value, relativePath);
+      const envelope = value as { topic: string; event: { kind: string; data?: unknown } };
+      if (!("data" in envelope.event)) continue;
+      const definition = topics[envelope.topic];
+      const payload = envelope.event.kind === "data" ? definition?.dataSchema : definition?.resyncDataSchema;
+      if (!payload) throw new Error(`${relativePath}: topic ${envelope.topic} names no schema for a ${envelope.event.kind} payload`);
+      validate(payload, envelope.event.data, `${relativePath} ${envelope.topic} payload`);
+      continue;
+    }
+    const schemaName = fixtureSchemas[relativePath];
+    if (!schemaName) throw new Error(`${relativePath}: no schema is registered for this example`);
+    validate(schemaName, value, relativePath);
   }
 }
 

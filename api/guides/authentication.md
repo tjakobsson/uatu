@@ -6,7 +6,7 @@ Browser forms and same-origin pages use the Hub cookie. Cookie-authenticated sta
 
 Treat sessions as credentials. Do not log them, put them in URLs, or pass them to a workspace process. Use the documented logout or device-session revocation operations when a credential should stop working.
 
-Terminal access has a separate, short-lived handshake. Request terminal authorization through the documented REST operation, then use the returned connection details exactly as described in [streaming.yaml](../streaming.yaml). Do not reuse the Hub session as a WebSocket query token unless the contract explicitly requires it.
+The live stream authenticates like every other Hub operation. Browsers send the cookie, because `EventSource` cannot set headers, and native clients send the bearer header. Only the session that opened a stream may change its subscriptions. Terminals belong to the internal workspace protocol and have no public handshake.
 
 ## Failure handling
 

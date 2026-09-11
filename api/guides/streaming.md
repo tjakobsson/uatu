@@ -1,15 +1,17 @@
 # Streaming protocols
 
-UatuCode uses three streaming forms. [streaming.yaml](../streaming.yaml) is authoritative for channel names, payload variants, lifecycle behavior, and terminal WebSocket close codes.
+The public API streams over Server-Sent Events. [streaming.yaml](../streaming.yaml) is authoritative for channel names, event and payload schemas, and lifecycle rules.
 
-## Server-sent events
+## The live stream
 
-Workspace state and clone jobs use SSE. Parse named events, retain the most recent event ID, and reconnect with the documented replay behavior. Unknown event variants indicate a contract mismatch; do not silently reinterpret them as known payloads.
+Open one `GET /api/hub/live` per client, not one per topic. The response starts with an `: open` comment, and the first event is `hello`, which carries the stream id. Every later event is named `live` and holds an envelope with the workspace, topic, optional key, cursor, and event. The topics are `document`, `inventory`, `conversation`, and `activity`.
 
-## NDJSON search
+Keep the last cursor you applied for each subscription, and advance it only on `data` events. A `resync` signal means that subscription's cursor can no longer be replayed. Take a fresh snapshot and add the subscription again with the snapshot's cursor, while other subscriptions carry on. An `unavailable` signal means the workspace behind that subscription failed or stopped. The Hub retries and sends `ready` once it recovers. Neither signal ends the stream.
 
-Search emits one JSON value per line. Process complete lines incrementally and distinguish the documented variants — file results, expensive/oversized disclosures, and the final done record — by their `kind` discriminator; there is no in-band error variant. HTTP success alone does not imply the stream completed successfully. Cancelling the request cancels the search; a partial result set is not a completion.
+Change subscriptions with `POST /api/hub/live/{streamId}/subscriptions`. To reconnect after a transport error, open a new stream and present every retained cursor in `subs`. The stream ignores SSE event ids and `Last-Event-ID`. Comment frames are keepalives and carry no data.
 
-## Terminal WebSocket
+## Clone job events
 
-Terminal output may be binary PTY data while control and lifecycle messages are JSON text frames. Preserve the frame type. Never decode binary output as JSON, and validate text control frames against the published variants. Handle documented application close codes separately from network loss.
+Each clone job has its own SSE stream. Retain the most recent event id and reconnect with `Last-Event-ID` to replay what you missed. The `result` event is the last one and closes the stream.
+
+Unknown event names, topics, or signal kinds mean your copy of the contract is out of date. Do not reinterpret them as known payloads.

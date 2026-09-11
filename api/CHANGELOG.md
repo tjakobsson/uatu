@@ -2,6 +2,31 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 16 - Unreleased
+
+Compatibility: breaking (workspace); additive (Hub)
+
+### Changes
+
+- The Hub API is now the whole public contract. The workspace API under `/s/{workspaceId}/` left it: every `workspace*` operation, the `workspaceState`, `workspaceChat`, `workspaceChatConversationInventory`, and `workspaceSearch` streaming channels, and the terminal WebSocket. Those routes are the internal protocol between the Hub, the workspace child, and the web client shipped in the same build. `exclusions.yaml` lists them as `workspace-api` and `direct-child-api`.
+- Added `hubStreamLive` (`GET /api/hub/live`), one Server-Sent Events connection per client. Each `live` event is an envelope `{ ws, topic, key?, cursor, event }` for one of four topics. `document` carries `WorkspaceState` snapshots, `inventory` carries `ConversationInventoryEvent`, `conversation` carries one conversation's `ChatEvent`s, and `activity` carries a `WorkspaceActivity` summary (`running`, `working`, `awaiting`) for every workspace the caller may access. Each subscription has its own cursor, and the `ready`, `resync`, and `unavailable` signals affect one subscription only. The `live` channel in `streaming.yaml` defines the protocol.
+- Added `hubUpdateLiveSubscriptions` (`POST /api/hub/live/{streamId}/subscriptions`), which adds and removes subscriptions on an open stream without reconnecting.
+- The Hub no longer proxies `/s/{workspaceId}/api/events`, `/s/{workspaceId}/api/chat/conversations/events`, or `/s/{workspaceId}/api/chat/conversations/{conversationId}/events`. It answers them, and the new internal `/s/{workspaceId}/api/activity`, with `410 Gone`, `Cache-Control: no-store`, and a JSON body whose `replacement` is `/api/hub/live`.
+- The workspace revision now versions the workspace payloads the live stream forwards: `WorkspaceState`, `ConversationInventoryEvent`, `ChatEvent`, and `ChatResyncEvent`. Their schemas did not change in this revision. `HubWorkspace.workspaceApiRevision` still reports the revision each workspace's child speaks.
+- `uatu serve` and `uatu watch` are no longer user commands. `uatu hub` runs UatuCode, and the workspace child the Hub starts is internal.
+
+### Migration
+
+Workspace clients have no public contract at workspace revision 16. A client that followed workspace streams through the Hub moves to the live stream:
+
+- Replace `/s/{workspaceId}/api/events` with `GET /api/hub/live?ws={workspaceId}` and a `document` subscription. Each `data` event carries the same `WorkspaceState` the old `state` event did.
+- Replace `/s/{workspaceId}/api/chat/conversations/events` with an `inventory` subscription on the same stream.
+- Replace `/s/{workspaceId}/api/chat/conversations/{conversationId}/events` with a `conversation` subscription keyed by the conversation id. The old `cursor` query parameter or `Last-Event-ID` becomes the subscription's `cursor`. The old `resync` event arrives as a `resync` signal whose `data` is the same `ChatResyncEvent`.
+- Open one stream per client and change its subscriptions with `hubUpdateLiveSubscriptions` rather than opening a connection per topic. After a transport error, open a new stream and present every retained cursor in `subs`.
+- Replace `uatu serve` and `uatu watch` with `uatu hub`, and reach workspaces through the Hub. `docs/SELF-HOSTING.md` has the bootstrap steps.
+
+The other workspace routes, meaning documents, search, chat mutations, personal state, and terminals, have no public replacement in this revision. They keep working for the web client the Hub serves, which ships with the child in the same build. Validators of the forwarded payloads can keep their workspace revision 15 schemas, since only the transport changed.
+
 ## Hub 5 / Workspace 15 - Unreleased
 
 Compatibility: breaking (workspace)

@@ -15,7 +15,9 @@ bunx playwright install chromium
 bun run dev
 ```
 
-The development server watches `testdata/watch-docs` by default.
+`bun run dev` starts a dev hub at `http://127.0.0.1:4702/` with
+`testdata/watch-docs` registered and opens it. Sign in as `dev` with password
+`dev`; [dev/README.md](./dev/README.md) has the details.
 [ARCHITECTURE.md](./ARCHITECTURE.md) describes the runtime, state, request,
 terminal, and extension points.
 

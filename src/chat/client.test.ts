@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { resetAppBasePathForTests } from "../shared/app-url";
-import { ChatApiClient } from "./client";
+import type { LiveSubscription, LiveSubscriptionKey } from "../shared/live-protocol";
+import type { LiveChannel, LiveTopicConsumer } from "../shell/live-channel";
+import { ChatApiClient, ChatConnectionInterruptedError } from "./client";
 
 const originalDocument = Reflect.get(globalThis, "document");
 
@@ -15,10 +17,10 @@ describe("chat API client", () => {
     const hanging = new ChatApiClient(async (_url, init) => {
       signal = init?.signal;
       return new Promise<Response>(() => {});
-    }, undefined, undefined, { ordinaryMs: 10 });
+    }, undefined, { ordinaryMs: 10 });
     await expect(hanging.snapshot("opencode:test")).rejects.toThrow("timed out");
     expect(signal?.aborted).toBe(true);
-    const body = new ChatApiClient(async () => new Response(new ReadableStream({ start() {} })), undefined, undefined, { ordinaryMs: 10 });
+    const body = new ChatApiClient(async () => new Response(new ReadableStream({ start() {} })), undefined, { ordinaryMs: 10 });
     await expect(body.conversations()).rejects.toThrow("timed out");
   });
 
@@ -27,7 +29,7 @@ describe("chat API client", () => {
       if (String(url).endsWith("status")) return Response.json({ agents: [{ agent: { id: "opencode", name: "OpenCode" }, availability: { state: "idle" } }] }, { headers: { "x-uatu-chat-startup-read-ms": "100" } });
       await new Promise(resolve => setTimeout(resolve, 20));
       return Response.json(snapshot());
-    }, undefined, undefined, { ordinaryMs: 10 });
+    }, undefined, { ordinaryMs: 10 });
     await client.status();
     expect((await client.snapshot("opencode:test")).items).toEqual([]);
     const abort = new AbortController();
@@ -126,33 +128,28 @@ describe("chat API client", () => {
     await expect(client.undo("c1", "undo-1")).rejects.toThrow("cannot redo without a staged boundary");
   });
 
-  test("reconnects from the latest event cursor and cleanup closes the stream", () => {
-    const sources: FakeEventSource[] = [];
-    const client = new ChatApiClient(fetch, url => {
-      const source = new FakeEventSource(url);
-      sources.push(source);
-      return source as unknown as EventSource;
-    });
-    const events: number[] = [];
+  test("a conversation stream is a subscription on the shared channel from the given cursor", () => {
+    const channel = new FakeChannel();
+    const client = new ChatApiClient(fetch, () => channel);
+    const events: [number, string][] = [];
     const stream = client.stream("c1", "cursor-1", {
-      event: event => events.push(event.sequence),
+      event: (event, cursor) => events.push([event.sequence, cursor]),
       resync: () => {},
       error: () => {},
     });
-    expect(sources[0]!.url).toContain("cursor=cursor-1");
-    sources[0]!.emit("chat", { generation: "g", sequence: 2, conversationId: "c1", type: "conversation.status", status: "running" }, "cursor-2");
-    expect(events).toEqual([2]);
+    expect(channel.entries.map(entry => [entry.key, entry.cursor])).toEqual([[{ topic: "conversation", key: "c1" }, "cursor-1"]]);
+    channel.deliver("c1", { generation: "g", sequence: 2, conversationId: "c1", type: "conversation.status", status: "running" }, "cursor-2");
+    expect(events).toEqual([[2, "cursor-2"]]);
     stream.close();
-    expect(sources[0]!.closed).toBe(true);
+    expect(channel.entries[0]!.closed).toBe(true);
+    // Nothing after close reaches the handlers.
+    channel.deliver("c1", { generation: "g", sequence: 3, conversationId: "c1", type: "conversation.status", status: "idle" }, "cursor-3");
+    expect(events).toHaveLength(1);
   });
 
-  test("a malformed event closes the stream and asks for a resync", () => {
-    const sources: FakeEventSource[] = [];
-    const client = new ChatApiClient(fetch, url => {
-      const source = new FakeEventSource(url);
-      sources.push(source);
-      return source as unknown as EventSource;
-    });
+  test("a malformed event closes the subscription and asks for a resync", () => {
+    const channel = new FakeChannel();
+    const client = new ChatApiClient(fetch, () => channel);
     const errors: string[] = [];
     let resyncs = 0;
     client.stream("c1", "cursor-1", {
@@ -161,322 +158,161 @@ describe("chat API client", () => {
       error: error => errors.push(error.message),
     });
 
-    sources[0]!.emit("chat", { nonsense: true }, "cursor-2");
+    channel.deliver("c1", { nonsense: true }, "cursor-2");
 
     expect(errors).toHaveLength(1);
     expect(resyncs).toBe(1);
-    expect(sources[0]!.closed).toBe(true);
+    expect(channel.entries[0]!.closed).toBe(true);
   });
 
-  test("the first reconnect is silent and later failures announce", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = new ChatApiClient(fetch, url => {
-      const source = new FakeEventSource(url);
-      sources.push(source);
-      return source as unknown as EventSource;
-    }, timers);
+  test("a topic resync detaches the subscription and hands the owner the child's reason", () => {
+    const channel = new FakeChannel();
+    const client = new ChatApiClient(fetch, () => channel);
+    const reasons: unknown[] = [];
+    client.stream("c1", "cursor-1", {
+      event: () => {},
+      resync: reason => reasons.push(reason?.reason ?? null),
+      error: () => {},
+    });
+    channel.entries[0]!.consumer.resync?.({ generation: "g", sequence: 0, conversationId: "c1", type: "resync", reason: "retention-gap" }, 1);
+    expect(reasons).toEqual(["retention-gap"]);
+    expect(channel.entries[0]!.closed).toBe(true);
+
+    // A resync with no usable payload still resyncs.
+    client.stream("c2", "cursor-1", { event: () => {}, resync: reason => reasons.push(reason ?? null), error: () => {} });
+    channel.entries[1]!.consumer.resync?.(undefined, 1);
+    expect(reasons).toEqual(["retention-gap", null]);
+  });
+
+  test("the first drop is silent, a persisting outage announces, and the topic's ready clears it", () => {
+    const channel = new FakeChannel();
+    const client = new ChatApiClient(fetch, () => channel);
     const errors: string[] = [];
-    const stream = client.stream("c1", "cursor-1", { event: () => {}, resync: () => {}, error: error => errors.push(error.message) });
+    const recoveries: number[] = [];
+    client.stream("c1", "cursor-1", {
+      event: () => {},
+      resync: () => {},
+      error: error => errors.push(error.message),
+      recovered: () => recoveries.push(1),
+    });
+    const consumer = channel.entries[0]!.consumer;
 
-    sources[0]!.fail();
+    consumer.dropped?.(1);
     expect(errors).toEqual([]);
-    expect(timers.delays()).toEqual([1_000]);
-    timers.runNext();
-
-    sources[1]!.fail();
+    consumer.dropped?.(2);
     expect(errors).toEqual(["Chat connection interrupted; reconnecting"]);
-    stream.close();
+    // The replacement stream attaches the topic while the conversation stays
+    // idle — no chat event arrives, and the open alone has to be enough.
+    consumer.ready?.(2);
+    expect(recoveries).toHaveLength(1);
+
+    // The hub losing the child is an interruption too, typed the same way.
+    consumer.unavailable?.(2);
+    expect(errors).toEqual(["Chat connection interrupted; reconnecting", "Chat connection interrupted; reconnecting"]);
+    expect(errors.every(message => message.length > 0)).toBe(true);
   });
 
-  test("inventory stream uses the app base path and accepts initial and reconnect frames", () => {
-    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
-    resetAppBasePathForTests();
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
+  test("interruptions are typed so the surface can own them", () => {
+    const channel = new FakeChannel();
+    const client = new ChatApiClient(fetch, () => channel);
+    const errors: unknown[] = [];
+    client.stream("c1", "cursor-1", { event: () => {}, resync: () => {}, error: error => errors.push(error) });
+    channel.entries[0]!.consumer.dropped?.(2);
+    expect(errors[0]).toBeInstanceOf(ChatConnectionInterruptedError);
+  });
+
+  test("the inventory topic invalidates on data, re-reads and re-attaches on resync, and reports transport like a conversation", () => {
+    const channel = new FakeChannel();
+    const client = new ChatApiClient(fetch, () => channel);
     const invalidations: unknown[] = [];
+    const errors: string[] = [];
+    const recoveries: number[] = [];
     const stream = client.inventoryStream({
       invalidation: event => invalidations.push(event),
-      error: () => {},
-    });
-
-    sources[0]!.emit("inventory", { type: "conversation.inventory" });
-    sources[0]!.fail();
-    timers.runNext();
-    sources[1]!.emit("inventory", { type: "conversation.inventory" });
-
-    // The client says whether it is replacing a stream it lost; the first
-    // attempt is not, its retry is.
-    expect(sources[0]!.url).toBe("/s/work/api/chat/conversations/events?reconnect=0");
-    expect(sources[1]!.url).toBe("/s/work/api/chat/conversations/events?reconnect=1");
-    expect(invalidations).toEqual([
-      { type: "conversation.inventory" },
-      { type: "conversation.inventory" },
-    ]);
-    stream.close();
-  });
-
-  test("inventory stream rejects malformed frames without invalidating", () => {
-    const sources: FakeEventSource[] = [];
-    const client = eventSourceClient(sources, new FakeTimers());
-    const errors: string[] = [];
-    let invalidations = 0;
-    const stream = client.inventoryStream({
-      invalidation: () => { invalidations += 1; },
-      error: error => errors.push(error.message),
-    });
-
-    sources[0]!.emit("inventory", { type: "conversation.created" });
-    sources[0]!.emit("inventory", { type: "conversation.inventory", id: "c1" });
-    sources[0]!.emitRaw("inventory", "not json");
-
-    expect(invalidations).toBe(0);
-    expect(errors).toHaveLength(3);
-    stream.close();
-  });
-
-  test("inventory stream retries with capped backoff and reports persistent failure", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    const errors: string[] = [];
-    const stream = client.inventoryStream({ invalidation: () => {}, error: error => errors.push(error.message) });
-
-    const expectedDelays = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000];
-    for (const [index, delay] of expectedDelays.entries()) {
-      sources[index]!.fail();
-      expect(timers.delays()).toEqual([delay]);
-      expect(errors).toHaveLength(Math.max(0, index));
-      timers.runNext();
-    }
-
-    expect(sources).toHaveLength(expectedDelays.length + 1);
-    expect(errors.every(error => error === "Chat inventory connection interrupted; reconnecting")).toBe(true);
-    stream.close();
-  });
-
-  test("a valid inventory frame resets consecutive failures", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    const errors: string[] = [];
-    const stream = client.inventoryStream({ invalidation: () => {}, error: error => errors.push(error.message) });
-
-    sources[0]!.fail();
-    timers.runNext();
-    sources[1]!.emit("inventory", { type: "conversation.inventory" });
-    sources[1]!.fail();
-
-    expect(timers.delays()).toEqual([1_000]);
-    expect(errors).toEqual([]);
-    stream.close();
-  });
-
-  test("an idle successful reconnect resets inventory failure accounting", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    const errors: string[] = [];
-    const recoveries: number[] = [];
-    const stream = client.inventoryStream({
-      invalidation: () => {},
       error: error => errors.push(error.message),
       recovered: () => recoveries.push(1),
     });
+    expect(channel.entries.map(entry => entry.key)).toEqual([{ topic: "inventory" }]);
+    const entry = channel.entries[0]!;
 
-    sources[0]!.fail();
-    timers.runNext();
-    sources[1]!.fail();
-    timers.runNext();
-    expect(errors).toHaveLength(1);
+    entry.consumer.data?.({ type: "conversation.inventory" }, "i1", 1);
+    expect(invalidations).toEqual([{ type: "conversation.inventory" }]);
 
-    // The replacement opens, and the workspace is idle — no inventory event
-    // follows. Recovery has to be observable from the open alone.
-    sources[2]!.open();
+    // Malformed frames are reported, never applied.
+    entry.consumer.data?.({ type: "conversation.created" }, "i2", 1);
+    entry.consumer.data?.("not an object", "i3", 1);
+    expect(invalidations).toHaveLength(1);
+    expect(errors).toHaveLength(2);
+
+    // A resync is one more reason to re-read; the topic re-attaches from now.
+    entry.consumer.resync?.(undefined, 1);
+    expect(invalidations).toHaveLength(2);
+    expect(entry.resubscribed).toEqual([undefined]);
+
+    entry.consumer.dropped?.(1);
+    expect(errors).toHaveLength(2);
+    entry.consumer.dropped?.(2);
+    expect(errors.at(-1)).toBe("Chat inventory connection interrupted; reconnecting");
+    entry.consumer.ready?.(2);
     expect(recoveries).toHaveLength(1);
+    entry.consumer.unavailable?.(2);
+    expect(errors.at(-1)).toBe("Chat inventory connection interrupted; reconnecting");
 
-    // A later interruption starts from the first-failure state: one second of
-    // backoff and no banner, rather than inheriting the earlier count.
-    sources[2]!.fail();
-    expect(timers.delays()).toEqual([1_000]);
-    expect(errors).toHaveLength(1);
     stream.close();
-  });
-
-  test("an idle successful reconnect resets conversation-stream failure accounting", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    const errors: string[] = [];
-    const recoveries: number[] = [];
-    const stream = client.stream("c1", "cursor", {
-      event: () => {},
-      resync: () => {},
-      error: error => errors.push(error.message),
-      recovered: () => recoveries.push(1),
-    });
-
-    sources[0]!.fail();
-    timers.runNext();
-    sources[1]!.fail();
-    timers.runNext();
-    expect(errors).toEqual(["Chat connection interrupted; reconnecting"]);
-
-    sources[2]!.open();
+    expect(entry.closed).toBe(true);
+    entry.consumer.data?.({ type: "conversation.inventory" }, "i4", 2);
+    entry.consumer.ready?.(2);
+    expect(invalidations).toHaveLength(2);
     expect(recoveries).toHaveLength(1);
-
-    sources[2]!.fail();
-    expect(timers.delays()).toEqual([1_000]);
-    expect(errors).toHaveLength(1);
-    stream.close();
   });
 
-  test("a replay cursor is not a reconnect; the client marks recovery explicitly", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-
-    // The ordinary snapshot-to-stream handoff carries the snapshot's cursor
-    // and is not a recovery.
-    const first = client.stream("c1", "cursor-c1", { event: () => {}, resync: () => {}, error: () => {} });
-    expect(sources[0]!.url).toContain("cursor=cursor-c1");
-    expect(sources[0]!.url).toContain("reconnect=0");
-
-    // The client's own retry after a failure is.
-    sources[0]!.fail();
-    timers.runNext();
-    expect(sources[1]!.url).toContain("reconnect=1");
-    first.close();
-
-    // And a caller replacing a stream it lost says so on the first attempt.
-    client.stream("c1", "cursor-c1", { event: () => {}, resync: () => {}, error: () => {} }, { resumed: true }).close();
-    expect(sources[2]!.url).toContain("reconnect=1");
-  });
-
-  test("a superseded source's open neither resets accounting nor reports recovery", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    const recoveries: number[] = [];
-    const stream = client.inventoryStream({
-      invalidation: () => {},
-      error: () => {},
-      recovered: () => recoveries.push(1),
-    });
-
-    sources[0]!.fail();
-    timers.runNext();
-    sources[1]!.fail();
-    timers.runNext();
-    // A late open from an already-replaced source proves nothing about the
-    // stream this client is actually holding.
-    sources[0]!.open();
-    expect(recoveries).toHaveLength(0);
-    sources[2]!.open();
-    expect(recoveries).toHaveLength(1);
-    stream.close();
-  });
-
-  test("a closed stream's open is ignored", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    const recoveries: number[] = [];
-    const stream = client.stream("c1", "cursor", {
-      event: () => {},
-      resync: () => {},
-      error: () => {},
-      recovered: () => recoveries.push(1),
-    });
-    stream.close();
-    sources[0]!.open();
-    expect(recoveries).toHaveLength(0);
-  });
-
-  test("inventory stream cleanup closes active sources and cancels reconnect timers", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    const activeStream = client.inventoryStream({ invalidation: () => {}, error: () => {} });
-
-    activeStream.close();
-    expect(sources[0]!.closed).toBe(true);
-
-    const reconnectingStream = client.inventoryStream({ invalidation: () => {}, error: () => {} });
-    sources[1]!.fail();
-    expect(timers.delays()).toEqual([1_000]);
-    reconnectingStream.close();
-    expect(timers.delays()).toEqual([]);
-    timers.runNext();
-    expect(sources).toHaveLength(2);
-  });
-
-  test("inventory stream does not schedule another reconnect when persistent-error handling closes it", () => {
-    const sources: FakeEventSource[] = [];
-    const timers = new FakeTimers();
-    const client = eventSourceClient(sources, timers);
-    let stream!: ReturnType<ChatApiClient["inventoryStream"]>;
-    stream = client.inventoryStream({ invalidation: () => {}, error: () => stream.close() });
-
-    sources[0]!.fail();
-    timers.runNext();
-    sources[1]!.fail();
-
-    expect(timers.delays()).toEqual([]);
-    expect(sources[1]!.closed).toBe(true);
+  test("no stream opens a connection of its own", () => {
+    const channel = new FakeChannel();
+    const client = new ChatApiClient(fetch, () => channel);
+    client.inventoryStream({ invalidation: () => {}, error: () => {} });
+    client.stream("c1", "cursor", { event: () => {}, resync: () => {}, error: () => {} });
+    client.stream("child", "cursor", { event: () => {}, resync: () => {}, error: () => {} });
+    expect(channel.connects).toBe(0);
+    expect(channel.entries).toHaveLength(3);
   });
 });
 
-class FakeEventSource {
-  readonly listeners = new Map<string, (event: MessageEvent<string>) => void>();
-  onerror: ((event: Event) => void) | null = null;
-  closed = false;
-  constructor(readonly url: string) {}
-  addEventListener(type: string, listener: EventListener) { this.listeners.set(type, listener as (event: MessageEvent<string>) => void); }
-  close() { this.closed = true; }
-  fail() { this.onerror?.(new Event("error")); }
-  open() { this.listeners.get("open")?.({} as MessageEvent<string>); }
-  emit(type: string, value: unknown, lastEventId = "") {
-    this.listeners.get(type)?.({ data: JSON.stringify(value), lastEventId } as MessageEvent<string>);
+// The channel as the client sees it: subscriptions with their consumers,
+// driven by hand.
+class FakeChannel implements LiveChannel {
+  readonly entries: Array<{
+    key: LiveSubscriptionKey;
+    cursor: string | undefined;
+    consumer: LiveTopicConsumer;
+    closed: boolean;
+    resubscribed: Array<string | undefined>;
+  }> = [];
+  connects = 0;
+  connect() { this.connects += 1; }
+  subscribe(key: LiveSubscriptionKey, consumer: LiveTopicConsumer, options: { cursor?: string } = {}) {
+    const entry = { key, cursor: options.cursor, consumer, closed: false, resubscribed: [] as Array<string | undefined> };
+    this.entries.push(entry);
+    return {
+      resubscribe(cursor?: string) { entry.resubscribed.push(cursor); },
+      close() { entry.closed = true; },
+    };
   }
-  emitRaw(type: string, data: string) {
-    this.listeners.get(type)?.({ data, lastEventId: "" } as MessageEvent<string>);
+  deliver(conversationId: string, value: unknown, cursor: string) {
+    for (const entry of this.entries) {
+      if (entry.key.topic === "conversation" && entry.key.key === conversationId && !entry.closed) entry.consumer.data?.(value, cursor, 1);
+    }
   }
-}
-
-class FakeTimers {
-  private nextId = 1;
-  private readonly tasks = new Map<ReturnType<typeof setTimeout>, { callback: () => void; delay: number }>();
-
-  setTimeout = (callback: () => void, delay: number): ReturnType<typeof setTimeout> => {
-    const id = this.nextId++ as unknown as ReturnType<typeof setTimeout>;
-    this.tasks.set(id, { callback, delay });
-    return id;
-  };
-
-  clearTimeout = (id: ReturnType<typeof setTimeout>): void => {
-    this.tasks.delete(id);
-  };
-
-  delays(): number[] {
-    return [...this.tasks.values()].map(task => task.delay);
+  onActivity() { return () => {}; }
+  onStatus() { return () => {}; }
+  confirm() {}
+  invalidate() {}
+  isCurrent() { return true; }
+  currentGeneration() { return 1; }
+  isRecovering() { return false; }
+  subscriptions(): LiveSubscription[] {
+    return this.entries.filter(entry => !entry.closed).map(entry => ({ ...entry.key, ...(entry.cursor ? { cursor: entry.cursor } : {}) }));
   }
-
-  runNext(): void {
-    const next = this.tasks.entries().next().value as [ReturnType<typeof setTimeout>, { callback: () => void }] | undefined;
-    if (!next) return;
-    this.tasks.delete(next[0]);
-    next[1].callback();
-  }
-}
-
-function eventSourceClient(sources: FakeEventSource[], timers: FakeTimers): ChatApiClient {
-  return new ChatApiClient(fetch, url => {
-    const source = new FakeEventSource(url);
-    sources.push(source);
-    return source as unknown as EventSource;
-  }, timers);
+  dispose() {}
 }
 
 function snapshot() {

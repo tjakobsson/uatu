@@ -1,0 +1,11 @@
+{
+  "port": 4702,
+  "host": "127.0.0.1",
+  "users": [
+    {
+      "name": "dev",
+      "passwordHash": "$argon2id$v=19$m=65536,t=2,p=1$oTWZAP8wFLekrcRIz0xa8B+BLZr/zquG+T0zdVse6zI$GhYqpNfSO12Al5XlUcMQkyD9ilTtsTMQbOhsKAPDRGk"
+    }
+  ],
+  "stateDir": ".local/dev-hub"
+}
