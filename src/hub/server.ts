@@ -1328,9 +1328,17 @@ export function createHubFetchHandler(deps: HubDeps) {
     // routes it replaced: SameSite=Lax attaches the cookie to a same-site
     // cross-origin GET (another port on this host), and an open stream
     // makes the hub open upstreams, which can spawn agent runtimes. A
-    // same-origin EventSource sends no Origin and passes.
+    // same-origin EventSource sends no Origin and passes. Neither does a
+    // followed link (a top-level navigation also sends no Origin), so a
+    // cookie request is refused, too, when Fetch Metadata reports anything
+    // but `same-origin` or `none` (a typed URL). `same-site` is refused as
+    // well: another port or a sibling subdomain is a different origin. An
+    // absent header (a non-browser client, an older browser) passes, as it
+    // does for the Origin check.
     if (pathname === LIVE_STREAM_PATH && request.method === "GET") {
-      if (!csrfOk(request, session.transport)) {
+      const fetchSite = request.headers.get("sec-fetch-site");
+      const crossSiteFetch = fetchSite !== null && fetchSite !== "same-origin" && fetchSite !== "none";
+      if (!csrfOk(request, session.transport) || (session.transport === "cookie" && crossSiteFetch)) {
         return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
       }
       // `ws` is required (api/openapi.yaml): absent is a malformed request,

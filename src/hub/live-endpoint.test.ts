@@ -629,6 +629,50 @@ describe("hub live routes", () => {
     await own.cancel();
   });
 
+  test("a cookie request Fetch Metadata marks as cross-site or same-site is refused before anything is subscribed", async () => {
+    // A top-level navigation (a followed link) carries the SameSite=Lax
+    // cookie and no Origin, so only Fetch Metadata tells it apart from the
+    // page's own EventSource. `same-site` is refused too: another port or a
+    // sibling subdomain is a different origin, and a sibling hub on this
+    // host is the case the gate exists for.
+    const subs = encodeURIComponent(JSON.stringify([{ topic: "document", key: "" }]));
+    const navigation = { accept: "text/html", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
+    // Streams earlier tests cancelled close on the hub asynchronously; wait
+    // them out so a count that falls during this test cannot mask one opening.
+    for (const deadline = Date.now() + 2_000; hub!.live.streamCount() > 0 && Date.now() < deadline;) await Bun.sleep(5);
+    expect(hub!.live.streamCount()).toBe(0);
+    const upstreamsBefore = hub!.liveBroker.upstreamCount();
+    const childRequestsBefore = childRequests.length;
+    for (const site of ["cross-site", "same-site"]) {
+      const refused = await fetch(`${origin}${LIVE_STREAM_PATH}?ws=project&subs=${subs}`, {
+        headers: { cookie, ...navigation, "sec-fetch-site": site },
+      });
+      expect(refused.status).toBe(403);
+      expect(refused.headers.get("cache-control")).toBe("no-store");
+      expect(await refused.json()).toEqual({ error: "cross-origin request rejected" });
+    }
+    await Bun.sleep(30);
+    // No stream means nothing was subscribed; a lingering upstream from an
+    // earlier test may expire meanwhile, but none may be added.
+    expect(hub!.live.streamCount()).toBe(0);
+    expect(hub!.liveBroker.upstreamCount()).toBeLessThanOrEqual(upstreamsBefore);
+    expect(childRequests.length).toBe(childRequestsBefore);
+
+    // The page's own EventSource (`same-origin`), a URL the user typed
+    // (`none`), and a client that sends no Fetch Metadata all open.
+    const opened = [
+      await openStream("ws=project", { cookie, "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty" }),
+      await openStream("ws=project", { cookie, ...navigation, "sec-fetch-site": "none" }),
+      await openStream("ws=project", { cookie }),
+      // A bearer credential is attached explicitly and cannot be ridden by
+      // another site, whatever Fetch Metadata it carries.
+      await openStream("ws=project", { authorization: `Bearer ${sessionId}`, ...navigation, "sec-fetch-site": "cross-site" }),
+    ];
+    for (const stream of opened) expect(stream.status).toBe(200);
+    await opened[0]!.waitFor(() => opened.every(stream => stream.hello !== null), "every hello");
+    for (const stream of opened) await stream.cancel();
+  });
+
   test("subscription control needs the stream's own session and a same-origin cookie request", async () => {
     const stream = await openStream("ws=project");
     await stream.waitFor(r => r.hello !== null, "hello");

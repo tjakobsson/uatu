@@ -786,6 +786,10 @@ paths:
             text/event-stream: { schema: { type: string } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403':
+          description: "A cookie-authenticated request failed the same-origin check, and nothing was subscribed. Its `Origin` names another origin, or its `Sec-Fetch-Site` is present and neither `same-origin` nor `none`, as on a link followed from another site or from another port on the same host. A bearer-authenticated request is not checked."
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
         '404': { $ref: '#/components/responses/Error' }
   /api/hub/live/{streamId}/subscriptions:
     parameters: [{ $ref: '#/components/parameters/LiveStreamId' }]

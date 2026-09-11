@@ -112,7 +112,7 @@ channels:
         Open until client cancellation, Hub shutdown, or transport failure.
         Upstream failures and workspace exits arrive as signals and never end
         the stream.
-      errors: HTTP 400, 401, and 404 occur before the stream starts. There is no in-band error event.
+      errors: HTTP 400, 401, 403, and 404 occur before the stream starts. There is no in-band error event.
   cloneJobEvents:
     transport: sse
     operationId: hubStreamCloneJobEvents
