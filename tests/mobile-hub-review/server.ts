@@ -2,6 +2,7 @@ import { createServer } from "node:net";
 import { reviewHostingOptions, reviewRequestAllowed, validatePublicOrigin } from "./hosting";
 import { buildEvidenceAssets } from "./hosting-evidence";
 import { frontendFingerprint } from "./hosting-identity";
+import { buildDesignSystemAssets, designSystemPrefix } from "./design-system-assets";
 import { createSyntheticBackend, type Scenario } from "./backend";
 import { createWorkspaceProtocols, terminalId } from "./protocols";
 import { controller, controllerScript, scenarios, controls, dispatchControl } from "./controller";
@@ -63,12 +64,13 @@ async function boundedBody(request: Request, limit: number): Promise<string | nu
 
 /** Test-only loopback listener. Requests carry no live session meaning; cookies
  * and Authorization are neither read, forwarded, set nor written into logs. */
-export async function startReviewServer(options: { port?: number; assets?: ReviewAssets; publicOrigin?: string; evidenceAssets?: ReviewAssets; instanceId?: string } = {}) {
+export async function startReviewServer(options: { port?: number; assets?: ReviewAssets; publicOrigin?: string; evidenceAssets?: ReviewAssets; designSystemAssets?: ReviewAssets; instanceId?: string } = {}) {
   const port = options.port ?? 4703;
   const publicOrigin = validatePublicOrigin(options.publicOrigin);
   if ([4700, 4701, 4702].includes(port)) throw new Error("Reserved review backend port");
   await assertFreePort(port);
   const assets = options.assets ?? await buildWorkspaceAssets();
+  const designSystemAssets = options.designSystemAssets ?? (options.assets ? new Map() : await buildDesignSystemAssets());
   const instanceId = options.instanceId ?? crypto.randomUUID();
   if (!/^[a-f0-9-]{36}$/.test(instanceId)) throw new Error("Invalid review instance identity");
   const version = { kind: "frontend-content-sha256", fingerprint: await frontendFingerprint(assets) };
@@ -131,6 +133,13 @@ export async function startReviewServer(options: { port?: number; assets?: Revie
       // Encodings/backslashes are never meaningful review asset names.
       if (/%|\\|\0/.test(url.pathname.replace(/\/api\/chat\/conversations\/review%3Aconversation-[0-9]+/, "/api/chat/conversations/synthetic"))) return reply("Invalid review path", 400);
       if (url.search && ((url.pathname.startsWith("/review/") && url.pathname !== "/review/clone-events") || url.pathname.startsWith("/api/hub/"))) return reply("Unexpected review query", 400);
+      if (url.pathname === "/review/design-system" || url.pathname.startsWith(designSystemPrefix)) {
+        if (canonical || request.method !== "GET") return reply("Unknown reference route", 404);
+        if (url.pathname === designSystemPrefix) return new Response(null, { status: 308, headers: { ...headers, Location: "/review/design-system" } });
+        const path = url.pathname === "/review/design-system" ? designSystemPrefix + "design-system.html" : url.pathname;
+        const asset = designSystemAssets.get(path);
+        return asset ? reply(asset.body, 200, asset.type) : reply("Unknown reference asset", 404);
+      }
       if (url.pathname === "/api/hub/state" && request.method === "GET") {
         const result = await synthetic.backend.readWorkspaces();
         if (result.status !== "available") return json({ error: result.problem.message }, result.problem.kind === "unauthorized" ? 401 : 503);
@@ -206,7 +215,7 @@ export async function startReviewServer(options: { port?: number; assets?: Revie
         const evidence = options.evidenceAssets?.get(url.pathname);
         if (evidence) return reply(evidence.body, 200, evidence.type);
         if (url.pathname === "/review/health") return json({ status: "ready", backend: "synthetic", assembly: "same-document-mobile", instanceId, pid: process.pid, version });
-        if (url.pathname === "/review/controller") return reply(controller, 200, "text/html");
+        if (url.pathname === "/review/controller") return reply(controller + '<p><a href="/review/design-system">Design system reference — local examples, not Settings</a></p>', 200, "text/html");
         if (url.pathname === "/review/capabilities") return json({ backend: "synthetic", warning: "Mock backend; do not enter real credentials", methods: reviewMethods, controls: Object.keys(controls), credentialFacts: ["protection", "lock", "userId"], factStates: ["known", "unknown", "not-applicable"], toolConfiguration: "savedOverride", cloneAttemptStates: ["accepted", "pending", "not-accepted", "expired", "unavailable"], attemptIdRequired: true, notAcceptedFencesLateSubmission: true });
         if (url.pathname === "/review/controller.js") return reply(controllerScript, 200, "text/javascript");
         if (url.pathname === "/review/state") return json({ ...synthetic.snapshot(), model: synthetic.inspect(), protocols: protocols.snapshot(), missing });

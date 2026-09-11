@@ -59,14 +59,19 @@ test("assignment labels retain separate hosts and roles without duplicating defa
 
 test.each([true, false])("workspace detail preserves facts and a sole contextual Open/Start (running=%s)", async running => {
   const h = await harness(async () => ({ status: "available", value: catalog }), running);
-  expect(h.root.textContent).toContain(h.w.path); expect(h.root.textContent).toContain(`Stable ID: ${h.w.id}`);
+  const values = (region: ParentNode, label: string) => [...region.querySelectorAll(".mh-info-row")].filter(row => row.querySelector("dt")?.textContent === label).map(row => row.querySelector(".mh-info-value")?.textContent);
+  expect(values(h.root, "Folder")).toContain(h.w.path); expect(values(h.root, "Stable ID")).toEqual([h.w.id]);
   expect(h.root.textContent).toContain("next · no commits"); expect(h.root.textContent).toContain("Credential changes require a workspace restart.");
   expect(h.root.textContent).toContain("Assignment presence is not credential readiness.");
-  expect(h.root.textContent).toContain("AUTH: Shared identity · one.invalid"); expect(h.root.textContent).toContain("SIGNING: Shared identity");
+  const section = (title: string) => [...h.root.querySelectorAll(".mh-section")].find(el => el.querySelector("h2")?.textContent === title)!;
+  expect(values(section("Git authentication"), "Host")).toEqual(["one.invalid", "two.invalid"]);
+  expect(values(section("Git authentication"), "Credential")).toEqual(["Shared identity", "Shared identity"]);
+  expect(values(section("Commit signing"), "Credential")).toEqual(["Shared identity"]);
   if (running) { expect(h.root.textContent).toContain("1 shells"); expect(h.root.textContent).toContain("Build shell · Attached"); }
   expect(h.root.textContent).not.toContain("Workspace actions");
   expect(h.root.querySelectorAll('[data-flow="open"]')).toHaveLength(1);
   const primary = h.root.querySelector<HTMLButtonElement>('.mh-flow-content [data-flow="open"]')!;
+  expect(primary.classList.contains("mh-commit")).toBe(false);
   expect(primary.textContent).toBe(running ? "Open" : "Start"); primary.click(); expect(h.started()).toBe(1);
 });
 

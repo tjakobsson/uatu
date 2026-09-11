@@ -101,7 +101,7 @@ test("CLI-only provider token is selectable for retained authentication, never f
   const created = await (await request.post("/review/backend/createToken", { data: [{ name: "CLI only", host: "github.com", token: "DISPOSABLE-NOT-REAL", capabilities: ["github-cli"] }] })).json();
   expect(created.status).toBe("completed"); const id = created.value.id;
   await page.goto("/settings?detail=assignments"); await page.locator('[data-flow="workspace-notes"]').click(); await page.locator('[data-flow="new-notes"]').click();
-  await page.getByRole("combobox", { name: "Authentication", exact: true }).selectOption(id);
+  await page.getByRole("combobox", { name: "Git authentication credential", exact: true }).selectOption(id);
   await page.getByLabel("Authentication host").fill("github.com"); await button(page, "Review").click(); await button(page, "Apply").click();
   await expect.poll(async () => (await state(request)).model.workspaces.find((w: { id: string }) => w.id === "notes").assignments).toContainEqual({ workspaceId: "notes", credentialId: id, role: "authentication", host: "github.com" });
   await page.goto("/clone");

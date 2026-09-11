@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import { createSyntheticBackend } from "../../../tests/mobile-hub-review/backend";
 import { mountMobileHub } from "./frontend";
-import { credentialFactSummary, credentialPrimaryAction, supportsRole } from "./credential-flows";
+import { credentialFactSummary, credentialPrimaryAction, readOnlyPurposes, supportsRole } from "./credential-flows";
 import { cloneCredentialCompatible } from "./clone-flow";
 import type { MobileHubBackend } from "./backend";
 
@@ -25,6 +25,19 @@ function mount(backend: MobileHubBackend) {
 }
 
 describe("explicit credential and tool facts", () => {
+  test("saved purposes are semantic read-only labels and only show supported uses", () => {
+    const cases = [
+      ["ssh-authentication", "Git access", "SSH"], ["ssh-signing", "Commit signing", "SSH"],
+      ["openpgp-signing", "Commit signing", "OpenPGP"], ["https-git", "Git access", "HTTPS"],
+      ["github-cli", "GitHub CLI", "Authentication"], ["gitlab-cli", "GitLab CLI", "Authentication"],
+    ] as const;
+    for (const [cap, label, value] of cases) {
+      const { document } = parseHTML(readOnlyPurposes({ capabilities: [cap] }));
+      expect([...document.querySelectorAll("dt")].map(el => el.textContent)).toEqual([label]);
+      expect([...document.querySelectorAll("dd")].map(el => el.textContent)).toEqual([value]);
+      expect(document.querySelector("input, select, textarea, button, [role=checkbox], [role=switch], [role=textbox]")).toBeNull();
+    }
+  });
   test("known unlocked keys omit Unlock; unknown keys retain applicable operations", async () => {
     const model = createSyntheticBackend(); const h = mount(model.backend); await h.ui.ready;
     h.ui.showDetail({ kind: "credential", id: "ssh-open" }); await settle();
@@ -41,7 +54,11 @@ describe("explicit credential and tool facts", () => {
       h.ui.showDetail({ kind: "credential", id }); await settle();
       expect(h.region().querySelector('details, [data-readiness-layer], [data-flow="diagnostics"]')).toBeNull();
       h.click("test"); await settle();
-      expect(h.region().textContent).toContain("Check Results");
+       expect(h.region().textContent).toContain("Check Results");
+       const labels = [...h.region().querySelectorAll("dt")].map(el => el.textContent);
+       expect(labels).toContain("Subject"); expect(labels).toContain("Git access");
+       expect(labels).toContain("Result"); expect(labels).toContain("Scope");
+       expect(h.region().textContent).toContain("Remote permissions have not been checked.");
       expect(h.region().querySelector('[data-readiness-layer]')).toBeNull();
       const expected = await model.backend.testCredential({ id, type: "ssh" });
       if (expected.status !== "completed") throw Error("fixture");
@@ -106,10 +123,10 @@ describe("explicit credential and tool facts", () => {
       if (result.status === "available") result.value = result.value.map(c => ({ ...c, readiness: [{ layer: "credential", status: "ready", message: "Unlocked protected identity (misleading prose)" }] }));
       return result;
     } }); await h.ui.ready; h.ui.showDetail({ kind: "credential", id: "ssh-open" }); await settle();
-    expect(h.region().querySelector('[data-credential-fact="lock"] .mh-value')?.textContent).toBe("Locked");
-    expect(h.region().querySelector('[data-credential-fact="protection"] .mh-value')?.textContent).toBe("Not set");
+    expect(h.region().querySelector('[data-credential-fact="lock"] dd')?.textContent).toBe("Locked");
+    expect(h.region().querySelector('[data-credential-fact="protection"] dd')?.textContent).toBe("Not set");
     expect(h.region().querySelector('.mh-readiness-summary')).toBeNull();
-    expect(h.region().textContent).toContain("SSH connections");
+    expect(h.region().textContent).toContain("Git access");
     expect(credentialFactSummary({ id: "ssh-open", type: "ssh", protection: { status: "known", value: "unprotected" }, lock: { status: "known", value: "locked" }, userId: { status: "not-applicable" } })).toBe("Availability: Locked · Passphrase: Not set");
   });
   test("OpenPGP user ID comes from facts, not public-key comments or the display name", async () => {
@@ -119,9 +136,9 @@ describe("explicit credential and tool facts", () => {
       if (result.status === "available") result.value = result.value.map(c => c.type === "openpgp" ? { ...c, name: "Misleading person", metadata: { ...c.metadata, publicKey: "Comment: Another identity" } } : c);
       return result;
     } }); await h.ui.ready; h.ui.showDetail({ kind: "credential", id: "pgp-locked" }); await settle();
-    expect(h.region().querySelector('[data-credential-fact="userId"] .mh-value')?.textContent).toBe("Explicit user <fact@mock.invalid>");
+    expect(h.region().querySelector('[data-credential-fact="userId"] dd')?.textContent).toBe("Explicit user <fact@mock.invalid>");
     model.setCredentialFactsUnknown("pgp-locked", true); h.ui.showDetail({ kind: "credential", id: "pgp-locked" }); await settle();
-    for (const name of ["lock", "protection", "userId"]) expect(h.region().querySelector(`[data-credential-fact="${name}"] .mh-value`)?.textContent).toBe("Unknown");
+    for (const name of ["lock", "protection", "userId"]) expect(h.region().querySelector(`[data-credential-fact="${name}"] dd`)?.textContent).toBe("Unknown");
     h.ui.showDetail({ kind: "credential", id: "token-github" }); await settle();
     expect(h.region().querySelector('[data-credential-fact="lock"]')).toBeNull();
     expect(h.region().querySelector('[data-flow="unlock"], [data-flow="lock"]')).toBeNull();
@@ -168,7 +185,7 @@ describe("explicit credential and tool facts", () => {
     expect(h.region().textContent).not.toContain("/synthetic/bin");
     h.click("tool-git");
     expect(h.region().querySelectorAll('[data-readiness-layer]')).toHaveLength(0);
-    expect(h.region().textContent).toContain("Version: synthetic-1");
+    expect([...h.region().querySelectorAll("dt")].find(el => el.textContent === "Version")?.nextElementSibling?.textContent).toBe("synthetic-1");
     h.click("override-git"); await settle(); h.click("commit-sheet"); await settle();
     expect(calls).toEqual([]); expect(h.region().textContent).toContain("Executable path is required");
     h.click("clear"); h.click("commit-sheet"); await settle(); expect(calls).toEqual([null]);
@@ -181,6 +198,9 @@ describe("explicit credential and tool facts", () => {
     expect(h.region().querySelector('details, [data-readiness-layer], [data-flow="diagnostics"]')).toBeNull();
     h.click("test-git"); await settle();
     expect(tested).toBe(1); expect(h.region().textContent).toContain("Check Results");
+    const facts = Object.fromEntries([...h.region().querySelectorAll("dt")].map(el => [el.textContent, el.nextElementSibling?.textContent]));
+    expect(facts.Subject).toBe("git"); expect(facts.Use).toBe("Git repositories");
+    expect(facts.Result).toBe("Ready on this Hub"); expect(facts.Scope).toContain("Local setup only");
     expect(h.region().querySelector('[data-readiness-layer]')).toBeNull();
     h.click("diagnostics");
     expect(h.region().querySelectorAll('[data-readiness-layer]')).toHaveLength(3);

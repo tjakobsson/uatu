@@ -5,12 +5,12 @@ import { confirmAuthenticatedHubContext, invalidateAuthenticatedHubContext } fro
 import { createTaskHistory } from "./task-history";
 
 export function mobileHubRoute(url: URL): MobileHubRoute | null {
-  if (url.pathname === "/") return "hub";
-  if (url.pathname === "/settings" || url.pathname === "/clone") return "settings";
+  if (url.pathname === "/" || url.pathname === "/clone") return "hub";
+  if (url.pathname === "/settings") return "settings";
   return null;
 }
 
-const detailKinds = new Set(["add-credential", "tools", "assignments", "default-folder", "devices", "security", "add-workspace", "clone"]);
+const detailKinds = new Set(["add-credential", "tools", "assignments", "default-folder", "devices", "security", "add-workspace", "clone", "folders"]);
 /** Only frontend identities belong in route context, never filesystem authority
  * or form/secret drafts. Unknown/malformed queries fall back to the overview. */
 export function mobileHubDetail(url: URL): MobileHubDetail | undefined {

@@ -4,7 +4,8 @@ import type { DefaultWorkspaceParentState } from "../preferences";
 import { escapeHtml as esc } from "../../shared/html";
 import { appUrl } from "../../shared/app-url";
 import { DEFAULT_NAVIGATION_PLACEMENT, getNavigationPreferences, setNavigationPreferences, onNavigationPreferencesChange } from "../../shell/navigation-preferences";
-import { mobileHubIcon as icon, type MobileHubIcon } from "./icons";
+import { mobileHubIcon as icon } from "./icons";
+import { group as section, text as note, destinationRow as destination, choiceGroup as choices } from "./design-system";
 import { createMobileHubFlows, type MobileHubDetail } from "./flows";
 import { advisory, clearSecrets, dismissAdvisory, field as flowField, showContextualError } from "./flow-ui";
 import { branchLabel } from "./workspace-presentation";
@@ -14,7 +15,7 @@ import { createTaskView, type TaskPresentation } from "./task-view";
 export type { MobileHubDetail } from "./flows";
 
 export type MobileHubRoute = "hub" | "settings";
-export type MobileHubDestination = { kind: "credential"; id: string } | { kind: "add-credential" | "tools" | "assignments" | "default-folder" | "devices" | "security" | "add-workspace" };
+export type MobileHubDestination = { kind: "credential"; id: string } | { kind: "add-credential" | "tools" | "assignments" | "default-folder" | "devices" | "security" | "add-workspace" | "folders" };
 export interface MobileHubCallbacks {
   navigateWorkspace(workspaceId: string): void;
   returnToWorkspace(workspaceId: string): void;
@@ -98,13 +99,12 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
       if (!detail && overviewTriggerAction) [...page.querySelectorAll<HTMLElement>("[data-action]")].find(el => el.dataset.action === overviewTriggerAction)?.focus({ preventScroll: true });
     },
   });
-  const deferredDestinations = new Set(["add-credential", "tools", "assignments", "default-folder", "devices", "security", "add-workspace"]);
+  const deferredDestinations = new Set(["add-credential", "tools", "assignments", "default-folder", "devices", "security", "add-workspace", "folders"]);
+  // Local chrome composition seam: label is trusted product HTML and attrs are
+  // developer-owned markup with escaped interpolations, never raw user input.
   const button = (action: string, label: string, cls = "", attrs = "") => {
     return `<button type="button" class="${cls}" data-action="${esc(action)}" ${attrs}>${label}</button>`;
   };
-  const section = (title: string, body: string, count?: number) => `<section class="mh-section"><h2>${esc(title)}${count === undefined ? "" : `<span>${count}</span>`}</h2><div class="mh-group">${body}</div></section>`;
-  const note = (text: string) => `<p class="mh-note">${esc(text)}</p>`;
-  const destination = (action: string, label: string, symbol: MobileHubIcon, subtitle = "", value = "", color = "gray", attrs = "") => button(action, `<span class="mh-tile mh-${color}">${icon(symbol)}</span><span class="mh-row-copy">${esc(label)}${subtitle ? `<small>${esc(subtitle)}</small>` : ""}</span><span class="mh-value">${esc(value)}</span>${icon("chevron")}`, "mh-destination", attrs);
   function credentialStatus(c: PublicCredentialDto): string {
     if (c.type === "token") return c.enabled && c.readiness.some(r => r.status === "unavailable") ? "Unavailable" : "";
     const state = credentialFacts.get(c.id);
@@ -151,7 +151,7 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
   function credentialCatalog() {
     return credentials.status === "ready" ? credentials.value.map(c => {
       const type = c.type === "ssh" ? "SSH key" : c.type === "openpgp" ? "OpenPGP key" : "HTTPS / provider token";
-      return destination(`credential:${c.id}`, c.name, "key", `${type}${c.enabled ? "" : " · Disabled"}`, credentialStatus(c), "green", `data-credential-id="${esc(c.id)}"`);
+      return destination(`credential:${c.id}`, c.name, "key", `${type}${c.enabled ? "" : " · Disabled"}`, credentialStatus(c), "green", c.id);
     }).join("") : credentials.status === "loading" ? note("Loading credentials…") : `<div role="alert">${note(credentials.problem.message)}</div>${button("retry-credentials", "Retry", "mh-text-action")}`;
   }
   async function retryCredentials() {
@@ -175,7 +175,7 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
     const folderNotice = defaultFolder.status === "ready" && defaultFolder.value.configured && !defaultFolder.value.configuredAvailable ? "Saved folder unavailable; using fallback" : "";
     const deviceCount = devices.status === "ready" ? String(devices.value.length) : devices.status === "loading" ? "Loading…" : "Unavailable";
     const catalog = `<div data-credential-catalog>${credentialCatalog()}</div>`;
-    return `<h1>Settings</h1>${identity ? button("identity", `<img src="${esc(appUrl("/assets/uatu-logo.svg"))}" alt=""/><span><strong>${esc(identity.user)}</strong><small>${esc(identity.host)}</small><small class="mh-running">● Connected</small></span>`, "mh-identity") : ""}${section("Credentials", `${catalog}${button("add-credential", "Add Credential", "mh-text-action")}`)}${note("Secure access for your workspaces. Stored only on this hub.")}${section("Workspaces", destination("default-folder", "Default Folder", "folder", folderNotice, folderValue, "blue") + destination("preview-side", "Preview File Controls", "preview", "Placement on this device", prefs.previewSide === "left" ? "Left" : "Right") + destination("auto-hide", "Navigation Auto-hide", "hub", "", prefs.autoHide ? "After 7 seconds" : "Until I close it"))}${section("Account", destination("devices", "Devices", "device", "", deviceCount) + destination("security", "Session Security", "shield", "", "", "purple"))}${section("More settings", destination("handle", "Navigation Handle", "hub", "Side and vertical placement") + destination("tools", "Credential Tools", "key") + destination("assignments", "Workspace Assignments", "folder"))}`;
+    return `<h1>Settings</h1>${identity ? button("identity", `<img src="${esc(appUrl("/assets/uatu-logo.svg"))}" alt=""/><span><strong>${esc(identity.user)}</strong><small>${esc(identity.host)}</small><small class="mh-running">● Connected</small></span>`, "mh-identity") + advisory(identity.user) : ""}${section("Credentials", `${catalog}${button("add-credential", "Add Credential", "mh-text-action")}`)}${note("Secure access for your workspaces. Stored only on this hub.")}${section("Workspaces", destination("default-folder", "Default Folder", "folder", folderNotice, folderValue, "blue") + destination("preview-side", "Preview File Controls", "preview", "Placement on this device", prefs.previewSide === "left" ? "Left" : "Right") + destination("auto-hide", "Navigation Auto-hide", "hub", "", prefs.autoHide ? "After 7 seconds" : "Until I close it"))}${section("Account", destination("devices", "Devices", "device", "", deviceCount) + destination("security", "Session Security", "shield", "", "", "purple"))}${section("More settings", destination("handle", "Navigation Handle", "hub", "Side and vertical placement") + destination("tools", "Credential Tools", "key") + destination("assignments", "Workspace Assignments", "folder"))}`;
   }
   function render() {
     if (disposed) return;
@@ -184,7 +184,7 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
     const activeAction = page.contains(root.ownerDocument.activeElement) ? (root.ownerDocument.activeElement as HTMLElement)?.dataset.action : undefined;
     const previousScroll = page.scrollTop;
     clearSecrets(page);
-    page.innerHTML = `<header class="mh-brand"><img src="${esc(appUrl("/assets/uatu-logo.svg"))}" alt=""/><span>UatuCode</span></header><main>${signedOut ? login() : !identity ? `<h1>UatuCode</h1>${workspaces.status === "unavailable" ? `<div role="alert">${note(workspaces.problem.message)}${button("refresh", "Retry", "mh-text-action")}</div>` : note("Connecting to hub…")}` : route === "hub" ? dashboard() : settings() + advisory(identity.user)}</main>${identity ? dock() : ""}`;
+    page.innerHTML = `<header class="mh-brand"><img src="${esc(appUrl("/assets/uatu-logo.svg"))}" alt=""/><span>UatuCode</span></header><main>${signedOut ? login() : !identity ? `<h1>UatuCode</h1>${workspaces.status === "unavailable" ? `<div role="alert">${note(workspaces.problem.message)}${button("refresh", "Retry", "mh-text-action")}</div>` : note("Connecting to hub…")}` : route === "hub" ? dashboard() : settings()}</main>${identity ? dock() : ""}`;
     page.querySelector<HTMLElement>("main")!.inert = !!flows.detail;
     if (flows.detail) page.querySelector("main")!.setAttribute("aria-hidden", "true");
     else page.querySelector("main")!.removeAttribute("aria-hidden");
@@ -239,7 +239,6 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
   }
   function preference(kind: "preview-side" | "handle" | "auto-hide") {
     const draft = getNavigationPreferences();
-    const choices = (name: string, label: string, selected: string, options: Array<[string, string]>) => `<fieldset class="mh-preference-choices"><legend>${esc(label)}</legend><div class="mh-group">${options.map(([value, title]) => `<label class="mh-check"><input type="radio" name="${name}" data-pref="${name}" value="${value}" ${value === selected ? "checked" : ""}/><span>${esc(title)}</span></label>`).join("")}</div></fieldset>`;
     const sideField = (label: string, value: string) => choices("side", label, value, [["left", "Left"], ["right", "Right"]]);
     const title = kind === "preview-side" ? "Preview File Controls" : kind === "handle" ? "Navigation Handle" : "Navigation Auto-hide";
     const body = kind === "preview-side" ? `${sideField("Side", draft.previewSide)}${note("Choose which side shows Preview file controls on this device.")}` : kind === "handle" ? `${sideField("Side", draft.side)}<label class="mh-field">Vertical position<input data-pref="position" type="range" min="0" max="100" step="any" value="${draft.position * 100}"/><span class="mh-range-endpoints" aria-hidden="true"><span>Top</span><span>Bottom</span></span></label>${button("reset-handle", "Reset placement", "mh-text-action")}${note("Moves the collapsed navigation handle. Applies across workspaces on this Hub, on this device.")}` : choices("autoHide", "Hide navigation", String(draft.autoHide), [["true", "After 7 seconds"], ["false", "Until I close it"]]) + note("The timer pauses while you interact. Applies across workspaces on this Hub, on this device.");

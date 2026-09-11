@@ -89,6 +89,28 @@ requirements are implemented and verified.
 - [ ] 11.4 Complete current cross-engine editor/confirmation/history/operation/continuity verification and current visual evidence; keep failed or blocked checks explicit rather than inheriting older passes.
 - [x] 11.5 Publish the isolated page-based candidate and updated evidence/acceptance record, then stop for user review without live integration.
 
+## 12. Readable information and explicit controls
+
+- [x] 12.1 Commit and push the pre-refinement checkpoint to the fork before starting new UX work; exclude private runtime data, the separate worktree, unrelated tooling deletions and raw generated traces.
+- [x] 12.2 Revisit official Apple guidance, reproduce automatic focus/false-selected action styling, and identify semantic information, notice placement and duplicate navigation problems.
+- [x] 12.3 Implement labeled purpose/workspace/review facts, canonical Devices navigation, a prominent dismissible notice, and accurate normalized Current / After applying review without changing operation safeguards.
+- [x] 12.4 Implement accessible green Boolean switches, distinct editable/disabled field affordances, and heading-only editor entry focus; preserve defaults, radio semantics and draft-only changes.
+- [x] 12.5 Verify current focused regressions and visual examples, publish only the isolated review with exact evidence/remaining limitations, and leave new UX work uncommitted pending a separate request.
+
+## 13. Shared Uatu Web design system
+
+- [x] 13.1 Define and document the compact semantic design-system contract, preserving current user decisions and desktop/workspace-interior scope.
+- [x] 13.2 Consolidate shared tokens and authoritative recipes, centralize stateless primitives, and migrate real callers without changing operation or lifecycle ownership.
+- [x] 13.3 Add a separate local-only reference page using actual product modules, with explicit asset serving, bundle separation and representative state/interaction tests.
+- [x] 13.4 Verify current focused regressions and reference states, record remaining browser/visual limits, and publish only the isolated review with renewed approval pending.
+
+## 14. Focused Hub folder selection
+
+- [x] 14.1 Research official Apple directory/file-selection guidance and distinguish remote-folder selection from the existing management capabilities and caller contracts.
+- [x] 14.2 Implement a read-only full-page picker with persistent Cancel/Choose header, verified path selection, hierarchy navigation, loading/empty/error recovery and preserved caller drafts; move maintenance to explicit Manage folders without dropping operations.
+- [x] 14.3 Add the actual picker to the reference catalog and verify current selection/Cancel/hierarchy/readonly/long-list workflows in Chromium and WebKit, plus focused unit/style checks and retained evidence.
+- [x] 14.4 Publish the focused-selector candidate and updated guide/evidence, retaining the existing full-app and human approval gates without live integration.
+
 ### Reconciliation checkpoint — 2026-09-10
 
 **31/36 complete; 7.1, 7.4, 8.1, 8.2, 8.3 remain pending.** See

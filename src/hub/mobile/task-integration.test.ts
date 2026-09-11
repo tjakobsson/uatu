@@ -125,7 +125,7 @@ test("Editor → Review → Back to edit preserves the assignment draft in one w
   Object.defineProperty(select, "value", { value: "token-github", configurable: true });
   root.querySelector<HTMLInputElement>('[name="host"]')!.value = "github.com";
   click("commit-sheet");
-  expect(root.querySelector(".mh-task h1")?.textContent).toBe("Review workspace credentials");
+  expect(root.querySelector(".mh-task h1")?.textContent).toBe("Review changes");
   expect(entries).toHaveLength(3); expect(root.querySelector('[data-action="cancel-sheet"]')?.textContent).toBe("Back to edit");
   click("cancel-sheet"); await settle();
   expect(root.querySelector(".mh-task h1")?.textContent).toBe("Edit workspace credentials");

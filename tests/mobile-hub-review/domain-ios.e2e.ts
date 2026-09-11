@@ -33,7 +33,7 @@ test("assignment and device lists disclose named secondary operations", async ({
   await page.goto("/settings?detail=assignments"); await flow(page, "workspace-atlas").click();
   await settingsCommand(page, "edit-atlas"); await flow(page, "new-atlas").click();
   await expect(page.getByRole('combobox', { name: 'Signing', exact: true })).toHaveCount(0);
-  await page.getByRole("combobox", { name: "Authentication", exact: true }).selectOption("token-github");
+  await page.getByRole("combobox", { name: "Git authentication credential", exact: true }).selectOption("token-github");
   await page.getByLabel("Authentication host").fill("github.com");
   await page.getByRole("button", { name: "Review", exact: true }).click();
   await expect(page.getByRole("button", { name: "Back to edit", exact: true })).toHaveCount(1);

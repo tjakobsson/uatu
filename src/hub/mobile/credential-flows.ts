@@ -1,7 +1,7 @@
 import type { PublicCredentialDto, PublicToolReadinessDto, CredentialRecord, SshCredentialRecord } from "../credential-types";
 import type { PrivateKeySource, KeyTarget, CredentialFacts, KnownFact, NotApplicableFact } from "./backend";
 import { escapeHtml as esc } from "../../shared/html";
-import { action, advisory, check, clearSecrets, field, group, listRow, required, text, value, values, type FlowActions, type FlowEnvironment } from "./flow-ui";
+import { action, advisory, check, clearSecrets, field, group, infoRows, listRow, required, text, value, values, type FlowActions, type FlowEnvironment } from "./flow-ui";
 import { diagnosticReport, readiness } from "./readiness";
 
 const literalInput = 'autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text"';
@@ -36,8 +36,19 @@ export function credentialFactSummary(facts: CredentialFacts): string {
   return `Availability: ${credentialFactValue(facts.lock)} · Passphrase: ${credentialFactValue(facts.protection)}`;
 }
 export function credentialFactRows(facts: CredentialFacts): string {
-  const row = (name: string, label: string, fact: KnownFact<string> | NotApplicableFact) => `<div class="mh-fact-row${name === "userId" ? " mh-fact-row-stacked" : ""}" data-credential-fact="${name}"><span>${label}</span><span class="mh-value">${esc(name === "userId" && fact.status === "known" ? fact.value : credentialFactValue(fact))}</span></div>`;
-  return (facts.type === "token" ? "" : row("protection", "Passphrase", facts.protection) + row("lock", "Availability", facts.lock)) + (facts.type === "openpgp" ? row("userId", "OpenPGP user ID", facts.userId) : "");
+  const row = (name: string, label: string, fact: KnownFact<string> | NotApplicableFact) => `<div data-credential-fact="${name}">${infoRows([{ label, value: name === "userId" && fact.status === "known" ? fact.value : credentialFactValue(fact), tone: fact.status === "unknown" ? "warning" : "neutral" }])}</div>`;
+  return (facts.type === "token" ? "" : row("protection", "Stored key passphrase", facts.protection) + row("lock", "Runtime availability", facts.lock)) + (facts.type === "openpgp" ? row("userId", "OpenPGP user ID", facts.userId) : "");
+}
+export function readOnlyPurposes(c: { capabilities: readonly CredentialRecord["capabilities"][number][] }): string {
+  const caps = new Set(c.capabilities);
+  const git = [caps.has("ssh-authentication") ? "SSH" : "", caps.has("https-git") ? "HTTPS" : ""].filter(Boolean);
+  const signing = [caps.has("ssh-signing") ? "SSH" : "", caps.has("openpgp-signing") ? "OpenPGP" : ""].filter(Boolean);
+  return infoRows([
+    ...(git.length ? [{ label: "Git access", value: git.join(" / ") }] : []),
+    ...(signing.length ? [{ label: "Commit signing", value: signing.join(" / ") }] : []),
+    ...(caps.has("github-cli") ? [{ label: "GitHub CLI", value: "Authentication" }] : []),
+    ...(caps.has("gitlab-cli") ? [{ label: "GitLab CLI", value: "Authentication" }] : []),
+  ]);
 }
 export function credentialPurpose(c: Pick<PublicCredentialDto, "capabilities">): string {
   const labels = { "ssh-authentication": "SSH connections", "ssh-signing": "Signing commits with SSH", "openpgp-signing": "Signing commits with OpenPGP", "https-git": "HTTPS Git connections", "github-cli": "GitHub CLI", "gitlab-cli": "GitLab CLI" };
@@ -51,9 +62,9 @@ export function createCredentialFlows(env: FlowEnvironment) {
   const { backend } = env;
   let toolConfigurationRequest = 0;
   const reload = (id: string) => { env.changed(); detail(id); };
-  function checkResults(rows: PublicCredentialDto["readiness"], purpose: string) {
-    env.task("Check Results", text(purpose) + readiness(rows) + group("Report", listRow("diagnostics", "View diagnostic report", "Detailed output from this check", "settings")), undefined, {
-      diagnostics: () => env.task("Diagnostic report", diagnosticReport(rows), undefined, {}, () => checkResults(rows, purpose), { cancelLabel: "Back" }),
+  function checkResults(rows: PublicCredentialDto["readiness"], subject: string, use: string) {
+    env.task("Check Results", group("Checked", infoRows([{ label: "Subject", value: subject }]) + use) + readiness(rows) + group("Report", listRow("diagnostics", "View diagnostic report", `${rows.length} checks · full results`, "settings")), undefined, {
+      diagnostics: () => env.task("Diagnostic report", diagnosticReport(rows), undefined, {}, () => checkResults(rows, subject, use), { cancelLabel: "Back" }),
     });
   }
   function chooser() {
@@ -137,7 +148,7 @@ export function createCredentialFlows(env: FlowEnvironment) {
        const primary = credentialPrimaryAction(c, facts);
         const commands: FlowActions = {
          "retry-facts": readFacts,
-         test: () => env.mutate(() => backend.testCredential(target), results => { checkResults(results, credentialPurpose(c)); env.changed(); }),
+          test: () => env.mutate(() => backend.testCredential(target), results => { checkResults(results, c.name, readOnlyPurposes(c)); env.changed(); }),
          "copy-id": async () => {
            const status = env.root.querySelector<HTMLElement>("[data-identifier-status]");
            try { await navigator.clipboard.writeText(publicInfo); if (status?.isConnected) status.textContent = "Public identifier copied."; }
@@ -162,8 +173,8 @@ export function createCredentialFlows(env: FlowEnvironment) {
           + (c.type === "ssh" && !(facts.lock.status === "known" && facts.lock.value === "locked") ? action("lock", "Lock SSH key") : "");
        // Availability already communicates a known lock. Only surface another actual blocker once.
        const blocker = notice || !c.enabled || primary === "unlock" ? "" : c.readiness.find(r => r.status === "unavailable")?.message ?? "";
-       env.page(c.name, group("Purpose", text(credentialPurpose(c)) + (blocker ? text(blocker) : ""))
-          + group(c.type === "token" ? "Provider" : "Key protection and availability", factRows + `<div class="mh-fact-row mh-fact-row-stacked"><span>Public identifier</span><span class="mh-value">${esc(publicInfo)}</span></div>` + action("copy-id", "Copy public identifier") + '<p class="mh-note" role="status" data-identifier-status></p>')
+       env.page(c.name, group("Used for", readOnlyPurposes(c) + (blocker ? infoRows([{ label: "Needs attention", value: blocker, tone: "warning" }]) : ""))
+           + group(c.type === "token" ? "Provider" : "Key protection and availability", factRows + infoRows(c.type === "token" ? [{ label: "Provider host", value: c.metadata.host, mono: true }, { label: "Username", value: c.metadata.username || "Not set" }] : [{ label: "Public identifier", value: publicInfo, mono: true }]) + action("copy-id", "Copy public identifier") + '<p class="mh-note" role="status" data-identifier-status></p>')
          + group("Workspace assignments", (c.assignments.length ? c.assignments.map(a => text(`${a.workspaceId} · ${a.role}${a.role === "authentication" ? ` · ${a.host}` : ""}`)).join("") : text("No workspace assignments")) + listRow("defaults", "Manage assignments", "Workspace defaults and credential selection", "settings"))
          + group("Actions", keyActions + listRow("test", "Check setup", "Run local checks; not a repository access test", "settings") + action("toggle", c.enabled ? "Disable" : "Enable", c.enabled) + action("delete", "Delete credential", true)), commands,
          { icon: "key", subtitle: `${c.type === "ssh" ? "SSH key" : c.type === "openpgp" ? "OpenPGP key" : "HTTPS / provider token"} · ${c.enabled ? "Enabled" : "Disabled"}` });
@@ -173,7 +184,7 @@ export function createCredentialFlows(env: FlowEnvironment) {
   }
   function publicKey(target: KeyTarget) {
     void env.read(() => backend.readPublicKey(target), key => {
-      env.task("Public key", text(key.fingerprint) + `<pre class="mh-public-key">${esc(key.publicKey)}</pre>` + action("copy", "Copy public key") + action("download", "Download public key"), undefined, {
+      env.task("Public key", infoRows([{ label: "Fingerprint", value: key.fingerprint, mono: true }]) + `<pre class="mh-public-key">${esc(key.publicKey)}</pre>` + action("copy", "Copy public key") + action("download", "Download public key"), undefined, {
         copy: async () => { try { await navigator.clipboard.writeText(key.publicKey); env.sheet.error("Public key copied."); } catch { env.sheet.error("Clipboard unavailable. Select and copy the public key above."); } },
         download: () => {
           const url = URL.createObjectURL(new Blob([key.publicKey], { type: "text/plain" }));
@@ -193,7 +204,7 @@ export function createCredentialFlows(env: FlowEnvironment) {
     ++toolConfigurationRequest;
     const commands: FlowActions = {
       "flow-back": tools,
-      [`test-${t.tool}`]: () => env.mutate(() => backend.testTool(t.tool), result => { env.changed(); checkResults(result.results, toolPurposes[result.tool]); }),
+      [`test-${t.tool}`]: () => env.mutate(() => backend.testTool(t.tool), result => { env.changed(); checkResults(result.results, result.tool, infoRows([{ label: "Use", value: toolPurposes[result.tool] }])); }),
       [`override-${t.tool}`]: () => {
           const request = ++toolConfigurationRequest;
           void env.read(() => backend.readToolConfiguration(t.tool), configuration => {
@@ -221,7 +232,7 @@ export function createCredentialFlows(env: FlowEnvironment) {
            }, () => toolDetail(t));
       },
     };
-    env.page(t.tool, group("Purpose", text(toolPurposes[t.tool])) + group("Installation", listRow(`override-${t.tool}`, "Executable location", `${t.path ?? "Not found"} · View saved setting or use a different installation`, "settings") + text(`Version: ${t.version ?? "Unavailable"}`)) + group("Check installation", listRow(`test-${t.tool}`, `Recheck ${t.tool} setup`, "Reprobe installed tools and local services; no remote access tests", "settings")), commands, { icon: "settings", subtitle: toolPurposes[t.tool] });
+     env.page(t.tool, group("Used for", infoRows([{ label: "Use", value: toolPurposes[t.tool] }])) + group("Installation", infoRows([{ label: "Detected executable", value: t.path ?? "Not found", mono: !!t.path }, { label: "Version", value: t.version ?? "Unavailable" }]) + listRow(`override-${t.tool}`, "Executable location", "View saved setting or use a different installation", "settings")) + group("Check installation", listRow(`test-${t.tool}`, `Recheck ${t.tool} setup`, "Reprobe installed tools and local services; no remote access tests", "settings")), commands, { icon: "settings", subtitle: toolPurposes[t.tool] });
   }
   return { chooser, detail, tools, toolDetail, unlock };
 }

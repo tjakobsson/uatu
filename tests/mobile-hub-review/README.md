@@ -128,3 +128,20 @@ The backend suite covers many of these model semantics; that does not prove thei
 complete UI presentation. Real cryptography, executable detection, shell/Git/PTY,
 filesystem recovery and provider execution are intentionally absent. The synthetic
 workspace corpus does not claim every Chat/terminal/document protocol feature.
+# Folder chooser reference
+
+At `/review/design-system`, **Choose Hub folder** runs the production
+`createFolderPicker` and `createTaskView`, not a copied chooser. Folder rows
+traverse; the header **Choose** selects the current path into local status.
+Cancel or Escape discards the selection and returns focus to the catalog.
+The test-only adapter implements `FolderPickerEnvironment`: a read-only
+`browseFolders` backend plus task, sheet, current-generation and auth ownership
+hooks. Cancellation invokes the picker's callback before restoring the catalog,
+so obsolete reads cannot update a dismissed task.
+
+Only `/example`, `/example/projects`, `/example/projects/docs` and
+`/example/empty` exist in the static client tree. **Unavailable** demonstrates
+the product error/recovery UI with a typed unavailable read result. No HTTP
+model calls, filesystem reads, folder creation or workspace mutations occur.
+All chooser controls and styling come from production modules and follow the
+device appearance. Existing editor, review and confirmation demos remain local.

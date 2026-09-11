@@ -35,6 +35,7 @@ const ssh = (): PublicCredentialDto => ({ id: "ssh", type: "ssh", name: "SSH ide
 const pgp = (): PublicCredentialDto => ({ id: "pgp", type: "openpgp", name: "Signing identity", enabled: true, createdAt: "2026-01-01T00:00:00Z", capabilities: ["openpgp-signing"], metadata: { publicKey: "PUBLIC", fingerprint: "PGP:SYNTHETIC" }, assignments: [], readiness: [] });
 const token = (): PublicCredentialDto => ({ id: "token", type: "token", name: "Provider identity", enabled: true, createdAt: "2026-01-01T00:00:00Z", capabilities: ["https-git", "github-cli"], metadata: { host: "git.example.invalid" }, assignments: [], readiness: [] });
 const settle = async () => { for (let i = 0; i < 35; i++) await Promise.resolve(); };
+const facts = (root: ParentNode) => [...root.querySelectorAll("dt")].map(dt => [dt.textContent, dt.nextElementSibling?.textContent]);
 function harness(overrides: Partial<MobileHubBackend> = {}) {
   const calls: Array<{ operation: string; args: unknown[] }> = [], opens: string[] = [];
   let invalidate: (event: Invalidation) => void = () => {};
@@ -88,9 +89,9 @@ describe("folder picker current read failures", () => {
       if (caller === "default-folder") { h.click("edit"); h.set("path", "/typed-draft"); }
       else { h.click("create"); await settle(); h.set("parent", "/typed-draft"); h.set("folderName", "new-folder"); h.set("displayName", "My draft"); }
       h.click("browse"); await settle();
-      expect(h.region().textContent).toContain("Information unavailable");
+      expect(h.region().querySelector(".mh-folder-error")).not.toBeNull();
       if (retry) { h.click("retry"); await settle(); }
-      h.click("flow-back");
+      h.click("cancel-sheet");
       expect(h.input(caller === "default-folder" ? "path" : "parent")?.value).toBe("/typed-draft");
       if (caller === "add-workspace") { expect(h.input("folderName").value).toBe("new-folder"); expect(h.input("displayName").value).toBe("My draft"); }
     });
@@ -228,7 +229,7 @@ describe("assignment, workspace and account flows", () => {
     expect(h.region().textContent).toContain("Edit workspace credentials"); h.click("new-a");
     expect(h.region().textContent).toContain("Add authentication host"); expect(h.region().querySelector('[name="signing"]')).toBeNull();
     h.set("authentication", "token"); h.set("host", "git.example.invalid"); h.click("commit-sheet"); await settle();
-    expect(h.region().textContent).toContain("This replaces the default for that host"); expect(h.mutations("assignWorkspace")).toHaveLength(0);
+    expect(facts(h.region())).toContainEqual(["Change on apply", "Replace credential"]); expect(h.mutations("assignWorkspace")).toHaveLength(0);
     h.click("cancel-sheet"); expect(h.input("authentication").value).toBe("token"); expect(h.region().querySelector('[name="signing"]')).toBeNull();
     h.click("commit-sheet"); await settle(); h.click("commit-sheet"); await settle();
     expect(h.mutations("assignWorkspace")[0]?.args).toEqual([{ workspaceId: "a", mode: "assign-new", selection: { authentication: { credentialId: "token", host: "git.example.invalid" } } }]);
@@ -249,7 +250,7 @@ describe("assignment, workspace and account flows", () => {
   test("assignment Review/back preserves both roles and host; cancel makes no mutation", async () => {
     const h = harness(); await h.ui.ready; h.ui.showDetail({ kind: "assignments" }); await settle(); h.click("workspace-a"); await settle(); h.click("edit-a");
     expect(h.input("host").disabled).toBe(true); h.set("authentication", "ssh"); expect(h.input("host").disabled).toBe(false); h.set("host", "git.invalid"); h.set("signing", "pgp"); h.click("commit-sheet"); await settle();
-    expect(h.region().textContent).toContain("Authentication on git.invalid"); expect(h.region().textContent).toContain("Signing becomes"); expect(h.region().querySelector('[data-flow="back"]')).toBeNull(); h.click("cancel-sheet");
+    expect(facts(h.region())).toContainEqual(["Host", "git.invalid"]); expect(facts(h.region())).toContainEqual(["After applying", "Signing identity"]); expect(h.region().querySelector('[data-flow="back"]')).toBeNull(); h.click("cancel-sheet");
     expect(h.input("authentication").value).toBe("ssh"); expect(h.input("signing").value).toBe("pgp"); expect(h.input("host").value).toBe("git.invalid"); h.click("cancel-sheet");
     expect(h.mutations("assignWorkspace")).toHaveLength(0);
   });
@@ -260,6 +261,54 @@ describe("assignment, workspace and account flows", () => {
     expect(h.region().textContent).toContain("No changes"); expect(h.mutations("assignWorkspace")).toHaveLength(0);
     h.set("authentication", "token"); h.set("host", "git.example.invalid"); h.set("signing", "ssh"); h.click("commit-sheet"); await settle(); h.click("commit-sheet"); await settle();
     expect(h.mutations("assignWorkspace")[0]?.args).toEqual([{ workspaceId: "a", mode: "edit-current", selection: { authentication: { credentialId: "token", host: "git.example.invalid" }, signing: { credentialId: "ssh" } } }]);
+  });
+  test("review canonicalizes only explicit input, preserves draft and replaces a canonical existing host only on Apply", async () => {
+    const workspace = { ...w(), assignments: [{ workspaceId: "a", credentialId: "ssh", role: "authentication" as const, host: "git.example.invalid" }, { workspaceId: "a", credentialId: "pgp", role: "signing" as const }] };
+    const h = harness({ readWorkspaces: async () => available([workspace]), assignWorkspace: async () => completed([]) }); await h.ui.ready;
+    h.ui.showDetail({ kind: "assignments" }); await settle(); h.click("workspace-a"); await settle(); h.click("edit-a");
+    expect(h.input("host").value).toBe("git.example.invalid"); expect(h.mutations("assignWorkspace")).toHaveLength(0);
+    h.set("host", "Git.Example.Invalid."); h.click("commit-sheet"); await settle();
+    expect(h.region().textContent).toContain("No changes"); expect(h.mutations("assignWorkspace")).toHaveLength(0);
+    h.set("authentication", "token"); h.set("host", "https://Git.Example.Invalid/"); h.set("signing", ""); h.click("commit-sheet"); await settle();
+    expect(h.region().querySelector("h1")?.textContent).toBe("Review changes");
+    expect(facts(h.region())).toContainEqual(["Current", "SSH identity"]); expect(facts(h.region())).toContainEqual(["After applying", "Provider identity"]);
+    expect(facts(h.region())).toContainEqual(["Change on apply", "Replace credential"]); expect(facts(h.region())).toContainEqual(["Change on apply", "Keep current"]);
+    expect(facts(h.region())).toContainEqual(["After applying", "Signing identity"]);
+    expect(h.region().querySelector('[data-action="commit-sheet"]')?.textContent).toBe("Apply and replace"); expect(h.mutations("assignWorkspace")).toHaveLength(0);
+    h.click("cancel-sheet"); expect(h.input("host").value).toBe("https://Git.Example.Invalid/"); expect(h.input("signing").value).toBe("");
+    h.click("commit-sheet"); await settle(); h.click("commit-sheet"); await settle();
+    expect(h.mutations("assignWorkspace").map(c => c.args)).toEqual([[{ workspaceId: "a", mode: "edit-current", selection: { authentication: { credentialId: "token", host: "git.example.invalid" } } }]]);
+  });
+  test("changing authentication host adds without removing the previous host and leaves unselected signing unchanged", async () => {
+    const workspace = { ...w(), assignments: [{ workspaceId: "a", credentialId: "ssh", role: "authentication" as const, host: "old.invalid" }, { workspaceId: "a", credentialId: "pgp", role: "signing" as const }] };
+    const h = harness({ readWorkspaces: async () => available([workspace]), assignWorkspace: async () => completed([]) }); await h.ui.ready;
+    h.ui.showDetail({ kind: "assignments" }); await settle(); h.click("workspace-a"); await settle(); h.click("edit-auth-a-0");
+    h.set("host", "https://New.Invalid/"); h.set("signing", ""); h.click("commit-sheet"); await settle();
+    const rows = facts(h.region()); expect(rows).toContainEqual(["Host", "old.invalid"]); expect(rows).toContainEqual(["Host", "new.invalid"]);
+    expect(rows).toContainEqual(["After applying", "SSH identity"]); expect(rows).toContainEqual(["After applying", "Signing identity"]);
+    expect(h.region().textContent).toContain("Existing hosts will stay unchanged."); expect(h.region().querySelector('[data-action="commit-sheet"]')?.textContent).toBe("Apply");
+    expect(h.mutations("assignWorkspace")).toHaveLength(0); h.click("commit-sheet"); await settle();
+    expect(h.mutations("assignWorkspace")[0]?.args).toEqual([{ workspaceId: "a", mode: "edit-current", selection: { authentication: { credentialId: "ssh", host: "new.invalid" } } }]);
+    expect(h.mutations("removeAssignment")).toHaveLength(0); expect(workspace.assignments).toHaveLength(2);
+  });
+  test("workspace identity and assignment facts are labeled without duplicate name headings or lost host actions", async () => {
+    const workspace = { ...w(), displayName: "Atlas", assignments: [{ workspaceId: "a", credentialId: "ssh", role: "authentication" as const, host: "one.invalid" }, { workspaceId: "a", credentialId: "ssh", role: "authentication" as const, host: "two.invalid" }, { workspaceId: "a", credentialId: "ssh", role: "signing" as const }] };
+    const h = harness({ readWorkspaces: async () => available([workspace]), readWorkspace: async () => available(workspace) }); await h.ui.ready;
+    h.ui.showDetail({ kind: "workspace", id: "a" }); await settle();
+    expect(facts(h.region())).toContainEqual(["Folder", "/projects/a"]); expect(facts(h.region())).toContainEqual(["Status", "stopped"]);
+    expect([...h.region().querySelectorAll("h1,h2")].filter(el => el.textContent === "Atlas")).toHaveLength(1);
+    expect(facts(h.region())).toContainEqual(["Host", "two.invalid"]); expect(facts(h.region())).toContainEqual(["Credential", "SSH identity"]);
+    h.click("assign"); await settle();
+    expect([...h.region().querySelectorAll("h1,h2")].filter(el => el.textContent === "Atlas")).toHaveLength(1);
+    for (const key of ["edit-auth-a-0", "edit-auth-a-1", "remove-a-0", "remove-a-1", "remove-a-2", "edit-a", "new-a"]) expect(h.region().querySelectorAll(`[data-flow="${key}"]`)).toHaveLength(1);
+  });
+  test("Devices has one Settings navigation entry, not a second Security command; same-name sessions remain distinct", async () => {
+    const h = harness({ readDevices: async () => available([{ handle: "one", deviceLabel: "Phone", issuedAt: 1, current: false }, { handle: "two", deviceLabel: "Phone", issuedAt: 2, current: true }]) }); await h.ui.ready;
+    h.ui.show("settings"); await settle(); expect(h.root.querySelectorAll('[data-action="devices"]')).toHaveLength(1);
+    h.ui.showDetail({ kind: "security" }); await settle(); expect(h.region().querySelector('[data-flow="devices"]')).toBeNull();
+    expect(h.region().querySelectorAll('[data-flow="signout"]')).toHaveLength(1); expect(h.region().querySelector("[data-shared-uid]")).toBeNull();
+    expect(h.region().textContent).toContain("Shared Hub account policy"); expect(h.region().textContent).toContain("Login and sessions");
+    h.ui.showDetail({ kind: "devices" }); await settle(); expect(h.region().querySelectorAll('[data-flow^="device-"]')).toHaveLength(2);
   });
   test("Stop and Forget confirmation produce distinct effects and named outcomes", async () => {
     let running = true;
@@ -303,8 +352,32 @@ describe("assignment, workspace and account flows", () => {
 });
 
 describe("onboarding and clone lifecycle", () => {
+  test("technical inputs preserve saved paths, explain disabled hosts, and do not alter human display-name input policy", async () => {
+    const h = harness(); await h.ui.ready; h.ui.showDetail({ kind: "clone" }); await settle();
+    expect(h.input("dest").value).toBe("/projects");
+    for (const name of ["url", "dest", "folderName", "host"]) {
+      expect(h.input(name).getAttribute("autocapitalize")).toBe("none"); expect(h.input(name).getAttribute("autocorrect")).toBe("off");
+    }
+    expect(h.input("displayName").getAttribute("autocapitalize")).toBeNull();
+    expect(h.input("host").disabled).toBe(true); expect(h.input("host").placeholder).toBe("Select a credential first");
+    expect(h.input("host").getAttribute("aria-description")).toContain("Choose a Git authentication credential first");
+    expect(h.mutations("submitClone")).toHaveLength(0);
+  });
+  test("clone review separates one-time identity from named credentials after setup with semantic path and start facts", async () => {
+    const h = harness({ submitClone: async () => completed({ status: "accepted", jobId: "job" }) }); await h.ui.ready; h.ui.showDetail({ kind: "clone" }); await settle();
+    h.set("url", "git@git.example.invalid:org/repo.git"); h.set("folderName", "checkout"); h.set("displayName", "Readable name"); h.set("cloneCredential", "ssh"); h.set("authentication", "token"); h.set("host", "Git.Example.Invalid."); h.set("signing", "pgp");
+    expect(h.mutations("submitClone")).toHaveLength(0); h.click("review"); await settle();
+    const rows = facts(h.region()); expect(rows).toContainEqual(["Display name", "Readable name"]); expect(rows).toContainEqual(["Parent folder", "/projects"]); expect(rows).toContainEqual(["Checkout path", "/projects/checkout"]);
+    expect(rows).toContainEqual(["Credential", "Provider identity"]); expect(rows).toContainEqual(["Credential", "Signing identity"]); expect(rows).toContainEqual(["Host", "git.example.invalid"]);
+    expect(h.region().textContent).toContain("One-time clone identitySSH identity"); expect(h.region().textContent).toContain("Git authentication after setup"); expect(h.mutations("submitClone")).toHaveLength(0);
+    h.click("commit-sheet"); await settle();
+    const intent = h.mutations("submitClone")[0]?.args[0] as Record<string, unknown>;
+    expect(intent).toEqual({ attemptId: expect.any(String), url: "git@git.example.invalid:org/repo.git", dest: "/projects", folderName: "checkout", displayName: "Readable name", credentialId: "ssh", retainedAuthentication: [{ credentialId: "token", host: "git.example.invalid" }], signing: "pgp", start: false });
+    h.stream({ type: "job-event", event: { id: 1, type: "result", data: { status: "start-failed", target: "/projects/checkout", workspaceId: "opaque-id", error: "Start unavailable" } } }); await settle();
+    expect(facts(h.region())).toContainEqual(["Checkout location", "/projects/checkout"]); expect(h.region().querySelector("[data-clone-primary].mh-commit")).toBeNull();
+  });
   test("folder commands have one current-context home and child rows stay compact", async () => {
-    const h = harness(); await h.ui.ready; h.ui.showDetail({ kind: "add-workspace" }); h.click("existing"); await settle();
+    const h = harness(); await h.ui.ready; h.ui.showDetail({ kind: "add-workspace" }); h.click("folders"); await settle();
     for (const key of ["choose", "elsewhere", "create", "workspace", "rename", "remove"]) expect(h.region().querySelectorAll(`[data-flow="${key}"]`)).toHaveLength(1);
     expect(h.region().querySelector('[data-flow="more"], [data-flow^="more-"], details')).toBeNull();
     expect(h.region().querySelectorAll('[data-flow="folder-0"]')).toHaveLength(1);
@@ -326,11 +399,12 @@ describe("onboarding and clone lifecycle", () => {
     expect(h.region().querySelectorAll('[data-flow="browse"]')).toHaveLength(1);
     h.click("browse"); await settle(); h.click("folder-0"); await settle();
     expect(h.region().querySelectorAll('[data-flow="up"]')).toHaveLength(1);
-    expect(h.region().querySelector('nav[aria-label="Folder location"] [data-flow="up"]')?.textContent).toBe("Up to /projects");
-    expect(h.region().querySelectorAll('.mh-flow-header [data-flow="flow-back"]')).toHaveLength(1);
-    expect(h.region().querySelector('[data-flow="flow-back"]')?.textContent).toBe("Back");
+    expect(h.region().querySelector('.mh-folder-parent [data-flow="up"]')?.textContent).toBe("projects");
+    expect(h.region().querySelector('.mh-folder-parent [data-flow="up"]')?.getAttribute("aria-label")).toBe("Parent folder: /projects");
+    expect(h.region().querySelectorAll('header [data-action="cancel-sheet"]')).toHaveLength(1);
+    expect(h.region().querySelector('[data-action="cancel-sheet"]')?.textContent).toBe("Cancel");
     h.click("up"); await settle(); expect(h.region().textContent).toContain("/projects");
-    h.click("folder-0"); await settle(); h.click("flow-back");
+    h.click("folder-0"); await settle(); h.click("cancel-sheet");
     expect(h.region().querySelector("h1, h2")?.textContent).toBe("Default Folder");
     expect(h.input("path").value).toBe("/typed-draft");
     expect(h.mutations("setDefaultFolder")).toHaveLength(0);
@@ -341,7 +415,7 @@ describe("onboarding and clone lifecycle", () => {
     h.set("parent", "/typed-parent"); h.set("folderName", "unfinished/"); h.set("displayName", "Draft name");
     h.set("authentication", "ssh"); h.set("host", ""); h.set("signing", "pgp"); h.input("start").checked = true; h.input("init").checked = true;
     expect(h.region().querySelector('input[type="password"], textarea[data-secret]')).toBeNull();
-    h.click("browse"); await settle(); h.click("folder-0"); await settle(); h.click("flow-back");
+    h.click("browse"); await settle(); h.click("folder-0"); await settle(); h.click("cancel-sheet");
     expect(h.input("parent").value).toBe("/typed-parent"); expect(h.input("folderName").value).toBe("unfinished/"); expect(h.input("displayName").value).toBe("Draft name");
     expect(h.input("authentication").value).toBe("ssh"); expect(h.input("host").value).toBe(""); expect(h.input("signing").value).toBe("pgp");
     expect(h.input("start").hasAttribute("checked")).toBe(true); expect(h.input("init").hasAttribute("checked")).toBe(true);
@@ -350,7 +424,7 @@ describe("onboarding and clone lifecycle", () => {
   test("cancel while folders load rejects the late listing and keeps the caller draft", async () => {
     let resolve!: (value: Awaited<ReturnType<MobileHubBackend["browseFolders"]>>) => void;
     const h = harness({ browseFolders: () => new Promise(r => { resolve = r; }) }); await h.ui.ready;
-    h.ui.showDetail({ kind: "default-folder" }); await settle(); h.click("edit"); h.set("path", "/draft"); h.click("browse"); h.click("flow-back");
+    h.ui.showDetail({ kind: "default-folder" }); await settle(); h.click("edit"); h.set("path", "/draft"); h.click("browse"); h.click("cancel-sheet");
     resolve(available({ path: "/late", parent: "/", directories: [] })); await settle();
     expect(h.input("path").value).toBe("/draft"); h.click("cancel-sheet");
     expect(h.region().querySelector("h1")?.textContent).toBe("Default Folder"); expect(h.region().textContent).not.toContain("/late");
@@ -358,17 +432,17 @@ describe("onboarding and clone lifecycle", () => {
   test("late browse failure cannot replace the restored editor", async () => {
     let reject!: (error: Error) => void;
     const h = harness({ browseFolders: () => new Promise((_resolve, fail) => { reject = fail; }) }); await h.ui.ready;
-    h.ui.showDetail({ kind: "default-folder" }); await settle(); h.click("edit"); h.set("path", "/draft"); h.click("browse"); h.click("flow-back");
+    h.ui.showDetail({ kind: "default-folder" }); await settle(); h.click("edit"); h.set("path", "/draft"); h.click("browse"); h.click("cancel-sheet");
     reject(new Error("Late failure")); await settle(); expect(h.input("path").value).toBe("/draft");
     h.click("cancel-sheet"); expect(h.region().querySelector("h1")?.textContent).toBe("Default Folder");
   });
-  test("elsewhere and empty-folder transitions carry the caller; Existing Back returns Add Workspace", async () => {
+  test("management keeps elsewhere and empty-folder transitions; Existing Cancel returns Add Workspace", async () => {
     const h = harness({ createFolder: async () => completed({ path: "/projects/a" }) }); await h.ui.ready;
-    h.ui.showDetail({ kind: "default-folder" }); await settle(); h.click("edit"); h.set("path", "/draft"); h.click("browse"); await settle();
+    h.ui.showDetail({ kind: "add-workspace" }); h.click("folders"); await settle();
     h.click("elsewhere"); h.set("path", "/projects"); h.click("commit-sheet"); await settle();
     h.click("create"); h.set("name", "a"); h.click("commit-sheet"); await settle(); h.click("flow-back");
-    expect(h.input("path").value).toBe("/draft"); expect(h.mutations("setDefaultFolder")).toHaveLength(0); expect(h.mutations("createWorkspace")).toHaveLength(0);
-    h.ui.showDetail({ kind: "add-workspace" }); h.click("existing"); await settle(); h.click("folder-0"); await settle(); h.click("flow-back");
+    expect(h.region().querySelector("h1")?.textContent).toBe("Add Workspace"); expect(h.mutations("setDefaultFolder")).toHaveLength(0); expect(h.mutations("createWorkspace")).toHaveLength(0);
+    h.ui.showDetail({ kind: "add-workspace" }); h.click("existing"); await settle(); h.click("folder-0"); await settle(); h.click("cancel-sheet");
     expect(h.region().querySelector("h1")?.textContent).toBe("Add Workspace");
   });
   test("creating a workspace requires explicit Git init and preserves separate names", async () => {
@@ -383,12 +457,13 @@ describe("onboarding and clone lifecycle", () => {
     const h = harness(); await h.ui.ready; h.ui.showDetail({ kind: "add-workspace" }); h.click("create"); await settle();
     expect(h.region().textContent).toContain("Git authentication"); expect(h.region().textContent).toContain("Commit signing"); expect(h.region().textContent).not.toContain("Retained signing");
     h.set("folderName", "folder"); h.set("displayName", "Display"); h.set("authentication", "token"); h.set("host", "git.example.invalid"); h.set("signing", "pgp"); h.input("init").checked = true;
-    h.click("commit-sheet"); await settle(); expect(h.region().textContent).toContain("Git authentication: Provider identity on git.example.invalid"); expect(h.region().textContent).toContain("Commit signing: Signing identity"); expect(h.region().textContent).not.toContain("Commit signing: pgp");
+    h.click("commit-sheet"); await settle(); expect(facts(h.region())).toContainEqual(["Host", "git.example.invalid"]); expect(facts(h.region())).toContainEqual(["Credential", "Provider identity"]); expect(facts(h.region())).toContainEqual(["Credential", "Signing identity"]);
+    expect(facts(h.region())).toContainEqual(["Display name", "Display"]); expect(facts(h.region())).toContainEqual(["Parent folder", "/projects"]); expect(facts(h.region())).toContainEqual(["Folder path", "/projects/folder"]); expect(facts(h.region())).toContainEqual(["Git initialization", "Authorized"]); expect(h.mutations("createWorkspace")).toHaveLength(0);
     h.click("cancel-sheet"); expect(h.input("authentication").value).toBe("token"); expect(h.input("signing").value).toBe("pgp"); h.click("cancel-sheet"); expect(h.mutations("createWorkspace")).toHaveLength(0);
   });
   test("empty folder creation is not workspace creation and collision stays contextual", async () => {
     const h = harness({ createFolder: async () => ({ status: "rejected", problem: { kind: "conflict", message: "Folder already exists" } }) }); await h.ui.ready;
-    h.ui.showDetail({ kind: "add-workspace" }); h.click("existing"); await settle(); h.click("create"); h.set("name", "collision"); h.click("commit-sheet"); await settle();
+    h.ui.showDetail({ kind: "add-workspace" }); h.click("folders"); await settle(); h.click("create"); h.set("name", "collision"); h.click("commit-sheet"); await settle();
     expect(h.region().textContent).toContain("Folder already exists"); expect(h.mutations("createWorkspace")).toHaveLength(0); expect(h.mutations("createFolder")[0]?.args).toEqual([{ parent: "/projects", name: "collision" }]);
   });
   test("existing folder config, multiple retained hosts, and initialization intent remain distinct", async () => {
@@ -402,7 +477,7 @@ describe("onboarding and clone lifecycle", () => {
   });
   test("nested folder rename exposes affected registrations and uses ask then explicit stop consent", async () => {
     const h = harness({ renameFolder: async intent => intent.stop === "ask" ? completed({ status: "needs-stop", workspaceIds: ["a"] }) : completed({ status: "completed", value: { path: "/renamed", workspaceIds: ["a"] } }) }); await h.ui.ready;
-    h.ui.showDetail({ kind: "add-workspace" }); h.click("existing"); await settle(); h.click("rename"); await settle();
+    h.ui.showDetail({ kind: "add-workspace" }); h.click("folders"); await settle(); h.click("rename"); await settle();
     expect(h.region().textContent).toContain("Workspace a"); h.set("name", "renamed"); h.click("commit-sheet"); await settle(); h.click("commit-sheet"); await settle();
     expect(h.mutations("renameFolder")).toHaveLength(1); h.click("commit-sheet"); await settle();
     expect(h.mutations("renameFolder").map(c => c.args[0])).toEqual([{ path: "/projects", name: "renamed", stop: "ask" }, { path: "/projects", name: "renamed", stop: "stop-dependent-workspaces" }]);
@@ -410,7 +485,7 @@ describe("onboarding and clone lifecycle", () => {
   test("onboarding partial failure reports retained folder and committed registration without duplicate creation", async () => {
     const h = harness({ createWorkspace: async () => completed({ status: "failed", code: "recovery-required", message: "Journal requires recovery", retainedPath: "/projects/new", committedEntry: w("new") }) }); await h.ui.ready;
     h.ui.showDetail({ kind: "add-workspace" }); h.click("create"); await settle(); h.set("folderName", "new"); h.set("displayName", "New"); h.input("init").checked = true; h.click("commit-sheet"); await settle(); h.click("commit-sheet"); await settle();
-    expect(h.region().textContent).toContain("Folder retained: /projects/new"); expect(h.region().textContent).toContain("Registration committed"); expect(h.mutations("createWorkspace")).toHaveLength(1);
+    expect(h.region().querySelector("dt")?.closest("dl")?.textContent).toContain("/projects/new"); expect(h.region().textContent).toContain("Registration committed"); expect(h.mutations("createWorkspace")).toHaveLength(1);
   });
   test("clone validates separate identity, destination and credential-free remote URL", () => {
     expect(() => validateCloneDraft({ ...emptyCloneDraft(), url: "https://user:secret@git.invalid/repo", dest: "/projects", folderName: "repo", displayName: "Repo" })).toThrow("embed credentials");

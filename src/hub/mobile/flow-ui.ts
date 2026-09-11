@@ -1,24 +1,19 @@
 import { escapeHtml as esc } from "../../shared/html";
 import type { BackendProblem, MobileHubBackend, OperationResult, ReadResult, StopConsent, CoordinatedResult } from "./backend";
 export { readiness } from "./readiness";
+export { infoRows, type InfoRow, text, action, listRow, group, field, check, select } from "./design-system";
+import { text, action } from "./design-system";
 import { mobileHubIcon, type MobileHubIcon } from "./icons";
 import type { TaskPort, TaskPresentation } from "./task-view";
 
 export type MobileHubDetail =
   | { kind: "credential"; id: string }
   | { kind: "workspace"; id: string }
-  | { kind: "add-credential" | "tools" | "assignments" | "default-folder" | "devices" | "security" | "add-workspace" | "clone" };
+  | { kind: "add-credential" | "tools" | "assignments" | "default-folder" | "devices" | "security" | "add-workspace" | "clone" | "folders" };
 export type FlowActions = Record<string, () => unknown>;
 export type SheetPort = TaskPort;
 export type { TaskPort } from "./task-view";
-export const text = (value: string) => `<p class="mh-note">${esc(value)}</p>`;
-export const action = (key: string, label: string, destructive = false) => `<button type="button" data-flow="${esc(key)}" class="mh-text-action${destructive ? " mh-destructive" : ""}">${esc(label)}</button>`;
-export const listRow = (key: string, label: string, subtitle = "", iconName: MobileHubIcon = "folder", more?: { key: string; label: string }) => `<div class="mh-list-row"><button type="button" class="mh-list-primary" data-flow="${esc(key)}" aria-label="${esc(label + (subtitle ? `, ${subtitle}` : ""))}">${mobileHubIcon(iconName)}<span class="mh-list-copy"><strong>${esc(label)}</strong>${subtitle ? `<small>${esc(subtitle)}</small>` : ""}</span>${mobileHubIcon("chevron")}</button>${more ? `<button type="button" class="mh-list-more" data-flow="${esc(more.key)}" aria-label="${esc(more.label)}">${mobileHubIcon("more")}</button>` : ""}</div>`;
 export interface FlowPresentation { icon?: MobileHubIcon; subtitle?: string; primaryAction?: string; secondaryAction?: string; backLabel?: string; actionPlacement?: "frequent" }
-export const group = (title: string, body: string) => `<section class="mh-section"><h2>${esc(title)}</h2><div class="mh-group">${body}</div></section>`;
-export const field = (name: string, label: string, value = "", type = "text", attrs = "") => `<label class="mh-field">${esc(label)}<input name="${esc(name)}" type="${type}" value="${esc(value)}" ${attrs}/></label>`;
-export const check = (name: string, label: string, checked = false, value = "on") => `<label class="mh-check"><input type="checkbox" name="${esc(name)}" value="${esc(value)}" ${checked ? "checked" : ""}/><span>${esc(label)}</span></label>`;
-export const select = (name: string, label: string, options: Array<{ value: string; label: string; disabled?: boolean }>, value = "") => `<label class="mh-field">${esc(label)}<select name="${esc(name)}">${options.map(o => `<option value="${esc(o.value)}" ${o.value === value ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>`;
 export const value = (root: ParentNode, name: string) => root.querySelector<HTMLInputElement | HTMLSelectElement>(`[name="${name}"]`)?.value ?? "";
 export const checked = (root: ParentNode, name: string) => root.querySelector<HTMLInputElement>(`[name="${name}"]`)?.checked ?? false;
 export const values = (root: ParentNode, name: string) => [...root.querySelectorAll<HTMLInputElement>(`[name="${name}"]:checked`)].map(input => input.value);
@@ -64,7 +59,7 @@ const dismissed = new Set<string>();
 export function advisory(user: string): string {
   const key = sharedUidKey(user);
   try { if (window.localStorage.getItem(key) === "dismissed") dismissed.add(key); } catch { /* in-memory fallback */ }
-  return dismissed.has(key) ? "" : `<aside class="mh-advisory" data-shared-uid>${text(sharedUidWarning)}${action("dismiss-advisory", "Dismiss")}</aside>`;
+  return dismissed.has(key) ? "" : `<aside class="mh-advisory" data-shared-uid aria-label="Credential security"><h2>${mobileHubIcon("shield")}<span>Credentials are shared on this Hub</span></h2>${text("Assignments choose defaults for tools. They do not prevent another workspace on this Hub from accessing a credential.")}${action("dismiss-advisory", "Dismiss")}</aside>`;
 }
 export function dismissAdvisory(user: string, root: HTMLElement) {
   const key = sharedUidKey(user); dismissed.add(key);
@@ -123,7 +118,7 @@ export function createFlowEnvironment(root: HTMLElement, backend: MobileHubBacke
       for (const key of new Set([presentation?.secondaryAction, presentation?.primaryAction])) {
         if (!key || key === "flow-back") continue;
         const control = [...root.querySelectorAll<HTMLButtonElement>(".mh-flow-content button[data-flow]")].find(button => button.dataset.flow === key);
-        if (control) { toolbar?.append(control); if (key === presentation?.primaryAction) control.classList.add("mh-commit"); }
+        if (control) { toolbar?.append(control); if (toolbar && key === presentation?.primaryAction && !control.classList.contains("mh-destructive")) control.classList.add("mh-commit"); }
       }
       bind(root, { "flow-back": hooks.home, ...actions, "dismiss-advisory": () => dismissAdvisory(hooks.user(), root) });
       if (!root.inert) root.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
@@ -200,7 +195,7 @@ export function createFlowEnvironment(root: HTMLElement, backend: MobileHubBacke
     // semantic dismissal label without introducing another navigation control.
     const dismiss = taskRoot.querySelector('[data-action="cancel-sheet"]');
     if (presentation.cancelLabel && dismiss) dismiss.textContent = presentation.cancelLabel;
-    bind(taskRoot, actions);
+    bind(taskRoot, { ...actions, "dismiss-advisory": () => dismissAdvisory(hooks.user(), taskRoot) });
     return taskRoot;
   }
   const clear = () => { pageBack = hooks.home; pageBackLabel = "Back"; clearSecrets(root); root.onclick = null; root.oninput = null; root.onchange = null; root.replaceChildren(); root.hidden = true; };

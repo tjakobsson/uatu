@@ -1,0 +1,74 @@
+/* Compact semantic theme; all rem roles follow browser text enlargement.
+   Icon art, switch geometry and safe-area/layout calculations are recipe details,
+   not theme knobs. Measured keyboard/dock/toolbar outputs live in styles.css. */
+.mh-root {
+  --mh-canvas: #f2f1f7;
+  --mh-surface: #fff;
+  --mh-text: #080809;
+  --mh-muted: #6c6b73;
+  --mh-action: #0064d5;
+  --mh-action-fill: #0064d5;
+  --mh-on-action: #fff;
+  --mh-action-subtle: #edf6ff;
+  --mh-line: #dedde3;
+  --mh-selected: rgb(226 240 255 / 75%);
+  --mh-positive: #218c3e;
+  --mh-danger: #b3261e;
+  --mh-warning: #986500;
+  --mh-warning-background: #fff6d8;
+  --mh-field-background: var(--mh-canvas);
+  --mh-field-line: var(--mh-muted);
+  --mh-switch-on: #34c759;
+  --mh-switch-off: #85858d;
+  --mh-switch-line: #248a3d;
+  --mh-switch-thumb: #fff;
+  --mh-material: rgb(255 255 255 / 76%);
+  --mh-scrim: rgb(0 0 0 / 35%);
+  --mh-shadow-material: inset 0 0 0 1.5px rgb(255 255 255 / 65%), 0 8px 25px rgb(35 39 62 / 9%);
+  --mh-shadow-raised: 0 1px 8px rgb(35 39 62 / 9%);
+  --mh-shadow-thumb: 0 1px 3px #0004;
+  --mh-icon-neutral: #919197;
+  --mh-icon-purple: #b766df;
+  --mh-identity-art: linear-gradient(135deg, #409eff, #087cff);
+  --mh-font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mh-font-mono: "Hack Nerd Font Mono", monospace;
+  --mh-type-page: 2.125rem;
+  --mh-type-detail: 1.625rem;
+  --mh-type-editor: 1.625rem;
+  --mh-type-body: 1.0625rem;
+  --mh-type-value: 1.0625rem;
+  --mh-type-control: .9375rem;
+  --mh-type-secondary: .8125rem;
+  --mh-type-label: .8125rem;
+  /* Dock labels alone use the compact navigation role. */
+  --mh-type-navigation: .6875rem;
+  --mh-space-1: 4px;
+  --mh-space-2: 8px;
+  --mh-space-3: 12px;
+  --mh-space-4: 16px;
+  --mh-space-5: 20px;
+  --mh-space-6: 24px;
+  --mh-space-7: 32px;
+  --mh-radius-group: 13px;
+  --mh-radius-field: 8px;
+  --mh-radius-button: 13px;
+  --mh-radius-dialog: 18px;
+  --mh-radius-pill: 999px;
+  --mh-target: 44px;
+  --mh-motion: 150ms;
+}
+@media (prefers-color-scheme: dark) {
+  .mh-root {
+    --mh-canvas: #18181e; --mh-surface: #27272e; --mh-text: #f7f7fa;
+    --mh-muted: #b2b1bc; --mh-action: #70b1ff; --mh-action-subtle: #22364e;
+    --mh-line: #42424b; --mh-material: rgb(40 40 49 / 85%);
+    --mh-selected: #283e57; --mh-positive: #65d881; --mh-danger: #ffaaa3;
+    --mh-warning: #dbb66b; --mh-warning-background: #342c1b;
+  }
+}
+@media (prefers-contrast: more) {
+  .mh-root { --mh-switch-on: #248a3d; --mh-line: var(--mh-muted); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mh-root { --mh-motion: 0ms; }
+}

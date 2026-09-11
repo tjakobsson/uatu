@@ -140,12 +140,12 @@ test("assignment review is inert until Apply and stop failure preserves removal 
   await page.goto("/settings?detail=assignments");
   await page.locator('[data-flow="workspace-atlas"]').click();
   await page.locator('[data-flow="new-atlas"]').click();
-  await page.getByRole("combobox", { name: "Authentication", exact: true }).selectOption("token-github");
+  await page.getByRole("combobox", { name: "Git authentication credential", exact: true }).selectOption("token-github");
   await page.getByLabel("Authentication host").fill("github.com");
   await button(page, "Review").click();
   expect((await state(request)).model.workspaces.find((w: { id: string }) => w.id === "atlas").assignments).toEqual([]);
   await button(page, "Back to edit").click();
-  await expect(page.getByRole("combobox", { name: "Authentication", exact: true })).toHaveValue("token-github");
+  await expect(page.getByRole("combobox", { name: "Git authentication credential", exact: true })).toHaveValue("token-github");
   await button(page, "Review").click();
   await button(page, "Apply").click();
   await page.locator('[data-flow="assignment-0"]').click();

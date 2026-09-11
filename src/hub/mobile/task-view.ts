@@ -43,7 +43,11 @@ export function createTaskView(host: HTMLElement, foreground: () => boolean, can
           if (commit && !commit.disabled) { event.preventDefault(); commit.click(); }
         }
       });
-      (opened.querySelector<HTMLElement>("input,select,textarea") ?? opened).focus({ preventScroll: true });
+      // Orient the reader without opening a keyboard/picker or changing a draft.
+      // Confirmation entry chooses the safe action, never a consent control.
+      const orientation = confirmation ? opened.querySelector<HTMLElement>('[data-action="cancel-sheet"]') : opened.querySelector<HTMLElement>("h1");
+      if (orientation && !confirmation) orientation.tabIndex = -1;
+      if (foreground()) (orientation ?? opened).focus({ preventScroll: true });
       return opened;
     },
     key(event: KeyboardEvent) {

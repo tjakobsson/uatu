@@ -28,12 +28,12 @@ test("Settings page keeps contextual controls and top Back, preserving sole disp
   env.page("Settings", ""); expect(root.classList.contains("mh-object-detail")).toBe(false);
 });
 
-test("list row is one named hierarchy button and a separate accessible More", () => {
-  const { document } = parseHTML(listRow("folder", "A <folder>", "Git repository", "folder", { key: "more", label: "Actions for A <folder>" }));
-  expect(document.querySelectorAll("button").length).toBe(2);
+test("list row is one named hierarchy button without hidden context actions", () => {
+  const { document } = parseHTML(listRow("folder", "A <folder>", "Git repository", "folder"));
+  expect(document.querySelectorAll("button").length).toBe(1);
   expect(document.querySelector("button button")).toBeNull();
   expect(document.querySelector(".mh-list-primary")?.getAttribute("aria-label")).toBe("A <folder>, Git repository");
-  expect(document.querySelector(".mh-list-more")?.getAttribute("aria-label")).toBe("Actions for A <folder>");
+  expect(document.querySelector('.mh-list-more, [data-flow="more"]')).toBeNull();
 });
 
 test("explicit page actions dispatch once; review can rename its sole cancel", () => {

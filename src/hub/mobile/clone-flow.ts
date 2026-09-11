@@ -1,8 +1,8 @@
 import type { CloneIntent, CloneStreamEvent, KeyTarget } from "./backend";
 import type { CloneJobResult } from "../clone-jobs";
 import { normalizeProviderHost, type PublicCredentialDto } from "../credential-types";
-import { absolute, action, advisory, clearSecrets, displayName, field, folderName, group, hubForeground, required, select, sharedUidKey, showContextualError, text, value, type FlowEnvironment } from "./flow-ui";
-import { bindAuthenticationHost, configurationFields, readConfiguration, type ConfigurationDraft } from "./onboarding-flows";
+import { absolute, action, advisory, clearSecrets, displayName, field, folderName, group, hubForeground, infoRows, required, select, sharedUidKey, showContextualError, text, value, type FlowEnvironment } from "./flow-ui";
+import { bindAuthenticationHost, configurationFacts, configurationFields, readConfiguration, technicalField, type ConfigurationDraft } from "./onboarding-flows";
 
 export type CloneDraft = CloneIntent;
 export function emptyCloneDraft(): CloneDraft { return { url: "", dest: "", folderName: "", displayName: "", credentialId: null, retainedAuthentication: [], signing: null, start: false }; }
@@ -113,7 +113,7 @@ export function createCloneFlow(env: FlowEnvironment, unlock: (target: KeyTarget
     if (attempt) { renderRecovery(); return; }
     const choices = [{ value: "", label: "No clone identity" }, ...catalog.filter(c => (c.type === "ssh" && c.capabilities.includes("ssh-authentication")) || (c.type === "token" && c.capabilities.includes("https-git"))).map(c => ({ value: c.id, label: `${c.name} · ${c.type}${c.enabled ? "" : " · Disabled"}`, disabled: !c.enabled }))];
     if (draft.credentialId && !choices.some(c => c.value === draft.credentialId)) choices.push({ value: draft.credentialId, label: "Missing clone identity; choose a replacement", disabled: true });
-    const root = env.page("Clone Repository", advisory(env.user()) + field("url", "Remote URL", draft.url, "text", 'autocomplete="off" spellcheck="false"') + field("dest", "Destination parent", draft.dest) + field("folderName", "Checkout folder name", draft.folderName) + field("displayName", "Workspace display name", draft.displayName) + group("Clone identity", select("cloneCredential", "One-time clone credential", choices, draft.credentialId ?? "") + text("The clone identity is separate from credentials used after setup.") + action("unlock", "Unlock selected clone identity")) + group("Credentials used after setup (optional)", configurationFields(catalog, configuration())) + action("review", "Review clone") + (actionProblem ? text(actionProblem) : ""), {
+    const root = env.page("Clone Repository", advisory(env.user()) + technicalField("url", "Remote URL", draft.url, 'autocomplete="off"') + technicalField("dest", "Destination parent", draft.dest) + technicalField("folderName", "Checkout folder name", draft.folderName) + field("displayName", "Workspace display name", draft.displayName) + group("Clone identity", select("cloneCredential", "One-time clone credential", choices, draft.credentialId ?? "") + text("The clone identity is separate from credentials used after setup.") + action("unlock", "Unlock selected clone identity")) + group("Credentials used after setup (optional)", configurationFields(catalog, configuration())) + action("review", "Review clone") + (actionProblem ? text(actionProblem) : ""), {
       "flow-back": back,
       review: () => { try { snapshot(root, true); review(); } catch (e) { localError(e, true); } },
       unlock: () => { snapshot(root); const c = catalog.find(c => c.id === draft.credentialId); if (!c || c.type !== "ssh" || !c.enabled) { localError(new Error("Select an enabled SSH clone identity to unlock. Tokens do not support passphrase unlock."), true); return; } unlock({ id: c.id, type: "ssh" }, () => renderForm(), () => renderForm(), "Unlock Clone Identity"); },
@@ -126,7 +126,7 @@ export function createCloneFlow(env: FlowEnvironment, unlock: (target: KeyTarget
   function localError(error: unknown, reveal = false) { showContextualError(env.root, error instanceof Error ? error.message : "The clone form is invalid.", { reveal }); }
   function review() {
     const intent = structuredClone(draft);
-    env.task("Review Clone", text(`${intent.displayName} · ${intent.dest}/${intent.folderName}`) + text(intent.url) + text(`Clone identity: ${catalog.find(c => c.id === intent.credentialId)?.name ?? "None"}`) + intent.retainedAuthentication.map(a => text(`Git authentication: ${catalog.find(c => c.id === a.credentialId)?.name ?? "Unavailable credential"} · ${a.host}`)).join("") + text(`Commit signing: ${intent.signing ? catalog.find(c => c.id === intent.signing)?.name ?? "Unavailable credential" : "None"}`) + text(intent.start ? "Start after clone explicitly requested." : "Register the completed checkout stopped.") + (intent.start && !intent.retainedAuthentication.length && !intent.signing ? text("No credentials assigned after setup. Git authentication and signing may be unavailable in the started workspace.") : ""), { label: "Clone", run: () => { env.sheet.close(); return submit(intent); } }, {}, () => renderForm(), { cancelLabel: "Back to edit" });
+    env.task("Review Clone", group("Workspace", infoRows([{ label: "Display name", value: intent.displayName }, { label: "Parent folder", value: intent.dest, mono: true }, { label: "Folder name", value: intent.folderName, mono: true }, { label: "Checkout path", value: `${intent.dest.replace(/\/$/, "")}/${intent.folderName}`, mono: true }])) + group("Clone operation", infoRows([{ label: "Remote URL", value: intent.url, mono: true }, { label: "One-time clone identity", value: catalog.find(c => c.id === intent.credentialId)?.name ?? "None", detail: "Used only for this clone; not automatically assigned after setup." }, { label: "Git initialization", value: "Clone the remote repository; no separate Git initialization" }, { label: "Start", value: intent.start ? "Start after clone explicitly requested" : "Register the completed checkout stopped" }])) + configurationFacts(catalog, intent.retainedAuthentication, intent.signing) + (intent.start && !intent.retainedAuthentication.length && !intent.signing ? text("No credentials assigned after setup. Git authentication and signing may be unavailable in the started workspace.") : ""), { label: "Clone", run: () => { env.sheet.close(); return submit(intent); } }, {}, () => renderForm(), { cancelLabel: "Back to edit" });
   }
   async function submit(intent: CloneIntent) {
     if (attempt || jobId) return;
@@ -225,7 +225,7 @@ export function createCloneFlow(env: FlowEnvironment, unlock: (target: KeyTarget
       case "succeeded": return `${r.target}: registered ${r.running ? "and running" : "stopped"}.`;
       case "clone-failed": return `Clone failed at ${r.target}: ${r.error}. Inspect retained state before retrying.`;
       case "register-failed": return `Checkout at ${r.target} could not be registered: ${r.error}. Inspect the retained folder; do not blindly clone over it.`;
-      case "start-failed": return `Start failed: ${r.error}. ${r.workspaceId ? `Configured workspace ${r.workspaceId} remains stopped.` : `Inspect ${r.target} for retained state.`}`;
+      case "start-failed": return `Start failed: ${r.error}. ${r.workspaceId ? "The configured workspace remains stopped." : "Inspect the checkout for retained state."}`;
       case "cleanup-failed": return `Cleanup failed at ${r.target}: ${r.error}. Files or registration may remain; inspect before retrying.`;
       case "cancelled": return `Clone cancelled at ${r.target}.`;
       case "timed-out": return `Clone timed out (${r.reason ?? "timeout"}) at ${r.target}.`;
@@ -292,7 +292,7 @@ export function createCloneFlow(env: FlowEnvironment, unlock: (target: KeyTarget
       const prompt = env.root.querySelector<HTMLElement>(".mh-clone-prompt");
       if (state !== "active") { if (prompt) { clearSecrets(prompt); prompt.remove(); } }
       else if (!prompt) results.insertAdjacentHTML("beforebegin", promptFields());
-      results.innerHTML = result ? text("Review the outcome and any retained path before another clone. A new attempt is a distinct operation.") : "";
+       results.innerHTML = result ? group("Outcome", infoRows([{ label: "Checkout location", value: result.target, mono: true }, { label: "Result", value: resultText(result), tone: result.status === "succeeded" ? "positive" : "warning" }])) + text("Review the outcome and any retained path before another clone. A new attempt is a distinct operation.") : "";
       const primary = recoveryPrimary();
       env.root.querySelector("[data-clone-actions]")!.innerHTML = result
         ? (result.status === "succeeded" && result.running ? action("inspect", "Workspace information") : "") + (primary !== "folder" ? action("folder", "Inspect checkout location") : "") + action("edit", "Return to clone options")
@@ -304,7 +304,7 @@ export function createCloneFlow(env: FlowEnvironment, unlock: (target: KeyTarget
           const toolbar = env.root.querySelector<HTMLElement>(".mh-flow-toolbar") ?? env.root.querySelector<HTMLElement>(".mh-flow-content")!;
           toolbar.insertAdjacentHTML("beforeend", action(primary, ""));
           button = toolbar.lastElementChild as HTMLButtonElement;
-          button.dataset.clonePrimary = ""; button.classList.add("mh-commit");
+           button.dataset.clonePrimary = "";
         }
         button.dataset.flow = primary;
         button.textContent = primary === "open" ? "Open workspace" : primary === "inspect" ? "Workspace information" : primary === "folder" ? "Inspect checkout location" : "Reconcile original attempt";

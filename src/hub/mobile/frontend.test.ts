@@ -217,7 +217,9 @@ describe("mobile Hub scoped composition", () => {
     expect(secret.value).toBe(""); expect(secret.isConnected).toBe(false); expect(unlocks).toBe(0);
   });
   test("every visual rule opts into the Hub root, including theme/material alternatives", async () => {
-    const css = (await Bun.file(new URL("./styles.css", import.meta.url)).text()).replace(/\/\*[\s\S]*?\*\//g, "");
+    const entry = await Bun.file(new URL("./styles.css", import.meta.url)).text();
+    const imports = await Promise.all([...entry.matchAll(/@import "(.+?)";/g)].map(match => Bun.file(new URL(match[1]!, import.meta.url)).text()));
+    const css = [entry.replace(/@import ".+?";/g, ""), ...imports].join("\n").replace(/\/\*[\s\S]*?\*\//g, "");
     for (const match of css.matchAll(/([^{}]+)\{/g)) {
       const selector = match[1]!.trim();
       if (selector.startsWith("@media")) continue;
@@ -259,7 +261,9 @@ describe("mobile Hub scoped composition", () => {
     const h = harness(); await h.ui.ready; h.click("info:a"); await settle();
     expect(h.root.querySelector('[role="dialog"]')).toBeNull();
     expect(h.root.querySelector('.mh-flow-page')?.textContent).toContain("editor · Attached");
-    expect(h.root.querySelector('.mh-flow-page')?.textContent).toContain("No credentials assigned");
+    expect(h.root.querySelector('.mh-flow-page')?.textContent).toContain("Git authentication");
+    expect(h.root.querySelector('.mh-flow-page')?.textContent).toContain("Commit signing");
+    expect([...h.root.querySelectorAll('.mh-flow-page dd')].filter(el => el.textContent === "None assigned")).toHaveLength(2);
     expect(h.root.querySelector<HTMLElement>(".mh-page main")?.inert).toBe(true);
     expect(h.root.querySelector('[data-action^="manage:"]')).toBeNull();
     h.root.querySelector<HTMLButtonElement>('[data-flow="flow-back"]')!.click();

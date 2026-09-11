@@ -16,7 +16,7 @@ export function createMobileHubFlows(root: HTMLElement, backend: MobileHubBacken
   const credentials = createCredentialFlows(owner.env);
   const workspaces = createWorkspaceFlows(owner.env, hooks.startWorkspace);
   const onboarding = createOnboardingFlows(owner.env);
-  const clone = createCloneFlow(owner.env, credentials.unlock, path => { show({ kind: "add-workspace" }, true); onboarding.browse(path); });
+  const clone = createCloneFlow(owner.env, credentials.unlock, path => { show({ kind: "folders" }, true); onboarding.browse(path, undefined, () => show({ kind: "clone" }, true)); });
   function show(next: MobileHubDetail, notify = false) {
     clone.hide(); sheet.close(); owner.begin(); detail = next;
     if (notify) hooks.detailChanged?.(next);
@@ -30,6 +30,7 @@ export function createMobileHubFlows(root: HTMLElement, backend: MobileHubBacken
       case "security": workspaces.security(); break;
       case "default-folder": onboarding.defaultFolder(); break;
       case "add-workspace": onboarding.add(); break;
+      case "folders": onboarding.browse(); break;
       case "clone": clone.show(); break;
     }
   }

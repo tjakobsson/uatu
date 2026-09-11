@@ -5,7 +5,23 @@ Passing tests, reference normalization approval and approved additive frontend
 contracts do not approve the served visual/interaction design. No exceptions or
 omissions listed here have been accepted by the user.
 
-## Current candidate — direct Settings and full-page editors
+## Current candidate — focused folder picker on the shared design system
+
+**Latest refinement:** [folder-picker/verification.md](folder-picker/verification.md).
+Full-page Cancel/current folder/Choose separates remote-folder selection from
+Add Workspace → Manage folders. Focused picker tests pass in both engines;
+the current full-app matrix and physical-device/approval gates remain open.
+
+**Current shared-system consolidation:** [design-system.md](design-system.md).
+The user approved creating the small reusable Web design system; this does not
+approve every rendered state. Product modules/tokens now provide the shared
+patterns, and `/review/design-system` is a separate local-only reference.
+
+**Current readability refinement:** [readability-update.md](readability-update.md).
+The user requested the pre-work checkpoint be committed/pushed; `c259efb` was
+pushed to the fork before the new work. Structured information, canonical Devices
+navigation, prominent notice, green Boolean switches and deliberate field entry
+refine the same full-page model. No visual/interaction approval is inferred.
 
 **The previous Settings/cold-entry presentation is superseded:** the user rejected
 drawers and More menus and explicitly chose full-page editors. Current scope
@@ -32,7 +48,7 @@ they do not certify this corrected version. Task 9.6 is still open.
 |---|---|
 | Candidate product URL | `[PRIVATE_REVIEW_ORIGIN_REDACTED]/` — user confirmed phone access |
 | Source version / dirty-tree description | Uncommitted frontend implementation over preserved dirty baseline; no clean-Git or released-version claim. |
-| Served frontend content fingerprint | `sha256:5ed20838d9c8813222b8a0ffd972efbb916cc698d95611b85c4317a778671d65` — direct Settings/full-page editors |
+| Served frontend content fingerprint | `sha256:950c3438aa9847910394485417cf27e112eb80241ed4be887f4b8265e7fc86bc` — focused folder picker |
 | Evidence snapshot identity | `/review/evidence/manifest.json` supplies snapshot time and individual SHA-256 values, separate from frontend fingerprint. |
 | Remote access / handoff delivery timestamp | URLs delivered 2026-09-10. Local two-engine smoke passed; user answered “It opens” to the explicitly connectivity-only phone question. No design approval inferred. |
 | Reviewer / approval timestamp | AWAITING USER |

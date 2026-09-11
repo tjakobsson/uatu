@@ -204,6 +204,55 @@ named report view there retains every original result. Report Back returns to
 the existing result without running checks again. Long public identifiers/user
 IDs receive full-width value treatment rather than a narrow trailing column.
 
+### Information hierarchy, explicit interaction and Boolean switches
+
+After checkpoint `c259efb` was committed and pushed at the user's request, the
+next refinement distinguishes read-only facts, editable fields, action rows and
+important notices. Purpose, workspace and review data use labeled semantic facts;
+review shows Current / After applying and prospective changes rather than prose
+or already-completed-looking states. Normalize hosts at explicit Review to meet
+the existing API contract while preserving raw drafts on Back and keeping other
+hosts/omitted roles unchanged.
+
+Boolean inputs use accessible green switches in rows, retaining draft semantics;
+mutually exclusive choices remain selection controls. Opening an editor focuses
+its heading, never automatically opens a picker/keyboard or emits changes. Saved
+values remain accurate. Ordinary actions no longer inherit filled primary-button
+styling that resembles a selection. The security notice is prominent before
+credential controls, with its existing per-user dismissal policy; Devices has
+one canonical navigation entry, without filtering genuine API device records.
+
+### Shared Uatu Web design system
+
+The user approved consolidating the mobile Hub's existing patterns into a small
+Apple-inspired Web design system. `design-system.ts` owns stateless semantic
+primitives, `tokens.css` owns a compact semantic theme, and `styles.css` owns one
+authoritative recipe per pattern. Actual overview/flow callers use these shared
+implementations; compatibility exports do not duplicate renderers. Lifecycle,
+validation, effects, history and measured geometry remain with existing owners.
+
+Document the interface and usage in `design/hub-mobile/design-system.md`, and
+serve a separately bundled test-owned reference at `/review/design-system` using
+the actual modules. Reference examples are local-only, outside product Settings
+and shipping bundles. This is not a new framework, native UIKit/SF Symbols port,
+desktop/workspace-interior redesign, or authorization for live backend rollout.
+
+### Focused remote-folder selection
+
+Following the user's folder-selector feedback, separate choosing a destination
+from managing folders. Use the shared full-page task owner for a read-only Hub
+folder picker: Cancel/current location/Choose header, a scrolling directory list,
+parent navigation and explicit loading/empty/error recovery. The header stays
+visible; Choose returns a backend-verified path once, not a stale request or an
+implicit click on a folder row. Caller drafts and cancellation context survive.
+
+Default Folder, Create Workspace parent and Existing Folder registration use the
+focused selector. Folder maintenance remains available through the explicit
+Manage folders destination in Add Workspace, including retained-path recovery;
+no operations are deleted or hidden in More. Native iPhone filesystem pickers
+would target the wrong filesystem. No search, favorites, permission flags or
+new public API is invented. Add the actual picker to the shared reference catalog.
+
 - **Large Hub module extraction** -> move by reviewed vertical slice, keep existing desktop rendering active, reuse domain semantics, and require local ownership rather than copying the global inline controller.
 - **Global workspace assumptions survive hiding** -> test input isolation, cached request base, URL dispatch, visibility/resize callbacks and scroll preservation on all four real surfaces before broad UI work.
 - **Mock conceals an integration mismatch** -> use existing types/protocols, fail unhandled calls, retain operation logs and explicit future contract gaps; no claim of live backend correctness.

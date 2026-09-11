@@ -3,7 +3,7 @@ import { parseHTML } from "linkedom";
 import { createSyntheticBackend } from "../../../tests/mobile-hub-review/backend";
 import { mountMobileHub } from "./frontend";
 import type { MobileHubBackend } from "./backend";
-import { credentialPurpose } from "./credential-flows";
+import { readOnlyPurposes } from "./credential-flows";
 
 const originals = new Map(["window", "document", "navigator"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
 let document: Document, dispose: (() => void) | undefined;
@@ -64,10 +64,9 @@ for (const failure of ["throw", "mismatch", "unavailable"] as const) test(`${fai
   for (const c of catalog.value) {
     h.ui.showDetail({ kind: "credential", id: c.id }); await settle();
     expect(h.region().querySelector("h1")?.textContent).toBe(c.name);
-    expect(h.region().textContent).toContain("Purpose"); expect(h.region().textContent).toContain(credentialPurpose(c));
-    const purposeLabels = { "ssh-authentication": "SSH connections", "ssh-signing": "Signing commits with SSH", "openpgp-signing": "Signing commits with OpenPGP", "https-git": "HTTPS Git connections", "github-cli": "GitHub CLI", "gitlab-cli": "GitLab CLI" };
-    for (const capability of c.capabilities) expect(h.region().textContent).toContain(purposeLabels[capability]);
-    expect(h.region().querySelector('[data-credential-fact="lock"] .mh-value')?.textContent).toBe(c.type === "token" ? undefined : "Unknown");
+    expect(h.region().textContent).toContain("Used for");
+    expect(h.region().textContent).toContain(parseHTML(readOnlyPurposes(c)).document.querySelector("dl")!.textContent);
+    expect(h.region().querySelector('[data-credential-fact="lock"] dd')?.textContent).toBe(c.type === "token" ? undefined : "Unknown");
     const rows = [...h.region().querySelectorAll('[data-readiness-layer]')];
     expect(rows).toHaveLength(0);
     expect(h.region().querySelectorAll('[data-flow="retry-facts"]')).toHaveLength(1);
@@ -78,7 +77,7 @@ for (const failure of ["throw", "mismatch", "unavailable"] as const) test(`${fai
     expect(h.region().querySelector('[data-flow="delete"]')).not.toBeNull();
   }
   h.ui.showDetail({ kind: "credential", id: "ssh-locked" }); await settle(); fail = false; h.click("retry-facts"); await settle();
-  expect(h.region().querySelector('[data-credential-fact="lock"] .mh-value')?.textContent).toBe("Locked");
+  expect(h.region().querySelector('[data-credential-fact="lock"] dd')?.textContent).toBe("Locked");
   expect(h.region().querySelector('[data-flow="retry-facts"]')).toBeNull();
 });
 

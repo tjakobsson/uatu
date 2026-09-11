@@ -5,10 +5,10 @@ const preview = await Bun.file(new URL("../../src/preview/file-navigation.css", 
 const shell = await Bun.file(new URL("../../src/styles.css", import.meta.url)).text();
 const markup = await Bun.file(new URL("../../src/index.html", import.meta.url)).text();
 
-test("Side field normalizes WebKit appearance and scales label/value spacing together", () => {
+test("radio preferences keep checkmarks and values wrap without shrinking", () => {
   expect(hub).toMatch(/\.mh-preference-choices input\[type="radio"\]\s*\{[^}]*inset: 0;[^}]*width: 100%;[^}]*height: 100%/);
   expect(hub).toContain('.mh-check:has(input:checked)::after { visibility: visible; }');
-  expect(hub).toContain('.mh-check:has(input:focus-visible) { outline: 3px solid var(--mh-blue);');
+  expect(hub).toContain('.mh-check:has(input:focus-visible) { outline: 3px solid var(--mh-action);');
   expect(hub).toMatch(/\.mh-root \.mh-value\s*\{[^}]*flex-shrink: 0;[^}]*max-width: 38%/);
   expect(hub.match(/\.mh-root \.mh-value\s*\{[^}]*\}/)?.[0]).not.toContain("nowrap");
 });

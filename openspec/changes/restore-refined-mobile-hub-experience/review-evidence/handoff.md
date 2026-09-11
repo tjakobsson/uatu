@@ -7,12 +7,13 @@ is authorized by these documents or tests.
 
 ## Review access (delivered and phone-confirmed 2026-09-10)
 
-**Current candidate:** [page-based-settings.md](page-based-settings.md). Settings
-actions are direct, editors/results are full pages, and only consequential
-confirmations are centered dialogs. Normal Settings no longer embeds diagnostic
-panels; reports belong to an explicit setup check. Cold-entry repair remains.
-No visual approval or verification waiver is inferred. Earlier refinements and
-full-suite/visual results describe historical candidates, not current approval.
+**Current candidate:** [focused folder picker](folder-picker/verification.md),
+building on the [shared design system](design-system.md). Folder rows navigate;
+Choose selects; Add Workspace → Manage folders retains maintenance separately.
+Interactive reference: `/review/design-system`; guide: `/review/design-system/guide`.
+The checkpoint `c259efb` remains the last requested commit/push. Direct actions,
+single Devices entry, deliberate field entry and cold-loading safeguards remain.
+No visual approval or verification waiver is inferred; older captures are historical.
 
 - Product: `[PRIVATE_REVIEW_ORIGIN_REDACTED]/`
 - Separate controller: `[PRIVATE_REVIEW_ORIGIN_REDACTED]/review/controller`
@@ -27,13 +28,13 @@ full-suite/visual results describe historical candidates, not current approval.
 | Served-version field | Status |
 |---|---|
 | Source version / dirty-tree description | Uncommitted implementation atop preserved dirty baseline; fingerprint identifies served frontend bytes, not a clean Git revision. |
-| Frontend content fingerprint (`sha256:…`) | `sha256:5ed20838d9c8813222b8a0ffd972efbb916cc698d95611b85c4317a778671d65` |
+| Frontend content fingerprint (`sha256:…`) | `sha256:950c3438aa9847910394485417cf27e112eb80241ed4be887f4b8265e7fc86bc` |
 | Instance id / owned PID | Use `bun tests/mobile-hub-review/manage.ts status` for the current owned process and instance; they change on scoped restart. |
 | Evidence manifest hash/snapshot time | Served `/review/evidence/manifest.json` records snapshot time and per-file SHA-256; it is separate from frontend fingerprint and approval. |
-| Local HTTP / SSE / WebSocket | PASS against running instance in Chromium and WebKit via `served-smoke.ts`. |
+| Earlier local HTTP / SSE / WebSocket | Historical two-engine `served-smoke.ts` pass; not a fresh transport matrix for the picker candidate. |
 | Remote HTTPS / phone | User confirmed Workspaces opens on the phone on 2026-09-10. No physical interaction/accessibility or visual approval inferred. |
 | Earlier pre-correction full matrix | **172 passed**, Chromium/WebKit, before the iOS correction; not a pass for the current candidate. |
-| Current candidate verification | **342 tests / 2851 assertions**, both typechecks pass. Targeted Chromium task/history cases and a 9-check visual-polish run passed; the latest recapture failed before page creation. Full current cross-engine integration remains incomplete. |
+| Current candidate verification | **384 tests / 3772 assertions**, both typechecks pass; focused picker **10/10** Chromium/WebKit and reference **2/2** Chromium. Broader current cross-engine integration remains incomplete. |
 | User visual/interaction decision and explicit exceptions | **AWAITING USER REVIEW** |
 
 Content fingerprint identifies served asset bytes, not Git cleanliness or user

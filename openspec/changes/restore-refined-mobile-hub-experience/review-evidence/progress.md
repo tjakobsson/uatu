@@ -1,5 +1,93 @@
 # Frontend implementation progress
 
+## 2026-09-11 — focused folder picker published
+
+Full-page Cancel/current folder/Choose now separates read-only directory selection
+from Add Workspace → Manage folders. The actual picker module is also available
+in `/review/design-system`; the hosted guide documents its restricted backend
+capability, draft behavior and remote Hub filesystem scope. See
+`folder-picker/verification.md` for design sources, workflow evidence and limits.
+
+Final focused checks: **384 tests / 3772 assertions**, both typechecks pass;
+**10/10 picker cases** across Chromium and WebKit (20.5s, no retries/skips), plus
+**2/2 Chromium reference cases** (4.2s). The earlier assertion/type adapter issues
+are reconciled. Browser JSON now uses an explicit repository evidence path rather
+than a config-relative duplicate tree. These scoped passes do not certify the
+broader current full-app matrix, physical iOS behavior or approved pixel goldens.
+
+Scoped restart stopped only prior review PID **90418**, then verified new PID
+**89753**, instance **1c84eea3-59af-4ebf-9cb8-618472826b28** on loopback 4703.
+Frontend fingerprint:
+`sha256:950c3438aa9847910394485417cf27e112eb80241ed4be887f4b8265e7fc86bc`.
+Independent reference fingerprint:
+`sha256:411392257fd588f01fc0ca38555e8798c64b8790e3b3e3c65ffd2614ad6bacb0`.
+
+Local HTTP returned 200 for product, Settings, `/?detail=folders`, reference,
+guide, evidence, acceptance, handoff and picker verification routes. All **20**
+allowlisted picker artifacts (18 PNGs, verification and browser JSON) were fetched
+and matched the served manifest's sizes and SHA-256 values. Evidence snapshot:
+**2026-09-11T10:08:49.754Z**. Served browser JSON confirms 10 expected, zero
+unexpected/flaky/skipped. Tailscale mappings remain unchanged at 443→4700,
+8443→4701, 8444→4702 and review 8445→4703. Phone connectivity was confirmed for
+the earlier review; no fresh physical-device validation is inferred here.
+
+**60/66 tasks complete.** Still open: 7.1, 7.4, 8.3, 9.6, 10.4 and 11.4.
+No dependency installation, commit/push, live integration, spec sync or archive.
+The isolated candidate is ready for renewed user visual/interaction review;
+approval and accepted exceptions remain unrecorded.
+
+## 2026-09-11 — shared design system and reference published
+
+The approved small Web design system is documented at
+`design/hub-mobile/design-system.md` and implemented through shared semantic
+primitives, `tokens.css`, consolidated recipes and existing lifecycle owners.
+Actual frontend callers use those primitives. The separate reference page is
+available at `/review/design-system`, with its source guide at
+`/review/design-system/guide`; neither is product Settings or a backend mutation UI.
+
+**372 tests passed / 3566 assertions**, both typechecks pass. A Chromium reference
+interaction/responsive run passed; the latest follow-up failed during page setup
+before actions. Full current cross-engine/physical-device/golden gates remain
+open. Details and independent fingerprints are in `design-system.md`.
+
+Scoped restart stopped only review PID 85093 and started PID **90418**, instance
+**918746ec-614c-457d-b618-6849cf5af1c8**. Product fingerprint:
+`sha256:b0f0e5a6ed242178693a57480648f7c0e8f8d85a676812b40b44209975205d1c`.
+Reference fingerprint:
+`sha256:8031124423f37240b7b43e2393fba177d0e2af018f49cca0c00f070fb2fc151c`.
+Settings, reference, guide, manifest and evidence report returned HTTP 200.
+Existing Tailscale mappings and other services were unchanged.
+
+**56/62 tasks complete.** No new dependency, framework, commit/push, live integration,
+spec sync or archive. The user-approved design-system direction is not visual
+approval of every state; current review and historical verification limits remain.
+
+## 2026-09-10 — checkpoint pushed, readability pass published
+
+Before new UX work, committed/pushed **c259efb** to
+`https://github.com/addiberra/uatu.git`, branch `design/hub-mobile-navigation`.
+The checkpoint excludes private `.local` data, the separate worktree, unrelated
+tooling deletions and raw browser outputs. It was not amended. New readability
+changes remain uncommitted, as the request was for a pre-work checkpoint.
+
+Current changes/evidence: `readability-update.md` and `readability/final/`.
+**359 tests passed / 3030 assertions**; product and review typechecks pass.
+Targeted native Chromium checks verified heading-only entry focus, no opening
+change/commit events, draft switches, explicit picker selection, structured
+review, canonical Devices navigation and notice dismissal. Final capture has
+**8 passing supplemental checks / 6 manually inspected images**. Current full
+WebKit/physical-device/golden verification remains open, not inherited.
+
+Scoped restart stopped old review PID 84505 and started PID **85093**, instance
+**347cc685-7983-46b3-b07f-1c5c029c28ee**. Health matches
+`sha256:d9d6b47fa2c48dcd28ac9a17ef376705446dc11cb28cd6168da9636fa9d4b4c9`.
+Product Settings/Clone and current evidence/report/images returned HTTP 200.
+No live Hub or other Tailscale endpoint was changed.
+
+**52/58 tasks complete.** Existing approval and full-matrix/evidence gates remain
+pending. No dependency installation, additional commit, live integration,
+spec sync or archive followed the checkpoint.
+
 ## 2026-09-10 — direct Settings/full-page editors published
 
 The user explicitly chose full-page editors after rejecting drawers, More menus
