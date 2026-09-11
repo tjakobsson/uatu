@@ -7,6 +7,7 @@ Throughout this spec, "phone-class viewport" means a viewport that is BOTH
 coarse-pointer (`pointer: coarse`) AND narrower than the 900-pixel stacked-layout
 breakpoint. iPads in landscape and narrow desktop windows are not phone-class.
 ## Requirements
+
 ### Requirement: Organize sidebar content into resizable panes
 The browser UI SHALL organize the expanded sidebar as a stack of panes. The pane catalog SHALL include `Change Overview`, `Files`, and `Git Log`, all available regardless of session state — the user MAY toggle any pane's visibility via the per-pane visibility menu. The document tree SHALL render inside the `Files` pane and MUST preserve existing document selection and follow-mode interaction (see the `follow-mode` capability). Tree-internal behaviors that are owned by the `@pierre/trees` library — directory expansion handling, binary-entry presentation, and any future row-annotation behavior such as relative-time labels — are governed by the `document-tree` capability rather than this requirement, and this requirement no longer asserts that they survive the library swap. Pane visibility, collapsed state, and vertical sizing SHALL persist across reloads in the same browser for that origin under a single set of storage keys (no per-Mode partitioning). The pane stack SHALL fill the available expanded-sidebar height and MUST NOT force the whole sidebar body to scroll. Scrollbars used inside panes and preview overflow regions SHOULD be thin and visually light while remaining discoverable. The existing whole-sidebar collapse and expand controls MUST remain separate from per-pane visibility and collapse controls.
 
@@ -147,10 +148,10 @@ The browser UI SHALL provide a control that collapses the sidebar into a narrow 
 - **THEN** the document list returns to its previous width
 
 ### Requirement: Animate the live connection indicator
-While the browser UI is connected to the live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The pulse MUST be disabled when the user's operating system requests reduced motion. The indicator's label MUST read `Connected` while the channel is open, `Reconnecting` while it is recovering, and `Connecting` before the first successful connect. The indicator MUST expose a hover tooltip whose text describes the current connection state to the uatu backend (for example, `Connected to the uatu backend`). The connection indicator SHALL be rendered inside the sidebar header, stacked beneath the `UatuCode` wordmark, so the indicator visually belongs to the application chrome rather than the per-document preview controls. As a tradeoff of this placement, collapsing the sidebar MAY hide the indicator along with the rest of the sidebar chrome. The indicator's label and animation MUST NOT vary by any Mode-equivalent state — the SPA is a single mode.
+While the browser UI has received and applied authoritative state from its current live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The indicator MUST remain reconnecting until a current replacement channel has supplied authoritative state, and MUST return to connected immediately after that recovery succeeds rather than waiting for a later file change. The pulse MUST be disabled when the user's operating system requests reduced motion. The indicator's label MUST read `Connected` while the channel is confirmed live, `Reconnecting` while it is recovering, and `Connecting` before the first successful connect. The indicator MUST expose a hover tooltip whose text describes the current connection state to the uatu backend (for example, `Connected to the uatu backend`). The connection indicator SHALL be rendered inside the sidebar header, stacked beneath the `UatuCode` wordmark, so the indicator visually belongs to the application chrome rather than the per-document preview controls. As a tradeoff of this placement, collapsing the sidebar MAY hide the indicator along with the rest of the sidebar chrome. The indicator's label and animation MUST NOT vary by any Mode-equivalent state - the SPA is a single mode. On a hub-served page the live update channel is the hub's brokered stream, and the indicator SHALL reflect that stream's transport state together with the current workspace's applied `document` state; a topic-scoped resync or unavailability for a chat topic MUST NOT change the shell indicator, and Chat transport status SHALL remain scoped to the Chat surface.
 
 #### Scenario: The indicator pulses while connected to the server
-- **WHEN** the browser UI's event channel is open
+- **WHEN** the browser UI's current event channel supplies authoritative state that the client applies
 - **THEN** the connection indicator displays a pulsing animation labeled `Connected`
 - **AND** the indicator's hover tooltip reads `Connected to the uatu backend`
 
@@ -159,6 +160,16 @@ While the browser UI is connected to the live update channel, the connection ind
 - **THEN** the indicator stops pulsing
 - **AND** the label reads `Reconnecting`
 - **AND** the hover tooltip describes the reconnecting state
+
+#### Scenario: Successful recovery clears reconnecting immediately
+- **WHEN** a replacement event channel supplies and applies its authoritative state
+- **THEN** the indicator returns to `Connected` without waiting for a watched file to change
+- **AND** an older recovery attempt cannot return the indicator to a stale state
+
+#### Scenario: Chat status does not misrepresent document connectivity
+- **WHEN** a chat topic on the brokered stream requires a resync while the stream and its `document` topic remain confirmed live
+- **THEN** the shell connection indicator remains `Connected`
+- **AND** Chat reports its own status within the Chat surface
 
 #### Scenario: Reduced-motion users see no animation
 - **WHEN** the operating system reports a reduced-motion preference

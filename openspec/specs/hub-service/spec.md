@@ -2,16 +2,16 @@
 
 ## Purpose
 
-Define the uatu hub daemon: a long-running service that keeps a persistent workspace registry (absolute paths, stable session ids), starts and stops `uatu serve` sessions through a pluggable session backend, and reverse-proxies all session traffic (HTTP, SSE, WebSocket) under `/s/<id>/` prefixes behind hub-terminated TLS — so one authenticated origin fronts many loopback-bound sessions — plus a self-hosting runbook covering real certificate and startup paths.
+Define the uatu hub daemon: a long-running service that keeps a persistent workspace registry (absolute paths, stable session ids), starts and stops `uatu serve` sessions through a pluggable session backend, reverse-proxies session traffic (HTTP and WebSocket) under `/s/<id>/` prefixes behind hub-terminated TLS, and delivers live updates to each page over one brokered stream it fans out from the sessions' internal event routes — so one authenticated origin fronts many loopback-bound sessions — plus a self-hosting runbook covering real certificate and startup paths.
 
 ## Requirements
 
 ### Requirement: Hub reports its public API compatibility identity
-The Hub SHALL expose an authenticated machine-readable compatibility identity containing its public Hub API revision and the public workspace API revision expected behind its proxied workspace routes. These revisions SHALL identify wire-contract compatibility independently from the product version and source-build identity, and SHALL correspond to published contract metadata. Clients MUST NOT need to infer API compatibility from a display-formatted version string.
+The Hub SHALL expose an authenticated machine-readable compatibility identity containing its public Hub API revision and the workspace revision, which versions the workspace-owned payload schemas the Hub forwards on its live stream (the workspace routes behind the Hub are internal and carry no public revision). These revisions SHALL identify wire-contract compatibility independently from the product version and source-build identity, and SHALL correspond to published contract metadata. Clients MUST NOT need to infer API compatibility from a display-formatted version string.
 
 #### Scenario: Native client probes Hub compatibility
 - **WHEN** an authenticated native client requests Hub state
-- **THEN** the response identifies the Hub API revision and proxied workspace API revision as machine-readable values
+- **THEN** the response identifies the Hub API revision and the workspace payload revision as machine-readable values
 - **AND** the values can be matched to published contract revisions
 
 #### Scenario: Product release does not imply a contract break
@@ -105,8 +105,9 @@ The Hub SHALL handle the personal-state API under `/s/<workspace-id>/` before ge
 - **AND** the child receives no request
 
 #### Scenario: Session traffic still proxies normally
-- **WHEN** the same client requests document state, SSE, or terminal transport
+- **WHEN** the same client requests document state or terminal transport
 - **THEN** the Hub forwards that traffic according to the existing proxy contract
+- **AND** the client's live updates arrive over the Hub's brokered live stream, not through a proxied workspace SSE route
 
 ### Requirement: The binary provides a hub daemon subcommand
 The `uatu` binary SHALL provide a `hub` subcommand that starts a long-running daemon from a configuration file (listen port, TLS certificate and key paths, users, state directory override), suitable for supervision by systemd or launchd. The hub SHALL persist its workspace registry and secrets under an XDG-resolved state directory, creating secret-bearing files with owner-only permissions. On SIGTERM or SIGINT the hub SHALL stop every running session and exit cleanly. The configuration SHALL NOT define a workspaces root: workspaces are registered by absolute path and the hub SHALL reject a configuration containing the removed `workspacesDir` key with an error naming it.
@@ -170,11 +171,21 @@ The hub SHALL manage session processes exclusively through a backend interface w
 - **THEN** each child server exits on its own because its standard input reached EOF
 
 ### Requirement: All session traffic is reverse-proxied under the workspace prefix
-The hub SHALL proxy every request under `/s/<id>/` to that workspace's loopback endpoint, covering plain HTTP, Server-Sent Events, and WebSocket upgrades. SSE responses SHALL be streamed without buffering. WebSocket proxying SHALL forward messages and close events in both directions, preserving application close codes (including the terminal's 4001, 4409, and 4410). Requests for an unknown or stopped workspace SHALL receive a non-cached error response that links back to the dashboard. Children SHALL bind loopback only and MUST NOT be directly reachable from the network.
+The hub SHALL proxy every request under `/s/<id>/` to that workspace's loopback endpoint, covering plain HTTP and WebSocket upgrades. Live updates for hub-served pages SHALL NOT be proxied one browser stream to one child stream: the hub SHALL deliver them over its brokered live stream, subscribing to each child's topics once and fanning out, so the hub's outbound connections for live delivery are bounded by watched topics rather than by connected clients. The per-stream workspace SSE routes (`/s/<id>/api/events`, `/s/<id>/api/chat/conversations/events`, `/s/<id>/api/chat/conversations/<conversation>/events`) SHALL NOT be proxied: a request for one SHALL receive a non-cached error naming the brokered stream as its replacement, and the child's routes remain the internal source the hub subscribes to. WebSocket proxying SHALL forward messages and close events in both directions, preserving application close codes (including the terminal's 4001, 4409, and 4410). Requests for an unknown or stopped workspace SHALL receive a non-cached error response that links back to the dashboard. Children SHALL bind loopback only and MUST NOT be directly reachable from the network.
 
 #### Scenario: A session round-trips through the hub
 - **WHEN** an authenticated browser requests `/s/uatu/api/state`
 - **THEN** the hub forwards the request to that session's loopback endpoint and streams the response back
+
+#### Scenario: Live updates are brokered, not proxied per client
+- **WHEN** three authenticated tabs view the same running workspace's page
+- **THEN** the hub holds one upstream subscription per watched topic of that workspace
+- **AND** each tab receives updates over its own single brokered stream
+
+#### Scenario: A per-stream route is refused through the hub
+- **WHEN** a client requests `/s/uatu/api/events` through the hub
+- **THEN** the hub answers with a non-cached error that names the brokered live stream as the replacement
+- **AND** no request reaches the child
 
 #### Scenario: Terminal WebSocket transits the hub
 - **WHEN** an authenticated browser upgrades `/s/uatu/api/terminal?sessionId=<uuid>` and later the PTY is killed via the session inventory
@@ -189,7 +200,7 @@ The hub SHALL proxy every request under `/s/<id>/` to that workspace's loopback 
 - **WHEN** a browser that accepts gzip loads a session's bundled script chunk through the hub
 - **THEN** the response is gzip-compressed and marked immutable with long-lived caching
 - **AND** a revalidation request with the asset's entity tag answers 304 without a body
-- **AND** incremental feeds (the SSE event stream, the NDJSON search feed) are never buffered for compression
+- **AND** incremental feeds (the NDJSON search feed) are never buffered for compression
 
 ### Requirement: The hub forwards loopback-shaped requests so children keep their localhost model
 When proxying to a child, the hub SHALL rewrite the forwarded `Host` header (and `Origin` header, when present) to the child's loopback endpoint, after the hub has itself validated the browser's origin against the hub's host. Children's existing loopback origin gates and token checks SHALL hold without modification.

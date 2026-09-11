@@ -150,7 +150,7 @@ The authenticated `/clone` page SHALL show live terminal output and current phas
 - **THEN** the clone page reports completion and navigates to the workspace's stable session URL
 
 ### Requirement: Hub-served sessions expose hub navigation
-When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace by its display name, whose menu links to the hub dashboard and to every registered workspace by display name with running or stopped state and offers a sign-out entry. Duplicate display names SHALL be disambiguated with path or stable-id detail. Outside a hub, including plain `uatu serve` and a bare `--base-path` invocation, the affordance MUST stay hidden. The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
+When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace by its display name, whose menu links to the hub dashboard and to every registered workspace by display name with running or stopped state and offers a sign-out entry. Duplicate display names SHALL be disambiguated with path or stable-id detail. Outside a hub, including a source-run session child at the default base path or under a bare `--base-path`, the affordance MUST stay hidden. The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
 
 #### Scenario: Switching workspaces from inside a session
 - **WHEN** a user inside a hub-served session opens the workspace switcher
@@ -162,16 +162,20 @@ When the SPA is served through a hub (a hub-session-shaped base path AND the hub
 - **THEN** the switcher provides path or stable-id detail that distinguishes them without requiring names to be unique
 
 #### Scenario: No hub affordance outside a hub
-- **WHEN** the SPA runs under plain `uatu serve` or under a base path with no hub answering at the origin root
+- **WHEN** the SPA runs under a source-run session child or under a base path with no hub answering at the origin root
 - **THEN** the workspace switcher is not shown
 
 ### Requirement: The workspace switcher chip reflects real session state
-The in-session workspace switcher's collapsed chip SHALL show the current workspace's live indicator from hub-reported state, never from an assumption that the viewed session is running: a session page can outlive its server (a stop from the dashboard, a back/forward-cache restore). The chip SHALL update from fresh hub state on page-cache restores and whenever the menu's state refresh completes, so chip and menu can never disagree.
+The in-session workspace switcher's collapsed chip SHALL show the current workspace's live indicator from hub-reported state, never from an assumption that the viewed session is running: a session page can outlive its server (a stop from the dashboard, a back/forward-cache restore). The chip and the open menu SHALL update from the brokered live stream's activity topic as workspace state changes, and additionally from fresh hub state on page-cache restores and whenever the menu's state refresh completes, so chip and menu can never disagree.
 
 #### Scenario: A cached page of a stopped session shows a truthful chip
 - **WHEN** the user stops a session from the dashboard and returns to its page via browser history
 - **THEN** the switcher chip's indicator shows not-running
 - **AND** opening the menu shows the same state
+
+#### Scenario: A stop elsewhere updates the chip without a refresh
+- **WHEN** the viewed workspace's session is stopped from another device while its page is open
+- **THEN** the chip's indicator turns not-running from the stream update, without the menu being opened or the page reloaded
 
 ### Requirement: Dashboard and login follow uatu's visual language
 The hub's pages (login, dashboard, session-unavailable) SHALL use uatu's design system, not an ad-hoc theme: the same brand header (inline logo with its dark-scheme retint, wordmark typography), `color-scheme: light dark` with the app's `light-dark()` token palette so both schemes render correctly, the app's sans-serif body font with monospace reserved for paths and code, pane-style section headers, and the app's indicator-dot idiom for live/running state. Fixed single-scheme palettes MUST NOT be used.
@@ -365,3 +369,16 @@ Workspace rows and directory rows SHALL distinguish Rename workspace, Rename fol
 - **WHEN** the directory browser lists a registered workspace with no running session
 - **THEN** its primary action is Start
 - **AND** activating it uses the normal credential-aware start flow rather than navigating to an unavailable session
+
+### Requirement: The switcher surfaces other workspaces' activity
+The in-session workspace switcher SHALL show, for each other workspace the user may access, whether its session is running, whether an agent is working in it, and whether an interaction awaits the user — sourced from the brokered stream's activity topic. The collapsed chip SHALL carry a badge while any other workspace has an interaction awaiting the user, and SHALL distinguish that from mere agent activity. Activity presentation MUST NOT reveal conversation content or titles, and MUST NOT vary by mode beyond the switcher's existing placement rules.
+
+#### Scenario: An agent finishes in another workspace
+- **WHEN** an agent in a workspace the user is not viewing transitions from working to idle
+- **THEN** that workspace's entry in the switcher menu changes from working to idle without the menu being reopened
+
+#### Scenario: A question elsewhere badges the chip
+- **WHEN** an agent in another running workspace asks the user a question
+- **THEN** the collapsed switcher chip shows an awaiting-interaction badge
+- **AND** the menu entry for that workspace names it as awaiting the user
+- **AND** the badge clears once the interaction is answered from any device

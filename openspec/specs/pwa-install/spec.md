@@ -71,22 +71,27 @@ The server SHALL serve raster icons at `/assets/icon-192.png` and `/assets/icon-
 - **AND** the response body is a valid PNG image with width and height of 512 pixels
 
 ### Requirement: Server uses a stable default port
-The server SHALL bind to a stable default port (4711) when no `--port` flag is provided. If the default port is in use, the server SHALL pick the next available port and log the rolled port to stderr. Users SHALL be able to override the default with `--port <n>`, including `--port 0` to opt into ephemeral port behavior.
+A session child SHALL bind to a stable default port (4711) when no `--port` flag is provided. If the default port is in use, the session child SHALL pick the next available port and log the rolled port to stderr. A session child's invocation MAY override the default with `--port <n>`, which is honored without rolling, including `--port 0` to opt into ephemeral port behavior. The hub starts every session child with `--port 0`, so hub-managed sessions bind kernel-assigned loopback ports that the hub reads from each child's printed URL and fronts at its own origin. The default port therefore applies to session children started without `--port`, such as a source run.
 
 #### Scenario: Default port is used when free
-- **WHEN** the user runs `uatu watch .` and port 4711 is free
+- **WHEN** a session child is started with `.` and no `--port`, and port 4711 is free
 - **THEN** the server binds to 4711
-- **AND** the printed URL is `http://127.0.0.1:4711`
+- **AND** the printed URL's origin is `http://127.0.0.1:4711`
 
 #### Scenario: Default port rolls when occupied
-- **WHEN** the user runs `uatu watch .` and port 4711 is already in use
+- **WHEN** a session child is started with `.` and no `--port`, and port 4711 is already in use
 - **THEN** the server binds to a free port above 4711
 - **AND** writes a warning to stderr indicating the rolled port
 
 #### Scenario: Explicit port is honored
-- **WHEN** the user runs `uatu watch . --port 9000`
+- **WHEN** a session child is started with `. --port 9000`
 - **THEN** the server binds to 9000
 
 #### Scenario: Ephemeral port via --port 0
-- **WHEN** the user runs `uatu watch . --port 0`
+- **WHEN** a session child is started with `. --port 0`
 - **THEN** the server binds to a kernel-assigned ephemeral port
+
+#### Scenario: Hub-started children bind ephemeral ports
+- **WHEN** the hub starts a workspace session
+- **THEN** the session child is started with `--port 0` and binds a kernel-assigned loopback port
+- **AND** the hub takes that port from the URL the child prints and proxies to it
