@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the uatu hub daemon: a long-running service that keeps a persistent workspace registry (absolute paths, stable session ids), starts and stops `uatu serve` sessions through a pluggable session backend, and reverse-proxies all session traffic (HTTP, SSE, WebSocket) under `/s/<id>/` prefixes behind hub-terminated TLS — so one authenticated origin fronts many loopback-bound sessions — plus a self-hosting runbook covering real certificate and startup paths.
+Define the uatu hub daemon: a long-running service that keeps a persistent workspace registry (absolute paths, stable session ids), starts and stops `uatu serve` sessions through a pluggable session backend, reverse-proxies session traffic (HTTP and WebSocket) under `/s/<id>/` prefixes behind hub-terminated TLS, and delivers live updates to each page over one brokered stream it fans out from the sessions' internal event routes — so one authenticated origin fronts many loopback-bound sessions — plus a self-hosting runbook covering real certificate and startup paths.
 
 ## Requirements
 
@@ -105,8 +105,9 @@ The Hub SHALL handle the personal-state API under `/s/<workspace-id>/` before ge
 - **AND** the child receives no request
 
 #### Scenario: Session traffic still proxies normally
-- **WHEN** the same client requests document state, SSE, or terminal transport
+- **WHEN** the same client requests document state or terminal transport
 - **THEN** the Hub forwards that traffic according to the existing proxy contract
+- **AND** the client's live updates arrive over the Hub's brokered live stream, not through a proxied workspace SSE route
 
 ### Requirement: The binary provides a hub daemon subcommand
 The `uatu` binary SHALL provide a `hub` subcommand that starts a long-running daemon from a configuration file (listen port, TLS certificate and key paths, users, state directory override), suitable for supervision by systemd or launchd. The hub SHALL persist its workspace registry and secrets under an XDG-resolved state directory, creating secret-bearing files with owner-only permissions. On SIGTERM or SIGINT the hub SHALL stop every running session and exit cleanly. The configuration SHALL NOT define a workspaces root: workspaces are registered by absolute path and the hub SHALL reject a configuration containing the removed `workspacesDir` key with an error naming it.
