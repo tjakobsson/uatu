@@ -334,6 +334,40 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     expect(new Set(behind.envelopes.filter(e => e.event.kind === "data").map(e => e.cursor)).size).toBe(6);
   });
 
+  test("a second subscriber behind the buffer while a child replay runs takes a resync instead of its own replay", async () => {
+    let replays = 0;
+    const child = fakeSource({
+      refuse: path => {
+        const behind = [1, 2].some(sequence => path.includes(`?cursor=${encodeURIComponent(cursorOf("g1", sequence))}`));
+        if (!behind) return null;
+        replays += 1;
+        // A replay that stays open without reaching the shared head: in flight.
+        return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(chatFrame("g1", 3))); } }), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+    });
+    const live = broker(child.source, { replayBufferBytes: 260 });
+    const watcher = sink();
+    live.subscribe(watcher, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 3) });
+    await waitFor(() => child.opened.length === 1, "shared upstream");
+    const upstream = child.opened[0]!;
+    upstream.push(": open\n\n");
+    for (let sequence = 4; sequence <= 8; sequence += 1) upstream.push(chatFrame("g1", sequence));
+    await waitFor(() => watcher.envelopes.filter(e => e.event.kind === "data").length === 5, "watcher live");
+
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 1) });
+    await waitFor(() => replays === 1, "one replay in flight");
+    const second = sink();
+    live.subscribe(second, "ws", { topic: "conversation", key: "c", cursor: cursorOf("g1", 2) });
+    await waitFor(() => second.envelopes.length === 1, "second resynced");
+    expect(second.envelopes[0]!.event.kind).toBe("resync");
+    // Still one child replay, and the first lagging subscriber keeps it.
+    expect(replays).toBe(1);
+    expect(kinds(first.envelopes)).not.toContain("resync");
+  });
+
   test("a child resync ends the upstream: every subscriber gets resync, is detached, and a fresh add reopens", async () => {
     const child = fakeSource();
     const live = broker(child.source);
@@ -485,6 +519,27 @@ describe("failure and child exit (2.3)", () => {
     expect(child.opened[0]!.cancelled).toBe(true);
   });
 
+  test("tabs joining a failed upstream share the attempt that failed and bring one retry forward to the floor", async () => {
+    let attempts = 0;
+    const child = fakeSource({ refuse: () => { attempts += 1; return new Error("refused"); } });
+    const live = broker(child.source, { retryMinMs: 200, retryMaxMs: 5_000 });
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "inventory" });
+    await waitFor(() => first.envelopes.length === 1, "unavailable");
+    expect(attempts).toBe(1);
+    // Three more tabs join within the floor: each is told at once, none
+    // restarts the upstream.
+    const joiners = [sink(), sink(), sink()];
+    for (const joiner of joiners) live.subscribe(joiner, "ws", { topic: "inventory" });
+    for (const joiner of joiners) expect(kinds(joiner.envelopes)).toEqual(["unavailable"]);
+    await Bun.sleep(30);
+    expect(attempts).toBe(1);
+    // One retry at the floor for all four.
+    await waitFor(() => attempts === 2, "one retry", 1_000);
+    await Bun.sleep(40);
+    expect(attempts).toBe(2);
+  });
+
   test("a subscriber joining a failed upstream is told unavailable immediately", async () => {
     const child = fakeSource({ refuse: () => new Error("refused") });
     const live = broker(child.source, { retryMinMs: 5_000, retryMaxMs: 5_000 });
@@ -585,6 +640,22 @@ describe("activity (2.4)", () => {
 });
 
 describe("diagnostics (3.3)", () => {
+  test("a retried upstream is one active upstream, and its release returns the gauge to zero", async () => {
+    const registry = new MetricsRegistry();
+    const child = fakeSource();
+    const live = broker(child.source, { metrics: registry, lingerMs: 10, retryMinMs: 20, retryMaxMs: 40 });
+    const attachment = live.subscribe(sink(), "ws", { topic: "document", key: "" });
+    await waitFor(() => child.opened.length === 1, "upstream");
+    child.opened[0]!.push('event: state\ndata: {"generatedAt":1}\n\n');
+    child.opened[0]!.end();
+    await waitFor(() => child.opened.length === 2, "retry");
+    expect(registry.get(upstreamCounter("document", "opened"))).toBe(2);
+    expect(registry.get(upstreamActiveGauge("document"))).toBe(1);
+    attachment.detach();
+    await waitFor(() => registry.get(upstreamCounter("document", "released")) === 1, "released");
+    expect(registry.get(upstreamActiveGauge("document"))).toBe(0);
+  });
+
   test("upstream counters are fixed classes only", async () => {
     const registry = new MetricsRegistry();
     const child = fakeSource();

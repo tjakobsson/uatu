@@ -139,6 +139,53 @@ describe("the page's live channel singleton", () => {
     expect(order).toEqual(["connect", "fetch"]);
   });
 
+  test("a hidden page releases its stream; a regained network while hidden leaves it released; showing the page reconnects", async () => {
+    let suspends = 0;
+    const connects: { resumed?: boolean }[] = [];
+    const channel = {
+      connect(options?: { resumed?: boolean }) { connects.push(options ?? {}); },
+      suspend() { suspends += 1; },
+      dispose() {},
+    } as unknown as LiveChannel;
+    installLiveChannelForTests(channel);
+    const win = fakeTarget();
+    const doc = fakeTarget();
+    setGlobal("window", win);
+    setGlobal("document", doc);
+    watchPageLifecycle();
+    expect(suspends).toBe(0);
+
+    doc.visibilityState = "hidden";
+    doc.fire("visibilitychange");
+    expect(suspends).toBe(1);
+    expect(connects).toEqual([]);
+
+    win.fire("online");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(connects).toEqual([]);
+
+    doc.visibilityState = "visible";
+    doc.fire("visibilitychange");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(connects).toEqual([{ resumed: true }]);
+  });
+
+  test("a page booted in a background tab releases the stream boot opened", () => {
+    let suspends = 0;
+    const channel = {
+      connect() {},
+      suspend() { suspends += 1; },
+      dispose() {},
+    } as unknown as LiveChannel;
+    installLiveChannelForTests(channel);
+    const doc = fakeTarget();
+    doc.visibilityState = "hidden";
+    setGlobal("window", fakeTarget());
+    setGlobal("document", doc);
+    watchPageLifecycle();
+    expect(suspends).toBe(1);
+  });
+
   test("a discarded page disposes the channel; a frozen one keeps it", () => {
     let disposed = 0;
     const channel = {

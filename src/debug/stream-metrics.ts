@@ -113,9 +113,12 @@ export class UpstreamSubscriptionMetrics {
 
   constructor(private readonly registry?: MetricsRegistry) {}
 
-  opened(topic: UpstreamTopic): void {
+  // `reopen` is a retry of an upstream already counted active: it counts as
+  // an open attempt, but it is the same logical upstream, so the gauge holds.
+  opened(topic: UpstreamTopic, options: { reopen?: boolean } = {}): void {
     if (!this.registry) return;
     this.registry.inc(upstreamCounter(topic, "opened"));
+    if (options.reopen) return;
     const next = (this.active.get(topic) ?? 0) + 1;
     this.active.set(topic, next);
     this.registry.set(upstreamActiveGauge(topic), next);

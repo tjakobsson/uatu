@@ -158,6 +158,10 @@ export type LiveChannel = {
   // Supersedes any current attempt with a fresh one presenting every
   // retained cursor. Also the entry point for a lifecycle wake-up.
   connect(options?: LiveChannelConnectOptions): void;
+  // Closes the stream without treating it as lost — no drop, no error, no
+  // retry — and keeps every subscription with its cursor for the next
+  // connect. A page in the background holds no connection this way.
+  suspend(): void;
   subscribe(key: LiveSubscriptionKey, consumer: LiveTopicConsumer, options?: { cursor?: string }): LiveSubscriptionHandle;
   onActivity(listener: LiveActivityListener): () => void;
   onStatus(listener: (status: LiveChannelStatus) => void): () => void;
@@ -558,6 +562,19 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     },
     subscriptions() {
       return [...entries.values()].map(subscriptionOf);
+    },
+    suspend() {
+      if (disposed) return;
+      cancelPendingReconnect();
+      cancelControlRetry();
+      source?.close();
+      source = null;
+      streamId = null;
+      controlInFlight = 0;
+      // Anything the closed source still delivers is from a superseded
+      // attempt, and the next connect is a replacement, not a first connect.
+      generation += 1;
+      recovering = false;
     },
     dispose() {
       disposed = true;

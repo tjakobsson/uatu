@@ -5,15 +5,25 @@ The hub-brokered live stream is the one long-lived connection a hub-served sessi
 ## ADDED Requirements
 
 ### Requirement: A hub-served page holds exactly one live connection
-A session page served through the hub SHALL receive every pushed update — document state, conversation inventory, conversation events, subagent transcripts, and cross-workspace activity — over one authenticated Server-Sent Events connection to the hub origin. Selecting a conversation, opening a subagent transcript, opening or collapsing the chat panel, and switching the previewed document MUST NOT open an additional long-lived HTTP connection. WebSocket terminal sessions are outside this guarantee. The stream SHALL be authenticated by the hub session exactly as other hub routes are, and a stream MUST carry only workspaces the authenticated user may access.
+A session page served through the hub SHALL receive every pushed update — document state, conversation inventory, conversation events, subagent transcripts, and cross-workspace activity — over one authenticated Server-Sent Events connection to the hub origin. Selecting a conversation, opening a subagent transcript, opening or collapsing the chat panel, and switching the previewed document MUST NOT open an additional long-lived HTTP connection. WebSocket terminal sessions are outside this guarantee. A page hidden from view SHALL release its live connection while hidden, retaining every subscription and its cursor, and SHALL resume every topic from those cursors when it is shown again; a page opened in the background SHALL NOT hold a live connection before it is first shown, so the connections a browser holds to the hub are bounded by its visible session pages, not by its open tabs. The stream SHALL be authenticated by the hub session exactly as other hub routes are, and a stream MUST carry only workspaces the authenticated user may access.
 
 #### Scenario: A page with everything open holds one stream
 - **WHEN** a user has the chat panel open, a conversation selected, a subagent transcript open, and a document previewed in one session tab
 - **THEN** the browser holds one long-lived HTTP connection to the hub for that tab's live updates
 
-#### Scenario: Six session tabs still answer requests
-- **WHEN** a user opens six session tabs on the same hub origin in one browser, each with a conversation selected
-- **THEN** an ordinary request from any of those tabs (a document load, a personal-state update) is answered without waiting for a live connection to close
+#### Scenario: Background tabs do not exhaust the browser
+- **WHEN** a user has six or more session tabs open on the same hub origin in one browser, each with a conversation selected, and one of them is visible
+- **THEN** the hidden tabs hold no live connection
+- **AND** an ordinary request from the visible tab (a document load, a personal-state update) is answered without waiting for a live connection to close
+
+#### Scenario: A background tab resumes where it was left
+- **WHEN** a hidden session tab with a conversation selected is shown again
+- **THEN** it holds one live connection again, resumed from its retained cursors
+- **AND** its conversation timeline, draft, and previewed document are as the user left them
+
+#### Scenario: A tab opened in the background waits to connect
+- **WHEN** a user opens a session in a background tab
+- **THEN** the tab holds no live connection until it is first shown
 
 #### Scenario: Terminals do not count
 - **WHEN** a session tab has several terminal panes attached

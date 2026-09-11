@@ -51,6 +51,8 @@ A hub-side broker holds `Map<upstreamKey, { fetch, subscribers, lastCursor, buff
 
 *Why linger:* the measured pattern is rapid switching. *Why bounded buffer rather than relying only on child replay:* the child's conversation replay exists, but the document topic's "replay" is a fresh snapshot, and inventory is a tick; a small hub buffer gives all topics the same cheap fast path. *Alternative — no fan-out, one upstream per client stream:* removes the browser problem only; the Bun 256 cap and the child's subscriber count would still scale with tabs.
 
+Two bounds keep this true when upstreams fail or clients fall behind. A subscriber joining a failed upstream is told at once and shares the attempt that failed; it brings the next retry forward to the retry floor rather than retrying itself, so tabs joining one after another never each restart a failing child request. And at most one child replay (catch-up) runs per upstream: a second subscriber behind the buffer while it runs takes a topic-scoped resync — one short snapshot request from its client — instead of a long-lived child request of its own.
+
 ### D5 — Activity is computed at the hub from a small child endpoint
 
 Each child gains an additive internal endpoint that streams a workspace activity summary: `{ working: boolean, awaiting: boolean }` derived from live conversation statuses and pending interactions across agents. The hub subscribes to it for every running workspace the user may access (refcounted like any topic, but keyed by user rather than by tab) and merges with its own session state (`running`) into the `activity` topic. The summary carries no identifiers beyond the workspace id.
@@ -78,6 +80,12 @@ A checked-in `dev/hub.json` (one user `dev`, a documented password, `stateDir` u
 ### D9 — Coherence with `resilient-live-connections`
 
 That change is implemented but unarchived and modifies `sidebar-shell`'s indicator requirement. This change's MODIFIED block for that requirement is written on top of that delta's text, and its new requirements for document, inventory, and conversation are ADDED rather than rewrites, so the two changes can archive in either order and converge. Its D5 (explicit hub stream cancellation) and D6 (fixed-vocabulary diagnostics) carry over verbatim into the broker.
+
+### D10 — A page in the background releases its connection
+
+One connection per tab still reaches the browser's six-connection cap at six tabs. A page hidden from view closes its stream and keeps every subscription and cursor; the return to the foreground — already a lifecycle wake-up — reconnects, and each topic resumes from its cursor or resyncs. A page opened in the background releases the connection boot opened. A regained network while hidden does not reconnect. There is no grace period: the recovery reconnects on every return to the foreground anyway, so holding the stream through a short absence would keep a socket without saving a reconnect. Nothing visible depends on live events in a hidden tab — the title and favicon come from the project, and there are no notifications or app badges.
+
+*Alternative — one connection per browser, shared across tabs (a Web Locks leader relaying over BroadcastChannel):* removes the cap outright, but a frozen or throttled leader tab (mobile, background timer throttling) stalls every tab until leadership moves, and the tabs' differing subscription sets must be merged at the leader. *Alternative — keep one per tab and state a five-tab limit:* honest, but a limit users hit. Both rejected with the user.
 
 ## Risks / Trade-offs
 

@@ -19,6 +19,25 @@ import { createLifecycleRecovery, type LifecycleRecovery } from "./recovery";
 let channel: LiveChannel | null = null;
 let lifecycle: LifecycleRecovery | null = null;
 const recoveryWork = new Set<() => Promise<unknown>>();
+// Set while the page is hidden and has released its stream.
+let releasedInBackground = false;
+let backgroundWatchInstalled = false;
+
+// A page hidden from view holds no live connection. Browsers allow six
+// HTTP/1.1 connections per host across every tab on the hub, so one stream
+// per tab would still stall the sixth tab; only visible pages count now. The
+// channel keeps every subscription and cursor, and the return to the
+// foreground — which the lifecycle recovery below already treats as a
+// wake-up — reconnects and resumes each topic. There is no grace period:
+// that recovery reconnects on every return anyway, so holding the stream
+// through a short absence would keep a socket without saving a reconnect.
+// Nothing visible depends on live events while hidden: the title and favicon
+// come from the project, and there are no notifications or app badges.
+function releaseInBackground(): void {
+  if (typeof document === "undefined" || document.visibilityState !== "hidden" || channel === null) return;
+  releasedInBackground = true;
+  channel.suspend();
+}
 
 export function liveChannel(): LiveChannel {
   if (channel === null) {
@@ -58,6 +77,10 @@ export function registerRecoveryWork(work: () => Promise<unknown>): () => void {
 // reconciliation work then runs against a page that already holds one
 // current connection attempt.
 export async function recoverLiveChannel(): Promise<void> {
+  // A regained network while still in the background must not undo the
+  // release; the return to the foreground recovers.
+  if (releasedInBackground && typeof document !== "undefined" && document.visibilityState === "hidden") return;
+  releasedInBackground = false;
   liveChannel().connect({ resumed: true });
   await Promise.allSettled([...recoveryWork].map(work => work()));
 }
@@ -72,12 +95,24 @@ export function watchPageLifecycle(): void {
     recover: recoverLiveChannel,
     discard: disposeLiveChannel,
   });
+  if (!backgroundWatchInstalled) {
+    document.addEventListener("visibilitychange", releaseInBackground);
+    backgroundWatchInstalled = true;
+  }
+  // Boot connects before this runs; a page opened in a background tab
+  // releases that connection until it is first shown.
+  releaseInBackground();
 }
 
 // Tears the channel down for good. Called when the page is being discarded:
 // a retry cycle outliving the page would keep firing timers against a
 // document that is on its way out.
 export function disposeLiveChannel(): void {
+  if (backgroundWatchInstalled && typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", releaseInBackground);
+  }
+  backgroundWatchInstalled = false;
+  releasedInBackground = false;
   channel?.dispose();
   channel = null;
   lifecycle?.dispose();

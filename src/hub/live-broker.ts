@@ -171,6 +171,18 @@ class Upstream {
   // True from a failure until the next successful open: the failure counter
   // and log speak once per episode, not once per retry.
   failing = false;
+  // Whether this upstream has moved the active gauge. Set by its first
+  // attempt, so a retry is not counted twice and a release only returns what
+  // was counted.
+  counted = false;
+  // When the latest open attempt began, and when the pending retry fires:
+  // together they bound how often subscribers joining a failed upstream can
+  // make the broker try the child again.
+  lastAttemptAt = 0;
+  retryAt = 0;
+  // The subscriber whose child replay is in flight. One per upstream: child
+  // requests must not scale with the number of lagging clients.
+  catchUpOwner: Subscriber | null = null;
 
   constructor(
     readonly id: string,
@@ -331,13 +343,19 @@ export class LiveBroker {
       case "unsupported":
         this.attachLive(upstream, subscriber);
         return;
-      case "failed":
-        // Told at once, then the upstream is tried again now rather than at
-        // the episode's next backoff tick: a fresh page should not inherit
-        // the wait an earlier one accrued. A dead child refuses instantly.
+      case "failed": {
+        // Told at once. A page joining a failed upstream must not inherit the
+        // backoff an earlier episode accrued, but tabs joining one after
+        // another must not each restart it either: joiners within the retry
+        // floor share the attempt that failed and bring the next one forward
+        // to the floor. A joiner after the floor tries again now.
         this.signalUnavailable(upstream, subscriber);
-        this.open(upstream);
+        upstream.retryDelayMs = 0;
+        const sinceAttempt = Date.now() - upstream.lastAttemptAt;
+        if (sinceAttempt >= this.retryMinMs) this.open(upstream);
+        else this.retryWithin(upstream, this.retryMinMs - sinceAttempt);
         return;
+      }
       case "opening":
       case "closed":
         // Pending until the fetch settles; `closed` cannot be in the map.
@@ -352,6 +370,7 @@ export class LiveBroker {
     subscriber.catchUp?.abort();
     subscriber.catchUp = null;
     const upstream = this.upstreams.get(upstreamId(subscriber.workspaceId, subscriber.topic, subscriber.key));
+    if (upstream?.catchUpOwner === subscriber) upstream.catchUpOwner = null;
     if (!upstream || !upstream.subscribers.delete(subscriber)) return;
     if (upstream.subscribers.size > 0 || upstream.lingerTimer) return;
     // Linger: a reload or a quick A→B→A reuses the upstream instead of
@@ -496,6 +515,18 @@ export class LiveBroker {
   private catchUp(upstream: Upstream, subscriber: Subscriber): void {
     subscriber.live = false;
     subscriber.catchUp?.abort();
+    subscriber.catchUp = null;
+    const owner = upstream.catchUpOwner;
+    if (owner && owner !== subscriber && !owner.detached && owner.catchUp) {
+      // One child replay per upstream at a time. A second subscriber behind
+      // the buffer while it runs takes a fresh snapshot — one short request
+      // from its client — instead of a long-lived child request of its own,
+      // so several tabs waking together cannot multiply child connections.
+      subscriber.sink.write(this.envelope(subscriber, { kind: "resync" }, upstream.head || subscriber.cursor || ""));
+      this.detach(subscriber);
+      return;
+    }
+    upstream.catchUpOwner = subscriber;
     const controller = new AbortController();
     subscriber.catchUp = controller;
     const path = `${childConversationEventsPath(upstream.key ?? "")}?cursor=${encodeURIComponent(subscriber.cursor ?? "")}`;
@@ -536,6 +567,7 @@ export class LiveBroker {
             this.emitData(subscriber, parseJson(frame.data), frame.id);
             if (this.mergeCatchUp(upstream, subscriber, frame.id)) {
               subscriber.catchUp = null;
+              if (upstream.catchUpOwner === subscriber) upstream.catchUpOwner = null;
               controller.abort();
               await reader.cancel().catch(() => undefined);
               return;
@@ -591,6 +623,7 @@ export class LiveBroker {
       clearTimeout(upstream.retryTimer);
       upstream.retryTimer = null;
     }
+    upstream.lastAttemptAt = Date.now();
     if (!this.source.isRunning(upstream.workspaceId)) {
       this.fail(upstream, "unreachable");
       return;
@@ -613,7 +646,10 @@ export class LiveBroker {
     const controller = new AbortController();
     upstream.abort = controller;
     upstream.state = "opening";
-    this.metrics.opened(upstream.topic);
+    // Every attempt is an open; only the first moves the active gauge — a
+    // retry is the same logical upstream.
+    this.metrics.opened(upstream.topic, { reopen: upstream.counted });
+    upstream.counted = true;
     const path = this.childPath(upstream);
     // Presumed live after the grace unless refused first — see
     // LiveBrokerOptions.inventoryOpenGraceMs. Runs until the first chunk or
@@ -803,11 +839,23 @@ export class LiveBroker {
     upstream.retryDelayMs = upstream.retryDelayMs === 0
       ? this.retryMinMs
       : Math.min(this.retryMaxMs, upstream.retryDelayMs * 2);
+    this.armRetry(upstream, upstream.retryDelayMs);
+  }
+
+  // Brings the pending retry forward to `delayMs` from now, never later.
+  private retryWithin(upstream: Upstream, delayMs: number): void {
+    if (upstream.retryTimer && upstream.retryAt <= Date.now() + delayMs) return;
+    this.armRetry(upstream, delayMs);
+  }
+
+  private armRetry(upstream: Upstream, delayMs: number): void {
+    if (upstream.retryTimer) clearTimeout(upstream.retryTimer);
+    upstream.retryAt = Date.now() + delayMs;
     upstream.retryTimer = setTimeout(() => {
       upstream.retryTimer = null;
       if (upstream.state !== "failed" || upstream.subscribers.size === 0) return;
       this.open(upstream);
-    }, upstream.retryDelayMs);
+    }, delayMs);
     if (typeof upstream.retryTimer.unref === "function") upstream.retryTimer.unref();
   }
 
@@ -825,8 +873,9 @@ export class LiveBroker {
       subscriber.catchUp = null;
       subscriber.live = false;
     }
+    upstream.catchUpOwner = null;
     if (this.upstreams.get(upstream.id) === upstream) this.upstreams.delete(upstream.id);
-    if (released) this.metrics.released(upstream.topic);
+    if (released && upstream.counted) this.metrics.released(upstream.topic);
   }
 
   private onSessionChange(change: LiveSessionChange): void {

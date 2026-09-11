@@ -44,3 +44,10 @@
 ## 8. End-to-end verification
 
 - [x] 8.1 Add an e2e test through a hub that opens three session tabs with conversations selected and asserts a document load in the first tab completes under one second; verify it fails against the pre-change hub and passes after
+
+## 9. Review fixes
+
+- [x] 9.1 Release the live connection in a page hidden from view and in a page booted in the background, keeping subscriptions and cursors, and resume on return to the foreground; verify with channel and lifecycle unit tests and the six-tab e2e test (hidden tabs hold no connection, the visible tab loads a document within a second, a tab shown again resumes its conversation)
+- [x] 9.2 Bound reopening a failed upstream: a subscriber joining it shares the attempt that failed and brings the retry forward to the retry floor; verify with a broker unit test that four joiners cause one attempt and then one retry, and that the three-tab integration test holds one conversation attempt
+- [x] 9.3 Run at most one child replay per upstream; a second subscriber behind the buffer during it takes a topic-scoped resync; verify with a broker unit test that the second lagging subscriber is resynced and no second replay opens
+- [x] 9.4 Count an upstream retry as an open attempt without moving the active gauge, and release only what was counted; verify with a broker unit test that a retried upstream reads one active and zero after release

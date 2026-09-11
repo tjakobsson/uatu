@@ -280,6 +280,7 @@ describe("chat API client", () => {
 // The channel as the client sees it: subscriptions with their consumers,
 // driven by hand.
 class FakeChannel implements LiveChannel {
+  suspend(): void {}
   readonly entries: Array<{
     key: LiveSubscriptionKey;
     cursor: string | undefined;

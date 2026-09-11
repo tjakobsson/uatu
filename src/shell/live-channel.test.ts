@@ -296,6 +296,32 @@ describe("createLiveChannel — the one stream", () => {
   });
 });
 
+describe("createLiveChannel — background release", () => {
+  test("suspend closes the stream without a drop or a retry, and the next connect resumes every retained cursor", () => {
+    const h = createHarness();
+    const r = recorder();
+    h.channel.subscribe({ topic: "conversation", key: "c" }, r.consumer, { cursor: "c1" });
+    h.channel.connect();
+    const first = h.latest();
+    first.hello();
+    first.live(envelope("conversation", { kind: "data", data: { n: 1 } }, { key: "c", cursor: "c2" }));
+    const timersBefore = h.scheduled.length;
+
+    h.channel.suspend();
+    expect(first.closed).toBe(true);
+    expect(h.scheduled.length).toBeLessThanOrEqual(timersBefore);
+    // The closed source's late traffic is from a superseded attempt.
+    first.live(envelope("conversation", { kind: "data", data: { n: 2 } }, { key: "c", cursor: "c3" }));
+    first.fail();
+    expect(r.calls.some(call => call.includes('"n":2') || call.startsWith("dropped"))).toBe(false);
+    expect(h.sources).toHaveLength(1);
+
+    h.channel.connect({ resumed: true });
+    expect(h.sources).toHaveLength(2);
+    expect(h.subs(h.latest())).toEqual([{ topic: "conversation", key: "c", cursor: "c2" }]);
+  });
+});
+
 describe("createLiveChannel — subscription control", () => {
   test("changes on an open stream go through the control route bound by the hello id", async () => {
     const h = createHarness();
