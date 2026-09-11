@@ -16,10 +16,15 @@ function object(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
 }
 
+// A tag decides first, then the path. Under /s/ the Hub proxies the
+// workspace child, so an untagged or child-tagged operation there is
+// workspace. An operation the Hub serves itself under /s/ (personal state)
+// carries a Hub tag, and a break in it moves the Hub revision.
 function domainFor(path: string, operation: JsonObject): ApiDomain {
-  const tags = Array.isArray(operation.tags) ? operation.tags.map(String) : [];
-  if (tags.some(tag => tag.toLowerCase().startsWith("workspace")) || path.startsWith("/s/")) return "workspace";
-  return "hub";
+  const tags = Array.isArray(operation.tags) ? operation.tags.map(tag => String(tag).toLowerCase()) : [];
+  if (tags.some(tag => tag.startsWith("workspace"))) return "workspace";
+  if (tags.some(tag => tag.startsWith("hub"))) return "hub";
+  return path.startsWith("/s/") ? "workspace" : "hub";
 }
 
 function operations(contract: JsonObject): Map<string, { domain: ApiDomain; value: JsonObject }> {

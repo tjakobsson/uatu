@@ -2,7 +2,7 @@
 
 UatuCode separates product identity from wire compatibility. A version or commit identifies a build; `hubApiRevision` and `workspaceApiRevision` identify incompatible public API generations. The bundled web-client freshness revision is unrelated to native-client compatibility.
 
-`hubApiRevision` covers the Hub's operations and the envelopes of its streams. `workspaceApiRevision` covers the workspace payloads the live stream forwards: `WorkspaceState` on the document topic, `ConversationInventoryEvent` on the inventory topic, and `ChatEvent` and `ChatResyncEvent` on the conversation topic. Since workspace revision 16 the routes under `/s/{workspaceId}/` are internal, and no public revision describes them.
+`hubApiRevision` covers the Hub's operations, including the personal-state operations it serves under `/s/{workspaceId}/`, and the envelopes of its streams. `workspaceApiRevision` covers the workspace payloads the live stream forwards: `WorkspaceState` on the document topic, `ConversationInventoryEvent` on the inventory topic, and `ChatEvent` and `ChatResyncEvent` on the conversation topic. Since workspace revision 16 the routes the Hub proxies under `/s/{workspaceId}/` are internal, and no public revision describes them.
 
 Record the revision pair used to generate or validate a client. At connection time, fetch authenticated Hub state and compare both reported public revisions with the pinned [contract metadata](../contract.json). Each workspace entry also reports the `workspaceApiRevision` its child speaks. It equals the top-level value for the local backend but may differ for backends running children of other builds, so a client reading one workspace's live payloads should compare the per-entry value.
 

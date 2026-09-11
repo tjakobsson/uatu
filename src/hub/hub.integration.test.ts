@@ -2829,20 +2829,34 @@ describe("hub end to end", () => {
     const diff = await fetch(`${origin}/s/myproject/api/document/diff?id=${encodeURIComponent(documentId!)}`, { headers: { cookie } });
     expect(diff.status).toBe(200);
 
+    // Personal state is a public Hub operation: the Hub answers it itself.
     const personal = await fetch(`${origin}/s/myproject/api/personal-state`, { headers: { cookie } });
     expect(personal.status).toBe(200);
+    await assertContract("GET", "/s/{workspaceId}/api/personal-state", personal);
     const patched = await fetch(`${origin}/s/myproject/api/personal-state`, {
       method: "PATCH",
       headers: { "content-type": "application/json", cookie, origin },
       body: JSON.stringify({ follow: true }),
     });
     expect(patched.status).toBe(200);
+    await assertContract("PATCH", "/s/{workspaceId}/api/personal-state", patched);
     const rejectedPatch = await fetch(`${origin}/s/myproject/api/personal-state`, {
       method: "PATCH",
       headers: { "content-type": "application/json", cookie, origin },
       body: JSON.stringify({ follow: "sideways" }),
     });
     expect(rejectedPatch.status).toBe(400);
+    await assertContract("PATCH", "/s/{workspaceId}/api/personal-state", rejectedPatch);
+    const unknownPersonal = await fetch(`${origin}/s/no-such-workspace/api/personal-state`, { headers: { cookie } });
+    expect(unknownPersonal.status).toBe(404);
+    await assertContract("GET", "/s/{workspaceId}/api/personal-state", unknownPersonal);
+    const unknownPatch = await fetch(`${origin}/s/no-such-workspace/api/personal-state`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ follow: true }),
+    });
+    expect(unknownPatch.status).toBe(404);
+    await assertContract("PATCH", "/s/{workspaceId}/api/personal-state", unknownPatch);
 
     const inventory = await fetch(`${origin}/s/myproject/api/terminal/sessions`, { headers: { cookie } });
     expect(inventory.status).toBe(200);

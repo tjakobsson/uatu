@@ -126,6 +126,8 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubUnassignCredential", "const action ="],
     ["hubTestCredential", "const action ="],
     ["hubDeleteCredential", "const action ="],
+    ["workspaceGetPersonalState", 'suffix === "/api/personal-state"'],
+    ["workspacePatchPersonalState", 'suffix === "/api/personal-state"'],
   ] as const;
   expect(hub.map(item => item.operationId).sort()).toEqual(expected.map(item => item[0]).sort());
   for (const [, marker] of expected) expect(source).toContain(marker);
@@ -139,6 +141,16 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     item.pathPattern?.endsWith("*") && path.startsWith(item.pathPattern.slice(0, -1)),
   );
   expect(exactPaths.filter(path => !publicPaths.has(path) && !excludedPaths.has(path) && !matchesExcludedPattern(path))).toEqual([]);
+  // Under a workspace prefix the Hub dispatches on the suffix after
+  // SESSION_PATH. A suffix it answers itself, such as personal state, is a
+  // public Hub operation. The rest of the prefix is proxied to the child and
+  // classified by the child-route check.
+  expect(source).toContain("const SESSION_PATH = /^\\/s\\/([^/]+)(\\/|$)/;");
+  const hubServedWorkspacePaths = [...source.matchAll(/suffix === "([^"]+)"/g)].map(match => `/s/{workspaceId}${match[1]!}`);
+  expect(hubServedWorkspacePaths.length).toBeGreaterThan(0);
+  expect(hubServedWorkspacePaths.filter(path => !publicPaths.has(path))).toEqual([]);
+  expect(hub.filter(item => item.path.startsWith("/s/") && !hubServedWorkspacePaths.includes(item.path)).map(item => item.operationId)).toEqual([]);
+  expect(hub.filter(item => item.path.startsWith("/s/") && (item.childPath !== undefined || item.runtime !== "src/hub/server.ts")).map(item => item.operationId)).toEqual([]);
   // Regex dispatch families: every /^\/api\/hub\/.../ route regex in the hub
   // handler, inline or bound to a constant, must match at least one documented hub path (with placeholders
   // substituted), so a new regex family cannot ship undocumented — and every
@@ -155,7 +167,9 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
   for (const regex of routeRegexes) {
     expect(samplePaths.some(path => regex.test(path))).toBe(true);
   }
-  const templatedPaths = hub.filter(item => item.path.includes("{")).map(item => item.path.replace(/\{[^}]+\}/g, "sample"));
+  const templatedPaths = hub
+    .filter(item => item.path.includes("{") && !hubServedWorkspacePaths.includes(item.path))
+    .map(item => item.path.replace(/\{[^}]+\}/g, "sample"));
   for (const path of templatedPaths) {
     expect(routeRegexes.some(regex => regex.test(path))).toBe(true);
   }

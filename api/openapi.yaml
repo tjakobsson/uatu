@@ -6,9 +6,11 @@ info:
   summary: Hub revision 5 and workspace revision 16
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
-    Everything under `/s/{workspaceId}/` is the internal protocol between the
-    Hub, the workspace child, and the web client shipped in the same build,
-    and `exclusions.yaml` lists it. Workspace payloads reach public clients
+    Under `/s/{workspaceId}/` the Hub serves one family itself, personal
+    state, and it is part of this contract. Everything else under that
+    prefix is the internal protocol between the Hub, the workspace child,
+    and the web client shipped in the same build, and `exclusions.yaml`
+    lists it. Workspace payloads reach public clients
     as topics of the Hub's live stream, and the workspace revision versions
     those payloads. `streaming.yaml` defines streaming messages and lifecycle
     rules.
@@ -26,7 +28,7 @@ servers:
       hubHost: { default: uatu.example.test }
 tags:
   - { name: Hub authentication, description: Native JSON session creation and revocation. }
-  - { name: Hub, description: "Workspace registry, lifecycle, browsing, and device sessions." }
+  - { name: Hub, description: "Workspace registry, lifecycle, browsing, device sessions, and per-user workspace state." }
   - { name: Hub credentials, description: "Hub-managed credentials, workspace assignments, and credential-tool readiness." }
   - { name: Clone jobs, description: "Asynchronous clone creation, interaction, cancellation, and events." }
   - { name: Live stream, description: "One SSE connection per client for document state, conversation inventory and events, and cross-workspace activity." }
@@ -826,6 +828,40 @@ paths:
           description: The stream is unknown or has ended. Reconnect and present the whole subscription set in `subs`.
           content:
             application/json: { schema: { $ref: '#/components/schemas/Error' } }
+  /s/{workspaceId}/api/personal-state:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: workspaceGetPersonalState
+      tags: [Hub]
+      summary: Read per-user workspace state
+      description: The Hub stores personal state per Hub user and workspace and answers this request itself, without proxying it to the workspace child, so it answers whether or not the workspace is running. The operation ID predates the move to the Hub domain and is kept for generated clients.
+      responses:
+        '200':
+          description: Personal state
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/PersonalState' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      operationId: workspacePatchPersonalState
+      tags: [Hub]
+      summary: Patch per-user workspace state
+      description: The Hub applies and stores the patch itself, without proxying it to the workspace child. The operation ID predates the move to the Hub domain and is kept for generated clients.
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/PersonalStatePatch' } }
+      responses:
+        '200':
+          description: Updated personal state
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/PersonalState' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     hubBearer: { type: http, scheme: bearer, description: Session ID returned by native JSON login. }
@@ -929,6 +965,16 @@ components:
       properties: { revoked: { type: boolean }, current: { type: boolean } }
       additionalProperties: false
     WorkspaceId: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+    ViewMode: { enum: [rendered, source, diff] }
+    PersonalState:
+      type: object
+      required: [version]
+      properties: { version: { const: 1 }, documentPath: { type: string }, follow: { type: boolean }, previewMode: { $ref: '#/components/schemas/ViewMode' }, compareTarget: { enum: [base, last-commit] }, filesFilter: { enum: [all, changed] }, lastPtyId: { type: string, format: uuid } }
+      additionalProperties: false
+    PersonalStatePatch:
+      type: object
+      properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, changed, null] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
+      additionalProperties: false
     CredentialId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
     CredentialToolName: { enum: [ssh, ssh-agent, ssh-add, ssh-keygen, gpg, gpgconf, git, gh, glab] }
     NativeLoginRequest:

@@ -10,7 +10,7 @@ Compact entry point for implementing a Hub API client without reading server sou
 4. [API changelog](https://tjakobsson.github.io/uatu/api/CHANGELOG.md) provides compatibility and migration guidance.
 5. [Source guides](https://tjakobsson.github.io/uatu/docs/guides/) explain workflows but do not override machine-readable schemas.
 
-Routes under `/s/{workspaceId}/` are internal and appear only in [exclusions.yaml](https://tjakobsson.github.io/uatu/api/exclusions.yaml). Do not call them. Workspace updates come from the live stream, `GET /api/hub/live`.
+Routes the Hub proxies under `/s/{workspaceId}/` are internal and appear only in [exclusions.yaml](https://tjakobsson.github.io/uatu/api/exclusions.yaml). Do not call them. The exception is `/s/{workspaceId}/api/personal-state`: the Hub serves it itself, and OpenAPI documents it as a Hub operation. Workspace updates come from the live stream, `GET /api/hub/live`.
 
 If artifacts disagree, stop and report drift. Do not infer a wire shape from examples or prose over the canonical contract.
 

@@ -60,8 +60,24 @@ describe("API contract structure", () => {
       readYaml<{ channels: Record<string, { path?: string }> }>("api/streaming.yaml"),
       readYaml<{ exclusions: Array<{ id: string; pathPattern?: string; reason?: string }> }>("api/exclusions.yaml"),
     ]);
-    expect(Object.keys(openapi.paths).filter(path => path.startsWith("/s/"))).toEqual([]);
-    expect(inventory.operations.filter(operation => operation.domain !== "hub" || !operation.operationId.startsWith("hub")).map(operation => operation.operationId)).toEqual([]);
+    // The Hub serves personal state itself under the workspace prefix, so it
+    // is a Hub operation. Nothing the Hub proxies to the child is public.
+    const personalStatePath = "/s/{workspaceId}/api/personal-state";
+    expect(Object.keys(openapi.paths).filter(path => path.startsWith("/s/"))).toEqual([personalStatePath]);
+    const hubServed = inventory.operations.filter(operation => operation.path.startsWith("/s/"));
+    expect(hubServed.map(operation => operation.operationId).sort()).toEqual(["workspaceGetPersonalState", "workspacePatchPersonalState"]);
+    for (const operation of hubServed) {
+      expect(operation).toMatchObject({ domain: "hub", runtime: "src/hub/server.ts" });
+      expect(operation.childPath).toBeUndefined();
+    }
+    // The Hub tag is what makes the compatibility check charge a break here
+    // to the Hub revision rather than the workspace revision.
+    const personalState = openapi.paths[personalStatePath] as Record<"get" | "patch", { tags?: string[] }>;
+    expect([personalState.get.tags, personalState.patch.tags]).toEqual([["Hub"], ["Hub"]]);
+    // New operation IDs begin with `hub`. The personal-state IDs predate the
+    // move to the Hub domain and are kept, since a rename breaks generated clients.
+    const retainedIds = new Set(hubServed.map(operation => operation.operationId));
+    expect(inventory.operations.filter(operation => operation.domain !== "hub" || !(operation.operationId.startsWith("hub") || retainedIds.has(operation.operationId))).map(operation => operation.operationId)).toEqual([]);
     expect(Object.entries(streaming.channels).filter(([, channel]) => channel.path?.startsWith("/s/")).map(([name]) => name)).toEqual([]);
     expect(excluded.exclusions.find(item => item.id === "workspace-api")?.pathPattern).toBe("/s/{workspaceId}/api/*");
     // The streams the Hub refuses say where their events went.

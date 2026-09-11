@@ -25,6 +25,22 @@ describe("API compatibility policy", () => {
       .not.toThrow();
   });
 
+  test("charges a Hub-tagged operation under a workspace prefix to the Hub", () => {
+    const path = "/s/{workspaceId}/api/personal-state";
+    const hubServed = compareContracts(
+      { paths: { [path]: { get: operation("Hub", { "200": {}, "404": {} }) } } },
+      { paths: { [path]: { get: operation("Hub", { "200": {} }) } } },
+    );
+    expect(hubServed.breaking).toEqual({ hub: [`GET ${path}: removed response 404`], workspace: [] });
+    // A child route proxied under the same prefix stays workspace even when
+    // its tag names neither domain.
+    const proxied = compareContracts(
+      { paths: { "/s/{workspaceId}/api/chat/status": { get: operation("Chat", { "200": {}, "503": {} }) } } },
+      { paths: { "/s/{workspaceId}/api/chat/status": { get: operation("Chat", { "200": {} }) } } },
+    );
+    expect(proxied.breaking).toEqual({ hub: [], workspace: ["GET /s/{workspaceId}/api/chat/status: removed response 503"] });
+  });
+
   test("does not reuse migration guidance from an older revision entry", () => {
     const result = compareContracts(
       { paths: { "/api/hub/state": { get: operation("Hub", { "200": {}, "401": {} }) } } },
