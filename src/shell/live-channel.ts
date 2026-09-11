@@ -165,6 +165,15 @@ export type LiveChannel = {
   subscribe(key: LiveSubscriptionKey, consumer: LiveTopicConsumer, options?: { cursor?: string }): LiveSubscriptionHandle;
   onActivity(listener: LiveActivityListener): () => void;
   onStatus(listener: (status: LiveChannelStatus) => void): () => void;
+  // Each stream the hub attached, once, when its hello arrives. `replacement`
+  // is false only for the page's first stream; every later one follows a
+  // drop, a background release, or a deliberate reconnect, so the page held
+  // no stream for a while. Independent of `confirm`: a stream opens whether
+  // or not the document topic can prove its state. Not replayed to a
+  // listener that registers later. Optional: the page's own channel always
+  // reports openings, but a stand-in that only carries topics may leave it
+  // out and reports none.
+  onStreamOpened(listener: (stream: { replacement: boolean }) => void): () => void;
   // The owner applied authoritative state from `generation`. Resets failure
   // accounting and reports `live` — unless the generation has already been
   // superseded, in which case the report is stale and is dropped.
@@ -236,6 +245,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
   // held no stream) must not let the previous stream's facts replay.
   const latestActivity = new Map<string, WorkspaceActivity>();
   const statusListeners = new Set<(status: LiveChannelStatus) => void>();
+  const openedListeners = new Set<(stream: { replacement: boolean }) => void>();
 
   const emitStatus = (status: LiveChannelStatus) => {
     for (const listener of [...statusListeners]) listener(status);
@@ -474,6 +484,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     for (const id of deferred) dirty.add(id);
     const next = options.openSource(urlFor(subs));
     source = next;
+    let opened = false;
     next.addEventListener("error", () => {
       if (attempt !== generation || disposed) return;
       lost(next);
@@ -486,6 +497,9 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
       dropsSinceHello = 0;
       // Anything subscribed or closed while the stream was connecting.
       flushControl();
+      if (opened) return;
+      opened = true;
+      for (const listener of [...openedListeners]) listener({ replacement: superseding });
     });
     next.addEventListener(LIVE_ENVELOPE_EVENT, event => {
       if (attempt !== generation || disposed) return;
@@ -543,6 +557,10 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     onStatus(listener) {
       statusListeners.add(listener);
       return () => { statusListeners.delete(listener); };
+    },
+    onStreamOpened(listener) {
+      openedListeners.add(listener);
+      return () => { openedListeners.delete(listener); };
     },
     confirm(confirmedGeneration) {
       if (disposed || confirmedGeneration !== generation) return;

@@ -304,6 +304,7 @@ class FakeChannel implements LiveChannel {
     }
   }
   onActivity() { return () => {}; }
+  onStreamOpened() { return () => {}; }
   onStatus() { return () => {}; }
   confirm() {}
   invalidate() {}

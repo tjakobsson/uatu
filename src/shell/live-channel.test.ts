@@ -322,6 +322,71 @@ describe("createLiveChannel — background release", () => {
   });
 });
 
+describe("createLiveChannel — stream openings", () => {
+  test("each stream's hello is reported once, and every stream after the page's first is a replacement", () => {
+    const h = createHarness();
+    const opened: boolean[] = [];
+    h.channel.onStreamOpened(stream => opened.push(stream.replacement));
+    h.channel.connect();
+    // An open socket is not an opening; only hello says the hub attached it.
+    expect(opened).toEqual([]);
+    h.latest().hello("s1");
+    h.latest().hello("s1");
+    h.latest().raw("hello", "{}");
+    expect(opened).toEqual([false]);
+
+    // Lost, and replaced. An attempt that fails before hello never opened.
+    h.latest().fail();
+    h.runPendingTimer();
+    h.latest().fail();
+    h.runPendingTimer();
+    h.latest().hello("s2");
+    expect(opened).toEqual([false, true]);
+
+    // Released in the background, then resumed. The released stream's late
+    // hello is from a superseded attempt.
+    const released = h.latest();
+    h.channel.suspend();
+    released.hello("late");
+    h.channel.connect({ resumed: true });
+    h.latest().hello("s3");
+    expect(opened).toEqual([false, true, true]);
+  });
+
+  test("a page released before its first stream said hello opens a replacement when shown", () => {
+    const h = createHarness();
+    const opened: boolean[] = [];
+    h.channel.onStreamOpened(stream => opened.push(stream.replacement));
+    h.channel.connect();
+    h.channel.suspend();
+    h.channel.connect({ resumed: true });
+    h.latest().hello("s1");
+    expect(opened).toEqual([true]);
+  });
+
+  test("an opening is not replayed to a later listener; unsubscribing and disposal silence it", () => {
+    const h = createHarness();
+    h.channel.connect();
+    h.latest().hello("s1");
+    const late: boolean[] = [];
+    const off = h.channel.onStreamOpened(stream => late.push(stream.replacement));
+    expect(late).toEqual([]);
+
+    h.channel.connect();
+    off();
+    h.latest().hello("s2");
+    expect(late).toEqual([]);
+
+    const kept: boolean[] = [];
+    h.channel.onStreamOpened(stream => kept.push(stream.replacement));
+    h.channel.connect();
+    const disposed = h.latest();
+    h.channel.dispose();
+    disposed.hello("s3");
+    expect(kept).toEqual([]);
+  });
+});
+
 describe("createLiveChannel — subscription control", () => {
   test("changes on an open stream go through the control route bound by the hello id", async () => {
     const h = createHarness();

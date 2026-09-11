@@ -435,19 +435,20 @@ export function initHubNav(): void {
       refreshForUnlisted();
     });
 
-    // A stream reopened after an interruption (the page hidden and shown
-    // again, the connection lost and regained) cannot tell the page what
-    // happened to the list while it held none: a workspace forgotten
-    // meanwhile is simply absent from its snapshot. Re-read the list once the
-    // new stream is confirmed live.
-    let interrupted = liveChannel().isRecovering();
-    liveChannel().onStatus(status => {
-      if (status === "reconnecting") {
-        interrupted = true;
-      } else if (status === "live" && interrupted) {
-        interrupted = false;
-        void refreshHubState();
-      }
+    // A replacement stream (after the page was hidden and shown again, the
+    // connection was lost and regained, or the hub restarted) cannot tell
+    // the page what happened to the list while it held none: a workspace
+    // forgotten meanwhile is simply absent from its snapshot, and nothing
+    // says it went. Re-read the list as each replacement says hello, not
+    // when the stream is confirmed live: a stopped current workspace leaves
+    // the document topic unavailable, so the stream would never count as
+    // live. The page's first stream is skipped, since the probe above read
+    // the list. The hub writes hello before any envelope, so the request goes
+    // out before the new snapshot is dispatched. Whether its answer lands
+    // before or after the snapshot, it drops only activity reported before
+    // it was asked (see refreshHubState).
+    liveChannel().onStreamOpened(stream => {
+      if (stream.replacement) void refreshHubState();
     });
 
     // A back/forward-cache restore revives this page exactly as it was —

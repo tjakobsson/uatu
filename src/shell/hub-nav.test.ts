@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import { resetAppBasePathForTests } from "../shared/app-url";
-import { createLiveChannel, type LiveChannel } from "./live-channel";
+import { createLiveChannel, type LiveChannel, type LiveChannelStatus } from "./live-channel";
 import { disposeLiveChannel, installLiveChannelForTests, watchPageLifecycle } from "./live";
 import {
   applyWorkspaceActivity,
@@ -291,8 +291,7 @@ describe("initHubNav with the live activity topic", () => {
     let deliver: ((ws: string, activity: { running: boolean; working: boolean; awaiting: boolean }) => void) | null = null;
     installLiveChannelForTests({
       onActivity(listener: typeof deliver) { deliver = listener; return () => {}; },
-      onStatus() { return () => {}; },
-      isRecovering() { return false; },
+      onStreamOpened() { return () => {}; },
       dispose() {},
     } as unknown as LiveChannel);
 
@@ -353,7 +352,34 @@ describe("initHubNav with the live activity topic", () => {
     expect(badge.textContent).toBe("1");
   });
 
-  test("a workspace forgotten while the page was hidden leaves no badge and no menu entry once the page is shown", async () => {
+  type Facts = { running: boolean; working: boolean; awaiting: boolean };
+  type Workspace = { id: string; displayName: string; path: string; running: boolean };
+  type FakeStream = {
+    closed: boolean;
+    hello(streamId: string): void;
+    activity(ws: string, facts: Facts): void;
+    documentState(): void;
+    documentUnavailable(): void;
+    fail(): void;
+    addEventListener(type: string, listener: (event: Event) => void): void;
+    close(): void;
+  };
+  const idle: Facts = { running: true, working: false, awaiting: false };
+  const working: Facts = { running: true, working: true, awaiting: false };
+  const awaiting: Facts = { running: true, working: true, awaiting: true };
+  const stopped: Facts = { running: false, working: false, awaiting: false };
+  const workspace = (id: string, displayName: string, running = true): Workspace =>
+    ({ id, displayName, path: `/src/${id}`, running });
+  const waitFor = async (condition: () => boolean) => {
+    for (let attempt = 0; attempt < 100 && !condition(); attempt += 1) await Bun.sleep(1);
+  };
+  const settle = () => Bun.sleep(5);
+
+  // A session page at /s/uatu/ on a hub, holding the page's real live channel
+  // over fake streams and timers. Its document consumer does what
+  // shell/events.ts does: state or `ready` confirms the generation, and
+  // `unavailable` invalidates it.
+  async function mountHubPage(initial: Workspace[]) {
     const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
     const { document, window } = parseHTML(html);
     const meta = document.createElement("meta");
@@ -367,89 +393,258 @@ describe("initHubNav with the live activity topic", () => {
     setGlobal("Node", (window as unknown as Record<string, unknown>).Node);
     resetAppBasePathForTests();
 
-    let stateFetches = 0;
-    let workspaces = [
-      { id: "uatu", displayName: "Uatu", path: "/src/uatu", running: true },
-      { id: "two", displayName: "Payments", path: "/src/two", running: true },
-      { id: "scratch", displayName: "Scratch", path: "/src/scratch", running: true },
-    ];
+    // The hub answers with its list as it is when asked. While answers are
+    // held, each waits for its own release, in request order.
+    const hub = { workspaces: initial, stateFetches: 0 };
+    const held: (() => void)[] = [];
+    let holding = false;
     setGlobal("fetch", async (url: string) => {
-      if (url === "/api/hub/state") {
-        stateFetches += 1;
-        return Response.json({ workspaces });
-      }
-      return Response.json({ error: "unexpected" }, { status: 404 });
+      if (url !== "/api/hub/state") return Response.json({ error: "unexpected" }, { status: 404 });
+      hub.stateFetches += 1;
+      const answer = Response.json({ workspaces: hub.workspaces });
+      if (holding) await new Promise<void>(resolve => { held.push(resolve); });
+      return answer;
     });
-    const sources: { live: (data: string) => void; closed: boolean }[] = [];
+
+    let cursor = 0;
+    const sources: FakeStream[] = [];
+    const timers = new Map<number, () => void>();
+    let nextTimer = 1;
     const channel = createLiveChannel({
       ws: "uatu",
       activity: true,
       fetcher: async () => Response.json({ ok: true }),
+      timers: {
+        setTimeout(callback) {
+          const id = nextTimer++;
+          timers.set(id, callback);
+          return id as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout(timer) { timers.delete(timer as unknown as number); },
+      },
       openSource: () => {
         const listeners = new Map<string, (event: Event) => void>();
-        const source = {
+        const emit = (type: string, data?: unknown) =>
+          listeners.get(type)?.({ type, data: data === undefined ? undefined : JSON.stringify(data) } as unknown as Event);
+        const document = (event: unknown) =>
+          emit("live", { ws: "uatu", topic: "document", key: "scope=folder", cursor: `d${++cursor}`, event });
+        const stream: FakeStream = {
           closed: false,
-          live: (data: string) => listeners.get("live")?.({ type: "live", data } as unknown as Event),
-          addEventListener(type: string, listener: (event: Event) => void) { listeners.set(type, listener); },
-          close() { source.closed = true; },
+          hello: streamId => emit("hello", { streamId }),
+          activity: (ws, facts) => emit("live", { ws, topic: "activity", cursor: `a${++cursor}`, event: { kind: "data", data: facts } }),
+          documentState: () => document({ kind: "data", data: {} }),
+          documentUnavailable: () => document({ kind: "unavailable" }),
+          fail: () => emit("error"),
+          addEventListener(type, listener) { listeners.set(type, listener); },
+          close() { stream.closed = true; },
         };
-        sources.push(source);
-        return source;
+        sources.push(stream);
+        return stream;
       },
     });
+    const statuses: LiveChannelStatus[] = [];
+    channel.onStatus(status => statuses.push(status));
+    channel.subscribe({ topic: "document", key: "scope=folder" }, {
+      data: (_data, _cursor, generation) => channel.confirm(generation),
+      ready: generation => channel.confirm(generation),
+      unavailable: generation => channel.invalidate(generation),
+    });
     installLiveChannelForTests(channel);
-    const activityFrame = (ws: string, cursor: string, facts: { running: boolean; working: boolean; awaiting: boolean }) =>
-      JSON.stringify({ ws, topic: "activity", cursor, event: { kind: "data", data: facts } });
-    // What shell/events.ts does once a generation's document state lands.
-    const documentStateApplied = () => channel.confirm(channel.currentGeneration());
 
-    // Boot: the stream opens, the lifecycle watch is installed, the switcher probes.
-    channel.connect();
-    watchPageLifecycle();
-    initHubNav();
-    documentStateApplied();
     const control = document.querySelector<HTMLElement>("#hub-control")!;
     const toggle = document.querySelector<HTMLButtonElement>("#hub-toggle")!;
     const badge = document.querySelector<HTMLElement>("#hub-activity-badge")!;
     const menu = document.querySelector<HTMLElement>("#hub-menu")!;
-    for (let attempt = 0; attempt < 100 && control.hidden; attempt += 1) await Bun.sleep(1);
-    expect(control.hidden).toBe(false);
+    const setVisibility = (next: "visible" | "hidden") => {
+      visibility = next;
+      document.dispatchEvent(new window.Event("visibilitychange"));
+    };
+    return {
+      hub,
+      sources,
+      statuses,
+      badge,
+      toggle,
+      menu,
+      latest: () => sources.at(-1)!,
+      hold() { holding = true; },
+      heldAnswers: () => held.length,
+      release: (index: number) => held[index]!(),
+      runPendingTimer() {
+        const [id, run] = [...timers][0]!;
+        timers.delete(id);
+        run();
+      },
+      hide: () => setVisibility("hidden"),
+      show: () => setVisibility("visible"),
+      // The menu as it renders the moment it opens, before the refresh that
+      // opening starts has answered: what the page already believed.
+      openMenu() {
+        toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+        expect(menu.hidden).toBe(false);
+        return [...menu.querySelectorAll<HTMLAnchorElement>(".hub-menu-item")];
+      },
+      // Boot as the app does: the stream opens, the lifecycle watch is
+      // installed, and the switcher probes. Then the stream says hello, the
+      // document state lands, and the hub sends its activity snapshot.
+      async boot(snapshot: [string, Facts][]) {
+        channel.connect();
+        watchPageLifecycle();
+        initHubNav();
+        await waitFor(() => !control.hidden);
+        expect(control.hidden).toBe(false);
+        sources[0]!.hello("stream-boot");
+        sources[0]!.documentState();
+        for (const [ws, facts] of snapshot) sources[0]!.activity(ws, facts);
+      },
+    };
+  }
+  const hrefs = (items: HTMLAnchorElement[]) => items.map(item => item.getAttribute("href"));
 
+  test("a workspace forgotten while the page was hidden leaves no badge and no menu entry, though the stopped current workspace never lets the stream count as live", async () => {
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments"), workspace("scratch", "Scratch")]);
     // An agent in Scratch is waiting on the user.
-    sources[0]!.live(activityFrame("uatu", "a1", { running: true, working: false, awaiting: false }));
-    sources[0]!.live(activityFrame("two", "a2", { running: true, working: false, awaiting: false }));
-    sources[0]!.live(activityFrame("scratch", "a3", { running: true, working: true, awaiting: true }));
-    expect(badge.hidden).toBe(false);
-    expect(badge.className).toBe("hub-activity-badge is-awaiting");
+    await page.boot([["uatu", idle], ["two", idle], ["scratch", awaiting]]);
+    expect(page.badge.hidden).toBe(false);
+    expect(page.badge.className).toBe("hub-activity-badge is-awaiting");
 
-    // The page goes to the background and releases its stream; meanwhile
-    // Scratch is stopped and forgotten from another device.
-    visibility = "hidden";
-    document.dispatchEvent(new window.Event("visibilitychange"));
-    expect(sources[0]!.closed).toBe(true);
-    workspaces = workspaces.filter(workspace => workspace.id !== "scratch");
+    // The page goes to the background and releases its stream. Meanwhile,
+    // from another device, this workspace is stopped, and Scratch is stopped
+    // and forgotten.
+    page.hide();
+    expect(page.sources[0]!.closed).toBe(true);
+    page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments")];
 
-    // Shown again: a fresh stream, whose snapshot no longer mentions Scratch.
-    const fetchesBefore = stateFetches;
-    visibility = "visible";
-    document.dispatchEvent(new window.Event("visibilitychange"));
-    expect(sources).toHaveLength(2);
-    sources[1]!.live(activityFrame("uatu", "b1", { running: true, working: false, awaiting: false }));
-    sources[1]!.live(activityFrame("two", "b2", { running: true, working: false, awaiting: false }));
-    documentStateApplied();
+    // Shown again: a replacement stream opens. Nothing is asked of the hub
+    // before it says hello.
+    const fetchesBefore = page.hub.stateFetches;
+    const statusesBefore = page.statuses.length;
+    page.show();
+    expect(page.sources).toHaveLength(2);
+    await settle();
+    expect(page.hub.stateFetches).toBe(fetchesBefore);
 
-    for (let attempt = 0; attempt < 100 && !badge.hidden; attempt += 1) await Bun.sleep(1);
-    expect(stateFetches).toBeGreaterThan(fetchesBefore);
-    expect(badge.hidden).toBe(true);
-    expect(toggle.getAttribute("aria-label")).toBe("Switch workspace or open the hub dashboard");
+    // It says hello, its snapshot no longer mentions Scratch, and the stopped
+    // workspace's document topic is unavailable.
+    const replacement = page.latest();
+    replacement.hello("stream-shown");
+    replacement.activity("uatu", stopped);
+    replacement.activity("two", idle);
+    replacement.documentUnavailable();
 
-    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
-    expect(menu.hidden).toBe(false);
-    const entries = () => [...menu.querySelectorAll<HTMLAnchorElement>(".hub-menu-item")].map(item => item.getAttribute("href"));
-    expect(entries()).toContain("/s/two/");
-    expect(entries()).not.toContain("/s/scratch/");
-    expect(menu.textContent).not.toContain("Scratch");
-    expect(menu.textContent).not.toContain("awaiting you");
+    await waitFor(() => page.badge.hidden === true);
+    // The stream never counted as live.
+    expect(page.statuses.slice(statusesBefore)).toEqual(["reconnecting"]);
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 1);
+    expect(page.badge.hidden).toBe(true);
+    expect(page.toggle.getAttribute("aria-label")).toBe("Switch workspace or open the hub dashboard");
+    const entries = hrefs(page.openMenu());
+    expect(entries).toContain("/s/two/");
+    expect(entries).not.toContain("/s/scratch/");
+    expect(page.menu.textContent).not.toContain("Scratch");
+    expect(page.menu.textContent).not.toContain("awaiting you");
+  });
+
+  for (const [interruption, failedAttempts] of [["a dropped connection", 0], ["a hub restart", 2]] as const) {
+    test(`after ${interruption}, the list is read once, when the replacement stream says hello`, async () => {
+      const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments"), workspace("scratch", "Scratch")]);
+      await page.boot([["uatu", idle], ["two", idle], ["scratch", awaiting]]);
+      expect(page.badge.hidden).toBe(false);
+      const fetchesBefore = page.hub.stateFetches;
+
+      // The stream is lost; Scratch is forgotten before one is back. While
+      // the hub restarts, the first reconnect attempts fail before hello.
+      page.sources[0]!.fail();
+      page.hub.workspaces = [workspace("uatu", "Uatu"), workspace("two", "Payments")];
+      page.runPendingTimer();
+      for (let attempt = 0; attempt < failedAttempts; attempt += 1) {
+        page.latest().fail();
+        page.runPendingTimer();
+      }
+      expect(page.sources).toHaveLength(2 + failedAttempts);
+      await settle();
+      expect(page.hub.stateFetches).toBe(fetchesBefore);
+
+      page.latest().hello("stream-back");
+      page.latest().activity("uatu", idle);
+      page.latest().activity("two", idle);
+      await waitFor(() => page.badge.hidden === true);
+      expect(page.hub.stateFetches).toBe(fetchesBefore + 1);
+      expect(page.badge.hidden).toBe(true);
+      expect(hrefs(page.openMenu())).not.toContain("/s/scratch/");
+
+      // The document confirming the stream live asks nothing more.
+      const fetchesAtOpen = page.hub.stateFetches;
+      page.latest().documentState();
+      expect(page.statuses.at(-1)).toBe("live");
+      await settle();
+      expect(page.hub.stateFetches).toBe(fetchesAtOpen);
+    });
+  }
+
+  for (const order of ["after", "before"] as const) {
+    test(`the reconnect list answer landing ${order} the new stream's activity drops the forgotten workspace and keeps what the stream reported since`, async () => {
+      const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments"), workspace("scratch", "Scratch")]);
+      await page.boot([["uatu", idle], ["two", idle], ["scratch", awaiting]]);
+      page.hide();
+      page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments")];
+      page.hold();
+      page.show();
+
+      // Hello: the reconnect's request goes out, and its answer is the list
+      // as it is at this moment.
+      const replacement = page.latest();
+      replacement.hello("stream-shown");
+      expect(page.heldAnswers()).toBe(1);
+      if (order === "before") {
+        page.release(0);
+        await settle();
+        expect(page.badge.hidden).toBe(true);
+      }
+
+      // The stream reports: the snapshot, then a workspace registered after
+      // that request, whose agent at once asks a question. Scratch is
+      // registered again too, and not started.
+      page.hub.workspaces = [
+        workspace("uatu", "Uatu", false),
+        workspace("two", "Payments"),
+        workspace("three", "New"),
+        workspace("scratch", "Scratch", false),
+      ];
+      replacement.activity("uatu", stopped);
+      replacement.activity("two", working);
+      replacement.activity("three", awaiting);
+      // "three" is not in the list the page holds, so the list is read again.
+      expect(page.heldAnswers()).toBe(2);
+      if (order === "after") {
+        // The reconnect's answer lands only now. It does not list "three",
+        // whose report is newer than the answer and is kept; Scratch's old
+        // question, reported before the request, is dropped.
+        page.release(0);
+        await settle();
+        expect(page.badge.className).toBe("hub-activity-badge is-working");
+      }
+
+      page.release(1);
+      await waitFor(() => page.badge.className === "hub-activity-badge is-awaiting");
+      // Only New's question counts: Scratch, listed again but not started,
+      // carries nothing of its old one.
+      expect(page.badge.className).toBe("hub-activity-badge is-awaiting");
+      expect(page.badge.textContent).toBe("1");
+      const items = page.openMenu();
+      expect(hrefs(items)).toContain("/s/three/");
+      const scratch = items.find(item => item.getAttribute("href") === "/s/scratch/");
+      expect(scratch?.querySelector(".hub-menu-state")?.textContent).toBe("stopped");
+    });
+  }
+
+  test("the page's first stream saying hello asks the hub for nothing beyond the boot probe", async () => {
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
+    await page.boot([["uatu", idle], ["two", working]]);
+    await settle();
+    expect(page.hub.stateFetches).toBe(1);
+    expect(page.statuses).toEqual(["live"]);
+    expect(page.badge.className).toBe("hub-activity-badge is-working");
   });
 
   test("an older list answer landing last does not bring back a workspace a newer one dropped", async () => {
@@ -481,8 +676,7 @@ describe("initHubNav with the live activity topic", () => {
     let deliver: ((ws: string, activity: { running: boolean; working: boolean; awaiting: boolean }) => void) | null = null;
     installLiveChannelForTests({
       onActivity(listener: typeof deliver) { deliver = listener; return () => {}; },
-      onStatus() { return () => {}; },
-      isRecovering() { return false; },
+      onStreamOpened() { return () => {}; },
       dispose() {},
     } as unknown as LiveChannel);
 
