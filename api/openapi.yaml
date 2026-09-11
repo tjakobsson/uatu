@@ -1,13 +1,19 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 5.15.0-experimental
+  version: 5.16.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 5 and workspace revision 15
+  summary: Hub revision 5 and workspace revision 16
   description: |
-    Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
-    operations use their externally visible Hub proxy paths. Streaming message
-    and lifecycle semantics are defined in `streaming.yaml`.
+    Canonical HTTP contract for the UatuCode Hub API, the only public API.
+    Under `/s/{workspaceId}/` the Hub serves one family itself, personal
+    state, and it is part of this contract. Everything else under that
+    prefix is the internal protocol between the Hub, the workspace child,
+    and the web client shipped in the same build, and `exclusions.yaml`
+    lists it. Workspace payloads reach public clients
+    as topics of the Hub's live stream, and the workspace revision versions
+    those payloads. `streaming.yaml` defines streaming messages and lifecycle
+    rules.
 
     `info.version` encodes the revision pair as `<hub>.<workspace>.0` with an
     `-experimental` tag while stability is experimental; `x-uatu-revisions`
@@ -15,19 +21,17 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 5
-    workspaceApiRevision: 15
+    workspaceApiRevision: 16
 servers:
   - url: https://{hubHost}
     variables:
       hubHost: { default: uatu.example.test }
 tags:
   - { name: Hub authentication, description: Native JSON session creation and revocation. }
-  - { name: Hub, description: "Workspace registry, lifecycle, browsing, and device sessions." }
+  - { name: Hub, description: "Workspace registry, lifecycle, browsing, device sessions, and per-user workspace state." }
   - { name: Hub credentials, description: "Hub-managed credentials, workspace assignments, and credential-tool readiness." }
   - { name: Clone jobs, description: "Asynchronous clone creation, interaction, cancellation, and events." }
-  - { name: Workspace, description: "Proxied document, repository, search, and personal-state APIs." }
-  - { name: Terminal, description: "Terminal credentials, session inventory, and WebSocket attachment." }
-  - { name: Chat, description: "Workspace-scoped OpenCode conversations and interactions." }
+  - { name: Live stream, description: "One SSE connection per client for document state, conversation inventory and events, and cross-workspace activity." }
 security:
   - hubBearer: []
   - hubCookie: []
@@ -737,545 +741,104 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
-  /s/{workspaceId}/api/state:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
+  /api/hub/live:
     get:
-      operationId: workspaceGetState
-      tags: [Workspace]
-      summary: Read the current workspace state
-      responses:
-        '200':
-          description: Workspace state
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 10, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/document:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
-    get:
-      operationId: workspaceRenderDocument
-      tags: [Workspace]
-      summary: Render a document
+      operationId: hubStreamLive
+      tags: [Live stream]
+      summary: Open the live stream for a workspace
+      description: |
+        One long-lived Server-Sent Events connection per client. It carries
+        every pushed update for one workspace, meaning document state, the
+        conversation inventory, and conversation events. On request it also
+        carries an activity summary of every workspace the caller may access.
+        streaming.yaml#channels.live defines the frames, envelopes, topics,
+        cursors, and signals.
+
+        The response writes an `: open` comment frame at once, then one
+        `hello` event. Its stream id addresses `hubUpdateLiveSubscriptions`,
+        and only the Hub session that opened the stream may use it. Upstream
+        failures arrive as signals for the affected subscription and never
+        end the stream. To reconnect, open a new stream and present every
+        retained cursor in `subs`. The stream does not use the SSE `id` field
+        or `Last-Event-ID`.
       parameters:
-        - { name: id, in: query, required: true, schema: { type: string } }
-        - { name: view, in: query, schema: { $ref: '#/components/schemas/ViewMode' } }
+        - name: ws
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/WorkspaceId' }
+          description: "Workspace whose document, inventory, and conversation topics the stream carries. Required. An absent or empty id, or one longer than 256 UTF-8 bytes, answers 400 (absent: `workspace id required`). An id that is unknown, or that the caller may not access, answers 404."
+        - name: activity
+          in: query
+          schema: { type: string, enum: ['0', '1'], default: '0' }
+          description: "`1` adds the activity topic. The Hub sends one summary per workspace the caller may access when the stream opens, then one whenever a workspace's facts change."
+        - name: subs
+          in: query
+          schema: { type: string, contentMediaType: application/json, contentSchema: { $ref: '#/components/schemas/LiveSubscriptionList' } }
+          description: "Initial subscriptions as a JSON array of LiveSubscription, each with the cursor to resume from. A reconnect presents every retained cursor here. Malformed JSON or an invalid entry answers 400. The set rides the query string, and proxies commonly refuse a request line past about 8 KB. A client whose set would exceed that presents part of it here and adds the rest with hubUpdateLiveSubscriptions after `hello`, from the same cursors."
+        - name: reconnect
+          in: query
+          schema: { type: string, enum: ['0', '1'], default: '0' }
+          description: "`1` when this stream replaces one the client lost. The Hub records it in diagnostics and behaves the same either way."
       responses:
         '200':
-          description: Rendered document
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/RenderedDocument' } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/document/diff:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
-    get:
-      operationId: workspaceGetDocumentDiff
-      tags: [Workspace]
-      summary: Read a document diff
-      parameters: [{ name: id, in: query, required: true, schema: { type: string } }]
-      responses:
-        '200':
-          description: Document diff
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/DocumentDiff' } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/events:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
-    get:
-      operationId: workspaceStreamState
-      tags: [Workspace]
-      summary: Follow workspace state snapshots
-      responses:
-        '200':
-          description: SSE stream described by streaming.yaml#channels.workspaceState
+          description: SSE stream described by streaming.yaml#channels.live
           content:
             text/event-stream: { schema: { type: string } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/search:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
-    get:
-      operationId: workspaceSearch
-      tags: [Workspace]
-      summary: Search workspace documents as NDJSON
-      parameters:
-        - { name: q, in: query, required: true, schema: { type: string } }
-        - { name: case, in: query, schema: { type: string, enum: ['0', '1'], default: '0' } }
-        - { name: word, in: query, schema: { type: string, enum: ['0', '1'], default: '0' } }
-        - { name: regex, in: query, schema: { type: string, enum: ['0', '1'], default: '0' } }
-        - { name: allRoots, in: query, schema: { type: string, enum: ['0', '1'], default: '0' } }
-      responses:
-        '200':
-          description: NDJSON stream described by streaming.yaml#channels.workspaceSearch
+        '403':
+          description: "A cookie-authenticated request failed the same-origin check, and nothing was subscribed. Its `Origin` names another origin, or its `Sec-Fetch-Site` is present and neither `same-origin` nor `none`, as on a link followed from another site or from another port on the same host. A bearer-authenticated request is not checked."
           content:
-            application/x-ndjson: { schema: { type: string } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/chat/status:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceGetChatStatus
-      tags: [Chat]
-      summary: Report every chat agent's availability
-      description: Identifies each agent the workspace offers and reports its availability independently. One agent being unavailable never hides another.
-      responses:
-        '200': { description: Per-agent chat availability, content: { application/json: { schema: { $ref: '#/components/schemas/ChatStatusList' } } } }
-        '401': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/chat/retry:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/hub/live/{streamId}/subscriptions:
+    parameters: [{ $ref: '#/components/parameters/LiveStreamId' }]
     post:
-      operationId: workspaceRetryChat
-      tags: [Chat]
-      summary: Discard one agent's cached startup failure and start it again
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatRetryRequest' }, example: { agentId: opencode } } } }
-      responses:
-        '200': { description: The named agent's availability after the retry, content: { application/json: { schema: { $ref: '#/components/schemas/AgentChatStatus' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/chat/models:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceListChatModels
-      tags: [Chat]
-      parameters: [{ $ref: '#/components/parameters/ChatAgentId' }]
-      summary: List one agent's enabled native models
-      responses:
-        '200':
-          description: Available chat models
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ChatModelList' }
-              example:
-                models:
-                  - selection: { providerId: anthropic, modelId: default }
-                    provider: Anthropic
-                    name: Default (recommended)
-                    detail: Opus 5 with 1M context · Best for everyday, complex tasks
-                    default: true
-                    resolvesTo: { providerId: anthropic, modelId: "opus[1m]" }
-                    variants: [low, medium, high, xhigh, max]
-                    contextLimit: 1000000
-                    imageInput: true
-                  - selection: { providerId: anthropic, modelId: "opus[1m]" }
-                    provider: Anthropic
-                    name: Opus (1M context)
-                    detail: Opus 5 with 1M context · Best for everyday, complex tasks
-                    variants: [low, medium, high, xhigh, max]
-                    contextLimit: 1000000
-                    imageInput: true
-        '400': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/modes:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceListChatModes
-      tags: [Chat]
-      parameters: [{ $ref: '#/components/parameters/ChatAgentId' }]
-      summary: List the modes one agent's prompts can run under
-      responses:
-        '200': { description: Available chat modes, content: { application/json: { schema: { $ref: '#/components/schemas/ChatModeList' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/commands:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceListChatCommands
-      tags: [Chat]
-      parameters: [{ $ref: '#/components/parameters/ChatAgentId' }]
-      summary: List one agent's slash commands
-      responses:
-        '200': { description: Available slash commands, content: { application/json: { schema: { $ref: '#/components/schemas/ChatCommandList' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceListChatConversations
-      tags: [Chat]
-      summary: List conversations confined to the workspace
-      responses:
-        '200': { description: Conversation inventory, content: { application/json: { schema: { $ref: '#/components/schemas/ConversationList' } } } }
-        '401': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-    post:
-      operationId: workspaceCreateChatConversation
-      tags: [Chat]
-      summary: Create an empty workspace conversation
-      description: The conversation is owned for life by the chosen agent; omitting `agentId` selects the server's default agent.
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateChatConversationRequest' }, example: {} } } }
-      responses:
-        '201': { description: Created conversation snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/ConversationSnapshot' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/events:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceStreamChatConversationInventory
-      tags: [Chat]
-      summary: Follow conversation inventory invalidations
-      description: Each inventory event signals that clients should refetch the authoritative conversation list. The event does not identify a mutation or carry a conversation snapshot.
-      responses:
-        '200':
-          description: SSE stream described by streaming.yaml#channels.workspaceChatConversationInventory
-          headers:
-            Cache-Control: { schema: { type: string, const: 'no-store, no-transform' } }
-            X-Accel-Buffering: { schema: { type: string, const: 'no' } }
-          content: { text/event-stream: { schema: { type: string } } }
-        '401': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    get:
-      operationId: workspaceGetChatConversation
-      tags: [Chat]
-      summary: Read a paginated normalized conversation snapshot
-      description: Older-page cursors refer to a history version. A 409 response requires a fresh snapshot without a cursor before paging again.
-      parameters:
-        - { name: cursor, in: query, schema: { type: string, maxLength: 2048 } }
-        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
-      responses:
-        '200': { description: Conversation snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/ConversationSnapshot' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-    patch:
-      operationId: workspaceRenameChatConversation
-      tags: [Chat]
-      summary: Rename a resumable conversation idempotently
-      description: Requires the agent to declare the `conversation-rename` capability. The server trims the title before validating and persisting it; the trimmed title must be non-empty and at most 200 UTF-8 bytes.
+      operationId: hubUpdateLiveSubscriptions
+      tags: [Live stream]
+      summary: Change an open live stream's subscriptions
+      description: |
+        Adds and removes subscriptions on an open stream without reconnecting.
+        Removals apply before additions. Adding a topic and key that is
+        already subscribed replaces the subscription and re-attaches it from
+        the new cursor. A client answers a `resync` signal this way. It takes
+        a fresh snapshot, then adds the subscription again with the
+        snapshot's cursor. Once this operation answers, the stream carries no
+        further envelope for a removed subscription.
+
+        A 400, 403, or 404 answer means this stream cannot take the change,
+        and repeating the request fails the same way. Reconnect and present
+        the whole subscription set in `subs`. Retry a 5xx, or a request that
+        got no answer, with backoff a bounded number of times, then
+        reconnect. Validate subscriptions against the byte and count bounds
+        before sending: one the Hub refuses here is refused in `subs` too, on
+        every reconnect.
       requestBody:
         required: true
         content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ConversationRenameRequest' }
-            example: { requestId: 550e8400-e29b-41d4-a716-446655440000, title: API contract follow-up }
+          application/json: { schema: { $ref: '#/components/schemas/LiveSubscriptionChange' } }
       responses:
         '200':
-          description: Renamed conversation
+          description: Subscriptions changed
           content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ConversationRenameResult' }
-              example: { conversation: { id: "opencode:conversation-1", title: API contract follow-up, createdAt: 1724100000000, updatedAt: 1724100300000, status: idle, agent: { id: opencode, name: OpenCode } } }
+            application/json: { schema: { $ref: '#/components/schemas/LiveSubscriptionsUpdated' } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/events:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    get:
-      operationId: workspaceStreamChatEvents
-      tags: [Chat]
-      summary: Replay and follow ordered conversation events
-      parameters:
-        - { name: cursor, in: query, schema: { type: string, maxLength: 2048 } }
-        - { name: Last-Event-ID, in: header, schema: { type: string, maxLength: 2048 }, description: Used when cursor is absent. }
-      responses:
-        '200':
-          description: SSE stream described by streaming.yaml#channels.workspaceChat
-          headers:
-            Cache-Control: { schema: { type: string, const: 'no-cache, no-transform' } }
-            X-Accel-Buffering: { schema: { type: string, const: 'no' } }
-          content: { text/event-stream: { schema: { type: string } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/prompts:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    post:
-      operationId: workspacePromptChatConversation
-      tags: [Chat]
-      summary: Prompt or queue a conversation idempotently
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatPromptRequest' }, example: { requestId: 550e8400-e29b-41d4-a716-446655440000, text: Implement the server routes, model: { providerId: anthropic, modelId: claude-sonnet } } } } }
-      responses:
-        '202': { description: Prompt accepted, content: { application/json: { schema: { $ref: '#/components/schemas/ChatPromptAccepted' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/undo:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    post:
-      operationId: workspaceUndoChatConversation
-      tags: [Chat]
-      summary: Move the reversible-history boundary back one user turn idempotently
-      description: Requires the agent to declare `reversible-history`. Interrupts active work before changing the boundary. The optional restored draft belongs only to the invoking client.
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
-      responses:
-        '200': { description: Undo outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/redo:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    post:
-      operationId: workspaceRedoChatConversation
-      tags: [Chat]
-      summary: Move the reversible-history boundary forward one user turn idempotently
-      description: Requires the agent to declare `reversible-history`. Clearing the newest boundary resumes any paused queued messages. The optional restored draft belongs only to the invoking client.
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
-      responses:
-        '200': { description: Redo outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/revert:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    post:
-      operationId: workspaceRevertChatConversation
-      tags: [Chat]
-      summary: Revert from a selected visible user message idempotently
-      description: Requires the agent to declare `reversible-history`. The selected user turn and every later turn become hidden. Interrupts active work before changing the boundary. The selected turn is returned as a private restored draft only to the invoking client.
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryTargetRequest' } } } }
-      responses:
-        '200': { description: Revert outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/restore:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    post:
-      operationId: workspaceRestoreChatConversation
-      tags: [Chat]
-      summary: Restore through a selected hidden user message idempotently
-      description: Requires the agent to declare `reversible-history`. Restores the selected user turn and all earlier hidden turns by advancing or clearing the suffix boundary. Resumes paused queued messages when the newest hidden turn is restored. Any remaining boundary draft belongs only to the invoking client.
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryTargetRequest' } } } }
-      responses:
-        '200': { description: Restore outcome and current reversible-history state, content: { application/json: { schema: { $ref: '#/components/schemas/ReversibleHistoryResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/attachments:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    post:
-      operationId: workspaceUploadChatAttachment
-      tags: [Chat]
-      summary: Upload one image attachment for a later prompt
-      description: Accepts one PNG, JPEG, GIF, or WebP image (sniffed from the bytes, 10 MiB cap) as the multipart field `file` and stores it outside every watched root. The returned id is what a prompt's `attachments` entry references.
-      requestBody: { required: true, content: { multipart/form-data: { schema: { type: object, required: [file], properties: { file: { type: string, format: binary } }, additionalProperties: false } } } }
-      responses:
-        '201': { description: Attachment stored, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAttachmentStored' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/attachments/{attachmentId}:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { name: attachmentId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }]
-    get:
-      operationId: workspaceGetChatAttachment
-      tags: [Chat]
-      summary: Serve a stored attachment's bytes
-      description: Serves the stored image under the workspace's chat authorization. Only identifiers the workspace itself issued resolve; anything else answers 404 without filesystem interpretation.
-      responses:
-        '200': { description: Attachment bytes, content: { image/png: { schema: { type: string, format: binary } }, image/jpeg: { schema: { type: string, format: binary } }, image/gif: { schema: { type: string, format: binary } }, image/webp: { schema: { type: string, format: binary } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/cancel:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
-    post:
-      operationId: workspaceCancelChatConversation
-      tags: [Chat]
-      summary: Cancel an active turn idempotently
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
-      responses:
-        '200': { description: Cancellation accepted, content: { application/json: { schema: { $ref: '#/components/schemas/ChatCancelResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/queue/{messageId}:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/QueuedMessageId' }]
-    delete:
-      operationId: workspaceRemoveQueuedChatMessage
-      tags: [Chat]
-      summary: Remove a held message before delivery idempotently
-      description: Removes a message the workspace still holds; it is never delivered. A message already delivered to the agent answers 409, and the client learns it is no longer held.
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
-      responses:
-        '200': { description: Held message removed, content: { application/json: { schema: { $ref: '#/components/schemas/ChatQueueRemoveResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/InteractionId' }]
-    post:
-      operationId: workspaceRespondChatPermission
-      tags: [Chat]
-      summary: Resolve a pending permission idempotently
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionResponseRequest' } } } }
-      responses:
-        '200': { description: Permission outcome, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/tasks/{taskId}/stop:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }, { name: taskId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 }, description: "The background task's id, as carried by its `background_task` item." }]
-    post:
-      operationId: workspaceStopChatTask
-      tags: [Chat]
-      summary: Stop one running background task idempotently
-      description: "Only for agents declaring `background-tasks`. The agent reports the stop as that task settling (`background_task` status `stopped`); this operation carries the request and acknowledges it."
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/StopTaskRequest' } } } }
-      responses:
-        '200': { description: Stop acknowledged, content: { application/json: { schema: { $ref: '#/components/schemas/StopTaskResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/conversations/{conversationId}/questions/{interactionId}:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/InteractionId' }]
-    post:
-      operationId: workspaceRespondChatQuestion
-      tags: [Chat]
-      summary: Answer or reject a pending structured question idempotently
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/QuestionResponseRequest' } } } }
-      responses:
-        '200': { description: Question outcome, content: { application/json: { schema: { $ref: '#/components/schemas/QuestionResult' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
-        '415': { $ref: '#/components/responses/Error' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+        '403':
+          description: The stream belongs to another Hub session, or a cookie-authenticated request failed the same-origin check.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: The stream is unknown or has ended. Reconnect and present the whole subscription set in `subs`.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
   /s/{workspaceId}/api/personal-state:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     get:
       operationId: workspaceGetPersonalState
-      tags: [Workspace]
+      tags: [Hub]
       summary: Read per-user workspace state
+      description: The Hub stores personal state per Hub user and workspace and answers this request itself, without proxying it to the workspace child, so it answers whether or not the workspace is running. The operation ID predates the move to the Hub domain and is kept for generated clients.
       responses:
         '200':
           description: Personal state
@@ -1286,8 +849,9 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
     patch:
       operationId: workspacePatchPersonalState
-      tags: [Workspace]
+      tags: [Hub]
       summary: Patch per-user workspace state
+      description: The Hub applies and stores the patch itself, without proxying it to the workspace child. The operation ID predates the move to the Hub domain and is kept for generated clients.
       requestBody:
         required: true
         content:
@@ -1302,100 +866,6 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
-  /s/{workspaceId}/api/auth:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceProbeTerminalAuth
-      tags: [Terminal]
-      summary: Probe terminal credentials and origin
-      parameters: [{ name: X-Uatu-Page-Origin, in: header, schema: { type: string, format: uri } }]
-      responses:
-        '204': { description: Credentials and origin accepted }
-        '401':
-          description: Terminal credentials rejected. Bodiless when produced by the workspace child; the Hub's own session gate rejects with a JSON error body.
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/Error' } }
-        '403':
-          description: Browser origin rejected. Bodiless when produced by the workspace child; the Hub's cross-origin cookie gate rejects with a JSON error body.
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/Error' } }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
-  /s/{workspaceId}/api/terminal/sessions:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceListTerminalSessions
-      tags: [Terminal]
-      summary: List live terminal sessions
-      security: [{ hubBearer: [] }, { hubCookie: [] }]
-      responses:
-        '200':
-          description: Terminal inventory
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/TerminalSessionList' } }
-        '401': { $ref: '#/components/responses/ProxyError' }
-        '403': { $ref: '#/components/responses/ProxyError' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-    post:
-      operationId: workspaceCreateTerminalSession
-      tags: [Terminal]
-      summary: Create a detached terminal session
-      security: [{ hubBearer: [] }, { hubCookie: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json: { schema: { $ref: '#/components/schemas/TerminalDimensions' } }
-      responses:
-        '201':
-          description: Terminal created
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/TerminalSession' } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/ProxyError' }
-        '403': { $ref: '#/components/responses/ProxyError' }
-        '500': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/terminal/sessions/{terminalSessionId}:
-    parameters:
-      - { $ref: '#/components/parameters/WorkspaceId' }
-      - { $ref: '#/components/parameters/TerminalSessionId' }
-    delete:
-      operationId: workspaceDeleteTerminalSession
-      tags: [Terminal]
-      summary: Terminate a terminal session
-      security: [{ hubBearer: [] }, { hubCookie: [] }]
-      responses:
-        '204': { description: Terminal terminated }
-        '400': { $ref: '#/components/responses/ProxyError' }
-        '401': { $ref: '#/components/responses/ProxyError' }
-        '403': { $ref: '#/components/responses/ProxyError' }
-        '404': { $ref: '#/components/responses/PlainError' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/terminal:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    get:
-      operationId: workspaceAttachTerminal
-      tags: [Terminal]
-      summary: Upgrade to the terminal WebSocket protocol
-      description: The HTTP handshake and all frames are defined by streaming.yaml#channels.terminal.
-      security: [{ hubBearer: [] }, { hubCookie: [] }]
-      parameters:
-        - { $ref: '#/components/parameters/TerminalSessionIdQuery' }
-        - { name: takeover, in: query, schema: { type: string, enum: ['0', '1'], default: '0' } }
-        - { name: Origin, in: header, required: false, schema: { type: string, format: uri }, description: "Optional: browsers send it and a present-but-foreign Origin is rejected with 403; native clients may omit it — the Hub injects a loopback Origin toward the workspace child." }
-        - { name: Upgrade, in: header, required: true, schema: { type: string, const: websocket } }
-      responses:
-        '101': { description: WebSocket upgrade accepted }
-        '400': { $ref: '#/components/responses/ProxyError' }
-        '401': { $ref: '#/components/responses/ProxyError' }
-        '403': { $ref: '#/components/responses/ProxyError' }
-        '404': { $ref: '#/components/responses/PlainError' }
-        '409': { $ref: '#/components/responses/PlainError' }
-        '500': { $ref: '#/components/responses/PlainError' }
-        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
 components:
   securitySchemes:
     hubBearer: { type: http, scheme: bearer, description: Session ID returned by native JSON login. }
@@ -1405,15 +875,7 @@ components:
     CredentialId: { name: credentialId, in: path, required: true, schema: { $ref: '#/components/schemas/CredentialId' } }
     CredentialTool: { name: tool, in: path, required: true, schema: { $ref: '#/components/schemas/CredentialToolName' } }
     JobId: { name: jobId, in: path, required: true, schema: { type: string, minLength: 1 } }
-    TerminalSessionId: { name: terminalSessionId, in: path, required: true, schema: { type: string, format: uuid } }
-    TerminalSessionIdQuery: { name: sessionId, in: query, required: true, schema: { type: string, format: uuid } }
-    Scope: { name: scope, in: query, schema: { type: string, enum: [folder, file] }, description: "Optional watched-tree scope. scope=file requires the companion documentId parameter." }
-    DocumentId: { name: documentId, in: query, schema: { type: string }, description: "Watched-document identifier selecting the file to scope to. Required when scope=file; scope=file without documentId is rejected with 400." }
-    CompareTarget: { name: compareTarget, in: query, schema: { type: string, enum: [base, last-commit] } }
-    ConversationId: { name: conversationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 }, description: "Agent-qualified conversation id (<agentId>:<providerConversationId>)." }
-    ChatAgentId: { name: agent, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 64 }, description: "The agent this catalog read describes. Required: an unscoped read has no answer that is not a guess." }
-    InteractionId: { name: interactionId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
-    QueuedMessageId: { name: messageId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
+    LiveStreamId: { name: streamId, in: path, required: true, schema: { type: string, minLength: 1 }, description: "Opaque id from the stream's hello event." }
   responses:
     Error:
       description: JSON error
@@ -1427,29 +889,6 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/FolderMutationError' }
           example: { error: folder operation failed }
-    PlainError:
-      description: Plain-text terminal error
-      content:
-        text/plain: { schema: { type: string } }
-    WorkspaceStopped:
-      description: Workspace session is stopped. Runtime currently returns an HTML stopped-session page.
-      content:
-        text/html: { schema: { type: string } }
-    ProxyError:
-      description: Request rejected by the Hub as JSON or by the running child as plain text.
-      content:
-        application/json: { schema: { $ref: '#/components/schemas/Error' } }
-        text/plain: { schema: { type: string } }
-    WorkspaceUnavailable:
-      description: Workspace is stopped, or a requested child capability is unavailable.
-      content:
-        application/json: { schema: { $ref: '#/components/schemas/Error' } }
-        text/html: { schema: { type: string } }
-        text/plain: { schema: { type: string } }
-    SessionUnreachable:
-      description: The Hub could not reach the running workspace child.
-      content:
-        text/plain: { schema: { type: string, const: session unreachable } }
     Accepted:
       description: Request accepted
       content:
@@ -1530,6 +969,16 @@ components:
       properties: { revoked: { type: boolean }, current: { type: boolean } }
       additionalProperties: false
     WorkspaceId: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+    ViewMode: { enum: [rendered, source, diff] }
+    PersonalState:
+      type: object
+      required: [version]
+      properties: { version: { const: 1 }, documentPath: { type: string }, follow: { type: boolean }, previewMode: { $ref: '#/components/schemas/ViewMode' }, compareTarget: { enum: [base, last-commit] }, filesFilter: { enum: [all, changed] }, lastPtyId: { type: string, format: uuid } }
+      additionalProperties: false
+    PersonalStatePatch:
+      type: object
+      properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, changed, null] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
+      additionalProperties: false
     CredentialId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
     CredentialToolName: { enum: [ssh, ssh-agent, ssh-add, ssh-keygen, gpg, gpgconf, git, gh, glab] }
     NativeLoginRequest:
@@ -1972,42 +1421,14 @@ components:
       additionalProperties: false
     EmptyObject: { type: object, additionalProperties: false }
     ChatAgentDescriptor: { type: object, required: [id, name], description: "The identity of one offered agent. Capabilities ride the agent's availability, which only exists once its runtime has spoken.", properties: { id: { type: string, minLength: 1, maxLength: 64, pattern: '^[^:]+$' }, name: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    AgentChatStatus: { type: object, required: [agent, availability], properties: { agent: { $ref: '#/components/schemas/ChatAgentDescriptor' }, availability: { $ref: '#/components/schemas/ChatAvailability' } }, additionalProperties: false }
-    ChatStatusList: { type: object, required: [agents], description: "Every offered agent with its availability, in the server's presentation order; the first entry is the server-default agent for new conversations.", properties: { agents: { type: array, minItems: 1, items: { $ref: '#/components/schemas/AgentChatStatus' } } }, additionalProperties: false }
-    ChatRetryRequest: { type: object, required: [agentId], properties: { agentId: { type: string, minLength: 1, maxLength: 64 } }, additionalProperties: false }
-    CreateChatConversationRequest: { type: object, properties: { agentId: { type: string, minLength: 1, maxLength: 64, description: "The agent that will own the conversation for life. Absent selects the server's default agent." } }, additionalProperties: false }
-    ChatAvailability:
-      oneOf:
-        - { type: object, required: [state], properties: { state: { enum: [idle, starting] } }, additionalProperties: false }
-        - { type: object, required: [state, version], properties: { state: { const: ready }, version: { type: string, minLength: 1 }, agent: { $ref: '#/components/schemas/ChatAgent' } }, additionalProperties: false }
-        - { type: object, required: [state, reason, message], properties: { state: { const: unavailable }, reason: { enum: [not-installed, startup-failed, unsupported] }, message: { type: string, minLength: 1 }, diagnostics: { $ref: '#/components/schemas/ChatStartupDiagnostics' } }, additionalProperties: false }
-    ChatProbeOutcome:
-      oneOf:
-        - { type: object, required: [kind], properties: { kind: { enum: [none, refused, abandoned] } }, additionalProperties: false }
-        - { type: object, required: [kind, status], properties: { kind: { enum: [http-status, unhealthy-body, healthy] }, status: { type: integer, minimum: 100, maximum: 599 } }, additionalProperties: false }
-        - { type: object, required: [kind, error], properties: { kind: { const: unknown }, error: { type: string } }, additionalProperties: false }
-    ChatStartupDiagnostics:
-      type: object
-      description: Evidence attached to a failed Chat startup. Never contains the ephemeral OpenCode server password.
-      required: [executable, shadowedExecutables, version, endpoint, elapsedMs, probes, lastProbe, stdout, stderr]
-      properties: { executable: { type: [string, 'null'] }, shadowedExecutables: { type: array, items: { type: string } }, version: { type: [string, 'null'] }, endpoint: { type: [string, 'null'] }, elapsedMs: { type: number, minimum: 0 }, probes: { type: integer, minimum: 0 }, lastProbe: { $ref: '#/components/schemas/ChatProbeOutcome' }, stdout: { type: string }, stderr: { type: string } }
-      additionalProperties: false
     ConversationStatus: { enum: [idle, sending, running, completed, interrupted, failed, background, retrying, compacting], description: "`background`: no turn is running but the agent still holds live background work; prompting is possible. Presented only for agents declaring `background-tasks`. `retrying` and `compacting` are live-turn states with a name: the agent is waiting to retry a failed API request, or compacting its context; both return to `running` when the turn resumes." }
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, variants: { type: array, items: { type: string, minLength: 1 }, description: "Reasoning variants the model advertises (e.g. high, xhigh). Absent when it offers none." }, contextLimit: { type: integer, minimum: 1, description: "The model's context-window size in tokens, when reported." }, imageInput: { type: boolean, description: "Whether this model can see image attachments, as the agent reports it. Absent means not reported, which clients treat as no." }, detail: { type: string, minLength: 1, description: "The agent's own words about this model, shown as the row's secondary line in place of the provider/id identity." }, default: { type: boolean, description: "The agent's own recommended default. When a catalog declares one, clients offer it in place of a generic delegation row and present it as the active choice while the conversation has not chosen a model. At most one entry should carry it; clients honor the first." }, resolvesTo: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "What a default entry currently resolves to: the catalog entry the agent would actually run. Clients name the resolution rather than presenting an opaque Default." } }, additionalProperties: false }
-    ChatModelList: { type: object, required: [models], properties: { models: { type: array, items: { $ref: '#/components/schemas/ChatModel' } } }, additionalProperties: false }
-    ChatAgent: { type: object, required: [id, name, capabilities], description: "The agent Chat is talking to. Capabilities are declared positively: a capability is listed or the agent does not have it. `conversation-rename` means the conversation title can be persisted through the rename operation. `attachments` means prompts accept image attachments; whether a selected model can see them is per-model (`ChatModel.imageInput`). `reversible-history` enables the dedicated Undo and Redo operations. `custom-model-id` means the agent runs any model id the user types: an unlisted `model` on a prompt is passed through verbatim and its rejection is reported on the turn. `background-tasks` means the agent runs work in the background and reports it: running tasks arrive as `background_task` items, the conversation can report the `background` status, and the stop-task operation is offered.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 512 }, capabilities: { type: array, items: { type: string, minLength: 1, description: "Recognized today: modes, models, commands, questions, permissions, subagents, variants, context, conversation-rename, attachments, reversible-history, custom-model-id, background-tasks. Open on purpose: a later revision adds capabilities without a breaking change, and a client MUST ignore a name it does not recognize rather than reject the agent." } }, permissionScopeNote: { type: string, minLength: 1, description: "The sentence a permission card shows under its persistent-approval choice: what that approval covers under this agent, in the agent's own terms. Agents with different persistence semantics carry different sentences; a client renders the declared one and never writes its own. Absent when the agent offers no persistent approval it can describe." } }, additionalProperties: false }
-    ChatMode: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string }, default: { type: boolean, description: "The agent's own recommended default: presented as the active choice while the conversation has not set a mode, in place of a generic delegation entry. At most one mode should carry it; clients honor the first." } }, additionalProperties: false }
-    ChatModeList: { type: object, required: [modes], properties: { modes: { type: array, items: { $ref: '#/components/schemas/ChatMode' } } }, additionalProperties: false }
-    ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill, local-operation] } }, additionalProperties: false }
-    ChatCommandList: { type: object, required: [commands], properties: { commands: { type: array, items: { $ref: '#/components/schemas/ChatCommand' } } }, additionalProperties: false }
     ConversationSummary:
       type: object
       required: [id, title, createdAt, updatedAt, status, agent]
       description: "`id` is agent-qualified (`<agentId>:<providerConversationId>`); ids from different agents never collide. `agent` names the owner, fixed at creation for the conversation's lifetime."
       properties: { id: { type: string, minLength: 1, maxLength: 512 }, title: { type: string }, createdAt: { type: number, minimum: 0 }, updatedAt: { type: number, minimum: 0 }, status: { $ref: '#/components/schemas/ConversationStatus' }, agent: { $ref: '#/components/schemas/ChatAgentDescriptor' } }
       additionalProperties: false
-    ConversationList: { type: object, required: [conversations], properties: { conversations: { type: array, items: { $ref: '#/components/schemas/ConversationSummary' } } }, additionalProperties: false }
     ConversationInventoryEvent: { type: object, required: [type], properties: { type: { const: conversation.inventory } }, additionalProperties: false }
     TimelineBase: { type: object, required: [id, type, createdAt], properties: { id: { type: string }, type: { type: string }, createdAt: { type: number, minimum: 0 } } }
     ConversationItem:
@@ -2047,34 +1468,8 @@ components:
         variant: { type: string, minLength: 1, maxLength: 512, description: "Reasoning variant of `model`. Invalid without `model` in the same configuration record." }
       dependentRequired: { variant: [model] }
       additionalProperties: false
-    ConversationSnapshot: { type: object, required: [conversation, configuration, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' }, description: "Held messages in submission order, so a client joining mid-run presents the same queue as one that watched it build." }, reversibleHistory: { $ref: '#/components/schemas/ReversibleHistoryState' }, olderCursor: { type: string } }, additionalProperties: false }
-    ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    ReversibleHistoryTargetRequest: { type: object, required: [requestId, messageId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, messageId: { type: string, minLength: 1, maxLength: 512, description: "Canonical user-message id from the visible timeline or current revertedMessages list, as appropriate for the operation." } }, additionalProperties: false }
-    RevertedUserMessage: { type: object, required: [id, text], description: "A hidden user turn at or after the staged suffix boundary. Listed oldest first so a client can offer restore-through controls.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, text: { type: string } }, additionalProperties: false }
-    ReversibleHistoryState: { type: object, required: [staged, canUndo, canRedo, revertedMessages], properties: { staged: { type: boolean }, canUndo: { type: boolean }, canRedo: { type: boolean, description: "False whenever no revert boundary is staged." }, revertedMessages: { type: array, items: { $ref: '#/components/schemas/RevertedUserMessage' }, description: "Hidden user turns in chronological order. Empty when no boundary is staged." } }, additionalProperties: false }
-    RestoredDraft: { type: object, required: [text], properties: { text: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } } }, additionalProperties: false }
-    ReversibleHistoryResult: { type: object, required: [outcome, state], properties: { outcome: { enum: [changed, nothing-to-undo, nothing-to-redo] }, state: { $ref: '#/components/schemas/ReversibleHistoryState' }, restoredDraft: { $ref: '#/components/schemas/RestoredDraft', description: "Editable turn returned only to the client that invoked this mutation." } }, additionalProperties: false }
-    ConversationRenameRequest:
-      type: object
-      required: [requestId, title]
-      properties:
-        requestId: { type: string, minLength: 1, maxLength: 512 }
-        title: { type: string, minLength: 1, maxLength: 200, pattern: '\S', x-uatu-maxUtf8Bytes: 200, description: "Replacement title. The server trims leading and trailing whitespace, then requires a non-empty value of at most 200 UTF-8 bytes. The byte limit can be stricter than maxLength for non-ASCII text." }
-      additionalProperties: false
-    ConversationRenameResult: { type: object, required: [conversation], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
-    ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 0, maxLength: 65536, description: "May be blank (empty or whitespace-only) only when `attachments` is non-empty: a message needs words or images." }, model: { $ref: '#/components/schemas/ModelSelection' }, mode: { type: string, minLength: 1, maxLength: 512 }, variant: { type: string, minLength: 1, maxLength: 512, description: "How the selected model should reason (a variant it advertises). Requires `model` in the same request: a variant names an effort OF a model, and pairing them keeps validation independent of server-side memory of the conversation's current model." }, attachments: { type: array, maxItems: 8, items: { type: object, required: [id, name, mimeType], properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 200, x-uatu-maxUtf8Bytes: 200, description: "Bounded by UTF-8 bytes at the route, not code points — a 200-emoji name validates here but answers 400." }, mimeType: { type: string, enum: [image/png, image/jpeg, image/gif, image/webp] } }, additionalProperties: false }, description: "References to previously uploaded attachments, sent with the text as one message. Bytes never ride the prompt request." } }, dependentRequired: { variant: [model] }, anyOf: [{ required: [text], properties: { text: { minLength: 1, pattern: '\S' } } }, { required: [attachments], properties: { attachments: { minItems: 1 } } }], additionalProperties: false }
-    ChatPromptAccepted: { type: object, required: [messageId, held, configuration], description: "`held: true` reports a submission accepted while the conversation was busy: the workspace holds it, `messageId` is the queued-message id removal addresses, and delivery happens when the running turn ends. `held: false` reports a dispatched prompt whose `messageId` is the provider message id.", properties: { messageId: { type: string }, held: { type: boolean }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
     MessageAttachment: { type: object, required: [name, mimeType], description: "An image riding a user message, referenced by workspace attachment id — never by bytes. `id` is absent on a replayed attachment whose reference could not be recovered; clients render those as labeled placeholders.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 200 }, mimeType: { type: string, enum: [image/png, image/jpeg, image/gif, image/webp] } }, additionalProperties: false }
-    ChatAttachmentStored: { type: object, required: [id, mimeType, sizeBytes], description: "An accepted upload. `mimeType` is sniffed from the bytes, never taken from the client's claim.", properties: { id: { type: string }, mimeType: { type: string, enum: [image/png, image/jpeg, image/gif, image/webp] }, sizeBytes: { type: integer, minimum: 1 } }, additionalProperties: false }
     QueuedMessage: { type: object, required: [id, text, queuedAt], description: "A submission the workspace holds until the running turn ends. Not a timeline item; it becomes one when delivered. `requestId` echoes the accepting mutation's client request id so the submitting client can reconcile.", properties: { id: { type: string }, text: { type: string, description: "Empty for an image-only message." }, queuedAt: { type: number }, requestId: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } } }, additionalProperties: false }
-    ChatQueueRemoveResult: { type: object, required: [removed], properties: { removed: { const: true } }, additionalProperties: false }
-    ChatCancelResult: { type: object, required: [cancelled], properties: { cancelled: { const: true } }, additionalProperties: false }
-    PermissionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { enum: [approved-once, approved-session, rejected] }, choiceId: { type: string, minLength: 1, maxLength: 128, description: "The approval intent chosen, when the request offered choices." } }, additionalProperties: false }
-    PermissionResult: { type: object, required: [outcome], properties: { outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
-    QuestionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
-    QuestionResult: { type: object, required: [outcome], properties: { outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
-    StopTaskRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    StopTaskResult: { type: object, required: [stopped], properties: { stopped: { const: true } }, additionalProperties: false }
     ChatEvent:
       oneOf:
         - { type: object, required: [generation, sequence, conversationId, type, item], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.upsert }, item: { $ref: '#/components/schemas/ConversationItem' } }, additionalProperties: false }
@@ -2135,39 +1530,81 @@ components:
         message: { type: [string, 'null'] }
         commitLog: { type: array, items: { type: object, additionalProperties: true } }
       additionalProperties: false
-    ViewMode: { enum: [rendered, source, diff] }
-    FileFacts: { type: object, required: [lines, bytes, mtime], properties: { lines: { type: [integer, 'null'] }, bytes: { type: integer }, mtime: { type: string }, git: { type: object, additionalProperties: true } }, additionalProperties: false }
-    RenderedDocument:
-      type: object
-      required: [id, title, path, html, kind, view, language]
-      properties: { id: { type: string }, title: { type: string }, path: { type: string }, html: { type: string }, kind: { enum: [markdown, asciidoc, text] }, view: { $ref: '#/components/schemas/ViewMode' }, language: { type: [string, 'null'] }, metadata: { type: object, additionalProperties: true }, fileFacts: { $ref: '#/components/schemas/FileFacts' } }
-      additionalProperties: false
-    DocumentDiff:
+    LiveCursor:
+      type: string
+      x-uatu-maxUtf8Bytes: 1024
+      description: "Opaque cursor scoped to one subscription, at most 1024 UTF-8 bytes. Conversation cursors are the workspace's own replay ids. The Hub assigns document, inventory, and activity cursors. An empty or absent cursor starts from the current position."
+    LiveDocumentKey:
+      type: string
+      x-uatu-maxUtf8Bytes: 4096
+      description: "The watch context as a form-urlencoded query string of `compareTarget`, `scope`, and `documentId`, in that order, each only when set. For example `compareTarget=last-commit&scope=file&documentId=README.md`. `compareTarget` is `base` or `last-commit`, `scope` is `folder` or `file`, and `scope=file` also needs `documentId`. Empty or absent means the default context. Streams that present the same key share one upstream subscription. At most 4096 UTF-8 bytes, which leaves room for a file pinned deep in the tree, since `documentId` is a URL-encoded absolute path."
+    LiveConversationKey:
+      type: string
+      minLength: 1
+      x-uatu-maxUtf8Bytes: 4096
+      description: "Agent-qualified conversation id, `<agentId>:<providerConversationId>`, at most 4096 UTF-8 bytes."
+    LiveSubscriptionKey:
+      description: "One subscription on a stream, meaning a topic and its key where the topic has one. The activity topic is not subscribed here. Request it with the stream's `activity` parameter."
       oneOf:
-        - { type: object, required: [kind, baseRef, patch, bytes, addedLines, deletedLines], properties: { kind: { const: text }, baseRef: { type: string }, patch: { type: string }, bytes: { type: integer }, addedLines: { type: integer }, deletedLines: { type: integer }, oldContents: { type: string }, newContents: { type: string }, oldPath: { type: string }, fileFacts: { $ref: '#/components/schemas/FileFacts' } }, additionalProperties: false }
-        - { type: object, required: [kind, baseRef], properties: { kind: { enum: [unchanged, binary] }, baseRef: { type: string }, fileFacts: { $ref: '#/components/schemas/FileFacts' } }, additionalProperties: false }
-        - { type: object, required: [kind], properties: { kind: { const: unsupported-no-git }, fileFacts: { $ref: '#/components/schemas/FileFacts' } }, additionalProperties: false }
-    PersonalState:
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: document }
+            key: { $ref: '#/components/schemas/LiveDocumentKey' }
+          additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: inventory }
+          additionalProperties: false
+        - type: object
+          required: [topic, key]
+          properties:
+            topic: { type: string, const: conversation }
+            key: { $ref: '#/components/schemas/LiveConversationKey' }
+          additionalProperties: false
+    LiveSubscription:
+      description: A subscription and the cursor to resume it from.
+      oneOf:
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: document }
+            key: { $ref: '#/components/schemas/LiveDocumentKey' }
+            cursor: { $ref: '#/components/schemas/LiveCursor' }
+          additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: inventory }
+            cursor: { $ref: '#/components/schemas/LiveCursor' }
+          additionalProperties: false
+        - type: object
+          required: [topic, key]
+          properties:
+            topic: { type: string, const: conversation }
+            key: { $ref: '#/components/schemas/LiveConversationKey' }
+            cursor: { $ref: '#/components/schemas/LiveCursor' }
+          additionalProperties: false
+    LiveSubscriptionList:
+      type: array
+      maxItems: 16
+      items: { $ref: '#/components/schemas/LiveSubscription' }
+      description: At most 16 entries. A later entry for the same topic and key replaces an earlier one.
+    LiveSubscriptionKeyList:
+      type: array
+      maxItems: 16
+      items: { $ref: '#/components/schemas/LiveSubscriptionKey' }
+    LiveSubscriptionChange:
       type: object
-      required: [version]
-      properties: { version: { const: 1 }, documentPath: { type: string }, follow: { type: boolean }, previewMode: { $ref: '#/components/schemas/ViewMode' }, compareTarget: { enum: [base, last-commit] }, filesFilter: { enum: [all, changed] }, lastPtyId: { type: string, format: uuid } }
+      properties:
+        add: { $ref: '#/components/schemas/LiveSubscriptionList' }
+        remove: { $ref: '#/components/schemas/LiveSubscriptionKeyList' }
       additionalProperties: false
-    PersonalStatePatch:
+      description: Removals apply before additions. Adding a topic and key that is already subscribed replaces the subscription and re-attaches it from the new cursor.
+    LiveSubscriptionsUpdated:
       type: object
-      properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, changed, null] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
-      additionalProperties: false
-    TerminalDimensions:
-      type: object
-      required: [cols, rows]
-      properties: { cols: { type: integer, minimum: 1, maximum: 1000 }, rows: { type: integer, minimum: 1, maximum: 1000 } }
-      additionalProperties: false
-    TerminalSession:
-      type: object
-      required: [id, attached, createdAt, cols, rows, label]
-      properties: { id: { type: string, format: uuid }, attached: { type: boolean }, createdAt: { type: integer }, cols: { type: integer }, rows: { type: integer }, label: { type: string } }
-      additionalProperties: false
-    TerminalSessionList:
-      type: object
-      required: [sessions]
-      properties: { sessions: { type: array, items: { $ref: '#/components/schemas/TerminalSession' } } }
+      required: [ok]
+      properties:
+        ok: { type: boolean, const: true }
       additionalProperties: false

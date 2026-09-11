@@ -11,7 +11,7 @@ export const guides = [
   { slug: "boundaries", title: "Hub and workspace boundaries", summary: "Know which service owns identity, lifecycle, documents, and terminals.", source: boundaries },
   { slug: "workspaces", title: "Workspace lifecycle", summary: "Register, start, observe, stop, and forget workspaces safely.", source: workspaces },
   { slug: "clone-jobs", title: "Clone jobs", summary: "Drive asynchronous clones, prompts, progress, and cancellation.", source: cloneJobs },
-  { slug: "streaming", title: "Streaming protocols", summary: "Consume SSE, NDJSON, and mixed-frame terminal WebSockets.", source: streaming },
+  { slug: "streaming", title: "Streaming protocols", summary: "Consume the brokered live stream and clone job events over SSE.", source: streaming },
   { slug: "errors", title: "Errors", summary: "Handle HTTP and stream failures without relying on display text.", source: errors },
   { slug: "compatibility", title: "Compatibility", summary: "Compare Hub and workspace revisions and apply migrations.", source: compatibility },
 ] as const;

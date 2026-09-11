@@ -11,6 +11,7 @@ import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { isLiveConversationStatus } from "./types";
 import type {
+  ChatActivity,
   ChatAgent,
   ChatMode,
   ChatEvent,
@@ -203,6 +204,10 @@ export type ChatAdapterOptions = {
   metrics?: ChatEventMetrics;
   now?: () => number;
   id?: () => string;
+  // Called when activity() may read differently than it last did (already
+  // deduplicated here). The service forwards it to whoever watches the
+  // workspace's activity summary.
+  onActivityChange?: () => void;
 };
 
 export class ChatAdapter {
@@ -227,6 +232,12 @@ export class ChatAdapter {
   // survives projection eviction. This is what distinguishes "the store says
   // running because OpenCode died mid-turn" from "running right now".
   private readonly liveTurns = new Set<string>();
+  // Pending permission and question item ids per conversation, adapter-level
+  // like liveTurns: a conversation blocked on the user goes quiet and is
+  // exactly the one an LRU pass evicts, and its request must still count.
+  private readonly pendingInteractions = new Map<string, Set<string>>();
+  private readonly onActivityChange: (() => void) | undefined;
+  private lastActivity: ChatActivity = { working: false, awaiting: false };
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
@@ -295,6 +306,7 @@ export class ChatAdapter {
     this.coalesceWindowMs = options.coalesceWindowMs;
     this.metrics = options.metrics;
     this.id = options.id ?? randomUUID;
+    this.onActivityChange = options.onActivityChange;
     this.receipts = new IdempotencyReceipts({
       maxEntries: options.receiptEntries ?? 1_000,
       maxBytes: options.receiptBytes ?? 512 * 1024,
@@ -615,6 +627,59 @@ export class ChatAdapter {
 
   subscribeInventory(signal?: AbortSignal): ConversationInventorySubscription {
     return this.inventory.subscribe(signal);
+  }
+
+  /**
+   * This agent's slice of the workspace activity summary: whether any
+   * conversation has a turn in flight, and whether any permission request or
+   * question awaits the user. Read from the adapter-level records, never from
+   * the provider, so it is cheap enough to answer on every change.
+   */
+  activity(): ChatActivity {
+    return { working: this.liveTurns.size > 0, awaiting: this.pendingInteractions.size > 0 };
+  }
+
+  // Deduplicated at the source: a second conversation starting while one
+  // already runs does not change the summary.
+  private activityMayHaveChanged(): void {
+    const next = this.activity();
+    if (next.working === this.lastActivity.working && next.awaiting === this.lastActivity.awaiting) return;
+    this.lastActivity = next;
+    this.onActivityChange?.();
+  }
+
+  private trackInteraction(conversationId: string, itemId: string, pending: boolean): void {
+    const ids = this.pendingInteractions.get(conversationId);
+    if (pending) {
+      if (ids) ids.add(itemId);
+      else this.pendingInteractions.set(conversationId, new Set([itemId]));
+    } else if (ids) {
+      ids.delete(itemId);
+      if (ids.size === 0) this.pendingInteractions.delete(conversationId);
+    }
+    this.activityMayHaveChanged();
+  }
+
+  private forgetInteractions(conversationId: string): void {
+    this.pendingInteractions.delete(conversationId);
+    this.activityMayHaveChanged();
+  }
+
+  // A conversation that is deleted or has left the workspace can neither work
+  // nor wait on the user here: requireSession rejects its later events, so
+  // nothing else would ever settle its adapter-level records. If it returns,
+  // its activity is re-derived from new events.
+  private forgetActivity(conversationId: string): void {
+    this.liveTurns.delete(conversationId);
+    this.forgetInteractions(conversationId);
+  }
+
+  // The adapter's only workspace classification. Every path that learns a
+  // conversation lies outside the workspace forgets its activity here.
+  private async isInWorkspace(session: Pick<ProviderSession, "id" | "directory">): Promise<boolean> {
+    const inWorkspace = await isSessionInWorkspace(session.directory, this.workspacePath);
+    if (!inWorkspace) this.forgetActivity(session.id);
+    return inWorkspace;
   }
 
   startEventPump(): Promise<void> {
@@ -1437,6 +1502,9 @@ export class ChatAdapter {
     if (!parentId) return;
     const parent = this.projections.get(parentId);
     if (parent?.has(itemId)) resolve(parent);
+    // An evicted parent has no copy left to resolve, but its eviction-proof
+    // pending record must not outlive the answer.
+    else this.trackInteraction(parentId, itemId, false);
   }
 
   // Counts an event the pump could not use, by type. Never records a payload:
@@ -1963,7 +2031,7 @@ export class ChatAdapter {
     // "skip this frame" but must restart on transport errors, and the API
     // routes should answer 500, not 404, when the provider is unreachable.
     const session = await this.provider.getSession(id);
-    if (!session || !await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
+    if (!session || !await this.isInWorkspace(session)) throw new ConversationNotFoundError();
     return session;
   }
 
@@ -1974,7 +2042,7 @@ export class ChatAdapter {
     const parentId = session.parentId ?? null;
     boundedSet(this.sessionParents, session.id, parentId, INVENTORY_SESSION_LIMIT);
     return {
-      inWorkspace: await isSessionInWorkspace(session.directory, this.workspacePath),
+      inWorkspace: await this.isInWorkspace(session),
       parentId,
       title: session.title,
       deleted,
@@ -1991,7 +2059,11 @@ export class ChatAdapter {
   }
 
   private async applySessionLifecycle(lifecycle: NormalizedSessionLifecycle): Promise<void> {
-    if (lifecycle.kind === "deleted") this.cancelRevertReconciliation(lifecycle.id);
+    if (lifecycle.kind === "deleted") {
+      this.cancelRevertReconciliation(lifecycle.id);
+      this.forgetActivity(lifecycle.id);
+    }
+    // Classification forgets the activity of a session outside the workspace.
     const next = await this.classifyInventorySession(lifecycle, lifecycle.kind === "deleted");
     if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
     const previous = this.inventorySessions.get(lifecycle.id);
@@ -2039,6 +2111,11 @@ export class ChatAdapter {
       // these two: an interruption leaves the queue dormant by decision, and
       // a failure must not restart a failing conversation by itself.
       if (status === "idle" || status === "completed") this.scheduleDelivery(id);
+      this.activityMayHaveChanged();
+    }, {
+      pending: itemId => this.trackInteraction(id, itemId, true),
+      settled: itemId => this.trackInteraction(id, itemId, false),
+      cleared: () => this.forgetInteractions(id),
     });
     this.projections.set(id, projection);
     for (const [candidateId, candidate] of this.projections) {
@@ -2122,6 +2199,14 @@ function sameConversationItems(left: ConversationItem[], right: ConversationItem
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+// How a projection reports its interaction requests (permissions, questions)
+// becoming pending or settling, and its timeline being rebuilt wholesale.
+export type ProjectionInteractionHooks = {
+  pending(itemId: string): void;
+  settled(itemId: string): void;
+  cleared(): void;
+};
+
 export class ConversationProjection {
   status: ConversationStatus = "idle";
   private readonly timeline = new Map<string, ConversationItem>();
@@ -2132,6 +2217,9 @@ export class ConversationProjection {
     // Every status change flows through statusUpdate, so this single hook is
     // how the adapter keeps its eviction-proof live-turn set accurate.
     private readonly onStatus?: (status: ConversationStatus) => void,
+    // Every interaction request's lifecycle, so the adapter can keep an
+    // eviction-proof record of what awaits the user.
+    private readonly interactions?: ProjectionInteractionHooks,
   ) {}
 
   has(itemId: string): boolean {
@@ -2150,7 +2238,12 @@ export class ConversationProjection {
 
   seed(items: ConversationItem[]): void {
     for (const item of items) {
-      this.timeline.set(item.id, mergeInteraction(this.timeline.get(item.id), item));
+      const merged = mergeInteraction(this.timeline.get(item.id), item);
+      this.timeline.set(item.id, merged);
+      if (merged.type === "permission" || merged.type === "question") {
+        if (merged.status === "pending") this.interactions?.pending(merged.id);
+        else this.interactions?.settled(merged.id);
+      }
       if (item.type === "assistant_message") this.text.seed(item.id.replace(/^part:/, ""), item.markdown);
       else if (item.type === "reasoning") this.text.seed(item.id.replace(/^part:|^reasoning:/, ""), item.text);
     }
@@ -2159,6 +2252,7 @@ export class ConversationProjection {
   replace(items: ConversationItem[]): ChatEvent {
     this.timeline.clear();
     this.text.clear();
+    this.interactions?.cleared();
     this.seed(items);
     return this.replay.publish({ type: "resync", reason: "conversation-rewritten" });
   }
@@ -2167,6 +2261,7 @@ export class ConversationProjection {
     if (update.kind === "upsert") return this.upsert(update.item);
     if (update.kind === "remove") {
       this.timeline.delete(update.itemId);
+      this.interactions?.settled(update.itemId);
       // A removed item's stream is over: its reconciler text goes with it,
       // or a long conversation would keep every replaced streaming block.
       this.text.forget(update.itemId);
@@ -2217,6 +2312,10 @@ export class ConversationProjection {
   upsert(item: ConversationItem): ChatEvent | undefined {
     const current = this.timeline.get(item.id);
     const merged = mergeInteraction(current, item);
+    // A settled request clears the adapter's record even when the frame is
+    // dropped below for lack of content: that record outlives eviction, and a
+    // recreated projection may see nothing of the request but its resolution.
+    if ((merged.type === "permission" || merged.type === "question") && merged.status !== "pending") this.interactions?.settled(merged.id);
     // A resolution for a question this projection never saw (asked frame
     // missed, projection evicted) has no question content to render, and an
     // empty questions array fails client validation — publishing it would
@@ -2230,6 +2329,7 @@ export class ConversationProjection {
     // accepts empty resources exactly when a plan is present.
     if (merged.type === "permission" && merged.resources.length === 0 && merged.plan === undefined) return undefined;
     this.timeline.set(item.id, merged);
+    if ((merged.type === "permission" || merged.type === "question") && merged.status === "pending") this.interactions?.pending(merged.id);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);
     return this.replay.publish({ type: "item.upsert", item: merged });

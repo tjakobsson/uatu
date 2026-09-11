@@ -25,6 +25,22 @@ describe("API compatibility policy", () => {
       .not.toThrow();
   });
 
+  test("charges a Hub-tagged operation under a workspace prefix to the Hub", () => {
+    const path = "/s/{workspaceId}/api/personal-state";
+    const hubServed = compareContracts(
+      { paths: { [path]: { get: operation("Hub", { "200": {}, "404": {} }) } } },
+      { paths: { [path]: { get: operation("Hub", { "200": {} }) } } },
+    );
+    expect(hubServed.breaking).toEqual({ hub: [`GET ${path}: removed response 404`], workspace: [] });
+    // A child route proxied under the same prefix stays workspace even when
+    // its tag names neither domain.
+    const proxied = compareContracts(
+      { paths: { "/s/{workspaceId}/api/chat/status": { get: operation("Chat", { "200": {}, "503": {} }) } } },
+      { paths: { "/s/{workspaceId}/api/chat/status": { get: operation("Chat", { "200": {} }) } } },
+    );
+    expect(proxied.breaking).toEqual({ hub: [], workspace: ["GET /s/{workspaceId}/api/chat/status: removed response 503"] });
+  });
+
   test("does not reuse migration guidance from an older revision entry", () => {
     const result = compareContracts(
       { paths: { "/api/hub/state": { get: operation("Hub", { "200": {}, "401": {} }) } } },
@@ -352,6 +368,37 @@ describe("API compatibility policy", () => {
     const openapi = (type: string) => ({ components: { schemas: { WorkspaceState: { type: "object", required: ["generatedAt"], properties: { generatedAt: { type } }, additionalProperties: false } } } });
     const result = compareStreamingContracts(streaming, structuredClone(streaming), openapi("number"), openapi("string"));
     expect(result.breaking.workspace.some(item => item.includes("schema WorkspaceState") && item.includes("changed type"))).toBe(true);
+  });
+
+  test("multiplexed topic payloads count against the domain that owns them", () => {
+    const streaming = {
+      channels: {
+        live: {
+          path: "/api/hub/live",
+          events: [{ name: "live", dataSchema: "LiveEnvelope" }],
+          topics: {
+            conversation: { domain: "workspace", dataSchema: "ChatEvent" },
+            activity: { domain: "hub", dataSchema: "WorkspaceActivity" },
+          },
+        },
+      },
+      schemas: {
+        LiveEnvelope: { type: "object", required: ["topic"], properties: { topic: { enum: ["conversation", "activity"] } }, additionalProperties: false },
+        ChatEvent: { $ref: "./openapi.yaml#/components/schemas/ChatEvent" },
+        WorkspaceActivity: { type: "object", required: ["running"], properties: { running: { type: "boolean" } }, additionalProperties: false },
+      },
+    };
+    const openapi = (types: string[]) => ({ components: { schemas: { ChatEvent: { type: "object", required: ["type"], properties: { type: { enum: types } }, additionalProperties: false } } } });
+    const payload = compareStreamingContracts(streaming, structuredClone(streaming), openapi(["conversation.status"]), openapi(["conversation.status", "conversation.queue"]));
+    expect(payload.changedDomains).toEqual(["workspace"]);
+    expect(payload.breaking.hub).toEqual([]);
+    expect(payload.breaking.workspace.some(item => item.includes("schema ChatEvent") && item.includes("conversation.queue"))).toBe(true);
+
+    const activity = structuredClone(streaming);
+    activity.schemas.WorkspaceActivity.properties.running.type = "string";
+    const hubPayload = compareStreamingContracts(streaming, activity);
+    expect(hubPayload.breaking.workspace).toEqual([]);
+    expect(hubPayload.breaking.hub.some(item => item.includes("schema WorkspaceActivity"))).toBe(true);
   });
 
   test("inventory wire-field mutations and removals are breaking; additions are changed", () => {

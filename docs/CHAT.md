@@ -69,13 +69,12 @@ hub workspace.
 
 ## Access And Authority
 
-Direct `uatu serve` access uses the same short-lived workspace credential
-and HttpOnly cookie as the embedded terminal. Chat reads and mutations
-require that credential, and mutations also require a same-origin request.
-
-With `uatu hub`, users authenticate to the hub. The hub brokers the child
-workspace credential and proxies Chat HTTP and SSE traffic under
-`/s/<workspace-id>/`; it does not expose any loopback agent service.
+Users authenticate to the hub. Behind it, each workspace child requires
+its short-lived workspace credential for Chat reads and mutations, and a
+same-origin request for mutations. The hub brokers that credential, so it
+never reaches a browser. Chat HTTP is proxied under `/s/<workspace-id>/`;
+conversation and inventory updates reach the page over its one live stream
+(`/api/hub/live`). The hub does not expose any loopback agent service.
 Hub users share the authority of the operating-system account running the
 hub.
 

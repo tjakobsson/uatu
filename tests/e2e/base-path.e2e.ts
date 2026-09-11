@@ -2,8 +2,14 @@
 // not the e2e harness server — so the production shell relocation (Bun
 // HTMLBundle chunk rewriting, meta injection) is what's under test, and
 // drives the core flows through the prefix: shell boot, /api/state, document
-// selection with prefixed pushState URLs, SSE live reload, terminal auth,
-// and the outside-prefix 404 wall.
+// selection with prefixed pushState URLs, terminal auth, and the
+// outside-prefix 404 wall.
+//
+// Live reload is NOT asserted here: the SPA's one live stream is the hub's
+// `/api/hub/live`, which a bare child does not serve, so this page runs with
+// its stream refused (the channel keeps backing off; the shell must boot and
+// work regardless). Live reload through a prefix is covered by the
+// hub-served e2e added for task 8.1 of hub-brokered-live-stream.
 //
 // This file deliberately imports from @playwright/test directly: it owns its
 // own server child (the compiled-from-source CLI) instead of the worker
@@ -103,14 +109,17 @@ test("selecting a document produces a prefixed pushState URL and deep links reso
   await expect(page.locator("#preview")).toContainText("hello from the prefix");
 });
 
-test("SSE live reload works through the prefix", async ({ page }) => {
+test("the shell boots and stays usable while its live stream is refused", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
   await page.goto(sessionUrl);
   await revealTreeRow(page, "README.md");
   await treeRow(page, "README.md").click();
   await expect(page.locator("#preview")).toContainText("hello from the prefix");
-
-  await writeFile(path.join(workspace, "README.md"), "# Base Path\n\nlive reloaded content\n");
-  await expect(page.locator("#preview")).toContainText("live reloaded content", { timeout: 15_000 });
+  // No hub answers the live route here; the indicator says so and the
+  // channel's retry cycle throws nothing at the page.
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Reconnecting", { timeout: 15_000 });
+  expect(pageErrors).toEqual([]);
 });
 
 test("requests outside the prefix are 404", async ({ request }) => {

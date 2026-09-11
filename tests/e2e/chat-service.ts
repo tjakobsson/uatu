@@ -9,7 +9,9 @@ import { ConversationInventoryBroadcaster, type ConversationInventorySubscriptio
 import { ReversibleHistoryTargetError } from "../../src/chat/provider";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
+import { isLiveConversationStatus } from "../../src/chat/types";
 import type {
+  ChatActivity,
   ChatCapability,
   ChatModel,
   ChatEvent,
@@ -73,6 +75,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly children = new Set<string>();
   private readonly subscriptions = new Set<{ cancel(): void }>();
   private inventory = new ConversationInventoryBroadcaster();
+  private activityChanges = new ConversationInventoryBroadcaster();
   private readonly inventorySubscriptions = new Set<ConversationInventorySubscription>();
   private readonly pendingInventorySubscriptions = new Set<() => void>();
   private inventoryTransportInterrupted = false;
@@ -257,6 +260,22 @@ export class FakeE2EChatService implements WorkspaceChatService {
       this.pendingInventorySubscriptions.add(resume);
       options.signal?.addEventListener("abort", resume, { once: true });
     });
+  }
+
+  // Workspace activity (hub-brokered-live-stream D5), read from the same
+  // state the fixture's conversations publish — a live status is working, a
+  // pending permission or question awaits the user — so a spec that drives a
+  // conversation drives the summary with it. Every mutation below ticks;
+  // the route drops ticks that leave the summary unchanged.
+  async activity(): Promise<ChatActivity> {
+    const working = [...this.conversations.values()].some(conversation => isLiveConversationStatus(conversation.status));
+    const awaiting = [...this.items.values()].some(items => [...items.values()].some(item =>
+      (item.type === "permission" || item.type === "question") && item.status === "pending"));
+    return { working, awaiting };
+  }
+
+  async subscribeActivity(options: { signal?: AbortSignal } = {}) {
+    return this.activityChanges.subscribe(options.signal);
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
@@ -532,6 +551,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
   async dispose(): Promise<void> {
     for (const subscription of [...this.inventorySubscriptions]) subscription.cancel();
     this.inventory.dispose();
+    // Ends every activity watcher, but stays usable: the harness keeps
+    // serving from this instance after a reset.
+    this.activityChanges.dispose();
+    this.activityChanges = new ConversationInventoryBroadcaster();
     this.inventoryTransportInterrupted = false;
     for (const resume of [...this.pendingInventorySubscriptions]) resume();
   }
@@ -576,6 +599,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.dormant.clear();
     this.nextCreatedConfiguration = {};
     this.children.clear();
+    this.activityChanges.invalidate();
     // A narrowed agent is one test's setup, not the fixture's resting state:
     // left in place it reaches whichever test boots against this worker next.
     this.capabilities = this.defaultCapabilities();
@@ -594,6 +618,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.conversations.set(id, conversation);
     if (child) this.children.add(id);
     this.items.set(id, new Map(items.map(item => [item.id, item])));
+    this.activityChanges.invalidate();
     this.authoritativeItems.set(id, structuredClone(items));
     this.configurations.set(id, configuration);
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
@@ -634,6 +659,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.conversations.delete(id);
     this.items.delete(id);
     this.authoritativeItems.delete(id);
+    this.activityChanges.invalidate();
     this.revertBoundaries.delete(id);
     this.reversibleFiles.delete(id);
     this.configurations.delete(id);
@@ -708,6 +734,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       return this.replay.get(id)!.publish({ type: "resync", reason: "conversation-rewritten" });
     }
     this.items.get(id)!.set(item.id, item);
+    this.activityChanges.invalidate();
     return this.replay.get(id)!.publish({ type: "item.upsert", item });
   }
 
@@ -902,6 +929,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const authoritative = this.authoritativeItems.get(id)!;
     const end = this.boundaryIndex(id) ?? authoritative.length;
     this.items.set(id, new Map(authoritative.slice(0, end).map(item => [item.id, structuredClone(item)])));
+    this.activityChanges.invalidate();
   }
 
   private commitRevertedBranch(id: string): void {
@@ -944,6 +972,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const conversation = this.require(id);
     this.conversations.set(id, { ...conversation, status, updatedAt: this.nextId });
     this.replay.get(id)!.publish({ type: "conversation.status", status, ...(message ? { message } : {}) });
+    this.activityChanges.invalidate();
     // A turn that ended on its own releases the next held message.
     if (status === "completed" || status === "idle") this.deliverNext(id);
   }

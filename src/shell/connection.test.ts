@@ -68,9 +68,11 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       },
     };
     const channel = createLiveChannel({
+      ws: null,
+      activity: false,
       timers,
-      onStatus: applyChannelStatus,
-      open: () => {
+      fetcher: async () => new Response("{}"),
+      openSource: () => {
         const listeners: ((event: Event) => void)[] = [];
         const source: FakeSource = {
           addEventListener(type, listener) {
@@ -86,6 +88,7 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
         return source;
       },
     });
+    channel.onStatus(applyChannelStatus);
     return {
       channel,
       sources,

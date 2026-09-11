@@ -26,7 +26,16 @@ import { e2ePort, resetE2EWorkspace, workspaceRoot } from "./config";
 // distinct value via env so each worker's server lives in its own dir.
 const E2E_WORKSPACE_ROOT = workspaceRoot();
 const E2E_PORT = e2ePort();
+// The harness serves at "/" for the worker fixture (tests/e2e/fixtures.ts).
+// As a hub child (tests/e2e/hub-server.ts) it serves under the hub-shaped
+// prefix the hub assigned — `/s/<id>/` — relocating its routes and the SPA
+// shell exactly as `uatu serve --base-path` does, and it does NOT mount the
+// brokered live stream: that is the hub's, and the hub subscribes to this
+// process's child routes through it. Unset, nothing below changes.
+const E2E_BASE_PATH = normalizeBasePath(process.env.UATU_E2E_BASE_PATH ?? "/");
+const E2E_HUB_CHILD = E2E_BASE_PATH !== "/";
 import { safeGit } from "../../src/document/git-base-ref";
+import { normalizeBasePath, stripBasePath } from "../../src/shared/base-path";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, spaShellResponse } from "../../src/server/navigation";
 import { resolveWatchRoots, type WatchEntry } from "../../src/server/roots";
 import { createWatchSession } from "../../src/server/watch-session";
@@ -37,6 +46,9 @@ import {
 } from "../../src/server/routes";
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
+import { LiveBroker, type LiveUpstreamSource } from "../../src/hub/live-broker";
+import { LiveEndpoint } from "../../src/hub/live-endpoint";
+import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture } from "./chat-service";
 import type { ChatCapability, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus } from "../../src/chat/types";
 
@@ -150,6 +162,56 @@ const chatService = new Proxy({} as MultiAgentChatService, {
 });
 const terminalEnabled = await terminalBackendAvailable();
 let watchSession = await createSession({ resetWorkspace: true });
+
+// The brokered live stream, exactly as a hub would mount it, over this one
+// workspace: the SPA opens only /api/hub/live, so the harness brokers its
+// own child routes back to itself (a loopback fetch carrying the workspace
+// credential the chat routes check). No hub auth here — one fixed identity;
+// `ws` may be absent or anything, and names this workspace.
+const E2E_WORKSPACE_ID = "e2e";
+const E2E_LIVE_PRINCIPAL = { user: "e2e", sessionId: "e2e-session" };
+// A reset stops the watch session before the next one exists. Stopping ends
+// the broker's upstreams, and the broker retries within ~100 ms, which,
+// unguarded, lands on the STOPPED session: it still answers with a snapshot
+// of the old tree and never broadcasts again, so the next test's page sees
+// the previous test's files. (A real child that stops is gone; only this
+// in-process swap can answer from a dead session.) Upstream opens therefore
+// wait for the swap to finish.
+let liveUpstreamsReady: Promise<void> = Promise.resolve();
+function holdLiveUpstreams(): () => void {
+  let release!: () => void;
+  liveUpstreamsReady = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  // A reset that throws midway must not wedge every later stream.
+  const safety = setTimeout(release, 30_000);
+  return () => {
+    clearTimeout(safety);
+    release();
+  };
+}
+const liveUpstreamSource: LiveUpstreamSource = {
+  isRunning: () => true,
+  workspaceIds: () => [E2E_WORKSPACE_ID],
+  async open({ path: childPath, signal }) {
+    await liveUpstreamsReady;
+    const target = new URL(childPath, `http://127.0.0.1:${server.port}`);
+    target.searchParams.set("t", watchSession.getTerminalToken());
+    return fetch(target, {
+      headers: { accept: "text/event-stream", origin: `http://127.0.0.1:${server.port}` },
+      signal,
+    });
+  },
+};
+const liveBroker = new LiveBroker(liveUpstreamSource, {
+  // A reset replaces the watch session under the broker's upstreams; the
+  // in-process child answers instantly, so recovery can be quick.
+  retryMinMs: 100,
+});
+const liveEndpoint = new LiveEndpoint({
+  broker: liveBroker,
+  resolveWorkspace: requested => requested ?? E2E_WORKSPACE_ID,
+});
 const terminalServer = terminalEnabled
   ? createTerminalServer({ cwd: activeWorkspaceRoot })
   : null;
@@ -190,6 +252,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
     }
   }
 
+  const releaseLiveUpstreams = holdLiveUpstreams();
   await watchSession.stop();
   activeFilePath = typeof body.file === "string" ? body.file : null;
   activeRespectGitignore =
@@ -233,6 +296,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   }
 
   watchSession = await createSession({ resetWorkspace: false });
+  releaseLiveUpstreams();
   return Response.json(watchSession.getStatePayload());
 }
 
@@ -409,7 +473,22 @@ server = Bun.serve({
     // through spaShellResponse like production so the e2e suite exercises
     // the same no-cache HTML + prefixed bundle-asset flow browsers get.
     [INTERNAL_SHELL_PATH]: index,
-    "/": { GET: () => spaShellResponse(server) },
+    // Under a hub prefix the root and the live stream belong to the hub;
+    // the prefix root resolves through the navigation fallback instead (as
+    // in cli.ts). Cast: TS types the conditional spread's keys as
+    // optional-undefined, which Bun's Routes type rejects.
+    ...((E2E_HUB_CHILD
+      ? {}
+      : {
+          "/": { GET: () => spaShellResponse(server) },
+          [LIVE_STREAM_PATH]: {
+            GET: (request: Request) => liveEndpoint.openStream(request, E2E_LIVE_PRINCIPAL),
+          },
+          [`${LIVE_STREAM_PATH}/:streamId/subscriptions`]: {
+            POST: (request: Request & { params: { streamId: string } }) =>
+              liveEndpoint.changeSubscriptions(request, request.params.streamId, E2E_LIVE_PRINCIPAL),
+          },
+        }) as Record<string, never>),
     ...buildRoutes({
       mode: "e2e",
       assets: {
@@ -428,6 +507,9 @@ server = Bun.serve({
       getSession: () => watchSession,
       chatService,
       getWorkspaceCredential: () => watchSession.getTerminalToken(),
+      basePath: E2E_BASE_PATH,
+      // A hub owns its origin root, as production's child invocation declares.
+      ...(E2E_HUB_CHILD ? { manifestScope: "origin" as const } : {}),
       handleE2EReset,
       handleE2EPersonalState,
       handleE2EChat,
@@ -435,7 +517,10 @@ server = Bun.serve({
   },
   fetch: async (request, srv) => {
     const url = new URL(request.url);
-    if (url.pathname === "/__e2e/terminal-sessions-delay") {
+    // Root-relative for the comparisons below; outside the prefix the
+    // fallback answers 404 itself.
+    const pathname = stripBasePath(url.pathname, E2E_BASE_PATH);
+    if (pathname === "/__e2e/terminal-sessions-delay") {
       if (request.method === "POST") {
         const body = (await request.json()) as { ms?: number };
         terminalSessionsDelay = {
@@ -450,7 +535,7 @@ server = Bun.serve({
     if (
       terminalSessionsDelay?.armed
       && request.method === "GET"
-      && url.pathname === "/api/terminal/sessions"
+      && pathname === "/api/terminal/sessions"
     ) {
       // Consume the arming immediately so only THIS read is held — a second
       // read arriving during the delay must pass through at full speed, or
@@ -485,17 +570,23 @@ const navigationFetch = createNavigationFetchHandler({
   getEntries: () => activeEntries,
   getRespectGitignore: () => activeRespectGitignore,
   getServer: () => server,
+  basePath: E2E_BASE_PATH,
 });
 
 const fetchFallback = buildFetchFallback({
   getTerminalServer: () => terminalServer,
   getTerminalToken: () => watchSession.getTerminalToken(),
   navigationFetch,
+  basePath: E2E_BASE_PATH,
 });
 
-console.log(`http://127.0.0.1:${server.port}`);
+// The readiness line the spawning fixture waits for. A hub child announces
+// its prefixed session URL, the shape the hub's backend contract expects.
+console.log(E2E_HUB_CHILD ? `http://127.0.0.1:${server.port}${E2E_BASE_PATH}` : `http://127.0.0.1:${server.port}`);
 
 const shutdown = async () => {
+  liveEndpoint.endAll();
+  liveBroker.dispose();
   await singleAgentRouter.dispose();
   await dualAgentRouter.dispose().catch(() => undefined);
   await watchSession.stop();

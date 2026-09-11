@@ -4,7 +4,7 @@ import { measureChatWork } from "./performance";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { registerBackInterceptor } from "../shell/history";
-import { createLifecycleRecovery, type LifecycleRecovery } from "../shell/recovery";
+import { registerRecoveryWork } from "../shell/live";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type ScrollMovement } from "./anchor";
@@ -215,7 +215,7 @@ export function initChat(api = new ChatApiClient()): void {
   const stagedConfigurations = new Map<string, ConversationConfiguration>();
   let configurationPicker: ChatConfigurationPickerController | null = null;
   let stream: ChatEventStream | null = null;
-  let chatLifecycle: LifecycleRecovery | null = null;
+  let releaseRecoveryWork: (() => void) | null = null;
   let inventoryStream: ChatEventStream | null = null;
   let selectionGeneration = 0;
   let selectedConversationDeleted = false;
@@ -1960,16 +1960,15 @@ export function initChat(api = new ChatApiClient()): void {
     stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
   };
 
-  // Opens the selected conversation's event stream at a cursor. Split out of
-  // snapshot installation so a lifecycle resume can replace a stale stream
-  // without reprojecting: replaying from the cursor the projection already
-  // holds keeps the timeline, its scroll anchor, and the composer draft
-  // exactly as the user left them.
+  // Subscribes to the selected conversation's events from a cursor — a topic
+  // on the page's one live stream, never a connection of its own. A
+  // lifecycle wake-up does not come back here: the channel reconnects and
+  // resumes this topic from the cursor it holds, so the timeline, its scroll
+  // anchor, and the composer draft stay exactly as the user left them.
   const openConversationStream = (
     conversationId: string,
     cursor: string,
     token: number,
-    options: { resumed?: boolean } = {},
   ): ChatEventStream =>
     api.stream(conversationId, cursor, {
       event: (event, cursor) => {
@@ -2008,7 +2007,7 @@ export function initChat(api = new ChatApiClient()): void {
       // whether the projection is correct, so this clears the reconnect
       // message and nothing else — no refetch, no reprojection.
       recovered: () => { if (token === selectionGeneration) interruptions.clear("conversation"); },
-    }, options);
+    });
 
   async function refreshSelectedConversation(id: string): Promise<boolean> {
     const token = selectionGeneration;
@@ -2839,18 +2838,16 @@ export function initChat(api = new ChatApiClient()): void {
    * one on screen: the drill-down is one level deep by design, and back
    * returns to the conversation the picker still shows.
    */
-  // The drill-down's own event stream. Split out of the open path so a
-  // lifecycle resume can replace a stalled one from the cursor the child
-  // projection already holds — the transcript on screen is as live a surface
-  // as the parent conversation, and a half-dead socket under it silently
-  // stops reporting subagent output.
+  // The drill-down's own event topic — one more subscription on the same
+  // stream, alongside the parent's. The transcript on screen is as live a
+  // surface as the parent conversation; the channel resumes it from its own
+  // cursor after a wake-up, the same as the parent.
   const openChildStream = (
     entry: Drilldown,
     id: string,
     label: string,
     cursor: string,
     generation: number,
-    options: { resumed?: boolean } = {},
   ): ChatEventStream =>
     api.stream(id, cursor, {
       event: (event, cursor) => {
@@ -2868,7 +2865,7 @@ export function initChat(api = new ChatApiClient()): void {
       resync: () => { if (generation === childGeneration) openChildConversation(id, label); },
       error: error => { if (generation === childGeneration) childInterruptions.report("child", error); },
       recovered: () => { if (generation === childGeneration) childInterruptions.clear("child"); },
-    }, options);
+    });
 
   const openChildConversation = (id: string, label: string) => {
     if (!drilldown || !drilldownItems || !drilldownTimeline) return;
@@ -3545,7 +3542,7 @@ export function initChat(api = new ChatApiClient()): void {
     stopConversationRefreshRecovery();
     stream?.close();
     inventoryStream?.close();
-    chatLifecycle?.dispose();
+    releaseRecoveryWork?.();
     child?.stream?.close();
     child?.read?.controller.abort();
     childReadSignal?.cancel();
@@ -3693,16 +3690,14 @@ export function initChat(api = new ChatApiClient()): void {
     }, 1_500);
   };
 
-  // `resumed` distinguishes replacing a stream this client lost from opening
-  // the first one — only the former is transport recovery.
-  const startInventoryStream = (resumed = false) => {
+  const startInventoryStream = () => {
     if (inventoryStream) return;
     try {
       inventoryStream = api.inventoryStream({
         invalidation: () => { void inventoryReconciler.request(); },
         error: error => interruptions.report("inventory", error),
         recovered: () => interruptions.clear("inventory"),
-      }, { resumed });
+      });
     } catch (error) {
       announce(messageOf(error), true);
     }
@@ -3943,57 +3938,17 @@ export function initChat(api = new ChatApiClient()): void {
     }
   });
   // A page that was frozen, backgrounded, or off the network missed whatever
-  // the streams would have delivered, and may be holding sockets that will
-  // never speak again. Recovery is: reconcile the authoritative inventory and
-  // replace both streams. Nothing here touches presentation — the selected
-  // conversation resumes from the cursor its projection already holds, so
-  // drafts, timeline content, and scroll position survive intact.
-  chatLifecycle = createLifecycleRecovery({
-    win: window,
-    doc: document,
-    discard: () => {},
-    recover: async () => {
-      if (disposed || !bootstrapped) return;
-      // Close every stream this recovery replaces BEFORE asking for anything.
-      // Over HTTP/1.1 the browser holds six connections per host, shared by
-      // every tab on the hub, and the long-lived streams count against it.
-      // A fetch issued while the old streams still hold their slots queues
-      // behind them; the replacements then race it for the slots the closes
-      // free. Closing first, then fetching, then reopening puts the one
-      // request that must succeed at the head of the queue.
-      inventoryStream?.close();
-      inventoryStream = null;
-      const current = projection;
-      const resumeConversation = current !== null && activeConversationId() === current.conversationId;
-      if (resumeConversation) {
-        stream?.close();
-        stream = null;
-      }
-      // An open subagent transcript owns its own stream, which the parent's
-      // replacement does not touch. Left alone it stays half-dead and silently
-      // stops reporting, while the surface looks recovered.
-      const openChild = child;
-      if (openChild?.projection) {
-        openChild.stream?.close();
-        openChild.stream = null;
-      }
-      const inventory = inventoryReconciler.request();
-      startInventoryStream(true);
-      if (resumeConversation && current) {
-        stream = openConversationStream(current.conversationId, current.cursor, selectionGeneration, { resumed: true });
-      }
-      if (openChild?.projection) {
-        openChild.stream = openChildStream(
-          openChild,
-          openChild.conversationId,
-          openChild.label,
-          openChild.projection.cursor,
-          childGeneration,
-          { resumed: true },
-        );
-      }
-      await inventory;
-    },
+  // the stream would have delivered. The shell's one lifecycle recovery
+  // (shell/live.ts) reconnects the page's live channel, which resumes the
+  // inventory, the selected conversation, and any open subagent transcript
+  // from the cursors it holds — a cursor the hub can no longer replay comes
+  // back as a resync on that topic alone. Chat's own part is the state the
+  // stream cannot replay: the authoritative inventory. Nothing here touches
+  // presentation — drafts, timeline content, and scroll position survive
+  // intact.
+  releaseRecoveryWork = registerRecoveryWork(async () => {
+    if (disposed || !bootstrapped) return;
+    await inventoryReconciler.request();
   });
   handleChatSurfaceState();
 }

@@ -330,6 +330,7 @@ describe("chat reversible-history composer", () => {
       select.value = "one";
       select.dispatchEvent(new Event("change"));
       await waitUntil(() => streams.at(-1)?.conversationId === "one" && input.value === "earlier draft");
+      expect(eventSourceConstructions).toBe(0);
       expect(document.querySelector("#chat-attachments")?.textContent).toContain("earlier.png");
 
       redoResults.push(Promise.resolve(changed("redo draft", [{ id: "redo", name: "redo.png", mimeType: "image/png" }])));
@@ -438,11 +439,17 @@ afterAll(() => {
 });
 }
 
+// The chat surface owns no connection: every EventSource the page holds is
+// the shell's one live channel. Any construction from chat code is a
+// regression, whatever the fake api above does.
+let eventSourceConstructions = 0;
+
 function installDomGlobals(document: Document, window: Window): void {
   const browserGlobal = window as unknown as Record<string, unknown>;
   const values: Record<string, unknown> = {
     document,
     window,
+    EventSource: class { constructor() { eventSourceConstructions += 1; } addEventListener() {} close() {} },
     history: window.history ?? { back() {}, forward() {}, pushState() {}, replaceState() {} },
     navigator: window.navigator ?? {},
     Event: browserGlobal.Event,

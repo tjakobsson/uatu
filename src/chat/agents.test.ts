@@ -5,7 +5,7 @@ import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ReplaySubscription } from "./replay";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
-import type { ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary } from "./types";
+import type { ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary } from "./types";
 
 function summary(id: string, updatedAt = 1): ConversationSummary {
   return { id, title: `Conversation ${id}`, createdAt: updatedAt, updatedAt, status: "idle" };
@@ -74,6 +74,10 @@ class StubAgentService implements WorkspaceChatService {
   }
   async stopTask(id: string, taskId: string) { return this.record("stopTask", [id, taskId], { stopped: true as const }); }
   async dispose() { this.calls.push({ method: "dispose", args: [] }); }
+  activityState: ChatActivity = { working: false, awaiting: false };
+  activityChanges = new ConversationInventoryBroadcaster();
+  async activity() { return this.activityState; }
+  async subscribeActivity(options: { signal?: AbortSignal } = {}) { return this.activityChanges.subscribe(options.signal); }
 }
 
 describe("background task stops route to the owning agent", () => {
@@ -393,5 +397,89 @@ describe("lifecycle", () => {
     await service.dispose();
     expect(a.calls).toEqual([{ method: "dispose", args: [] }]);
     expect(b.calls).toEqual([{ method: "dispose", args: [] }]);
+  });
+});
+
+describe("workspace activity merges across agents", () => {
+  function activityRouter() {
+    const a = new StubAgentService();
+    const b = new StubAgentService();
+    const service = new MultiAgentChatService({
+      workspacePath: process.cwd(),
+      agents: [
+        { descriptor: { id: "a", name: "A" }, service: a },
+        { descriptor: { id: "b", name: "B" }, service: b },
+      ],
+    });
+    return { service, a, b };
+  }
+
+  async function until(predicate: () => boolean): Promise<void> {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await Bun.sleep(1);
+    expect(predicate()).toBe(true);
+  }
+
+  function within<T>(promise: Promise<T>, ms = 500): Promise<T | "timeout"> {
+    return Promise.race([promise, Bun.sleep(ms).then(() => "timeout" as const)]);
+  }
+
+  test("working in one agent and awaiting in another merge into one summary", async () => {
+    const { service, a, b } = activityRouter();
+    expect(await service.activity()).toEqual({ working: false, awaiting: false });
+    a.activityState = { working: true, awaiting: false };
+    b.activityState = { working: false, awaiting: true };
+    expect(await service.activity()).toEqual({ working: true, awaiting: true });
+  });
+
+  test("an agent that cannot answer counts as idle and does not silence the others", async () => {
+    const { service, a, b } = activityRouter();
+    b.activity = async () => { throw new Error("agent down"); };
+    b.subscribeActivity = async () => { throw new Error("agent down"); };
+    a.activityState = { working: false, awaiting: true };
+    expect(await service.activity()).toEqual({ working: false, awaiting: true });
+
+    const changes = await service.subscribeActivity();
+    expect((await changes.next()).done).toBe(false);
+    await until(() => a.activityChanges.subscriberCount() === 1);
+    // Let the source's own opening tick land, then consume it, so the next
+    // tick can only be the forwarded change.
+    await Bun.sleep(5);
+    expect(await within(changes.next())).toEqual({ value: undefined, done: false });
+    a.activityState = { working: true, awaiting: true };
+    a.activityChanges.invalidate();
+    expect(await within(changes.next())).toEqual({ value: undefined, done: false });
+    expect(await service.activity()).toEqual({ working: true, awaiting: true });
+    changes.cancel();
+  });
+
+  test("a hung agent neither delays the subscription nor its peers' ticks", async () => {
+    const { service, a, b } = activityRouter();
+    b.subscribeActivity = () => new Promise(() => undefined);
+    const changes = await within(service.subscribeActivity());
+    if (changes === "timeout") throw new Error("subscribeActivity waited on the hung agent");
+    expect((await changes.next()).done).toBe(false);
+    await until(() => a.activityChanges.subscriberCount() === 1);
+    await Bun.sleep(5);
+    expect(await within(changes.next())).toEqual({ value: undefined, done: false });
+    a.activityChanges.invalidate();
+    expect(await within(changes.next())).toEqual({ value: undefined, done: false });
+    changes.cancel();
+  });
+
+  test("ending the merged subscription ends every agent's, by abort or by disposal", async () => {
+    const { service, a, b } = activityRouter();
+    const abort = new AbortController();
+    const aborted = await service.subscribeActivity({ signal: abort.signal });
+    await until(() => a.activityChanges.subscriberCount() === 1 && b.activityChanges.subscriberCount() === 1);
+    abort.abort();
+    expect(a.activityChanges.subscriberCount()).toBe(0);
+    expect(b.activityChanges.subscriberCount()).toBe(0);
+    expect((await aborted.next()).done).toBe(true);
+
+    const disposed = await service.subscribeActivity();
+    await until(() => a.activityChanges.subscriberCount() === 1);
+    await service.dispose();
+    expect(a.activityChanges.subscriberCount()).toBe(0);
+    expect((await disposed.next()).done).toBe(true);
   });
 });

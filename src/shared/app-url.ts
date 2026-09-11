@@ -38,6 +38,22 @@ export function appUrl(rootRelativePath: string): string {
   return joinBasePath(appBasePath(), rootRelativePath);
 }
 
+// Extracts the workspace id from a hub-shaped base path ("/s/uatu/" →
+// "uatu"). Null for the default "/" and for prefixes that are not
+// hub-session-shaped. Shared by the workspace switcher and the live channel
+// (whose stream is keyed by this id).
+export function workspaceIdFromBasePath(basePath: string): string | null {
+  const match = /^\/s\/([^/]+)\/$/.exec(basePath);
+  if (!match) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(match[1]!);
+  } catch {
+    return null;
+  }
+}
+
 // Strips the base path from a location pathname, returning the root-relative
 // remainder the app's routing logic reasons about — or null for a pathname
 // outside the session's prefix (which the SPA should treat as "no document").

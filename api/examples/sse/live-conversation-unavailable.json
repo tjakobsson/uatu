@@ -1,0 +1,12 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "conversation",
+    "key": "opencode:conversation-1",
+    "cursor": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0xIiwicyI6NH0",
+    "event": {
+      "kind": "unavailable"
+    }
+  }
+}

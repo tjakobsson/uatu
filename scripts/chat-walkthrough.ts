@@ -3,16 +3,18 @@
  * `claude` end to end — agent choice, a live conversation, permission and
  * question cards, plan approval, task progress, an attachment, undo, and a
  * subagent drill-down — capturing evidence screenshots into the change
- * folder. Spends real tokens; run against a `bun run dev` server.
+ * folder. Spends real tokens; run against the dev hub (`bun run dev`), whose
+ * session page signs in as the dev user from dev/hub.json (see dev/README.md).
  *
- * Run: bun run scripts/chat-walkthrough.ts <url-with-token>
+ * Run: bun run scripts/chat-walkthrough.ts <hub-session-url> [user] [password]
  */
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { chromium, type Page } from "@playwright/test";
 
 const url = process.argv[2];
-if (!url) throw new Error("usage: bun run scripts/chat-walkthrough.ts <url-with-token>");
+if (!url) throw new Error("usage: bun run scripts/chat-walkthrough.ts <hub-session-url> [user] [password]");
+const [hubUser = "dev", hubPassword = "dev"] = process.argv.slice(3);
 const outDir = path.resolve("openspec/changes/add-claude-code-agent/screenshots");
 await mkdir(outDir, { recursive: true });
 
@@ -20,6 +22,14 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "light" });
 page.setDefaultTimeout(300_000);
 await page.goto(url);
+// The hub gates the session page behind its sign-in form; its `next` return
+// path brings the browser back to the session afterwards.
+if (new URL(page.url()).pathname === "/login") {
+  await page.locator("input[name=name]").fill(hubUser);
+  await page.locator("input[name=password]").fill(hubPassword);
+  await page.locator("button[type=submit]").click();
+  await page.waitForURL(target => target.pathname !== "/login");
+}
 await page.locator("#connection-state .connection-label").filter({ hasText: "Connected" }).waitFor();
 const strip = page.locator("#chat-expand");
 if (await strip.isVisible()) await strip.click();

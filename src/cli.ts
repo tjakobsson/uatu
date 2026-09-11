@@ -15,7 +15,7 @@ import hackLicenseAsset from "./assets/fonts/LICENSE-hack.md" with { type: "file
 import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { type: "file" };
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
-import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/parse";
+import { parseCommand, serveRemovedText, usageText, versionText, type WatchOptions } from "./cli/parse";
 import { LazyChatService } from "./chat/service";
 import { MultiAgentChatService } from "./chat/agents";
 import { ClaudeProvider } from "./chat/claude/provider";
@@ -28,8 +28,6 @@ import {
   formatSessionUrl,
   printIndexingStatus,
   printStartupBanner,
-  SERVE_DEPRECATION_WARNING,
-  shouldWarnServeDeprecation,
   startSupervisedStartupHeartbeat,
 } from "./cli/output";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, openBrowser, spaShellResponse } from "./server/navigation";
@@ -103,6 +101,11 @@ async function main() {
     process.exit(1);
   }
 
+  if (parsed.kind === "serve-removed") {
+    process.stderr.write(serveRemovedText());
+    process.exit(1);
+  }
+
   if (parsed.kind === "help") {
     console.log(usageText());
     return;
@@ -129,13 +132,9 @@ async function main() {
   }
 }
 
+// The session child. parseCommand only routes here for the hub's spawn
+// (--exit-on-stdin-close) or a source run; users get serveRemovedText().
 async function runWatch(options: WatchOptions) {
-  // stderr only, so piped-stdout consumers capturing the URL line are
-  // unaffected; behavior is otherwise identical to before.
-  if (shouldWarnServeDeprecation(options)) {
-    console.error(`uatu: ${SERVE_DEPRECATION_WARNING}`);
-  }
-
   // Diagnostic plumbing comes before any heavy startup work — the cache dir
   // and the metrics registry are needed by createWatchSession and by the
   // watchdog spawn. Failures in this layer must never fail the watch session.
@@ -535,7 +534,7 @@ async function runWatch(options: WatchOptions) {
   // our stdin pipe for its whole lifetime. EOF means the supervisor is gone —
   // including by crash, where no signal is ever sent — so shut down instead of
   // running orphaned. Without the flag stdin's lifetime is deliberately
-  // ignored (piped invocations like `uatu serve | tee` must not couple).
+  // ignored (a source run piped through `tee` must not couple).
   if (options.exitOnStdinClose && !process.stdin.isTTY) {
     process.stdin.resume();
     // Bun emits BOTH `end` and `close` for a single EOF. Wired directly to

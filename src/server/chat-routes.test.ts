@@ -5,7 +5,7 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
-import type { ChatAvailability, ConversationSnapshot, ConversationSummary, MessageAttachment, ModelSelection, PermissionOutcome, QuestionOutcome, ReversibleHistoryResult } from "../chat/types";
+import { isLiveConversationStatus, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
 import { ReversibleHistoryTargetError, InvalidQuestionAnswerError } from "../chat/provider";
@@ -15,6 +15,9 @@ import { buildRoutes } from "./routes";
 import { MultiAgentChatService } from "../chat/agents";
 
 const TOKEN = "chat-test-token";
+// The conversation route opens with an `open` event naming the cursor its
+// live events follow, never a chat event and never an `id:` line.
+const CONVERSATION_OPEN_FRAME = /^event: open\ndata: \{"cursor":"[^"]+"\}\n\n$/;
 
 class FakeChatService implements WorkspaceChatService {
   readonly conversation: ConversationSummary = { id: "local", title: "Local", createdAt: 1, updatedAt: 1, status: "idle" };
@@ -140,7 +143,25 @@ class FakeChatService implements WorkspaceChatService {
   async respondPermission(id: string, _interactionId: string, _requestId: string, outcome: PermissionOutcome) { this.require(id); return { outcome }; }
   async respondQuestion(id: string, _interactionId: string, _requestId: string, outcome: QuestionOutcome) {
     if (this.rejectAnswers) throw this.rejectAnswers; this.require(id); this.questionResponses.push(outcome); return { outcome }; }
-  async dispose() { this.inventory.dispose(); }
+  async dispose() { this.inventory.dispose(); this.activityChanges.dispose(); }
+
+  // Workspace activity, derived as the adapter derives it: a live status is
+  // working, a pending permission awaits the user. The extra fields stand in
+  // for a careless service — nothing but the two facts may reach the wire.
+  readonly activityChanges = new ConversationInventoryBroadcaster();
+  readonly pendingPermissions = new Set<string>();
+  async activity(): Promise<ChatActivity> {
+    return {
+      working: isLiveConversationStatus(this.conversation.status),
+      awaiting: this.pendingPermissions.size > 0,
+      conversationId: this.conversation.id,
+      title: this.conversation.title,
+    } as ChatActivity;
+  }
+  async subscribeActivity(options: { signal?: AbortSignal } = {}) { return this.activityChanges.subscribe(options.signal); }
+  setStatus(status: ConversationStatus) { this.conversation.status = status; this.activityChanges.invalidate(); }
+  askPermission(requestId: string) { this.pendingPermissions.add(requestId); this.activityChanges.invalidate(); }
+  settlePermission(requestId: string) { this.pendingPermissions.delete(requestId); this.activityChanges.invalidate(); }
 
   private snapshot(): ConversationSnapshot {
     return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: [] };
@@ -255,6 +276,8 @@ describe("workspace chat routes", () => {
     expect(response.headers.get("cache-control")).toBe("no-store, no-transform");
     expect(response.headers.get("x-accel-buffering")).toBe("no");
     const reader = response.body!.getReader();
+    // The opening comment leaves at once; the initial signal follows it.
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
     const first = await reader.read();
     expect(new TextDecoder().decode(first.value)).toBe('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
     expect(new TextDecoder().decode(first.value)).not.toContain("id:");
@@ -267,6 +290,7 @@ describe("workspace chat routes", () => {
     const handler = routes(service)["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
     const response = await handler.GET(request("/api/chat/conversations/events"));
     const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
     const frame = 'event: inventory\ndata: {"type":"conversation.inventory"}\n\n';
     expect(new TextDecoder().decode((await reader.read()).value)).toBe(frame);
 
@@ -292,6 +316,7 @@ describe("workspace chat routes", () => {
     const handler = routes(service, "/", 10)["/api/chat/conversations/events"] as { GET(request: Request): Promise<Response> };
     const response = await handler.GET(request("/api/chat/conversations/events"));
     const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
     expect(new TextDecoder().decode((await reader.read()).value)).toBe('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
 
     // Nothing invalidates, so every following frame is a comment: no `event:`
@@ -312,7 +337,7 @@ describe("workspace chat routes", () => {
     };
     const response = await handler.GET(request("/api/chat/conversations/opencode:local/events", {}, { conversationId: "opencode:local" }) as never);
     const reader = response.body!.getReader();
-    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
+    expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
 
     for (let index = 0; index < 3; index += 1) {
       const frame = new TextDecoder().decode((await reader.read()).value);
@@ -340,11 +365,11 @@ describe("workspace chat routes", () => {
       reader.read().then(result => new TextDecoder().decode(result.value)),
       Bun.sleep(1_000).then(() => "nothing within 1s"),
     ]);
-    expect(first).toBe(": open\n\n");
+    expect(first).toMatch(CONVERSATION_OPEN_FRAME);
     expect(performance.now() - startedAt).toBeLessThan(500);
-    // A comment: no `event:` for a listener to fire on, no `id:` to move the
+    // Not a chat event for a listener to fire on, and no `id:` to move the
     // replay cursor a reconnect would resume from.
-    expect(first).not.toContain("event:");
+    expect(first).not.toContain("event: chat");
     expect(first).not.toContain("id:");
     await reader.cancel();
   });
@@ -425,7 +450,8 @@ describe("workspace chat routes", () => {
     const inventoryReader = (await inventory.GET(
       request("/api/chat/conversations/events", { signal: inventoryAbort.signal }),
     )).body!.getReader();
-    await inventoryReader.read();
+    await inventoryReader.read(); // the opening comment
+    await inventoryReader.read(); // the initial inventory signal
     const inventoryPending = inventoryReader.read();
     inventoryAbort.abort();
     expect((await inventoryPending).done).toBe(true);
@@ -456,7 +482,8 @@ describe("workspace chat routes", () => {
     const controller = new AbortController();
     const response = await handler.GET(request("/api/chat/conversations/events", { signal: controller.signal }));
     const reader = response.body!.getReader();
-    await reader.read();
+    await reader.read(); // the opening comment
+    await reader.read(); // the initial inventory signal
     expect(service.inventory.subscriberCount()).toBe(1);
     const waiting = reader.read();
 
@@ -750,7 +777,7 @@ describe("workspace chat routes", () => {
     expect(response.headers.get("x-accel-buffering")).toBe("no");
     const reader = response.body!.getReader();
     // The opening comment flushes the headers; the retained event follows.
-    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": open\n\n");
+    expect(new TextDecoder().decode((await reader.read()).value)).toMatch(CONVERSATION_OPEN_FRAME);
     const first = await reader.read();
     const frame = new TextDecoder().decode(first.value);
     expect(frame).toContain("event: chat");
@@ -915,5 +942,143 @@ describe("upload body streaming limit", () => {
     const response = await handler.POST(request_);
     expect(response.status).toBe(413);
     expect(service.uploads).toBe(0);
+  });
+});
+
+// Reads SSE frames one at a time without losing a read that timed out: the
+// pending read stays armed and resolves with the next frame.
+class FrameReader {
+  private pending: ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]> | null = null;
+  constructor(readonly reader: ReadableStreamDefaultReader<Uint8Array>) {}
+
+  async next(timeoutMs = 1_000): Promise<string> {
+    const read = this.pending ??= this.reader.read();
+    const result = await Promise.race([read, Bun.sleep(timeoutMs).then(() => "timeout" as const)]);
+    if (result === "timeout") return result;
+    this.pending = null;
+    return result.done ? "done" : new TextDecoder().decode(result.value);
+  }
+}
+
+function activityFrame(data: { working: boolean; awaiting: boolean }): string {
+  return `event: activity\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+async function openActivity(
+  service: FakeChatService,
+  options: { basePath?: string; keepaliveMs?: number; signal?: AbortSignal; metrics?: MetricsRegistry } = {},
+) {
+  const basePath = options.basePath ?? "/";
+  const pathname = `${basePath}api/activity`;
+  const handler = routes(service, basePath, options.keepaliveMs ?? 60_000, options.metrics)[pathname] as { GET(request: Request): Promise<Response> };
+  const response = await handler.GET(request(pathname, options.signal ? { signal: options.signal } : {}));
+  return { response, frames: new FrameReader(response.body!.getReader()) };
+}
+
+async function untilSubscribers(service: FakeChatService, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 200 && service.activityChanges.subscriberCount() !== count; attempt += 1) await Bun.sleep(1);
+  expect(service.activityChanges.subscriberCount()).toBe(count);
+}
+
+describe("workspace activity route", () => {
+  test("requires the workspace credential and subscribes to nothing without it", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/activity"] as { GET(request: Request): Promise<Response> };
+    expect((await handler.GET(new Request("http://127.0.0.1:4711/api/activity"))).status).toBe(401);
+    expect(service.activityChanges.subscriberCount()).toBe(0);
+  });
+
+  test("opens at once, then sends the current summary, under a relocated base path", async () => {
+    const service = new FakeChatService();
+    const { response, frames } = await openActivity(service, { basePath: "/s/project/" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store, no-transform");
+    expect(response.headers.get("x-accel-buffering")).toBe("no");
+    // The keepalive is a minute long here: the opening comment cannot be it.
+    const startedAt = performance.now();
+    expect(await frames.next()).toBe(": open\n\n");
+    expect(performance.now() - startedAt).toBeLessThan(500);
+    expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+    await frames.reader.cancel();
+  });
+
+  test("a status change and a pending permission each produce exactly one event carrying only the two facts", async () => {
+    const service = new FakeChatService();
+    const { frames } = await openActivity(service);
+    expect(await frames.next()).toBe(": open\n\n");
+    expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+
+    service.setStatus("running");
+    const working = await frames.next();
+    expect(working).toBe(activityFrame({ working: true, awaiting: false }));
+    // Another live status ticks but changes nothing, so nothing is sent.
+    service.setStatus("retrying");
+    expect(await frames.next(50)).toBe("timeout");
+
+    service.askPermission("permission-1");
+    const awaiting = await frames.next();
+    expect(awaiting).toBe(activityFrame({ working: true, awaiting: true }));
+    // A second request while one already waits changes nothing either.
+    service.askPermission("permission-2");
+    expect(await frames.next(50)).toBe("timeout");
+
+    for (const frame of [working, awaiting]) {
+      expect(frame).not.toContain("id:");
+      const data = JSON.parse(frame.split("\ndata: ")[1]!) as Record<string, unknown>;
+      // The fake also returns its conversation id and title; neither leaks.
+      expect(Object.keys(data)).toEqual(["working", "awaiting"]);
+      expect(typeof data.working).toBe("boolean");
+      expect(typeof data.awaiting).toBe("boolean");
+    }
+
+    service.settlePermission("permission-1");
+    service.settlePermission("permission-2");
+    expect(await frames.next()).toBe(activityFrame({ working: true, awaiting: false }));
+    service.setStatus("completed");
+    expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+    expect(await frames.next(50)).toBe("timeout");
+    await frames.reader.cancel();
+  });
+
+  test("an idle activity stream emits comment keepalives and nothing else", async () => {
+    const service = new FakeChatService();
+    const { frames } = await openActivity(service, { keepaliveMs: 10 });
+    expect(await frames.next()).toBe(": open\n\n");
+    expect(await frames.next()).toBe(activityFrame({ working: false, awaiting: false }));
+    for (let index = 0; index < 3; index += 1) expect(await frames.next()).toBe(": keepalive\n\n");
+    await frames.reader.cancel();
+  });
+
+  test("a client disconnect or cancel releases every subscription the stream held", async () => {
+    const service = new FakeChatService();
+    const abort = new AbortController();
+    const aborted = await openActivity(service, { signal: abort.signal });
+    await aborted.frames.next();
+    await aborted.frames.next();
+    // Agent subscriptions attach as they arrive; wait for this one.
+    await untilSubscribers(service, 1);
+    const waiting = aborted.frames.next();
+    abort.abort();
+    expect(await waiting).toBe("done");
+    expect(service.activityChanges.subscriberCount()).toBe(0);
+
+    const cancelled = await openActivity(service);
+    await cancelled.frames.next();
+    await cancelled.frames.next();
+    await untilSubscribers(service, 1);
+    await cancelled.frames.reader.cancel();
+    expect(service.activityChanges.subscriberCount()).toBe(0);
+  });
+
+  test("records no stream metrics", async () => {
+    const metrics = new MetricsRegistry();
+    const service = new FakeChatService();
+    const before = JSON.stringify(metrics.snapshot().counters);
+    const { frames } = await openActivity(service, { metrics });
+    await frames.next();
+    await frames.next();
+    await frames.reader.cancel();
+    expect(JSON.stringify(metrics.snapshot().counters)).toBe(before);
   });
 });

@@ -3,6 +3,11 @@
 // come back on its own. Both cases are deterministic — the interruption is a
 // refused request, and the resume is the lifecycle event the browser fires,
 // not a wall-clock wait.
+//
+// The page holds ONE live stream (the hub-brokered `/api/hub/live`) carrying
+// the document and chat topics alike, so refusing it interrupts everything
+// at once; each consumer still owns its own status — the shell indicator for
+// the document topic, the chat surface for its topics.
 
 import type { APIRequestContext, Page } from "@playwright/test";
 import { promises as fs } from "node:fs";
@@ -33,10 +38,10 @@ test.describe("document channel recovery", () => {
   test("an interrupted stream reads Reconnecting, then recovers current state on resume without a reload", async ({ page, request }) => {
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
-    // Every attempt to (re)open the event stream is refused from here on. The
+    // Every attempt to (re)open the live stream is refused from here on. The
     // network-restored signal makes the client install a fresh stream, which
     // is what walks it into the refusal — the shape of a vanished path.
-    await page.route("**/api/events*", route => route.abort());
+    await page.route("**/api/hub/live*", route => route.abort());
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
 
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Reconnecting", { timeout: 15_000 });
@@ -71,7 +76,7 @@ test.describe("document channel recovery", () => {
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Reconnecting");
 
     // The path comes back and the page resumes from the back/forward cache.
-    await page.unroute("**/api/events*");
+    await page.unroute("**/api/hub/live*");
     await resumePage(page);
 
     // Connected means authoritative state was applied, not merely that a
@@ -104,22 +109,25 @@ test.describe("Chat channel recovery", () => {
     const status = page.locator("#chat-state");
     await expect(status).not.toContainText("interrupted");
 
-    // Refuse the selected conversation's stream only; the inventory stream is
-    // a different route and stays healthy, so one stream fails alone.
-    await page.route("**/api/chat/conversations/*/events*", route => route.abort());
+    // Refuse the one live stream. Chat's topics ride it, so Chat is
+    // interrupted too — and reports that within its own surface.
+    await page.route("**/api/hub/live*", route => route.abort());
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
 
     // The first drop retries silently; the message appears only once the
     // outage outlives one reconnect attempt.
     await expect(status).toContainText("Chat connection interrupted; reconnecting", { timeout: 40_000 });
-    // The document channel is unaffected — Chat's trouble is Chat's to report.
-    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+    // The shell indicator reports the same stream from the document topic's
+    // point of view; neither surface speaks for the other.
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Reconnecting");
 
-    await page.unroute("**/api/chat/conversations/*/events*");
+    await page.unroute("**/api/hub/live*");
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
 
-    // Nothing is sent and no assistant output arrives. The successful open is
-    // the only evidence of recovery there is, and it has to be enough.
+    // Nothing is sent and no assistant output arrives. The conversation
+    // topic's `ready` on the replacement stream is the only evidence of
+    // recovery there is, and it has to be enough.
     await expect(status).not.toContainText("Chat connection interrupted; reconnecting", { timeout: 40_000 });
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected", { timeout: 15_000 });
   });
 });

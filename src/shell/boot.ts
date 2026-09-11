@@ -1,6 +1,6 @@
 // Initial boot — fetches the first /api/state payload, resolves the URL
 // against the available documents, configures the shell chrome, and hands
-// off to `connectEvents` for the SSE stream. The follow-mode capability owns
+// off to `connectEvents` for the live document topic. The follow-mode capability owns
 // the Follow toggle's behavior; this file's only job is the initial state
 // resolution.
 
@@ -18,7 +18,8 @@ import { setFollowEnabled, syncFollowToggle } from "./follow";
 import type { StatePayload } from "../shared/types";
 import { applyViewMode } from "../preview/view-mode";
 import { renderBuildBadge } from "./connection";
-import { applyServerSnapshot, connectEvents, watchPageLifecycle } from "./events";
+import { applyServerSnapshot, connectEvents } from "./events";
+import { watchPageLifecycle } from "./live";
 import { replaceSelection, scrollToFragment } from "./history";
 import {
   appState,

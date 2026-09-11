@@ -186,6 +186,10 @@
                  page can belong to a stopped session, so no default. -->
             <span class="indicator-dot" aria-hidden="true"></span>
             <span id="hub-current" class="hub-toggle-label"></span>
+            <!-- Other workspaces' activity, from the live stream: a count
+                 pill while one awaits the user, a quiet dot while agents
+                 merely work. The button's aria-label carries the words. -->
+            <span id="hub-activity-badge" class="hub-activity-badge" aria-hidden="true" hidden></span>
             <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
               <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
             </svg>

@@ -2,6 +2,7 @@
 // the unit suite can exercise `parseCommand` directly — the executable
 // entrypoint (`src/cli.ts`) imports from here and owns all process wiring.
 
+import { DEFAULT_HUB_PORT, defaultHubConfigPath } from "../hub/config";
 import { DEFAULT_RESPECT_GITIGNORE } from "../server/roots";
 import { normalizeBasePath } from "../shared/base-path";
 import { BUILD, formatBuildIdentifier, type BuildInfo } from "../shared/version";
@@ -58,7 +59,11 @@ export type HubOptions = {
 };
 
 export type ParsedCommand =
+  // The session child (hub spawn or source run) — see parseCommand.
   | { kind: "watch"; options: WatchOptions }
+  // A user-shaped serve/watch invocation: cli.ts prints serveRemovedText()
+  // to stderr and exits non-zero.
+  | { kind: "serve-removed" }
   | { kind: "hub"; options: HubOptions }
   // `uatu hub hash-password` — reads the password from stdin and prints the
   // hash to paste into the config's users list.
@@ -66,44 +71,59 @@ export type ParsedCommand =
   | { kind: "help" }
   | { kind: "version" };
 
+const SELF_HOSTING_URL = "https://github.com/tjakobsson/uatu/blob/main/docs/SELF-HOSTING.md";
+
 export function usageText(build: BuildInfo = BUILD): string {
   return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
-  uatu [serve] [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
   uatu hub [--config <PATH>] [--port <PORT>] [--exit-on-stdin-close]
   uatu hub hash-password
   uatu --help
   uatu --version
 
-The 'serve' command is the default: 'uatu docs' and 'uatu serve docs' are
-equivalent. 'uatu watch' is a deprecated alias for 'uatu serve'.
-
-The 'hub' command runs uatu: a daemon that serves a dashboard, supervises
-one session child per workspace, and reverse-proxies each session under
+'uatu hub' runs uatu: a daemon that serves a login-gated dashboard, runs
+one session per workspace folder, and serves each session under
 /s/<workspace-id>/. Every interface requires login against the config's
-users list — 'hub hash-password' reads a password from stdin and prints
-the hash for a user entry.
+users list. 'uatu hub hash-password' reads a password from stdin and
+prints the hash for a user entry.
 
 Options:
-  --no-open               Do not open a browser automatically
-  --no-follow             Start with follow mode disabled
-  --no-gitignore          Do not honor .gitignore patterns when indexing files
-  --force                 Serve non-git paths anyway; indexing may be slow
-  -p, --port              Bind the local server to a specific port
-  --debug                 Record verbose 1Hz counter history under \$XDG_CACHE_HOME/uatu (or ~/.cache/uatu)
-  --exit-on-stdin-close   Shut down when stdin reaches EOF (for supervising wrappers, so a crashed supervisor cannot orphan the server)
-  --base-path <PREFIX>    Serve the whole session under an absolute path prefix (default: /)
-  --manifest-scope <MODE> PWA manifest scope: base-path (default) or origin (for hubs, which own their origin root)
-  --no-watchdog           Suppress the companion watchdog subprocess (escape hatch — leaves no recovery on freeze)
-  --watchdog-timeout <ms> Override the heartbeat staleness threshold (default: 30000)
+  --config <PATH>         Hub config file (default: \$XDG_CONFIG_HOME/uatu/hub.json, or ~/.config/uatu/hub.json)
+  -p, --port <PORT>       Listen on this port instead of the config's (0 picks a free port)
+  --exit-on-stdin-close   Shut down when stdin reaches EOF (for supervising wrappers, so a crashed supervisor cannot orphan the hub)
   -h, --help              Show help
   -V, --version           Show version
+
+Setup guide: ${SELF_HOSTING_URL}
 `;
 }
 
 export function versionText(build: BuildInfo = BUILD): string {
   return formatBuildIdentifier(build);
+}
+
+// What a user-shaped serve/watch invocation prints (stderr) before exiting
+// non-zero. `uatu serve` was deprecated as a public command in v0.5.0 and
+// removed with the hub-brokered live stream. The steps mirror the quick
+// start in docs/SELF-HOSTING.md, short enough to follow from a terminal.
+export function serveRemovedText(
+  configPath: string = defaultHubConfigPath(),
+  port: number = DEFAULT_HUB_PORT,
+): string {
+  return `uatu: 'uatu serve' and 'uatu watch' were removed. uatu runs as a hub now,
+and you add folders from its dashboard.
+
+To start:
+  1. printf '%s' '<password>' | uatu hub hash-password
+  2. Put the printed hash in ${configPath}:
+       { "users": [{ "name": "<your-name>", "passwordHash": "<hash from step 1>" }] }
+  3. uatu hub
+  4. Open http://127.0.0.1:${port}/, sign in, and choose Add Folder.
+
+Remote access, TLS, and running the hub as a service:
+${SELF_HOSTING_URL}
+`;
 }
 
 export { normalizeBasePath };
@@ -165,9 +185,21 @@ function parseHubCommand(rest: string[]): ParsedCommand {
   return { kind: "hub", options: { configPath, port, exitOnStdinClose } };
 }
 
+// How the process was started, which tells the repository's own harness
+// apart from a user. A source run (`bun run src/cli.ts …`: the dev hub's
+// children, the stdin-close test, the base-path e2e) has the script path in
+// Bun.argv[1]; a compiled binary has its extensionless virtual entry
+// (`/$bunfs/root/uatu`) there. The watchdog re-exec and the hub backend's
+// resolveUatuArgv detect source runs the same way.
+export type ParseContext = { sourceRun: boolean };
+
+export function isSourceRun(scriptPath: string | null = Bun.argv[1] ?? null): boolean {
+  return scriptPath !== null && /\.(ts|js)$/.test(scriptPath);
+}
+
 export function parseCommand(
   argv: string[],
-  warn: (message: string) => void = message => process.stderr.write(message),
+  context: ParseContext = { sourceRun: isSourceRun() },
 ): ParsedCommand {
   if (argv[0] === "-h" || argv[0] === "--help") {
     return { kind: "help" };
@@ -177,21 +209,22 @@ export function parseCommand(
     return { kind: "version" };
   }
 
-  // Command dispatch: `serve` is canonical. `watch` forwards with a one-line
-  // deprecation warning (stderr only, so piped-stdout consumers capturing the
-  // URL are unaffected). Anything else — flags, paths, or nothing at all — is
-  // the bare-invocation default and behaves exactly as `serve`.
   if (argv[0] === "hub") {
     return parseHubCommand(argv.slice(1));
   }
 
-  let rest = argv;
-  if (argv[0] === "serve") {
-    rest = argv.slice(1);
-  } else if (argv[0] === "watch") {
-    warn("warning: 'uatu watch' is deprecated; use 'uatu serve'\n");
-    rest = argv.slice(1);
+  // `serve` is no longer a user command. It survives as the session child
+  // the hub spawns (`serve <folder> --no-open --exit-on-stdin-close …`, see
+  // hub/backend.ts; --exit-on-stdin-close is the supervisor contract) and as
+  // the repository's source-run harness. Everything else that used to reach
+  // serve (`uatu serve`, the removed `watch` alias, a bare `uatu` or
+  // `uatu <path>`) gets the hub bootstrap steps, whatever flags follow, so
+  // an old habit ends in instructions rather than a flag-parsing error.
+  const internal = argv[0] === "serve" && (context.sourceRun || argv.includes("--exit-on-stdin-close"));
+  if (!internal) {
+    return { kind: "serve-removed" };
   }
+  const rest = argv.slice(1);
 
   let openBrowser = true;
   let follow = true;

@@ -67,11 +67,15 @@ test("a multi-file burst refreshes the active document when another path is nomi
       __uatuWatchSource?: EventSource;
     };
     state.__uatuWatchEvents = [];
-    const source = new EventSource("/api/events");
+    // An observer on the brokered live stream, subscribed to the same
+    // document topic the page holds; it records each batch's nominated path.
+    const subs = JSON.stringify([{ topic: "document", key: "compareTarget=base&scope=folder" }]);
+    const source = new EventSource(`/api/hub/live?subs=${encodeURIComponent(subs)}`);
     state.__uatuWatchSource = source;
-    source.addEventListener("state", event => {
-      const payload = JSON.parse((event as MessageEvent<string>).data) as { changedId: string | null };
-      state.__uatuWatchEvents!.push(payload.changedId);
+    source.addEventListener("live", event => {
+      const envelope = JSON.parse((event as MessageEvent<string>).data) as { topic: string; event: { kind: string; data?: { changedId: string | null } } };
+      if (envelope.topic !== "document" || envelope.event.kind !== "data" || !envelope.event.data) return;
+      state.__uatuWatchEvents!.push(envelope.event.data.changedId);
     });
     await new Promise<void>((resolve, reject) => {
       source.addEventListener("open", () => resolve(), { once: true });

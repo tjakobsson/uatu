@@ -650,6 +650,61 @@ html.uatu-desktop-host
   flex-shrink: 0;
 }
 
+/* Other workspaces' live activity (hub-nav's activity consumer). In the
+   menu, the state column names it; on the collapsed chip, a badge summarizes
+   it — a warm count pill when an interaction awaits the user, a quiet accent
+   dot while agents merely work — so the two never read alike. The chip
+   button's aria-label carries the same words. */
+.hub-menu-item .hub-menu-state.is-awaiting {
+  color: var(--attention);
+  font-weight: 600;
+}
+
+.hub-menu-item .hub-menu-state.is-working {
+  color: var(--accent);
+}
+
+.hub-activity-badge {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.hub-activity-badge[hidden] {
+  display: none;
+}
+
+.hub-activity-badge.is-awaiting {
+  min-width: 1.15rem;
+  height: 1.15rem;
+  /* Taller than the label's line box: without pulling it back into the
+     flex line, the chip grows by ~2 px when the pill appears and every row
+     below jumps each time a question arrives or is answered. */
+  margin-block: -0.25rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--notice-warn-border);
+  border-radius: 999px;
+  background: var(--notice-warn-bg);
+  color: var(--attention);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.hub-activity-badge.is-working {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: uatu-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-activity-badge.is-working {
+    animation: none;
+  }
+}
+
 .hub-menu-divider {
   margin: 0.3rem 0.15rem;
   border: 0;

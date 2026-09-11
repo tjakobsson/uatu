@@ -6,37 +6,41 @@ For the user-facing pitch (features, install, usage), see [README.md](./README.m
 
 ## What uatu is
 
-`uatu` is a local Bun-served Progressive Web App that watches a directory of docs and source, previews Markdown and AsciiDoc with Mermaid diagrams, surfaces the repository's change context (changed files, diffs, git log), and (where supported) hosts an embedded terminal in the same browser tab. It runs entirely on `localhost` — there is no cloud component — and ships as a single Bun-compiled binary or runs from source.
+`uatu` is a Bun-served Progressive Web App that watches a directory of docs and source, previews Markdown and AsciiDoc with Mermaid diagrams, surfaces the repository's change context (changed files, diffs, git log), and (where supported) hosts an embedded terminal in the same browser tab. It runs as a hub (`uatu hub`) on a machine you own: a login-gated daemon that runs one loopback-only session child per workspace and is the only server a browser talks to. There is no cloud component. It ships as a single Bun-compiled binary or runs from source.
 
 ## The 30-second map
 
 ```mermaid
 flowchart LR
-  CLI["src/cli.ts<br/>(uatu serve ...)"]
-  WS["chokidar<br/>file watcher"]
-  Server["Bun.serve<br/>(src/cli.ts + src/server/routes.ts)"]
-  Session["WatchSession<br/>(src/server/watch-session.ts)"]
   SPA["browser SPA<br/>(src/app.ts → shell/preview/sidebar)"]
-  Term["terminal<br/>(xterm.js ↔ WebSocket ↔ PTY)"]
+  Hub["uatu hub<br/>(src/hub/: auth, proxy, live broker)"]
+  Child["session child<br/>(src/cli.ts serve, one per workspace)"]
+  Session["WatchSession<br/>(src/server/watch-session.ts)"]
+  WS["chokidar<br/>file watcher"]
+  Term["terminal<br/>(WebSocket ↔ PTY)"]
   FS[("docs tree<br/>on disk")]
   Term_PTY[("user's shell<br/>(real PTY)")]
 
-  CLI -- spawns + configures --> Server
-  WS -- file events --> Session
+  Hub -- spawns + supervises --> Child
+  SPA <-- "HTTP + WebSocket under /s/id/" --> Hub
+  SPA <-- "one live SSE stream: /api/hub/live" --> Hub
+  Hub <-- "HTTP, WebSocket, internal SSE (loopback)" --> Child
+  Child --- Session
+  Child --- Term
   FS -- mtime, contents --> WS
-  Server <-- HTTP + SSE --> SPA
-  Server <-- WebSocket --> Term
+  WS -- file events --> Session
   Term <-- spawn/io --> Term_PTY
-  Session -- /api/state, /api/events --> Server
 ```
 
-Four boundaries to keep in mind:
+The boundaries to keep in mind:
 
-- **HTTP/SSE between server and SPA.** `/api/state` supplies the initial snapshot, `/api/document` and `/api/document/diff` render one path, `/api/search` sweeps content, and `/api/events` streams updates. Scope and compare target travel as validated request context on all related requests; there are no process-global mutation endpoints.
-- **Per-client watch context.** The Change Overview measures against `base` (merge-base reviewer view) or `last-commit` (`HEAD` working view). `src/shared/watch-context.ts` serializes the client's scope and compare target, and `server/watch-session.ts` selects the corresponding roots and cached repository snapshot independently for each request and SSE subscriber. Two clients can therefore browse different scopes and comparison lenses through the same child process.
-- **Chokidar between server and the filesystem.** The `WatchSession` debounces, applies the ignore policy, rebuilds the document index, and emits SSE events.
+- **The hub between browser and session child.** Browsers only talk to the hub. It authenticates them, then reverse-proxies HTTP and WebSockets under `/s/<id>/` to that workspace's loopback child and brokers the child's token (see [Base paths and the hub](#base-paths-and-the-hub)).
+- **HTTP between the SPA and its session child.** Under the session's base path, `/api/state` supplies the initial snapshot, `/api/document` and `/api/document/diff` render one path, and `/api/search` sweeps content. Scope and compare target travel as validated request context on all related requests; there are no process-global mutation endpoints.
+- **One live stream per page.** Pushed updates (document state, chat inventory, conversation events, other workspaces' activity) reach a page over a single `GET /api/hub/live` SSE connection to the hub. The child's own SSE routes are the internal hub↔child protocol (see [Live delivery](#live-delivery)).
+- **Per-client watch context.** The Change Overview measures against `base` (merge-base reviewer view) or `last-commit` (`HEAD` working view). `src/shared/watch-context.ts` serializes the client's scope and compare target, and `server/watch-session.ts` selects the corresponding roots and cached repository snapshot independently for each request and each document subscription. Two clients can therefore browse different scopes and comparison lenses through the same child process.
+- **Chokidar between the child and the filesystem.** The `WatchSession` debounces, applies the ignore policy, rebuilds the document index, and emits state events on the child's internal `/api/events` route.
 - **WebSocket between SPA and terminal subsystem.** Authenticated by a cookie set on `POST /api/auth`; multiplexed across multiple PTY panes by `terminal/server.ts`.
-- **A single Bun binary.** No node, no separate frontend bundler — `Bun.serve` serves both the SPA and the API.
+- **A single Bun binary.** No node, no separate frontend bundler. The same binary runs the hub and every session child, and each child's `Bun.serve` serves the SPA and its API.
 
 ## Folder tour
 
@@ -45,8 +49,10 @@ Four boundaries to keep in mind:
 ```
 src/
 ├── app.ts                SPA entry — DOM queries, init calls, top-level boot
-├── cli.ts                CLI entry — process wiring: port probing, Bun.serve
-│                         assembly, watchdog spawn, signal handling
+├── cli.ts                CLI entry — dispatches `uatu hub`, and hosts the
+│                         session child the hub spawns (internal `serve`):
+│                         port probing, Bun.serve assembly, watchdog spawn,
+│                         signal handling
 ├── styles.d.ts           CSS module type declarations
 ├── index.html, styles.css, assets/   HTML shell + CSS + bundled assets
 │                         (logo, PWA icons + manifest,
@@ -55,8 +61,9 @@ src/
 │                         in the app, surfaced via the shared
 │                         `--mono-font-family` CSS variable on `:root`)
 │
-├── cli/                  CLI domain — argument parsing + usage text
-│                         (parse.ts) and TTY startup output (output.ts);
+├── cli/                  CLI domain — argument parsing, usage text, and the
+│                         refusal a user-shaped `serve` gets (parse.ts) and
+│                         TTY startup output (output.ts);
 │                         side-effect-free so the unit suite can import them
 ├── chat/                 The agent chat surface, shared across agents:
 │                         seam types (provider.ts, types.ts), the adapter
@@ -72,7 +79,9 @@ src/
 │                         Agent SDK sessions, native-transcript reader,
 │                         model catalog (control-channel probe, manifest fallback), its own normalization)
 ├── shell/                App-wide chrome and the appState singleton: boot,
-│                         SSE event handling, URL/history, follow-mode
+│                         the page's one live stream (live-channel.ts) and
+│                         its lifecycle recovery (live.ts), document-state
+│                         handling (events.ts), URL/history, follow-mode
 │                         capability, connection chip, PWA registration
 ├── preview/              The right pane — every renderer that mounts HTML
 │                         into #preview: rendered / source / diff views,
@@ -103,7 +112,8 @@ src/
 ├── hub/                  The self-hostable session hub (`uatu hub`): config,
 │                         XDG state dir, workspace registry, the
 │                         SessionBackend seam + local-process backend,
-│                         HTTP/SSE/WS reverse proxy, hub auth (users, signed
+│                         HTTP/WS reverse proxy, the live broker
+│                         (live-broker.ts, live-sse.ts), hub auth (users, signed
 │                         cookie, rate limit, CSRF), dashboard pages, server
 │                         assembly, process wiring
 ├── watchdog/             Heartbeat-driven hang recovery — spawned sibling
@@ -157,8 +167,8 @@ and the desktop app rides the same release train (see
 
 ## Base paths and the hub
 
-A serve session is relocatable under a path prefix: `uatu serve --base-path
-/s/uatu/` moves the entire HTTP surface — routes, assets, PWA scope, pushState
+A session child is relocatable under a path prefix: `--base-path /s/uatu/`,
+which the hub passes when it spawns a child, moves the entire HTTP surface — routes, assets, PWA scope, pushState
 document URLs, the terminal cookie's `Path` — under the prefix, with `/` as
 the byte-for-byte-unchanged default. Server-side, `buildRoutes` prefixes its
 static keys and the fetch fallback 404s anything outside the prefix;
@@ -175,10 +185,10 @@ a self-hostable daemon that keeps a workspace registry of absolute folder
 paths (stable collision-suffixed slugs; folders are added through a
 server-side directory browser or the API — there is no workspaces root;
 `backend` field reserved for a future container/VM backend), starts one
-loopback-bound `uatu serve` child per workspace through
-the `SessionBackend` interface (`hub/backend.ts` — the desktop wrapper's
-spawn contract: URL on stdout, held stdin as orphan backstop, SIGTERM), and
-reverse-proxies HTTP, SSE, and WebSockets under `/s/<id>/` from a single
+loopback-bound session child per workspace through
+the `SessionBackend` interface (`hub/backend.ts`: URL on stdout, held stdin
+as orphan backstop, SIGTERM), and
+reverse-proxies HTTP and WebSockets under `/s/<id>/` from a single
 TLS-terminating, login-gated port (`hub/proxy.ts`, `hub/auth.ts`,
 `hub/server.ts`). Authentication is a server-side session store in the hub's
 state dir: login mints an opaque session id (recorded with user, issue time,
@@ -191,13 +201,55 @@ mode. The hub is a trusted intermediary: it authenticates the client and
 validates its Origin (bearer requests are exempt — they carry no ambient
 credential), then forwards loopback-shaped `Host`/`Origin` headers and
 brokers the child's session token server-side — children keep their
-localhost security model unchanged and are never network-reachable. `uatu
-serve` remains the internal session child the hub spawns (its supervisor
-contract: URL on stdout, held stdin as orphan backstop, SIGTERM), but is
-deprecated as a public command. Operator documentation lives in
+localhost security model unchanged and are never network-reachable. Live
+updates do not go through the proxy; [Live delivery](#live-delivery) covers
+them.
+
+The session child is `uatu serve`, and it is no longer a user command. A
+user-shaped invocation (`uatu serve`, the removed `watch` alias, a bare
+`uatu <path>`) prints the hub bootstrap steps and exits non-zero
+(`serveRemovedText` in `cli/parse.ts`). `serve` runs only for the hub's
+spawn, whose `--exit-on-stdin-close` marks the supervisor contract, and for
+source runs (`bun run src/cli.ts serve …`, detected from the script path in
+`Bun.argv[1]`), which the repository's own tests use. `bun run dev` starts a
+dev hub (`scripts/dev-hub.ts` with `dev/hub.json`). Operator documentation lives in
 `docs/SELF-HOSTING.md`;
 the design rationale (single-origin proxy over port-per-session, restart
 semantics, trust model) in `openspec/changes/add-uatu-hub/design.md`.
+
+## Live delivery
+
+A page gets pushed updates over exactly one long-lived connection: `GET /api/hub/live`, a server-sent-events stream at the hub origin, authenticated by the hub session like any other hub request. Document state, the chat inventory, conversation events (a subagent transcript is a conversation too), and the activity of the user's other workspaces all ride it as typed envelopes. The wire contract, including frame order and bounds, is `src/shared/live-protocol.ts`. The reasoning is in `openspec/changes/hub-brokered-live-stream/design.md`.
+
+The count is the point. Browsers allow six HTTP/1.1 connections per host, shared by every tab, and `Bun.serve` speaks only HTTP/1.1. When each pane held its own stream, two session tabs with chat open used up the budget and every later request stalled. On the hub side, Bun caps outbound `fetch` at 256 concurrent requests per process, and every proxied stream used to take one. Now a tab costs one connection whatever is open in it, and the hub's connections to a child follow what is watched, not how many tabs watch it.
+
+```mermaid
+sequenceDiagram
+  participant Tab as Browser tab (shell/live-channel.ts)
+  participant Hub as Hub (hub/server.ts, hub/live-broker.ts)
+  participant Child as Session child (server/routes.ts)
+  Tab->>Hub: GET /api/hub/live (ws, subs: document + inventory)
+  Hub-->>Tab: ": open", then event: hello with the stream id
+  Hub->>Child: GET base/api/events (first subscriber only)
+  Child-->>Hub: event: state (snapshot)
+  Hub-->>Tab: event: live, topic document, cursor, data
+  Note over Child: a watched file changes
+  Child-->>Hub: event: state
+  Hub-->>Tab: event: live (to every tab subscribed to the topic)
+  Tab->>Hub: POST /api/hub/live/streamId/subscriptions (add conversation)
+  Hub->>Child: GET base/api/chat/conversations/id/events
+```
+
+- **The stream.** The response writes `: open` at once, then a `hello` event carrying an unguessable stream id, then `live` envelopes `{ ws, topic, key?, cursor, event }`. While idle it sends a `: keepalive` comment every 15 s. The query names the workspace (`ws`), opts into activity (`activity=1`), and lists the initial subscriptions with the cursor each one resumes from (`subs`).
+- **Subscription changes.** Selecting a conversation or opening a subagent never opens a connection. The page posts `add` and `remove` operations to `POST /api/hub/live/<streamId>/subscriptions`, which the hub accepts only from the hub session that owns the stream, so one tab can't steer another's. An `add` for a key that is already subscribed replaces it; that is how a topic re-attaches after a resync.
+- **Topics.** `document` is keyed by the watch context (compare target and scope) and carries the child's state snapshot. `inventory` is an invalidation tick that tells the chat client to re-read the merged inventory. `conversation` is keyed by the agent-qualified conversation id and carries one chat event. `activity` describes each workspace the user may access as `{ running, working, awaiting }`; the hub validates it to that fixed shape before fan-out, so it can't carry content.
+- **Cursors and signals.** Each topic has its own opaque cursor, and only `data` events advance it. A reconnect presents every retained cursor, so each topic resumes independently and a stale conversation cursor never forces a document resync. Besides `data`, a topic can receive `ready` (attached, any owed replay written), `resync` (the cursor can't be replayed: take a fresh snapshot, then add the subscription again), or `unavailable` (the upstream failed or the child exited, and the hub is retrying). All three are scoped to their topic and never end the stream.
+
+**Fan-out at the hub.** `hub/live-broker.ts` holds one upstream subscription per (workspace, topic, key). The first interested client stream opens it and every later one shares it. The upstreams are the child's own SSE routes: `/api/events` for document state, `/api/chat/conversations/events` for the inventory, `/api/chat/conversations/<id>/events` for one conversation, and `/api/activity` for the workspace's working/awaiting summary (`hub/live-sse.ts` parses them). When the last subscriber leaves, the upstream lingers for 3 s (`LIVE_LINGER_MS`), so a reload or a quick A→B→A switch doesn't churn the child. After that the broker aborts it explicitly, which cancels the request at the child. Each upstream keeps a 256 KB replay buffer (`LIVE_REPLAY_BUFFER_BYTES`). A client cursor inside the buffer replays from the hub; one behind it falls back to the child's own replay, or its resync. An upstream failure sends `unavailable` to each subscriber, leaves every client stream open, and retries with capped backoff while anyone is still subscribed. The `activity` topic is computed per user: the hub merges its own session state (`running`) with each running child's `/api/activity` summary.
+
+**Child routes are internal.** The child's SSE routes are the hub↔child protocol, and the hub does not proxy them. A browser request for `/s/<id>/api/events` or either chat events route gets a non-cached error naming `/api/hub/live`. The child never learns the hub's address and holds no credential for it; the hub reaches the child through the endpoint and token it already brokers.
+
+**One channel in the page.** `shell/live-channel.ts` owns the stream: capped-exponential reconnect, a generation per attempt so events from a superseded stream are dropped, per-topic cursors, and subscription changes. `shell/live.ts` holds that one channel for the page and runs the one lifecycle recovery. A `pageshow`, `visibilitychange`, or `online` wake-up reconnects the stream and runs the reconciliation each consumer registered, in one coalesced pass. The consumers keep their own callbacks. `shell/events.ts` handles `document` and confirms the shell's connection indicator once the current generation has applied state. The chat client handles `inventory` and `conversation` and reports topic-scoped trouble as chat-surface status, never as shell status. `shell/hub-nav.ts` shows `activity` in the workspace switcher.
 
 ## Request lifecycle
 
@@ -224,34 +276,20 @@ Failure paths:
 - File no longer exists → Session throws → Routes returns 404 → `preview/mount.ts` shows the "no longer exists" empty state.
 - File is binary → Session throws `"document is binary"` → Routes returns 415 → `preview/binary.ts` or `preview/image.ts` renders the appropriate fallback (image for `.png` / `.jpg` / etc., a "not viewable" notice otherwise).
 
-The companion SSE stream:
-
-```mermaid
-sequenceDiagram
-  participant Browser
-  participant Routes as server/routes.ts
-  participant Session as server/watch-session.ts
-  participant Watcher as chokidar
-  Browser->>Routes: GET /api/events (EventSource)
-  Routes->>Session: eventsResponse()
-  Session-->>Browser: SSE connection open
-  Watcher->>Session: file changed (debounced)
-  Session-->>Browser: event: state, data: <StatePayload>
-  Note over Browser: shell/events.ts<br/>updates appState + re-renders
-```
+Pushed updates take a different path. The child emits state events on its internal `/api/events` route, and the hub fans them out to every subscribed page over `/api/hub/live` (see [Live delivery](#live-delivery)).
 
 The route table that wires both of these requests is declared exactly once, in `src/server/routes.ts` via `buildRoutes({ mode: "prod" | "e2e", ... })`. Both `src/cli.ts` (production) and `tests/e2e/server.ts` (the Playwright harness) call it.
 
 ## State lifecycle
 
-The SPA's source of truth is `appState`, a module-level mutable singleton in `src/shell/state.ts`. The SSE handler in `src/shell/events.ts` is the only path that mutates `appState` from external events.
+The SPA's source of truth is `appState`, a module-level mutable singleton in `src/shell/state.ts`. The `document` topic consumer in `src/shell/events.ts` is the only path that mutates `appState` from pushed events.
 
 State is deliberately split into four lifetimes:
 
 | Lifetime | Examples | Owner / storage |
 |---|---|---|
 | Child session | watched roots, file index, repository snapshots, live PTYs | `server/watch-session.ts` and `terminal/server.ts`; ends when the child stops |
-| Client watch context | scope and compare target used by state, SSE, search, navigation, and diff requests | explicit URL/query context from `shell/watch-context.ts`; never mutates another client |
+| Client watch context | scope and compare target used by state, search, navigation, and diff requests and by the `document` topic's key | explicit URL/query context from `shell/watch-context.ts`; never mutates another client |
 | Personal workspace state | selected document, Follow, preview mode, compare target, Files filter, last-active PTY id | Hub store keyed by authenticated user + stable workspace id in `hub/personal-state.ts`; local Hub uses identity `local` |
 | Client presentation | sidebar and preview geometry, terminal dock/splits/pane attachments, transient visibility | base-path-namespaced browser local/session storage in `shell/presentation-storage.ts`; native macOS window/split geometry remains in `UserDefaults` |
 
@@ -370,12 +408,12 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 | Aspect | Behavior |
 |---|---|
 | Default `Follow` at boot | on at `/`; forced off when arriving via a direct document URL (e.g. `/guides/setup.md`) |
-| `--no-follow` CLI flag | flips the default at `/` to off |
+| `--no-follow` child flag | flips the default at `/` to off (source runs only; the hub never passes it) |
 | User clicks a tree row | selection moves; follow turns off (Rule A) |
 | User clicks the Follow switch | flips state; turning on jumps to the newest-mtime file (Rule B) |
 | File changes on disk + follow on | selection moves to the changed file (Rule C) |
 | File changes on disk + follow off | current file reloads in place if it's what changed; otherwise tree refreshes silently (Rule D) |
-| Single-file CLI invocation (`uatu serve some-file.md`) | Follow switch disabled — nothing else to follow |
+| Single-file root (a source run such as `bun run src/cli.ts serve some-file.md`; hub workspaces are folders) | Follow switch disabled — nothing else to follow |
 | Sidebar panes available | Change Overview, Search, Files, Git Log, Usage — all always available; toggle via the per-pane visibility menu. Fresh clients start with Change Overview and Files visible (Git Log, Search, and Usage hidden); stored arrangements always win. Usage is chat-fed (`src/chat/usage-pane.ts` paints it; the sidebar owns the chrome) |
 
 The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.
@@ -525,7 +563,7 @@ one that matches what actually broke.
 ## Run and test
 
 ```bash
-bun run dev               # local watch on testdata/watch-docs
+bun run dev               # dev hub on :4702 with testdata/watch-docs (user dev / dev)
 bun test                  # unit + integration suite (~18s)
 bun run test:e2e          # Playwright (~5min, workers: 1, serial)
 bun run build             # compile single-file dist/uatu binary
@@ -537,5 +575,4 @@ For tighter loops:
 
 - `bun test src/sidebar/git-log.test.ts` — single file
 - `bun x playwright test tests/e2e/mermaid.e2e.ts:127` — single e2e test
-- `bun run dev --no-gitignore` — exposes gitignored files in the tree
-- `bun run dev --no-follow` — boots with Follow disabled
+- `bun run dev --no-open` — start the dev hub without opening a browser

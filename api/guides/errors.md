@@ -12,4 +12,4 @@ HTTP errors use the reusable error schemas in [openapi.yaml](../openapi.yaml). B
 
 The list is orientation, not an endpoint contract. Each operation's declared responses are authoritative. Preserve request identifiers and structured details when present, redact credentials, and surface actionable messages to users.
 
-Streams can report protocol-level errors after an HTTP connection succeeds. Treat the typed stream error or terminal close code as the operation outcome and follow [streaming.yaml](../streaming.yaml).
+Once the live stream is open, it reports trouble inside the stream. A `resync` or `unavailable` signal affects one subscription and never ends the stream. [streaming.yaml](../streaming.yaml) says what each signal asks of the client.

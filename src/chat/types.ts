@@ -130,6 +130,15 @@ export type ConversationStatus = "idle" | "sending" | "running" | "completed" | 
 export function isLiveConversationStatus(status: ConversationStatus | undefined): boolean {
   return status === "running" || status === "sending" || status === "retrying" || status === "compacting";
 }
+
+/**
+ * A workspace's chat activity at a glance, for surfaces that describe the
+ * workspace rather than a conversation (the hub's cross-workspace badge).
+ * Exactly two facts and never an id, a title, or a count: `working` — some
+ * conversation has a turn in flight (isLiveConversationStatus); `awaiting` —
+ * some permission request or question waits on the user.
+ */
+export type ChatActivity = { working: boolean; awaiting: boolean };
 export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type ModelSelection = {
