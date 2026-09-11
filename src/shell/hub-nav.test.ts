@@ -3,7 +3,7 @@ import { parseHTML } from "linkedom";
 
 import { resetAppBasePathForTests } from "../shared/app-url";
 import { createLiveChannel, type LiveChannel } from "./live-channel";
-import { installLiveChannelForTests } from "./live";
+import { disposeLiveChannel, installLiveChannelForTests, watchPageLifecycle } from "./live";
 import {
   applyWorkspaceActivity,
   chipLabel,
@@ -195,20 +195,33 @@ describe("switcher activity", () => {
   const facts = (running: boolean, working = false, awaiting = false) => ({ running, working, awaiting });
 
   test("a question in another workspace badges the chip; agents merely working are a quieter note; the current workspace never counts", () => {
+    const list = [summary("uatu", true), summary("two", true), summary("three", true)];
     const activity = new Map([
       ["uatu", facts(true, true, true)],
       ["two", facts(true, true, false)],
       ["three", facts(true, false, false)],
     ]);
-    expect(switcherBadge(activity, "uatu")).toEqual({ kind: "working", count: 1 });
+    expect(switcherBadge(list, activity, "uatu")).toEqual({ kind: "working", count: 1 });
     activity.set("three", facts(true, true, true));
-    expect(switcherBadge(activity, "uatu")).toEqual({ kind: "awaiting", count: 1 });
+    expect(switcherBadge(list, activity, "uatu")).toEqual({ kind: "awaiting", count: 1 });
     // Answered from any device: the badge clears back to the quieter note.
     activity.set("three", facts(true, true, false));
-    expect(switcherBadge(activity, "uatu")).toEqual({ kind: "working", count: 2 });
+    expect(switcherBadge(list, activity, "uatu")).toEqual({ kind: "working", count: 2 });
     activity.set("two", facts(true, false, false));
     activity.set("three", facts(false, true, true));
-    expect(switcherBadge(activity, "uatu")).toBeNull();
+    expect(switcherBadge(list, activity, "uatu")).toBeNull();
+  });
+
+  test("activity for a workspace the hub list no longer has never counts toward the badge", () => {
+    // Facts left over from before the workspace was forgotten: the stream
+    // never says so, and a reopened stream simply omits it.
+    const activity = new Map([
+      ["gone", facts(true, true, true)],
+      ["two", facts(true, true, false)],
+    ]);
+    expect(switcherBadge([summary("uatu", true), summary("two", true)], activity, "uatu")).toEqual({ kind: "working", count: 1 });
+    expect(switcherBadge([summary("uatu", true)], activity, "uatu")).toBeNull();
+    expect(switcherBadge([], activity, "uatu")).toBeNull();
   });
 
   test("the badge is spoken, never colour alone", () => {
@@ -244,6 +257,7 @@ describe("initHubNav with the live activity topic", () => {
   };
 
   afterEach(() => {
+    disposeLiveChannel();
     installLiveChannelForTests(null);
     for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
     savedGlobals.clear();
@@ -277,6 +291,9 @@ describe("initHubNav with the live activity topic", () => {
     let deliver: ((ws: string, activity: { running: boolean; working: boolean; awaiting: boolean }) => void) | null = null;
     installLiveChannelForTests({
       onActivity(listener: typeof deliver) { deliver = listener; return () => {}; },
+      onStatus() { return () => {}; },
+      isRecovering() { return false; },
+      dispose() {},
     } as unknown as LiveChannel);
 
     initHubNav();
@@ -325,13 +342,179 @@ describe("initHubNav with the live activity topic", () => {
     deliver!("uatu", { running: false, working: false, awaiting: false });
     expect(chipDot.className).toBe("indicator-dot");
 
-    // A workspace the list does not know yet: the list is refetched.
+    // A workspace the list does not know yet: the list is refetched, and the
+    // activity kept meanwhile badges the chip as soon as the entry exists.
     const fetchesBefore = stateFetches;
     workspaces.push({ id: "three", displayName: "New", path: "/src/three", running: true });
     deliver!("three", { running: true, working: false, awaiting: true });
-    expect(badge.className).toBe("hub-activity-badge is-awaiting");
-    for (let attempt = 0; attempt < 100 && stateFetches === fetchesBefore; attempt += 1) await Bun.sleep(1);
+    for (let attempt = 0; attempt < 100 && badge.hidden; attempt += 1) await Bun.sleep(1);
     expect(stateFetches).toBe(fetchesBefore + 1);
+    expect(badge.className).toBe("hub-activity-badge is-awaiting");
+    expect(badge.textContent).toBe("1");
+  });
+
+  test("a workspace forgotten while the page was hidden leaves no badge and no menu entry once the page is shown", async () => {
+    const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
+    const { document, window } = parseHTML(html);
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", "/s/uatu/");
+    document.head.appendChild(meta);
+    let visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { get: () => visibility, configurable: true });
+    setGlobal("document", document);
+    setGlobal("window", window);
+    setGlobal("Node", (window as unknown as Record<string, unknown>).Node);
+    resetAppBasePathForTests();
+
+    let stateFetches = 0;
+    let workspaces = [
+      { id: "uatu", displayName: "Uatu", path: "/src/uatu", running: true },
+      { id: "two", displayName: "Payments", path: "/src/two", running: true },
+      { id: "scratch", displayName: "Scratch", path: "/src/scratch", running: true },
+    ];
+    setGlobal("fetch", async (url: string) => {
+      if (url === "/api/hub/state") {
+        stateFetches += 1;
+        return Response.json({ workspaces });
+      }
+      return Response.json({ error: "unexpected" }, { status: 404 });
+    });
+    const sources: { live: (data: string) => void; closed: boolean }[] = [];
+    const channel = createLiveChannel({
+      ws: "uatu",
+      activity: true,
+      fetcher: async () => Response.json({ ok: true }),
+      openSource: () => {
+        const listeners = new Map<string, (event: Event) => void>();
+        const source = {
+          closed: false,
+          live: (data: string) => listeners.get("live")?.({ type: "live", data } as unknown as Event),
+          addEventListener(type: string, listener: (event: Event) => void) { listeners.set(type, listener); },
+          close() { source.closed = true; },
+        };
+        sources.push(source);
+        return source;
+      },
+    });
+    installLiveChannelForTests(channel);
+    const activityFrame = (ws: string, cursor: string, facts: { running: boolean; working: boolean; awaiting: boolean }) =>
+      JSON.stringify({ ws, topic: "activity", cursor, event: { kind: "data", data: facts } });
+    // What shell/events.ts does once a generation's document state lands.
+    const documentStateApplied = () => channel.confirm(channel.currentGeneration());
+
+    // Boot: the stream opens, the lifecycle watch is installed, the switcher probes.
+    channel.connect();
+    watchPageLifecycle();
+    initHubNav();
+    documentStateApplied();
+    const control = document.querySelector<HTMLElement>("#hub-control")!;
+    const toggle = document.querySelector<HTMLButtonElement>("#hub-toggle")!;
+    const badge = document.querySelector<HTMLElement>("#hub-activity-badge")!;
+    const menu = document.querySelector<HTMLElement>("#hub-menu")!;
+    for (let attempt = 0; attempt < 100 && control.hidden; attempt += 1) await Bun.sleep(1);
+    expect(control.hidden).toBe(false);
+
+    // An agent in Scratch is waiting on the user.
+    sources[0]!.live(activityFrame("uatu", "a1", { running: true, working: false, awaiting: false }));
+    sources[0]!.live(activityFrame("two", "a2", { running: true, working: false, awaiting: false }));
+    sources[0]!.live(activityFrame("scratch", "a3", { running: true, working: true, awaiting: true }));
+    expect(badge.hidden).toBe(false);
+    expect(badge.className).toBe("hub-activity-badge is-awaiting");
+
+    // The page goes to the background and releases its stream; meanwhile
+    // Scratch is stopped and forgotten from another device.
+    visibility = "hidden";
+    document.dispatchEvent(new window.Event("visibilitychange"));
+    expect(sources[0]!.closed).toBe(true);
+    workspaces = workspaces.filter(workspace => workspace.id !== "scratch");
+
+    // Shown again: a fresh stream, whose snapshot no longer mentions Scratch.
+    const fetchesBefore = stateFetches;
+    visibility = "visible";
+    document.dispatchEvent(new window.Event("visibilitychange"));
+    expect(sources).toHaveLength(2);
+    sources[1]!.live(activityFrame("uatu", "b1", { running: true, working: false, awaiting: false }));
+    sources[1]!.live(activityFrame("two", "b2", { running: true, working: false, awaiting: false }));
+    documentStateApplied();
+
+    for (let attempt = 0; attempt < 100 && !badge.hidden; attempt += 1) await Bun.sleep(1);
+    expect(stateFetches).toBeGreaterThan(fetchesBefore);
+    expect(badge.hidden).toBe(true);
+    expect(toggle.getAttribute("aria-label")).toBe("Switch workspace or open the hub dashboard");
+
+    toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    expect(menu.hidden).toBe(false);
+    const entries = () => [...menu.querySelectorAll<HTMLAnchorElement>(".hub-menu-item")].map(item => item.getAttribute("href"));
+    expect(entries()).toContain("/s/two/");
+    expect(entries()).not.toContain("/s/scratch/");
+    expect(menu.textContent).not.toContain("Scratch");
+    expect(menu.textContent).not.toContain("awaiting you");
+  });
+
+  test("an older list answer landing last does not bring back a workspace a newer one dropped", async () => {
+    const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
+    const { document, window } = parseHTML(html);
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", "/s/uatu/");
+    document.head.appendChild(meta);
+    setGlobal("document", document);
+    setGlobal("window", window);
+    setGlobal("Node", (window as unknown as Record<string, unknown>).Node);
+    resetAppBasePathForTests();
+
+    let workspaces = [
+      { id: "uatu", displayName: "Uatu", path: "/src/uatu", running: true },
+      { id: "scratch", displayName: "Scratch", path: "/src/scratch", running: true },
+    ];
+    let hold: Promise<void> | null = null;
+    setGlobal("fetch", async (url: string) => {
+      if (url !== "/api/hub/state") return Response.json({ error: "unexpected" }, { status: 404 });
+      // The hub answers with the list as it is now; delivery may be held.
+      const answer = Response.json({ workspaces });
+      const gate = hold;
+      hold = null;
+      if (gate) await gate;
+      return answer;
+    });
+    let deliver: ((ws: string, activity: { running: boolean; working: boolean; awaiting: boolean }) => void) | null = null;
+    installLiveChannelForTests({
+      onActivity(listener: typeof deliver) { deliver = listener; return () => {}; },
+      onStatus() { return () => {}; },
+      isRecovering() { return false; },
+      dispose() {},
+    } as unknown as LiveChannel);
+
+    initHubNav();
+    const control = document.querySelector<HTMLElement>("#hub-control")!;
+    const toggle = document.querySelector<HTMLButtonElement>("#hub-toggle")!;
+    const badge = document.querySelector<HTMLElement>("#hub-activity-badge")!;
+    const menu = document.querySelector<HTMLElement>("#hub-menu")!;
+    for (let attempt = 0; attempt < 100 && control.hidden; attempt += 1) await Bun.sleep(1);
+    deliver!("scratch", { running: true, working: true, awaiting: true });
+    expect(badge.hidden).toBe(false);
+
+    // Opening the menu asks for the list; that answer is slow to arrive.
+    let release!: () => void;
+    hold = new Promise<void>(resolve => { release = resolve; });
+    const click = () => toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+    click();
+    // Scratch is forgotten; reopening the menu asks again and hears at once.
+    workspaces = workspaces.filter(workspace => workspace.id !== "scratch");
+    click();
+    click();
+    for (let attempt = 0; attempt < 100 && !badge.hidden; attempt += 1) await Bun.sleep(1);
+    expect(badge.hidden).toBe(true);
+    const entries = () => [...menu.querySelectorAll<HTMLAnchorElement>(".hub-menu-item")].map(item => item.getAttribute("href"));
+    expect(entries()).not.toContain("/s/scratch/");
+
+    // The first, older answer finally lands.
+    release();
+    await Bun.sleep(5);
+    expect(menu.hidden).toBe(false);
+    expect(entries()).not.toContain("/s/scratch/");
+    expect(badge.hidden).toBe(true);
   });
 
   test("activity the stream delivered before the hub probe answered still badges the chip", async () => {

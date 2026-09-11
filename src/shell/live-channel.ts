@@ -231,6 +231,9 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
   const activityListeners = new Set<LiveActivityListener>();
   // The latest activity per described workspace, replayed to a listener as
   // it registers: the hub sends its snapshot once, when the stream opens.
+  // Only the current stream's facts: every new stream resends the whole
+  // snapshot, and one that omits a workspace (forgotten while this page
+  // held no stream) must not let the previous stream's facts replay.
   const latestActivity = new Map<string, WorkspaceActivity>();
   const statusListeners = new Set<(status: LiveChannelStatus) => void>();
 
@@ -430,6 +433,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
     controlInFlight = 0;
     controlFailures = 0;
     dirty.clear();
+    latestActivity.clear();
     const superseding = generation > 0;
     generation += 1;
     const attempt = generation;
@@ -575,6 +579,7 @@ export function createLiveChannel(options: LiveChannelOptions): LiveChannel {
       // attempt, and the next connect is a replacement, not a first connect.
       generation += 1;
       recovering = false;
+      latestActivity.clear();
     },
     dispose() {
       disposed = true;

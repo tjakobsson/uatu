@@ -80,11 +80,20 @@ export type SwitcherBadge =
   | { kind: "working"; count: number }
   | null;
 
-export function switcherBadge(activity: WorkspaceActivityMap, currentId: string | null): SwitcherBadge {
+// Counts only workspaces the hub list has: the stream never reports a
+// workspace being forgotten, so activity for one the list no longer names is
+// left over from before and must not claim anything.
+export function switcherBadge(
+  workspaces: HubWorkspaceSummary[],
+  activity: WorkspaceActivityMap,
+  currentId: string | null,
+): SwitcherBadge {
   let awaiting = 0;
   let working = 0;
-  for (const [ws, facts] of activity) {
-    if (ws === currentId || !facts.running) continue;
+  for (const workspace of workspaces) {
+    if (workspace.id === currentId) continue;
+    const facts = activity.get(workspace.id);
+    if (!facts?.running) continue;
     if (facts.awaiting) awaiting += 1;
     else if (facts.working) working += 1;
   }
@@ -238,7 +247,7 @@ export function initHubNav(): void {
     if (chipDot) {
       chipDot.className = chipDotClass(latest, currentId);
     }
-    const badge = switcherBadge(activity, currentId);
+    const badge = switcherBadge(latest, activity, currentId);
     const spoken = switcherBadgeLabel(badge);
     if (chipBadge) {
       chipBadge.hidden = badge === null;
@@ -351,6 +360,55 @@ export function initHubNav(): void {
     menu.hidden = true;
   };
 
+  // Every refresh of the hub list goes through here. The list is the
+  // authority on which workspaces exist, so activity for any it no longer
+  // names is dropped: the stream never says a workspace was forgotten, and a
+  // stream reopened afterwards simply leaves it out of its snapshot. Two
+  // races are guarded. An answer issued before one already applied describes
+  // an older hub and must not put back what the newer list dropped. And
+  // activity reported while a request was out is kept even when its answer
+  // does not list the workspace: that answer may predate it.
+  let requested = 0;
+  let applied = 0;
+  let reports = 0;
+  const reportedAt = new Map<string, number>();
+  const isListed = (ws: string) => latest.some(workspace => workspace.id === ws);
+  // Resolves whether the hub answered.
+  const refreshHubState = async (): Promise<boolean> => {
+    const request = ++requested;
+    const reportsBefore = reports;
+    const fresh = await fetchHubState();
+    if (fresh === null) return false;
+    if (request < applied) return true;
+    applied = request;
+    latest = fresh.workspaces;
+    for (const ws of [...activity.keys()]) {
+      if (!isListed(ws) && (reportedAt.get(ws) ?? 0) <= reportsBefore) {
+        activity.delete(ws);
+        reportedAt.delete(ws);
+      }
+    }
+    updateChip();
+    if (!menu.hidden) {
+      renderMenu();
+    }
+    return true;
+  };
+
+  // Activity named a workspace the list lacks (one registered since the
+  // last read): read the list again, and again while an answer still lacks
+  // one reported after that request went out. The next answer lists it or,
+  // no longer predating the report, prunes it.
+  let refreshPending = false;
+  const refreshForUnlisted = () => {
+    if (refreshPending || [...activity.keys()].every(isListed)) return;
+    refreshPending = true;
+    void refreshHubState().then(answered => {
+      refreshPending = false;
+      if (answered) refreshForUnlisted();
+    });
+  };
+
   // One probe decides hub-ness; only a hub origin answers this at the root.
   void fetchHubState().then(state => {
     if (state === null) {
@@ -365,26 +423,30 @@ export function initHubNav(): void {
     // probe was in flight is not lost. A workspace the list does not know
     // (one registered since the probe) triggers a list refresh; the activity
     // is kept meanwhile so the badge is right as soon as the entry exists.
-    let refreshPending = false;
     liveChannel().onActivity((ws, facts) => {
+      reports += 1;
+      reportedAt.set(ws, reports);
       activity.set(ws, facts);
       latest = applyWorkspaceActivity(latest, ws, facts);
       updateChip();
       if (!menu.hidden) {
         renderMenu();
       }
-      if (!refreshPending && !latest.some(workspace => workspace.id === ws)) {
-        refreshPending = true;
-        void fetchHubState().then(fresh => {
-          refreshPending = false;
-          if (fresh !== null) {
-            latest = fresh.workspaces;
-            updateChip();
-            if (!menu.hidden) {
-              renderMenu();
-            }
-          }
-        });
+      refreshForUnlisted();
+    });
+
+    // A stream reopened after an interruption (the page hidden and shown
+    // again, the connection lost and regained) cannot tell the page what
+    // happened to the list while it held none: a workspace forgotten
+    // meanwhile is simply absent from its snapshot. Re-read the list once the
+    // new stream is confirmed live.
+    let interrupted = liveChannel().isRecovering();
+    liveChannel().onStatus(status => {
+      if (status === "reconnecting") {
+        interrupted = true;
+      } else if (status === "live" && interrupted) {
+        interrupted = false;
+        void refreshHubState();
       }
     });
 
@@ -395,12 +457,7 @@ export function initHubNav(): void {
       if (!event.persisted) {
         return;
       }
-      void fetchHubState().then(fresh => {
-        if (fresh !== null) {
-          latest = fresh.workspaces;
-          updateChip();
-        }
-      });
+      void refreshHubState();
     });
 
     toggle.addEventListener("click", () => {
@@ -414,15 +471,7 @@ export function initHubNav(): void {
       menu.hidden = false;
       // Refresh in the background so the open menu reflects sessions
       // started or stopped elsewhere; re-render only while still open.
-      void fetchHubState().then(fresh => {
-        if (fresh !== null) {
-          latest = fresh.workspaces;
-          updateChip();
-          if (!menu.hidden) {
-            renderMenu();
-          }
-        }
-      });
+      void refreshHubState();
     });
 
     document.addEventListener("click", event => {

@@ -804,6 +804,35 @@ describe("createLiveChannel — recovery and status", () => {
     ]);
   });
 
+  test("a new stream's snapshot replaces the replayed activity: a workspace it omits is never replayed again", () => {
+    const h = createHarness({ activity: true });
+    h.channel.connect();
+    h.latest().live(envelope("activity", { kind: "data", data: { running: true, working: false, awaiting: false } }, { ws: "two" }));
+    h.latest().live(envelope("activity", { kind: "data", data: { running: true, working: true, awaiting: true } }, { ws: "gone" }));
+
+    // Released in the background: a listener registering now hears nothing
+    // from the closed stream, whose facts may already be out of date.
+    h.channel.suspend();
+    const whileReleased: [string, unknown][] = [];
+    h.channel.onActivity((ws, activity) => whileReleased.push([ws, activity]));
+    expect(whileReleased).toEqual([]);
+
+    // The replacement's snapshot no longer mentions "gone" (forgotten meanwhile).
+    h.channel.connect({ resumed: true });
+    h.latest().live(envelope("activity", { kind: "data", data: { running: true, working: false, awaiting: false } }, { ws: "two" }));
+    expect(whileReleased).toEqual([["two", { running: true, working: false, awaiting: false }]]);
+    const late: [string, unknown][] = [];
+    h.channel.onActivity((ws, activity) => late.push([ws, activity]));
+    expect(late).toEqual([["two", { running: true, working: false, awaiting: false }]]);
+
+    // A reconnect after a lost stream starts from a clean slate the same way.
+    h.latest().fail();
+    h.runPendingTimer();
+    const afterLoss: [string, unknown][] = [];
+    h.channel.onActivity((ws, activity) => afterLoss.push([ws, activity]));
+    expect(afterLoss).toEqual([]);
+  });
+
   test("disposal stops the retry cycle, closes the source, and silences late errors", () => {
     const h = createHarness();
     h.channel.subscribe({ topic: "inventory" }, {});
