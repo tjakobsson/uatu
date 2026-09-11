@@ -1,6 +1,25 @@
 import { expect, test } from "bun:test";
+import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import { assertFreePort, buildWorkspaceAssets, startReviewServer } from "./server";
 import { buildEvidenceAssets } from "./hosting-evidence";
+
+test("actual workspace assets serve the lazy production Mermaid library under canonical workspace paths", async () => {
+  const review = await startReviewServer({ port: 0, assets: await buildWorkspaceAssets() });
+  const installedLibrary = await Bun.file(mermaidAsset).text();
+  try {
+    for (const workspace of ["atlas", "notes"]) {
+      const response = await fetch(`${review.url}/s/${workspace}/assets/mermaid.min.js`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("javascript");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(await response.text()).toBe(installedLibrary);
+    }
+    for (const suffix of ["mermaid.min.js?file=secret", "mermaid.js", "mermaid.min.js.map", "%6dermaid.min.js"]) {
+      expect((await fetch(`${review.url}/s/atlas/assets/${suffix}`)).status).toBeGreaterThanOrEqual(400);
+    }
+    expect((await fetch(`${review.url}/s/atlas/assets/mermaid.min.js`, { method: "POST" })).status).toBeGreaterThanOrEqual(400);
+  } finally { review.stop(); }
+});
 
 test("canonical registered workspaces share only synthetic corpus, not personal or protocol state", async () => {
   const assets = new Map([["/index.html", { body: '<meta charset="utf-8"><div class="app-shell"></div>', type: "text/html" }]]);

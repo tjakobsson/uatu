@@ -5,7 +5,7 @@ import { escapeHtml as esc } from "../../shared/html";
 import { appUrl } from "../../shared/app-url";
 import { DEFAULT_NAVIGATION_PLACEMENT, getNavigationPreferences, setNavigationPreferences, onNavigationPreferencesChange } from "../../shell/navigation-preferences";
 import { mobileHubIcon as icon } from "./icons";
-import { group as section, text as note, destinationRow as destination, choiceGroup as choices } from "./design-system";
+import { group as section, text as note, destinationRow as destination, choiceGroup as choices, emptyState } from "./design-system";
 import { createMobileHubFlows, type MobileHubDetail } from "./flows";
 import { advisory, clearSecrets, dismissAdvisory, field as flowField, showContextualError } from "./flow-ui";
 import { branchLabel } from "./workspace-presentation";
@@ -146,9 +146,11 @@ export function mountMobileHub(root: HTMLElement, backend: MobileHubBackend, cal
     const rows = workspaces.status === "ready" ? workspaces.value : [];
     const running = rows.filter(w => w.runtime.status === "running");
     const stopped = rows.filter(w => w.runtime.status === "stopped");
-    return `<h1>Workspaces</h1><p class="mh-subtitle">${identity ? esc(identity.host) : ""}${workspaces.status === "ready" ? ` · ${running.length} session${running.length === 1 ? "" : "s"} running` : ""}</p>${target && (targetUnavailable || target.runtime.status === "stopped") ? note(`${target.displayName} ${targetUnavailable ? "is unavailable. Refresh to check its status." : "has stopped. Use Start below to open it again."}`) : ""}${workspaces.status === "loading" ? note("Loading workspaces…") : workspaces.status === "unavailable" ? `<div role="alert">${note(workspaces.problem.message)}${button("refresh", "Retry", "mh-text-action")}</div>` : `${running.length ? section("Running", running.map(workspaceRow).join(""), running.length) : ""}${stopped.length ? section("Ready to start", stopped.map(workspaceRow).join(""), stopped.length) : ""}${!rows.length ? note("No workspaces yet. Add an existing folder, create a project, or clone a repository.") : note("Workspaces stay on your hub, even when a session stops.")}`}${button("add-workspace", `${icon("plus")}<span>Add Workspace<small>Existing folder, new project, or clone</small></span>`, "mh-add")}`;
+    const collection = !rows.length ? emptyState("folder", "No workspaces yet", "Add an existing folder, create a project, or clone a repository.") : note("Workspaces stay on your hub, even when a session stops.");
+    return `<h1>Workspaces</h1><p class="mh-subtitle">${identity ? esc(identity.host) : ""}${workspaces.status === "ready" ? ` · ${running.length} session${running.length === 1 ? "" : "s"} running` : ""}</p>${target && (targetUnavailable || target.runtime.status === "stopped") ? note(`${target.displayName} ${targetUnavailable ? "is unavailable. Refresh to check its status." : "has stopped. Use Start below to open it again."}`) : ""}${workspaces.status === "loading" ? note("Loading workspaces…") : workspaces.status === "unavailable" ? `<div role="alert">${note(workspaces.problem.message)}${button("refresh", "Retry", "mh-text-action")}</div>` : `${running.length ? section("Running", running.map(workspaceRow).join(""), running.length) : ""}${stopped.length ? section("Ready to start", stopped.map(workspaceRow).join(""), stopped.length) : ""}${collection}`}${button("add-workspace", `${icon("plus")}<span>Add Workspace<small>Existing folder, new project, or clone</small></span>`, "mh-add")}`;
   }
   function credentialCatalog() {
+    if (credentials.status === "ready" && !credentials.value.length) return emptyState("key", "No credentials", "Add a credential to set up Git authentication or commit signing on this Hub.");
     return credentials.status === "ready" ? credentials.value.map(c => {
       const type = c.type === "ssh" ? "SSH key" : c.type === "openpgp" ? "OpenPGP key" : "HTTPS / provider token";
       return destination(`credential:${c.id}`, c.name, "key", `${type}${c.enabled ? "" : " · Disabled"}`, credentialStatus(c), "green", c.id);

@@ -38,8 +38,8 @@
 .mh-root .mh-status .mh-icon { width: 12px; height: 15px; }
 .mh-root .mh-status > span:first-child:not(:only-child) { font-size: .625rem; }
 .mh-root .mh-running, .mh-root .mh-identity .mh-running { color: var(--mh-positive); }
-.mh-root .mh-primary { position: relative; isolation: isolate; font-size: var(--mh-type-control); font-weight: 600; border-radius: var(--mh-radius-pill); min-width: 66px; padding: var(--mh-space-1) var(--mh-space-4); text-align: center; margin: -7px 0; align-self: center; }
-.mh-root .mh-primary::before { content: ""; position: absolute; z-index: -1; inset: 7px 0; border-radius: inherit; background: var(--mh-action-subtle); }
+/* Repeated workspace-row commands stay secondary to Add Workspace. */
+.mh-root .mh-primary { font-size: var(--mh-type-control); font-weight: 600; border-radius: var(--mh-radius-button); min-width: 66px; padding: var(--mh-space-1) var(--mh-space-4); text-align: center; align-self: center; background: var(--mh-action-subtle); }
 .mh-root .mh-note { font-size: var(--mh-type-secondary); line-height: 1.4; color: var(--mh-muted); margin: var(--mh-space-2) var(--mh-space-4) var(--mh-space-4); overflow-wrap: anywhere; }
 .mh-root .mh-add { display: flex; align-items: center; gap: var(--mh-space-3); width: 100%; background: var(--mh-surface); border-radius: var(--mh-radius-group); padding: var(--mh-space-3) var(--mh-space-4); margin-top: var(--mh-space-5); }
 .mh-root .mh-add small { display: block; color: var(--mh-muted); font-size: var(--mh-type-secondary); }
@@ -65,7 +65,7 @@
 .mh-root .mh-row-copy small { display: block; color: var(--mh-muted); font-size: var(--mh-type-secondary); margin-top: 2px; }
 .mh-root .mh-value { color: var(--mh-muted); font-size: var(--mh-type-control); text-align: right; flex-shrink: 0; max-width: 38%; overflow-wrap: anywhere; }
 .mh-root .mh-destination > .mh-icon { width: 12px; height: 16px; color: var(--mh-muted); }
-.mh-root .mh-text-action { display: block; padding: var(--mh-space-3) var(--mh-space-4); width: 100%; }
+.mh-root .mh-text-action { display: block; padding: var(--mh-space-3) var(--mh-space-4); width: calc(100% - 2 * var(--mh-space-4)); margin: var(--mh-space-3) var(--mh-space-4); border-radius: var(--mh-radius-button); background: var(--mh-action-subtle); text-align: center; font-weight: 600; }
 .mh-root .mh-destination + .mh-text-action { border-top: .5px solid var(--mh-line); }
 /* mh-sheet is a compatibility hook shared by tasks, never a drawer recipe. */
 .mh-root .mh-confirmation-backdrop { position: absolute; z-index: 5; inset: 0 0 var(--mh-keyboard-clearance); background: var(--mh-scrim); display: flex; align-items: center; justify-content: center; padding: var(--mh-space-5); }
@@ -77,7 +77,7 @@
 .mh-root .mh-editor header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--mh-space-4); flex: 0 0 auto; }
 .mh-root .mh-editor header h1 { grid-column: 1 / -1; margin: 0; font-size: var(--mh-type-editor); overflow-wrap: anywhere; }
 .mh-root .mh-editor header button { padding: 10px 0; min-width: var(--mh-target); border-radius: 0; justify-self: start; background: transparent; color: var(--mh-action); }
-.mh-root .mh-editor header .mh-commit { justify-self: end; }
+.mh-root .mh-editor header .mh-commit { justify-self: end; padding-inline: var(--mh-space-3); border-radius: var(--mh-radius-button); background: var(--mh-action-fill); color: var(--mh-on-action); text-align: center; }
 .mh-root .mh-task > header > h2 { font-size: var(--mh-type-body); text-align: center; margin: 0; line-height: 1.35; overflow-wrap: anywhere; }
 .mh-root .mh-sheet-body { min-height: 0; padding: var(--mh-space-6) var(--mh-space-5) var(--mh-space-1); overflow: auto; overscroll-behavior: contain; }
 .mh-root .mh-editor .mh-sheet-body { flex: 1; padding-bottom: var(--mh-space-6); }
@@ -99,7 +99,13 @@
 .mh-root .mh-cancel { background: var(--mh-surface); }
 .mh-root .mh-commit { background: var(--mh-action-fill); color: var(--mh-on-action); font-weight: 600; }
 .mh-root .mh-destructive { color: var(--mh-danger); }
-.mh-root .mh-confirmation .mh-commit.mh-destructive { background: var(--mh-surface); color: var(--mh-danger); }
+.mh-root .mh-text-action.mh-destructive { background: var(--mh-surface); border: 1px solid var(--mh-danger); }
+.mh-root .mh-text-action:not(:disabled):active, .mh-root .mh-commit:not(:disabled):active, .mh-root .mh-cancel:not(:disabled):active, .mh-root .mh-primary:not(:disabled):active { filter: brightness(.8); }
+.mh-root .mh-empty-state { display: flex; flex-direction: column; align-items: center; gap: var(--mh-space-3); padding: var(--mh-space-7) var(--mh-space-4); text-align: center; overflow-wrap: anywhere; }
+.mh-root .mh-empty-state > .mh-icon { width: 40px; height: 40px; color: var(--mh-muted); }
+.mh-root .mh-empty-state h2 { margin: 0; font-size: var(--mh-type-body); color: var(--mh-text); }
+.mh-root .mh-empty-state p { margin: 0; max-width: 34ch; font-size: var(--mh-type-secondary); color: var(--mh-muted); line-height: 1.5; }
+.mh-root .mh-confirmation .mh-commit.mh-destructive { background: var(--mh-surface); color: var(--mh-danger); border: 1px solid var(--mh-danger); }
 .mh-root .mh-flow-page { position: absolute; inset: 0; z-index: 1; overflow: hidden; overscroll-behavior: contain; background: var(--mh-canvas); padding: max(var(--mh-space-5), env(safe-area-inset-top)) max(var(--mh-space-5), env(safe-area-inset-right)) calc(var(--mh-keyboard-clearance) + var(--mh-dock-clearance) + var(--mh-flow-toolbar-height) + var(--mh-space-6)) max(var(--mh-space-5), env(safe-area-inset-left)); }
 .mh-root .mh-flow-page[hidden], .mh-root .mh-overview-toolbar[hidden] { display: none; }
 .mh-root .mh-page main[aria-hidden="true"] { visibility: hidden; }
@@ -183,7 +189,7 @@
 .mh-root .mh-folder-picker > header h1 { grid-column: 2; grid-row: 1; min-width: 0; font-size: var(--mh-type-body); line-height: 1.35; letter-spacing: normal; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mh-root .mh-folder-picker > header button { min-width: var(--mh-target); min-height: var(--mh-target); max-width: 100%; font-size: var(--mh-type-control); white-space: normal; overflow-wrap: anywhere; }
 .mh-root .mh-folder-picker > header [data-action="cancel-sheet"] { grid-column: 1; grid-row: 1; justify-self: start; }
-.mh-root .mh-folder-picker > header [data-action="commit-sheet"] { grid-column: 3; grid-row: 1; justify-self: end; text-align: right; }
+.mh-root .mh-folder-picker > header [data-action="commit-sheet"] { grid-column: 3; grid-row: 1; justify-self: end; text-align: center; }
 .mh-root .mh-folder-picker .mh-sheet-body { flex: 1; min-height: 0; overflow: auto; padding: var(--mh-space-4) max(var(--mh-space-4), env(safe-area-inset-right)) var(--mh-space-6) max(var(--mh-space-4), env(safe-area-inset-left)); }
 .mh-root .mh-folder-picker .mh-folder-location { min-width: 0; margin: 0 0 var(--mh-space-4); color: var(--mh-muted); font-size: var(--mh-type-secondary); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .mh-root .mh-folder-picker .mh-folder-location dd { color: var(--mh-muted); font-size: var(--mh-type-secondary); }
@@ -210,6 +216,7 @@
   .mh-root .mh-switch input:disabled { border-color: GrayText; }
   .mh-root .mh-dock, .mh-root .mh-group, .mh-root .mh-sheet, .mh-root .mh-advisory { border: 1px solid CanvasText; background: Canvas; }
   .mh-root .mh-selected { outline: 2px solid Highlight; }
+  .mh-root .mh-text-action, .mh-root .mh-commit, .mh-root .mh-cancel, .mh-root .mh-primary { border: 1px solid ButtonText; }
   .mh-root .mh-tile { color: ButtonText; border: 1px solid ButtonText; }
   .mh-root .mh-field select { appearance: auto; background-image: none; }
 }

@@ -6,6 +6,18 @@ This is a test-owned catalog, not another product surface or live-backend test.
 
 ## Example policy
 
+- Commands follow Apple's button hierarchy as a Web adaptation, not native
+  certification: one accent-filled likely action, tinted secondary actions,
+  outlined destructive actions, equal minimum 44 CSS px targets. Hold a button
+  for pressed feedback and use Tab for focus-visible; disabled remains inert.
+  Back/Cancel and disclosure rows retain their navigation conventions.
+- Empty collections use the shared icon / heading / explanation composition.
+  The catalog contrasts verified emptiness with loading and errors. Folder
+  selection never implies there are no files, and Choose remains the sole
+  header primary rather than adding a command inside the empty state.
+  Sources: [Apple Buttons](https://developer.apple.com/design/human-interface-guidelines/buttons)
+  and [UIContentUnavailableConfiguration](https://developer.apple.com/documentation/uikit/uicontentunavailableconfiguration).
+
 - Import actual product `design-system.ts` primitives, `flow-ui.ts` advisory /
   dismissal / contextual error behavior, `createTaskView`, and mobile
   `styles.css` (which imports `tokens.css`). Do not copy control CSS or override

@@ -6,7 +6,12 @@ import { escapeHtml as esc } from "../../shared/html";
 import { mobileHubIcon as icon, type MobileHubIcon } from "./icons";
 
 export const text = (value: string) => `<p class="mh-note">${esc(value)}</p>`;
-export const action = (key: string, label: string, destructive = false) => `<button type="button" data-flow="${esc(key)}" class="mh-text-action${destructive ? " mh-destructive" : ""}">${esc(label)}</button>`;
+export type ActionHierarchy = "primary" | "secondary" | "destructive";
+/** Commands default to secondary; the flow owner promotes its most likely action. */
+export const action = (key: string, label: string, hierarchy: ActionHierarchy | boolean = "secondary") => `<button type="button" data-flow="${esc(key)}" class="mh-text-action${hierarchy === true || hierarchy === "destructive" ? " mh-destructive" : hierarchy === "primary" ? " mh-commit" : ""}">${esc(label)}</button>`;
+/** Verified empty collections only, never loading or unavailable information.
+ * Keep operations outside the composition, owned by the surrounding flow. */
+export const emptyState = (symbol: MobileHubIcon, title: string, explanation: string) => `<div class="mh-empty-state">${icon(symbol)}<h2>${esc(title)}</h2><p>${esc(explanation)}</p></div>`;
 export const group = (title: string, body: string, count?: number) => `<section class="mh-section"><h2>${esc(title)}${count === undefined ? "" : `<span>${esc(String(count))}</span>`}</h2><div class="mh-group">${body}</div></section>`;
 export const field = (name: string, label: string, value = "", type = "text", attrs = "") => `<label class="mh-field">${esc(label)}<input name="${esc(name)}" type="${esc(type)}" value="${esc(value)}" ${attrs}/></label>`;
 export const check = (name: string, label: string, checked = false, value = "on") => `<label class="mh-check mh-switch"><input type="checkbox" role="switch" name="${esc(name)}" value="${esc(value)}" ${checked ? "checked" : ""}/><span>${esc(label)}</span></label>`;

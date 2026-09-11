@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type * as B from "../../src/hub/mobile/backend";
 import { parsePublicCredentialDto, parsePublicToolReadinessDto } from "../../src/hub/credential-types";
 import { createSyntheticBackend, FIXTURE_TIME, type CloneOutcome, type OnboardingFault } from "./backend";
+import { previewExamples, previewImagePath } from "./preview-corpus";
 
 const completed = <T>(result: B.OperationResult<T>): T => { expect(result.status).toBe("completed"); if (result.status !== "completed") throw new Error(JSON.stringify(result)); return result.value; };
 const available = <T>(result: B.ReadResult<T>): T => { expect(result.status).toBe("available"); if (result.status !== "available") throw new Error(JSON.stringify(result)); return result.value; };
@@ -13,6 +14,59 @@ let attemptCounter = 0;
 const cloneIntent = (overrides: Partial<B.CloneSubmissionIntent> = {}): B.CloneSubmissionIntent => ({ attemptId: `test-attempt-${++attemptCounter}`, url: "https://github.com/review/synthetic.git", dest: "/synthetic", folderName: "checkout", displayName: "Review checkout", credentialId: token.id, retainedAuthentication: [], signing: null, start: false, ...overrides });
 const existing = (overrides: Partial<Parameters<B.MobileHubBackend["configureExisting"]>[0]> = {}) => ({ path: "/synthetic/existing", displayName: "Existing review", authentication: [], signing: null, init: false, start: false, ...overrides });
 const jobId = async (f: ReturnType<typeof createSyntheticBackend>, intent = cloneIntent()) => { const value = completed(await f.backend.submitClone(intent)); expect(value.status).toBe("accepted"); if (value.status !== "accepted") throw new Error("expected accepted"); return value.jobId; };
+
+test("seeded populated workspace picker folders match every preview example and reads never mutate", async () => {
+  const expected = new Map<string, boolean>();
+  for (const path of [...previewExamples.map(example => example.path), previewImagePath.slice(1)]) {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      const directory = parts.slice(0, i).join("/");
+      expected.set(directory, (expected.get(directory) ?? false) || i === parts.length - 1);
+    }
+  }
+  const f = createSyntheticBackend();
+  for (const scenario of [null, "mixed", "branches", "credentials", "all-running", "all-stopped", "nested"] as const) {
+    if (scenario) f.reset(scenario);
+    const before = f.inspect();
+    const events: unknown[] = [];
+    const unsubscribe = f.backend.subscribeInvalidation(event => events.push(event));
+    for (const workspace of before.workspaces) {
+      if (!before.folders.find(folder => folder.path === workspace.path)!.content) continue;
+      const root = available(await f.backend.browseFolders(workspace.path));
+      expect(root.directories.map(directory => directory.name)).toContain("examples");
+      for (const [relativePath, content] of expected) {
+        const path = `${workspace.path}/${relativePath}`;
+        const listing = available(await f.backend.browseFolders(path));
+        expect(listing.path).toBe(path);
+        expect(listing.parent).toBe(path.slice(0, path.lastIndexOf("/")));
+        expect(before.folders.find(folder => folder.path === path)).toEqual({ path, git: false, content, available: true });
+        const children = [...expected.keys()].filter(child => child.slice(0, child.lastIndexOf("/")) === relativePath).map(child => child.split("/").pop()!).sort();
+        expect(listing.directories.map(directory => directory.name).sort()).toEqual(children);
+        expect(listing.directories.every(directory => !directory.git && directory.registration.status === "unregistered")).toBe(true);
+      }
+    }
+    expect(f.inspect()).toEqual(before);
+    expect(f.snapshot().log).toEqual([]);
+    expect(events).toEqual([]);
+    unsubscribe();
+  }
+});
+
+test("example seeding preserves empty lifecycle fixtures and does not fabricate dynamic checkout contents", async () => {
+  const f = createSyntheticBackend(); const b = f.backend;
+  for (const path of ["/synthetic/group", "/synthetic/empty-folder", "/synthetic/existing"]) expect(available(await b.browseFolders(path)).directories).toEqual([]);
+  f.reset("nested");
+  expect(available(await b.browseFolders("/synthetic/group")).directories.map(directory => directory.name)).toEqual(["child"]);
+  expect(available(await b.browseFolders("/synthetic/group/child")).directories).toEqual([]);
+  completed(await b.createFolder({ parent: "/synthetic", name: "dynamic" }));
+  completed(await b.configureExisting(existing({ path: "/synthetic/dynamic", init: true })));
+  const before = f.inspect(); const log = f.snapshot().log;
+  expect(available(await b.browseFolders("/synthetic/dynamic")).directories).toEqual([]);
+  expect(f.inspect()).toEqual(before);
+  expect(f.snapshot().log).toEqual(log);
+  f.reset("empty");
+  expect(f.inspect().folders.some(folder => folder.path.includes("/examples"))).toBe(false);
+});
 
 test("populated catalogs use actual public DTOs and layered lock/tool readiness", async () => {
   const f = createSyntheticBackend(); const credentials = available(await f.backend.readCredentials());

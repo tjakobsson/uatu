@@ -111,7 +111,14 @@ requirements are implemented and verified.
 - [x] 14.3 Add the actual picker to the reference catalog and verify current selection/Cancel/hierarchy/readonly/long-list workflows in Chromium and WebKit, plus focused unit/style checks and retained evidence.
 - [x] 14.4 Publish the focused-selector candidate and updated guide/evidence, retaining the existing full-app and human approval gates without live integration.
 
-### Reconciliation checkpoint — 2026-09-10
+## 15. Preview examples and recognizable Hub controls
+
+- [x] 15.1 Record the user's approved scope and official Apple button/empty-state guidance, explicitly preserving workspace interiors, chrome and Hub/workspace transition/lifetime boundaries.
+- [x] 15.2 Expand synthetic workspaces with linked Markdown/AsciiDoc examples, local images, diagrams, code, tables and nested files through the real rendering path; verify routing, isolation and actual browser preview interactions.
+- [x] 15.3 Apply shared primary/secondary/destructive buttons and composed empty states across applicable mobile Hub flows; verify the Configure new workspace caller, truthful folder-only empty copy, loading/error distinction, accessibility states and no operation/ownership changes.
+- [x] 15.4 Verify current focused cross-engine workflows and retained workspace boundaries, publish the isolated review with new evidence/identity, and leave the existing full-app and human approval gates open.
+
+### Historical reconciliation checkpoint — 2026-09-10
 
 **31/36 complete; 7.1, 7.4, 8.1, 8.2, 8.3 remain pending.** See
 `review-evidence/progress.md` for scoped commands/results and

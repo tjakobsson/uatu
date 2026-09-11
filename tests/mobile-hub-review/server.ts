@@ -1,10 +1,12 @@
 import { createServer } from "node:net";
+import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import { reviewHostingOptions, reviewRequestAllowed, validatePublicOrigin } from "./hosting";
 import { buildEvidenceAssets } from "./hosting-evidence";
 import { frontendFingerprint } from "./hosting-identity";
 import { buildDesignSystemAssets, designSystemPrefix } from "./design-system-assets";
 import { createSyntheticBackend, type Scenario } from "./backend";
 import { createWorkspaceProtocols, terminalId } from "./protocols";
+import { previewImage, previewImagePath } from "./preview-corpus";
 import { controller, controllerScript, scenarios, controls, dispatchControl } from "./controller";
 import { reviewMethods, deserializeReviewValue, createReviewPersonalState, type ReviewMethod } from "./transport";
 
@@ -36,6 +38,10 @@ export async function buildWorkspaceAssets(): Promise<ReviewAssets> {
     ["/assets/fonts/NOTICES.md", "../../src/assets/fonts/NOTICES.md", "text/plain"],
   ] as const;
   for (const [route, path, type] of staticAssets) assets.set(route, { body: new Blob([await Bun.file(new URL(path, import.meta.url)).arrayBuffer()], { type }), type });
+  // The production preview loads Mermaid lazily rather than importing it into
+  // the browser entry graph. Snapshot that same installed library explicitly;
+  // no request-derived filesystem lookup or general node_modules route exists.
+  assets.set("/assets/mermaid.min.js", { body: new Blob([await Bun.file(mermaidAsset).arrayBuffer()], { type: "text/javascript" }), type: "text/javascript" });
   return assets;
 }
 
@@ -212,6 +218,11 @@ export async function startReviewServer(options: { port?: number; assets?: Revie
         if (response) { for (const socket of sockets) if (socket.data.workspaceId === workspaceId && !protocols.terminal.has(socket.data.sessionId)) socket.close(1000, "Synthetic terminal deleted"); for (const [key, value] of Object.entries(headers)) response.headers.set(key, value); return response; }
       } else if (url.search && !["/", "/settings", "/clone"].includes(url.pathname) && !protocols.documentPathAllowed(url.pathname)) return reply("Unexpected review query", 400);
       if (request.method === "GET") {
+        if (url.pathname === previewImagePath && !url.search) {
+          if (!synthetic.snapshot().authenticated) return reply("Synthetic session signed out", 401);
+          if (!workspaceAvailable()) return reply("Synthetic workspace stopped or missing", 409);
+          return reply(previewImage, 200, "image/svg+xml");
+        }
         const evidence = options.evidenceAssets?.get(url.pathname);
         if (evidence) return reply(evidence.body, 200, evidence.type);
         if (url.pathname === "/review/health") return json({ status: "ready", backend: "synthetic", assembly: "same-document-mobile", instanceId, pid: process.pid, version });

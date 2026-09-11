@@ -5,9 +5,15 @@ Passing tests, reference normalization approval and approved additive frontend
 contracts do not approve the served visual/interaction design. No exceptions or
 omissions listed here have been accepted by the user.
 
-## Current candidate — focused folder picker on the shared design system
+## Current candidate — preview examples and recognizable Hub controls
 
-**Latest refinement:** [folder-picker/verification.md](folder-picker/verification.md).
+**Latest refinement:** [preview-refinement/verification.md](preview-refinement/verification.md).
+The user approved the scope after clarifying workspace interiors, not the finished
+visual result. Added synthetic Markdown/AsciiDoc examples use the actual previews;
+shared Hub button hierarchy and composed empty states leave workspace interior
+layouts, navigation chrome and Hub/workspace transition/retention unchanged.
+
+**Previous refinement:** [folder-picker/verification.md](folder-picker/verification.md).
 Full-page Cancel/current folder/Choose separates remote-folder selection from
 Add Workspace → Manage folders. Focused picker tests pass in both engines;
 the current full-app matrix and physical-device/approval gates remain open.
@@ -48,7 +54,7 @@ they do not certify this corrected version. Task 9.6 is still open.
 |---|---|
 | Candidate product URL | `[PRIVATE_REVIEW_ORIGIN_REDACTED]/` — user confirmed phone access |
 | Source version / dirty-tree description | Uncommitted frontend implementation over preserved dirty baseline; no clean-Git or released-version claim. |
-| Served frontend content fingerprint | `sha256:950c3438aa9847910394485417cf27e112eb80241ed4be887f4b8265e7fc86bc` — focused folder picker |
+| Served frontend content fingerprint | `sha256:49845329baf12c14a8da54b584cfb43c3f6c8152189a10adda6c0dfcbbd7c239` — preview examples and Hub controls |
 | Evidence snapshot identity | `/review/evidence/manifest.json` supplies snapshot time and individual SHA-256 values, separate from frontend fingerprint. |
 | Remote access / handoff delivery timestamp | URLs delivered 2026-09-10. Local two-engine smoke passed; user answered “It opens” to the explicitly connectivity-only phone question. No design approval inferred. |
 | Reviewer / approval timestamp | AWAITING USER |

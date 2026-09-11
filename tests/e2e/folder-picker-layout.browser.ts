@@ -1,7 +1,7 @@
 /** Server-free CSS regression: bun tests/e2e/folder-picker-layout.browser.ts */
 import { chromium, expect } from "@playwright/test";
 import { createTaskView } from "../../src/hub/mobile/task-view";
-import { action, listRow } from "../../src/hub/mobile/design-system";
+import { action, emptyState, listRow } from "../../src/hub/mobile/design-system";
 import { escapeHtml } from "../../src/shared/html";
 
 const tokens = await Bun.file(new URL("../../src/hub/mobile/tokens.css", import.meta.url)).text();
@@ -21,7 +21,7 @@ try {
       await page.addScriptTag({ content: `const esc = ${escapeHtml.toString()}; window.makeTask = ${createTaskView.toString()};` });
       for (const state of ["list", "empty", "error", "loading"]) {
         const content = state === "list" ? `<div class="mh-folder-list">${rows}</div>`
-          : state === "empty" ? '<p class="mh-folder-empty">This folder has no subfolders.</p>'
+          : state === "empty" ? `<div class="mh-folder-empty">${emptyState("folder", "No subfolders", "Files aren’t shown here. Tap Choose to use this folder.")}</div>`
           : state === "error" ? `<div class="mh-folder-error" role="alert"><p class="mh-note">This folder could not be loaded.</p>${action("retry", "Retry")}</div>`
           : '<p role="status">Loading folders…</p>';
         await page.evaluate(({ name, path, content, state }) => {

@@ -145,3 +145,24 @@ the product error/recovery UI with a typed unavailable read result. No HTTP
 model calls, filesystem reads, folder creation or workspace mutations occur.
 All chooser controls and styling come from production modules and follow the
 device appearance. Existing editor, review and confirmation demos remain local.
+# Preview exploration and recognizable Hub controls
+
+Open **Atlas → Files → examples → START-HERE.md** for six new linked Markdown
+and AsciiDoc examples. They cover tables, code, local images, Mermaid flow/sequence
+diagrams, nested folders and cross-document links. The same examples are available
+in Notes after synthetic Start. Existing README/continuity fixtures are retained.
+Use the real Source/Rendered and diagram viewer controls; no workspace redesign
+or live filesystem access is involved. The test server explicitly snapshots the
+installed Mermaid library for its normal lazy route.
+
+Hub commands now share primary/secondary/destructive button styles. Verified empty
+collections have a structured icon/title/explanation; a folder-only picker says
+No subfolders, not that the folder has no files. See the current OpenSpec
+`review-evidence/preview-refinement/verification.md` for screenshots and limits.
+
+Focused checks (disposable loopback **4731**, never the published 4703 reviewer):
+
+```sh
+UATU_REVIEW_PICKER_EVIDENCE="openspec/changes/restore-refined-mobile-hub-experience/review-evidence/preview-refinement/folder-picker" UATU_REVIEW_PREVIEW_EVIDENCE="openspec/changes/restore-refined-mobile-hub-experience/review-evidence/preview-refinement/previews" bunx --no-install playwright test --config tests/mobile-hub-review/preview-refinement.config.ts
+bunx --no-install playwright test --config tests/mobile-hub-review/preview-boundary.config.ts
+```

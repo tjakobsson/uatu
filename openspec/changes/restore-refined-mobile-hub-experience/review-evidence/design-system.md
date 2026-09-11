@@ -3,9 +3,10 @@
 The user approved consolidating the mobile Hub into a small, consistent,
 Apple-inspired Web design system rather than continuing screen-by-screen patches.
 
-The latest extension is the actual read-only **Choose Hub folder** module,
-demonstrated in the reference catalog. See [folder-picker/verification.md](folder-picker/verification.md)
-for selection/management separation, two-engine evidence and current limits.
+The latest extension is shared **primary/secondary/destructive button hierarchy**
+and **composed empty states**, used by actual Hub flows and the reference catalog.
+See [preview-refinement/verification.md](preview-refinement/verification.md) for
+current evidence and limits; the read-only picker remains separate from management.
 
 ## Use it
 
@@ -45,10 +46,10 @@ the reviewer's stored dismissal. Use dummy values only.
 ## Identity
 
 Product frontend:
-`sha256:950c3438aa9847910394485417cf27e112eb80241ed4be887f4b8265e7fc86bc`
+`sha256:49845329baf12c14a8da54b584cfb43c3f6c8152189a10adda6c0dfcbbd7c239`
 
 Independent reference build (including the usage guide):
-`sha256:411392257fd588f01fc0ca38555e8798c64b8790e3b3e3c65ffd2614ad6bacb0`
+`sha256:3f0423af7bc88fb972af6e0553d8db50ec8fecc33c2f77489acb668e1d173a22`
 
 The reference manifest at `/review/design-system/manifest.json` reports its own
 identity. It does not alter the workspace asset fingerprint or imply approval.
@@ -57,7 +58,7 @@ directory listing, source-map exposure or request-derived filesystem read.
 
 ## Verification
 
-- Focused product/review suite: **384 passed, 0 failed; 3772 assertions**.
+- Focused product/review suite: **393 passed, 0 failed; 4851 assertions**.
 - Product and review-runtime TypeScript checks: **passed**.
 - Tests enforce shared implementation identity, escaping, distinct semantic
   roles, native switch/radio drafts, token completeness, root scoping, one base
@@ -65,7 +66,8 @@ directory listing, source-map exposure or request-derived filesystem read.
 - Reference build/HTTP tests verify canonical routing, exact asset maps,
   host/origin/CSP protections, no backend mutation imports, independent identity
   and unchanged workspace version when reference assets vary.
-- The latest Chromium reference run passed **2/2 tests**, covering the actual
+- The latest Chromium reference run passed **3/3 tests**, covering command fills,
+  pressed/focus/minimum-target states, composed empty/loading/error examples, the actual
   picker and navigation-as-detail, full-page review/editor, centered removal
   confirmation, focus/Escape, local pending/error, dismissal isolation and
   responsive/200% text checks. An earlier page-creation timeout is historical;

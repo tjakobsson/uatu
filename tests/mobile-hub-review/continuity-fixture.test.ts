@@ -8,7 +8,7 @@ test("long-content/commit fixture is opt-in and reset restores the original prot
   const read = async (path: string) => { const url = new URL(path, "http://synthetic.invalid"); return (await protocols.handle(new Request(url), url))!.json(); };
   protocols.enableContinuityFixture();
   const expanded = await read("/api/state");
-  expect(expanded.roots[0].docs).toHaveLength(101);
+  expect(expanded.roots[0].docs).toHaveLength(original.roots[0]!.docs.length + 100);
   expect(expanded.repositories[0].commitLog[0].sha).toBe(continuityCommit);
   expect((await read("/api/document?id=readme")).html).toContain("Continuity section 79");
   expect((await read("/api/document?id=continuity-1")).path).toBe("note-001.md");

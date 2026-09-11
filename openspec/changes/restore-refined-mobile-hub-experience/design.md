@@ -253,6 +253,30 @@ no operations are deleted or hidden in More. Native iPhone filesystem pickers
 would target the wrong filesystem. No search, favorites, permission flags or
 new public API is invented. Add the actual picker to the shared reference catalog.
 
+### Preview examples and recognizable Hub controls (2026-09-11)
+
+After checkpoint `b7d51f7`, the user approved richer synthetic preview content and
+an Apple-guided mobile Hub refinement. Add linked Markdown/AsciiDoc examples with
+nested folders, tables, source blocks, diagrams and local images through the
+test-owned corpus and actual renderers. Do not modify real workspace files.
+
+Commands such as Configure new workspace must look like buttons: one coherent
+primary/secondary/destructive hierarchy, accent-filled primary actions, visible
+secondary surfaces, pressed/disabled/focus states and adequate targets. Preserve
+conventional navigation and disclosure rows; do not turn every command primary.
+Use the existing shared design system across Hub, Settings and onboarding.
+
+Verified empty collections use an icon/title/explanation composition, distinct
+from loading/error. The directory-only picker says No subfolders and explains
+that files are hidden and Choose selects the current folder. It cannot claim
+that the folder has no files; no duplicate Choose or management actions are added.
+
+The user clarified and approved the unchanged boundary: Files/Preview/Chat/Terminal
+interior layouts, controls, workspace navigation chrome, and Hub↔workspace
+transition/retention behavior remain as before. Only synthetic content expands
+inside the workspace. Native UIKit guidance is adapted to the Web, not imported
+as a new framework or claimed as native Apple certification.
+
 - **Large Hub module extraction** -> move by reviewed vertical slice, keep existing desktop rendering active, reuse domain semantics, and require local ownership rather than copying the global inline controller.
 - **Global workspace assumptions survive hiding** -> test input isolation, cached request base, URL dispatch, visibility/resize callbacks and scroll preservation on all four real surfaces before broad UI work.
 - **Mock conceals an integration mismatch** -> use existing types/protocols, fail unhandled calls, retain operation logs and explicit future contract gaps; no claim of live backend correctness.

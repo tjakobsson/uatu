@@ -141,7 +141,7 @@ export function createWorkspaceFlows(env: FlowEnvironment, start: (workspace: Wo
         actions[`device-${i}`] = actions[`revoke-${i}`]!;
         return listRow(`device-${i}`, name, `${d.current ? "Current session" : "Other session"} · Issued ${new Date(d.issuedAt).toLocaleDateString()} · Review revocation`);
       }).join("");
-      env.page("Devices", rows ? group("Sessions", rows) : text("No device sessions are available."), actions);
+      env.page("Devices", rows ? group("Sessions", rows) : emptyState("device", "No device sessions", "There are no device sessions available to manage."), actions);
     }, devices);
   }
   function security() {
@@ -151,3 +151,4 @@ export function createWorkspaceFlows(env: FlowEnvironment, start: (workspace: Wo
   }
   return { workspace, assignments, devices, security };
 }
+import { emptyState } from "./design-system";

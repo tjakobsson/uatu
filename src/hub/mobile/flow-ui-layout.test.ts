@@ -13,6 +13,9 @@ test("Settings page keeps contextual controls and top Back, preserving sole disp
   expect(root.querySelectorAll('[data-flow="flow-back"]').length).toBe(1);
   expect(root.querySelector('[data-flow="absent"]')).toBeNull();
   expect(root.querySelector('.mh-flow-toolbar')).toBeNull();
+  expect(root.querySelector('[data-flow="save"]')?.classList.contains("mh-commit")).toBe(true);
+  expect(root.querySelector('[data-flow="other"]')?.classList.contains("mh-commit")).toBe(false);
+  expect(root.querySelector('[data-flow="flow-back"]')?.classList.contains("mh-commit")).toBe(false);
   expect(root.querySelector('.mh-flow-header [data-flow="flow-back"]')?.textContent).toContain("Back to edit");
   root.querySelector<HTMLButtonElement>('.mh-flow-content [data-flow="save"]')!.click();
   root.querySelector<HTMLButtonElement>('[data-flow="flow-back"]')!.click();

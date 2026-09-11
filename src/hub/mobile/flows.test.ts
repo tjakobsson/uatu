@@ -78,6 +78,21 @@ function harness(overrides: Partial<MobileHubBackend> = {}) {
   return { root, ui, click, chooseKey, input, set, calls, opens, region, invalidate: (e: Invalidation) => invalidate(e), stream: (e: CloneStreamEvent) => stream(e), mutations: (name: string) => calls.filter(c => c.operation === name) };
 }
 
+test("Create Workspace keeps one prominent configure command after canceling its editor", async () => {
+  const h = harness(); await h.ui.ready;
+  h.ui.showDetail({ kind: "add-workspace" }); await settle();
+  h.click("create"); await settle(); h.click("cancel-sheet");
+  expect(h.region().querySelectorAll('[data-flow="edit"]')).toHaveLength(1);
+  expect(h.region().querySelector('[data-flow="edit"]')?.textContent).toBe("Configure new workspace");
+  expect(h.region().querySelector('[data-flow="edit"]')?.classList.contains("mh-commit")).toBe(true);
+  expect(h.region().querySelectorAll(".mh-commit")).toHaveLength(1);
+  expect(h.region().querySelector("input")).toBeNull();
+  h.click("edit");
+  expect(h.input("parent").value).toBe("/projects");
+  expect(h.region().querySelector('[data-flow="browse"]')?.classList.contains("mh-commit")).toBe(false);
+  expect(h.calls.some(call => /^(create|configure)/.test(call.operation))).toBe(false);
+});
+
 describe("folder picker current read failures", () => {
   for (const caller of ["default-folder", "add-workspace"] as const) for (const thrown of [false, true]) for (const retry of [false, true]) {
     test(`${caller} restores its editor draft after ${thrown ? "thrown" : "denied"} folder read${retry ? " and Retry" : ""}`, async () => {

@@ -131,6 +131,23 @@ env.task("Rename workspace", field("name", "Display name", workspace.displayName
 `listRow` is object navigation and uses data-flow. Neither hides commands in More.
 `action` is for immediate commands; the owning flow supplies confirmation when needed.
 
+Commands use explicit `primary`, `secondary` (default), or `destructive` hierarchy:
+`action("configure", "Configure new workspace", "primary")`. Existing Boolean
+destructive arguments remain compatible. A flow's `primaryAction` promotes the
+same button in place; promotion does not depend on a bottom toolbar. Prefer one
+prominent action, with filled accent background and contrasting label. Secondary
+commands have a quieter tinted rounded surface; destructive commands use a red
+label and boundary, never automatic primary promotion. Pressed, disabled and focus
+states accompany the visual hierarchy. Header Back/Cancel and navigation rows
+retain their distinct navigation treatment. Do not use size alone for emphasis.
+
+Use `emptyState("folder", "No subfolders", explanation)` for a verified empty
+collection, not for loading or failed reads. The shared composition has a
+decorative icon, heading and supporting text; operations remain outside it with
+their existing owner. The folder picker explains that files are hidden and its
+existing Choose button selects this folder. Never call a directory empty based
+only on the absence of subfolders, and never duplicate Choose within the message.
+
 ## State and accessibility contract
 
 - Rendering a primitive emits no change events and performs no storage/network work.
@@ -188,5 +205,7 @@ especially [Settings](https://developer.apple.com/design/human-interface-guideli
 [Toggles](https://developer.apple.com/design/human-interface-guidelines/toggles),
 [Text fields](https://developer.apple.com/design/human-interface-guidelines/text-fields),
 and [Feedback](https://developer.apple.com/design/human-interface-guidelines/feedback).
+Button hierarchy follows [Buttons](https://developer.apple.com/design/human-interface-guidelines/buttons);
+empty-state composition adapts [UIContentUnavailableConfiguration](https://developer.apple.com/documentation/uikit/uicontentunavailableconfiguration).
 The project-specific research and explicit user decisions remain in the current
 change's review evidence. No proprietary symbol/font package is introduced.

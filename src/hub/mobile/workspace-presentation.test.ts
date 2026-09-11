@@ -71,7 +71,7 @@ test.each([true, false])("workspace detail preserves facts and a sole contextual
   expect(h.root.textContent).not.toContain("Workspace actions");
   expect(h.root.querySelectorAll('[data-flow="open"]')).toHaveLength(1);
   const primary = h.root.querySelector<HTMLButtonElement>('.mh-flow-content [data-flow="open"]')!;
-  expect(primary.classList.contains("mh-commit")).toBe(false);
+  expect(primary.classList.contains("mh-commit")).toBe(true);
   expect(primary.textContent).toBe(running ? "Open" : "Start"); primary.click(); expect(h.started()).toBe(1);
 });
 

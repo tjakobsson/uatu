@@ -8,6 +8,31 @@ test.beforeAll(async () => {
   origin = await new Promise<string>((resolve, reject) => { process.stdout!.once("data", data => resolve(String(data).trim())); process.once("error", reject); process.once("exit", code => reject(new Error(`Reference server exited ${code}`))); });
 });
 test.afterAll(() => { process?.kill("SIGTERM"); });
+test("command hierarchy has real fills, press feedback, focus and minimum targets", async ({ page }) => {
+  await page.goto(origin + "/review/design-system");
+  const primary = page.getByRole("button", { name: "Run local action", exact: true });
+  const secondary = page.locator("#review button");
+  const destructive = page.getByRole("button", { name: "Remove example…", exact: true });
+  await expect(primary).toHaveClass(/mh-commit/);
+  await expect(secondary).not.toHaveClass(/mh-commit/);
+  await expect(destructive).toHaveClass(/mh-destructive/);
+  for (const control of [primary, secondary, destructive]) {
+    expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect(await control.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+  }
+  await primary.focus();
+  await expect(primary).toBeFocused();
+  expect(await primary.evaluate(el => getComputedStyle(el).outlineStyle)).not.toBe("none");
+  await primary.scrollIntoViewIfNeeded();
+  const box = (await primary.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  expect(await primary.evaluate(el => getComputedStyle(el).filter)).toBe("brightness(0.8)");
+  await page.mouse.up();
+  await expect(page.locator("#empty-states .mh-empty-state")).toHaveCount(1);
+  await expect(page.locator("#empty-states [role=status]")).toHaveText("Loading folders…");
+  await expect(page.locator("#empty-states [role=alert]")).toHaveText("This folder could not be loaded.");
+});
 test("product folder chooser traverses, chooses and cancels without backend calls", async ({ page }) => {
   const calls: string[] = [], failures: string[] = [];
   page.on("request", request => { if (request.method() !== "GET" || ["fetch", "xhr"].includes(request.resourceType())) calls.push(request.url()); });
@@ -24,13 +49,15 @@ test("product folder chooser traverses, chooses and cancels without backend call
   await expect(picker.getByRole("heading", { name: "projects", exact: true })).toBeVisible();
   await expect(page.locator("#local-result")).toHaveText("Examples ready. No backend operations.");
   await picker.locator("header").getByRole("button", { name: "Choose", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("Chosen folder: /example/projects. Local only; no backend changes.");
+  await expect(page.locator("#local-result")).toHaveText("Chosen folder: /example/projects. Local only; no backend changes.");
   await expect(launch).toBeFocused();
   await launch.click();
   await picker.getByRole("button", { name: "empty", exact: true }).click();
-  await expect(picker.getByText("This folder has no subfolders.")).toBeVisible();
+  await expect(picker.getByRole("heading", { name: "No subfolders" })).toBeVisible();
+  await expect(picker.getByText("Files aren’t shown here. Tap Choose to use this folder.")).toBeVisible();
+  await expect(picker.locator(".mh-empty-state button")).toHaveCount(0);
   await picker.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("Folder selection canceled. No backend changes.");
+  await expect(page.locator("#local-result")).toHaveText("Folder selection canceled. No backend changes.");
   await expect(launch).toBeFocused();
   await launch.click();
   await picker.getByRole("button", { name: "Unavailable", exact: true }).click();
@@ -60,7 +87,7 @@ test("real recipes, local task lifecycle and responsive reference", async ({ pag
   await expect(page.getByRole("button", { name: "Unavailable action", exact: true })).toBeDisabled();
   await expect(page.locator(".mh-list-more")).toHaveCount(0);
   await page.getByRole("button", { name: "Run local action", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("Local action ran. No backend changes.");
+  await expect(page.locator("#local-result")).toHaveText("Local action ran. No backend changes.");
   await expect(page.locator(".mh-task")).toHaveCount(0);
   for (const [selector, title] of [["[data-action=local-destination]", "Example credential details"], ["[data-flow=local-list]", "Example workspace details"]]) {
     await page.locator(selector!).click();
@@ -73,7 +100,7 @@ test("real recipes, local task lifecycle and responsive reference", async ({ pag
     await detail.getByRole("button", { name: "Back", exact: true }).click();
     await expect(page.locator(selector!)).toBeFocused();
   }
-  await page.getByRole("button", { name: "Review local draft", exact: true }).click();
+  await page.locator("#review").getByRole("button", { name: "Review local draft", exact: true }).click();
   const review = page.getByRole("region", { name: "Review local draft", exact: true });
   await expect(review).toBeVisible();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
@@ -82,7 +109,7 @@ test("real recipes, local task lifecycle and responsive reference", async ({ pag
   await expect(review.getByText("After", { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("review-fullpage-390.png") });
   await review.getByRole("button", { name: "Apply locally", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("Local example completed. No backend changes.");
+  await expect(page.locator("#local-result")).toHaveText("Local example completed. No backend changes.");
   await page.getByRole("button", { name: "Try editor", exact: true }).click();
   await expect(page.locator('[data-task-kind="editor"] h1')).toBeFocused();
   await page.getByLabel("Example display name").fill("Changed locally");

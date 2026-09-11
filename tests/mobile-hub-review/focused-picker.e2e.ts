@@ -1,7 +1,7 @@
 import { expect, test, type Page, type APIRequestContext } from '@playwright/test';
 import { namedButton } from './navigation';
 
-const evidence = 'openspec/changes/restore-refined-mobile-hub-experience/review-evidence/folder-picker';
+const evidence = process.env.UATU_REVIEW_PICKER_EVIDENCE ?? 'openspec/changes/restore-refined-mobile-hub-experience/review-evidence/folder-picker';
 const picker = (page: Page) => page.locator('.mh-folder-picker');
 const button = namedButton;
 const state = async (request: APIRequestContext) => (await request.get('/review/state')).json();
@@ -28,7 +28,9 @@ test('default nested/up selection returns canonical draft once, writes only on S
   await picker(page).getByRole('button', { name: 'group', exact: true }).click();
   await picker(page).getByRole('button', { name: 'child', exact: true }).click();
   await expect(picker(page).locator('h1')).toHaveAttribute('title', '/synthetic/group/child');
-  await expect(picker(page)).toContainText('This folder has no subfolders.');
+  await expect(picker(page).getByRole('heading', { name: 'No subfolders' })).toBeVisible();
+  await expect(picker(page)).toContainText('Files aren’t shown here. Tap Choose to use this folder.');
+  await expect(picker(page).locator('.mh-empty-state button')).toHaveCount(0);
   await page.screenshot({ path: `${evidence}/${info.project.name}-empty.png` });
   await picker(page).getByRole('button', { name: 'Parent folder: /synthetic/group', exact: true }).click();
   await expect(picker(page).locator('h1')).toHaveText('group');

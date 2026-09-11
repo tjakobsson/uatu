@@ -29,6 +29,28 @@ export function createSyntheticBackend() {
     if (event.scope === "workspace") workspaceEpochs.set(event.workspaceId, (workspaceEpochs.get(event.workspaceId) ?? 0) + 1);
     emit({ ...event, generation: ++generation });
   });
+  // Fixture construction only, never browse-time synthesis. Keep the picker
+  // aligned with the shared preview examples for seeded populated workspaces.
+  // Deliberately empty lifecycle fixtures (group/child, empty-folder) retain
+  // their removal semantics. Newly created/cloned workspaces retain the model's
+  // operation-specific folder facts; their preview is still a shared transport
+  // double, not a claim that onboarding copied these files into a checkout.
+  // The corpus test checks this lightweight list against every example/media
+  // ancestor, without importing server-side renderers into this backend module.
+  const seedPreviewFolders = () => {
+    for (const workspace of model.workspaces) {
+      if (!model.folders.get(workspace.path)?.content) continue;
+      for (const [relativePath, content] of [
+        ["examples", true], ["examples/guides", true],
+        ["examples/operations", true], ["examples/releases", false],
+        ["examples/releases/2026", true], ["examples/media", true],
+      ] as const) {
+        const path = `${workspace.path}/${relativePath}`;
+        if (!model.folders.has(path)) model.folders.set(path, { git: false, content, available: true });
+      }
+    }
+  };
+  seedPreviewFolders();
   const record = (method: Method, outcome: Mutation["outcome"]) => { log.push({ sequence: ++sequence, at: model.clock, method, outcome }); if (log.length > 500) log.shift(); };
   const problem = (error: unknown): B.BackendProblem => error instanceof ModelProblem
     ? error.kind === "rate-limited" ? { kind: error.kind, message: error.message, retryAfterSeconds: 30 } : { kind: error.kind, message: error.message }
@@ -208,6 +230,7 @@ export function createSyntheticBackend() {
     reset(scenario: Scenario = "mixed") {
       requireValue(["mixed", "empty", "signed-out", "branches", "credentials", "nested", "unavailable-tools", "all-running", "all-stopped"].includes(scenario));
       epoch++; generation++; workspaceEpochs.clear(); pendingCloneAttempts.clear(); model.reset(scenario);
+      seedPreviewFolders();
       log.length = 0; sequence = 0; failures.clear(); held.clear();
       for (const waiters of holds.values()) waiters.forEach(resolve => resolve());
       holds.clear();

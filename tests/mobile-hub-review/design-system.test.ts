@@ -11,6 +11,9 @@ test("reference build is a closed, prefixed asset map with product recipes", asy
   expect(js.join("\n")).toContain("createTaskView");
   expect(js.join("\n")).toContain("createFolderPicker");
   expect(js.join("\n")).toContain("Choose Hub folder");
+  expect(js.join("\n")).toContain("No subfolders");
+  expect(js.join("\n")).toContain("Loading, not empty");
+  expect(js.join("\n")).toContain("Error, not empty");
   expect(js.join("\n")).not.toContain("/review/backend/");
   expect([...assets.keys()].some(path => path.endsWith(".woff2"))).toBe(true);
   const guide = assets.get(designSystemPrefix + "guide")!;

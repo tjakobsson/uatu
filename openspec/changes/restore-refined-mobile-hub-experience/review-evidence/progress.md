@@ -1,5 +1,44 @@
 # Frontend implementation progress
 
+## 2026-09-11 — preview examples and Hub controls published
+
+After the user-approved scope clarification, added six linked synthetic
+Markdown/AsciiDoc documents, a local illustration and actual Mermaid rendering.
+Shared Hub command hierarchy makes Configure new workspace visibly primary;
+composed empty states explain folder-only selection without implying no files.
+Workspace interior/chrome owners and Hub/workspace transition code are unchanged.
+See `preview-refinement/verification.md` for official guidance, corpus inventory,
+diagnosed lazy-asset/test-selector failures, final evidence and simulation limits.
+
+Final verification: **393 tests / 4851 assertions**, both typechecks, strict
+OpenSpec validation and whitespace checks pass. Current browser passes:
+**20/20** preview/controls/picker cases (34.8s), **3/3** Chromium reference cases
+(4.8s), **48** layout combinations, and **4/4** Chromium/WebKit boundary cases
+(16.8s), preserving all-four-surface identity plus exact Chat File/draft and terminal
+transport. These do not close historical full-app/physical-device/golden gates.
+
+Scoped restart replaced only owned synthetic PID **89753** with **55321**, instance
+**7dab9526-84e8-4c8d-9479-67715da629c4** on loopback **4703** / HTTPS **8445**.
+Product asset fingerprint:
+`sha256:49845329baf12c14a8da54b584cfb43c3f6c8152189a10adda6c0dfcbbd7c239`.
+Independent reference fingerprint:
+`sha256:3f0423af7bc88fb972af6e0553d8db50ec8fecc33c2f77489acb668e1d173a22`.
+Evidence snapshot: **2026-09-11T11:58:25.380Z**.
+
+Local HTTP product/Settings/reference/guide/evidence and direct Markdown/AsciiDoc
+routes returned 200. Served Mermaid has JavaScript MIME and the local illustration
+has SVG MIME. The corpus exposes all six example documents. All **45** new selected
+artifacts (42 PNGs, two browser reports, verification record) match manifest byte
+sizes and hashes. Served reports confirm 20 and 4 expected passes with zero
+unexpected/flaky/skipped cases. Existing 443→4700, 8443→4701, 8444→4702 and
+8445→4703 Tailscale mappings are unchanged. No fresh physical phone validation is
+claimed by these local checks.
+
+**64/70 tasks complete.** Still open: 7.1, 7.4, 8.3, 9.6, 10.4 and 11.4.
+This refinement remains uncommitted after the prior requested `b7d51f7` checkpoint.
+No dependency installation, live integration, other-service reset, spec sync or
+archive occurred. New served bytes await the user's visual/interaction review.
+
 ## 2026-09-11 — focused folder picker published
 
 Full-page Cancel/current folder/Choose now separates read-only directory selection

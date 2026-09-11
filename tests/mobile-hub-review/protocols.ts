@@ -4,14 +4,15 @@ import { FIXTURE_TIME } from "./backend";
 import { continuityCorpus, continuityDocument, continuityConversation } from "./continuity-fixture";
 import { createChatProtocolModel } from "./chat-protocol-model";
 import { createTerminalProtocolModel } from "./terminal-protocol-model";
+import { addPreviewExamples, renderPreviewExample } from "./preview-corpus";
 
 export const conversationId = "review:conversation-1";
 export const terminalId = "11111111-1111-4111-8111-111111111111";
-export const corpus: StatePayload = {
+export const corpus: StatePayload = addPreviewExamples({
   workspaceApiRevision: 14, roots: [{ id: "synthetic", label: "Atlas", path: "/synthetic/atlas", hiddenCount: 0, docs: [{ id: "readme", rootId: "synthetic", name: "README.md", relativePath: "README.md", mtimeMs: FIXTURE_TIME, kind: "markdown" }] }],
   repositories: [], compareTarget: "base", initialFollow: false, defaultDocumentId: "readme", changedId: null, generatedAt: FIXTURE_TIME,
   build: { version: "review", branch: "synthetic", commitSha: "0000000", commitShort: "0000000", release: false, identifier: "synthetic@0000000", bundledWebRevision: 1 }, scope: { kind: "folder" }, terminal: "enabled",
-};
+});
 const initialConversation: ConversationSnapshot = {
   conversation: { id: conversationId, title: "Synthetic conversation", createdAt: FIXTURE_TIME, updatedAt: FIXTURE_TIME, status: "idle", agent: { id: "review", name: "Synthetic agent" } },
   configuration: {}, generation: "review-1", cursor: "review-1:0", items: [], queued: [],
@@ -90,6 +91,8 @@ export function createWorkspaceProtocols() {
           const document = currentCorpus().roots.flatMap(root => root.docs).find(doc => doc.id === url.searchParams.get("id"));
           if (!document || !["rendered", "source"].includes(url.searchParams.get("view") ?? "rendered")) return json({ error: "Unknown synthetic document/view" }, 404);
           const view = url.searchParams.get("view") ?? "rendered";
+          const example = await renderPreviewExample(document.id, view as "rendered" | "source");
+          if (example) return json(example);
           if (expandedCorpus) return json({ id: document.id, title: "Synthetic review document", path: document.relativePath, kind: "markdown", view, language: "markdown", html: view === "rendered" ? continuityDocument : '<pre class="uatu-source-pre"><code># Synthetic continuity document</code></pre>' });
           return json({ id: "readme", title: "Synthetic review document", path: "README.md", kind: "markdown", view, language: "markdown", html: view === "source" ? '<pre class="uatu-source-pre"><code># Synthetic review document\n\nNo live workspace was read.</code></pre>' : '<h1 id="synthetic-review-document">Synthetic review document</h1><p>No live workspace was read.</p>' });
         }

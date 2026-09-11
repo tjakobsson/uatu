@@ -118,7 +118,7 @@ export function createFlowEnvironment(root: HTMLElement, backend: MobileHubBacke
       for (const key of new Set([presentation?.secondaryAction, presentation?.primaryAction])) {
         if (!key || key === "flow-back") continue;
         const control = [...root.querySelectorAll<HTMLButtonElement>(".mh-flow-content button[data-flow]")].find(button => button.dataset.flow === key);
-        if (control) { toolbar?.append(control); if (toolbar && key === presentation?.primaryAction && !control.classList.contains("mh-destructive")) control.classList.add("mh-commit"); }
+        if (control) { toolbar?.append(control); if (key === presentation?.primaryAction && !control.classList.contains("mh-destructive")) control.classList.add("mh-commit"); }
       }
       bind(root, { "flow-back": hooks.home, ...actions, "dismiss-advisory": () => dismissAdvisory(hooks.user(), root) });
       if (!root.inert) root.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });

@@ -43,13 +43,16 @@ describe("read-only Hub folder picker", () => {
     expect(h.host.querySelector("h1")?.textContent).toBe("Hub folders");
     expect(h.host.querySelector("h1")?.getAttribute("title")).toBe("/");
     expect(h.host.querySelector(".mh-folder-location code")?.textContent).toBe("/");
-    expect(h.host.querySelector(".mh-folder-empty")?.textContent).toContain("no subfolders");
+    expect(h.host.querySelector(".mh-folder-empty h2")?.textContent).toBe("No subfolders");
+    expect(h.host.querySelector(".mh-folder-empty p")?.textContent).toBe("Files aren’t shown here. Tap Choose to use this folder.");
+    expect(h.host.querySelector(".mh-folder-empty button")).toBeNull();
     expect(h.host.querySelector('[data-flow="up"], [data-flow="create"]')).toBeNull();
     await h.submit(); expect(h.choices).toEqual(["/"]);
   });
   test("starts at caller path; navigation never selects; Choose returns the verified canonical path once", async () => {
     const h = harness(); h.open("/typed"); expect(h.reads[0]!.path).toBe("/typed");
     expect(h.host.querySelector<HTMLButtonElement>('[data-action="commit-sheet"]')!.disabled).toBe(true);
+    expect(h.host.querySelector(".mh-empty-state")).toBeNull();
     expect(h.host.querySelector<HTMLButtonElement>('[data-action="cancel-sheet"]')!.disabled).toBe(false);
     await h.submit(); expect(h.choices).toEqual([]);
     h.reads[0]!.resolve(listing()); await settle();
@@ -67,6 +70,7 @@ describe("read-only Hub folder picker", () => {
     if (thrown) h.reads[1]!.reject(new Error("Denied"));
     else h.reads[1]!.resolve({ status: "unavailable", problem: { kind: "unavailable", message: "Denied" } });
     await settle(); expect(h.host.querySelector(".mh-folder-error")).not.toBeNull();
+    expect(h.host.querySelector(".mh-empty-state")).toBeNull();
     await h.submit(); expect(h.choices).toEqual([]);
     h.click('[data-flow="retry"]'); expect(h.reads[2]!.path).toBe("/projects/child");
     h.click('[data-flow="last-valid"]'); expect(h.reads[3]!.path).toBe("/projects");

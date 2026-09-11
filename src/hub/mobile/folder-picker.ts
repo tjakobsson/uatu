@@ -2,6 +2,7 @@ import { escapeHtml as esc } from "../../shared/html";
 import type { FolderListing, MobileHubBackend } from "./backend";
 import { action, listRow, text, type FlowEnvironment } from "./flow-ui";
 import { mobileHubIcon } from "./icons";
+import { emptyState } from "./design-system";
 
 const folderLabel = (path: string) => path.split("/").filter(Boolean).at(-1) ?? "Hub folders";
 const location = (path?: string) => `<div class="mh-folder-location" aria-label="Current folder path"><span>On this Hub</span>${path ? `<code>${esc(path)}</code>` : ""}</div>`;
@@ -62,7 +63,7 @@ export function createFolderPicker(env: FolderPickerEnvironment) {
           }
           ready = lastValid = result.value;
           const heading = root.querySelector("h1"); if (heading) { heading.textContent = folderLabel(ready.path); heading.setAttribute("title", ready.path); }
-          body.innerHTML = `${location(ready.path)}<nav class="mh-folder-parent" aria-label="Parent folder">${ready.parent ? parentAction("up", ready.parent) : ""}</nav><div class="mh-folder-list">${ready.directories.map((directory, i) => listRow(`folder-${i}`, directory.name, "", "folder")).join("")}</div>${ready.directories.length ? "" : '<p class="mh-folder-empty">This folder has no subfolders.</p>'}`;
+          body.innerHTML = `${location(ready.path)}<nav class="mh-folder-parent" aria-label="Parent folder">${ready.parent ? parentAction("up", ready.parent) : ""}</nav><div class="mh-folder-list">${ready.directories.map((directory, i) => listRow(`folder-${i}`, directory.name, "", "folder")).join("")}</div>${ready.directories.length ? "" : `<div class="mh-folder-empty">${emptyState("folder", "No subfolders", "Files aren’t shown here. Tap Choose to use this folder.")}</div>`}`;
           if (primary) primary.disabled = false;
         } catch { if (active()) error("This folder could not be loaded."); }
       })();

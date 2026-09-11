@@ -132,7 +132,7 @@ export function createOnboardingFlows(env: FlowEnvironment) {
         actions[`folder-${i}`] = () => browse(child, choose, cancel);
         return listRow(`folder-${i}`, d.name, `${d.git ? "Git repository" : "Folder"}${d.registration.status === "registered" ? ` · Registered · ${d.registration.runtime.status}` : " · Not registered"}`, "folder");
       }).join("");
-      env.page("Manage Folders", `<nav aria-label="Folder location">${text(listing.path)}${listing.parent ? action("up", `Up to ${listing.parent}`) : ""}</nav>` + (folders ? group("Folders", folders) : text("This folder has no subfolders.")) + group("Current folder", action("choose", "Configure this folder") + action("elsewhere", "Browse elsewhere") + action("create", "Create empty folder") + action("workspace", "Create workspace here") + action("rename", "Rename folder") + action("remove", "Remove empty folder", true)), actions, { primaryAction: "choose", backLabel: "Back" });
+      env.page("Manage Folders", `<nav aria-label="Folder location">${text(listing.path)}${listing.parent ? action("up", `Up to ${listing.parent}`) : ""}</nav>` + (folders ? group("Folders", folders) : emptyState("folder", "No subfolders", "Files aren’t shown here. Current folder actions are available below.")) + group("Current folder", action("choose", "Configure this folder") + action("elsewhere", "Browse elsewhere") + action("create", "Create empty folder") + action("workspace", "Create workspace here") + action("rename", "Rename folder") + action("remove", "Remove empty folder", true)), actions, { primaryAction: "choose", backLabel: "Back" });
     }, () => browse(path, choose, cancel));
   }
   function loadConfiguration(listing: FolderListing) {
@@ -194,3 +194,4 @@ export function createOnboardingFlows(env: FlowEnvironment) {
   }
   return { add, browse, newWorkspace, defaultFolder, outcome };
 }
+import { emptyState } from "./design-system";
