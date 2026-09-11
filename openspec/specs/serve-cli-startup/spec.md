@@ -2,58 +2,59 @@
 
 ## Purpose
 
-Define the CLI startup surface of uatu under the canonical `serve` verb: how a session is started (positional paths, git preflight, `--force`, `--no-gitignore`), the bare-invocation default, the deprecated `watch` alias's transition behavior, browser/follow startup behavior, and the diagnostic startup flags. Supersedes the retired `watch-cli-startup` capability (archived with change `rename-watch-to-serve`).
+Define how a uatu session child starts: the internal `serve` command the hub spawns for each workspace. A session child is an invocation that carries the hub's child marker (`--exit-on-stdin-close`), or one run from source by the repository's own harness; any other `serve`, `watch`, or bare invocation is user-shaped and is refused with the hub bootstrap steps. The capability covers which invocations are accepted, positional paths, git preflight, `--force`, `--no-gitignore`, browser and follow startup behavior, the diagnostic flags, supervision through standard input, and the base path. Supersedes the retired `watch-cli-startup` capability (archived with change `rename-watch-to-serve`).
+
 ## Requirements
 
 ### Requirement: Configure startup browser behavior
 The system SHALL attempt to open the browser automatically and SHALL start with follow mode enabled by default. The command MUST provide flags to disable browser auto-open (`--no-open`) and to disable follow mode (`--no-follow`) before the session starts. The local browser URL MUST be printed whether or not the browser is opened successfully. When the SPA boots with `location.pathname` resolving to a known non-binary document (anything other than `/`), the SPA MUST disable follow mode for the session regardless of the CLI default — see the `follow-mode` capability's "Follow defaults to ON; URL direct links force OFF on boot" requirement for the full rule. The usage text MUST list only flags the parser actually honors.
 
 #### Scenario: Default startup opens the browser with follow enabled
-- **WHEN** a user runs `uatu serve docs`
+- **WHEN** a session child is started with `docs`
 - **THEN** the system attempts to open the browser automatically
 - **AND** the session starts with follow mode enabled
 - **AND** the local browser URL is printed
 
 #### Scenario: Startup flags disable auto-open and follow
-- **WHEN** a user runs `uatu serve docs --no-open --no-follow`
+- **WHEN** a session child is started with `docs --no-open --no-follow`
 - **THEN** the system does not attempt to open the browser
 - **AND** the session starts with follow mode disabled
 - **AND** the local browser URL is printed
 
 #### Scenario: SPA boot at the root URL honors the CLI follow default
 - **WHEN** a user opens the browser to `http://127.0.0.1:NNNN/`
-- **AND** the CLI was started without `--no-follow`
+- **AND** the session child was started without `--no-follow`
 - **THEN** the SPA boots with follow mode enabled
 
 ### Requirement: Configure startup diagnostic behavior
-The `uatu serve` command SHALL accept a `--debug` flag that enables verbose on-disk metrics history for the session. The same effect MUST be triggered when the environment variable `UATU_DEBUG` is set to a non-empty value. The command SHALL accept a `--no-watchdog` flag that suppresses the companion watchdog subprocess (intended as an escape hatch). The command SHALL accept a `--watchdog-timeout=<ms>` flag that overrides the default heartbeat staleness threshold; the same effect MUST be triggered when the environment variable `UATU_HEARTBEAT_TIMEOUT_MS` is set. None of these flags SHALL change the user-visible startup output (the URL line, the optional ASCII banner, the indexing status). Conflicting values between the flag and the environment variable MUST resolve in favor of the flag.
+The session command SHALL accept a `--debug` flag that enables verbose on-disk metrics history for the session. The same effect MUST be triggered when the environment variable `UATU_DEBUG` is set to a non-empty value. The command SHALL accept a `--no-watchdog` flag that suppresses the companion watchdog subprocess (intended as an escape hatch). The command SHALL accept a `--watchdog-timeout=<ms>` flag that overrides the default heartbeat staleness threshold; the same effect MUST be triggered when the environment variable `UATU_HEARTBEAT_TIMEOUT_MS` is set. None of these flags SHALL change the user-visible startup output (the URL line, the optional ASCII banner, the indexing status). Conflicting values between the flag and the environment variable MUST resolve in favor of the flag.
 
 #### Scenario: --debug enables verbose metrics history
-- **WHEN** a user runs `uatu serve --debug`
+- **WHEN** a session child is started with `--debug`
 - **THEN** the session starts normally and prints its URL
 - **AND** the verbose NDJSON metrics file appears in the cache directory shortly after startup
 
 #### Scenario: UATU_DEBUG env var is equivalent to --debug
-- **WHEN** a user runs `UATU_DEBUG=1 uatu serve`
+- **WHEN** a session child is started with `UATU_DEBUG=1` in its environment
 - **THEN** the verbose NDJSON metrics file appears in the cache directory shortly after startup
 - **AND** the behavior is otherwise identical to passing `--debug`
 
 #### Scenario: --no-watchdog suppresses the watchdog subprocess
-- **WHEN** a user runs `uatu serve --no-watchdog`
+- **WHEN** a session child is started with `--no-watchdog`
 - **THEN** no watchdog subprocess is spawned during startup
 - **AND** no heartbeat file is created in the cache directory
 
 #### Scenario: --watchdog-timeout overrides the default staleness threshold
-- **WHEN** a user runs `uatu serve --watchdog-timeout=60000`
+- **WHEN** a session child is started with `--watchdog-timeout=60000`
 - **THEN** the watchdog subprocess uses a 60-second staleness threshold for the duration of the session
 
 #### Scenario: Flag value overrides environment variable
 - **WHEN** the environment has `UATU_HEARTBEAT_TIMEOUT_MS=10000`
-- **AND** a user runs `uatu serve --watchdog-timeout=60000`
+- **AND** a session child is started with `--watchdog-timeout=60000`
 - **THEN** the watchdog subprocess uses the 60-second value from the flag
 
 #### Scenario: Diagnostic flags do not change the user-visible startup output
-- **WHEN** a user runs `uatu serve --debug` from an interactive terminal
+- **WHEN** a session child is started with `--debug` from an interactive terminal
 - **THEN** the indexing status, ASCII banner, and URL are printed exactly as they would be without `--debug`
 
 ### Requirement: Serve exits when supervised standard input closes
@@ -70,7 +71,7 @@ supervising wrapper processes so a crashed supervisor cannot orphan the server.
 - **THEN** the server detects stdin end-of-file and shuts down cleanly
 
 #### Scenario: Default behavior is unchanged
-- **WHEN** `uatu serve` runs without the flag and its standard input closes
+- **WHEN** a source-run session child runs without the flag and its standard input closes
 - **THEN** the server keeps running
 
 #### Scenario: Flag is documented
@@ -78,18 +79,18 @@ supervising wrapper processes so a crashed supervisor cannot orphan the server.
 - **THEN** the usage text lists `--exit-on-stdin-close` with its supervising-wrapper purpose
 
 ### Requirement: Serve accepts a base path flag
-`uatu serve` SHALL accept a `--base-path <prefix>` flag whose value is a normalized absolute path prefix (leading slash required; a trailing slash is accepted and normalized), defaulting to `/`. The session URL printed at startup — both the TTY banner and the single piped-stdout URL line consumed by supervisors — SHALL include the prefix so a supervisor can load the session without reconstructing it. An invalid value (no leading slash, embedded whitespace, or path traversal segments) SHALL fail startup with a usage error. The flag SHALL compose with existing flags (`--no-open`, `--exit-on-stdin-close`, port selection) without behavioral interaction beyond the URL shape.
+The session command SHALL accept a `--base-path <prefix>` flag whose value is a normalized absolute path prefix (leading slash required; a trailing slash is accepted and normalized), defaulting to `/`. The session URL printed at startup — both the TTY banner and the single piped-stdout URL line consumed by supervisors — SHALL include the prefix so a supervisor can load the session without reconstructing it. An invalid value (no leading slash, embedded whitespace, or path traversal segments) SHALL fail startup with a usage error. The flag SHALL compose with existing flags (`--no-open`, `--exit-on-stdin-close`, port selection) without behavioral interaction beyond the URL shape.
 
 #### Scenario: Prefixed URL is printed for supervisors
-- **WHEN** `uatu serve <folder> --no-open --base-path /s/uatu/` starts with piped stdout
+- **WHEN** a session child `uatu serve <folder> --no-open --exit-on-stdin-close --base-path /s/uatu/` starts with piped stdout
 - **THEN** the single URL line printed includes the `/s/uatu/` prefix
 
 #### Scenario: Invalid base path fails fast
-- **WHEN** `uatu serve <folder> --base-path relative/path` is invoked
+- **WHEN** a session child is started with `<folder> --base-path relative/path`
 - **THEN** the process exits non-zero with a usage error before any server starts
 
 #### Scenario: Omitted flag preserves today's output
-- **WHEN** `uatu serve <folder>` runs without `--base-path`
+- **WHEN** a session child is started with `<folder>` and no `--base-path`
 - **THEN** startup output and the session URL are identical to behavior before this flag existed
 
 ### Requirement: Session children start only for the hub
