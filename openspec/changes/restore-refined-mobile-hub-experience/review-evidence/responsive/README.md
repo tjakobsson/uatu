@@ -30,6 +30,11 @@ Earlier complete runs and failed preflights are retained under `history/` and
 `preflight/history/`, with their original FAIL/UNTESTED rows. The initial report
 is preserved under `history/2026-09-10T00-46-29-069Z/`.
 
+Subsequent authorized cleanup removed 115 history PNG copies whose Git blobs
+exactly matched retained current images. See [the duplicate map](../artifact-cleanup.md)
+for all old-path → retained-file associations and immutable blob identities.
+Every run-result JSON, unique capture and preflight artifact remains unchanged.
+
 Observed failures were transient readiness/HTTP/navigation waits, not failed
 select/reflow geometry: pending requests varied among synthetic document,
 credential facts, personal state and a script asset. The previous landscape
@@ -89,5 +94,6 @@ runner does not alter the server heartbeat contract.
 - `{chromium,webkit}-{reduced-motion,forced-colors,contrast}.png` (6)
 - `chromium-reduced-transparency.png` (1)
 
-All are outside the initial golden set. Historical directories intentionally
-retain the earlier screenshots and failing discovery reports without approval.
+All are outside the initial golden set. Historical directories retain unique
+earlier screenshots and all failing discovery reports without approval; removed
+byte-identical PNG copies are documented in the duplicate map above.

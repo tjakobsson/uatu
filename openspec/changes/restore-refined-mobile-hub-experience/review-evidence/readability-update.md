@@ -73,10 +73,16 @@ fingerprint and limits. Initial captures/flags remain in the parent directory.
 | `bun test src/hub/mobile tests/mobile-hub-review src/shell/navigation-cold-boot.test.ts src/shell/hub-nav.test.ts src/shell/navigation-preferences.test.ts` | **359 passed, 0 failed; 3030 assertions** |
 | `bun run typecheck` | PASS |
 | `bunx --no-install tsc --noEmit --pretty false -p tests/mobile-hub-review/tsconfig.json` | PASS |
-| `newstage12.browser.ts` in the combined native probe run | PASS: canonical Devices navigation, notice/dismissal, heading focus, explicit picker interaction, no opening/review mutations and retained mixed-case draft |
+| `newstage12.browser.ts` in the combined native probe run (now retired/superseded; see below) | PASS: canonical Devices navigation, notice/dismissal, heading focus, explicit picker interaction, no opening/review mutations and retained mixed-case draft |
 | `bun test ./tests/mobile-hub-review/shared-ux.browser.ts` | PASS: green 51×31 switch, ≥44px row, native checked semantics, draft-only state, reduced motion and forced colors |
 | `bun tests/mobile-hub-review/editor-entry-chrome-audit.ts` | `activeTag: H1`, `activeName: null`, `changes: 0`, `commits: 0` |
 | Final readability capture | **8 supplemental checks passed, 0 failed; 6 actual PNGs manually inspected** |
+
+The ad hoc `tests/mobile-hub-review/newstage12.browser.ts` probe is explicitly
+retired/superseded, not a current runnable verification entry point. Its source
+is recoverable in Git history at pre-cleanup commit `8fc4811`; its recorded PASS
+above remains historical evidence, not a new run. The focused
+`tests/mobile-hub-review/editor-entry-chrome-audit.ts` remains available.
 
 The switch's first immediate-color assertion caught a normal 150ms transition;
 the corrected assertion waits for the unchanged intended green/translated-thumb

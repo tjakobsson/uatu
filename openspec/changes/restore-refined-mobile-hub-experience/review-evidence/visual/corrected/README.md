@@ -2,14 +2,18 @@
 
 Implementation and browser verification recorded 2026-09-09. This is the actual
 frontend with synthetic services, **not a new approved golden set**, a live Hub
-validation, or completion of the human acceptance gate. Initial discovery files
-in the parent directory remain intact.
+validation, or completion of the human acceptance gate. Initial discovery actuals
+and measurements remain in the parent directory. Earlier derived PNGs from both
+galleries were removed in the approved cleanup and are recoverable at their
+original paths in pre-cleanup Git commit `8fc4811`. Canonical originals, all
+actuals and latest `review-ready/` derivatives remain; historical results and
+failures below have not been rebaselined.
 
 ## Start here
 
-- [Comparison gallery](index.html): **25 reference comparisons per engine**, plus
-  three explicitly unpictured accessibility captures per engine. Each original
-  is left, actual right, with full-frame overlay and absolute RGB diff links.
+- [Actual gallery](index.html): **25 reference-associated actuals per engine**, plus
+  three explicitly unpictured accessibility captures per engine. Each compared
+  actual names its canonical original reference; older composites are in Git.
   The original eight states also have initial-actual / corrected-actual pairs.
 - [Pixel summary](diff-summary.md), [selected geometry](geometry-summary.json).
 - [Chromium measurements](chromium-measurements.json) and
@@ -170,6 +174,9 @@ scalable spacing, normal/contrast material, vectors and zero permanent gutter.
   placement differences and **must not become accepted pixel tolerances**.
 
 ## Verification commands and results
+
+Historical commands/results follow. Do not rerun capture/report commands merely
+to verify cleanup: they write evidence, including pixel/geometry summaries.
 
 ```sh
 bun tests/mobile-hub-review/visual.e2e.ts

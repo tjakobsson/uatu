@@ -15,9 +15,14 @@ user review, **not approved goldens or a claim of exact visual acceptance**.
 - [chromium-measurements.json](chromium-measurements.json) and
   [webkit-measurements.json](webkit-measurements.json): complete computed data,
   source hashes, explicit credential facts and mutation-check outcomes.
-- [preservation.json](preservation.json): **400 retained files verified unchanged**
-  before/after capture, including original references and initial/corrected
-  visual reports/images. This iteration does not rewrite either earlier report.
+- [preservation.json](preservation.json): historical verification of **400 files
+  unchanged before/after the capture**, including original references and
+  initial/corrected visual reports/images. It is not a current-file inventory:
+  the later approved cleanup removes 264 older derived PNGs and updates those
+  galleries. Earlier composites remain recoverable from pre-cleanup Git commit
+  `8fc4811` at their original paths. The manifest and recorded hashes are preserved
+  unchanged, not rebaselined; all actuals, canonical originals, measurements and
+  this latest gallery's derivatives remain.
 - [current-interior-comparison.json](current-interior-comparison.json): independent
   comparison to the initial current Preview/Terminal captures, not historical
   prototype interiors.
@@ -154,7 +159,7 @@ become an accepted golden threshold.
 - iPhone13 descriptor is explicitly overridden to **390×844**, not390×664;
   actual screenshots use CSS scale. Original780×1688 images normalize2→1 using
   Canvas under the approved policy. Historical browser DPR remains unknown.
-- Full originals, normalized originals, actuals, side-by-sides,50% overlays and
+- For this review-ready capture, full originals, normalized originals, actuals, side-by-sides,50% overlays and
   absolute RGB diffs are retained. No masks hide vectors, material, dim hierarchy
   or focus rings. Original SHA-256 accompanies each comparison.
 - Computed geometry tolerances:1.5px for manually read Hub/sheet coordinates,
@@ -222,7 +227,8 @@ git diff --check
   no longer present in the current source.
 - Focused tests: **48 pass,0 fail,357 expectations across3 files**.
 - `git diff --check`: **PASS**.
-- Retained evidence verification: **400 files unchanged**.
+- Historical capture-time evidence verification: **400 files unchanged** (not
+  a claim that all files remain after the later cleanup).
 
 This worker edited only `visual.e2e.ts`, `visual-checks.ts` and new files under
 `visual/review-ready/`. No product/CSS/config/task changes, dependency installation,

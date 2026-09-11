@@ -8,8 +8,8 @@ and both browsers/server close in `finally`. Nothing uses the other worker's 470
 
 ## Browse / reproduce
 
-- Open [index.html](index.html): all 16 side-by-side comparisons, original left,
-  actual right; links to each actual, 50% overlay and absolute RGB difference.
+- Open [index.html](index.html): all 16 retained actuals with their original
+  reference names. Earlier derived comparisons are available in Git (see below).
 - [diff-summary.md](diff-summary.md): numerical pixel comparison for every image.
 - [chromium-measurements.json](chromium-measurements.json) and
   [webkit-measurements.json](webkit-measurements.json): computed typography,
@@ -21,6 +21,8 @@ bun tests/mobile-hub-review/visual.e2e.ts
 bun openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/report.ts
 ```
 
+These are historical capture/report commands, not cleanup verification commands;
+running them may overwrite evidence. The report now targets the corrected gallery.
 The `.e2e.ts` is a standalone Bun discovery runner, not a snapshot assertion suite;
 it programmatically reuses the existing server rather than the fixed-port
 Playwright config. Preserve this initial evidence before recapturing after fixes.
@@ -30,8 +32,14 @@ The iPhone 13 descriptor is explicitly overridden to **390×844 CSS pixels**;
 it is not the descriptor's 390×664 browser viewport. Actuals use `scale: css`.
 Original 780×1688 images are resampled to 390×844 using browser Canvas according
 to the approved normalization index; originals are untouched. The normalization
-is not a claim to know historical browser DPR. Each state has five PNGs:
-`{chromium,webkit}-{state}-{actual,normalized,side,overlay,diff}.png`.
+is not a claim to know historical browser DPR. Each state originally had five
+PNGs: `{chromium,webkit}-{state}-{actual,normalized,side,overlay,diff}.png`.
+The approved cleanup removes only the 64 derived PNGs in this directory and
+200 in `corrected/` (nonrecursive `*-{normalized,side,overlay,diff}.png`). All
+actuals, canonical originals, measurements and latest `review-ready/` derivatives
+remain. Earlier composites are recoverable from pre-cleanup Git commit `8fc4811`
+at their original paths; this is a normal cleanup, not artifact-history removal.
+Historical results and failures below are unchanged, not rebaselined.
 
 States: `hub`, `visited-return`, `settings`, `preview-side-sheet`,
 `preview-expanded`, `preview-collapsed`, `terminal-expanded`, `terminal-collapsed`.
