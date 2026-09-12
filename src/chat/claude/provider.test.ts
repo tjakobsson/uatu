@@ -465,21 +465,29 @@ describe("streaming and session signals (D10, D11)", () => {
     expect(removed.length).toBe(3);
   });
 
-  test("rate limits surface as coded notices with their reset, and clear once allowed again", () => {
+  test("a rate limit is one standing with its onset, updated in place and retired when allowed", () => {
     const memory = createClaudeEventMemory();
     const warning = normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl1", timestamp: at(0), rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.87, resetsAt: 1_788_400_000 } }, memory, "live");
-    expect(warning.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "notice:rate-limit:rl1", type: "notice", level: "warning", code: "rate-limit-warning", resetsAt: 1_788_400_000_000 }) });
+    expect(warning.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "notice:rate-limit", type: "notice", createdAt: Date.parse(at(0)), level: "warning", code: "rate-limit-warning", resetsAt: 1_788_400_000_000 }) });
     expect((warning.updates[0] as { item: { message: string } }).item.message).toBe("Approaching your 5-hour rate limit (87% used).");
+    // Restating one standing is not news: the same item, at the same onset.
+    const restated = normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl1b", timestamp: at(9), rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.88 } }, memory, "live");
+    expect(restated.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "notice:rate-limit", createdAt: Date.parse(at(0)), code: "rate-limit-warning" }) }]);
+    // Hardening to a rejection updates that same item, still at its onset.
     const rejected = normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl2", timestamp: at(1), rate_limit_info: { status: "rejected", rateLimitType: "seven_day", resetsAt: 1_788_400_000_000 } }, memory, "live");
-    expect(rejected.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ level: "error", code: "rate-limit-rejected", resetsAt: 1_788_400_000_000 }) });
+    expect(rejected.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "notice:rate-limit", createdAt: Date.parse(at(0)), level: "error", code: "rate-limit-rejected", resetsAt: 1_788_400_000_000 }) });
     expect((rejected.updates[0] as { item: { message: string } }).item.message).toBe("Rate limit reached for your 7-day window.");
+    // Allowed again retires the standing rather than appending a third row.
     const allowed = normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl3", timestamp: at(2), rate_limit_info: { status: "allowed" } }, memory, "live");
-    expect(allowed.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ code: "rate-limit-cleared", level: "info" }) });
+    expect(allowed.updates).toEqual([{ kind: "remove", itemId: "notice:rate-limit" }]);
     // Routine allowed events with nothing to clear are silent.
     expect(normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl4", timestamp: at(3), rate_limit_info: { status: "allowed" } }, memory, "live").outcome).toBe("ignored");
     // A warning alone is a standing too: the next plain "allowed" retires it.
     normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl5", timestamp: at(4), rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.9 } }, memory, "live");
-    expect(normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl6", timestamp: at(5), rate_limit_info: { status: "allowed" } }, memory, "live").updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ code: "rate-limit-cleared" }) });
+    expect(normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl6", timestamp: at(5), rate_limit_info: { status: "allowed" } }, memory, "live").updates).toEqual([{ kind: "remove", itemId: "notice:rate-limit" }]);
+    // A fresh standing after a clear is a fresh onset.
+    const reentered = normalizeClaudeMessage({ type: "rate_limit_event", uuid: "rl7", timestamp: at(6), rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.91 } }, memory, "live");
+    expect(reentered.updates[0]).toEqual({ kind: "upsert", item: expect.objectContaining({ id: "notice:rate-limit", createdAt: Date.parse(at(6)) }) });
   });
 
   test("a refusal fallback re-attributes later usage to the fallback model and says so", () => {
@@ -1663,11 +1671,21 @@ describe("ClaudeProvider sessions", () => {
     first.push({ type: "rate_limit_event", uuid: "rl1", session_id: session.id, rate_limit_info: { status: "rejected", rateLimitType: "five_hour" } });
     first.push({ type: "result", subtype: "error_during_execution", uuid: "res1", timestamp: "2026-09-02T10:00:05.000Z", session_id: session.id, is_error: true, errors: ["rate limited"] });
     await waitFor(() => first.returned);
-    // The window reset; the next process's first "allowed" clears the badge.
     await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
     const second = queries[1]!;
+    // The onset survived the query boundary: the second process's standing
+    // is the first's, not a fresh one dated to the resume.
+    const onset = events.flatMap(event => event.updates)
+      .find(update => update.kind === "upsert" && update.item.id === "notice:rate-limit") as { item: { createdAt: number } };
+    second.push({ type: "rate_limit_event", uuid: "rl1b", session_id: session.id, rate_limit_info: { status: "rejected", rateLimitType: "five_hour" } });
+    await waitFor(() => events.filter(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "notice:rate-limit")).length > 1);
+    const resumed = events.flatMap(event => event.updates)
+      .filter(update => update.kind === "upsert" && update.item.id === "notice:rate-limit")
+      .at(-1) as { item: { createdAt: number } };
+    expect(resumed.item.createdAt).toBe(onset.item.createdAt);
+    // The window reset; the next "allowed" retires the standing.
     second.push({ type: "rate_limit_event", uuid: "rl2", session_id: session.id, rate_limit_info: { status: "allowed" } });
-    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && (update.item as { code?: string }).code === "rate-limit-cleared")));
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "remove" && update.itemId === "notice:rate-limit")));
     stop();
     await provider.dispose();
   });

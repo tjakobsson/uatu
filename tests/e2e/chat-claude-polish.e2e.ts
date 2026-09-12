@@ -19,6 +19,9 @@ import { openChatConfiguration, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 const CHANGE_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/polish-claude-code-chat/screenshots");
+// Shots for the change in flight land in its own folder, not the archived
+// one the rest of this file was written for.
+const RATE_LIMIT_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/quiet-rate-limit-signals/screenshots");
 // The plan-usage readout landed as its own change; its evidence goes to its
 // own folder while the change is open and to the test output once archived.
 const USAGE_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/claude-usage-readout/screenshots");
@@ -395,20 +398,31 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(status).toHaveAttribute("aria-label", "Retrying (attempt 2 of 10, HTTP 529)");
     // Still a live turn: the primary action is Cancel, not Send.
     await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", /Cancel/);
-    await control(request, { action: "item", conversationId: id, item: { id: "notice:rl1", type: "notice", createdAt: 5, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt: Date.now() + 3_600_000 } });
-    const badge = page.locator("#chat-rate-limit");
-    await expect(badge).toBeVisible();
-    await expect(badge).toHaveText(/^Rate limited · resets /);
-    await expect(badge).toHaveAttribute("data-level", "rejected");
-    await expect(page.locator('[data-chat-item-id="notice:rl1"]')).toHaveAttribute("data-notice-code", "rate-limit-rejected");
+    // The standing is the composer's, not the timeline's: one chip, opened
+    // for the detail, and no row anywhere.
+    await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 5, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt: Date.now() + 3_600_000 } });
+    const chip = page.locator("#chat-plan-usage");
+    const chipSummary = page.locator("#chat-plan-usage-summary");
+    await expect(chipSummary).toBeVisible();
+    await expect(chipSummary).toHaveText(/^Rate limited · resets /);
+    await expect(chip).toHaveAttribute("data-level", "rejected");
+    await expect(page.locator('[data-chat-item-id="notice:rate-limit"]')).toHaveCount(0);
+    await expect(page.locator("#chat-rate-limit-live")).toHaveText(/^Rate limit reached for your 5-hour window\. Resets /);
+    // It opens — the thing the badge could never do.
+    await chipSummary.click();
+    await expect(page.locator("#chat-plan-readout-standing")).toBeVisible();
+    await expect(page.locator("#chat-plan-readout-standing")).toHaveText(/^Rate limit reached for your 5-hour window\. Resets /);
+    await chipSummary.click();
     await capture(page, testInfo, "phase3-status-retrying-compacting-ratelimit");
     await control(request, { action: "status", conversationId: id, status: "running" });
     await expect(status).toHaveAttribute("data-state", "working");
     await control(request, { action: "status", conversationId: id, status: "compacting" });
     await expect(status).toHaveAttribute("data-state", "compacting");
     await expect(status).toHaveAttribute("aria-label", "Compacting context");
-    await control(request, { action: "item", conversationId: id, item: { id: "notice:rl2", type: "notice", createdAt: 6, level: "info", message: "Rate limit cleared; requests are allowed again.", code: "rate-limit-cleared" } });
-    await expect(badge).toBeHidden();
+    // Retired, not restated: the agent removes the standing it reported.
+    await control(request, { action: "removeItem", conversationId: id, itemId: "notice:rate-limit" });
+    await expect(chipSummary).toBeHidden();
+    await expect(page.locator("#chat-rate-limit-live")).toHaveText("Rate limit cleared; requests are allowed again.");
     await control(request, { action: "status", conversationId: id, status: "running" });
     await control(request, { action: "status", conversationId: id, status: "completed" });
     await expect(status).toHaveAttribute("data-state", "ready");
@@ -446,6 +460,64 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(summary).toHaveText("Session 37% · Week 12%");
     await control(request, { action: "item", conversationId: id, item: { id: "context:report:3", type: "context_report", createdAt: 6, total: 25_000, max: 200_000, plan: {} } });
     await expect(plan).toBeHidden();
+  });
+
+  test("a rate-limit standing folds into the plan chip, with and without a plan to fold into", async ({ page, request }, testInfo) => {
+    const resetsAt = Date.now() + 3_600_000;
+    const standing = (code: "rate-limit-warning" | "rate-limit-rejected", message: string) =>
+      ({ id: "notice:rate-limit", type: "notice" as const, createdAt: 5, level: code === "rate-limit-rejected" ? "error" as const : "warning" as const, message, code, resetsAt });
+    const id = await bootClaude(page, request, "Rate limit", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+      { id: "context:report:1", type: "context_report", createdAt: 2, total: 24_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" }, plan: { fiveHour: { utilization: 9, resetsAt }, sevenDay: { utilization: 25, resetsAt } } },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const chip = page.locator("#chat-plan-usage");
+    const summary = page.locator("#chat-plan-usage-summary");
+    await expect(summary).toHaveText("Session 9% · Week 25%");
+    await expect(chip).toHaveAttribute("data-level", "normal");
+
+    // A warning keeps the figures and raises the level — here for a window
+    // the summary does not even name.
+    await control(request, { action: "item", conversationId: id, item: standing("rate-limit-warning", "Approaching your 7-day (overage included) rate limit (77% used).") });
+    await expect(summary).toHaveText("Session 9% · Week 25%");
+    await expect(chip).toHaveAttribute("data-level", "warning");
+    await expect(page.locator('[data-chat-item-id="notice:rate-limit"]')).toHaveCount(0);
+    await expect(page.locator(".chat-notice")).toHaveCount(0);
+    await summary.click();
+    await expect(page.locator("#chat-plan-readout-standing")).toHaveText(/^Approaching your 7-day \(overage included\) rate limit \(77% used\)\. Resets /);
+    // The windows are still there to read beneath it.
+    await expect(page.locator("#chat-plan-readout-rows")).toBeVisible();
+    await capture(page, testInfo, "rate-limit-warning-folded-into-plan-chip", RATE_LIMIT_SCREENSHOTS);
+    await summary.click();
+
+    // A rejection displaces the figures: blocked is the fact that matters.
+    await control(request, { action: "item", conversationId: id, item: standing("rate-limit-rejected", "Rate limit reached for your 7-day window.") });
+    await expect(summary).toHaveText(/^Rate limited · resets /);
+    await expect(chip).toHaveAttribute("data-level", "rejected");
+    await capture(page, testInfo, "rate-limit-rejected-folded-into-plan-chip", RATE_LIMIT_SCREENSHOTS);
+
+    // Retired: the chip returns to the plan it was showing all along.
+    await control(request, { action: "removeItem", conversationId: id, itemId: "notice:rate-limit" });
+    await expect(summary).toHaveText("Session 9% · Week 25%");
+    await expect(chip).toHaveAttribute("data-level", "normal");
+  });
+
+  test("a rate limit on a login with no plan still has a chip to live in", async ({ page, request }, testInfo) => {
+    // An API-key login reports an empty plan and no cost: before this the
+    // standing had nowhere to go, because there was no chip at all.
+    const id = await bootClaude(page, request, "Rate limit, no plan", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+      { id: "context:report:1", type: "context_report", createdAt: 2, total: 24_000, max: 200_000, model: { providerId: "anthropic", modelId: "sonnet" }, plan: {} },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const summary = page.locator("#chat-plan-usage-summary");
+    await expect(page.locator("#chat-plan-usage")).toBeHidden();
+    await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 3, level: "warning", message: "Approaching your 5-hour rate limit (91% used).", code: "rate-limit-warning", resetsAt: Date.now() + 1_800_000 } });
+    await expect(summary).toBeVisible();
+    await expect(summary).toHaveText(/^Near rate limit · resets /);
+    // It opens, and the standing is the whole readout: no windows to draw.
+    await summary.click();
+    await expect(page.locator("#chat-plan-readout-standing")).toHaveText(/^Approaching your 5-hour rate limit \(91% used\)\. Resets /);
+    await expect(page.locator("#chat-plan-readout-rows")).toBeHidden();
+    await capture(page, testInfo, "rate-limit-without-a-plan", RATE_LIMIT_SCREENSHOTS);
   });
 
   test("a login without plan limits keeps the conversation's cost reachable: the chip states it and the readout is this conversation alone", async ({ page, request }, testInfo) => {

@@ -14,7 +14,7 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, statusLabel, subagentEntries, subagentLabel, workingLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
-import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLevel, rateLimitBadgeLabel, sessionTotalsTitle } from "./composer-status";
+import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
@@ -103,13 +103,14 @@ export function initChat(api = new ChatApiClient()): void {
   const configurationVariantSection = document.querySelector<HTMLElement>("#chat-configuration-variant-section");
   const configurationVariant = document.querySelector<HTMLSelectElement>("#chat-configuration-variant");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
-  const rateLimitBadge = document.querySelector<HTMLElement>("#chat-rate-limit");
+  const rateLimitLive = document.querySelector<HTMLElement>("#chat-rate-limit-live");
   const planUsage = document.querySelector<HTMLDetailsElement>("#chat-plan-usage");
   const planUsageSummary = document.querySelector<HTMLElement>("#chat-plan-usage-summary");
   const planReadout = document.querySelector<HTMLElement>("#chat-plan-readout");
   const planReadoutHead = document.querySelector<HTMLElement>("#chat-plan-readout-head");
   const planReadoutName = document.querySelector<HTMLElement>("#chat-plan-readout-name");
   const planReadoutRowsElement = document.querySelector<HTMLElement>("#chat-plan-readout-rows");
+  const planReadoutStanding = document.querySelector<HTMLElement>("#chat-plan-readout-standing");
   const planPin = document.querySelector<HTMLButtonElement>("#chat-plan-pin");
   const planSession = document.querySelector<HTMLElement>("#chat-plan-readout-session");
   const planSessionTitle = document.querySelector<HTMLElement>("#chat-plan-session-title");
@@ -1623,6 +1624,12 @@ export function initChat(api = new ChatApiClient()): void {
    * resets keep pace with the clock.
    */
   let paintedPlanReport: ContextReportItem | undefined;
+  // The standing the chip and readout were last painted for, so a rate
+  // limit that begins or ends without a new plan report still repaints.
+  let paintedStanding: RateLimitStanding | undefined;
+  // The standing last spoken, so the live region announces transitions
+  // rather than repeating itself on every routine sync.
+  let announcedStanding: string | undefined;
   let planTick: ReturnType<typeof setInterval> | undefined;
   const paintPlanRows = () => {
     if (planReadoutRowsElement && paintedPlanReport?.plan) planReadoutRowsElement.replaceChildren(...buildPlanRowNodes(document, planReadoutRows(paintedPlanReport.plan)));
@@ -1690,36 +1697,50 @@ export function initChat(api = new ChatApiClient()): void {
   // empty plan and says the login reports none. "Empty" is the readout's
   // own test — no row to draw — not the chip's base summary: a plan of only
   // a model-scoped bucket, or of reset-only base windows, has rows to show.
-  const syncPlanUsage = () => {
+  const syncPlanUsage = (standing: RateLimitStanding | undefined) => {
     if (!planUsage || !planUsageSummary) return;
     const report = projection && declares("context") ? latestPlanReport(projection.items) : undefined;
     const plan = report?.plan;
-    const text = report ? planSummaryLabel(report) : undefined;
-    planUsage.hidden = !text;
-    if (!text || !report || !plan) {
+    // One chip for the plan and the standing together. It can be shown for
+    // a standing alone, so a login with no plan is not left with nowhere to
+    // say it is rate limited.
+    const chip = planChip(report, standing);
+    planUsage.hidden = !chip;
+    if (!chip) {
       planUsage.open = false;
       paintedPlanReport = undefined;
+      paintedStanding = undefined;
       // An empty plan still tells the pane something: this login has none.
       if (report?.plan) noteUsageReport({ plan: report.plan, reportedAt: report.createdAt });
       return;
     }
-    const hasWindows = planHasRows(plan);
-    planUsageSummary.textContent = text;
-    planUsage.dataset.level = hasWindows ? planUtilizationLevel(plan) : "normal";
-    planUsage.dataset.summary = hasWindows ? "plan" : "cost";
-    if (report === paintedPlanReport) return;
+    const hasWindows = Boolean(plan && planHasRows(plan));
+    planUsageSummary.textContent = chip.text;
+    planUsage.dataset.level = chip.level;
+    planUsage.dataset.summary = chip.kind;
+    // The standing is repainted on its own, not only when the report moves:
+    // a rate limit can begin and end without the login reporting a window.
+    if (report === paintedPlanReport && standing?.message === paintedStanding?.message && standing?.level === paintedStanding?.level) return;
     paintedPlanReport = report;
-    const name = planName(plan);
+    paintedStanding = standing;
+    if (planReadoutStanding) {
+      const resets = standing?.resetsAt === undefined ? "" : ` Resets ${new Date(standing.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`;
+      planReadoutStanding.hidden = !standing;
+      planReadoutStanding.textContent = standing ? `${standing.message}${resets}` : "";
+    }
+    const name = plan ? planName(plan) : undefined;
     if (planReadoutHead) planReadoutHead.hidden = !hasWindows;
     if (planReadoutRowsElement) planReadoutRowsElement.hidden = !hasWindows;
-    planReadout?.setAttribute("aria-label", hasWindows ? "Plan usage" : "This conversation's usage");
+    planReadout?.setAttribute("aria-label", hasWindows ? "Plan usage" : standing ? "Rate limit" : "This conversation's usage");
     if (planReadoutName) planReadoutName.textContent = name ?? "Plan usage";
     planUsageSummary.title = hasWindows
       ? `${name ?? "Plan usage"} · open for every window and its reset`
-      : "This login reports no plan limits · open for this conversation's cost and per-model usage";
+      : standing
+        ? "Open for what the login reported and when it resets"
+        : "This login reports no plan limits · open for this conversation's cost and per-model usage";
     paintPlanRows();
-    paintPlanSession(report.session, projection?.items ?? []);
-    noteUsageReport({ plan, reportedAt: report.createdAt });
+    paintPlanSession(report?.session, projection?.items ?? []);
+    if (plan) noteUsageReport({ plan, reportedAt: report!.createdAt });
   };
   planUsage?.addEventListener("toggle", () => {
     if (planUsage.open) {
@@ -1758,19 +1779,21 @@ export function initChat(api = new ChatApiClient()): void {
       backgroundDeclared: declares("background-tasks"),
       backgroundTasks: runningBackgroundTasks(projection?.items ?? []),
     });
-    // The rate-limit badge and plan utilization ride beside the status, from
-    // the latest notice / report the timeline holds (D11, spec).
+    // The rate-limit standing and plan utilization ride beside the status as
+    // one chip, from the standing / report the timeline holds (D11, spec).
     const limit = projection ? latestRateLimit(projection.items) : undefined;
-    if (rateLimitBadge) {
-      const badge = limit ? rateLimitBadgeLabel(limit) : undefined;
-      rateLimitBadge.hidden = !badge;
-      rateLimitBadge.textContent = badge ?? "";
-      rateLimitBadge.dataset.level = limit?.level ?? "";
-      if (limit?.resetsAt) rateLimitBadge.title = `Resets ${new Date(limit.resetsAt).toLocaleString()}`;
-      else rateLimitBadge.removeAttribute("title");
+    syncPlanUsage(limit);
+    // Spoken only on a transition: beginning, hardening, or being retired.
+    if (rateLimitLive) {
+      const spoken = limit ? `${limit.message}${limit.resetsAt === undefined ? "" : ` Resets ${new Date(limit.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`}` : undefined;
+      if (spoken !== announcedStanding) {
+        // A standing that ended is worth saying: the reader was told it
+        // began, and the chip they were watching is about to go quiet.
+        rateLimitLive.textContent = spoken ?? (announcedStanding ? "Rate limit cleared; requests are allowed again." : "");
+        announcedStanding = spoken;
+      }
     }
-    syncPlanUsage();
-    if (composerChips) composerChips.hidden = (rateLimitBadge?.hidden ?? true) && (planUsage?.hidden ?? true);
+    if (composerChips) composerChips.hidden = planUsage?.hidden ?? true;
     composerStatus.dataset.state = stateName;
     composerStatus.setAttribute("aria-label", label);
     composerStatus.title = stateName === "working" ? workingText() : label;

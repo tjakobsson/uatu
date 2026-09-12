@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import type { ChatProjection } from "./projection";
-import type { ConversationItem } from "./types";
+import { RATE_LIMIT_ITEM_ID, type ConversationItem } from "./types";
 
 const dom = parseHTML("<!doctype html><html><body><div id=\"items\"></div></body></html>");
 beforeAll(() => {
@@ -1030,12 +1030,40 @@ describe("recalled memory rows and coded notices", () => {
   test("a coded notice carries its code for the surface to react to", () => {
     const renderer = new TimelineRenderer();
     const host = target();
-    renderer.render(host, projectionWith([{ id: "notice:rl", type: "notice", createdAt: 1, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt: 1_788_400_000_000 }]), new Set());
-    const notice = host.querySelector('[data-chat-item-id="notice:rl"]')!;
-    expect(notice.getAttribute("data-notice-code")).toBe("rate-limit-rejected");
-    // The reset time is the reader's clock, appended where the notice shows.
-    expect(notice.textContent).toMatch(/^Rate limit reached for your 5-hour window\. Resets \d.*\.$/);
-    expect(notice.getAttribute("role")).toBe("alert");
+    renderer.render(host, projectionWith([{ id: "notice:fb", type: "notice", createdAt: 1, level: "warning", message: "claude-opus-5 declined this request; the turn continues on claude-sonnet-4-5.", code: "refusal-fallback" }]), new Set());
+    const notice = host.querySelector('[data-chat-item-id="notice:fb"]')!;
+    expect(notice.getAttribute("data-notice-code")).toBe("refusal-fallback");
+    expect(notice.getAttribute("role")).toBe("status");
+  });
+
+  test("a rate-limit standing is data for the composer, never a row", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const standing = (code: string, level: "warning" | "error"): ConversationItem =>
+      ({ id: RATE_LIMIT_ITEM_ID, type: "notice", createdAt: 1, level, message: "Approaching your 7-day rate limit (77% used).", code, resetsAt: 1_788_400_000_000 });
+    for (const item of [standing("rate-limit-warning", "warning"), standing("rate-limit-rejected", "error")]) {
+      renderer.render(host, projectionWith([item]), new Set());
+      expect(host.querySelector(`[data-chat-item-id="${RATE_LIMIT_ITEM_ID}"]`)).toBeNull();
+      expect(host.querySelectorAll(".chat-item")).toHaveLength(0);
+    }
+  });
+
+  test("a filtered standing between two tool calls does not split their group", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const tool = (n: number): ConversationItem => ({ id: `tool:${n}`, type: "tool", createdAt: n, name: "Read", status: "completed", input: JSON.stringify({ file_path: `${n}.ts` }), output: "x" });
+    renderer.render(host, projectionWith([
+      tool(1),
+      tool(2),
+      { id: RATE_LIMIT_ITEM_ID, type: "notice", createdAt: 3, level: "warning", message: "Approaching your 7-day rate limit (77% used).", code: "rate-limit-warning" },
+      tool(4),
+    ], { status: "completed" }), new Set());
+    // One group holding all three calls: the standing is filtered before
+    // grouping, so it cannot break a finished run apart.
+    const groups = host.querySelectorAll(".chat-activity-group");
+    expect(groups).toHaveLength(1);
+    expect([...groups[0]!.querySelectorAll(".chat-group-items [data-chat-item-id]")].map(node => node.getAttribute("data-chat-item-id")))
+      .toEqual(["tool:1", "tool:2", "tool:4"]);
   });
 });
 

@@ -443,13 +443,29 @@ export type NoticeItem = TimelineItemBase & {
   level: "info" | "warning" | "error";
   message: string;
   // A machine-readable kind for notices the surface reacts to beyond
-  // showing them: `rate-limit-warning` and `rate-limit-rejected` drive the
-  // composer's rate-limit badge (the latest one wins), `rate-limit-cleared`
-  // retires it, `refusal-fallback` names a model swap. Absent otherwise.
+  // showing them: `rate-limit-warning` and `rate-limit-rejected` carry the
+  // plan chip's standing and are never drawn as rows; `refusal-fallback`
+  // names a model swap. Absent otherwise.
   code?: string;
   // When a rate-limit notice's window resets, as a timestamp.
   resetsAt?: number;
 };
+
+/**
+ * The one item id a rate-limit standing occupies. A standing is a state,
+ * not an event log: however many times the login restates it, it is this
+ * one item, upserted in place and removed when requests are allowed again.
+ * `createdAt` marks when the conversation entered the standing.
+ *
+ * Data for the composer's plan chip and its readout, never a timeline row —
+ * the same contract `context_report` has with the context readout.
+ */
+export const RATE_LIMIT_ITEM_ID = "notice:rate-limit";
+
+/** Whether an item is the rate-limit standing (data, not a row). */
+export function isRateLimitStanding(item: ConversationItem): boolean {
+  return item.type === "notice" && item.code?.startsWith("rate-limit") === true;
+}
 
 // One row of an agent-reported context breakdown. `kind` says what the row
 // is: `used` content occupies the window and sums to the report's total;

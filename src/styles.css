@@ -6566,7 +6566,6 @@ body.is-resizing-chat .chat-resizer {
   display: none;
 }
 
-.chat-rate-limit,
 .chat-plan-usage-summary {
   flex: 0 0 auto;
   max-width: 14rem;
@@ -6603,27 +6602,43 @@ body.is-resizing-chat .chat-resizer {
   border-color: var(--border-medium);
 }
 
-/* Warning is the rate-limit badge's colour: the same signal, one step
-   earlier — the reading says a window is nearly spent before the server
-   says so. */
+/* Warning: a window is nearly spent, or the login says it is near its
+   limit. One colour for one meaning, whether the reading or the server
+   said so first. */
 .chat-plan-usage[data-level="warning"] > .chat-plan-usage-summary {
   color: var(--warning, #b7791f);
   border-color: var(--warning, #b7791f);
   font-weight: 600;
 }
 
-.chat-rate-limit {
-  border: 1px solid var(--warning, #b7791f);
-  color: var(--warning, #b7791f);
-}
-
-.chat-rate-limit[data-level="rejected"] {
-  border-color: var(--danger, #cf4f57);
+/* Rejected: requests are blocked, not merely close to it. */
+.chat-plan-usage[data-level="rejected"] > .chat-plan-usage-summary {
   color: var(--danger, #cf4f57);
+  border-color: var(--danger, #cf4f57);
+  font-weight: 600;
 }
 
-.chat-rate-limit[hidden],
 .chat-plan-usage[hidden] {
+  display: none;
+}
+
+/* The standing, above the window rows it explains. */
+.chat-plan-standing {
+  margin: 0 0 0.6rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.4rem;
+  border-left: 3px solid var(--warning, #b7791f);
+  background: var(--surface-sunken, rgba(127, 127, 127, 0.08));
+  color: var(--text-strong);
+  font-size: 0.82em;
+  line-height: 1.35;
+}
+
+.chat-plan-usage[data-level="rejected"] .chat-plan-standing {
+  border-left-color: var(--danger, #cf4f57);
+}
+
+.chat-plan-standing[hidden] {
   display: none;
 }
 

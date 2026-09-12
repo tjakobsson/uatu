@@ -19,7 +19,7 @@ import type {
 import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
-import { createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions } from "./normalization";
+import { createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, type ClaudeEventMemory } from "./normalization";
 import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
 /**
@@ -325,8 +325,10 @@ export class ClaudeProvider implements ChatProvider {
   private readonly backgroundGraceMs: number;
   private readonly titleRefreshDelaysMs: number[];
   // Conversations whose last rate-limit signal was a standing (warning or
-  // rejection): carried across processes so the eventual "allowed" clears it.
-  private readonly rateLimitedSessions = new Set<string>();
+  // rejection), with the moment they entered it: carried across this
+  // process's queries so a resumed conversation keeps one standing, at its
+  // original onset, and the eventual "allowed" clears it.
+  private readonly rateLimitedSessions = new Map<string, NonNullable<ClaudeEventMemory["rateLimit"]>>();
   // Per conversation, the totals of the queries this process has retired and
   // when it began observing the conversation: process memory, like the
   // rate-limit standing, so a restart truthfully starts a new "since".
@@ -1018,13 +1020,13 @@ export class ClaudeProvider implements ChatProvider {
   private async readSession(session: LiveSession): Promise<void> {
     const memory = createClaudeEventMemory();
     memory.resolveModel = id => this.modelAliases.get(id) ?? id;
-    memory.rateLimited = this.rateLimitedSessions.has(session.id);
+    memory.rateLimit = this.rateLimitedSessions.get(session.id);
     try {
       for await (const message of session.query) {
         this.captureCommands(message);
         this.trackSessionLevel(session, message, memory);
         const normalized = normalizeClaudeMessage(message, memory, "live", session.id);
-        if (memory.rateLimited) this.rateLimitedSessions.add(session.id); else this.rateLimitedSessions.delete(session.id);
+        if (memory.rateLimit) this.rateLimitedSessions.set(session.id, memory.rateLimit); else this.rateLimitedSessions.delete(session.id);
         this.adoptRefusalFallback(session.id, message);
         // A retry or a compaction names a state of the conversation's own
         // turn. Outside one (a background subagent's retry, the CLI's side
