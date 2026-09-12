@@ -1,5 +1,7 @@
 # Review-ready visual recapture — manual approval awaiting
 
+> Start with the [current evidence index](../../README.md) and [current verification](../../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 **Final successful capture:** 2026-09-10, Chromium153.0.8010.12 and WebKit26.6,
 Bun1.4.2. This directory contains **50 full-frame reference comparisons and six
 accessibility-extension captures** of the actual frontend. It is evidence for
@@ -7,15 +9,15 @@ user review, **not approved goldens or a claim of exact visual acceptance**.
 
 ## Evidence entry points
 
-- [index.html](index.html): all25 compared states per engine, original left /
+- [historical index.html](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/review-ready/index.html): all25 compared states per engine, original left /
   actual right, links to50% overlays and full absolute-RGB differences. Previous
   corrected / final actual pairs are available without modifying earlier images.
 - [diff-summary.md](diff-summary.md):50 numerical comparisons with exact anchors.
-- [summary.json](summary.json): selected geometry, errors, checks and provenance.
-- [chromium-measurements.json](chromium-measurements.json) and
-  [webkit-measurements.json](webkit-measurements.json): complete computed data,
+- [summary.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/review-ready/summary.json): selected geometry, errors, checks and provenance.
+- [chromium-measurements.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/review-ready/chromium-measurements.json) and
+  [webkit-measurements.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/review-ready/webkit-measurements.json): complete computed data,
   source hashes, explicit credential facts and mutation-check outcomes.
-- [preservation.json](preservation.json): historical verification of **400 files
+- [preservation.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/review-ready/preservation.json): historical verification of **400 files
   unchanged before/after the capture**, including original references and
   initial/corrected visual reports/images. It is not a current-file inventory:
   the later approved cleanup removes 264 older derived PNGs and updates those
@@ -23,7 +25,7 @@ user review, **not approved goldens or a claim of exact visual acceptance**.
   `8fc4811` at their original paths. The manifest and recorded hashes are preserved
   unchanged, not rebaselined; all actuals, canonical originals, measurements and
   this latest gallery's derivatives remain.
-- [current-interior-comparison.json](current-interior-comparison.json): independent
+- [current-interior-comparison.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/review-ready/current-interior-comparison.json): independent
   comparison to the initial current Preview/Terminal captures, not historical
   prototype interiors.
 

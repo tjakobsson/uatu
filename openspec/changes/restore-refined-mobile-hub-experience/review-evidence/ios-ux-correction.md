@@ -1,5 +1,7 @@
 # iOS UX correction — review candidate, full verification pending
 
+> Start with the [current evidence index](README.md) and [current verification](verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 2026-09-10. The user requested an all-screen iOS UX review, lower-half access for
 frequent commands, and **no duplicate buttons as a reachability workaround**.
 The user subsequently chose **“Update review now”**, explicitly permitting

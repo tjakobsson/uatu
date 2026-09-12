@@ -1,5 +1,7 @@
 # Responsive/accessibility discovery — task 7.2
 
+> Start with the [current evidence index](../../../README.md) and [current verification](../../../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 Run `bun tests/mobile-hub-review/responsive.e2e.ts` with a **20 minute** outer
 timeout. The standalone runner launches the installed Chromium and WebKit,
 uses one OS-assigned loopback port, synthetic protocols only, and closes its

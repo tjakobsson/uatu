@@ -1,5 +1,7 @@
 # Apple iOS guidance and Uatu operation constraints
 
+> Current entry points: [evidence index](README.md) and [verification](verification.md). This retained research informs the interface; any recorded implementation status belongs to pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, not fresh acceptance.
+
 Researched 2026-09-10 from [Apple Design](https://developer.apple.com/design/)
 and Apple's first-party Human Interface Guidelines/DocC documents. These are
 guidelines adapted to a web/PWA, not Apple certification or native UIKit behavior.

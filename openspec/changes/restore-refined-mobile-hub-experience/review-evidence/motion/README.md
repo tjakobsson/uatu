@@ -1,5 +1,7 @@
 # Same-document motion and remaining continuity verification
 
+> Start with the [current evidence index](../README.md) and [current verification](../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 **Follow-up:** the subsequently authorized fresh/reset default calibration is
 recorded in [default-placement.md](default-placement.md). The old-default audit
 below and `*-handle.json` files are retained as historical measurements; saved

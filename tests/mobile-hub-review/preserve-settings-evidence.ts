@@ -1,5 +1,5 @@
 /** Fixed synthetic browser captures only; never reads user attachments. */
-const root = "openspec/changes/restore-refined-mobile-hub-experience/review-evidence/settings-refinement";
+const root = new URL("./results/artifacts/settings-refinement", import.meta.url).pathname;
 const files = [
   ["credential-current.png", "evidence/purpose-led-settings-results/purpose-led-settings.e2e.t-cd086-tics-behind-Troubleshooting/credential-current.png"],
   ["tools-current.png", "evidence/purpose-led-settings-results/purpose-led-settings.e2e.t-a04dd-overy-cancel-save-ownership/tools-current.png"],

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { chromium, webkit } from "@playwright/test";
 import { buildWorkspaceAssets, startReviewServer, type ApprovedAsset } from "./server";
 import { evidence, buildIdentity } from "./isolation-audit";
 import { pixels } from "./isolation-browser";
 
+await mkdir(evidence, { recursive: true });
 const integratedAssets = await buildWorkspaceAssets();
 const original = await Bun.build({ entrypoints: [new URL("../../src/index.html", import.meta.url).pathname], target: "browser", define: { __UATU_BUILD__: JSON.stringify(buildIdentity) } });
 assert(original.success, original.logs.map(String).join("\n"));

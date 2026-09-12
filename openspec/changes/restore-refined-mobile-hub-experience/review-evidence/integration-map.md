@@ -1,5 +1,7 @@
 # Task 1.3 — scoped same-document integration audit
 
+> Current entry points: [evidence index](README.md) and [verification](verification.md). Keep the interface guidance below; its recorded verification and generated-artifact paths are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, not new acceptance.
+
 Audited 2026-09-09 against the preserved dirty-tree baseline. This is an
 implementation map, not evidence that continuity already works. References are
 to the current working tree; later edits can move line numbers.

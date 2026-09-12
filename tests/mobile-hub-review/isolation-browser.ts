@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { chromium, webkit, type Page } from "@playwright/test";
 import { loginPage, dashboardPage, settingsPage, clonePage, stoppedSessionPage } from "../../src/hub/pages";
 import { evidence, sha } from "./isolation-audit";
@@ -17,6 +17,7 @@ export async function pixels(page: Page, a: Uint8Array, b: Uint8Array) {
 }
 
 if (import.meta.main) {
+  await mkdir(evidence, { recursive: true });
   const html = new Map([["/login", loginPage()], ["/", dashboardPage("baseline")], ["/settings", settingsPage("baseline")], ["/clone", clonePage("baseline")], ["/stopped", stoppedSessionPage("a", true, "Shared workspace")]]);
   const state = { version: "design/hub-mobile-navigation@0ba1dad", workspaces: [
     { id: "a", displayName: "Shared workspace", path: "/private/tmp/uatu-hm-J6ow2s/workspace-a", running: true, shells: [], credentialAssignments: { authentication: ["Baseline SSH"], signing: ["Baseline SSH"] } },

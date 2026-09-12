@@ -1,5 +1,7 @@
 # Synthetic frontend scenario guide
 
+> Current entry points: [evidence index](README.md) and [verification](verification.md). Keep the scenario guidance below; its recorded verification and generated-artifact paths are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, not new acceptance.
+
 2026-09-10. **Mock backend; do not enter real credentials. Awaiting user review.**
 This reconciles every H01–W03 screen and R01–R11 journey in `screen-map.md` with
 the implemented frontend. P = pictured, D = derived, E = unpictured extension.

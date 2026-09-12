@@ -1,5 +1,7 @@
 # Frontend review handoff — phone access confirmed, approval pending
 
+> Start with the [current evidence index](README.md) and [current verification](verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 2026-09-10. **Mock backend; do not enter real credentials.** Actual frontend,
 synthetic management/Chat/Terminal protocols only. This is neither live-backend
 validation nor visual/interaction approval. No archive/spec sync or live rollout

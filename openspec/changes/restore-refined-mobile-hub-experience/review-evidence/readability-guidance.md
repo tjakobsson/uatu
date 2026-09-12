@@ -1,5 +1,7 @@
 # Apple guidance recheck: readable facts, fields and choices
 
+> Current entry points: [evidence index](README.md) and [verification](verification.md). This retained research informs the interface; any recorded implementation status belongs to pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, not fresh acceptance.
+
 2026-09-10. Research was performed after the requested checkpoint was committed
 and pushed: [`c259efb`](https://github.com/addiberra/uatu/commit/c259efb), on
 `fork/design/hub-mobile-navigation`. This pass did not install dependencies or

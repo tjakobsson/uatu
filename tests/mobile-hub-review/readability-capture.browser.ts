@@ -2,7 +2,7 @@ import { chromium, expect } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 
 // Current product bundle, typed synthetic backend, fresh disposable preferences.
-const output = new URL(process.env.READABILITY_OUTPUT ?? "../../openspec/changes/restore-refined-mobile-hub-experience/review-evidence/readability/", import.meta.url).pathname;
+const output = new URL(process.env.READABILITY_OUTPUT ?? "./results/artifacts/readability/", import.meta.url).pathname;
 await mkdir(output, { recursive: true });
 const started = Date.now();
 if (!process.env.READABILITY_URL) {

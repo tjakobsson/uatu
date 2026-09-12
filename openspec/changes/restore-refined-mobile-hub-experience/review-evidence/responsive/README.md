@@ -1,10 +1,12 @@
 # Responsive/accessibility discovery — task 7.2
 
-## Current result
+> Start with the [current evidence index](../README.md) and [current verification](../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
+## Historical final result
 
 **1102 PASS, 0 FAIL, 0 UNTESTED, 1 UNSUPPORTED** in the final complete run.
 Installed Chromium **153.0.8010.12**, WebKit **26.6**, Bun **1.4.2**.
-`scenarios.md` is the exact engine/size/theme/text/state table; `results.json`
+[scenarios.md](scenarios.md) is the exact engine/size/theme/text/state table; [historical results.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/responsive/results.json)
 contains measurements, browser/source provenance and media API evidence.
 This is discovery evidence, not approved screenshot goldens or human acceptance.
 
@@ -33,7 +35,9 @@ is preserved under `history/2026-09-10T00-46-29-069Z/`.
 Subsequent authorized cleanup removed 115 history PNG copies whose Git blobs
 exactly matched retained current images. See [the duplicate map](../artifact-cleanup.md)
 for all old-path → retained-file associations and immutable blob identities.
-Every run-result JSON, unique capture and preflight artifact remains unchanged.
+That was the earlier cleanup's scope. The subsequent compact cleanup moves all
+generated JSON and PNG evidence out of the working tree; unchanged originals are
+available in the pre-cleanup commit above. Scenario tables remain local.
 
 Observed failures were transient readiness/HTTP/navigation waits, not failed
 select/reflow geometry: pending requests varied among synthetic document,
@@ -84,7 +88,7 @@ runner does not alter the server heartbeat contract.
 - Physical screen readers and OS accessibility settings remain outside this
   automated scenario table. Human visual/interaction approval is still needed.
 
-## Current screenshot inventory (22 unapproved extension images)
+## Historical screenshot inventory (22 unapproved extension images)
 
 - `chromium-320x740-{light,dark}-200-{preference,credential}.png` (4)
 - `webkit-320x740-{light,dark}-200-{preference,credential}.png` (4)
@@ -94,6 +98,52 @@ runner does not alter the server heartbeat contract.
 - `{chromium,webkit}-{reduced-motion,forced-colors,contrast}.png` (6)
 - `chromium-reduced-transparency.png` (1)
 
-All are outside the initial golden set. Historical directories retain unique
-earlier screenshots and all failing discovery reports without approval; removed
-byte-identical PNG copies are documented in the duplicate map above.
+All are outside the initial golden set. The pre-cleanup commit retains unique
+earlier screenshots and all failing discovery reports without approval; previously
+removed byte-identical PNG copies are documented in the duplicate map above.
+
+## Preserved failure history and ongoing gates
+
+The compact cleanup does not supersede or convert earlier failures. Counts below
+were checked against the original JSON rows at the pre-cleanup commit, not rerun.
+Each retained scenario table preserves the individual FAIL/UNTESTED rows; full
+measurements, pending-request lists and traces remain in the historical JSON.
+
+| Run (2026-09-10 UTC) | PASS | FAIL | UNTESTED | UNSUPPORTED |
+| --- | ---: | ---: | ---: | ---: |
+| [00:46:29.069](history/2026-09-10T00-46-29-069Z/scenarios.md) | 1022 | 33 | 8 | 0 |
+| [Preflight 00:52:25.303](preflight/history/2026-09-10T00-52-25-303Z/scenarios.md) | 50 | 1 | 14 | 1 |
+| [Preflight 00:54:04.967](preflight/scenarios.md) | 80 | 0 | 0 | 1 |
+| [01:06:33.051](history/2026-09-10T01-06-33-051Z/scenarios.md) | 971 | 4 | 45 | 1 |
+| [01:16:49.444](history/2026-09-10T01-16-49-444Z/scenarios.md) | 1025 | 2 | 21 | 1 |
+| [01:24:57.679](history/2026-09-10T01-24-57-679Z/scenarios.md) | 1070 | 0 | 0 | 1 |
+| [01:31:39.606](history/2026-09-10T01-31-39-606Z/scenarios.md) | 1070 | 0 | 0 | 1 |
+| [01:39:02.234](history/2026-09-10T01-39-02-234Z/scenarios.md) | 1070 | 0 | 0 | 1 |
+| [01:51:36.896](history/2026-09-10T01-51-36-896Z/scenarios.md) | 1001 | 4 | 46 | 1 |
+| [Final 01:58:58.907](scenarios.md) | 1102 | 0 | 0 | 1 |
+
+- Initial failures included **32 WebKit assignment/onboarding target-size rows**
+  across sizes/themes/text stress: native selects measured 23 or 43px high, below
+  the 44px requirement. The 33rd FAIL was Chromium landscape navigation timeout;
+  six downstream rows were UNTESTED. Both engines' reduced transparency were
+  initially UNTESTED, before actual Chromium CDP emulation was added and WebKit
+  was explicitly classified UNSUPPORTED.
+- Later Chromium failures were not confined to the original landscape cell:
+  320×740 light 200%, 844×390 light/dark 200%, and 820×1180 light/dark 200%
+  encountered missing Hub Open readiness, Add token waits, assignment navigation
+  waits, empty Preview content, an onboarding footer wait, or an Open click
+  interruption. Downstream coverage remained UNTESTED, not implicitly passed.
+  The failed preflight specifically timed out waiting for the synthetic Preview
+  document and left 14 downstream rows UNTESTED.
+- The [01:51:36.896 landscape Open-click trace](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/responsive/history/2026-09-10T01-51-36-896Z/results.json)
+  also explicitly records the Settings button in the Hub dock **intercepting
+  pointer events** before a later click attempt and timeout. Preserve this
+  actionability/occlusion observation; the history cannot all be reduced to
+  network waits, and cleanup does not establish its cause or resolution.
+- Three green 1070-row runs were followed by the **1001/4/46/1** run despite
+  `closeConnections: true`. Keep-alive is not an established cause; increasing
+  waits and the final 1102-row pass do not close transport/harness investigation.
+- WebKit reduced-transparency emulation remains UNSUPPORTED. Physical keyboard,
+  VoiceOver/screen readers, OS text scaling/accessibility settings, real-device
+  safe areas, complete interior regression and human visual/interaction approval
+  are not certified by this matrix. No new pass or gate closure is claimed.

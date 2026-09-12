@@ -1,5 +1,7 @@
 # Responsive discovery scenario table
 
+> Start with the [current evidence index](../../README.md) and [current verification](../../verification.md). This is a historical scenario table at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, where its generated JSON/captures remain available. Counts and failures are not fresh acceptance.
+
 | Scenario | Result |
 | --- | --- |
 | chromium-844x390-dark-200-login | PASS |

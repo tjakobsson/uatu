@@ -1,5 +1,7 @@
 # Focused folder picker workflow verification
 
+> Start with the [current evidence index](../README.md) and [current verification](../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 2026-09-11. Browser workflows use a disposable synthetic review server on
 **4727**. Publication uses only the separately owned synthetic reviewer on
 **4703 / HTTPS 8445**. No live backend, providers, PTYs, dependency installation,

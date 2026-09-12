@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { startReviewServer } from "./server";
 
-const output = new URL("../../openspec/changes/restore-refined-mobile-hub-experience/review-evidence/direct-settings/current/", import.meta.url).pathname;
+const output = new URL("./results/artifacts/direct-settings/current/", import.meta.url).pathname;
 
 /** Evidence runner only: actual product bundle, isolated synthetic backend, no live services. */
 export async function runDirectSettingsReview() {

@@ -1,5 +1,7 @@
 # Implementation review — reconciliation and historical findings
 
+> Start with the [current evidence index](README.md) and [current verification](verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 ## Current disposition — 2026-09-10
 
 The interface refinements below were **approved and implemented**, not left as
@@ -89,7 +91,7 @@ targeted composed tests, not all reproduced bugs yet.
 
 ## Visual findings
 
-See [visual/README.md](visual/README.md), [gallery](visual/index.html), measured
+See [visual/README.md](visual/README.md), [historical gallery](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/index.html), measured
 JSON and comparison images: eight states per engine at explicit 390×844 CSS.
 No actual screenshots were approved as goldens.
 

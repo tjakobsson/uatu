@@ -10,8 +10,9 @@ import { corpus, terminalId } from "./protocols";
 import { createReviewPersonalState } from "./transport";
 import { checkHubGeometry, checkSheetGeometry, checkWorkspaceChrome } from "./visual-checks";
 import { activeTask } from './navigation';
+import { mkdir } from "node:fs/promises";
 
-const evidenceRoot = "openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual";
+const evidenceRoot = new URL("./results/artifacts/visual", import.meta.url).pathname;
 const out = `${evidenceRoot}/review-ready`;
 const originals = "design/hub-mobile/screenshots-refined";
 const selectors = [".mh-brand", ".mh-root h1", ".mh-subtitle", ".mh-section", ".mh-group", ".mh-workspace", ".mh-workspace h3", ".mh-folder", ".mh-more svg", ".mh-primary", ".mh-dock", ".mh-tab", ".mh-return", ".mh-identity", ".mh-destination", ".mh-tile", ".mh-sheet", ".mh-sheet header", ".mh-field", ".mh-preference-choices input[type=radio]", ".mh-preference-choices label", ".mh-value", ".mh-sheet footer", ".mh-backdrop", "#touch-tab-bar", ".touch-tab", ".touch-tab-label", "#navigation-handle", "#navigation-handle span", "#preview-file-navigation", ".preview-nav-pill", ".preview-nav-alert"];
@@ -49,6 +50,7 @@ async function compare(page: Page, actual: Buffer, reference: string, prefix: st
 }
 export async function captureVisualDiscovery() {
   if (process.env.MOBILE_HUB_HISTORICAL_DRAWER_REPORT !== '1') throw new Error('Historical drawer report is incompatible with full-page Settings. Use task-layout.e2e.ts for current layout; do not overwrite historical evidence.');
+  await mkdir(evidenceRoot, { recursive: true });
   const hash = async (path: string) => new Bun.CryptoHasher("sha256").update(await Bun.file(path).arrayBuffer()).digest("hex");
   const preserved: Record<string, string> = {};
   for (const root of [evidenceRoot, originals]) for await (const path of new Bun.Glob("**/*").scan({ cwd: root, onlyFiles: true })) {

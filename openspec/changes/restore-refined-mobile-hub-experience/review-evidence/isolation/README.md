@@ -1,5 +1,7 @@
 # Isolation evidence (tasks 7.3 / 7.4)
 
+> Start with the [current evidence index](../README.md) and [current verification](../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 Test-owned evidence only. No production Hub, CLI, backend, credential tool,
 provider or PTY is started. Scripts write only here, never retained goldens.
 Run from repository root with existing Bun/Playwright installations.

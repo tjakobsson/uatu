@@ -78,9 +78,9 @@ test("Devices has one Security entry, truthful count, safe direct routes and con
   const state = await (await request.get("/review/state")).json();
   await expect(devices).toContainText(`${state.model.devices.length} device session`);
   await devices.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: new URL(`../../openspec/changes/restore-refined-mobile-hub-experience/review-evidence/navigation-recovery/${info.project.name}-security.png`, import.meta.url).pathname });
+  await page.screenshot({ path: new URL(`./results/artifacts/navigation-recovery/${info.project.name}-security.png`, import.meta.url).pathname });
   await devices.click(); await expect(page).toHaveURL(/\/settings\?detail=devices$/);
-  await page.screenshot({ path: new URL(`../../openspec/changes/restore-refined-mobile-hub-experience/review-evidence/navigation-recovery/${info.project.name}-devices.png`, import.meta.url).pathname });
+  await page.screenshot({ path: new URL(`./results/artifacts/navigation-recovery/${info.project.name}-devices.png`, import.meta.url).pathname });
   await page.goBack(); await expect(page).toHaveURL(/\/settings\?detail=security$/);
   await expect(page.getByRole("heading", { name: "Session Security", exact: true })).toBeVisible();
   await page.goForward(); await expect(page.getByRole("heading", { name: "Devices", exact: true })).toBeVisible();

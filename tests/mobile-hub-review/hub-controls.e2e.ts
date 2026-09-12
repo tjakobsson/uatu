@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { namedButton } from "./navigation";
 
-const evidence = process.env.UATU_REVIEW_HUB_EVIDENCE ?? new URL("../../openspec/changes/restore-refined-mobile-hub-experience/review-evidence/preview-refinement/", import.meta.url).pathname;
+const evidence = process.env.UATU_REVIEW_HUB_EVIDENCE ?? new URL("./results/artifacts/preview-refinement/", import.meta.url).pathname;
 test.beforeEach(async ({ request }) => { await request.post("/review/reset", { data: { scenario: "mixed" } }); });
 
 test("Hub creation Cancel returns to its starting choices without an extra Configure page", async ({ page, request }, info) => {

@@ -1,5 +1,7 @@
 # Direct settings — actual product evidence
 
+> Start with the [current evidence index](../README.md) and [current verification](../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 Captured 2026-09-10 using `bun tests/mobile-hub-review/direct-settings-review.browser.ts`.
 The runner starts its own port-0 server, builds the actual product frontend, resets
 the existing synthetic backend to `mixed`, and uses one browser at a time. No

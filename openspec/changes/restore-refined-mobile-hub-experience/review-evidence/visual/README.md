@@ -1,5 +1,7 @@
 # Task 7.1 — initial visual discovery, not acceptance
 
+> Start with the [current evidence index](../README.md) and [current verification](../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 Captured 2026-09-09 using installed Playwright **Chromium and WebKit**, real current
 frontend, existing synthetic review server. No live Hub, Tailscale, provider,
 shell, package install, server/config/product edit, or approved golden update.
@@ -8,13 +10,13 @@ and both browsers/server close in `finally`. Nothing uses the other worker's 470
 
 ## Browse / reproduce
 
-- Open [index.html](index.html): all 16 retained actuals with their original
+- Open [historical index.html](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/index.html): all 16 retained actuals with their original
   reference names. Earlier derived comparisons are available in Git (see below).
 - [diff-summary.md](diff-summary.md): numerical pixel comparison for every image.
-- [chromium-measurements.json](chromium-measurements.json) and
-  [webkit-measurements.json](webkit-measurements.json): computed typography,
+- [chromium-measurements.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/chromium-measurements.json) and
+  [webkit-measurements.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/webkit-measurements.json): computed typography,
   geometry, colors, material and icon counts, plus mutation-check results.
-- [geometry-summary.json](geometry-summary.json): selected measurement subset.
+- [geometry-summary.json](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/geometry-summary.json): selected measurement subset.
 
 ```sh
 bun tests/mobile-hub-review/visual.e2e.ts

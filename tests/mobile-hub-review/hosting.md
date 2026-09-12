@@ -44,11 +44,11 @@ Health adds this content identity (not a Git revision):
 The fingerprint hashes sorted served frontend asset paths, MIME types, lengths
 and bytes, including the bundled frontend. It is separate from the evidence
 snapshot manifest and does not imply a clean working tree or user acceptance.
-The fresh safe evidence gallery embeds selected PNGs; retained HTML reports
-remain inert source. Optional future publication is bounded to the exact
-`visual/review-ready` filenames in `hosting-evidence.ts` and `handoff.md`,
-`scenario-guide.md`, `acceptance.md`; absent optional files are not published.
-Adding arbitrary files to these folders does not expose them.
+The compact evidence gallery contains exactly 20 named PNGs, a review guide and
+one current verification/known-issues record. `hosting-evidence.ts` and
+`compact-gallery.ts` declare that fixed set. Historical captures/reports stay in
+Git history; raw generated outputs stay locally ignored. Adding arbitrary files
+to any of these folders does not expose them.
 
 Test-only listener remains hard-bound to `127.0.0.1`. No live Hub authentication,
 cookie reads/writes, proxying, request logging or forwarded-header trust is added.
@@ -102,10 +102,11 @@ identity and the user's review decision separately; these hashes are not approva
 
 `hosting-evidence.ts` declares every selected filename before startup; no root,
 directory listing, baseline, history, personal file or request-derived read exists.
-PNG files render as images; Markdown/JSON/HTML reports are inert text with nosniff.
-The index uses absolute evidence links so both index URLs work. Original HTML
-report source may mention unselected baseline images: those remain unavailable.
-Missing selected files fail startup. Evidence changes require restart.
+PNG files render as images; the two Markdown records are inert text with nosniff.
+Only the generated manifest is JSON. The index uses absolute evidence links so
+both index URLs work. Historical reports, baseline records and raw run directories
+remain unavailable. Missing selected files fail startup. Evidence changes require
+restart; source cleanup never automatically restarts an existing reviewer.
 
 No persistent listener, Tailscale exposure, dependency installation or live Hub
 operation is part of this preparation. Remote HTTPS/WebSocket checks and actual

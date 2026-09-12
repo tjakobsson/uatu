@@ -16,8 +16,12 @@ test("evidence is an immutable byte snapshot of explicit safe selections", async
   const assets = await buildEvidenceAssets();
   expect(assets.size).toBeGreaterThanOrEqual(evidenceSelection.length + 3);
   expect(assets.has("/review/evidence/baseline.json")).toBe(false);
-  expect(assets.get("/review/evidence/visual/corrected/index.html")!.type).toBe("text/plain; charset=utf-8");
+  expect(evidenceSelection).toHaveLength(22);
+  expect(assets.get("/review/evidence/verification.md")!.type).toBe("text/plain; charset=utf-8");
+  expect(assets.has("/review/evidence/visual/corrected/index.html")).toBe(false);
   const manifest = JSON.parse(assets.get("/review/evidence/manifest.json")!.body as string);
+  expect(manifest.selection).toBe("compact-current-review-v1");
+  expect(manifest.files.filter((file: { path: string }) => file.path.endsWith(".png"))).toHaveLength(20);
   for (const file of manifest.files) {
     const asset = assets.get(`/review/evidence/${file.path}`)!;
     expect(new Bun.CryptoHasher("sha256").update(await (asset.body as Blob).arrayBuffer()).digest("hex")).toBe(file.sha256);

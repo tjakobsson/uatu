@@ -1,5 +1,7 @@
 # Task 1.1 — retained reference and dirty-tree evidence
 
+> Current entry points: [evidence index](README.md) and [verification](verification.md). The canonical 49-reference normalization table and baseline below remain useful and retained. Other generated-artifact paths and recorded status are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, not new acceptance.
+
 Recorded 2026-09-09, before product implementation for this change. This is an
 offline inventory, **not frontend acceptance**, new visual goldens, or evidence
 of live backend behavior. `tasks.md` is deliberately unchanged (lead-owned).

@@ -1,3 +1,5 @@
+> Start with the [current evidence index](../../README.md) and [current verification](../../verification.md). This unchanged numeric table is historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, where its generated comparison artifacts remain available; it is not fresh acceptance.
+
 | Engine | State | Reference | Mean absolute RGB error /255 | Pixels over16 |
 |---|---|---|---:|---:|
 | chromium | hub | 01-hub | 8.36 | 8.04% |

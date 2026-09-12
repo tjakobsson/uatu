@@ -6,7 +6,7 @@ import { activeTask, namedButton, credentialCreation } from './navigation';
 // Playwright imports every *.e2e.ts during discovery under Node. The extended
 // Bun evidence runner must have no launch/file effects merely from that import.
 export async function captureResponsiveEvidence() {
-const base = "openspec/changes/restore-refined-mobile-hub-experience/review-evidence/responsive";
+const base = new URL("./results/artifacts/responsive", import.meta.url).pathname;
 // Discovery checks readiness, not response latency; retain failures separately.
 const expect = baseExpect.configure({ timeout: 30000 });
 const out = process.env.RESPONSIVE_PREFLIGHT ? `${base}/preflight` : base;

@@ -1,5 +1,7 @@
 # Corrected Hub / workspace chrome — awaiting visual approval
 
+> Start with the [current evidence index](../../README.md) and [current verification](../../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 Implementation and browser verification recorded 2026-09-09. This is the actual
 frontend with synthetic services, **not a new approved golden set**, a live Hub
 validation, or completion of the human acceptance gate. Initial discovery actuals
@@ -11,15 +13,15 @@ failures below have not been rebaselined.
 
 ## Start here
 
-- [Actual gallery](index.html): **25 reference-associated actuals per engine**, plus
+- [Historical actual gallery](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/corrected/index.html): **25 reference-associated actuals per engine**, plus
   three explicitly unpictured accessibility captures per engine. Each compared
   actual names its canonical original reference; older composites are in Git.
   The original eight states also have initial-actual / corrected-actual pairs.
-- [Pixel summary](diff-summary.md), [selected geometry](geometry-summary.json).
-- [Chromium measurements](chromium-measurements.json) and
-  [WebKit measurements](webkit-measurements.json): full computed metrics,
+- [Pixel summary](diff-summary.md), [selected geometry](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/corrected/geometry-summary.json).
+- [Chromium measurements](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/corrected/chromium-measurements.json) and
+  [WebKit measurements](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/corrected/webkit-measurements.json): full computed metrics,
   assertions, mutation sensitivity, browser versions and relevant source hashes.
-- [Current-interior before/after comparison](current-interior-comparison.json).
+- [Historical current-interior before/after comparison](https://github.com/addiberra/uatu/blob/373ef6350032f6a0f2a91c2037ebafb553bc002f/openspec/changes/restore-refined-mobile-hub-experience/review-evidence/visual/corrected/current-interior-comparison.json).
 - [Retained initial discovery](../README.md).
 
 ## What changed (owned files only)

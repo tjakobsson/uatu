@@ -1,5 +1,7 @@
 # Superseded artifact cleanup — 2026-09-11
 
+> Start with the [current evidence index](README.md) and [current verification](verification.md). This records the earlier cleanup, not the current inventory. Its then-retained generated artifacts are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; the 264 previously removed derived images remain recoverable at `8fc4811c6decb1d2ae0464f8677e6cfd5e4ba7ad`.
+
 User-approved narrow cleanup while this change remains unfinished. Removals are
 recorded in a **new normal commit**, not stripped from earlier history. Privacy
 sanitization/history rewriting is separate and requires later confirmation.

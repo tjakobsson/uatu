@@ -1,5 +1,7 @@
 # Approved-scope fresh/reset handle calibration
 
+> Start with the [current evidence index](../README.md) and [current verification](../verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 This follow-up intentionally changes the **fresh and explicit-reset default**
 only. It does not claim the old0.72 and new≈0.7373 values are equivalent, change
 the placement mapping, retune saved placements, migrate storage or add fields.

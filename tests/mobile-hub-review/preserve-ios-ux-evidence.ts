@@ -1,6 +1,6 @@
 /** Preserve explicitly selected, synthetic test captures before another test run
  * clears its output directory. No user attachment or arbitrary file traversal. */
-const destination = "openspec/changes/restore-refined-mobile-hub-experience/review-evidence/ios-ux";
+const destination = new URL("./results/artifacts/ios-ux", import.meta.url).pathname;
 const selections = [
   ["folder-before.png", "evidence/ios-ux-red-final-1/ios-ux.e2e.ts-RED-folder-b-a2ce5-not-per-folder-action-cards/A02-folder-cards.png"],
   ["folder-after.png", "evidence/ios-ux-smoke-current/ios-ux.e2e.ts-RED-folder-b-a2ce5-not-per-folder-action-cards/A02-folder-cards.png"],

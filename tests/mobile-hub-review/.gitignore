@@ -1,1 +1,6 @@
 results/
+
+# Raw legacy runner outputs, never the compact curated package.
+evidence/*/
+evidence/*.zip
+evidence/*.json

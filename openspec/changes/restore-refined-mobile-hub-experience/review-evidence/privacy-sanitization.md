@@ -1,5 +1,7 @@
 # Current-file privacy sanitization
 
+> Start with the [current evidence index](README.md) and [current verification](verification.md). This records earlier current-file sanitization, not a new privacy finding or history-redaction request. Generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`.
+
 Private review addresses and machine-specific exposure commands are removed from
 public documentation. New managed review starts are local-only by default; an
 optional public origin is supplied explicitly through local runtime configuration.

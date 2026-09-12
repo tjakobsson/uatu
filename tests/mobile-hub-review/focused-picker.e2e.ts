@@ -1,7 +1,7 @@
 import { expect, test, type Page, type APIRequestContext } from '@playwright/test';
 import { namedButton } from './navigation';
 
-const evidence = process.env.UATU_REVIEW_PICKER_EVIDENCE ?? 'openspec/changes/restore-refined-mobile-hub-experience/review-evidence/folder-picker';
+const evidence = process.env.UATU_REVIEW_PICKER_EVIDENCE ?? new URL('./results/artifacts/folder-picker', import.meta.url).pathname;
 const picker = (page: Page) => page.locator('.mh-folder-picker');
 const button = namedButton;
 const state = async (request: APIRequestContext) => (await request.get('/review/state')).json();

@@ -1,5 +1,7 @@
 # Frontend acceptance record
 
+> Start with the [current evidence index](README.md) and [current verification](verification.md). Status and generated-artifact paths below are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`; they do not assert fresh passes or close pending gates.
+
 **AWAITING USER REVIEW — no human approval recorded.** Prepared 2026-09-10.
 Passing tests, reference normalization approval and approved additive frontend
 contracts do not approve the served visual/interaction design. No exceptions or

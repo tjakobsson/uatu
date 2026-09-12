@@ -1,5 +1,7 @@
 # Uatu Web UI design system — review candidate
 
+> Current entry points: [evidence index](README.md) and [verification](verification.md). Keep the design guidance below; its recorded verification and generated-artifact paths are historical at pre-cleanup commit `373ef6350032f6a0f2a91c2037ebafb553bc002f`, not new acceptance.
+
 The user approved consolidating the mobile Hub into a small, consistent,
 Apple-inspired Web design system rather than continuing screen-by-screen patches.
 

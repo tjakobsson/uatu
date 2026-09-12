@@ -50,11 +50,11 @@ test("evidence routes serve only built selections, never repository paths", asyn
   const review = await startReviewServer({ port: 0, assets: new Map(), evidenceAssets: await buildEvidenceAssets() });
   try {
     expect(await (await fetch(`${review.url}/review/evidence`)).text()).toContain("Simulation only");
-    const report = await fetch(`${review.url}/review/evidence/visual/corrected/index.html`);
+    const report = await fetch(`${review.url}/review/evidence/verification.md`);
     expect(report.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(report.headers.get("x-content-type-options")).toBe("nosniff");
-    expect((await fetch(`${review.url}/review/evidence/visual/corrected/chromium-hub-actual.png`)).headers.get("content-type")).toBe("image/png");
-    for (const path of ["baseline.json", "../baseline.json", "%2e%2e%2fbaseline.json", "visual/index.html", "responsive/history/results.json", "../../../../.env", "manifest.json?file=baseline.json"]) expect((await fetch(`${review.url}/review/evidence/${path}`)).status).toBeGreaterThanOrEqual(400);
+    expect((await fetch(`${review.url}/review/evidence/gallery/chromium-hub.png`)).headers.get("content-type")).toBe("image/png");
+    for (const path of ["baseline.json", "../baseline.json", "%2e%2e%2fbaseline.json", "visual/index.html", "visual/corrected/index.html", "responsive/history/results.json", "navigation-recovery/browser-results.json", "gallery/unknown.png", "gallery/%63hromium-hub.png", "../../../../.env", "manifest.json?file=baseline.json"]) expect((await fetch(`${review.url}/review/evidence/${path}`)).status).toBeGreaterThanOrEqual(400);
   } finally { review.stop(); }
 });
 

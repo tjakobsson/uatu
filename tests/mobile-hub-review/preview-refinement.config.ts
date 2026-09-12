@@ -4,7 +4,7 @@ export default defineConfig({
   testDir: ".",
   testMatch: ["preview-examples.e2e.ts", "hub-controls.e2e.ts", "focused-picker.e2e.ts", "folder-picker.e2e.ts"],
   workers: 1, retries: 0, timeout: 30_000, globalTimeout: 240_000,
-  reporter: [["list"], ["json", { outputFile: new URL("../../openspec/changes/restore-refined-mobile-hub-experience/review-evidence/preview-refinement/browser-results.json", import.meta.url).pathname }]],
+  reporter: [["list"], ["json", { outputFile: new URL("./results/artifacts/preview-refinement/browser-results.json", import.meta.url).pathname }]],
   outputDir: "./evidence/preview-refinement-results",
   use: { baseURL: "http://127.0.0.1:4731", serviceWorkers: "block", screenshot: "only-on-failure" },
   projects: ["chromium", "webkit"].map(browserName => ({ name: browserName, use: { ...devices["iPhone 13"], browserName: browserName as "chromium" | "webkit", viewport: { width: 390, height: 844 } } })),
