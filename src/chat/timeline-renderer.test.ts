@@ -1048,6 +1048,15 @@ describe("recalled memory rows and coded notices", () => {
     }
   });
 
+  test("a rate-limit-adjacent notice is still a row", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    // Only the two coded standings are data. Anything else keeps its row,
+    // whatever its code begins with.
+    renderer.render(host, projectionWith([{ id: "notice:policy", type: "notice", createdAt: 1, level: "info", message: "Your plan's rate limits changed.", code: "rate-limit-policy-changed" }]), new Set());
+    expect(host.querySelector('[data-chat-item-id="notice:policy"]')).not.toBeNull();
+  });
+
   test("a filtered standing between two tool calls does not split their group", () => {
     const renderer = new TimelineRenderer();
     const host = target();

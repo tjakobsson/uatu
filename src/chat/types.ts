@@ -462,9 +462,18 @@ export type NoticeItem = TimelineItemBase & {
  */
 export const RATE_LIMIT_ITEM_ID = "notice:rate-limit";
 
+/**
+ * The notice codes that carry a standing. Exactly these two: the contract
+ * names them and nothing else, so the test is membership rather than a
+ * `rate-limit` prefix. A prefix would silently swallow any later
+ * rate-limit-adjacent notice — hiding it from the timeline and reporting
+ * it to the composer as a warning it never was.
+ */
+const RATE_LIMIT_STANDING_CODES: ReadonlySet<string> = new Set(["rate-limit-warning", "rate-limit-rejected"]);
+
 /** Whether an item is the rate-limit standing (data, not a row). */
 export function isRateLimitStanding(item: ConversationItem): boolean {
-  return item.type === "notice" && item.code?.startsWith("rate-limit") === true;
+  return item.type === "notice" && item.code !== undefined && RATE_LIMIT_STANDING_CODES.has(item.code);
 }
 
 // One row of an agent-reported context breakdown. `kind` says what the row

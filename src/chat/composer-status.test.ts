@@ -74,6 +74,11 @@ describe("rate-limit badge and plan utilization", () => {
     expect(isRateLimitStanding(elsewhere)).toBe(true);
     // Newest wins: one item id is a producer's property, not the wire's.
     expect(latestRateLimit([warning, { ...rejected, id: "agent:standing:8" }])?.level).toBe("rejected");
+    // Exactly the two coded standings. A later rate-limit-adjacent notice
+    // is someone else's message, not a standing to report as a warning.
+    const adjacent = notice("notice:policy", "rate-limit-policy-changed", "info");
+    expect(latestRateLimit([adjacent])).toBeUndefined();
+    expect(isRateLimitStanding(adjacent)).toBe(false);
     expect(latestRateLimit([notice("n4", "refusal-fallback", "warning")])).toBeUndefined();
     expect(rateLimitBadgeLabel({ level: "rejected", message: "" })).toBe("Rate limited");
     expect(rateLimitBadgeLabel({ level: "warning", message: "", resetsAt: 1_788_400_000_000 })).toMatch(/^Near rate limit · resets /);
