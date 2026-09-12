@@ -2,7 +2,7 @@ import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import type { ContextReportItem, ConversationItem, MessageAttachment, ModelSelection, TokenUsage } from "../types";
-import { foldCommandMarkup, parseTaskNotification, TASK_NOTIFICATION_ORIGIN, type TranscriptEntry } from "./transcript";
+import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, type TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
 
@@ -483,9 +483,9 @@ export function normalizeClaudeMessage(
     // nothing else to go on. A person who pastes nothing but an envelope —
     // asking what it is, say — is still a person, and their message must
     // not be swallowed and reissued as a task that never ran.
-    const notification = parseTaskNotification(rawText);
     const authored = typeof record.origin === "string" ? record.origin : undefined;
-    if (authored === TASK_NOTIFICATION_ORIGIN || (authored === undefined && notification)) {
+    if (readsAsTaskNotification(authored, rawText)) {
+      const notification = parseTaskNotification(rawText);
       // A notification that fails to parse shows nothing rather than its markup.
       if (!notification) return { ...base, outcome: "ignored" };
       return backgroundTaskUpdate(storedNotificationRecord(notification, record, memory), memory, base);

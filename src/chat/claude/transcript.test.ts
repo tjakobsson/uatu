@@ -123,6 +123,25 @@ describe("reading one transcript", () => {
     expect(sessions[0]!.firstPrompt).toBe("what happened?");
   });
 
+  test("a legacy notification is not a session's first prompt, but a person's envelope is", async () => {
+    const { workspace, configDir, projectDir } = fixture();
+    const envelope = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>";
+    // Written before `origin` existed: only the shape says what it is, and
+    // the title must read it the same way the replayed timeline does.
+    writeFileSync(path.join(projectDir, "legacy.jsonl"), [
+      userLine("u1", envelope, "2026-09-09T04:47:00.000Z", { cwd: workspace }),
+      userLine("u2", "what happened?", "2026-09-09T04:47:01.000Z", { cwd: workspace }),
+    ].join(""));
+    // The store says a person wrote this one, so it is their prompt even
+    // though it is shaped like an envelope.
+    writeFileSync(path.join(projectDir, "pasted.jsonl"),
+      userLine("u1", envelope, "2026-09-09T04:48:00.000Z", { origin: { kind: "human" }, cwd: workspace }));
+    const { sessions } = await listTranscriptSessions(workspace, configDir);
+    const byId = new Map(sessions.map(session => [session.id, session.firstPrompt]));
+    expect(byId.get("legacy")).toBe("what happened?");
+    expect(byId.get("pasted")).toBe(envelope);
+  });
+
   test("a stored task notification parses to its fields; quoted markup does not", () => {
     expect(parseTaskNotification("<task-notification>\n<task-id>bp1gl2rjw</task-id>\n<tool-use-id>toolu_01</tool-use-id>\n<output-file>/tmp/x.output</output-file>\n<status>completed</status>\n<summary>Background command \"Wait for CI\" completed (exit code 0)</summary>\n</task-notification>\n"))
       .toEqual({ taskId: "bp1gl2rjw", toolUseId: "toolu_01", status: "completed", summary: "Background command \"Wait for CI\" completed (exit code 0)" });

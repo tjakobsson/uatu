@@ -162,9 +162,19 @@ function originKind(value: unknown): string | undefined {
   return typeof kind === "string" && kind ? kind : undefined;
 }
 
-/** A user record the CLI wrote on the person's behalf rather than the person's own prompt. */
-export function isHarnessAuthored(entry: Pick<TranscriptEntry, "origin" | "isMeta">): boolean {
-  return entry.isMeta === true || entry.origin === TASK_NOTIFICATION_ORIGIN;
+/**
+ * Whether a stored user record is the settled-task notification the CLI
+ * sent the model, rather than something the person typed.
+ *
+ * The one rule, so the replayed timeline and the session's title cannot
+ * disagree about the same record. Authorship decides where the store
+ * states it; the envelope's shape stands in only where it does not, for
+ * records written before `origin` existed. A record the store attributes
+ * to the person stays the person's, whatever its text looks like.
+ */
+export function readsAsTaskNotification(origin: string | undefined, text: string): boolean {
+  if (origin === TASK_NOTIFICATION_ORIGIN) return true;
+  return origin === undefined && parseTaskNotification(text) !== null;
 }
 
 export const TASK_NOTIFICATION_ORIGIN = "task-notification";
@@ -422,9 +432,11 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
  * prompt nor its title.
  */
 export function promptText(entry: TranscriptEntry): string | null {
-  if (isHarnessAuthored(entry)) return null;
+  if (entry.isMeta === true) return null;
   const content = entry.message.content;
-  if (typeof content === "string") return foldCommandMarkup(content);
+  if (typeof content === "string") {
+    return readsAsTaskNotification(entry.origin, content) ? null : foldCommandMarkup(content);
+  }
   if (!Array.isArray(content)) return null;
   const blocks = content.filter((block): block is { type: string; text?: unknown } =>
     Boolean(block) && typeof block === "object");
@@ -433,7 +445,8 @@ export function promptText(entry: TranscriptEntry): string | null {
     .filter(block => block.type === "text" && typeof block.text === "string")
     .map(block => block.text as string)
     .join("\n");
-  return text.length > 0 ? foldCommandMarkup(text) : null;
+  if (text.length === 0) return null;
+  return readsAsTaskNotification(entry.origin, text) ? null : foldCommandMarkup(text);
 }
 
 /**

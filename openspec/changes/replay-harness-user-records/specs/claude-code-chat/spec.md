@@ -28,6 +28,11 @@ person SHALL be presented as their message whatever its text looks like.
 - **THEN** no user message is shown for it
 - **AND** a prompt in which the person merely quotes such markup is still shown as their message
 
+#### Scenario: A record older than the store's authorship field reads the same everywhere
+- **WHEN** a transcript written before authorship was recorded opens with a task-notification envelope
+- **THEN** it is not offered as the session's first prompt or title
+- **AND** the replayed timeline and the session's title agree on what that record is
+
 #### Scenario: A person's own words are never reissued as agent activity
 - **WHEN** the store attributes a record to the person and its text is nothing but a task-notification envelope
 - **THEN** it is shown as their message
