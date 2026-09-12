@@ -882,6 +882,11 @@
                       <span id="chat-plan-readout-name" class="chat-plan-readout-name">Plan usage</span>
                       <button id="chat-plan-pin" class="chat-plan-pin" type="button" hidden>Keep in sidebar</button>
                     </div>
+                    <!-- The standing, stated in full where it can be read:
+                         the chip has room for a level and a reset, this has
+                         room for which limit is biting and why. Present
+                         whenever one stands, plan or no plan. -->
+                    <p id="chat-plan-readout-standing" class="chat-plan-standing" hidden></p>
                     <div id="chat-plan-readout-rows" class="plan-rows"></div>
                     <section id="chat-plan-readout-session" class="chat-plan-session" aria-label="This conversation" hidden>
                       <h3 id="chat-plan-session-title" class="chat-plan-session-title">This conversation</h3>
@@ -895,8 +900,15 @@
                     </section>
                   </div>
                 </details>
-                <span id="chat-rate-limit" class="chat-rate-limit" role="status" hidden></span>
               </span>
+              <!-- The standing used to announce itself because the badge was
+                   a live region. The chip that replaced it is a <summary>
+                   and cannot be one, so the announcement lives here rather
+                   than being lost to a visual simplification. Its own region,
+                   not the composer's: re-announcing the routine state on
+                   every rate-limit change would talk over the state the
+                   reader is actually waiting on. -->
+              <span id="chat-rate-limit-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
             </div>
           </form>
           <span id="chat-conversation-inventory-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>

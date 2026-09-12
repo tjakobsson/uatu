@@ -381,6 +381,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "item":
       if (body.conversationId && body.item) return controlJson(targetFake.publishItem(body.conversationId, body.item));
       break;
+    case "removeItem":
+      if (body.conversationId && body.itemId) return controlJson(targetFake.removeItem(body.conversationId, body.itemId));
+      break;
     case "delta":
       if (body.conversationId && body.itemId && typeof body.delta === "string") {
         return controlJson(targetFake.publishDelta(body.conversationId, body.itemId, body.delta));

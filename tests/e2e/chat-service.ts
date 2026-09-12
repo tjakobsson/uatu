@@ -722,6 +722,17 @@ export class FakeE2EChatService implements WorkspaceChatService {
     };
   }
 
+  /** Retire an item, as an agent does when a standing it reported ends. */
+  removeItem(id: string, itemId: string): ChatEvent {
+    this.require(id);
+    const authoritative = this.authoritativeItems.get(id)!;
+    const existing = authoritative.findIndex(candidate => candidate.id === itemId);
+    if (existing >= 0) authoritative.splice(existing, 1);
+    this.items.get(id)!.delete(itemId);
+    this.activityChanges.invalidate();
+    return this.replay.get(id)!.publish({ type: "item.remove", itemId });
+  }
+
   publishItem(id: string, item: ConversationItem): ChatEvent {
     this.require(id);
     const authoritative = this.authoritativeItems.get(id)!;

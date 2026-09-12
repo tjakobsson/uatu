@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import { composerRoutineState, latestPlanUtilization, latestRateLimit, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel, sessionTotalsTitle } from "./composer-status";
-import type { ConversationItem } from "./types";
+import { composerRoutineState, latestPlanUtilization, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel, sessionTotalsTitle } from "./composer-status";
+import { isRateLimitStanding, RATE_LIMIT_ITEM_ID, type ConversationItem } from "./types";
+import type { RateLimitStanding } from "./composer-status";
 
 const base = { cancelling: false, submitting: false, backgroundDeclared: true, backgroundTasks: [] as [] };
 
@@ -56,15 +57,56 @@ describe("composer routine state", () => {
 describe("rate-limit badge and plan utilization", () => {
   const notice = (id: string, code: string, level: "warning" | "error" | "info", resetsAt?: number): ConversationItem => ({ id, type: "notice", createdAt: 1, level, message: `${code} message`, code, ...(resetsAt === undefined ? {} : { resetsAt }) });
 
-  test("the newest rate-limit notice stands until a clearing one retires it", () => {
-    const warning = notice("n1", "rate-limit-warning", "warning", 1_788_400_000_000);
-    const rejected = notice("n2", "rate-limit-rejected", "error", 1_788_400_000_000);
+  test("the standing is the one item the agent keeps, and its absence means not limited", () => {
+    const warning = notice(RATE_LIMIT_ITEM_ID, "rate-limit-warning", "warning", 1_788_400_000_000);
+    const rejected = notice(RATE_LIMIT_ITEM_ID, "rate-limit-rejected", "error", 1_788_400_000_000);
     expect(latestRateLimit([warning])).toEqual({ level: "warning", message: "rate-limit-warning message", resetsAt: 1_788_400_000_000 });
-    expect(latestRateLimit([warning, rejected])?.level).toBe("rejected");
-    expect(latestRateLimit([warning, rejected, notice("n3", "rate-limit-cleared", "info")])).toBeUndefined();
+    // The agent upserts that one id, so the projection holds the current
+    // standing rather than a history to scan.
+    expect(latestRateLimit([rejected])?.level).toBe("rejected");
+    // Retired: the agent removed the item, so there is nothing to find.
+    expect(latestRateLimit([])).toBeUndefined();
+    // Found by its code, not by the id one producer happens to use — the
+    // contract gives clients the code, and the timeline filters on it, so a
+    // standing under another stable id must not vanish from both surfaces.
+    const elsewhere = notice("agent:standing:7", "rate-limit-warning", "warning", 1_788_400_000_000);
+    expect(latestRateLimit([elsewhere])?.level).toBe("warning");
+    expect(isRateLimitStanding(elsewhere)).toBe(true);
+    // Newest wins: one item id is a producer's property, not the wire's.
+    expect(latestRateLimit([warning, { ...rejected, id: "agent:standing:8" }])?.level).toBe("rejected");
+    // Exactly the two coded standings. A later rate-limit-adjacent notice
+    // is someone else's message, not a standing to report as a warning.
+    const adjacent = notice("notice:policy", "rate-limit-policy-changed", "info");
+    expect(latestRateLimit([adjacent])).toBeUndefined();
+    expect(isRateLimitStanding(adjacent)).toBe(false);
     expect(latestRateLimit([notice("n4", "refusal-fallback", "warning")])).toBeUndefined();
     expect(rateLimitBadgeLabel({ level: "rejected", message: "" })).toBe("Rate limited");
     expect(rateLimitBadgeLabel({ level: "warning", message: "", resetsAt: 1_788_400_000_000 })).toMatch(/^Near rate limit · resets /);
+  });
+
+  test("the chip folds the standing and the plan into one control", () => {
+    const withWindows = { plan: { fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } } };
+    const spentWindow = { plan: { fiveHour: { utilization: 9 }, sevenDay: { utilization: 83 } } };
+    const noPlan = { plan: {}, session: { costUsd: 1.23, apiDurationMs: 42_000, durationMs: 90_000, linesAdded: 0, linesRemoved: 0, models: [] } };
+    const warning: RateLimitStanding = { level: "warning", message: "Approaching your 7-day rate limit (77% used).", resetsAt: 1_788_400_000_000 };
+    const rejected: RateLimitStanding = { level: "rejected", message: "Rate limit reached for your 7-day window.", resetsAt: 1_788_400_000_000 };
+
+    // A rejection displaces the figures: blocked is the fact that matters.
+    expect(planChip(withWindows, rejected)).toEqual({ text: expect.stringMatching(/^Rate limited · resets /), level: "rejected", kind: "rate-limit" });
+    // A warning keeps them and raises the level — including for a window
+    // the summary does not name, which is the whole reason the level is not
+    // derived from the percentages.
+    expect(planChip(withWindows, warning)).toEqual({ text: "Session 9% · Week 25%", level: "warning", kind: "plan" });
+    expect(planChip(withWindows, undefined)).toEqual({ text: "Session 9% · Week 25%", level: "normal", kind: "plan" });
+    expect(planChip(spentWindow, undefined)?.level).toBe("warning");
+    // A login with no plan can still be rate limited; before this the fact
+    // had nowhere to go.
+    expect(planChip(noPlan, warning)).toEqual({ text: expect.stringMatching(/^Near rate limit · resets /), level: "warning", kind: "rate-limit" });
+    expect(planChip(undefined, rejected)?.kind).toBe("rate-limit");
+    // Unchanged without a standing: the cost chip, and nothing at all.
+    expect(planChip(noPlan, undefined)).toEqual({ text: "$1.23 this conversation", level: "normal", kind: "cost" });
+    expect(planChip(undefined, undefined)).toBeUndefined();
+    expect(planChip({ plan: {} }, undefined)).toBeUndefined();
   });
 
   test("plan utilization reads the newest report and is absent without one", () => {

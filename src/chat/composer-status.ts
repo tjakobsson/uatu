@@ -5,7 +5,7 @@
 
 import { backgroundStatusLabel } from "./background-tasks";
 import { statusLabel } from "./timeline-renderer";
-import type { BackgroundTaskItem, ContextReportItem, ConversationItem, ConversationStatus, NoticeItem, PlanUtilization, PlanUtilizationWindow, SessionTotals } from "./types";
+import { isRateLimitStanding, type BackgroundTaskItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals } from "./types";
 
 export type ComposerRoutineState = {
   stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "failed" | "ready";
@@ -40,19 +40,70 @@ export function composerRoutineState(input: {
 export type RateLimitStanding = { level: "warning" | "rejected"; message: string; resetsAt?: number };
 
 /**
- * The latest rate-limit notice still standing: a rejection or a warning
- * until a later clearing notice retires it. Notices are scanned from the
- * tail, so the newest wins.
+ * The rate-limit standing in force, or none.
+ *
+ * Found by its code, not by an id: the code is what the contract gives a
+ * client to recognize a standing by, and it is what the timeline filters
+ * on. Keying this on the id the Claude normalizer happens to use would
+ * make the two disagree — an agent that kept its standing under another
+ * stable id would have it filtered out of the timeline and not found here,
+ * so the standing would show nowhere at all.
+ *
+ * The newest wins. One producer keeping one item id is a property of that
+ * producer, not a guarantee of the wire, so this reads the last one in
+ * order rather than assuming there is only ever one to find. Its absence
+ * is the answer "not limited": the agent removes the item when requests
+ * are allowed again.
  */
 export function latestRateLimit(items: readonly ConversationItem[]): RateLimitStanding | undefined {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    if (!item || item.type !== "notice" || !item.code?.startsWith("rate-limit")) continue;
+    if (!item || !isRateLimitStanding(item)) continue;
     const notice = item as NoticeItem;
-    if (notice.code === "rate-limit-cleared") return undefined;
-    return { level: notice.code === "rate-limit-rejected" ? "rejected" : "warning", message: notice.message, ...(notice.resetsAt === undefined ? {} : { resetsAt: notice.resetsAt }) };
+    return {
+      level: notice.code === "rate-limit-rejected" ? "rejected" : "warning",
+      message: notice.message,
+      ...(notice.resetsAt === undefined ? {} : { resetsAt: notice.resetsAt }),
+    };
   }
   return undefined;
+}
+
+/**
+ * The one chip beside the composer, resolved from the plan report and the
+ * rate-limit standing together.
+ *
+ * They were two controls saying one thing: a plan summary that could not
+ * see it was rate limited, and a badge that could not be opened. Folding
+ * them gives the standing somewhere to be read in full — the readout the
+ * chip opens already names every window and its reset.
+ *
+ * Order matters. A rejection displaces the percentages deliberately: once
+ * requests are blocked, how full the window is has stopped being the
+ * actionable fact, and the figures are one click away. A warning keeps
+ * them and only raises the level, because there the percentage IS the
+ * warning — and the level cannot be derived from the figures alone, since
+ * the login warns on windows the summary does not list.
+ */
+export type PlanChip = {
+  text: string;
+  level: "normal" | "warning" | "rejected";
+  // What the chip is saying, for the surface's styling and its title.
+  kind: "plan" | "cost" | "rate-limit";
+};
+
+export function planChip(report: Pick<ContextReportItem, "plan" | "session"> | undefined, standing: RateLimitStanding | undefined): PlanChip | undefined {
+  if (standing?.level === "rejected") return { text: rateLimitBadgeLabel(standing), level: "rejected", kind: "rate-limit" };
+  const plan = report?.plan;
+  const summary = report ? planSummaryLabel(report) : undefined;
+  if (plan && planHasRows(plan) && summary) {
+    const level = standing || planUtilizationLevel(plan) === "warning" ? "warning" : "normal";
+    return { text: summary, level, kind: "plan" };
+  }
+  // No windows to show. A standing still has to be sayable — a login with
+  // no plan can still be rate limited, and before this it had nowhere to go.
+  if (standing) return { text: rateLimitBadgeLabel(standing), level: "warning", kind: "rate-limit" };
+  return summary ? { text: summary, level: "normal", kind: "cost" } : undefined;
 }
 
 export function rateLimitBadgeLabel(standing: RateLimitStanding): string {

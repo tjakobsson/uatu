@@ -1,7 +1,7 @@
 import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
-import type { ContextReportItem, ConversationItem, MessageAttachment, ModelSelection, TokenUsage } from "../types";
+import { RATE_LIMIT_ITEM_ID, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type TokenUsage } from "../types";
 import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, type TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
@@ -54,9 +54,11 @@ export type ClaudeEventMemory = {
   // A named working state the turn is in (retrying, compacting); cleared —
   // with a `running` status — by the next message that shows the turn moved.
   transient?: "retrying" | "compacting";
-  // The last rate-limit standing reported, so a return to allowed can
-  // retire the badge without a notice for every allowed event.
-  rateLimited?: boolean;
+  // The rate-limit standing in force, with the moment the conversation
+  // entered it. A standing is a state, not an event: the login restates it
+  // on every request, and all those restatements are this one record, so a
+  // return to allowed retires one item rather than appending a third notice.
+  rateLimit?: { level: "warning" | "rejected"; since: number };
 };
 
 export function createClaudeEventMemory(): ClaudeEventMemory {
@@ -361,18 +363,26 @@ export function normalizeClaudeMessage(
     // The reset time travels as an epoch (resetsAt) and is formatted where
     // it is shown: the server's clock zone is not the reader's.
     const utilization = typeof info.utilization === "number" ? ` (${Math.round(info.utilization * (info.utilization <= 1 ? 100 : 1))}% used)` : "";
-    if (info.status === "rejected") {
-      memory.rateLimited = true;
-      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: { id: `notice:rate-limit:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "error", code: "rate-limit-rejected", message: `Rate limit reached for your ${kind} window.`, ...(resetsAt === undefined ? {} : { resetsAt }) } }] };
+    // One item for the standing, whatever the login says and however often
+    // it says it: the onset is kept from the first report so a conversation
+    // held at one standing does not restate it, and a level that hardens
+    // from warning to rejection updates the same row in place.
+    const standing = info.status === "rejected" ? "rejected" as const
+      : info.status === "allowed_warning" ? "warning" as const : undefined;
+    if (standing) {
+      const since = memory.rateLimit?.since ?? envelope.createdAt;
+      memory.rateLimit = { level: standing, since };
+      const item: ConversationItem = standing === "rejected"
+        ? { id: RATE_LIMIT_ITEM_ID, type: "notice", createdAt: since, level: "error", code: "rate-limit-rejected", message: `Rate limit reached for your ${kind} window.`, ...(resetsAt === undefined ? {} : { resetsAt }) }
+        : { id: RATE_LIMIT_ITEM_ID, type: "notice", createdAt: since, level: "warning", code: "rate-limit-warning", message: `Approaching your ${kind} rate limit${utilization}.`, ...(resetsAt === undefined ? {} : { resetsAt }) };
+      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item }] };
     }
-    if (info.status === "allowed_warning") {
-      // A warning is a standing too: the later plain "allowed" retires it.
-      memory.rateLimited = true;
-      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: { id: `notice:rate-limit:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "warning", code: "rate-limit-warning", message: `Approaching your ${kind} rate limit${utilization}.`, ...(resetsAt === undefined ? {} : { resetsAt }) } }] };
-    }
-    if (memory.rateLimited) {
-      memory.rateLimited = false;
-      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item: { id: `notice:rate-limit:${envelope.uuid}`, type: "notice", createdAt: envelope.createdAt, level: "info", code: "rate-limit-cleared", message: "Rate limit cleared; requests are allowed again." } }] };
+    // Allowed again: the standing ended. A state that ended is retired, not
+    // announced as a further row — the surface says so where it showed the
+    // standing. An allowed event with nothing in force says nothing at all.
+    if (memory.rateLimit) {
+      memory.rateLimit = undefined;
+      return { ...base, outcome: "handled", updates: [{ kind: "remove", itemId: RATE_LIMIT_ITEM_ID }] };
     }
     return { ...base, outcome: "ignored" };
   }

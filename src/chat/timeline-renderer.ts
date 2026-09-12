@@ -6,7 +6,7 @@ import { measureChatWork } from "./performance";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import { isLiveConversationStatus, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
+import { isLiveConversationStatus, isRateLimitStanding, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 const deferredBodies = new WeakMap<HTMLElement, () => void>();
@@ -114,9 +114,15 @@ export class TimelineRenderer {
     // finished run's group.
     // A context report is data of the same kind: the readout consumes it,
     // the timeline never shows it.
+    // A rate-limit standing is data of that same kind, and the reason it is
+    // filtered here rather than never minted: the composer's plan chip reads
+    // it out of the projection. The login restates it on every request, so
+    // drawn as rows it would bury the work the reader came for — the one
+    // place it belongs is the chip, which says it once and opens.
     // A running background task is presented in the composer's live list;
     // only a settled one takes a place in the timeline (D8).
     const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === "") && item.type !== "context_report"
+      && !isRateLimitStanding(item)
       && !(item.type === "background_task" && item.status === "running"));
 
     const nodes = new Map<string, HTMLElement>();

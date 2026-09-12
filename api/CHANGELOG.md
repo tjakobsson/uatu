@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 17 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- The `notice` item's rate-limit codes are data for the composer, not timeline content. `rate-limit-warning` and `rate-limit-rejected` carry the conversation's current rate-limit standing and are never rendered as a row, the same contract `context_report` has with the context readout.
+- The standing occupies one item id for the conversation's life. It is upserted as the standing begins and changes, keeping the `createdAt` of the moment the conversation entered it, rather than a new item per reported event.
+- `rate-limit-cleared` is removed. A standing that ends is retired with `item.remove` for that id — a state that ended, not a further event to record.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 17. Treat a notice coded `rate-limit-warning` or `rate-limit-rejected` as data, never as a timeline row: read the newest one as the conversation's standing and present it wherever the client shows plan or quota state, with its `resetsAt`. Expect one such item per conversation rather than one per event, and expect `item.remove` for its id when the standing ends; a client that waited for a `rate-limit-cleared` notice must treat the removal as the clear. Clients that ignore the codes and keep drawing the notices keep working, but will show the standing restated where this revision shows it once.
+
 ## Hub 5 / Workspace 16 - Unreleased
 
 Compatibility: breaking (workspace); additive (Hub)
