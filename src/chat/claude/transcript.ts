@@ -75,6 +75,15 @@ export type TranscriptEntry = {
   // completion carries the subagent linkage here: agentId, resolvedModel,
   // usage.
   toolUseResult?: Record<string, unknown>;
+  // Who authored a user record, as the store names it (`origin.kind`):
+  // "human" for typed prompts, "task-notification" for the message the
+  // CLI sends the model when background work settles. Absent from older
+  // records and from every non-user record.
+  origin?: string;
+  // The store's flag for a user record the CLI injected on the person's
+  // behalf — a skill's preamble, a local-command caveat, an image caption.
+  // Not the person's words, so never a prompt or a bubble.
+  isMeta?: boolean;
 };
 
 export type TranscriptReadResult = {
@@ -118,6 +127,7 @@ function validateEntry(value: unknown): TranscriptEntry | null {
   if (!message || typeof message !== "object" || Array.isArray(message)) return null;
   const timestamp = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
   if (Number.isNaN(timestamp)) return null;
+  const origin = originKind(record.origin);
   const metadata = compaction && record.compactMetadata && typeof record.compactMetadata === "object" && !Array.isArray(record.compactMetadata)
     ? record.compactMetadata as Record<string, unknown> : undefined;
   return {
@@ -141,8 +151,23 @@ function validateEntry(value: unknown): TranscriptEntry | null {
     ...(record.toolUseResult && typeof record.toolUseResult === "object" && !Array.isArray(record.toolUseResult)
       ? { toolUseResult: record.toolUseResult as Record<string, unknown> }
       : {}),
+    ...(origin ? { origin } : {}),
+    ...(record.isMeta === true ? { isMeta: true } : {}),
   };
 }
+
+function originKind(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const kind = (value as { kind?: unknown }).kind;
+  return typeof kind === "string" && kind ? kind : undefined;
+}
+
+/** A user record the CLI wrote on the person's behalf rather than the person's own prompt. */
+export function isHarnessAuthored(entry: Pick<TranscriptEntry, "origin" | "isMeta">): boolean {
+  return entry.isMeta === true || entry.origin === TASK_NOTIFICATION_ORIGIN;
+}
+
+export const TASK_NOTIFICATION_ORIGIN = "task-notification";
 
 /**
  * A subagent run's own transcript: the store keeps each run beside its
@@ -390,8 +415,14 @@ export async function listTranscriptSessions(workspacePath: string, configDir: s
   return { sessions, skippedFiles };
 }
 
-/** The user-typed text of an entry, or null for tool results and non-text. */
+/**
+ * The user-typed text of an entry, or null for tool results, non-text, and
+ * records the CLI authored on the person's behalf (a skill preamble, a
+ * background task's notification): those are neither a session's first
+ * prompt nor its title.
+ */
 export function promptText(entry: TranscriptEntry): string | null {
+  if (isHarnessAuthored(entry)) return null;
   const content = entry.message.content;
   if (typeof content === "string") return foldCommandMarkup(content);
   if (!Array.isArray(content)) return null;
@@ -438,6 +469,47 @@ export function foldCommandMarkup(text: string): string {
   if (outside.trim()) return text;
   const argText = args?.value.trim() ?? "";
   return argText ? `${command} ${argText}` : command;
+}
+
+/**
+ * What Claude Code tells the model when a background task settles. The
+ * SDK stream carries this as a `task_notification` system message, but the
+ * transcript stores only the prompt it became: a user record whose text is
+ * a `<task-notification>` envelope of `<task-id>`, `<tool-use-id>`,
+ * `<status>`, `<summary>` (and, for a monitor, an `<event>` body plus free
+ * text). Nothing else about the task survives in the store, so a reopened
+ * conversation reads the task's outcome from here.
+ */
+export type StoredTaskNotification = {
+  taskId: string;
+  toolUseId?: string;
+  status?: string;
+  summary?: string;
+};
+
+/**
+ * The notification's fields, or null when the text is not one. Only the
+ * generated envelope parses: the text, ignoring surrounding whitespace, is
+ * exactly one `<task-notification>…</task-notification>` naming a task id.
+ * A prompt that merely quotes the tag inline is the person's own words and
+ * comes back null.
+ */
+export function parseTaskNotification(text: string): StoredTaskNotification | null {
+  const body = text.trim();
+  const envelope = outerSpan(body, "task-notification");
+  if (!envelope || envelope.start !== 0 || envelope.end !== body.length) return null;
+  const inner = envelope.value;
+  const taskId = innerSpan(inner, "task-id")?.value.trim();
+  if (!taskId) return null;
+  const toolUseId = innerSpan(inner, "tool-use-id")?.value.trim();
+  const status = innerSpan(inner, "status")?.value.trim();
+  const summary = innerSpan(inner, "summary")?.value.trim();
+  return {
+    taskId,
+    ...(toolUseId ? { toolUseId } : {}),
+    ...(status ? { status } : {}),
+    ...(summary ? { summary } : {}),
+  };
 }
 
 type TagSpan = { start: number; end: number; value: string };
