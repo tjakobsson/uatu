@@ -5,7 +5,7 @@
 
 import { backgroundStatusLabel } from "./background-tasks";
 import { statusLabel } from "./timeline-renderer";
-import { RATE_LIMIT_ITEM_ID, type BackgroundTaskItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals } from "./types";
+import { isRateLimitStanding, type BackgroundTaskItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals } from "./types";
 
 export type ComposerRoutineState = {
   stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "failed" | "ready";
@@ -40,21 +40,33 @@ export function composerRoutineState(input: {
 export type RateLimitStanding = { level: "warning" | "rejected"; message: string; resetsAt?: number };
 
 /**
- * The rate-limit standing in force, or none. The standing occupies one
- * item id for the life of the conversation, so this is a lookup rather
- * than a scan: the agent upserts it as the standing changes and removes it
- * when requests are allowed again, which is why its absence is the answer
- * "not limited" rather than "not yet reported".
+ * The rate-limit standing in force, or none.
+ *
+ * Found by its code, not by an id: the code is what the contract gives a
+ * client to recognize a standing by, and it is what the timeline filters
+ * on. Keying this on the id the Claude normalizer happens to use would
+ * make the two disagree — an agent that kept its standing under another
+ * stable id would have it filtered out of the timeline and not found here,
+ * so the standing would show nowhere at all.
+ *
+ * The newest wins. One producer keeping one item id is a property of that
+ * producer, not a guarantee of the wire, so this reads the last one in
+ * order rather than assuming there is only ever one to find. Its absence
+ * is the answer "not limited": the agent removes the item when requests
+ * are allowed again.
  */
 export function latestRateLimit(items: readonly ConversationItem[]): RateLimitStanding | undefined {
-  const item = items.find(candidate => candidate.id === RATE_LIMIT_ITEM_ID);
-  if (!item || item.type !== "notice") return undefined;
-  const notice = item as NoticeItem;
-  return {
-    level: notice.code === "rate-limit-rejected" ? "rejected" : "warning",
-    message: notice.message,
-    ...(notice.resetsAt === undefined ? {} : { resetsAt: notice.resetsAt }),
-  };
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!item || !isRateLimitStanding(item)) continue;
+    const notice = item as NoticeItem;
+    return {
+      level: notice.code === "rate-limit-rejected" ? "rejected" : "warning",
+      message: notice.message,
+      ...(notice.resetsAt === undefined ? {} : { resetsAt: notice.resetsAt }),
+    };
+  }
+  return undefined;
 }
 
 /**

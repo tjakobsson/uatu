@@ -2,7 +2,7 @@
 
 - [x] 1.1 Mint the rate-limit standing as the singleton `notice:rate-limit`, upserted as the standing changes with `createdAt` at its onset; verify repeated events at one standing yield a single item whose id and onset do not move, and that a changed level updates it in place.
 - [x] 1.2 Retire a cleared standing with a `remove` update instead of the `rate-limit-cleared` notice; verify the item is gone from the projection after a clearing event, and that a clear arriving with no standing in force changes nothing.
-- [x] 1.3 Simplify `latestRateLimit` to find the standing by its id rather than scanning the tail for a code prefix; verify the existing composer-status cases still hold, including no standing and a standing followed by a clear.
+- [x] 1.3 Have `latestRateLimit` and the timeline's filter share one code-based predicate, so the composer recognizes a standing by what the contract gives clients rather than by the normalizer's own item id; verify the existing composer-status cases still hold, including no standing, a standing followed by a clear, and a standing carried under a different id.
 
 ## 2. Take the standing out of the timeline
 

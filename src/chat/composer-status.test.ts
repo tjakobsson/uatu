@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { composerRoutineState, latestPlanUtilization, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel, sessionTotalsTitle } from "./composer-status";
-import { RATE_LIMIT_ITEM_ID, type ConversationItem } from "./types";
+import { isRateLimitStanding, RATE_LIMIT_ITEM_ID, type ConversationItem } from "./types";
 import type { RateLimitStanding } from "./composer-status";
 
 const base = { cancelling: false, submitting: false, backgroundDeclared: true, backgroundTasks: [] as [] };
@@ -66,6 +66,14 @@ describe("rate-limit badge and plan utilization", () => {
     expect(latestRateLimit([rejected])?.level).toBe("rejected");
     // Retired: the agent removed the item, so there is nothing to find.
     expect(latestRateLimit([])).toBeUndefined();
+    // Found by its code, not by the id one producer happens to use — the
+    // contract gives clients the code, and the timeline filters on it, so a
+    // standing under another stable id must not vanish from both surfaces.
+    const elsewhere = notice("agent:standing:7", "rate-limit-warning", "warning", 1_788_400_000_000);
+    expect(latestRateLimit([elsewhere])?.level).toBe("warning");
+    expect(isRateLimitStanding(elsewhere)).toBe(true);
+    // Newest wins: one item id is a producer's property, not the wire's.
+    expect(latestRateLimit([warning, { ...rejected, id: "agent:standing:8" }])?.level).toBe("rejected");
     expect(latestRateLimit([notice("n4", "refusal-fallback", "warning")])).toBeUndefined();
     expect(rateLimitBadgeLabel({ level: "rejected", message: "" })).toBe("Rate limited");
     expect(rateLimitBadgeLabel({ level: "warning", message: "", resetsAt: 1_788_400_000_000 })).toMatch(/^Near rate limit · resets /);

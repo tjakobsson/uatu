@@ -43,7 +43,9 @@ This is still a contract change — a strict client that draws notice rows must 
 
 ### One item, updated in place; clearing removes it
 
-The id becomes the singleton `notice:rate-limit`, upserted as the standing changes, keyed to nothing about the event that reported it. A conversation held at 77% for an hour then holds one item instead of forty, and `latestRateLimit` becomes a find rather than a tail scan.
+The id becomes the singleton `notice:rate-limit`, upserted as the standing changes, keyed to nothing about the event that reported it. A conversation held at 77% for an hour then holds one item instead of forty.
+
+That id is the Claude normalizer's, not the wire's: the contract recognizes a standing by its **code**, and tells clients to read the newest notice so coded. So both readers — the timeline's filter and the composer's lookup — go through one code-based predicate. Keying the composer on the id instead would make them disagree, and a producer keeping its standing under another stable id would have it filtered out of the timeline and not found by the composer, showing nowhere at all.
 
 `createdAt` is the onset of the standing, not the latest report, so the data says when the conversation entered it.
 
