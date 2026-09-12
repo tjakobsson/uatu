@@ -201,6 +201,60 @@ describe("context usage measures the window, not the turn (D1)", () => {
     expect(items[2]).toEqual(expect.objectContaining({ type: "context_report", total: 40_000 }));
   });
 
+  test("a reopened conversation replays a background task's notification as its settled row, not a bubble", () => {
+    // The store keeps no task edges — only the notification the model was
+    // sent, as a user record. It settles the same `task:<id>` row the live
+    // stream would, named by the Bash step that launched it.
+    const notification = "<task-notification>\n<task-id>bp1gl2rjw</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/tmp/bp1gl2rjw.output</output-file>\n<status>completed</status>\n<summary>Background command \"Wait for CI to finish on 6fc0e5e\" completed (exit code 0)</summary>\n</task-notification>";
+    const { items } = normalizeTranscriptEntries([
+      { kind: "user", uuid: "u1", parentUuid: null, timestamp: 1, isSidechain: false, parentToolUseId: null, origin: "human", message: { role: "user", content: "merge it when green" } },
+      { kind: "assistant", uuid: "a1", parentUuid: "u1", timestamp: 2, isSidechain: false, parentToolUseId: null, message: { role: "assistant", model: "claude-opus-5", content: [{ type: "tool_use", id: "toolu_bg", name: "Bash", input: { command: "gh run watch", description: "Wait for CI to finish on 6fc0e5e", run_in_background: true } }] } },
+      { kind: "user", uuid: "u2", parentUuid: "a1", timestamp: 3, isSidechain: false, parentToolUseId: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_bg", content: "Command running in background with ID: bp1gl2rjw" }] } },
+      { kind: "user", uuid: "u3", parentUuid: "u2", timestamp: 4, isSidechain: false, parentToolUseId: null, origin: "task-notification", message: { role: "user", content: notification } },
+      { kind: "assistant", uuid: "a2", parentUuid: "u3", timestamp: 5, isSidechain: false, parentToolUseId: null, message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "CI is green; merging." }] } },
+    ]);
+    expect(items.map(item => item.id)).toEqual(["message:u1", "tool:toolu_bg", "task:bp1gl2rjw", "message:a2"]);
+    expect(items[2]).toEqual({
+      id: "task:bp1gl2rjw", type: "background_task", createdAt: 4, taskId: "bp1gl2rjw", toolUseId: "toolu_bg",
+      description: "Wait for CI to finish on 6fc0e5e", status: "completed",
+      summary: "Background command \"Wait for CI to finish on 6fc0e5e\" completed (exit code 0)",
+    });
+    expect(items.some(item => item.type === "user_message" && item.text.includes("<task-notification>"))).toBe(false);
+  });
+
+  test("replayed notifications settle by status and fall back to a generic name; harness records never bubble", () => {
+    const entry = (uuid: string, timestamp: number, content: string, extra: Partial<Parameters<typeof normalizeTranscriptEntries>[0][number]> = {}) =>
+      ({ kind: "user" as const, uuid, parentUuid: null, timestamp, isSidechain: false, parentToolUseId: null, message: { role: "user", content }, ...extra });
+    const { items } = normalizeTranscriptEntries([
+      // An unknown launcher: the live fallback name, the reported outcome.
+      entry("n1", 1, "<task-notification>\n<task-id>f1</task-id>\n<status>failed</status>\n<summary>exit 1</summary>\n</task-notification>", { origin: "task-notification" }),
+      entry("n2", 2, "<task-notification>\n<task-id>k1</task-id>\n<status>killed</status>\n<summary></summary>\n</task-notification>", { origin: "task-notification" }),
+      // A monitor event names no status: settled as completed, as live does.
+      entry("n3", 3, "<task-notification>\n<task-id>m1</task-id>\n<summary>Monitor event: \"review activity\"</summary>\n<event>x</event>\nIf this matters, notify.\n</task-notification>", { origin: "task-notification" }),
+      // An older record with no author but the generated envelope is one too.
+      entry("n4", 4, "<task-notification>\n<task-id>o1</task-id>\n<status>completed</status>\n<summary>ok</summary>\n</task-notification>"),
+      // The store says notification but the text is not one: nothing, never markup.
+      entry("n5", 5, "garbled", { origin: "task-notification" }),
+      // A skill's preamble is the harness's, not the person's.
+      entry("n6", 6, "Base directory for this skill: /x/skills/simplify", { isMeta: true }),
+      // The person quoting the tag keeps their bubble.
+      entry("n7", 7, "why did <task-notification> show up in my chat?", { origin: "human" }),
+      // And so does the person who pastes nothing BUT an envelope — asking
+      // what it is, say. The store says who wrote it; the shape only stands
+      // in where it does not (records older than `origin`).
+      entry("n8", 8, "<task-notification>\n<task-id>h1</task-id>\n<status>completed</status>\n<summary>is this mine?</summary>\n</task-notification>", { origin: "human" }),
+    ]);
+    expect(items.map(item => item.id)).toEqual(["task:f1", "task:k1", "task:m1", "task:o1", "message:n7", "message:n8"]);
+    expect(items.some(item => item.id === "task:h1")).toBe(false);
+    expect(items[5]).toEqual(expect.objectContaining({ type: "user_message", text: expect.stringContaining("<task-id>h1</task-id>") }));
+    expect(items[0]).toEqual(expect.objectContaining({ type: "background_task", description: "Background task", status: "failed", summary: "exit 1" }));
+    expect(items[1]).toEqual(expect.objectContaining({ type: "background_task", status: "stopped" }));
+    expect(items[1]).not.toHaveProperty("summary");
+    expect(items[2]).toEqual(expect.objectContaining({ type: "background_task", status: "completed", summary: "Monitor event: \"review activity\"" }));
+    expect(items[3]).toEqual(expect.objectContaining({ type: "background_task", status: "completed", summary: "ok" }));
+    expect(items[4]).toEqual(expect.objectContaining({ type: "user_message", text: "why did <task-notification> show up in my chat?" }));
+  });
+
   test("a subagent's frames carry no window carrier and never move the conversation's model", () => {
     const memory = createClaudeEventMemory();
     normalizeClaudeMessage({ type: "system", subtype: "init", uuid: "i1", model: "claude-opus-5[1m]" }, memory, "live");

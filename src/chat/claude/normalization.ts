@@ -2,7 +2,7 @@ import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import type { ContextReportItem, ConversationItem, MessageAttachment, ModelSelection, TokenUsage } from "../types";
-import { foldCommandMarkup, type TranscriptEntry } from "./transcript";
+import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, type TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
 
@@ -465,11 +465,34 @@ export function normalizeClaudeMessage(
       // The provider minted this user message when it accepted the prompt.
       return { ...base, outcome: "ignored" };
     }
+    // A record the CLI wrote on the person's behalf — a skill's preamble,
+    // a local-command caveat, an image caption — is not the person's words
+    // and gets no bubble (spec: harness-authored records are never
+    // presented as the user's messages).
+    if (record.isMeta === true) return { ...base, outcome: "ignored" };
+    const rawText = typeof message.content === "string"
+      ? message.content
+      : blocks.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text as string).join("\n");
+    // The store keeps no task edges; what it keeps of a background task is
+    // the notification the model was sent when the task settled, as a
+    // user record. That becomes the same settled row the live stream
+    // builds from its `task_notification` — never a bubble of markup.
+    //
+    // Authorship decides, and the envelope's shape only stands in where the
+    // store states none: records written before `origin` existed have
+    // nothing else to go on. A person who pastes nothing but an envelope —
+    // asking what it is, say — is still a person, and their message must
+    // not be swallowed and reissued as a task that never ran.
+    const authored = typeof record.origin === "string" ? record.origin : undefined;
+    if (readsAsTaskNotification(authored, rawText)) {
+      const notification = parseTaskNotification(rawText);
+      // A notification that fails to parse shows nothing rather than its markup.
+      if (!notification) return { ...base, outcome: "ignored" };
+      return backgroundTaskUpdate(storedNotificationRecord(notification, record, memory), memory, base);
+    }
     // A slash command is stored as tag markup; the bubble shows what was
     // typed, the same fold the session title reads.
-    const text = foldCommandMarkup(typeof message.content === "string"
-      ? message.content
-      : blocks.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text as string).join("\n"));
+    const text = foldCommandMarkup(rawText);
     // Images the prompt carried replay as labeled placeholders: the
     // transcript stores bytes, not the workspace store reference, so the
     // reference is unrecoverable by design (types.ts: absent id).
@@ -549,6 +572,8 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
         ...(entry.subtype ? { subtype: entry.subtype } : {}),
         ...(entry.compactMetadata ? { compactMetadata: entry.compactMetadata } : {}),
         ...(entry.toolUseResult ? { toolUseResult: entry.toolUseResult } : {}),
+        ...(entry.origin ? { origin: entry.origin } : {}),
+        ...(entry.isMeta ? { isMeta: true } : {}),
       },
       memory,
       "stored",
@@ -799,7 +824,7 @@ function backgroundTaskUpdate(record: RecordValue, memory: ClaudeEventMemory, ba
   let status: "running" | "completed" | "failed" | "stopped" = "running";
   let summary: string | undefined;
   if (record.subtype === "task_notification") {
-    status = record.status === "failed" ? "failed" : record.status === "stopped" ? "stopped" : "completed";
+    status = settledTaskStatus(record.status);
     summary = typeof record.summary === "string" && record.summary ? record.summary : undefined;
   } else if (record.subtype === "task_updated") {
     if (patch.status === "failed") status = "failed";
@@ -822,6 +847,50 @@ function backgroundTaskUpdate(record: RecordValue, memory: ClaudeEventMemory, ba
     ...(status === "running" && progress ? { progress } : {}),
     ...(summary ? { summary } : {}),
   } }] };
+}
+
+/** A notification's reported status as the row's outcome: anything not a failure or a stop settled as completed. */
+function settledTaskStatus(status: unknown): "completed" | "failed" | "stopped" {
+  return status === "failed" ? "failed" : status === "stopped" || status === "killed" ? "stopped" : "completed";
+}
+
+/**
+ * A stored notification as the `task_notification` frame the live stream
+ * would have carried, so one code path settles the row either way. The
+ * store never saw the task start, so the row is named from the tool that
+ * launched it — a Bash or Agent call's own `description` — the same name
+ * the live start edge carries; the flag says the task ran in the
+ * background, which is the only kind the CLI notifies about.
+ */
+function storedNotificationRecord(notification: { taskId: string; toolUseId?: string; status?: string; summary?: string }, record: RecordValue, memory: ClaudeEventMemory): RecordValue {
+  const launcher = notification.toolUseId ? memory.tools.get(notification.toolUseId) : undefined;
+  const description = launcher ? toolDescription(launcher.input) : undefined;
+  const taskType = launcher?.name === "Agent" || launcher?.name === "Task" ? "local_agent" : launcher?.name === "Workflow" ? "local_workflow" : undefined;
+  return {
+    type: "system",
+    subtype: "task_notification",
+    uuid: record.uuid,
+    timestamp: record.timestamp,
+    task_id: notification.taskId,
+    is_backgrounded: true,
+    ...(notification.toolUseId ? { tool_use_id: notification.toolUseId } : {}),
+    ...(notification.status ? { status: notification.status } : {}),
+    ...(notification.summary ? { summary: notification.summary } : {}),
+    ...(description ? { description } : {}),
+    ...(taskType ? { task_type: taskType } : {}),
+  };
+}
+
+/** The `description` a tool call's remembered input carried, when it parses as one. */
+function toolDescription(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    const description = asRecord(parsed).description;
+    return typeof description === "string" && description.trim() ? description.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

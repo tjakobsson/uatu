@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { claudeProjectDir, foldCommandMarkup, listTranscriptSessions, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
+import { claudeProjectDir, foldCommandMarkup, listTranscriptSessions, parseTaskNotification, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
 
 function line(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -87,6 +87,73 @@ describe("reading one transcript", () => {
     expect(promptText(stringEntry)).toBe("typed text");
     expect(promptText(blockEntry)).toBe("block text");
     expect(promptText(toolResultEntry)).toBeNull();
+  });
+
+  test("entries carry who authored a user record, as the store names it", async () => {
+    const { projectDir } = fixture();
+    const file = path.join(projectDir, "authored.jsonl");
+    writeFileSync(file, [
+      userLine("u1", "typed", "2026-09-09T04:47:00.000Z", { origin: { kind: "human" }, isMeta: false }),
+      userLine("u2", "Base directory for this skill: /x", "2026-09-09T04:47:01.000Z", { isMeta: true }),
+      userLine("u3", "<task-notification>\n<task-id>b1</task-id>\n</task-notification>", "2026-09-09T04:47:02.000Z", { origin: { kind: "task-notification" }, promptSource: "sdk" }),
+      // Older records name no author; a malformed origin names none either.
+      userLine("u4", "older", "2026-09-09T04:47:03.000Z"),
+      userLine("u5", "odd", "2026-09-09T04:47:04.000Z", { origin: "human", isMeta: "yes" }),
+    ].join(""));
+    const { entries } = await readSessionTranscript(file);
+    expect(entries.map(entry => [entry.origin, entry.isMeta])).toEqual([
+      ["human", undefined], [undefined, true], ["task-notification", undefined], [undefined, undefined], [undefined, undefined],
+    ]);
+    // Neither harness-authored record is a prompt: not a first prompt, not a title.
+    expect(promptText(entries[0]!)).toBe("typed");
+    expect(promptText(entries[1]!)).toBeNull();
+    expect(promptText(entries[2]!)).toBeNull();
+    expect(promptText(entries[3]!)).toBe("older");
+  });
+
+  test("a session whose first records are harness-authored is titled by the person's prompt", async () => {
+    const { workspace, configDir, projectDir } = fixture();
+    writeFileSync(path.join(projectDir, "skill-first.jsonl"), [
+      userLine("u1", "Base directory for this skill: /x", "2026-09-09T04:47:00.000Z", { isMeta: true, cwd: workspace }),
+      userLine("u2", "<task-notification>\n<task-id>b1</task-id>\n<summary>done</summary>\n</task-notification>", "2026-09-09T04:47:01.000Z", { origin: { kind: "task-notification" }, cwd: workspace }),
+      userLine("u3", "what happened?", "2026-09-09T04:47:02.000Z", { origin: { kind: "human" }, cwd: workspace }),
+    ].join(""));
+    const { sessions } = await listTranscriptSessions(workspace, configDir);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.firstPrompt).toBe("what happened?");
+  });
+
+  test("a legacy notification is not a session's first prompt, but a person's envelope is", async () => {
+    const { workspace, configDir, projectDir } = fixture();
+    const envelope = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>";
+    // Written before `origin` existed: only the shape says what it is, and
+    // the title must read it the same way the replayed timeline does.
+    writeFileSync(path.join(projectDir, "legacy.jsonl"), [
+      userLine("u1", envelope, "2026-09-09T04:47:00.000Z", { cwd: workspace }),
+      userLine("u2", "what happened?", "2026-09-09T04:47:01.000Z", { cwd: workspace }),
+    ].join(""));
+    // The store says a person wrote this one, so it is their prompt even
+    // though it is shaped like an envelope.
+    writeFileSync(path.join(projectDir, "pasted.jsonl"),
+      userLine("u1", envelope, "2026-09-09T04:48:00.000Z", { origin: { kind: "human" }, cwd: workspace }));
+    const { sessions } = await listTranscriptSessions(workspace, configDir);
+    const byId = new Map(sessions.map(session => [session.id, session.firstPrompt]));
+    expect(byId.get("legacy")).toBe("what happened?");
+    expect(byId.get("pasted")).toBe(envelope);
+  });
+
+  test("a stored task notification parses to its fields; quoted markup does not", () => {
+    expect(parseTaskNotification("<task-notification>\n<task-id>bp1gl2rjw</task-id>\n<tool-use-id>toolu_01</tool-use-id>\n<output-file>/tmp/x.output</output-file>\n<status>completed</status>\n<summary>Background command \"Wait for CI\" completed (exit code 0)</summary>\n</task-notification>\n"))
+      .toEqual({ taskId: "bp1gl2rjw", toolUseId: "toolu_01", status: "completed", summary: "Background command \"Wait for CI\" completed (exit code 0)" });
+    // A monitor's event: no status or tool, free text after the tags.
+    expect(parseTaskNotification("<task-notification>\n<task-id>bvadsqbov</task-id>\n<summary>Monitor event: \"codex review\"</summary>\n<event>SUMMARY &lt;!-- x --&gt;</event>\nIf this event is something the user would act on now, send a PushNotification.\n</task-notification>"))
+      .toEqual({ taskId: "bvadsqbov", summary: "Monitor event: \"codex review\"" });
+    // Only the generated envelope: a task id is required, and the text
+    // must be the envelope and nothing else.
+    expect(parseTaskNotification("<task-notification>\n<summary>no id</summary>\n</task-notification>")).toBeNull();
+    expect(parseTaskNotification("look at this <task-notification><task-id>b1</task-id></task-notification> I saw")).toBeNull();
+    expect(parseTaskNotification("<task-notification><task-id>b1</task-id></task-notification> and then some")).toBeNull();
+    expect(parseTaskNotification("plain prompt")).toBeNull();
   });
 
   test("prompt text folds slash-command markup to what was typed", () => {
