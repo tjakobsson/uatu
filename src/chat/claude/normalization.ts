@@ -477,12 +477,16 @@ export function normalizeClaudeMessage(
     // the notification the model was sent when the task settled, as a
     // user record. That becomes the same settled row the live stream
     // builds from its `task_notification` — never a bubble of markup.
-    // A person quoting the tag inline is not a notification: only the
-    // generated envelope, or a record the store itself attributes to one,
-    // is read as such (and a notification that fails to parse shows
-    // nothing rather than its markup).
+    //
+    // Authorship decides, and the envelope's shape only stands in where the
+    // store states none: records written before `origin` existed have
+    // nothing else to go on. A person who pastes nothing but an envelope —
+    // asking what it is, say — is still a person, and their message must
+    // not be swallowed and reissued as a task that never ran.
     const notification = parseTaskNotification(rawText);
-    if (notification || record.origin === TASK_NOTIFICATION_ORIGIN) {
+    const authored = typeof record.origin === "string" ? record.origin : undefined;
+    if (authored === TASK_NOTIFICATION_ORIGIN || (authored === undefined && notification)) {
+      // A notification that fails to parse shows nothing rather than its markup.
       if (!notification) return { ...base, outcome: "ignored" };
       return backgroundTaskUpdate(storedNotificationRecord(notification, record, memory), memory, base);
     }

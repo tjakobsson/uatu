@@ -10,7 +10,9 @@ parse SHALL be skipped without failing enumeration. A stored user record
 Claude Code authored on the person's behalf — a skill's preamble, a
 local-command caveat, an image caption, a background task's notification —
 MUST NOT be presented as the user's message, and MUST NOT serve as a
-session's first prompt or title.
+session's first prompt or title. Where the store states who authored a
+record, that statement SHALL decide; a record the store attributes to the
+person SHALL be presented as their message whatever its text looks like.
 
 #### Scenario: Prior sessions appear after a workspace restart
 - **WHEN** a workspace starts and the user opens Chat
@@ -25,6 +27,11 @@ session's first prompt or title.
 - **WHEN** a reopened conversation's transcript holds a user record Claude Code injected (a skill preamble, a task notification)
 - **THEN** no user message is shown for it
 - **AND** a prompt in which the person merely quotes such markup is still shown as their message
+
+#### Scenario: A person's own words are never reissued as agent activity
+- **WHEN** the store attributes a record to the person and its text is nothing but a task-notification envelope
+- **THEN** it is shown as their message
+- **AND** no background task row is produced for it
 
 ### Requirement: Background tasks are surfaced, stoppable, and wake the model
 When a Claude Code session starts a task in the background — a backgrounded

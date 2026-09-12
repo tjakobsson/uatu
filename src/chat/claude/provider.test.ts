@@ -239,8 +239,14 @@ describe("context usage measures the window, not the turn (D1)", () => {
       entry("n6", 6, "Base directory for this skill: /x/skills/simplify", { isMeta: true }),
       // The person quoting the tag keeps their bubble.
       entry("n7", 7, "why did <task-notification> show up in my chat?", { origin: "human" }),
+      // And so does the person who pastes nothing BUT an envelope — asking
+      // what it is, say. The store says who wrote it; the shape only stands
+      // in where it does not (records older than `origin`).
+      entry("n8", 8, "<task-notification>\n<task-id>h1</task-id>\n<status>completed</status>\n<summary>is this mine?</summary>\n</task-notification>", { origin: "human" }),
     ]);
-    expect(items.map(item => item.id)).toEqual(["task:f1", "task:k1", "task:m1", "task:o1", "message:n7"]);
+    expect(items.map(item => item.id)).toEqual(["task:f1", "task:k1", "task:m1", "task:o1", "message:n7", "message:n8"]);
+    expect(items.some(item => item.id === "task:h1")).toBe(false);
+    expect(items[5]).toEqual(expect.objectContaining({ type: "user_message", text: expect.stringContaining("<task-id>h1</task-id>") }));
     expect(items[0]).toEqual(expect.objectContaining({ type: "background_task", description: "Background task", status: "failed", summary: "exit 1" }));
     expect(items[1]).toEqual(expect.objectContaining({ type: "background_task", status: "stopped" }));
     expect(items[1]).not.toHaveProperty("summary");
