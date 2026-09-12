@@ -533,6 +533,33 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(live).toHaveText("Rate limit cleared; requests are allowed again.");
   });
 
+  test("a rising warning is not read aloud again on every request", async ({ page, request }) => {
+    // The login restates a warning per request with its utilization ticking
+    // up, and the message carries the figure. Keyed on the spoken words,
+    // the warning would be re-read on every one — the timeline's chattiness
+    // moved into the reader's ear.
+    const resetsAt = Date.now() + 3_600_000;
+    const id = await bootClaude(page, request, "Rising warning", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const warn = (used: number) => ({ action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 2, level: "warning" as const, message: `Approaching your 5-hour rate limit (${used}% used).`, code: "rate-limit-warning", resetsAt } });
+    const live = page.locator("#chat-rate-limit-live");
+    const summary = page.locator("#chat-plan-usage-summary");
+
+    await control(request, warn(87));
+    await expect(live).toHaveText(/87% used/);
+    await summary.click();
+
+    // Same level, higher figure: the readout follows, the live region holds.
+    for (const used of [88, 89, 90]) await control(request, warn(used));
+    await expect(page.locator("#chat-plan-readout-standing")).toContainText("(90% used)");
+    await expect(live).toHaveText(/87% used/);
+
+    // A level change is a transition, and is spoken — with the figure.
+    await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 2, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt } });
+    await expect(live).toHaveText(/^Rate limit reached /);
+  });
+
   test("a rolling reset repaints the opened readout, not only the chip", async ({ page, request }) => {
     // One standing restated with a later reset: the chip is painted before
     // the readout's repaint guard, so a guard blind to the reset would

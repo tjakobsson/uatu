@@ -1633,7 +1633,14 @@ export function initChat(api = new ChatApiClient()): void {
   // lands: read as one conversation's history, that blank says "the standing
   // ended" and the reader is told a limit cleared that is still in force.
   // A conversation's own entry only moves when its own standing does.
-  const announcedStandings = new Map<string, string | undefined>();
+  //
+  // The level, not the words. The login restates a warning on every request
+  // with its utilization ticking up, and the message carries that figure —
+  // keyed on the spoken text, the warning would be read aloud again on each
+  // one, moving the noise this change takes out of the timeline into the
+  // reader's ear instead. The transitions worth speaking are the ones the
+  // spec names: beginning, changing level, and retirement.
+  const announcedStandings = new Map<string, RateLimitStanding["level"] | undefined>();
   const ANNOUNCED_STANDING_LIMIT = 256;
   let planTick: ReturnType<typeof setInterval> | undefined;
   const paintPlanRows = () => {
@@ -1799,13 +1806,16 @@ export function initChat(api = new ChatApiClient()): void {
     // beginning, hardening, or being retired. With no conversation in hand
     // there is no standing to have changed, so nothing is said.
     if (rateLimitLive && projection) {
-      const spoken = limit ? `${limit.message}${limit.resetsAt === undefined ? "" : ` Resets ${new Date(limit.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`}` : undefined;
       const previous = announcedStandings.get(projection.conversationId);
-      if (spoken !== previous) {
-        // A standing that ended is worth saying: the reader was told it
-        // began, and the chip they were watching is about to go quiet.
-        rateLimitLive.textContent = spoken ?? (previous ? "Rate limit cleared; requests are allowed again." : "");
-        boundedSet(announcedStandings, projection.conversationId, spoken, ANNOUNCED_STANDING_LIMIT);
+      if (limit?.level !== previous) {
+        // What is spoken is still the full standing with its reset — the
+        // figure is worth hearing when the level moves, just not on every
+        // request. A standing that ended is worth saying too: the reader
+        // was told it began, and the chip is about to go quiet.
+        rateLimitLive.textContent = limit
+          ? `${limit.message}${limit.resetsAt === undefined ? "" : ` Resets ${new Date(limit.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`}`
+          : previous ? "Rate limit cleared; requests are allowed again." : "";
+        boundedSet(announcedStandings, projection.conversationId, limit?.level, ANNOUNCED_STANDING_LIMIT);
       }
     }
     if (composerChips) composerChips.hidden = planUsage?.hidden ?? true;
