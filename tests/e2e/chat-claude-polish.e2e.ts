@@ -518,9 +518,12 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(live).toHaveText(/^Rate limit reached /);
 
     // Away: the other conversation has no standing, and none is claimed to
-    // have ended — the limited one's standing never moved.
+    // have ended — the limited one's standing never moved. The region stops
+    // describing the conversation left behind rather than carrying its
+    // warning into an unlimited one.
     await chooser.selectOption(other.conversation.id);
     await expect(page.locator("#chat-plan-usage-summary")).toBeHidden();
+    await expect(live).toHaveText("");
     await expect(live).not.toHaveText(/cleared/);
 
     // Back: still limited, still the same standing, so nothing is re-said.

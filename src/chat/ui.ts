@@ -1641,6 +1641,9 @@ export function initChat(api = new ChatApiClient()): void {
   // reader's ear instead. The transitions worth speaking are the ones the
   // spec names: beginning, changing level, and retirement.
   const announcedStandings = new Map<string, RateLimitStanding["level"] | undefined>();
+  // Which conversation the live region is currently describing, so a change
+  // of selection can stop it describing the one the reader has left.
+  let liveStandingConversation: string | undefined;
   const ANNOUNCED_STANDING_LIMIT = 256;
   let planTick: ReturnType<typeof setInterval> | undefined;
   const paintPlanRows = () => {
@@ -1805,6 +1808,19 @@ export function initChat(api = new ChatApiClient()): void {
     // Spoken only on a transition of THIS conversation's standing:
     // beginning, hardening, or being retired. With no conversation in hand
     // there is no standing to have changed, so nothing is said.
+    if (rateLimitLive) {
+      // The region describes one conversation. When the selection moves it
+      // is emptied, so it cannot go on stating the standing of the
+      // conversation the reader has left — an unlimited conversation would
+      // otherwise carry the previous one's warning in the accessibility
+      // tree. Emptying is not the same as clearing: it announces nothing
+      // and claims nothing about the incoming conversation, which is why it
+      // is not routed through the transition below.
+      if (liveStandingConversation !== projection?.conversationId) {
+        liveStandingConversation = projection?.conversationId;
+        rateLimitLive.textContent = "";
+      }
+    }
     if (rateLimitLive && projection) {
       const previous = announcedStandings.get(projection.conversationId);
       if (limit?.level !== previous) {
