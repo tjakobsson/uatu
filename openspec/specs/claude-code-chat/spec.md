@@ -68,7 +68,13 @@ canonical workspace directory from Claude Code's own session storage, and
 SHALL present a conversation's history without starting a turn or
 requiring a live session. Conversations belonging to another directory
 MUST NOT be listed or accepted. A stored session the workspace cannot
-parse SHALL be skipped without failing enumeration.
+parse SHALL be skipped without failing enumeration. A stored user record
+Claude Code authored on the person's behalf — a skill's preamble, a
+local-command caveat, an image caption, a background task's notification —
+MUST NOT be presented as the user's message, and MUST NOT serve as a
+session's first prompt or title. Where the store states who authored a
+record, that statement SHALL decide; a record the store attributes to the
+person SHALL be presented as their message whatever its text looks like.
 
 #### Scenario: Prior sessions appear after a workspace restart
 - **WHEN** a workspace starts and the user opens Chat
@@ -78,6 +84,21 @@ parse SHALL be skipped without failing enumeration.
 #### Scenario: A foreign directory's session is not offered
 - **WHEN** Claude Code's storage holds sessions for a different directory
 - **THEN** those sessions do not appear in the workspace's conversation inventory
+
+#### Scenario: Harness-authored records are not the user's bubbles
+- **WHEN** a reopened conversation's transcript holds a user record Claude Code injected (a skill preamble, a task notification)
+- **THEN** no user message is shown for it
+- **AND** a prompt in which the person merely quotes such markup is still shown as their message
+
+#### Scenario: A record older than the store's authorship field reads the same everywhere
+- **WHEN** a transcript written before authorship was recorded opens with a task-notification envelope
+- **THEN** it is not offered as the session's first prompt or title
+- **AND** the replayed timeline and the session's title agree on what that record is
+
+#### Scenario: A person's own words are never reissued as agent activity
+- **WHEN** the store attributes a record to the person and its text is nothing but a task-notification envelope
+- **THEN** it is shown as their message
+- **AND** no background task row is produced for it
 
 ### Requirement: Claude Code activity is normalized into the shared timeline
 The server SHALL normalize Claude Code session activity into the shared
@@ -415,7 +436,10 @@ shell command, a backgrounded subagent, or a monitor — the conversation
 SHALL show that background work exists while it runs, naming each task
 and its progress where reported, and SHALL let the user stop a task. A
 task's completion, failure, or stop SHALL appear in the timeline with its
-summary. While the session holds live background work the composer SHALL
+summary, live and when the conversation is reopened from storage alike:
+the notification Claude Code stored for the model SHALL replay as the
+settled task row, linked to the step that launched it, never as its
+markup. While the session holds live background work the composer SHALL
 present a background-work state distinct from both working and idle, and
 prompting SHALL remain possible. When a background task settles and the
 model is not mid-turn, the workspace SHALL wake the session so the agent
@@ -432,6 +456,11 @@ work.
 - **WHEN** a backgrounded command completes
 - **THEN** the timeline gains a row with the task's summary
 - **AND** the agent produces a follow-up turn acting on it without a user prompt
+
+#### Scenario: A reopened conversation replays the settled task
+- **WHEN** a stored conversation whose transcript holds a background task's notification is reopened
+- **THEN** the timeline shows the task's settled row with its status and summary, named by the step that launched it
+- **AND** the notification's markup is not shown as a user message
 
 #### Scenario: The user stops a background task
 - **WHEN** the user stops a listed background task
@@ -464,17 +493,28 @@ outcome rather than remaining pending.
 The conversation SHALL surface Claude Code's routine session signals where
 they affect what the user is waiting on: an API retry SHALL show as a
 retrying state with the reason where reported; a claude.ai plan
-rate-limit warning or rejection SHALL be shown with its reset time; a
-compaction in progress SHALL show as compacting; a refusal that moved the
-turn to a fallback model SHALL be attributed to the fallback model in the
+rate-limit warning or rejection SHALL be shown as the current standing in
+the composer's plan summary and the readout it opens, with its reset
+time, and MUST NOT be presented as timeline content; a compaction in
+progress SHALL show as compacting; a refusal that moved the turn to a
+fallback model SHALL be attributed to the fallback model in the
 timeline; and memories the session recalled SHALL be shown inline as
 recalled context.
+
+A rate-limit standing is a standing, not an event log: however many times
+the login reports the same standing, the conversation SHALL present it
+once and update it in place, and SHALL retire it when the login reports
+that requests are allowed again. A change of standing SHALL be announced
+to assistive technology.
 
 Where the login reports plan utilization, the conversation SHALL present
 it beside context usage as a compact summary naming each window in plain
 words — the 5-hour window as the session and the 7-day window as the
 week — with its percentage used, and SHALL mark the summary as a warning
-when any window is at or past 80%. Activating the summary SHALL open a
+when any window is at or past 80% or when a rate-limit warning stands.
+While a rejection stands the summary SHALL instead state that requests
+are rate limited, name when the limit resets, and be marked as a
+rejection. Activating the summary SHALL open a
 readout that states, for every window the login reports: its name, its
 percentage used, and when it resets, both as a clock time and relative to
 now. The readout SHALL name the plan, SHALL list per-model weekly windows
@@ -485,8 +525,10 @@ percentage used derived from the amounts where the login states none — and SHA
 this conversation's accumulated cost and per-model token totals where the
 agent reports them. A login that reports only the two base windows SHALL
 render the summary and readout with just those. For a login without plan
-limits no plan summary SHALL be shown; where the agent still reports this
-conversation's accumulated cost, the summary SHALL state that cost instead,
+limits no plan summary SHALL be shown unless a rate-limit standing exists,
+in which case the summary SHALL appear carrying that standing; where the
+agent still reports this conversation's accumulated cost, the summary SHALL
+state that cost instead,
 and activating it SHALL show only this conversation's cost and per-model
 totals, with no plan name, windows, or sidebar control.
 
@@ -497,7 +539,31 @@ totals, with no plan name, windows, or sidebar control.
 
 #### Scenario: A rate limit names its reset
 - **WHEN** Claude Code reports a plan rate limit warning or rejection
-- **THEN** the conversation shows the limit's kind and when it resets
+- **THEN** the composer's plan summary is marked at that level
+- **AND** the readout it opens names the limit's window and when it resets
+
+#### Scenario: A rate limit is not timeline content
+- **WHEN** Claude Code reports a plan rate limit warning or rejection
+- **THEN** the timeline gains no row for it
+- **AND** the conversation's messages, tool activity, and task rows are unchanged
+
+#### Scenario: A standing is stated once, not once per report
+- **WHEN** the login reports the same rate-limit standing across many turns
+- **THEN** the conversation presents one standing, updated in place
+- **AND** it is retired once the login reports that requests are allowed again
+
+#### Scenario: A rejection says requests are blocked
+- **WHEN** the login rejects a request for having reached a window's limit, resetting at 06:00
+- **THEN** the composer summary states that requests are rate limited and that the limit resets at 06:00
+- **AND** the summary is marked as a rejection
+
+#### Scenario: A rate limit without a plan still has somewhere to go
+- **WHEN** the login reports no plan utilization but a rate-limit standing exists
+- **THEN** the composer summary is shown carrying that standing
+
+#### Scenario: A changed standing is announced
+- **WHEN** a rate-limit standing begins, changes level, or is retired
+- **THEN** the change is announced to assistive technology
 
 #### Scenario: A refusal fallback is attributed truthfully
 - **WHEN** a turn is retried on a fallback model after a refusal
@@ -511,6 +577,11 @@ totals, with no plan name, windows, or sidebar control.
 #### Scenario: A nearly spent window warns
 - **WHEN** any reported window is at or past 80%
 - **THEN** the composer summary is marked as a warning
+
+#### Scenario: A warned window keeps its figures
+- **WHEN** a rate-limit warning stands for a window the base summary does not name
+- **THEN** the composer summary still reads its windows' percentages
+- **AND** it is marked as a warning
 
 #### Scenario: The readout names every window and its reset
 - **WHEN** the reader activates the plan summary
@@ -545,7 +616,7 @@ totals, with no plan name, windows, or sidebar control.
 - **AND** activating it shows those windows as rows, and is not the cost-only readout
 
 #### Scenario: No plan, no summary
-- **WHEN** the login has no plan limits (an API-key session) and the agent reports no conversation cost
+- **WHEN** the login has no plan limits (an API-key session), the agent reports no conversation cost, and no rate-limit standing exists
 - **THEN** no summary is shown beside the composer
 
 #### Scenario: No plan, the cost is still reachable
