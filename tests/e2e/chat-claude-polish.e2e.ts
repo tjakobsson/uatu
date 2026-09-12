@@ -501,6 +501,59 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(chip).toHaveAttribute("data-level", "normal");
   });
 
+  test("switching conversations does not announce a clear the limited conversation never had", async ({ page, request }) => {
+    // The selection change blanks the projection before the incoming
+    // snapshot lands. Read as one conversation's history that blank looks
+    // like the standing ending, and the reader is told a limit cleared that
+    // is still in force.
+    const resetsAt = Date.now() + 3_600_000;
+    const limited = await bootClaude(page, request, "Limited", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const other = await control(request, { action: "seed", agent: "claude", title: "Unlimited", items: [{ id: "message:u2", type: "user_message", createdAt: 1, text: "Something else" }] }) as { conversation: { id: string } };
+    const live = page.locator("#chat-rate-limit-live");
+    const chooser = page.locator("#chat-conversation-select");
+
+    await control(request, { action: "item", conversationId: limited, item: { id: "notice:rate-limit", type: "notice", createdAt: 2, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt } });
+    await expect(live).toHaveText(/^Rate limit reached /);
+
+    // Away: the other conversation has no standing, and none is claimed to
+    // have ended — the limited one's standing never moved.
+    await chooser.selectOption(other.conversation.id);
+    await expect(page.locator("#chat-plan-usage-summary")).toBeHidden();
+    await expect(live).not.toHaveText(/cleared/);
+
+    // Back: still limited, still the same standing, so nothing is re-said.
+    await chooser.selectOption(limited);
+    await expect(page.locator("#chat-plan-usage-summary")).toHaveText(/^Rate limited · resets /);
+    await expect(live).not.toHaveText(/cleared/);
+
+    // A real clear still speaks.
+    await control(request, { action: "removeItem", conversationId: limited, itemId: "notice:rate-limit" });
+    await expect(live).toHaveText("Rate limit cleared; requests are allowed again.");
+  });
+
+  test("a rolling reset repaints the opened readout, not only the chip", async ({ page, request }) => {
+    // One standing restated with a later reset: the chip is painted before
+    // the readout's repaint guard, so a guard blind to the reset would
+    // leave the open readout contradicting the chip that opened it.
+    const id = await bootClaude(page, request, "Rolling reset", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const rejection = (resetsAt: number) => ({ action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 2, level: "error" as const, message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt } });
+    const at = (hour: number) => new Date(2026, 8, 12, hour, 0, 0).getTime();
+    await control(request, rejection(at(18)));
+    const summary = page.locator("#chat-plan-usage-summary");
+    await summary.click();
+    const standing = page.locator("#chat-plan-readout-standing");
+    await expect(standing).toContainText("Resets 06:00 PM.");
+
+    // Same message, same level, later reset.
+    await control(request, rejection(at(19)));
+    await expect(summary).toHaveText(/resets 07:00 PM$/);
+    await expect(standing).toContainText("Resets 07:00 PM.");
+  });
+
   test("a rate limit on a login with no plan still has a chip to live in", async ({ page, request }, testInfo) => {
     // An API-key login reports an empty plan and no cost: before this the
     // standing had nowhere to go, because there was no chip at all.

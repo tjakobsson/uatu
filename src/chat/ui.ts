@@ -1,3 +1,4 @@
+import { boundedSet } from "../shared/bounded-map";
 import { escapeHtml } from "../shared/html";
 import { createLoadingSignal } from "../preview/loading-signal";
 import { measureChatWork } from "./performance";
@@ -1627,9 +1628,13 @@ export function initChat(api = new ChatApiClient()): void {
   // The standing the chip and readout were last painted for, so a rate
   // limit that begins or ends without a new plan report still repaints.
   let paintedStanding: RateLimitStanding | undefined;
-  // The standing last spoken, so the live region announces transitions
-  // rather than repeating itself on every routine sync.
-  let announcedStanding: string | undefined;
+  // The standing last spoken, per conversation. Per conversation because a
+  // selection change blanks the projection before the incoming snapshot
+  // lands: read as one conversation's history, that blank says "the standing
+  // ended" and the reader is told a limit cleared that is still in force.
+  // A conversation's own entry only moves when its own standing does.
+  const announcedStandings = new Map<string, string | undefined>();
+  const ANNOUNCED_STANDING_LIMIT = 256;
   let planTick: ReturnType<typeof setInterval> | undefined;
   const paintPlanRows = () => {
     if (planReadoutRowsElement && paintedPlanReport?.plan) planReadoutRowsElement.replaceChildren(...buildPlanRowNodes(document, planReadoutRows(paintedPlanReport.plan)));
@@ -1720,7 +1725,14 @@ export function initChat(api = new ChatApiClient()): void {
     planUsage.dataset.summary = chip.kind;
     // The standing is repainted on its own, not only when the report moves:
     // a rate limit can begin and end without the login reporting a window.
-    if (report === paintedPlanReport && standing?.message === paintedStanding?.message && standing?.level === paintedStanding?.level) return;
+    // The reset is part of the key, not just the message and level: a
+    // rolling window restates one standing with a later reset, and the chip
+    // above already shows it — an early return here would leave the opened
+    // readout contradicting the chip that opened it.
+    const sameStanding = standing?.message === paintedStanding?.message
+      && standing?.level === paintedStanding?.level
+      && standing?.resetsAt === paintedStanding?.resetsAt;
+    if (report === paintedPlanReport && sameStanding) return;
     paintedPlanReport = report;
     paintedStanding = standing;
     if (planReadoutStanding) {
@@ -1783,14 +1795,17 @@ export function initChat(api = new ChatApiClient()): void {
     // one chip, from the standing / report the timeline holds (D11, spec).
     const limit = projection ? latestRateLimit(projection.items) : undefined;
     syncPlanUsage(limit);
-    // Spoken only on a transition: beginning, hardening, or being retired.
-    if (rateLimitLive) {
+    // Spoken only on a transition of THIS conversation's standing:
+    // beginning, hardening, or being retired. With no conversation in hand
+    // there is no standing to have changed, so nothing is said.
+    if (rateLimitLive && projection) {
       const spoken = limit ? `${limit.message}${limit.resetsAt === undefined ? "" : ` Resets ${new Date(limit.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`}` : undefined;
-      if (spoken !== announcedStanding) {
+      const previous = announcedStandings.get(projection.conversationId);
+      if (spoken !== previous) {
         // A standing that ended is worth saying: the reader was told it
         // began, and the chip they were watching is about to go quiet.
-        rateLimitLive.textContent = spoken ?? (announcedStanding ? "Rate limit cleared; requests are allowed again." : "");
-        announcedStanding = spoken;
+        rateLimitLive.textContent = spoken ?? (previous ? "Rate limit cleared; requests are allowed again." : "");
+        boundedSet(announcedStandings, projection.conversationId, spoken, ANNOUNCED_STANDING_LIMIT);
       }
     }
     if (composerChips) composerChips.hidden = planUsage?.hidden ?? true;
