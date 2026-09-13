@@ -129,21 +129,40 @@ export function createLifecycleRecovery(options: {
   // The recovery holding the coalescer. An object rather than a flag so the
   // late settlement of an abandoned recovery cannot release a newer one's slot.
   let inFlight: Attempt | null = null;
+  // Set when the page was released while a recovery was in flight. That
+  // recovery's channel is gone — the release suspended it — so its completion
+  // no longer leaves the page connected, and the next signal cannot be
+  // treated as a duplicate of it.
+  let releasedInFlight = false;
+  // A signal that arrived after such a release, to run once the slot frees.
+  let queued = false;
   let disposed = false;
 
   const settle = (attempt: Attempt) => {
     if (inFlight !== attempt) return;
     if (attempt.timer !== null) timers.clearTimeout(attempt.timer);
     inFlight = null;
+    releasedInFlight = false;
+    if (queued) {
+      queued = false;
+      request();
+    }
   };
 
   const request = () => {
-    // An overlapping signal has nothing to add: the recovery already in
-    // flight fetches current state and installs a fresh stream, which is the
-    // whole of what a second one would do. Dropping it — rather than queuing
-    // it — is what keeps a `pageshow` + `visibilitychange` + `online` burst
-    // from turning into a request storm on a phone waking up.
-    if (disposed || inFlight !== null) return;
+    if (disposed) return;
+    if (inFlight !== null) {
+      // An overlapping signal usually has nothing to add: the recovery in
+      // flight fetches current state and installs a fresh stream, which is
+      // the whole of what a second one would do. Dropping it — rather than
+      // queuing it — is what keeps a `pageshow` + `visibilitychange` +
+      // `online` burst from turning into a request storm on a phone waking
+      // up. The exception is a page hidden and shown again while that
+      // recovery was still waiting on its work: the hide took its channel
+      // away, so this signal is the only thing that will bring one back.
+      if (releasedInFlight) queued = true;
+      return;
+    }
     const attempt: Attempt = { timer: null };
     inFlight = attempt;
     attempt.timer = timers.setTimeout(() => settle(attempt), ceilingMs);
@@ -166,14 +185,21 @@ export function createLifecycleRecovery(options: {
     // `persisted: false`, and boot already installed a stream.
     if ((event as PageTransitionEvent).persisted) request();
   };
+  // Every hide goes through here — a hidden page, and `pagehide` whatever
+  // `persisted` says (a frozen page and a "discarded" one the browser keeps
+  // alive anyway are released the same way, and the listeners stay armed for
+  // whichever wake-up comes) — so the coalescer knows when an in-flight
+  // recovery has lost its channel.
+  const release = () => {
+    options.release();
+    if (inFlight !== null) releasedInFlight = true;
+  };
   const onVisibility = () => {
     if (options.doc.visibilityState === "visible") request();
+    else release();
   };
   const onOnline = () => request();
-  // `persisted` is not consulted: a frozen page and a "discarded" one that
-  // the browser keeps alive anyway are released the same way, and the
-  // listeners stay armed for whichever wake-up comes.
-  const onPageHide = () => options.release();
+  const onPageHide = () => release();
 
   options.win.addEventListener("pageshow", onPageShow);
   options.win.addEventListener("online", onOnline);
@@ -184,6 +210,7 @@ export function createLifecycleRecovery(options: {
     request,
     dispose() {
       disposed = true;
+      queued = false;
       if (inFlight !== null) settle(inFlight);
       options.win.removeEventListener("pageshow", onPageShow);
       options.win.removeEventListener("online", onOnline);

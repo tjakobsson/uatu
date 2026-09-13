@@ -391,7 +391,8 @@ describe("createLifecycleRecovery", () => {
     h.doc.visibilityState = "hidden";
     h.doc.fire("visibilitychange");
     h.win.fire("pagehide", { persisted: false } as Partial<Event>);
-    expect(h.releases).toHaveLength(1);
+    // Once for the hide, once for the pagehide: both are releases.
+    expect(h.releases).toHaveLength(2);
     expect(runs).toBe(0);
 
     h.doc.visibilityState = "visible";
@@ -410,6 +411,68 @@ describe("createLifecycleRecovery", () => {
     h.win.fire("pageshow", { persisted: true } as Partial<Event>);
     await flush();
     expect(runs).toBe(1);
+  });
+
+  test("a page hidden and shown again while a recovery is in flight is recovered once that recovery settles", async () => {
+    // The in-flight recovery is waiting on its state fetch when the page is
+    // hidden: the release suspends the channel that recovery installed. The
+    // return must not be dropped as a duplicate — the recovery in flight
+    // will end with no channel — but it must not pile on either.
+    const gate = defer<void>();
+    let runs = 0;
+    const h = harness(async () => { runs += 1; if (runs === 1) await gate.promise; });
+
+    h.win.fire("online");
+    expect(runs).toBe(1);
+
+    h.doc.visibilityState = "hidden";
+    h.doc.fire("visibilitychange");
+    expect(h.releases).toHaveLength(1);
+    h.win.fire("pagehide", { persisted: false } as Partial<Event>);
+    expect(h.releases).toHaveLength(2);
+
+    h.doc.visibilityState = "visible";
+    h.doc.fire("visibilitychange");
+    h.win.fire("online");
+    expect(runs).toBe(1);
+
+    gate.resolve();
+    await flush();
+    expect(runs).toBe(2);
+  });
+
+  test("a hidden page released mid-recovery is not recovered until it is shown", async () => {
+    const gate = defer<void>();
+    let runs = 0;
+    const h = harness(async () => { runs += 1; if (runs === 1) await gate.promise; });
+    h.win.fire("online");
+    h.doc.visibilityState = "hidden";
+    h.doc.fire("visibilitychange");
+    // A regained network while still hidden is a signal, and the follow-up
+    // it queues is the owner's to gate (see shell/live.ts); the coalescer
+    // itself only refuses to drop it.
+    gate.resolve();
+    await flush();
+    expect(runs).toBe(1);
+  });
+
+  test("the ceiling releasing a hidden-then-shown recovery still runs the follow-up", () => {
+    const clock = fakeTimers();
+    let runs = 0;
+    const h = harness(() => { runs += 1; return new Promise(() => {}); }, { timers: clock.timers });
+    h.win.fire("online");
+    h.win.fire("pagehide", { persisted: false } as Partial<Event>);
+    h.doc.fire("visibilitychange");
+    expect(runs).toBe(1);
+    clock.elapse();
+    expect(runs).toBe(2);
+  });
+
+  test("a hidden page is released through the lifecycle, so no separate listener is needed", () => {
+    const h = harness(async () => {});
+    h.doc.visibilityState = "hidden";
+    h.doc.fire("visibilitychange");
+    expect(h.releases).toHaveLength(1);
   });
 
   test("no pagehide removes a wake-up listener", () => {

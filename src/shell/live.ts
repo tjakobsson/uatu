@@ -21,7 +21,6 @@ let lifecycle: LifecycleRecovery | null = null;
 const recoveryWork = new Set<() => Promise<unknown>>();
 // Set while the page has released its stream because it was hidden.
 let releasedInBackground = false;
-let backgroundWatchInstalled = false;
 
 // The page is being hidden, however the browser announces it: drop the
 // connection and any pending reconnect, keeping every subscription and
@@ -46,6 +45,10 @@ function releaseLiveChannel(): void {
 // through a short absence would keep a socket without saving a reconnect.
 // Nothing visible depends on live events while hidden: the title and favicon
 // come from the project, and there are no notifications or app badges.
+//
+// The lifecycle recovery performs this release on every hide it observes
+// (it has to know, so a recovery hidden mid-flight is followed up); this is
+// only the boot-time check for a page opened in a background tab.
 function releaseInBackground(): void {
   if (typeof document === "undefined" || document.visibilityState !== "hidden") return;
   releaseLiveChannel();
@@ -109,10 +112,6 @@ export function watchPageLifecycle(): void {
     recover: recoverLiveChannel,
     release: releaseLiveChannel,
   });
-  if (!backgroundWatchInstalled) {
-    document.addEventListener("visibilitychange", releaseInBackground);
-    backgroundWatchInstalled = true;
-  }
   // Boot connects before this runs; a page opened in a background tab
   // releases that connection until it is first shown.
   releaseInBackground();
@@ -213,10 +212,6 @@ export function requestManualRecovery(): Promise<void> {
 // navigation away to the hub — never a lifecycle event: a hidden page is
 // released (see `releaseLiveChannel`), not disposed, so it can come back.
 export function disposeLiveChannel(): void {
-  if (backgroundWatchInstalled && typeof document !== "undefined") {
-    document.removeEventListener("visibilitychange", releaseInBackground);
-  }
-  backgroundWatchInstalled = false;
   releasedInBackground = false;
   manualAttempt?.cancel();
   channel?.dispose();

@@ -34,6 +34,9 @@ describe("chat lifecycle recovery", () => {
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
     document.documentElement.setAttribute("data-chat-panel", "open");
+    // The page under test is on screen: a hide is a release now, and a
+    // document that reports itself hidden would gate every recovery.
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
 
     const conversationSelect = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
     let selectedConversation = "";
@@ -155,6 +158,9 @@ describe("chat lifecycle recovery", () => {
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
     document.documentElement.setAttribute("data-chat-panel", "open");
+    // The page under test is on screen: a hide is a release now, and a
+    // document that reports itself hidden would gate every recovery.
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
 
     const conversationSelect = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
     let selectedConversation = "";
