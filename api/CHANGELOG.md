@@ -1,8 +1,8 @@
 # API changelog
 
-Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
+Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks.
 
-## Hub 5 / Workspace 17 - Unreleased
+## Hub 5 / Workspace 17 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -16,7 +16,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 17. Treat a notice coded `rate-limit-warning` or `rate-limit-rejected` as data, never as a timeline row: read the newest one as the conversation's standing and present it wherever the client shows plan or quota state, with its `resetsAt`. Expect one such item per conversation rather than one per event, and expect `item.remove` for its id when the standing ends; a client that waited for a `rate-limit-cleared` notice must treat the removal as the clear. Clients that ignore the codes and keep drawing the notices keep working, but will show the standing restated where this revision shows it once.
 
-## Hub 5 / Workspace 16 - Unreleased
+## Hub 5 / Workspace 16 - v0.7.0
 
 Compatibility: breaking (workspace); additive (Hub)
 
@@ -42,7 +42,7 @@ Workspace clients have no public contract at workspace revision 16. A client tha
 
 The other workspace routes, meaning documents, search, chat mutations, and terminals, have no public replacement in this revision. They keep working for the web client the Hub serves, which ships with the child in the same build. Validators of the forwarded payloads can keep their workspace revision 15 schemas, since only the transport changed. Clients of the personal-state operations need no change.
 
-## Hub 5 / Workspace 15 - Unreleased
+## Hub 5 / Workspace 15 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -55,7 +55,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 15 and admit `alwaysPatterns` on permission items (the item schema is closed, so a revision-14 validator rejects it). Clients that ignore the field keep working once their validators admit it.
 
-## Hub 5 / Workspace 14 - Unreleased
+## Hub 5 / Workspace 14 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -71,7 +71,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 14. Treat `retrying` and `compacting` as live statuses (offer Cancel, hold a new prompt), admit `code` and `resetsAt` on notices, `label` on reasoning items, and `plan` on context reports (an empty plan means the login reports no windows; an absent one means the report does not speak to the plan, so the previous plan stands). Clients that ignore the new fields keep working once their validators admit them; a client that maps unknown statuses to "working" needs no change.
 
-## Hub 5 / Workspace 13 - Unreleased
+## Hub 5 / Workspace 13 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -87,7 +87,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 13. Treat `background` as a non-live status that still accepts a prompt, render `background_task` items (running ones as a live list with a stop control where the agent declares `background-tasks`, settled ones in place), and admit `elapsedMs` on tool items. Clients that ignore the new status, item, and field keep working once their validators admit them.
 
-## Hub 5 / Workspace 12 - Unreleased
+## Hub 5 / Workspace 12 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -102,7 +102,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 12. Accept the new optional `permissionScopeNote` on the agent object and render it as the card's scope line when present; treat `context_report` and `compaction` items as data (one feeds the context readout, the other renders as a marker), never as message bubbles; and render a question carrying `source` with its `intro` and `link`. Clients that ignore the new fields and item kinds keep working once their validators admit them.
 
-## Hub 5 / Workspace 11 - Unreleased
+## Hub 5 / Workspace 11 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -118,7 +118,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 11. Read availability from the `agents` array (a single-agent deployment still answers one entry), send the owning agent on retry and on catalog reads, treat conversation ids as opaque qualified strings, and accept the new closed-object fields on models, modes, permissions, and summaries. Clients that ignore declared defaults keep working; the delegation presentation simply remains.
 
-## Hub 5 / Workspace 10 - Unreleased
+## Hub 5 / Workspace 10 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -131,7 +131,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 10 and accept required `revertedMessages` on every reversible-history state. Clients that expose selected revert or restore send a `messageId` from the visible timeline or current `revertedMessages` list respectively; a stale or inapplicable target answers `409`.
 
-## Hub 5 / Workspace 9 - Unreleased
+## Hub 5 / Workspace 9 - v0.7.0
 
 Compatibility: breaking (workspace)
 
@@ -145,7 +145,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 9 or accept the new closed-object fields and enum variants. Clients may ignore reversible history unless the agent declares the capability. Clients that implement it must preserve local composer drafts when another client triggers a `conversation-rewritten` resync.
 
-## Hub 5 / Workspace 8 - Unreleased
+## Hub 5 / Workspace 8 - v0.6.0
 
 Compatibility: breaking (Hub and workspace)
 
@@ -180,7 +180,7 @@ Strict Hub consumers must regenerate against Hub revision 5: accept required `di
 
 Strict workspace chat consumers must regenerate against workspace revision 8: the closed response objects for user message items, queued messages, and models gained optional properties (`attachments`, `imageInput`), so validators built from revision 7 reject conversation snapshots, chat events, and model listings produced by revision 8. Request producers need no changes — every new request field is optional, and existing prompts remain valid.
 
-## Hub 4 / Workspace 7 - Unreleased
+## Hub 4 / Workspace 7 - v0.6.0
 
 Compatibility: breaking (workspace)
 
@@ -198,7 +198,7 @@ Compatibility: breaking (workspace)
 
 Strict workspace chat consumers must regenerate against workspace revision 7: read `held` instead of `delivery` on prompt acceptance, accept the `conversation.queue` event variant, and accept optional `queued` on conversation snapshots. Clients that steered a running turn must queue instead; there is no steer delivery in revision 7.
 
-## Hub 4 / Workspace 6 - Unreleased
+## Hub 4 / Workspace 6 - v0.6.0
 
 Compatibility: breaking (Hub)
 
@@ -216,7 +216,7 @@ Compatibility: breaking (Hub)
 
 Strict credential-tool consumers must regenerate against Hub revision 4 or accept the new `ssh` enum value. The optional `stop` unassignment field and paired assignment operation are additive and require no migration. Clients may send an empty unlock passphrase only when unlocking an SSH credential.
 
-## Hub 3 / Workspace 6 - Unreleased
+## Hub 3 / Workspace 6 - v0.6.0
 
 Compatibility: breaking (Hub)
 
@@ -228,7 +228,7 @@ Compatibility: breaking (Hub)
 
 Strict Hub state consumers must regenerate against Hub revision 3 or add the required closed `credentialAssignments` object and its two required string arrays. Consumers deciding whether to warn about missing assignments must test both arrays for emptiness and must not treat a non-empty array as proof that startup will succeed.
 
-## Hub 2 / Workspace 6 - Unreleased
+## Hub 2 / Workspace 6 - v0.6.0
 
 Compatibility: breaking (Hub and workspace)
 
@@ -246,7 +246,7 @@ Compatibility: breaking (Hub and workspace)
 
 Strict workspace consumers must regenerate against Workspace revision 6 or widen their closed schemas before connecting. Snapshot decoders must accept and require `configuration`; prompt-acceptance decoders must accept and require `configuration`; stream decoders must accept `conversation.configuration` and `conversation.updated`. Configuration fields are optional, and absence means unknown or agent-controlled: clients must not substitute the first offered model, mode, or variant. A `variant` is only valid together with `model`. Capability-aware clients should expose rename only when `conversation-rename` is declared, send a unique `requestId`, and enforce the 200 UTF-8-byte trimmed-title limit rather than a 200-character limit. Clients that reject unknown event variants or newly required response fields are incompatible with revision 6. Strict Hub state consumers must regenerate against Hub revision 2 or add the required `credentialRestartRequired` boolean to their closed `HubWorkspace` schema. The credential operations and optional clone request fields otherwise remain additive.
 
-## Hub 1 / Workspace 5 - Unreleased
+## Hub 1 / Workspace 5 - v0.6.0
 
 Compatibility: breaking (workspace)
 
@@ -260,7 +260,7 @@ Compatibility: breaking (workspace)
 
 A workspace client that validates conversation items against a closed schema must accept the new optional `diff` on permission items, the new optional `usage` and `model` on assistant-message items, and the new optional `usage` and `model` on tool items, or it will reject an otherwise valid timeline. A client presenting assistant messages must suppress the empty-markdown `usage:<provider-message-id>` carrier as a bubble while still consuming its usage data. Clients that ignore unknown properties need no change. No existing field changed meaning, type, or nullability. Window occupancy is `input + cacheRead + cacheWrite`; `output` is what came back rather than what occupies the window, so a client that adds it to the fill will overstate it. When a usage carrier has `model`, its context percentage uses that model's `contextLimit`, not a different model selected for a future prompt.
 
-## Hub 1 / Workspace 4 - Unreleased
+## Hub 1 / Workspace 4 - v0.6.0
 
 Compatibility: breaking (workspace)
 
@@ -274,7 +274,7 @@ Compatibility: breaking (workspace)
 
 A workspace client that lists ways of working must call `/api/chat/modes` and read the `modes` key; the `agents` route and key are gone, not deprecated. A client that sends a mode with a prompt must rename the request property from `agent` to `mode`; the accepted values are unchanged. A client that validates `ChatAvailability` against a closed schema must accept the new optional `agent` on the `ready` variant, or it will reject an otherwise valid status. Clients that ignore unknown properties need no change for that last item. A client SHOULD present a control only when the agent declares the matching capability, and MUST treat an absent capability as unsupported rather than as an error or an empty result.
 
-## Hub 1 / Workspace 3 - Unreleased
+## Hub 1 / Workspace 3 - v0.6.0
 
 Compatibility: breaking (workspace)
 
@@ -286,7 +286,7 @@ Compatibility: breaking (workspace)
 
 Workspace clients that validate conversation items against a closed schema must accept the new optional `conversationId` on permission and question items, or they will reject an otherwise valid timeline. Clients that ignore unknown properties need no change. A client that answers a request MUST address the owning `conversationId` when present, rather than the conversation it is displaying; answering the displayed conversation for a surfaced subagent request will be refused as a stale request. No existing field changed meaning, type, or nullability.
 
-## Hub 1 / Workspace 2 - Unreleased
+## Hub 1 / Workspace 2 - v0.6.0
 
 Compatibility: breaking (workspace)
 
@@ -299,7 +299,7 @@ Compatibility: breaking (workspace)
 
 Workspace clients that validate `ChatAvailability` against a closed schema must accept the new optional `diagnostics` property on the `unavailable` variant, or they will reject an otherwise valid response. Clients that ignore unknown properties need no change, and the property is absent whenever there is nothing to report. No existing field changed meaning, type, or nullability.
 
-## Hub 1 / Workspace 1 - Unreleased
+## Hub 1 / Workspace 1 - v0.6.0
 
 Compatibility: initial
 

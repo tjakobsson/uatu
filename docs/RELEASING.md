@@ -70,19 +70,25 @@ should require the normal CI checks on the generated release PR.
    stable-to-stable user-facing delta. Correct unwanted entries through commit
    overrides on their source PRs, rerun Release Please, and wait for all
    required checks.
-4. Merge the release PR when its contents represent the intended release.
-5. Release Please creates `vX.Y.Z` and a draft GitHub Release.
-6. The tag triggers `.github/workflows/release.yml`, which validates that the
+4. Stamp `api/CHANGELOG.md`. Every entry still headed `Unreleased` ships in
+   this release, so replace `Unreleased` with the version the release PR
+   proposes (`- vX.Y.Z`) in a docs-only PR and merge it before the release
+   PR. The compatibility gate matches entries by revision pair, so the
+   suffix is free text.
+5. Merge the release PR when its contents represent the intended release.
+6. Release Please creates `vX.Y.Z` and a draft GitHub Release.
+7. The tag triggers `.github/workflows/release.yml`, which validates that the
    tag matches `package.json`, cross-compiles four binaries, smoke-tests the
    linux-x64 artifact, verifies its version, packages archives, writes
    `SHA256SUMS`, creates provenance attestations, and attaches each
    archive's attestation as a `<archive>.sigstore.json` release asset.
-7. The workflow uploads all assets and publishes the draft release.
-8. The dependent tap job regenerates and pushes `Formula/uatu.rb` using
+8. The workflow uploads all assets and publishes the draft release.
+9. The dependent tap job regenerates and pushes `Formula/uatu.rb` using
    `HOMEBREW_TAP_TOKEN`.
 
-Do not manually bump `package.json`, manually maintain future changelog
-sections, or manually create the normal release tag.
+Do not manually bump `package.json`, manually maintain future sections of the
+root `CHANGELOG.md`, or manually create the normal release tag. The API
+changelog under `api/` is hand-written; Release Please does not touch it.
 
 ### First activation check
 
