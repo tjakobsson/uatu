@@ -240,15 +240,15 @@ export const STATE_FETCH_TIMEOUT_MS = 15_000;
 // guard covers them all: an older fetch cannot land on top of newer state,
 // whichever route delivered that state.
 const stateReconciler = createStateReconciler<StatePayload>({
-  fetchState: async () => {
-    const response = await fetchWithinBudget(
-      (input, init) => fetch(input, init),
-      contextualAppUrl(appUrl("/api/state")),
-      STATE_FETCH_TIMEOUT_MS,
-    );
-    if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
-    return (await response.json()) as StatePayload;
-  },
+  fetchState: () => fetchWithinBudget(
+    (input, init) => fetch(input, init),
+    contextualAppUrl(appUrl("/api/state")),
+    STATE_FETCH_TIMEOUT_MS,
+    async response => {
+      if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
+      return (await response.json()) as StatePayload;
+    },
+  ),
   freshnessOf: payload => payload.generatedAt,
   applyState: payload => {
     // Decided against the roots this client still holds, BEFORE the snapshot

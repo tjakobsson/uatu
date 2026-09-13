@@ -16,12 +16,17 @@ const defaultTimers: BoundedFetchTimers = {
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
-export function fetchWithinBudget(
+// The budget covers the whole read, headers and body alike: a response whose
+// headers arrive and whose body then stalls is the same hung request from the
+// caller's point of view, so `consume` runs inside the bound and the abort
+// reaches the body read too.
+export function fetchWithinBudget<T>(
   fetcher: Fetcher,
   input: string,
   timeoutMs: number,
+  consume: (response: Response) => Promise<T>,
   timers: BoundedFetchTimers = defaultTimers,
-): Promise<Response> {
+): Promise<T> {
   const controller = new AbortController();
   const timer = timers.setTimeout(() => {
     controller.abort(new Error(`request unanswered after ${timeoutMs} ms: ${input}`));
@@ -32,6 +37,6 @@ export function fetchWithinBudget(
   const aborted = new Promise<never>((_, reject) => {
     controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
   });
-  return Promise.race([fetcher(input, { signal: controller.signal }), aborted])
+  return Promise.race([fetcher(input, { signal: controller.signal }).then(consume), aborted])
     .finally(() => timers.clearTimeout(timer));
 }
