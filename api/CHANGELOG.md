@@ -1,6 +1,6 @@
 # API changelog
 
-Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks.
+Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
 ## Hub 5 / Workspace 17 - v0.7.0
 
@@ -145,6 +145,18 @@ Compatibility: breaking (workspace)
 
 Strict workspace Chat consumers must regenerate against workspace revision 9 or accept the new closed-object fields and enum variants. Clients may ignore reversible history unless the agent declares the capability. Clients that implement it must preserve local composer drafts when another client triggers a `conversation-rewritten` resync.
 
+## Hub 5 / Workspace 8 - v0.6.1
+
+Compatibility: additive (workspace)
+
+### Changes
+
+- Added `workspaceStreamChatConversationInventory` (`GET .../chat/conversations/events`): an authenticated SSE stream whose `inventory` event carries only `{type: "conversation.inventory"}`. The initial event and every later invalidation tell clients to refetch the authoritative conversation list; the stream has no replay cursor or mutation-specific payload. Additive, so the revision pair did not move; v0.6.0 does not serve this route.
+
+### Migration
+
+None.
+
 ## Hub 5 / Workspace 8 - v0.6.0
 
 Compatibility: breaking (Hub and workspace)
@@ -172,7 +184,6 @@ Compatibility: breaking (Hub and workspace)
 - `ChatPromptRequest` gained optional `attachments`: up to 8 `{id, name, mimeType}` references to previously uploaded images, submitted with the text as one message. `text` may now be empty when `attachments` is non-empty — an image-only prompt is valid (and `QueuedMessage.text` may be empty for such a message). Bytes never ride the prompt request. A reference the workspace has not stored, attachments on a slash command, or an empty text with no attachments answer `400`.
 - `UserMessageItem` and `QueuedMessage` gained optional `attachments` (`MessageAttachment` references): held messages keep their attachments and deliver them under the configuration frozen at submission, and replayed user messages restate theirs. A replayed attachment whose reference could not be recovered carries no `id`; clients render it as a labeled placeholder.
 - `ChatModel` gained optional `imageInput`, reporting whether the model can see image attachments; absent means not reported, which clients treat as no.
-- Added `workspaceStreamChatConversationInventory` (`GET .../chat/conversations/events`): an authenticated SSE stream whose `inventory` event carries only `{type: "conversation.inventory"}`. The initial event and every later invalidation tell clients to refetch the authoritative conversation list; the stream has no replay cursor or mutation-specific payload. This operation is additive.
 
 ### Migration
 
