@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="./uatu-screenshot.png" alt="uatu previewing its own ARCHITECTURE.md — Change Overview and file tree in the sidebar, rendered Markdown with a Mermaid diagram and outline in the preview pane, and Claude Code running in the embedded terminal" />
+  <img src="./uatu-screenshot.png" alt="uatu previewing a project README — Change Overview, file tree, and plan usage in the sidebar, the rendered Markdown in the preview pane, a Claude Code conversation on the right, and two shells in the embedded terminal" />
 </p>
 
 ---

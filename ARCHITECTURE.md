@@ -547,10 +547,11 @@ one that matches what actually broke.
    clients (anything documented in `api/openapi.yaml` / `api/streaming.yaml`),
    bump `HUB_API_REVISION` and/or `WORKSPACE_API_REVISION` for the affected
    domain instead, mirror the pair in `api/contract.json` and the OpenAPI
-   `x-uatu-revisions` block, and add a changelog entry with migration
-   guidance to `api/CHANGELOG.md` — CI's compatibility gate
-   (`scripts/api-contract/compatibility.ts`) rejects breaking contract
-   diffs that arrive without the bump and the guidance.
+   `x-uatu-revisions` block, and add a changelog entry to `api/CHANGELOG.md`
+   with migration guidance, headed `Unreleased` until the release that ships
+   it — CI's compatibility gate (`scripts/api-contract/compatibility.ts`)
+   rejects breaking contract diffs that arrive without the bump and the
+   guidance.
    A product or bundled-web change alone is NOT a public API break; the
    families move independently.
 
