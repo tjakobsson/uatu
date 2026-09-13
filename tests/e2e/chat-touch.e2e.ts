@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { APIRequestContext, Page, TestInfo } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
 import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
@@ -440,15 +441,19 @@ test("rotation and live mode switching retain Chat without remounting", async ({
 // The folded rate-limit chip in the layout where composer room is scarcest:
 // a second chip beside it used to compete for the same row.
 test.describe("rate-limit standing in touch mode", () => {
+  // The change these shots were evidence for is archived; while its folder
+  // existed the shots landed there, and now they go to the test output rather
+  // than resurrecting an empty change folder on every run.
   const SHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/quiet-rate-limit-signals/screenshots");
 
-  async function shoot(page: Page, name: string): Promise<void> {
+  async function shoot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
     await page.evaluate(() => document.fonts.ready);
     await page.waitForTimeout(150);
-    await page.screenshot({ path: path.join(SHOTS, `${name}.png`), animations: "disabled", caret: "hide" });
+    const target = existsSync(SHOTS) ? path.join(SHOTS, `${name}.png`) : testInfo.outputPath(`${name}.png`);
+    await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
   }
 
-  test("the standing rides the plan chip and opens, with no timeline row", async ({ page, request }) => {
+  test("the standing rides the plan chip and opens, with no timeline row", async ({ page, request }, testInfo) => {
     const id = await boot(page, request, { items: [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
       { id: "context:report:1", type: "context_report", createdAt: 2, total: 24_000, max: 200_000, plan: { fiveHour: { utilization: 9, resetsAt: Date.now() + 3_600_000 }, sevenDay: { utilization: 25, resetsAt: Date.now() + 3_600_000 } } },
@@ -460,16 +465,16 @@ test.describe("rate-limit standing in touch mode", () => {
     await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 3, level: "warning", message: "Approaching your 7-day (overage included) rate limit (77% used).", code: "rate-limit-warning", resetsAt: Date.now() + 3_600_000 } });
     await expect(chip).toHaveAttribute("data-level", "warning");
     await expect(page.locator('[data-chat-item-id="notice:rate-limit"]')).toHaveCount(0);
-    await shoot(page, "touch-rate-limit-warning");
+    await shoot(page, testInfo, "touch-rate-limit-warning");
     // It opens here too, and the readout stays clear of the composer.
     await summary.click();
     await expect(page.locator("#chat-plan-readout-standing")).toBeVisible();
-    await shoot(page, "touch-rate-limit-warning-readout");
+    await shoot(page, testInfo, "touch-rate-limit-warning-readout");
     await summary.click();
 
     await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 3, level: "error", message: "Rate limit reached for your 7-day window.", code: "rate-limit-rejected", resetsAt: Date.now() + 3_600_000 } });
     await expect(summary).toHaveText(/^Rate limited · resets /);
     await expect(chip).toHaveAttribute("data-level", "rejected");
-    await shoot(page, "touch-rate-limit-rejected");
+    await shoot(page, testInfo, "touch-rate-limit-rejected");
   });
 });

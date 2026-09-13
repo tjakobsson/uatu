@@ -503,7 +503,15 @@ export function createChatConfigurationPicker(
     activeModelValue = "";
     elements.trigger.setAttribute("aria-expanded", "false");
     renderModels();
-    if (elements.trigger.ownerDocument.body.contains(elements.trigger)) elements.trigger.focus();
+    // Focus goes back to the trigger only if it has nowhere else to be. The
+    // native `close()` already restores it there synchronously and this
+    // `close` event lands a task later — by which time a user who tapped
+    // Done and then the composer has moved on, and refocusing the trigger
+    // would take that tap away from them.
+    const doc = elements.trigger.ownerDocument;
+    const active = doc.activeElement;
+    const stranded = !active || active === doc.body || elements.dialog.contains(active);
+    if (stranded && doc.body.contains(elements.trigger)) elements.trigger.focus();
   };
 
   const close = (): void => {

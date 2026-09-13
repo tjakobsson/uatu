@@ -10,6 +10,7 @@
 
 import type { BuildSummary } from "../shared/types";
 import type { LiveChannelStatus } from "./live-channel";
+import { onManualRecovery, requestManualRecovery } from "./live";
 
 const connectionStateElementMaybe = document.querySelector<HTMLElement>("#connection-state");
 const connectionLabelElementMaybe = connectionStateElementMaybe?.querySelector<HTMLElement>(".connection-label") ?? null;
@@ -55,7 +56,36 @@ function syncConnectionDisplay() {
   }
   connectionLabelElement.textContent = label;
   connectionStateElement.title = title;
+  // The title keeps naming the state — it is what a mouse user hovers for,
+  // and it is the string the e2e locators read. The accessible name names
+  // the ACTION instead, because that is what activating the control does;
+  // only while live, when the control is inert, do the two agree.
+  const live = connectionRawState === "live";
+  connectionStateElement.setAttribute("aria-label", live ? title : "Reconnect to the uatu backend");
+  // `aria-disabled`, not `disabled`: a disabled button leaves the tab order
+  // and stops showing its tooltip, and the state is still worth reading
+  // while the connection is healthy.
+  connectionStateElement.setAttribute("aria-disabled", live ? "true" : "false");
 }
+
+// The shell's half of the manual recovery. The Chat surface offers the same
+// action on its interruption line; both call the one `requestManualRecovery`,
+// which joins an attempt already in flight rather than starting a second.
+connectionStateElement.addEventListener("click", () => {
+  if (connectionRawState === "live") return;
+  void requestManualRecovery();
+});
+
+onManualRecovery(inFlight => {
+  connectionStateElement.classList.toggle("is-attempting", inFlight);
+  if (inFlight) connectionStateElement.setAttribute("aria-busy", "true");
+  else connectionStateElement.removeAttribute("aria-busy");
+});
+
+// The markup ships the pre-connection state; this states it in the same place
+// every later status does, so the control's ARIA is never a step behind the
+// template.
+syncConnectionDisplay();
 
 // The one translation from live-channel transport status to indicator state.
 // It lives here rather than at the call site so the indicator's contract —

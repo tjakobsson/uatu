@@ -814,6 +814,10 @@ html.uatu-desktop-host
   background: var(--surface-subtle);
 }
 
+/* A button that has to read as the label it used to be: the reset keeps the
+   chip visually identical to the old <span> so the wordmark block below the
+   logo is unchanged, while the element itself is focusable and activatable.
+   `position: relative` is here for the coarse-pointer hit area below. */
 .connection-state {
   display: inline-flex;
   align-items: center;
@@ -822,6 +826,28 @@ html.uatu-desktop-host
   font-weight: 500;
   color: var(--text-subtle);
   letter-spacing: 0.01em;
+  position: relative;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Inert while live: the click handler ignores activation, so the cursor has
+   to stop advertising one. `aria-disabled` rather than `disabled` — a
+   disabled button drops out of the tab order and loses its hover tooltip,
+   and the state title is the thing a mouse user comes here for. */
+.connection-state[aria-disabled="true"] {
+  cursor: default;
+}
+
+.connection-state:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 0.25rem;
 }
 
 .connection-state[hidden] {
@@ -850,6 +876,40 @@ html.uatu-desktop-host
   background: light-dark(#d4a72c, #d29922);
 }
 
+/* A requested attempt is under way. The label still follows the channel, so
+   what is left to say is that the page is acting on the tap: the chip lifts
+   into a pill (negative margins keep the header's box where it was) and the
+   dot beats faster than the live pulse, in the reconnecting colour. */
+.connection-state.is-attempting {
+  margin: -0.15rem -0.5rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+}
+
+.connection-state.is-attempting .indicator-dot {
+  background: light-dark(#d4a72c, #d29922);
+  animation: uatu-pulse 0.9s ease-in-out infinite;
+}
+
+/* Touch target, matching the 44px the rest of touch mode guarantees. Drawn
+   as an overlay rather than as padding or a min-height: the chip sits under
+   the wordmark in a fixed-height header, and growing the box would push the
+   header open. Keyed on the pointer, not the ui-mode attribute — an iPad in
+   desktop mode still taps with a finger. */
+@media (pointer: coarse) {
+  .connection-state::after {
+    content: "";
+    position: absolute;
+    left: -10px;
+    right: -10px;
+    top: 50%;
+    height: 44px;
+    transform: translateY(-50%);
+  }
+}
+
 @keyframes uatu-pulse {
   0%,
   100% {
@@ -863,7 +923,8 @@ html.uatu-desktop-host
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .connection-state.is-live .indicator-dot {
+  .connection-state.is-live .indicator-dot,
+  .connection-state.is-attempting .indicator-dot {
     animation: none;
   }
 }
@@ -5282,6 +5343,29 @@ body.is-resizing-chat .chat-resizer {
 
 .chat-state[hidden] {
   display: none;
+}
+
+/* The way back on an interruption report: inline with the message, not a
+   second row, so the line reads as one sentence with its action. */
+.chat-reconnect-button {
+  margin-inline-start: 0.6rem;
+  min-height: 1.6rem;
+  padding: 0.15rem 0.6rem;
+  font: inherit;
+  font-size: 0.85em;
+  vertical-align: baseline;
+}
+
+.chat-reconnect-button[aria-busy="true"] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+@media (pointer: coarse) {
+  .chat-reconnect-button {
+    min-height: 44px;
+    padding-inline: 0.9rem;
+  }
 }
 
 .chat-conversation-unavailable {

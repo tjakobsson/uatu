@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createLifecycleRecovery, createStateReconciler, type LifecycleRecoveryTarget } from "./recovery";
+import { createLifecycleRecovery, createStateReconciler, type LifecycleRecoveryTarget, type LifecycleRecoveryTimers } from "./recovery";
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
 
@@ -257,17 +257,45 @@ describe("createStateReconciler", () => {
 });
 
 describe("createLifecycleRecovery", () => {
-  function harness(recover: () => Promise<unknown>) {
+  // Timers under test control, so the ceiling can be crossed without waiting.
+  function fakeTimers() {
+    const scheduled: { id: number; delay: number; run: () => void }[] = [];
+    let nextId = 1;
+    const timers: LifecycleRecoveryTimers = {
+      setTimeout(callback, delay) {
+        const id = nextId++;
+        scheduled.push({ id, delay, run: callback });
+        return id as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimeout(timer) {
+        const index = scheduled.findIndex(entry => entry.id === (timer as unknown as number));
+        if (index >= 0) scheduled.splice(index, 1);
+      },
+    };
+    return {
+      timers,
+      pending: () => scheduled.length,
+      // Fires the oldest pending timer, as the clock passing its delay would.
+      elapse() {
+        const entry = scheduled.shift();
+        if (!entry) throw new Error("nothing scheduled");
+        entry.run();
+      },
+    };
+  }
+
+  function harness(recover: () => Promise<unknown>, options: { timers?: LifecycleRecoveryTimers; ceilingMs?: number } = {}) {
     const win = fakeTarget();
     const doc = Object.assign(fakeTarget(), { visibilityState: "visible" });
-    const discards: number[] = [];
+    const releases: number[] = [];
     const lifecycle = createLifecycleRecovery({
       win,
       doc,
       recover,
-      discard: () => discards.push(1),
+      release: () => releases.push(1),
+      ...options,
     });
-    return { win, doc, lifecycle, discards };
+    return { win, doc, lifecycle, releases };
   }
 
   test("a restored page, a return to the foreground, and regained network each reconcile", async () => {
@@ -354,12 +382,104 @@ describe("createLifecycleRecovery", () => {
     expect(channels).toEqual(["installed"]);
   });
 
-  test("a discarded page tears the channel down; a frozen one does not", () => {
-    const h = harness(async () => {});
-    h.win.fire("pagehide", { persisted: true } as Partial<Event>);
-    expect(h.discards).toHaveLength(0);
+  test("an unpersisted pagehide releases the connection, and a return to visible still recovers", async () => {
+    // iOS backgrounding a standalone page: `pagehide` with `persisted: false`
+    // — the shape of a discard — and then the same document runs again.
+    let runs = 0;
+    const h = harness(async () => { runs += 1; });
+
+    h.doc.visibilityState = "hidden";
+    h.doc.fire("visibilitychange");
     h.win.fire("pagehide", { persisted: false } as Partial<Event>);
-    expect(h.discards).toHaveLength(1);
+    expect(h.releases).toHaveLength(1);
+    expect(runs).toBe(0);
+
+    h.doc.visibilityState = "visible";
+    h.doc.fire("visibilitychange");
+    await flush();
+    expect(runs).toBe(1);
+  });
+
+  test("a frozen page is released the same way and its restore recovers", async () => {
+    let runs = 0;
+    const h = harness(async () => { runs += 1; });
+
+    h.win.fire("pagehide", { persisted: true } as Partial<Event>);
+    expect(h.releases).toHaveLength(1);
+
+    h.win.fire("pageshow", { persisted: true } as Partial<Event>);
+    await flush();
+    expect(runs).toBe(1);
+  });
+
+  test("no pagehide removes a wake-up listener", () => {
+    const h = harness(async () => {});
+    const armed = () => ({
+      pageshow: h.win.count("pageshow"),
+      online: h.win.count("online"),
+      pagehide: h.win.count("pagehide"),
+      visibilitychange: h.doc.count("visibilitychange"),
+    });
+    const before = armed();
+    expect(before).toEqual({ pageshow: 1, online: 1, pagehide: 1, visibilitychange: 1 });
+
+    h.win.fire("pagehide", { persisted: false } as Partial<Event>);
+    expect(armed()).toEqual(before);
+    h.win.fire("pagehide", { persisted: true } as Partial<Event>);
+    expect(armed()).toEqual(before);
+  });
+
+  test("a recovery that never settles stops holding the coalescer once the ceiling passes", () => {
+    const clock = fakeTimers();
+    let runs = 0;
+    // A state fetch the network never answers, registered without a bound
+    // of its own.
+    const h = harness(() => { runs += 1; return new Promise(() => {}); }, { timers: clock.timers, ceilingMs: 30_000 });
+
+    h.win.fire("online");
+    expect(runs).toBe(1);
+    // Still held: the signal is dropped.
+    h.doc.fire("visibilitychange");
+    expect(runs).toBe(1);
+
+    clock.elapse();
+    h.doc.fire("visibilitychange");
+    expect(runs).toBe(2);
+  });
+
+  test("a recovery that settles in time cancels its ceiling", async () => {
+    const clock = fakeTimers();
+    const h = harness(async () => {}, { timers: clock.timers });
+    h.win.fire("online");
+    expect(clock.pending()).toBe(1);
+    await flush();
+    expect(clock.pending()).toBe(0);
+  });
+
+  test("an abandoned recovery settling late does not release the recovery that replaced it", async () => {
+    const clock = fakeTimers();
+    const first = defer<void>();
+    const second = defer<void>();
+    const pending = [first, second];
+    let runs = 0;
+    const h = harness(() => { runs += 1; return pending.shift()!.promise; }, { timers: clock.timers });
+
+    h.win.fire("online");
+    clock.elapse();
+    h.win.fire("online");
+    expect(runs).toBe(2);
+
+    // The first, abandoned recovery finally answers. The second is still in
+    // flight and must keep its slot.
+    first.resolve();
+    await flush();
+    h.win.fire("online");
+    expect(runs).toBe(2);
+
+    second.resolve();
+    await flush();
+    h.win.fire("online");
+    expect(runs).toBe(3);
   });
 
   test("disposal removes every listener and stops honouring signals", () => {

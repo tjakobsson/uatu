@@ -2,12 +2,17 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { resetAppBasePathForTests } from "../shared/app-url";
 import type { LiveChannel } from "./live-channel";
+import { createLiveChannel } from "./live-channel";
 import {
   disposeLiveChannel,
   installLiveChannelForTests,
+  installManualRecoveryForTests,
+  isManualRecoveryInFlight,
   liveChannel,
+  onManualRecovery,
   recoverLiveChannel,
   registerRecoveryWork,
+  requestManualRecovery,
   watchPageLifecycle,
 } from "./live";
 
@@ -21,6 +26,7 @@ function setGlobal(key: string, value: unknown) {
 afterEach(() => {
   disposeLiveChannel();
   installLiveChannelForTests(null);
+  installManualRecoveryForTests(null);
   for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
   savedGlobals.clear();
   resetAppBasePathForTests();
@@ -186,10 +192,12 @@ describe("the page's live channel singleton", () => {
     expect(suspends).toBe(1);
   });
 
-  test("a discarded page disposes the channel; a frozen one keeps it", () => {
+  test("a pagehide releases the channel whether or not the browser promises a restore, and never disposes it", () => {
     let disposed = 0;
+    let suspends = 0;
     const channel = {
       connect() {},
+      suspend() { suspends += 1; },
       dispose() { disposed += 1; },
     } as unknown as LiveChannel;
     installLiveChannelForTests(channel);
@@ -199,8 +207,193 @@ describe("the page's live channel singleton", () => {
     watchPageLifecycle();
 
     win.fire("pagehide", { persisted: true });
-    expect(disposed).toBe(0);
+    expect(suspends).toBe(1);
+    // iOS backgrounding a standalone page: the shape of a discard, but the
+    // document lives on.
     win.fire("pagehide", { persisted: false });
-    expect(disposed).toBe(1);
+    expect(suspends).toBe(2);
+    expect(disposed).toBe(0);
+  });
+
+  test("a wake-up after an unpersisted pagehide reconnects the same channel", async () => {
+    const connects: { resumed?: boolean }[] = [];
+    const channel = {
+      connect(options?: { resumed?: boolean }) { connects.push(options ?? {}); },
+      suspend() {},
+      dispose() {},
+    } as unknown as LiveChannel;
+    installLiveChannelForTests(channel);
+    const win = fakeTarget();
+    const doc = fakeTarget();
+    setGlobal("window", win);
+    setGlobal("document", doc);
+    watchPageLifecycle();
+
+    doc.visibilityState = "hidden";
+    doc.fire("visibilitychange");
+    win.fire("pagehide", { persisted: false });
+    expect(connects).toEqual([]);
+
+    doc.visibilityState = "visible";
+    doc.fire("visibilitychange");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(connects).toEqual([{ resumed: true }]);
+  });
+
+  test("subscriptions and cursors survive the release and are re-presented on the next connect", () => {
+    CountingSource.instances = [];
+    setGlobal("EventSource", CountingSource);
+    const channel = createLiveChannel({
+      ws: null,
+      activity: false,
+      openSource: url => new CountingSource(url),
+      fetcher: async () => new Response("{}"),
+    });
+    installLiveChannelForTests(channel);
+    const win = fakeTarget();
+    const doc = fakeTarget();
+    setGlobal("window", win);
+    setGlobal("document", doc);
+    channel.connect();
+    channel.subscribe({ topic: "document", key: "k" }, {}, { cursor: "doc-7" });
+    channel.subscribe({ topic: "conversation", key: "one" }, {}, { cursor: "conv-3" });
+    watchPageLifecycle();
+    expect(CountingSource.instances).toHaveLength(1);
+
+    doc.visibilityState = "hidden";
+    doc.fire("visibilitychange");
+    win.fire("pagehide", { persisted: false });
+    // The socket is gone, the subscriptions are not.
+    expect(CountingSource.instances[0]!.closed).toBe(true);
+    expect(channel.subscriptions()).toEqual([
+      { topic: "document", key: "k", cursor: "doc-7" },
+      { topic: "conversation", key: "one", cursor: "conv-3" },
+    ]);
+
+    doc.visibilityState = "visible";
+    doc.fire("visibilitychange");
+    expect(CountingSource.instances).toHaveLength(2);
+    const query = new URL(CountingSource.instances[1]!.url, "http://hub.invalid").searchParams;
+    expect(query.get("reconnect")).toBe("1");
+    expect(JSON.parse(query.get("subs")!)).toEqual([
+      { topic: "document", key: "k", cursor: "doc-7" },
+      { topic: "conversation", key: "one", cursor: "conv-3" },
+    ]);
+  });
+});
+
+describe("manual recovery", () => {
+  type Status = "connecting" | "reconnecting" | "live";
+
+  function fakeClock() {
+    const scheduled: { id: number; run: () => void }[] = [];
+    let nextId = 1;
+    return {
+      timers: {
+        setTimeout(callback: () => void) {
+          const id = nextId++;
+          scheduled.push({ id, run: callback });
+          return id as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout(timer: ReturnType<typeof setTimeout>) {
+          const index = scheduled.findIndex(entry => entry.id === (timer as unknown as number));
+          if (index >= 0) scheduled.splice(index, 1);
+        },
+      },
+      pending: () => scheduled.length,
+      elapse: () => scheduled.shift()!.run(),
+    };
+  }
+
+  // A channel whose confirmation the test hands out by hand.
+  function statusChannel() {
+    const listeners = new Set<(status: Status) => void>();
+    const connects: { resumed?: boolean }[] = [];
+    const channel = {
+      connect(options?: { resumed?: boolean }) { connects.push(options ?? {}); },
+      onStatus(listener: (status: Status) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+      suspend() {},
+      dispose() {},
+    } as unknown as LiveChannel;
+    installLiveChannelForTests(channel);
+    setGlobal("window", fakeTarget());
+    setGlobal("document", fakeTarget());
+    return { connects, emit: (status: Status) => { for (const listener of [...listeners]) listener(status); }, listeners };
+  }
+
+  test("recovers in place when the channel confirms live within the window", async () => {
+    const clock = fakeClock();
+    let reloads = 0;
+    installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: clock.timers });
+    const channel = statusChannel();
+    const work: string[] = [];
+    registerRecoveryWork(async () => { work.push("state"); });
+
+    const attempt = requestManualRecovery();
+    expect(isManualRecoveryInFlight()).toBe(true);
+    // The same recovery a wake-up performs: the channel superseded, the
+    // consumers' reconciliation run.
+    expect(channel.connects).toEqual([{ resumed: true }]);
+    expect(work).toEqual(["state"]);
+
+    channel.emit("reconnecting");
+    channel.emit("live");
+    await attempt;
+    expect(reloads).toBe(0);
+    expect(isManualRecoveryInFlight()).toBe(false);
+    expect(clock.pending()).toBe(0);
+    expect(channel.listeners.size).toBe(0);
+  });
+
+  test("falls back to reloading when nothing confirms live within the window", async () => {
+    const clock = fakeClock();
+    let reloads = 0;
+    installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: clock.timers });
+    const channel = statusChannel();
+
+    const attempt = requestManualRecovery();
+    channel.emit("reconnecting");
+    expect(reloads).toBe(0);
+    clock.elapse();
+    await attempt;
+    expect(reloads).toBe(1);
+    expect(isManualRecoveryInFlight()).toBe(false);
+  });
+
+  test("a request while an attempt is in flight joins it rather than starting another", async () => {
+    const clock = fakeClock();
+    let reloads = 0;
+    installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: clock.timers });
+    const channel = statusChannel();
+    const seen: boolean[] = [];
+    onManualRecovery(inFlight => seen.push(inFlight));
+
+    const first = requestManualRecovery();
+    const second = requestManualRecovery();
+    expect(second).toBe(first);
+    expect(channel.connects).toHaveLength(1);
+    expect(clock.pending()).toBe(1);
+
+    channel.emit("live");
+    await first;
+    expect(reloads).toBe(0);
+    // Told once at registration, once when the attempt began, once when it ended.
+    expect(seen).toEqual([false, true, false]);
+
+    // Once settled, the next request is a fresh attempt.
+    void requestManualRecovery();
+    expect(channel.connects).toHaveLength(2);
+  });
+
+  test("an explicit teardown cancels an attempt without reloading", async () => {
+    const clock = fakeClock();
+    let reloads = 0;
+    installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: clock.timers });
+    statusChannel();
+    const attempt = requestManualRecovery();
+    disposeLiveChannel();
+    await attempt;
+    expect(reloads).toBe(0);
+    expect(isManualRecoveryInFlight()).toBe(false);
   });
 });

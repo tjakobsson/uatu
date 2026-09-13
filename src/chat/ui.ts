@@ -5,7 +5,7 @@ import { measureChatWork } from "./performance";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { registerBackInterceptor } from "../shell/history";
-import { registerRecoveryWork } from "../shell/live";
+import { onManualRecovery, registerRecoveryWork, requestManualRecovery } from "../shell/live";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type ScrollMovement } from "./anchor";
@@ -60,7 +60,14 @@ type Presentation = {
 
 // A status line that also reports what it is currently saying, so an owner of
 // a specific message can check it is still the one on screen before removing it.
-type Announcer = ((message: string, error?: boolean) => void) & { current: () => string };
+type Announcer = ((message: string, error?: boolean) => void) & {
+  current: () => string;
+  // The line itself, for an owner that keeps an element child on it.
+  target: HTMLElement | null;
+  // Told after every announcement, before the line's visibility is settled,
+  // so an owner can attach or remove its child in the same pass.
+  spoken: Set<() => void>;
+};
 
 const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, dismissedSubagents: {} };
 
@@ -217,11 +224,9 @@ export function initChat(api = new ChatApiClient()): void {
   const stagedConfigurations = new Map<string, ConversationConfiguration>();
   let configurationPicker: ChatConfigurationPickerController | null = null;
   let stream: ChatEventStream | null = null;
-  let releaseRecoveryWork: (() => void) | null = null;
   let inventoryStream: ChatEventStream | null = null;
   let selectionGeneration = 0;
   let selectedConversationDeleted = false;
-  let disposed = false;
   type ConversationRefreshRecovery = {
     conversationId: string;
     token: number;
@@ -463,6 +468,7 @@ export function initChat(api = new ChatApiClient()): void {
     // as the textContent variant did — but element children survive; they
     // are removed explicitly where that is meant.
     let node: Text | null = null;
+    const spoken = new Set<() => void>();
     const speak = (message: string, error = false) => {
       if (!target) return;
       if (!node || node.parentNode !== target) {
@@ -474,12 +480,13 @@ export function initChat(api = new ChatApiClient()): void {
       }
       node.textContent = message;
       target.classList.toggle("is-error", error);
+      for (const listener of [...spoken]) listener();
       target.hidden = !message && target.childElementCount === 0;
     };
     // What the line is saying right now. A caller that owns a specific
     // message needs this to check it is still the one being shown before
     // taking it down.
-    return Object.assign(speak, { current: () => node?.textContent ?? "" });
+    return Object.assign(speak, { current: () => node?.textContent ?? "", target, spoken });
   };
   const announce = announcerFor(state);
   const announceChild = announcerFor(drilldownState);
@@ -492,6 +499,36 @@ export function initChat(api = new ChatApiClient()): void {
   // the other's warning while it is still down.
   const interruptionsFor = (speak: Announcer) => {
     const owned = new Map<string, string>();
+    // The way back while an interruption is what the line reports. The
+    // channel keeps retrying on its own, but a stall can outlive that cycle
+    // (a wake-up signal lost, a page whose recovery machinery is gone), and
+    // on a home-screen page there is no browser reload to fall back on. The
+    // shell's manual recovery reconnects in place and reloads only if that
+    // does not confirm; either way this surface's draft and position stand.
+    const reconnect = document.createElement("button");
+    reconnect.type = "button";
+    reconnect.className = "chat-secondary-button chat-reconnect-button";
+    reconnect.textContent = "Reconnect";
+    reconnect.addEventListener("click", () => { void requestManualRecovery(); });
+    onManualRecovery(inFlight => {
+      reconnect.disabled = inFlight;
+      reconnect.textContent = inFlight ? "Reconnecting…" : "Reconnect";
+      if (inFlight) reconnect.setAttribute("aria-busy", "true");
+      else reconnect.removeAttribute("aria-busy");
+    });
+    // Present exactly while the line is showing one of this owner's
+    // interruption messages — not while another message (a provider
+    // refusal, a failed turn) has displaced it, even if a stream is still
+    // down underneath.
+    const sync = () => {
+      const showing = speak.target !== null && [...owned.values()].includes(speak.current());
+      if (showing) {
+        if (reconnect.parentNode !== speak.target) speak.target!.append(reconnect);
+      } else if (reconnect.parentNode) {
+        reconnect.remove();
+      }
+    };
+    speak.spoken.add(sync);
     return {
       report(stream: string, error: unknown) {
         const message = messageOf(error);
@@ -1979,7 +2016,7 @@ export function initChat(api = new ChatApiClient()): void {
 
   const recoverSelectedConversation = (id: string) => {
     const token = selectionGeneration;
-    if (disposed || activeConversationId() !== id) return;
+    if (activeConversationId() !== id) return;
     if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) return;
     stopConversationRefreshRecovery();
     const recovery: ConversationRefreshRecovery = {
@@ -1991,9 +2028,9 @@ export function initChat(api = new ChatApiClient()): void {
     };
     conversationRefreshRecovery = recovery;
     void (async () => {
-      while (!disposed && conversationRefreshRecovery === recovery && selectionGeneration === token && activeConversationId() === id) {
+      while (conversationRefreshRecovery === recovery && selectionGeneration === token && activeConversationId() === id) {
         if (await refreshSelectedConversation(id)) return;
-        if (disposed || conversationRefreshRecovery !== recovery || selectionGeneration !== token || activeConversationId() !== id) return;
+        if (conversationRefreshRecovery !== recovery || selectionGeneration !== token || activeConversationId() !== id) return;
         await new Promise<void>(resolve => {
           recovery.wake = () => {
             recovery.wake = null;
@@ -2076,11 +2113,11 @@ export function initChat(api = new ChatApiClient()): void {
   async function refreshSelectedConversation(id: string): Promise<boolean> {
     const token = selectionGeneration;
     const current = projection;
-    if (disposed || !current || current.conversationId !== id || activeConversationId() !== id) return false;
+    if (!current || current.conversationId !== id || activeConversationId() !== id) return false;
     try {
       return await runConversationRead("Updating conversation...", () => { void refreshSelectedConversation(id); }, async signal => {
         const snapshot = await api.snapshot(id, undefined, signal);
-        if (signal.aborted || disposed || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
+        if (signal.aborted || token !== selectionGeneration || projection?.conversationId !== id || activeConversationId() !== id) return false;
         const previousStream = stream;
         installConversationSnapshot(snapshot, projection.acceptedDrafts, token);
         if (conversationRefreshRecovery?.conversationId === id && conversationRefreshRecovery.token === token) {
@@ -3592,38 +3629,16 @@ export function initChat(api = new ChatApiClient()): void {
   observer?.observe(items);
   if (drilldownItems) observer?.observe(drilldownItems);
   viewport.start();
-  window.addEventListener("pagehide", event => {
-    // Drafts are saved either way — a frozen page can be discarded later
-    // without ever running code again.
+  // The draft is saved on every hide, persisted or not: a frozen page can be
+  // discarded later without ever running code again. Nothing else happens
+  // here. This surface is never torn down on a lifecycle event — iOS fires an
+  // unpersisted `pagehide` for a home-screen page it then keeps alive, and a
+  // torn-down Chat would stay closed for the life of that document. The
+  // hidden-page path (`handleChatSurfaceState`) already cancels the timers
+  // and frames; the page's one channel releases the socket and keeps every
+  // subscription, so a return resumes the streams from where they stopped.
+  window.addEventListener("pagehide", () => {
     flushSave();
-    // `persisted` means the page went into the back/forward cache: it is
-    // frozen, not finished, and a later `pageshow` restores this very surface.
-    // Tearing it down here would leave the restored page holding a disposed
-    // Chat that never resubscribes — the suspended-page case this recovery
-    // work exists to fix.
-    if ((event as PageTransitionEvent).persisted) return;
-    disposed = true;
-    stopConversationRefreshRecovery();
-    stream?.close();
-    inventoryStream?.close();
-    releaseRecoveryWork?.();
-    child?.stream?.close();
-    child?.read?.controller.abort();
-    childReadSignal?.cancel();
-    observer?.disconnect();
-    surfaceObserver.disconnect();
-    document.removeEventListener("visibilitychange", handleChatSurfaceState);
-    document.removeEventListener("uatu:before-surface-change", captureSurfaceAnchors);
-    if (renderFrame !== null) cancelAnimationFrame(renderFrame);
-    if (childRenderFrame !== null) cancelAnimationFrame(childRenderFrame);
-    if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
-    if (incrementalTimer !== null) clearTimeout(incrementalTimer);
-    if (childIncrementalTimer !== null) clearTimeout(childIncrementalTimer);
-    readLane?.controller.abort();
-    readSignal.cancel();
-    viewport.stop();
-    configurationPicker?.destroy();
-    if (workingTimer !== null) clearInterval(workingTimer);
   });
 
   // Bootstrap is deferred until Chat is actually the active surface: status()
@@ -4010,8 +4025,8 @@ export function initChat(api = new ChatApiClient()): void {
   // stream cannot replay: the authoritative inventory. Nothing here touches
   // presentation — drafts, timeline content, and scroll position survive
   // intact.
-  releaseRecoveryWork = registerRecoveryWork(async () => {
-    if (disposed || !bootstrapped) return;
+  registerRecoveryWork(async () => {
+    if (!bootstrapped) return;
     await inventoryReconciler.request();
   });
   handleChatSurfaceState();

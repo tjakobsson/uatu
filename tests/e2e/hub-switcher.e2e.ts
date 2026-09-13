@@ -7,11 +7,12 @@
 // at desktop and phone sizes; the phone run is touch mode, where the
 // switcher lives in the Files tab.
 
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { changeScreenshotsDir } from "./chat-helpers";
 import { childChatControl, expect, openSessionTab, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
-import type { BrowserContext, Page } from "@playwright/test";
+import type { BrowserContext, Page, TestInfo } from "@playwright/test";
 
 const SCREENSHOTS = changeScreenshotsDir("hub-brokered-live-stream");
 
@@ -54,10 +55,14 @@ async function finishWork(staged: Staged): Promise<void> {
   await childChatControl(staged.gamma, { action: "status", conversationId: staged.gammaConversation, status: "completed" });
 }
 
-async function shot(page: Page, name: string, clip?: { x: number; y: number; width: number; height: number }): Promise<void> {
+// Into the change's folder while it exists (review reads it from there); into
+// the test output once the change is archived, so a run does not resurrect
+// an empty change folder.
+async function shot(page: Page, testInfo: TestInfo, name: string, clip?: { x: number; y: number; width: number; height: number }): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(200);
-  await page.screenshot({ path: path.join(SCREENSHOTS, `${name}.png`), animations: "disabled", caret: "hide", ...(clip ? { clip } : {}) });
+  const target = existsSync(SCREENSHOTS) ? path.join(SCREENSHOTS, `${name}.png`) : testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path: target, animations: "disabled", caret: "hide", ...(clip ? { clip } : {}) });
 }
 
 // A close-up of the chip and, when open, its menu — the review needs the
@@ -119,27 +124,27 @@ async function expectIdle(page: Page, staged: Staged): Promise<void> {
 test.describe("desktop", () => {
   test.use({ viewport: { width: 1400, height: 1000 } });
 
-  test("badges the chip for a question elsewhere, names states in the menu, clears when answered", async ({ hub, hubContext }) => {
+  test("badges the chip for a question elsewhere, names states in the menu, clears when answered", async ({ hub, hubContext }, testInfo) => {
     const staged = await stageActivity(hub, hubContext);
     const page = await openSessionTab(hubContext, hub.workspaces[0]!);
 
     await expectStaged(page);
     const badgedHeight = await chipHeight(page);
-    await shot(page, "after-switcher-desktop-chip-awaiting");
-    await shot(page, "after-switcher-desktop-chip-awaiting-closeup", await switcherClip(page));
+    await shot(page, testInfo, "after-switcher-desktop-chip-awaiting");
+    await shot(page, testInfo, "after-switcher-desktop-chip-awaiting-closeup", await switcherClip(page));
 
     await openMenuAndExpectStates(page);
-    await shot(page, "after-switcher-desktop-menu");
-    await shot(page, "after-switcher-desktop-menu-closeup", await switcherClip(page));
+    await shot(page, testInfo, "after-switcher-desktop-menu");
+    await shot(page, testInfo, "after-switcher-desktop-menu-closeup", await switcherClip(page));
     await page.keyboard.press("Escape");
     await expect(page.locator("#hub-menu")).toBeHidden();
 
     await expectAnswered(page, staged);
-    await shot(page, "after-switcher-desktop-chip-answered");
-    await shot(page, "after-switcher-desktop-chip-answered-closeup", await switcherClip(page));
+    await shot(page, testInfo, "after-switcher-desktop-chip-answered");
+    await shot(page, testInfo, "after-switcher-desktop-chip-answered-closeup", await switcherClip(page));
 
     await expectIdle(page, staged);
-    await shot(page, "after-switcher-desktop-chip-idle-closeup", await switcherClip(page));
+    await shot(page, testInfo, "after-switcher-desktop-chip-idle-closeup", await switcherClip(page));
     expect(Math.abs((await chipHeight(page)) - badgedHeight)).toBeLessThan(0.5);
   });
 });
@@ -149,7 +154,7 @@ test.describe("phone", () => {
   // boots the UI into touch mode with the bottom tab bar.
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test("the same switcher states in touch mode's Files tab", async ({ hub, hubContext }) => {
+  test("the same switcher states in touch mode's Files tab", async ({ hub, hubContext }, testInfo) => {
     const staged = await stageActivity(hub, hubContext);
     const page = await openSessionTab(hubContext, hub.workspaces[0]!);
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
@@ -157,15 +162,15 @@ test.describe("phone", () => {
     await expect(page.locator("#touch-tab-files")).toHaveAttribute("aria-selected", "true");
 
     await expectStaged(page);
-    await shot(page, "after-switcher-phone-chip-awaiting");
+    await shot(page, testInfo, "after-switcher-phone-chip-awaiting");
 
     await openMenuAndExpectStates(page);
-    await shot(page, "after-switcher-phone-menu");
+    await shot(page, testInfo, "after-switcher-phone-menu");
     await page.keyboard.press("Escape");
     await expect(page.locator("#hub-menu")).toBeHidden();
 
     await expectAnswered(page, staged);
-    await shot(page, "after-switcher-phone-chip-answered");
+    await shot(page, testInfo, "after-switcher-phone-chip-answered");
 
     await expectIdle(page, staged);
   });

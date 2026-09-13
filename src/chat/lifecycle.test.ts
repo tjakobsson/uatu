@@ -81,6 +81,8 @@ describe("chat lifecycle recovery", () => {
     const { installLiveChannelForTests, watchPageLifecycle, disposeLiveChannel } = await import("../shell/live");
     installLiveChannelForTests({
       connect(options?: { resumed?: boolean }) { connects.push(options ?? {}); },
+      // A frozen page is released too; the fake need only accept it.
+      suspend() {},
       dispose() {},
     } as unknown as LiveChannel);
     watchPageLifecycle();
@@ -256,6 +258,233 @@ describe("chat lifecycle recovery", () => {
     window.dispatchEvent(new Event("pagehide"));
     disposeLiveChannel();
     installLiveChannelForTests(null);
+  });
+
+  test("an unpersisted pagehide keeps Chat subscribed: a return to visible delivers again and the draft survives", async () => {
+    // iOS backgrounding a home-screen page: `pagehide` with `persisted:
+    // false` — the shape of a discard — and then the same document runs
+    // again. Chat must not have torn itself down in between.
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    let visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+
+    const conversationSelect = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selectedConversation = "";
+    Object.defineProperty(conversationSelect, "value", {
+      configurable: true,
+      get: () => selectedConversation,
+      set: value => { selectedConversation = String(value); },
+    });
+
+    const sources: FakeLiveSource[] = [];
+    Reflect.set(globalThis, "EventSource", class {
+      constructor(url: string) {
+        const source = new FakeLiveSource(url);
+        sources.push(source);
+        return source;
+      }
+    });
+    let inventoryReads = 0;
+    const fetcher = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/api/hub/live/")) return Response.json({ ok: true });
+      if (url.endsWith("/api/chat/status")) {
+        return Response.json({ agents: [{
+          agent: { id: "test", name: "Test" },
+          availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
+        }] });
+      }
+      if (url.endsWith("/api/chat/conversations")) {
+        inventoryReads += 1;
+        return Response.json({ conversations: [conversation("one")] });
+      }
+      if (url.includes("/api/chat/conversations/one")) return Response.json(snapshot("one"));
+      void init;
+      return Response.json({ error: `unexpected ${url}` }, { status: 404 });
+    };
+
+    const { installLiveChannelForTests, liveChannel, watchPageLifecycle, disposeLiveChannel } = await import("../shell/live");
+    const { createLiveChannel } = await import("../shell/live-channel");
+    const { ChatApiClient } = await import("./client");
+    installLiveChannelForTests(null);
+    const channel = createLiveChannel({
+      ws: null,
+      activity: false,
+      openSource: url => new (globalThis as unknown as { EventSource: new (url: string) => FakeLiveSource }).EventSource(url),
+      fetcher,
+    });
+    installLiveChannelForTests(channel);
+    watchPageLifecycle();
+    liveChannel().connect();
+
+    const { initChat } = await import(`./ui.ts?pagehide-ui-test=${Date.now()}`);
+    initChat(new ChatApiClient(fetcher, liveChannel));
+
+    const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+    const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+    await waitUntil(
+      () => conversationSelect.value === "one" && !form.hidden && channel.subscriptions().some(sub => sub.topic === "conversation"),
+      () => document.querySelector("#chat-state")?.textContent ?? "no chat state",
+    );
+    sources[0]!.hello("s1");
+    input.value = "a draft written before the phone was pocketed";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const readsBefore = inventoryReads;
+
+    // Backgrounded: hidden, then the "discard"-shaped hide.
+    visibility = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: false }));
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.closed).toBe(true);
+    // Released, not disposed: every topic is still held with its cursor.
+    expect(channel.subscriptions()).toEqual([
+      { topic: "inventory" },
+      { topic: "conversation", key: "one", cursor: "cursor-one" },
+    ]);
+
+    // Reopened from the home screen. No `pageshow` — iOS does not reliably
+    // fire one here — only the visibility change.
+    visibility = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitUntil(() => sources.length === 2);
+    const query = new URL(sources[1]!.url, "http://hub.invalid").searchParams;
+    expect(query.get("reconnect")).toBe("1");
+    expect(JSON.parse(query.get("subs")!)).toEqual([
+      { topic: "inventory" },
+      { topic: "conversation", key: "one", cursor: "cursor-one" },
+    ]);
+    await waitUntil(() => inventoryReads > readsBefore);
+
+    // Both streams deliver on the replacement: a conversation event lands in
+    // the timeline, an inventory tick triggers a re-read.
+    sources[1]!.hello("s2");
+    sources[1]!.live({
+      ws: "e2e", topic: "conversation", key: "one", cursor: "cursor-one-2",
+      event: { kind: "data", data: {
+        generation: "g", sequence: 1, conversationId: "one", type: "item.upsert",
+        item: { id: "message:after", type: "user_message", createdAt: 2, text: "delivered after the return" },
+      } },
+    });
+    await waitUntil(() => (document.querySelector("#chat-items")?.textContent ?? "").includes("delivered after the return"));
+    const readsAfterReturn = inventoryReads;
+    sources[1]!.live({ ws: "e2e", topic: "inventory", cursor: "inv-1", event: { kind: "data", data: { type: "conversation.inventory" } } });
+    await waitUntil(() => inventoryReads > readsAfterReturn);
+
+    expect(input.value).toBe("a draft written before the phone was pocketed");
+
+    disposeLiveChannel();
+    installLiveChannelForTests(null);
+  });
+
+  test("an interrupted Chat offers Reconnect, which recovers in place and keeps the draft and timeline", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+
+    const conversationSelect = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selectedConversation = "";
+    Object.defineProperty(conversationSelect, "value", {
+      configurable: true,
+      get: () => selectedConversation,
+      set: value => { selectedConversation = String(value); },
+    });
+
+    type Handlers = { error: (error: ChatTransportError) => void; recovered?: () => void };
+    const streamHandlers: Handlers[] = [];
+    let snapshots = 0;
+    const api = {
+      status: async () => ([{
+        agent: { id: "test", name: "Test" },
+        availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: [] } },
+      }]),
+      conversations: async () => [conversation("one")],
+      commands: async () => [],
+      snapshot: async (id: string) => {
+        snapshots += 1;
+        return { ...snapshot(id), items: [{ id: "message:kept", type: "user_message", createdAt: 1, text: "already on screen" }] };
+      },
+      stream: (_conversationId: string, _cursor: string, handlers: Handlers) => {
+        streamHandlers.push(handlers);
+        return { close() {} };
+      },
+      inventoryStream: () => ({ close() {} }),
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+
+    // The shell's channel, with its confirmation under the test's control.
+    type Status = "connecting" | "reconnecting" | "live";
+    const statusListeners = new Set<(status: Status) => void>();
+    const connects: { resumed?: boolean }[] = [];
+    let reloads = 0;
+    const { installLiveChannelForTests, installManualRecoveryForTests, disposeLiveChannel } = await import("../shell/live");
+    installLiveChannelForTests({
+      connect(options?: { resumed?: boolean }) { connects.push(options ?? {}); },
+      onStatus(listener: (status: Status) => void) { statusListeners.add(listener); return () => { statusListeners.delete(listener); }; },
+      suspend() {},
+      dispose() {},
+    } as unknown as LiveChannel);
+    installManualRecoveryForTests({ reload: () => { reloads += 1; } });
+
+    const { initChat } = await import(`./ui.ts?reconnect-ui-test=${Date.now()}`);
+    initChat(api);
+
+    const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+    const status = document.querySelector<HTMLElement>("#chat-state")!;
+    const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+    const reconnect = () => status.querySelector<HTMLButtonElement>("button.chat-reconnect-button");
+    await waitUntil(() => conversationSelect.value === "one" && !form.hidden && streamHandlers.length === 1);
+    await waitUntil(() => (document.querySelector("#chat-items")?.textContent ?? "").includes("already on screen"));
+    expect(reconnect()).toBeNull();
+
+    input.value = "a draft the user is still writing";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const renderedBefore = document.querySelector("#chat-items")!.innerHTML;
+    const snapshotsBefore = snapshots;
+
+    const handlers = streamHandlers[0]!;
+    handlers.error(new ChatConnectionInterruptedError("Chat connection interrupted; reconnecting"));
+    expect(status.textContent).toContain("Chat connection interrupted; reconnecting");
+    expect(reconnect()?.textContent).toBe("Reconnect");
+    expect(reconnect()?.disabled).toBe(false);
+
+    // An unrelated error displacing the message takes the action with it;
+    // the interruption restated brings it back.
+    handlers.error(new ChatTransportError("The provider rejected the request"));
+    expect(reconnect()).toBeNull();
+    handlers.error(new ChatConnectionInterruptedError("Chat connection interrupted; reconnecting"));
+    expect(reconnect()).not.toBeNull();
+
+    reconnect()!.dispatchEvent(new Event("click"));
+    // The same recovery a wake-up performs, and the action says it is under way.
+    expect(connects).toEqual([{ resumed: true }]);
+    expect(reconnect()?.disabled).toBe(true);
+    expect(reconnect()?.getAttribute("aria-busy")).toBe("true");
+    expect(reconnect()?.textContent).toBe("Reconnecting…");
+    // A second press while under way starts nothing.
+    reconnect()!.dispatchEvent(new Event("click"));
+    expect(connects).toHaveLength(1);
+
+    for (const listener of [...statusListeners]) listener("live");
+    await waitUntil(() => reconnect()?.disabled === false);
+    expect(reloads).toBe(0);
+    expect(reconnect()?.getAttribute("aria-busy")).toBeNull();
+    // Recovered in place: the stream's own `ready` clears the report and
+    // the action with it; the draft and the timeline are as they were.
+    handlers.recovered?.();
+    expect(status.textContent).not.toContain("interrupted");
+    expect(reconnect()).toBeNull();
+    expect(input.value).toBe("a draft the user is still writing");
+    expect(snapshots).toBe(snapshotsBefore);
+    expect(document.querySelector("#chat-items")!.innerHTML).toBe(renderedBefore);
+
+    disposeLiveChannel();
+    installLiveChannelForTests(null);
+    installManualRecoveryForTests(null);
   });
 
   test("a successful stream open clears only the reconnect message, leaving unrelated errors standing", async () => {

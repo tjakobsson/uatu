@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
@@ -38,6 +38,7 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
 
   const { applyChannelStatus } = await import("./connection");
   const { createLiveChannel } = await import("./live-channel");
+  const { installLiveChannelForTests, installManualRecoveryForTests } = await import("./live");
 
   const indicator = document.querySelector("#connection-state") as unknown as HTMLElement;
   const label = indicator.querySelector(".connection-label") as unknown as HTMLElement;
@@ -92,6 +93,7 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
     return {
       channel,
       sources,
+      timers,
       fireReconnect() {
         const entry = scheduled.shift();
         if (!entry) throw new Error("no reconnect scheduled");
@@ -158,6 +160,81 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
 
       h.channel.confirm(stale);
       expect(readIndicator().label).toBe("Reconnecting");
+    });
+  });
+
+  describe("connection indicator reconnect control", () => {
+    // The control drives the real `requestManualRecovery`, so the harness
+    // channel has to be the page's channel and the reload / attempt window
+    // have to be injected — otherwise the test would reload the process's
+    // `window` and wait ten real seconds for the fallback.
+    function controlHarness() {
+      const h = harness();
+      installLiveChannelForTests(h.channel);
+      let reloads = 0;
+      installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: h.timers });
+      return { ...h, reloads: () => reloads };
+    }
+
+    const click = () => indicator.dispatchEvent(new Event("click"));
+    // The attempt settles through the promise chain `requestManualRecovery`
+    // built, so the DOM catches up a few microtasks after `confirm`.
+    const settled = () => new Promise(resolve => setTimeout(resolve, 0));
+
+    afterEach(() => {
+      installLiveChannelForTests(null);
+      installManualRecoveryForTests(null);
+    });
+
+    test("names the reconnect action rather than the state", () => {
+      const h = controlHarness();
+      h.channel.connect();
+      h.channel.confirm(h.channel.currentGeneration());
+      h.sources.at(-1)!.fail();
+
+      expect(readIndicator().label).toBe("Reconnecting");
+      expect(indicator.getAttribute("aria-label")).toBe("Reconnect to the uatu backend");
+      // The title still names the state — it is what hover is for.
+      expect(indicator.getAttribute("title")).toBe("Reconnecting to the uatu backend");
+    });
+
+    test("is inert while the connection is confirmed live", () => {
+      const h = controlHarness();
+      h.channel.connect();
+      h.channel.confirm(h.channel.currentGeneration());
+      expect(readIndicator().live).toBe(true);
+      expect(indicator.getAttribute("aria-disabled")).toBe("true");
+
+      const before = h.sources.length;
+      click();
+      // No superseding connect: a healthy page must not be disturbed.
+      expect(h.sources.length).toBe(before);
+      expect(indicator.hasAttribute("aria-busy")).toBe(false);
+    });
+
+    test("activation recovers in place, shows the attempt, and does not pile up", async () => {
+      const h = controlHarness();
+      h.channel.connect();
+      h.channel.confirm(h.channel.currentGeneration());
+      h.sources.at(-1)!.fail();
+      const before = h.sources.length;
+
+      click();
+      expect(h.sources.length).toBe(before + 1);
+      expect(indicator.getAttribute("aria-busy")).toBe("true");
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+      expect(indicator.getAttribute("aria-disabled")).toBe("false");
+
+      // A second tap joins the attempt already running.
+      click();
+      expect(h.sources.length).toBe(before + 1);
+
+      h.channel.confirm(h.channel.currentGeneration());
+      await settled();
+      expect(readIndicator()).toMatchObject({ label: "Connected", live: true });
+      expect(indicator.hasAttribute("aria-busy")).toBe(false);
+      expect(indicator.classList.contains("is-attempting")).toBe(false);
+      expect(h.reloads()).toBe(0);
     });
   });
 

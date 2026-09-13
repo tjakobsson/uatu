@@ -14,14 +14,27 @@
 
 import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import { createLiveChannel, type LiveChannel } from "./live-channel";
-import { createLifecycleRecovery, type LifecycleRecovery } from "./recovery";
+import { createLifecycleRecovery, type LifecycleRecovery, type LifecycleRecoveryTimers } from "./recovery";
 
 let channel: LiveChannel | null = null;
 let lifecycle: LifecycleRecovery | null = null;
 const recoveryWork = new Set<() => Promise<unknown>>();
-// Set while the page is hidden and has released its stream.
+// Set while the page has released its stream because it was hidden.
 let releasedInBackground = false;
 let backgroundWatchInstalled = false;
+
+// The page is being hidden, however the browser announces it: drop the
+// connection and any pending reconnect, keeping every subscription and
+// cursor. Reversible by construction — `suspend`, not `dispose` — because no
+// hide is proof the document will never run again. iOS fires `pagehide`
+// with `persisted: false` for a standalone page it then keeps alive, and a
+// document that really unloads takes its timers with it, so there is nothing
+// a permanent teardown would protect.
+function releaseLiveChannel(): void {
+  if (channel === null) return;
+  releasedInBackground = true;
+  channel.suspend();
+}
 
 // A page hidden from view holds no live connection. Browsers allow six
 // HTTP/1.1 connections per host across every tab on the hub, so one stream
@@ -34,9 +47,8 @@ let backgroundWatchInstalled = false;
 // Nothing visible depends on live events while hidden: the title and favicon
 // come from the project, and there are no notifications or app badges.
 function releaseInBackground(): void {
-  if (typeof document === "undefined" || document.visibilityState !== "hidden" || channel === null) return;
-  releasedInBackground = true;
-  channel.suspend();
+  if (typeof document === "undefined" || document.visibilityState !== "hidden") return;
+  releaseLiveChannel();
 }
 
 export function liveChannel(): LiveChannel {
@@ -88,12 +100,14 @@ export async function recoverLiveChannel(): Promise<void> {
 // Installed once, by boot. `pageshow` from the back/forward cache, a return
 // to the foreground, and a regained network connection all mean the same
 // thing — this page has been out of touch and cannot trust what it holds.
+// `pagehide` releases the stream; nothing here ever disposes it, so the
+// listeners stay armed for the life of the document.
 export function watchPageLifecycle(): void {
   lifecycle ??= createLifecycleRecovery({
     win: window,
     doc: document,
     recover: recoverLiveChannel,
-    discard: disposeLiveChannel,
+    release: releaseLiveChannel,
   });
   if (!backgroundWatchInstalled) {
     document.addEventListener("visibilitychange", releaseInBackground);
@@ -104,15 +118,107 @@ export function watchPageLifecycle(): void {
   releaseInBackground();
 }
 
-// Tears the channel down for good. Called when the page is being discarded:
-// a retry cycle outliving the page would keep firing timers against a
-// document that is on its way out.
+// ---------------------------------------------------------------------------
+// Manual recovery: the user's way back from a stall, whatever caused it.
+//
+// Both the Chat surface's interruption line and the shell's connection
+// indicator call this. It attempts the same recovery a wake-up performs and
+// waits for the channel to confirm live — authoritative state applied, not
+// merely a socket opened. If that does not happen within the window, the
+// page reloads: an in-place attempt cannot rescue a page whose own recovery
+// machinery is no longer running, and a reload is what the dashboard
+// round-trip costs today anyway. Reached only after the in-place attempt has
+// had its chance, so a recoverable stall keeps its scroll position, drafts,
+// and view state.
+
+// How long an in-place attempt has to confirm live before reloading. Longer
+// than the channel's first reconnect delay and than a state fetch on a slow
+// path; short enough that a user who tapped is not left wondering.
+export const MANUAL_RECOVERY_WINDOW_MS = 10_000;
+
+type ManualRecoveryDeps = {
+  reload: () => void;
+  windowMs: number;
+  timers: LifecycleRecoveryTimers;
+};
+
+const defaultManualDeps: ManualRecoveryDeps = {
+  reload: () => window.location.reload(),
+  windowMs: MANUAL_RECOVERY_WINDOW_MS,
+  timers: {
+    setTimeout: (callback, delay) => setTimeout(callback, delay),
+    clearTimeout: timer => clearTimeout(timer),
+  },
+};
+
+let manualDeps: ManualRecoveryDeps = defaultManualDeps;
+// The attempt in flight, or null. A second request while one is running
+// joins it rather than starting another.
+let manualAttempt: { promise: Promise<void>; cancel: () => void } | null = null;
+const manualListeners = new Set<(inFlight: boolean) => void>();
+
+// Test seam: an injected reload, window, and clock. `null` restores defaults.
+export function installManualRecoveryForTests(deps: Partial<ManualRecoveryDeps> | null): void {
+  manualDeps = deps ? { ...defaultManualDeps, ...deps } : defaultManualDeps;
+}
+
+export function isManualRecoveryInFlight(): boolean {
+  return manualAttempt !== null;
+}
+
+// Whether an attempt is under way, for the controls that offer one to show
+// it. Called at once with the current state.
+export function onManualRecovery(listener: (inFlight: boolean) => void): () => void {
+  manualListeners.add(listener);
+  listener(manualAttempt !== null);
+  return () => { manualListeners.delete(listener); };
+}
+
+function notifyManual(inFlight: boolean): void {
+  for (const listener of [...manualListeners]) listener(inFlight);
+}
+
+export function requestManualRecovery(): Promise<void> {
+  if (manualAttempt !== null) return manualAttempt.promise;
+  const deps = manualDeps;
+  const target = liveChannel();
+  let settle!: (outcome: "live" | "timeout" | "cancelled") => void;
+  const outcome = new Promise<"live" | "timeout" | "cancelled">(resolve => { settle = resolve; });
+  // Listening BEFORE the recovery starts, so a fast confirmation cannot be
+  // missed. Only a `live` emitted after this point counts: the recovery
+  // supersedes the current generation, and only the replacement's confirm
+  // can say the page is current again.
+  const unsubscribe = target.onStatus(status => { if (status === "live") settle("live"); });
+  const timer = deps.timers.setTimeout(() => settle("timeout"), deps.windowMs);
+  const attempt = {
+    promise: outcome.then(result => {
+      unsubscribe();
+      deps.timers.clearTimeout(timer);
+      manualAttempt = null;
+      notifyManual(false);
+      if (result === "timeout") deps.reload();
+    }),
+    cancel: () => settle("cancelled"),
+  };
+  manualAttempt = attempt;
+  notifyManual(true);
+  // Not awaited: the recovery's reconciliation work may itself take up to
+  // its own budget, and what decides the outcome is the channel confirming,
+  // which arrives over the stream independently of that work.
+  void recoverLiveChannel();
+  return attempt.promise;
+}
+
+// Tears the channel down for good. Explicit teardown only — tests, and a
+// navigation away to the hub — never a lifecycle event: a hidden page is
+// released (see `releaseLiveChannel`), not disposed, so it can come back.
 export function disposeLiveChannel(): void {
   if (backgroundWatchInstalled && typeof document !== "undefined") {
     document.removeEventListener("visibilitychange", releaseInBackground);
   }
   backgroundWatchInstalled = false;
   releasedInBackground = false;
+  manualAttempt?.cancel();
   channel?.dispose();
   channel = null;
   lifecycle?.dispose();
