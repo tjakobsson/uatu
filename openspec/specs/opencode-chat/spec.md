@@ -1573,6 +1573,10 @@ The conversation and inventory event streams SHALL maintain transport liveness d
 
 The Chat surface MUST NOT continue to claim that it is reconnecting after its replacement stream has opened successfully. A later independent interruption MAY be reported normally. Resuming a suspended page or restoring network connectivity SHALL trigger authoritative inventory reconciliation and ensure the selected conversation's stream is current without discarding drafts, timeline position, or already received content.
 
+A hidden page SHALL NOT permanently close the Chat surface. Chat MAY release its streams whenever the page is hidden, however the browser announces it, and MUST continue to save drafts on that signal, but it MUST remain able to resubscribe so that returning to a still-running page restores conversation and inventory delivery. Chat MUST NOT stay closed for the life of a document that is still running.
+
+While Chat reports a connection interruption, it SHALL offer the user an action that attempts recovery, so a stalled surface is never a dead end on a device with no browser reload control. That action MUST NOT discard drafts, timeline position, or content already received when recovery succeeds in place.
+
 #### Scenario: Idle reconnect clears stale interruption status
 - **WHEN** a Chat stream is interrupted, reports a reconnecting status, and then opens successfully while no conversation event is emitted
 - **THEN** the reconnecting status is cleared promptly
@@ -1591,6 +1595,16 @@ The Chat surface MUST NOT continue to claim that it is reconnecting after its re
 - **WHEN** a suspended page resumes after missing inventory or conversation events
 - **THEN** Chat reconciles the authoritative inventory and ensures the selected conversation stream is current
 - **AND** preserves drafts, timeline position, and content already received
+
+#### Scenario: A backgrounded standalone Chat resubscribes when reopened
+- **WHEN** a page installed to the home screen is backgrounded, the browser announces the hide in a form that does not promise a later restore, and the user reopens the still-running page
+- **THEN** Chat resubscribes its inventory and selected conversation streams
+- **AND** the composer draft written before the page was backgrounded is still present
+
+#### Scenario: An interrupted Chat offers a way back
+- **WHEN** Chat reports a connection interruption to the user
+- **THEN** an action that attempts recovery is available from that report
+- **AND** recovering in place leaves the draft, timeline position, and received content intact
 
 #### Scenario: Client recoveries are independent
 - **WHEN** one of multiple clients viewing the same conversation loses and restores its transport
