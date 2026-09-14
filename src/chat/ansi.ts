@@ -299,8 +299,15 @@ function eraseInLine(line: LineBuffer, params: string, style: TerminalStyle): vo
       line.styles[column] = blank;
     }
   } else if (mode === 2) {
-    line.chars.length = 0;
-    line.styles.length = 0;
+    // The whole line, cursor unmoved: the cells up to it are blanks under
+    // the active background, so what is written next lands where the
+    // cursor stands, after them; nothing beyond is kept.
+    line.chars.length = line.cursor;
+    line.styles.length = line.cursor;
+    for (let column = 0; column < line.cursor; column += 1) {
+      line.chars[column] = " ";
+      line.styles[column] = blank;
+    }
   }
 }
 
