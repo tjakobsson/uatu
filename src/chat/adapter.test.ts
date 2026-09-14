@@ -2916,6 +2916,43 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("a reversible-history replacement of the parent keeps its subagents' spend on their rows", async () => {
+    const provider = new FakeProvider();
+    provider.agent.capabilities.push("reversible-history");
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const historyState = { staged: true, canUndo: false, canRedo: true, revertedMessages: [] };
+    provider.getReversibleHistoryState = async () => historyState;
+    provider.undo = async () => ({ outcome: "changed", state: historyState });
+    provider.redo = async () => ({ outcome: "changed", state: historyState });
+    provider.revert = async () => ({ outcome: "changed", state: historyState });
+    provider.restore = async () => ({ outcome: "changed", state: historyState });
+    const launcher = {
+      id: "launch", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: { status: "completed", input: { description: "Review", subagent_type: "explore" }, metadata: { sessionId: "child" }, output: "done" } }],
+    };
+    let parentVisible = [launcher, { id: "later", type: "user", time: { created: 5 }, text: "discard me" }];
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId === "child") return { items: [{ id: "child_msg", type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 2 }, tokens: { input: 100, output: 10 }, cost: 0.5 }] as never[] };
+      if (sessionId === "parent") return { items: parentVisible as never[] };
+      return listMessages(sessionId, options);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool") as { usage?: { costUsd?: number } } | undefined;
+    await adapter.history("parent");
+    expect(row()?.usage?.costUsd).toBe(0.5);
+
+    // The parent's own later prompt is reverted: its history is replaced
+    // with the provider's raw rows, and the launcher keeps its child's spend.
+    const pump = adapter.startEventPump();
+    parentVisible = [launcher];
+    provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "parent" } } as never);
+    while (adapter.projectionForTests("parent").items().some(item => item.id === "message:later")) await Bun.sleep(1);
+    expect(row()?.usage?.costUsd).toBe(0.5);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("removing a subagent message withdraws its usage now and after reopening", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

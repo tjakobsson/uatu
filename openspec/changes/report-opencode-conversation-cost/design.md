@@ -135,4 +135,7 @@ model; an older history page merges into the projection by time, so a
 launcher the first page backfilled from older history keeps its place, with
 the page's copy and order winning for a row both hold; a revert inside a subagent (a lifecycle event, not a removal) forgets the
 child's banked tally and squares it against the rewritten store before
-putting the fresh figure on the launching row and up the ancestry.
+putting the fresh figure on the launching row and up the ancestry; a
+reversible-history replacement of a parent's own items re-applies the banked
+tallies to the launcher rows it puts in place, since the provider's raw rows
+carry none.

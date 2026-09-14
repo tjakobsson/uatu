@@ -207,12 +207,13 @@ export function renderTerminalText(text: string): TerminalLine[] {
         const final = text[end]!;
         const params = text.slice(index + 2, end);
         if (final === "m") style = applySgr(style, params);
-        else if (final === "K") eraseInLine(line, params);
+        else if (final === "K") eraseInLine(line, params, style);
         index = end + 1;
         continue;
       }
-      if (next === "]") {
-        // OSC: up to BEL or ST (ESC \).
+      if (next === "]" || next === "P" || next === "_" || next === "^" || next === "X") {
+        // A control string — OSC, DCS, APC, PM, SOS — runs to BEL or ST
+        // (ESC \): the whole payload goes, not just its introducer.
         let end = index + 2;
         while (end < length) {
           const c = text.charCodeAt(end);
@@ -272,15 +273,19 @@ export function renderTerminalText(text: string): TerminalLine[] {
   return lines.map(toRuns);
 }
 
-function eraseInLine(line: LineBuffer, params: string): void {
+// Erased cells take the active rendition, as a terminal fills them with the
+// current background: a coloured status line erased under its colour stays
+// coloured. Attributes that only apply to glyphs are irrelevant on a blank.
+function eraseInLine(line: LineBuffer, params: string, style: TerminalStyle): void {
   const mode = params === "" ? 0 : Number.parseInt(params, 10);
+  const blank = style.bg === undefined && !style.inverse ? PLAIN : { ...(style.bg === undefined ? {} : { bg: style.bg }), ...(style.inverse ? { inverse: true, ...(style.fg === undefined ? {} : { fg: style.fg }) } : {}) };
   if (mode === 0) {
     // A cursor on a wide glyph's second cell erases the glyph whole; erase
     // never moves the cursor, so the glyph's first cell becomes a blank the
     // next write lands after.
     if (line.chars[line.cursor] === WIDE_TAIL && line.cursor > 0) {
       line.chars[line.cursor - 1] = " ";
-      line.styles[line.cursor - 1] = PLAIN;
+      line.styles[line.cursor - 1] = blank;
     }
     line.chars.length = line.cursor;
     line.styles.length = line.cursor;
@@ -291,7 +296,7 @@ function eraseInLine(line: LineBuffer, params: string): void {
     const last = line.chars[line.cursor + 1] === WIDE_TAIL ? line.cursor + 1 : line.cursor;
     for (let column = 0; column <= last && column < line.chars.length; column += 1) {
       line.chars[column] = " ";
-      line.styles[column] = PLAIN;
+      line.styles[column] = blank;
     }
   } else if (mode === 2) {
     line.chars.length = 0;

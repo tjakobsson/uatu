@@ -61,6 +61,8 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText(`123456\r${ESC}[Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
     expect(renderTerminalText(`123456\r${ESC}[2Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
     expect(renderTerminalText(`123456\r12${ESC}[1Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["  ab56"]);
+    // Erased cells take the active background, as a terminal fills them.
+    expect(renderTerminalText(`abc\r${ESC}[41m${ESC}[1K`)[0]).toEqual([{ text: " ", style: { bg: 1 } }, { text: "bc", style: {} }]);
     // Mode 1 includes the cell under the cursor, and a wide glyph whole.
     expect(renderTerminalText(`abc\r${ESC}[1K`).map(line => line.map(run => run.text).join(""))).toEqual([" bc"]);
     expect(renderTerminalText(`界\r${ESC}[1Kxy`).map(line => line.map(run => run.text).join(""))).toEqual(["xy"]);
@@ -75,6 +77,8 @@ describe("renderTerminalText", () => {
   test("unknown sequences are dropped with the surrounding text intact", () => {
     const text = `${ESC}[2A${ESC}[?25lspin${ESC}[?25h ${ESC}]0;title${"\x07"}ok ${ESC}]8;;http://x${ESC}\\link${ESC}]8;;${ESC}\\ ${ESC}(Bplain${ESC}=${ESC}7\x07\x00end`;
     expect(renderTerminalText(text).map(line => line.map(run => run.text).join(""))).toEqual(["spin ok link plainend"]);
+    // Control strings — DCS, APC, PM, SOS — go whole, payload included.
+    expect(renderTerminalText(`before${ESC}P1;2|secret${ESC}\\after ${ESC}_apc\x07x ${ESC}^pm${ESC}\\y ${ESC}Xsos${ESC}\\z`).map(line => line.map(run => run.text).join(""))).toEqual(["beforeafter x y z"]);
     // A sequence cut off by the end of a streaming chunk is dropped, not shown.
     expect(renderTerminalText(`tail ${ESC}[3`).map(line => line.map(run => run.text).join(""))).toEqual(["tail "]);
   });

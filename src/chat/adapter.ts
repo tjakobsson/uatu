@@ -495,24 +495,7 @@ export class ChatAdapter {
     // child rather than per open (the aggregate is still computed here, not
     // fetched per render) — and in parallel, so a fan-out costs one round trip
     // rather than one each.
-    const unattributed = [...new Set(items.flatMap(item =>
-      item.type === "tool" && item.childConversationId && !this.completeAttributions.has(attributionKey(id, item.childConversationId))
-        ? [item.childConversationId]
-        : []))];
-    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId)));
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index]!;
-      if (item.type !== "tool" || !item.childConversationId) continue;
-      const key = attributionKey(id, item.childConversationId);
-      const model = latestModel(this.childModels.get(key));
-      const usage = sumUsage(this.childUsage.get(key));
-      if (model === undefined && usage === undefined) continue;
-      items[index] = {
-        ...item,
-        ...(model === undefined ? {} : { model }),
-        ...(usage === undefined ? {} : { usage }),
-      };
-    }
+    await this.attributeLaunchers(id, items);
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
     // Asking here is what makes an open question answerable at all. A failed
@@ -1355,6 +1338,10 @@ export class ChatAdapter {
     this.eventCoalescer?.discard(conversationId);
     this.rememberReversibleHistory(conversationId, state);
     if (changed) {
+      // The replacement is the provider's raw rows: a launcher among them
+      // carries no attribution, so the banked tallies go back on before
+      // they replace what the client shows.
+      await this.attributeLaunchers(conversationId, items);
       projection.replace(items);
       // A revert in a subagent rewrote what its store holds: the tally its
       // parent banked for it — and every ancestor's, through the inclusive
@@ -2053,6 +2040,34 @@ export class ChatAdapter {
 
   /** The provider's live background tasks for this conversation, as running rows. */
   /** Null when the provider cannot list: unknown, not empty. */
+  /**
+   * Put each subagent's banked tally onto the row that launched it, reading
+   * a child's store first where the tally is not yet squared against it.
+   * Used for a history page and for the items a reversible-history
+   * replacement puts in a projection's place — raw rows from the provider,
+   * which carry no attribution of their own.
+   */
+  private async attributeLaunchers(id: string, items: ConversationItem[]): Promise<void> {
+    const unattributed = [...new Set(items.flatMap(item =>
+      item.type === "tool" && item.childConversationId && !this.completeAttributions.has(attributionKey(id, item.childConversationId))
+        ? [item.childConversationId]
+        : []))];
+    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId)));
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (item.type !== "tool" || !item.childConversationId) continue;
+      const key = attributionKey(id, item.childConversationId);
+      const model = latestModel(this.childModels.get(key));
+      const usage = sumUsage(this.childUsage.get(key));
+      if (model === undefined && usage === undefined) continue;
+      items[index] = {
+        ...item,
+        ...(model === undefined ? {} : { model }),
+        ...(usage === undefined ? {} : { usage }),
+      };
+    }
+  }
+
   private async liveBackgroundTasks(id: string): Promise<ConversationItem[] | null> {
     if (!this.provider.listBackgroundTasks) return null;
     try {
