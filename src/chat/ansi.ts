@@ -122,10 +122,16 @@ export function renderTerminalText(text: string): TerminalLine[] {
   const length = text.length;
   let index = 0;
   const put = (column: number, char: string) => {
-    // Clearing a wide character's other half when one half is overwritten.
+    // Clearing a wide character's other half when one half is overwritten —
+    // its style too, or a red background would outlive the glyph it was on.
     const previous = line.chars[column];
-    if (previous === WIDE_TAIL && column > 0) line.chars[column - 1] = " ";
-    else if (previous !== undefined && line.chars[column + 1] === WIDE_TAIL && cellWidth(previous) === 2) line.chars[column + 1] = " ";
+    if (previous === WIDE_TAIL && column > 0) {
+      line.chars[column - 1] = " ";
+      line.styles[column - 1] = style;
+    } else if (previous !== undefined && line.chars[column + 1] === WIDE_TAIL && cellWidth(previous) === 2) {
+      line.chars[column + 1] = " ";
+      line.styles[column + 1] = style;
+    }
     line.chars[column] = char;
     line.styles[column] = style;
   };
@@ -234,11 +240,15 @@ export function renderTerminalText(text: string): TerminalLine[] {
 function eraseInLine(line: LineBuffer, params: string): void {
   const mode = params === "" ? 0 : Number.parseInt(params, 10);
   if (mode === 0) {
-    // A cursor on a wide glyph's second cell erases the glyph whole.
-    const cut = line.chars[line.cursor] === WIDE_TAIL ? line.cursor - 1 : line.cursor;
-    line.chars.length = cut;
-    line.styles.length = cut;
-    line.cursor = Math.min(line.cursor, cut);
+    // A cursor on a wide glyph's second cell erases the glyph whole; erase
+    // never moves the cursor, so the glyph's first cell becomes a blank the
+    // next write lands after.
+    if (line.chars[line.cursor] === WIDE_TAIL && line.cursor > 0) {
+      line.chars[line.cursor - 1] = " ";
+      line.styles[line.cursor - 1] = PLAIN;
+    }
+    line.chars.length = line.cursor;
+    line.styles.length = line.cursor;
   } else if (mode === 1) {
     // From the start of the line through the cursor cell, inclusive.
     for (let column = 0; column <= line.cursor && column < line.chars.length; column += 1) {

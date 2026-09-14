@@ -80,7 +80,10 @@ describe("renderTerminalText", () => {
     expect(text("ab\r日")).toEqual(["日"]);
     // Erasing to the end from a wide glyph's second cell clears the glyph.
     expect(text(`界x\b\b${ESC}[K`)).toEqual([""]);
-    expect(text(`a界\b${ESC}[Kz`)).toEqual(["az"]);
+    // Erase never moves the cursor: the next write lands where it stood.
+    expect(text(`a界\b${ESC}[Kz`)).toEqual(["a z"]);
+    // Overwriting a styled wide glyph clears its other cell's style too.
+    expect(renderTerminalText(`${ESC}[41m界${ESC}[0m\rA`)[0]).toEqual([{ text: "A ", style: {} }]);
     // Emoji with a variation selector or joiner stays one glyph.
     expect(text("\u2705\ufe0f ok")).toEqual(["\u2705\ufe0f ok"]);
     // A joined or skin-toned emoji is one two-cell glyph, cleared whole by
