@@ -52,15 +52,43 @@ const WIDE = [
   [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff], [0x20000, 0x2fffd], [0x30000, 0x3fffd],
 ] as const;
 
-function cellWidth(char: string): 0 | 1 | 2 {
-  if (ZERO_WIDTH.test(char)) return 0;
-  const point = char.codePointAt(0)!;
+function codePointWidth(point: number): 0 | 1 | 2 {
+  if (ZERO_WIDTH.test(String.fromCodePoint(point))) return 0;
   for (const [from, to] of WIDE) {
     if (point < from) return 1;
     if (point <= to) return 2;
   }
   return 1;
 }
+
+/**
+ * A grapheme's cells: two if any code point in it is wide (an emoji joined
+ * or modified — `👩‍💻`, `👍🏽` — is one double-width glyph, not a chain of
+ * them), none if every code point is zero-width (a lone combining mark,
+ * which rides the cell before it), one otherwise.
+ */
+function cellWidth(grapheme: string): 0 | 1 | 2 {
+  let width: 0 | 1 | 2 = 0;
+  for (const char of grapheme) {
+    const own = codePointWidth(char.codePointAt(0)!);
+    if (own === 2) return 2;
+    if (own === 1) width = 1;
+  }
+  return width;
+}
+
+// Graphemes, not code points, are what a terminal lays out and what a
+// redraw overwrites: the segmenter keeps a joined or modified emoji whole.
+const graphemes: (text: string) => Iterable<string> = typeof Intl !== "undefined" && "Segmenter" in Intl
+  ? (() => {
+      const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+      return (text: string) => {
+        const out: string[] = [];
+        for (const segment of segmenter.segment(text)) out.push(segment.segment);
+        return out;
+      };
+    })()
+  : (text: string) => [...text];
 
 // The second cell of a wide character: no text of its own, skipped when
 // runs are built. Overwriting either half blanks the other, as a terminal
@@ -189,15 +217,16 @@ export function renderTerminalText(text: string): TerminalLine[] {
       index += 1;
       continue;
     }
-    // Surrogate pairs travel as one character, or a `\r` overwrite would
-    // split an emoji in half.
-    if (code >= 0xd800 && code <= 0xdbff && index + 1 < length) {
-      write(text.slice(index, index + 2));
-      index += 2;
-      continue;
+    // A run of printable text is laid out grapheme by grapheme: a joined or
+    // modified emoji is one glyph, so a `\r` overwrite clears it whole.
+    let end = index + 1;
+    while (end < length) {
+      const next = text.charCodeAt(end);
+      if (next < 0x20 || next === 0x1b) break;
+      end += 1;
     }
-    write(text[index]!);
-    index += 1;
+    for (const grapheme of graphemes(text.slice(index, end))) write(grapheme);
+    index = end;
   }
   return lines.map(toRuns);
 }

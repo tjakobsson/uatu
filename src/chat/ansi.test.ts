@@ -83,6 +83,11 @@ describe("renderTerminalText", () => {
     expect(text(`a界\b${ESC}[Kz`)).toEqual(["az"]);
     // Emoji with a variation selector or joiner stays one glyph.
     expect(text("\u2705\ufe0f ok")).toEqual(["\u2705\ufe0f ok"]);
+    // A joined or skin-toned emoji is one two-cell glyph, cleared whole by
+    // a redraw rather than leaving its pieces behind.
+    expect(text("👩‍💻x\rA")).toEqual(["A x"]);
+    expect(text("👍🏽x\rAB")).toEqual(["ABx"]);
+    expect(text("👩‍💻")).toEqual(["👩‍💻"]);
     // A combining mark with nothing before it stands on its own.
     expect(text("\u0301x")).toEqual(["\u0301x"]);
   });
