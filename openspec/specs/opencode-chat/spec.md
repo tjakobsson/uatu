@@ -416,6 +416,55 @@ While a turn is running, the trailing run of activity SHALL be collapsed behind 
 - **WHEN** the reader's system prefers reduced motion
 - **THEN** the working line's live indicator does not animate
 
+### Requirement: Shell output reads as the terminal would render it
+Where a tool's output carries terminal escape sequences, Chat SHALL interpret them rather than show them: select-graphic-rendition styling — the 16 standard colours, 256-colour and truecolour foreground and background, bold, dim, italic, underline, inverse, and strikethrough — SHALL be rendered as styling; carriage-return overwrites and erase-line sequences SHALL be applied so a line that was rewritten in place shows only its final content; and any other control sequence SHALL be removed from the shown text. Interpreting escapes MUST NOT create active markup or script execution, whatever the sequences or the text around them contain.
+
+A shell command's output block SHALL be presented with the embedded terminal's background, foreground, 16-colour palette, and font, so the same bytes read the same in Chat and in the terminal pane; the palette SHALL be the one central set of terminal colour variables, not a second copy. Lines in a shell output block SHALL NOT be broken mid-token: a line longer than the block scrolls horizontally, as it would in the terminal.
+
+The streaming tail shown while a command runs, and the bounded preview with its way to see the rest once it finishes, SHALL operate on the lines as rendered — after overwrites are applied — so a progress bar that rewrote one line many times counts as one line, not as many.
+
+#### Scenario: Coloured test output renders in colour
+- **WHEN** a shell command's output contains `\x1b[32mpass\x1b[0m` and `\x1b[31mfail\x1b[0m`
+- **THEN** the block shows "pass" in the terminal's green and "fail" in the terminal's red
+- **AND** no bracket-code fragments appear in the text
+
+#### Scenario: A progress bar collapses to its final state
+- **WHEN** a running command rewrites one line repeatedly with carriage returns and erase-line sequences
+- **THEN** the block shows that line once, with its latest content
+- **AND** the streaming tail's line count treats it as one line
+
+#### Scenario: Unknown control sequences are dropped
+- **WHEN** a command's output contains cursor-movement or operating-system-command sequences the renderer does not interpret
+- **THEN** those sequences do not appear in the shown text
+- **AND** the surrounding text is shown intact
+
+#### Scenario: Escapes cannot smuggle markup
+- **WHEN** a command's output interleaves escape sequences with `<script>` text or a JavaScript URL
+- **THEN** the rendered block contains no active markup and executes nothing
+
+#### Scenario: Shell output uses the terminal's palette and font
+- **WHEN** the same coloured output is shown in Chat and typed into the embedded terminal
+- **THEN** both use the same background, foreground, colour values and font family
+- **AND** changing a terminal colour variable changes both
+
+#### Scenario: Long lines scroll instead of wrapping
+- **WHEN** a command prints a table wider than the output block
+- **THEN** the columns stay aligned and the block scrolls horizontally
+- **AND** no line is broken mid-token
+
+### Requirement: Activity chrome is legible and distinct from prose
+The activity chrome — the working line while a turn runs, a finished group's summary line, each member row's label and subject, and the rule and neutral dot that tie a group's members together — SHALL use a colour that is visibly stronger than the surface's secondary-label colour and visibly quieter than assistant prose, in both the light and the dark theme, so steps are readable and told apart from each other and from the answer without being the answer's equal. Status words and outcome indicators (running, failed) keep their own colours.
+
+#### Scenario: Steps are readable in light and dark
+- **WHEN** a turn has produced a working line with several member rows, in either theme
+- **THEN** the line and its rows meet at least the contrast the surface's body text meets against the same background
+- **AND** they remain distinguishable from the assistant prose around them
+
+#### Scenario: Chrome stays quieter than the answer
+- **WHEN** a finished group sits between two assistant messages
+- **THEN** the group's summary and rows read as secondary to the messages
+- **AND** a failed step's status is still shown in the failure colour
+
 ### Requirement: Users can resolve agent interaction requests in context
 An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the approval and rejection choices OpenCode supports for it: approving the single occurrence, approving persistently, and rejecting. Where a permission would change a file, the request SHALL show what it would change — the pending diff — where the choice is made, so the user sees the change before allowing it. A permission with nothing to show a diff for is unaffected. A structured OpenCode question SHALL render its prompt, options, multi-selection behavior, and free-form response when supported. A resolved request SHALL become non-interactive and record its outcome. A resolved request SHALL also recede: its outcome stays legible where the request was raised, but it MUST NOT keep the footprint it held while it needed an answer, and what it named SHALL stay reachable from the receded form. Submitting a response more than once MUST NOT produce multiple provider replies.
 
@@ -1009,6 +1058,49 @@ A subagent's attribution SHALL reflect the subagent's own session — a subagent
 - **WHEN** the agent does not declare the context capability
 - **THEN** the context indicator and the subagent token figure are absent
 - **AND** the capabilities the agent does declare are unaffected
+
+### Requirement: Chat reports what an OpenCode conversation has cost
+Where OpenCode reports a cost for an assistant message, Chat SHALL present the conversation's accumulated cost in the same place and form a Claude Code conversation's session totals appear: the composer's usage chip reads the conversation's cost when the agent reports no plan windows, and the usage readout's conversation block states the total and a per-model breakdown of tokens and cost. The figure SHALL be the sum of the cost OpenCode reported per assistant message, in the currency OpenCode reports it, counted once per message however many times the message was restated while it streamed.
+
+The cost SHALL be populated when an existing conversation is opened, from its stored history, not only after a new turn is taken; it SHALL NOT be qualified as "since" a later time, because the stored history carries every message's cost. When every message in the conversation reports a cost of zero — a model OpenCode has no price for — Chat SHALL show no cost rather than a zero figure. A message for which OpenCode reports no cost contributes nothing and SHALL NOT be presented as zero.
+
+The cost SHALL be attributed per agent as well as per model. The conversation block SHALL list the main agent's own spend and one row per subagent — labelled by the subagent's kind and description, with the model it ran, its tokens, and its cost — and the total, the chip's figure, and the per-model rows SHALL count subagent work, so the figure presented is what the whole conversation cost. A subagent's timeline row and the header of its opened transcript SHALL state the subagent's cost in context. A subagent whose child session reported no cost SHALL be listed without a figure, not with zero.
+
+#### Scenario: The chip reads the conversation's cost
+- **WHEN** an OpenCode conversation has exchanged turns and OpenCode reported a cost for its assistant messages
+- **THEN** the composer's usage chip reads the accumulated cost as "this conversation"
+- **AND** opening the readout shows the total and one row per model with that model's tokens and cost
+
+#### Scenario: A restated message is counted once
+- **WHEN** OpenCode restates one assistant message's cumulative cost several times while it streams
+- **THEN** the conversation total counts that message's latest figure once
+
+#### Scenario: Cost is restored from history
+- **WHEN** the user opens an OpenCode conversation whose assistant messages carry costs
+- **THEN** the chip and readout show the cost from that history before any new turn
+- **AND** the readout block is titled for the whole conversation, not "since" a time
+
+#### Scenario: A free model shows no cost
+- **WHEN** every assistant message in the conversation reports a cost of zero
+- **THEN** no cost figure is shown on the chip or in the readout
+
+#### Scenario: The readout attributes cost per agent
+- **WHEN** a conversation launched two subagents whose child sessions reported cost, on the same model as the main agent
+- **THEN** the conversation block lists the main agent's own spend and one row per subagent with its label, model, tokens, and cost
+- **AND** the chip's figure and the model row for that model include the subagents' spend
+
+#### Scenario: A subagent row states its cost in context
+- **WHEN** a subagent's child session reported cost with its tokens
+- **THEN** the subagent's timeline row states that cost
+- **AND** opening the subagent's transcript shows the same cost in its header
+
+#### Scenario: An unpriced subagent is listed without a figure
+- **WHEN** a subagent's child session reported tokens but no cost
+- **THEN** its row in the conversation block names it and its tokens and asserts no cost
+
+#### Scenario: Cost rides the usage wire
+- **WHEN** a client validates a conversation snapshot or update carrying a usage record with a cost
+- **THEN** the record is accepted under the workspace API revision that introduced it
 
 ### Requirement: Chat composer actions keep a stable one-line layout
 The Chat composer SHALL place context usage, one configuration trigger, routine status, and the Send/Cancel action in a deliberate non-wrapping action rail. The configuration trigger SHALL take the flexible space and truncate its visible label when necessary. Routine status and the trailing action SHALL keep fixed footprints, and routine lifecycle changes MUST NOT move either control or reorder the rail. Deliberate panel resizing can change the flexible label width but MUST NOT make individual controls jump between rows.
