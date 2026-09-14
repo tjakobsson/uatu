@@ -131,4 +131,5 @@ message leaves the top-level row; live-banked figures carry an arrival
 sequence and a reconstruction merges only those that landed during its
 read, so a partial figure seen before a disconnect never overwrites the
 store's final one; the totals repaint key carries each agent's label and
-model.
+model; an older history page merges into the projection by time, so a
+launcher the first page backfilled from older history keeps its place.

@@ -50,8 +50,9 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText(`123456\r${ESC}[Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
     expect(renderTerminalText(`123456\r${ESC}[2Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
     expect(renderTerminalText(`123456\r12${ESC}[1Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["  ab56"]);
-    // Mode 1 includes the cell under the cursor.
+    // Mode 1 includes the cell under the cursor, and a wide glyph whole.
     expect(renderTerminalText(`abc\r${ESC}[1K`).map(line => line.map(run => run.text).join(""))).toEqual([" bc"]);
+    expect(renderTerminalText(`界\r${ESC}[1Kxy`).map(line => line.map(run => run.text).join(""))).toEqual(["xy"]);
     // A tab is cursor movement to the next stop, so an overwrite lands on
     // the cells a terminal would put it on; skipped cells keep their text.
     expect(renderTerminalText("a\tb\rxy").map(line => line.map(run => run.text).join(""))).toEqual(["xy      b"]);

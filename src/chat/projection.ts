@@ -55,7 +55,13 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
 
 export function prependSnapshot(current: ChatProjection, page: ConversationSnapshot): ChatProjection {
   const existing = new Set(current.items.map(item => item.id));
-  return { ...current, items: [...page.items.filter(item => !existing.has(item.id)), ...current.items], olderCursor: page.olderCursor };
+  // Merged by time, not merely prepended: the first page can carry rows
+  // from before its own span (a subagent launcher backfilled for the cost
+  // fold), and an older page's rows must land around such a row, not
+  // wholesale ahead of it. The sort is stable, so ties keep the provider's
+  // own order and the older page still precedes what was already held.
+  const items = [...page.items.filter(item => !existing.has(item.id)), ...current.items].sort((left, right) => left.createdAt - right.createdAt);
+  return { ...current, items, olderCursor: page.olderCursor };
 }
 
 export function addAcceptedDraft(current: ChatProjection, draft: AcceptedDraft): ChatProjection {

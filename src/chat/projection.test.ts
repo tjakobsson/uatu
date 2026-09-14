@@ -138,6 +138,16 @@ describe("chat projection", () => {
     expect(prependSnapshot(current, page).items.map(item => item.id)).toEqual(["old", "new"]);
   });
 
+  test("an older page merges around rows the first page carried from before its span", () => {
+    // The first page backfills a subagent launcher from older history (for
+    // the cost fold); the older page's rows must land around it by time,
+    // not wholesale ahead of it.
+    const item = (id: string, createdAt: number) => ({ id, type: "user_message" as const, createdAt, text: id });
+    const current = projectionFromSnapshot(snapshot([item("launcher", 2), item("new", 101)]));
+    const page = snapshot([item("first", 1), item("mid", 50), item("launcher", 2)]);
+    expect(prependSnapshot(current, page).items.map(entry => entry.id)).toEqual(["first", "launcher", "mid", "new"]);
+  });
+
   test("authoritative replacement removes a suffix and resets text reconciliation", () => {
     const server = new ConversationProjection(new ConversationReplay("g1", "c1", 10_000));
     server.seed([

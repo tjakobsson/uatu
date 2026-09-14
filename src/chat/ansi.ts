@@ -250,8 +250,11 @@ function eraseInLine(line: LineBuffer, params: string): void {
     line.chars.length = line.cursor;
     line.styles.length = line.cursor;
   } else if (mode === 1) {
-    // From the start of the line through the cursor cell, inclusive.
-    for (let column = 0; column <= line.cursor && column < line.chars.length; column += 1) {
+    // From the start of the line through the cursor cell, inclusive — and
+    // through a wide glyph's second cell when the cursor is on its first,
+    // so no orphaned tail is left for the next write to trip over.
+    const last = line.chars[line.cursor + 1] === WIDE_TAIL ? line.cursor + 1 : line.cursor;
+    for (let column = 0; column <= last && column < line.chars.length; column += 1) {
       line.chars[column] = " ";
       line.styles[column] = PLAIN;
     }
