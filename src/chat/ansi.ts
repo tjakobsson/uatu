@@ -476,6 +476,35 @@ export function terminalLinesToHtml(lines: readonly TerminalLine[]): string {
   return lines.map(line => line.map(runToHtml).join("")).join("\n");
 }
 
+// How far back a tail cut looks for a control string it may have landed
+// inside. Bounded so a running render stays proportional to the tail, not
+// the stream; a payload longer than this is exotic enough to accept.
+const CONTROL_STRING_LOOKBACK = 4096;
+const CONTROL_STRING_INTRODUCER = /\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f]/g;
+const CONTROL_STRING_TERMINATOR = /\x07|\x1b\\|\x9c/g;
+
+/**
+ * Where a tail taken at `at` should really begin: `at`, unless `at` falls
+ * inside a control string (an OSC title, a DCS payload) that opened before
+ * it — its remainder would otherwise be laid out as text, since the tail
+ * never sees the introducer — in which case just after that string's
+ * terminator, or the end of the text if it has none yet.
+ */
+export function tailStart(text: string, at: number): number {
+  const from = Math.max(0, at - CONTROL_STRING_LOOKBACK);
+  const before = text.slice(from, at);
+  let lastIntroducer = -1;
+  for (const match of before.matchAll(CONTROL_STRING_INTRODUCER)) lastIntroducer = match.index;
+  if (lastIntroducer === -1) return at;
+  let lastTerminator = -1;
+  for (const match of before.matchAll(CONTROL_STRING_TERMINATOR)) lastTerminator = match.index;
+  if (lastTerminator > lastIntroducer) return at;
+  CONTROL_STRING_TERMINATOR.lastIndex = at;
+  const terminator = CONTROL_STRING_TERMINATOR.exec(text);
+  CONTROL_STRING_TERMINATOR.lastIndex = 0;
+  return terminator ? terminator.index + terminator[0].length : text.length;
+}
+
 /** Convenience for the common case: interpret and emit in one call. */
 export function terminalTextToHtml(text: string): string {
   return terminalLinesToHtml(renderTerminalText(text));

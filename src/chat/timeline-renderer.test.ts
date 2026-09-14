@@ -1723,6 +1723,21 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(host.querySelector('[data-chat-item-id="tool:ag"] .chat-activity-subject')!.textContent).toBe("explore · Review renderer · $0.13");
   });
 
+  test("a control string spanning the running tail's cut does not leak its payload", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    // An OSC payload with newlines, then eleven ordinary lines: the raw
+    // twelve-line cut lands inside the payload.
+    const output = `start\n\x1b]0;secret title\nwith newline\x07${Array.from({ length: 11 }, (_, i) => `line ${i + 1}`).join("\n")}`;
+    const item: ConversationItem = { id: "tool:osc", type: "tool", createdAt: 1, name: "bash", status: "running", input: JSON.stringify({ command: "x" }), output };
+    renderer.render(host, projectionWith([item]), new Set());
+    const text = host.querySelector(".chat-tool-stream")!.textContent!;
+    expect(text).not.toContain("with newline");
+    expect(text).not.toContain("secret");
+    expect(text).toContain("line 1");
+    expect(text).toContain("line 11");
+  });
+
   test("other tools interpret escapes but keep the plain block", () => {
     const renderer = new TimelineRenderer();
     const host = target();

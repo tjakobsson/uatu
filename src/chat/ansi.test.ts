@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { renderTerminalText, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
+import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 
 const ESC = "\x1b";
 
@@ -134,6 +134,24 @@ describe("renderTerminalText", () => {
     expect(text("🇺🇸x\rA")).toEqual(["A x"]);
     // A combining mark with nothing before it stands on its own.
     expect(text("\u0301x")).toEqual(["\u0301x"]);
+  });
+});
+
+describe("tailStart", () => {
+  test("a cut inside a control string resumes after its terminator", () => {
+    const text = `line one\n${ESC}]0;title with\na newline${"\x07"}line two\nline three`;
+    const cut = text.indexOf("a newline");
+    expect(text.slice(tailStart(text, cut))).toBe("line two\nline three");
+    // Terminated before the cut, or no control string at all: the cut stands.
+    expect(tailStart(`${ESC}]0;t${"\x07"}abc\ndef`, 8)).toBe(8);
+    expect(tailStart("plain\ntext", 6)).toBe(6);
+    // Unterminated so far (still streaming): nothing of the payload shows.
+    const open = `${ESC}Ppayload\nmore`;
+    expect(tailStart(open, open.indexOf("more"))).toBe(open.length);
+    // An 8-bit introducer and ST count too.
+    const c1 = `\u009d0;a\nb\u009cvisible`;
+    expect(text.length).toBeGreaterThan(0);
+    expect(c1.slice(tailStart(c1, c1.indexOf("b\u009c")))).toBe("visible");
   });
 });
 

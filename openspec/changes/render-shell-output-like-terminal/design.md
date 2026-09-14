@@ -70,7 +70,9 @@ lands on the cells the terminal would use.
 tail walks back twelve `\n` in the raw string so a long stream is not
 re-scanned per chunk; that stays. The tail is then converted, so a rewritten
 progress line counts once. SGR state opened before the cut is lost for the
-visible tail — accepted while running. The finished render converts the whole
+visible tail — accepted while running. A control string the cut lands
+inside is not: a bounded look-back finds the open introducer and the tail
+starts after its terminator, so a payload never reads as text. The finished render converts the whole
 output once and splits rendered lines into preview and rest, so the bounded
 preview and "Show N more lines" count rendered lines. Alternative rejected:
 convert the whole stream per chunk (quadratic over a long log).

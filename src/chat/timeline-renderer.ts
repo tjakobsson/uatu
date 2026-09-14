@@ -1,6 +1,6 @@
 import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
-import { renderTerminalText, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
+import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
 import { measureChatWork } from "./performance";
@@ -974,12 +974,14 @@ function renderActivityOutput(output: string | undefined, status: ActivityStatus
     // the raw text, the tail is then interpreted: a redrawn progress line
     // counts once, and a colour opened before the cut is lost to the tail —
     // accepted while the command runs; the finished render sees it whole.
+    // A control string the cut landed inside is not: its remainder would
+    // read as text, so the tail starts after it (`tailStart`).
     let cut = output.length;
     for (let index = 0; index < OUTPUT_LINE_LIMIT; index += 1) {
       cut = output.lastIndexOf("\n", cut - 1);
       if (cut === -1) return `<pre class="chat-tool-stream${look}">${terminalTextToHtml(output)}</pre>`;
     }
-    return `<p class="chat-output-elided">Earlier output omitted</p><pre class="chat-tool-stream${look}">${terminalTextToHtml(output.slice(cut + 1))}</pre>`;
+    return `<p class="chat-output-elided">Earlier output omitted</p><pre class="chat-tool-stream${look}">${terminalTextToHtml(output.slice(tailStart(output, cut + 1)))}</pre>`;
   }
   const block = terminal ? ' class="chat-tool-terminal"' : "";
   const lines = renderTerminalText(output);
