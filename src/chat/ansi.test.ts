@@ -60,6 +60,10 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText("123456\rab").map(line => line.map(run => run.text).join(""))).toEqual(["ab3456"]);
     expect(renderTerminalText(`123456\r${ESC}[Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
     expect(renderTerminalText(`123456\r${ESC}[2Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
+    // Erasing to the end keeps the cells that held text, blank under the
+    // active background.
+    expect(renderTerminalText(`abc\r${ESC}[41m${ESC}[K`)[0]).toEqual([{ text: "   ", style: { bg: 1 } }]);
+    expect(renderTerminalText(`abc\r${ESC}[41m${ESC}[Kz`)[0]).toEqual([{ text: "z  ", style: { bg: 1 } }]);
     // Erasing the whole line leaves the cursor where it was, the cells up
     // to it blank under the active background.
     expect(renderTerminalText(`abc${ESC}[41m${ESC}[2Kz`)[0]).toEqual([{ text: "   ", style: { bg: 1 } }, { text: "z", style: { bg: 1 } }]);

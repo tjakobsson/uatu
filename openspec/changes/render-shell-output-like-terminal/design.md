@@ -137,5 +137,5 @@ few coarse ranges, with U+FE0F emoji presentation making a narrow symbol
 wide and a regional-indicator pair (a flag) taking two cells; colon-form SGR subparameters (`4:2`, `38:2:cs:r:g:b`) stay with their
 parameter instead of being flattened into top-level codes; DCS/APC/PM/SOS
 control strings are consumed whole to BEL/ST like OSC; erased cells take the
-active background, as a terminal fills them, and erasing the whole line
-leaves the cursor where it stood.
+active background, as a terminal fills them, and erasing — to the end or the
+whole line — leaves the cursor where it stood and the erased cells in place.

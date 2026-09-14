@@ -287,8 +287,18 @@ function eraseInLine(line: LineBuffer, params: string, style: TerminalStyle): vo
       line.chars[line.cursor - 1] = " ";
       line.styles[line.cursor - 1] = blank;
     }
-    line.chars.length = line.cursor;
-    line.styles.length = line.cursor;
+    // Cells that held text keep their place as blanks under the active
+    // background — a terminal paints them, it does not shorten the line.
+    // Under the default rendition there is nothing to paint, so they go.
+    if (blank === PLAIN) {
+      line.chars.length = line.cursor;
+      line.styles.length = line.cursor;
+    } else {
+      for (let column = line.cursor; column < line.chars.length; column += 1) {
+        line.chars[column] = " ";
+        line.styles[column] = blank;
+      }
+    }
   } else if (mode === 1) {
     // From the start of the line through the cursor cell, inclusive — and
     // through a wide glyph's second cell when the cursor is on its first,
