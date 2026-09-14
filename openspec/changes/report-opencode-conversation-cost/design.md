@@ -50,8 +50,11 @@ A `conversationTotals(items)` (new module beside `context-readout.ts`) sums
 omitted. History is paged (50 newest), so a fold over the loaded page alone
 would be partial and grow as older pages load; where the provider exposes the
 complete transcript (`completeItems`, which OpenCode's provider does), the
-adapter ships every usage carrier with the first page — hidden, small, keyed
-by message id, idempotent when an older page restates it. Alternative: have the OpenCode provider emit a `context_report`
+adapter ships every priced usage carrier with the first page — hidden, small,
+keyed by message id, idempotent when an older page restates it — and every
+subagent-launching tool row, which is where a child's aggregate lives (it
+renders, as an out-of-page background task already does, and merges in place
+when its page loads). Alternative: have the OpenCode provider emit a `context_report`
 with `session` — needs a server ledger keyed by conversation, breaks on
 restart (the "since HH:MM" caveat Claude Code has), and restates what the
 carriers already say.

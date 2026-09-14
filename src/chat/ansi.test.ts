@@ -52,6 +52,10 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText(`123456\r12${ESC}[1Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["  ab56"]);
     // Mode 1 includes the cell under the cursor.
     expect(renderTerminalText(`abc\r${ESC}[1K`).map(line => line.map(run => run.text).join(""))).toEqual([" bc"]);
+    // A tab is cursor movement to the next stop, so an overwrite lands on
+    // the cells a terminal would put it on; skipped cells keep their text.
+    expect(renderTerminalText("a\tb\rxy").map(line => line.map(run => run.text).join(""))).toEqual(["xy      b"]);
+    expect(renderTerminalText("abcdefghij\rX\tY").map(line => line.map(run => run.text).join(""))).toEqual(["XbcdefghYj"]);
     // Backspace steps back one cell; `\r\n` is one line break.
     expect(renderTerminalText("abc\b\bXY\r\nnext").map(line => line.map(run => run.text).join(""))).toEqual(["aXY", "next"]);
   });

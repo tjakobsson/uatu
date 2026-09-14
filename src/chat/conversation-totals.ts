@@ -35,9 +35,12 @@ export type AgentTotals = {
  * one. Client-only: the breakdown is derived from items the client holds,
  * never sent, so the closed `context_report.session` schema is untouched.
  */
-export type ConversationTotals = SessionTotals & { agents?: AgentTotals[] };
+export type ConversationTotals = SessionTotals & { models: ConversationModelTotals[]; agents?: AgentTotals[] };
 
-const emptyModel = (id: string): SessionModelTotals => ({ id, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 });
+/** A model row whose every contribution came unpriced: listed, not asserted as free. */
+export type ConversationModelTotals = SessionModelTotals & { unpriced?: true };
+
+const emptyModel = (id: string): ConversationModelTotals => ({ id, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: true });
 
 /**
  * The conversation's cost and per-model tokens, with the per-agent split.
@@ -51,7 +54,7 @@ const emptyModel = (id: string): SessionModelTotals => ({ id, input: 0, output: 
  * carries every message's price, so the tally is whole.
  */
 export function conversationTotals(items: readonly ConversationItem[]): ConversationTotals | undefined {
-  const byModel = new Map<string, SessionModelTotals>();
+  const byModel = new Map<string, ConversationModelTotals>();
   const main: AgentTotals = { id: "main", label: "This agent", main: true, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const agents: AgentTotals[] = [main];
   let priced = false;
@@ -70,7 +73,10 @@ export function conversationTotals(items: readonly ConversationItem[]): Conversa
     row.output += usage.output ?? 0;
     row.cacheRead += usage.cacheRead ?? 0;
     row.cacheWrite += usage.cacheWrite ?? 0;
-    row.costUsd += usage.costUsd ?? 0;
+    if (usage.costUsd !== undefined) {
+      row.costUsd += usage.costUsd;
+      delete row.unpriced;
+    }
     byModel.set(id, row);
   };
   for (const item of items) {

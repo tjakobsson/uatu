@@ -203,17 +203,30 @@ describe("OpenCode conversation inventory and history", () => {
     });
     const older = priced("older", 1, 0.5);
     const newer = priced("newer", 101, 0.25);
+    // A subagent launched from the older page: its spend lives on the row
+    // that launched it, so the row rides the first page and is attributed.
+    const launch = {
+      id: "launch", type: "assistant", time: { created: 2 }, modelID: "gpt-5.6-sol", providerID: "openai",
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: { status: "completed", input: { description: "Review renderer", subagent_type: "explore" }, metadata: { sessionId: "child" }, output: "done" } }],
+    };
     // The provider pages locally over the complete transcript: the newest
-    // page holds one message, the transcript both.
-    provider.pages.set("first", { items: [newer], nextCursor: "older-page", configurationItems: [older, newer] });
-    provider.pages.set("older-page", { items: [older], configurationItems: [older, newer] });
+    // page holds one message, the transcript everything.
+    provider.pages.set("first", { items: [newer], nextCursor: "older-page", configurationItems: [older, launch, newer] });
+    provider.pages.set("older-page", { items: [older, launch], configurationItems: [older, launch, newer] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      return { items: [{ id: "child_a", type: "assistant", modelID: "gpt-5.6-sol", time: { created: 3 }, tokens: { input: 50, output: 5 }, cost: 0.125 }] as never[] };
+    };
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
 
     const first = await adapter.history("session");
     const carriers = (items: readonly ConversationItem[]) => items.filter(item => item.type === "assistant_message" && item.markdown === "" && item.usage).map(item => item.id).sort();
-    // The older message's text is not on the page; its price is.
+    // The older message's text is not on the page; its price is, and so is
+    // the subagent's row with its child's aggregate.
     expect(first.items.some(item => item.id === "part:prt_older")).toBe(false);
     expect(carriers(first.items)).toEqual(["usage:newer", "usage:older"]);
+    expect(first.items.find(item => item.id === "tool:prt_task")).toEqual(expect.objectContaining({ childConversationId: "child", model: "gpt-5.6-sol", usage: expect.objectContaining({ costUsd: 0.125 }) }));
     expect(first.olderCursor).toBeDefined();
 
     // Loading the older page restates the carrier under the same id: one
@@ -221,6 +234,7 @@ describe("OpenCode conversation inventory and history", () => {
     const older_page = await adapter.history("session", { cursor: first.olderCursor });
     expect(older_page.items.some(item => item.id === "part:prt_older")).toBe(true);
     expect(carriers(adapter.projectionForTests("session").items())).toEqual(["usage:newer", "usage:older"]);
+    expect(adapter.projectionForTests("session").items().filter(item => item.id === "tool:prt_task")).toHaveLength(1);
   });
 
   test("repairs a persisted default title from before the newest message page", async () => {

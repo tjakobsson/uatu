@@ -5964,7 +5964,6 @@ body.is-resizing-chat .chat-resizer {
   white-space: pre;
   overflow-wrap: normal;
   overflow-x: auto;
-  tab-size: 8;
 }
 
 .chat-activity pre.chat-tool-error.chat-tool-terminal {

@@ -1777,7 +1777,9 @@ export function initChat(api = new ChatApiClient()): void {
         [sessionModelName(model.id), model.id],
         [formatTokens(model.input + model.cacheRead + model.cacheWrite), `${model.input.toLocaleString()} input · ${model.cacheRead.toLocaleString()} cache read · ${model.cacheWrite.toLocaleString()} cache write`],
         [formatTokens(model.output), `${model.output.toLocaleString()} output`],
-        [formatUsd(model.costUsd), ""],
+        // A row whose every contribution came unpriced says so rather
+        // than asserting the model was free.
+        ["unpriced" in model && model.unpriced ? "—" : formatUsd(model.costUsd), "unpriced" in model && model.unpriced ? "No price reported" : ""],
       ];
       for (const [text, title] of cells) {
         const cell = document.createElement("td");

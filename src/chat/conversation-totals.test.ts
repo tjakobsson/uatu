@@ -46,7 +46,7 @@ describe("conversationTotals", () => {
       costUsd: 1,
       models: [
         { id: "gpt-5.6-sol", input: 1_500, output: 70, cacheRead: 10, cacheWrite: 0, costUsd: 1 },
-        { id: "local/llama", input: 300, output: 30, cacheRead: 0, cacheWrite: 0, costUsd: 0 },
+        { id: "local/llama", input: 300, output: 30, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: true },
       ],
       agents: [
         { id: "main", label: "This agent", main: true, input: 1_000, output: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.75 },

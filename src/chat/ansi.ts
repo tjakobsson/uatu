@@ -36,6 +36,7 @@ export type TerminalRun = { text: string; style: TerminalStyle };
 export type TerminalLine = TerminalRun[];
 
 const PLAIN: TerminalStyle = {};
+const TAB_STOP = 8;
 
 // One line under construction: parallel arrays of characters and the style
 // each was written with, plus the cursor column an overwrite resumes from.
@@ -52,8 +53,10 @@ function newLine(): LineBuffer {
  * Interpret terminal text into styled lines. Handles SGR (0, 1, 2, 3, 4, 7,
  * 9, 22–24, 27, 29, 30–37, 39, 40–47, 49, 90–97, 100–107, 38/48;5;n,
  * 38/48;2;r;g;b), `\r`, `\b`, and erase-in-line; every other CSI, OSC, and
- * two-byte ESC sequence is removed. Other C0 controls are dropped; `\t` is
- * kept as a character for CSS `tab-size` to lay out.
+ * two-byte ESC sequence is removed. `\t` moves the cursor to the next tab
+ * stop (every eight columns) as a terminal does, so a line redrawn over a
+ * tabbed one overwrites the right cells; the cells it skips are left as
+ * they were, or spaces where nothing was. Other C0 controls are dropped.
  */
 export function renderTerminalText(text: string): TerminalLine[] {
   const lines: LineBuffer[] = [newLine()];
@@ -119,7 +122,17 @@ export function renderTerminalText(text: string): TerminalLine[] {
       index += 1;
       continue;
     }
-    if (code < 0x20 && code !== 0x09) {
+    if (code === 0x09) {
+      const stop = (Math.floor(line.cursor / TAB_STOP) + 1) * TAB_STOP;
+      while (line.chars.length < stop) {
+        line.chars.push(" ");
+        line.styles.push(PLAIN);
+      }
+      line.cursor = stop;
+      index += 1;
+      continue;
+    }
+    if (code < 0x20) {
       index += 1;
       continue;
     }

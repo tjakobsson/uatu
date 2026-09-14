@@ -421,11 +421,18 @@ export class ChatAdapter {
     // idempotent when an older page later restates it. Priced only — an
     // agent that prices nothing (Claude Code) has a carrier per assistant
     // frame, and shipping those would grow the first page with the whole
-    // conversation for a fold that has nothing to sum.
+    // conversation for a fold that has nothing to sum. A subagent's spend
+    // lives on the row that launched it, so those rows ride too — the
+    // attribution pass below gives them their child's aggregate like any
+    // row on the page. They render, as an out-of-page background task
+    // already does, and merge in place when their page loads.
     if (page.completeItems && !cursor) {
       const held = new Set(items.map(item => item.id));
       for (const item of page.completeItems) {
-        if (item.type === "assistant_message" && item.markdown === "" && item.usage?.costUsd !== undefined && !held.has(item.id)) items.push(item);
+        if (held.has(item.id)) continue;
+        const pricedCarrier = item.type === "assistant_message" && item.markdown === "" && item.usage?.costUsd !== undefined;
+        const launcher = item.type === "tool" && item.childConversationId !== undefined;
+        if (pricedCarrier || launcher) items.push(item);
       }
     }
     // Stable sort with no id tiebreaker: parts of one message share the
