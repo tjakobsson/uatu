@@ -189,7 +189,7 @@ const costItems: ConversationItem[] = [
   { id: "message:u1", type: "user_message", createdAt: 1, text: "Review the renderer for double counting." },
   { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "I'll have a subagent read the renderer while I check the tests.", completedAt: 2 },
   carrier("msg_a", 2, "gpt-5", 12_000, 400, 0.75),
-  { id: "tool:agent", type: "tool", createdAt: 3, name: "task", status: "completed", input: JSON.stringify({ description: "Review renderer", subagent_type: "explore" }), output: "No double counting found.", childConversationId: "child-1", model: "gpt-5", usage: { input: 6_000, output: 300, cacheRead: 0, cacheWrite: 0, costUsd: 0.13 } },
+  { id: "tool:agent", type: "tool", createdAt: 3, name: "task", status: "completed", input: JSON.stringify({ description: "Review renderer", subagent_type: "explore" }), output: "No double counting found.", childConversationId: "CHILD", model: "gpt-5", usage: { input: 6_000, output: 300, cacheRead: 0, cacheWrite: 0, costUsd: 0.25 } },
   { id: "message:a2", type: "assistant_message", createdAt: 4, markdown: "The subagent found nothing; the carrier is keyed per message, so a restatement replaces rather than adds.", completedAt: 4 },
   carrier("msg_b", 4, "gpt-5", 15_000, 600, 0.375),
   { id: "message:u2", type: "user_message", createdAt: 5, text: "Summarise with the small model." },
@@ -197,11 +197,29 @@ const costItems: ConversationItem[] = [
   carrier("msg_c", 6, "claude-sonnet", 3_000, 100, 0.125),
 ];
 
+/** The subagent's child conversation is seeded first so the parent can point at it. */
+async function seedCost(request: APIRequestContext): Promise<string> {
+  await request.post("/__e2e/reset");
+  const child = await request.post("/__e2e/chat", { data: { action: "seed", title: "Review renderer", items: [
+    { id: "message:c1", type: "user_message", createdAt: 1, text: "Review the renderer for double counting." },
+    { id: "message:c2", type: "assistant_message", createdAt: 2, markdown: "No double counting found.", completedAt: 2 },
+  ] } });
+  expect(child.ok()).toBe(true);
+  const childId = ((await child.json()) as { conversation: { id: string } }).conversation.id;
+  const items = costItems.map(item => (item.type === "tool" && item.childConversationId === "CHILD" ? { ...item, childConversationId: childId } : item));
+  const response = await request.post("/__e2e/chat", { data: { action: "seed", title: "Conversation cost", items } });
+  expect(response.ok()).toBe(true);
+  const seeded = await response.json() as { conversation: { id: string } };
+  const token = await request.get("/__e2e/terminal-token").then(reply => reply.json()) as { token: string };
+  return `${seeded.conversation.id}\u0001${token.token}`;
+}
+
 async function costScenario(page: Page, request: APIRequestContext, testInfo: TestInfo, touch: boolean): Promise<void> {
-  const seeded = await seed(request, "Conversation cost", costItems);
+  const seeded = await seedCost(request);
   await openSeeded(page, seeded, touch);
   const summary = page.locator("#chat-plan-usage-summary");
-  await expect(summary).toHaveText("$1.25 this conversation");
+  // Main agent $1.25 plus the subagent's $0.25: what the whole conversation cost.
+  await expect(summary).toHaveText("$1.50 this conversation");
   await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-chip-${touch ? "phone" : "desktop"}`);
   if (touch) return;
   await summary.click();
@@ -211,21 +229,40 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   // not "since" a time — with a row per model and the subagent priced.
   await expect(page.locator("#chat-plan-readout-head")).toBeHidden();
   await expect(page.locator("#chat-plan-session-title")).toHaveText("This conversation");
-  await expect(page.locator("#chat-plan-session-cost")).toHaveText("$1.25");
+  await expect(page.locator("#chat-plan-session-cost")).toHaveText("$1.50");
   const rows = page.locator("#chat-plan-session-models tr");
   await expect(rows).toHaveCount(2);
+  // The subagent ran GPT-5 too: its $0.25 lands in that model's row.
   await expect(rows.nth(0).locator("td").first()).toHaveText("GPT-5");
-  await expect(rows.nth(0).locator("td").last()).toHaveText("$1.13");
+  await expect(rows.nth(0).locator("td").last()).toHaveText("$1.38");
   await expect(rows.nth(1).locator("td").first()).toHaveText("Claude Sonnet");
   await expect(rows.nth(1).locator("td").last()).toHaveText("$0.13");
-  await expect(page.locator("#chat-subagents-items")).toContainText("$0.13");
+  // Per agent: the main agent's own spend, then the subagent with its model.
+  const agents = page.locator("#chat-plan-session-agents tr");
+  await expect(agents).toHaveCount(2);
+  await expect(agents.nth(0).locator("td").first()).toHaveText("This agent");
+  await expect(agents.nth(0).locator("td").last()).toHaveText("$1.25");
+  await expect(agents.nth(1).locator("td").first()).toContainText("explore · Review renderer");
+  await expect(agents.nth(1).locator(".chat-plan-session-agent-model")).toHaveText("GPT-5");
+  await expect(agents.nth(1).locator("td").last()).toHaveText("$0.25");
+  await expect(page.locator("#chat-subagents-items")).toContainText("$0.25");
   await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-readout-desktop`);
+  await page.keyboard.press("Escape");
+
+  // In context: the subagent's timeline row, and the transcript it opens.
+  const agentRow = page.locator('[data-chat-item-id="tool:agent"]');
+  await expect(agentRow.locator(".chat-activity-subject")).toHaveText("explore · Review renderer · $0.25");
+  await agentRow.locator("> summary").click();
+  await agentRow.locator("[data-open-conversation]").click();
+  await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer · $0.25");
+  await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-subagent-drilldown-desktop`);
+  await page.goBack();
 
   // Reopened: the cost is restored from history, still titled for the whole conversation.
   await page.reload();
   await openChatPanel(page);
   await page.locator("#chat-conversation-select").selectOption(seeded.split("\u0001")[0]!);
-  await expect(summary).toHaveText("$1.25 this conversation");
+  await expect(summary).toHaveText("$1.50 this conversation");
   await summary.click();
   await expect(page.locator("#chat-plan-session-title")).toHaveText("This conversation");
   await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-reopen-desktop`);

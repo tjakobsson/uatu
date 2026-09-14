@@ -903,6 +903,16 @@
                         </thead>
                         <tbody id="chat-plan-session-models"></tbody>
                       </table>
+                      <!-- Per agent: the main agent's own spend and each
+                           subagent's, from the row that launched it. Only
+                           when the conversation launched subagents; alone,
+                           the main agent's row would restate the total. -->
+                      <table class="chat-plan-session-models chat-plan-session-agents" hidden>
+                        <thead>
+                          <tr><th scope="col">Agent</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cost</th></tr>
+                        </thead>
+                        <tbody id="chat-plan-session-agents"></tbody>
+                      </table>
                     </section>
                   </div>
                 </details>

@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import type { ChatProjection } from "./projection";
-import { RATE_LIMIT_ITEM_ID, type ConversationItem } from "./types";
+import { RATE_LIMIT_ITEM_ID, type ConversationItem, type TokenUsage } from "./types";
 
 const dom = parseHTML("<!doctype html><html><body><div id=\"items\"></div></body></html>");
 beforeAll(() => {
@@ -1711,6 +1711,16 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(more.querySelector("pre")!.classList.contains("chat-tool-terminal")).toBe(true);
     expect(more.querySelector("pre")!.textContent).toBe("Downloading 100%");
     expect(host.querySelector("pre.chat-tool-terminal .ansi-fg-2")!.textContent).toBe("pass");
+  });
+
+  test("a subagent's row states its cost once the child reported a price", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const agent = (usage?: TokenUsage): ConversationItem => ({ id: "tool:ag", type: "tool", createdAt: 1, name: "task", status: "completed", input: JSON.stringify({ description: "Review renderer", subagent_type: "explore" }), childConversationId: "child", ...(usage ? { usage } : {}) });
+    renderer.render(host, projectionWith([agent({ input: 10, costUsd: 0 })]), new Set());
+    expect(host.querySelector('[data-chat-item-id="tool:ag"] .chat-activity-subject')!.textContent).toBe("explore · Review renderer");
+    renderer.render(host, projectionWith([agent({ input: 10, costUsd: 0.13 })]), new Set());
+    expect(host.querySelector('[data-chat-item-id="tool:ag"] .chat-activity-subject')!.textContent).toBe("explore · Review renderer · $0.13");
   });
 
   test("other tools interpret escapes but keep the plain block", () => {

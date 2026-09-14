@@ -7,6 +7,7 @@ import { measureChatWork } from "./performance";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
+import { formatUsd } from "./usage";
 import { isLiveConversationStatus, isRateLimitStanding, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
@@ -996,7 +997,10 @@ function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: 
   // which task — every todowrite call carries the whole list, so showing the
   // list each time reprints it verbatim on every tool call.
   const label = detail.kind === "todo" && todo ? todo.label : detail.label;
-  const subject = detail.kind === "todo" ? todo?.task : toolSubject(detail);
+  // A subagent's row states what its child session cost, in context, once
+  // the child has reported a price; zero is an unpriced model, not free.
+  const subagentCost = detail.kind === "agent" && item.usage?.costUsd ? ` · ${formatUsd(item.usage.costUsd)}` : "";
+  const subject = detail.kind === "todo" ? todo?.task : `${toolSubject(detail) ?? ""}${subagentCost}` || undefined;
   return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, timestampAttribute(item.createdAt), activityStatusText(item.status, item.elapsedMs));
 }
 

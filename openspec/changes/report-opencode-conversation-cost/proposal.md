@@ -16,8 +16,12 @@ surface exists; only the OpenCode side is silent.
   reads "$x.xx this conversation" where the agent reports no plan windows (OpenCode
   reports none), and the readout's "This conversation" block lists the total
   and a per-model breakdown — the same block a Claude Code conversation gets.
-- A subagent's row carries the subagent's cost beside its tokens, from the
-  same mirrored usage.
+- Cost is attributed per agent, not only per model: the readout's
+  conversation block gains an Agents table — the main agent's own spend and
+  one row per subagent (its label, model, tokens, cost) — and the model table
+  and the chip's figure count subagent work too, so the total is what the
+  whole conversation cost. A subagent's timeline row and its drill-down
+  header state the subagent's cost in context.
 - A conversation whose every message reports zero cost (a model OpenCode has
   no price for) shows no cost rather than "$0.00".
 - **BREAKING (workspace API)**: `TokenUsage` gains an optional `costUsd`

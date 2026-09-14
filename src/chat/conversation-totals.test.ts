@@ -26,8 +26,37 @@ describe("conversationTotals", () => {
         { id: "gpt-5.6-sol", input: 1_800, output: 27, cacheRead: 100, cacheWrite: 0, costUsd: 1.125 },
         { id: "gpt-5.6-mini", input: 10, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.125 },
       ],
+      agents: [{ id: "main", label: "This agent", main: true, input: 1_810, output: 28, cacheRead: 100, cacheWrite: 0, costUsd: 1.25 }],
     });
     expect(totals).not.toHaveProperty("since");
+  });
+
+  test("subagents count toward the total and the model rows, and get their own row", () => {
+    const subagent = (id: string, description: string, usage: TokenUsage, model?: string): ConversationItem => ({
+      id, type: "tool", createdAt: 3, name: "task", status: "completed", input: JSON.stringify({ description, subagent_type: "explore" }), childConversationId: `child-${id}`, usage, ...(model ? { model } : {}),
+    });
+    const totals = conversationTotals([
+      carrier("msg_a", { input: 1_000, output: 20, costUsd: 0.75 }, "gpt-5.6-sol"),
+      // On the main agent's model: one model row, two agent rows.
+      subagent("tool:a", "Review renderer", { input: 500, output: 50, cacheRead: 10, cacheWrite: 0, costUsd: 0.25 }, "gpt-5.6-sol"),
+      // Tokens but no price: listed, not asserted as free, not in the total.
+      subagent("tool:b", "Scan tests", { input: 300, output: 30 }, "local/llama"),
+    ]);
+    expect(totals).toEqual(expect.objectContaining({
+      costUsd: 1,
+      models: [
+        { id: "gpt-5.6-sol", input: 1_500, output: 70, cacheRead: 10, cacheWrite: 0, costUsd: 1 },
+        { id: "local/llama", input: 300, output: 30, cacheRead: 0, cacheWrite: 0, costUsd: 0 },
+      ],
+      agents: [
+        { id: "main", label: "This agent", main: true, input: 1_000, output: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.75 },
+        { id: "tool:a", label: "explore · Review renderer", main: false, model: "gpt-5.6-sol", input: 500, output: 50, cacheRead: 10, cacheWrite: 0, costUsd: 0.25 },
+        { id: "tool:b", label: "explore · Scan tests", main: false, model: "local/llama", input: 300, output: 30, cacheRead: 0, cacheWrite: 0 },
+      ],
+    }));
+    expect(planChip({ session: totals }, undefined)?.text).toBe("$1.00 this conversation");
+    // A priced subagent alone is a priced conversation.
+    expect(conversationTotals([carrier("m", { input: 5 }), subagent("tool:c", "Alone", { input: 1, costUsd: 0.5 })])?.costUsd).toBe(0.5);
   });
 
   test("an unpriced carrier contributes nothing, and an all-zero conversation shows no cost", () => {

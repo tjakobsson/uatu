@@ -28,8 +28,6 @@ property is a breaking workspace-API change under the contract policy.
 **Non-Goals:**
 - Recomputing cost from `Model.cost` price lists — OpenCode's figure is the
   figure.
-- Folding a subagent's cost into its parent's total (OpenCode's own session
-  cost does not; the subagent row shows it separately).
 - API/wall-clock time and lines changed for OpenCode — left absent; the
   readout already omits zero parts.
 
@@ -67,6 +65,19 @@ to the plan does the carrier fold apply (OpenCode). `paintPlanSession` and
 `planChip` take the resolved `SessionTotals | undefined` instead of reading
 `report.session` directly. The Claude Code path is unchanged in behavior
 (the polish e2e that retires totals on a minimal report still passes).
+
+**D3b — Per-agent attribution is a client-side view over the same items.**
+The main agent's spend is the carrier fold; each subagent's is the aggregate
+its tool row already carries (`model` + `usage`, mirrored from the child
+session). `conversationTotals` sums both into the total and the per-model rows
+(a subagent's `model` is a raw id, matched to a carrier's `modelId`), and
+returns an `agents` list beside `models` — a client-only extension of
+`SessionTotals` (`ConversationTotals`), never on the wire, so the closed
+`context_report.session` schema is untouched. The readout paints an Agents
+table when the conversation has subagent rows; the subagent's timeline row
+and drill-down header read the cost off the same tool item. The user asked
+for the whole conversation's cost, so the chip counts subagents; OpenCode's
+own TUI figure (parent only) is the "This agent" row.
 
 **D4 — Zero-cost conversations show nothing.** `cost: 0` is how OpenCode
 reports "no price known" for local/proxy models. A `$0.00` chip on a free

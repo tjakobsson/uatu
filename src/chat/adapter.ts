@@ -416,13 +416,16 @@ export class ChatAdapter {
     // A conversation's price is the sum of every message's, and the client
     // folds it from the usage carriers it holds — so the newest page alone
     // would present a partial figure that grows as older pages load. Where
-    // the provider exposes the complete transcript, every carrier rides the
-    // first page: hidden, small, keyed by message id, and idempotent when an
-    // older page later restates it.
+    // the provider exposes the complete transcript, every priced carrier
+    // rides the first page: hidden, small, keyed by message id, and
+    // idempotent when an older page later restates it. Priced only — an
+    // agent that prices nothing (Claude Code) has a carrier per assistant
+    // frame, and shipping those would grow the first page with the whole
+    // conversation for a fold that has nothing to sum.
     if (page.completeItems && !cursor) {
       const held = new Set(items.map(item => item.id));
       for (const item of page.completeItems) {
-        if (item.type === "assistant_message" && item.markdown === "" && item.usage && !held.has(item.id)) items.push(item);
+        if (item.type === "assistant_message" && item.markdown === "" && item.usage?.costUsd !== undefined && !held.has(item.id)) items.push(item);
       }
     }
     // Stable sort with no id tiebreaker: parts of one message share the

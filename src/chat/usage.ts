@@ -24,6 +24,15 @@ export function totalTokens(usage: TokenUsage): number {
   return TOKEN_USAGE_COMPONENTS.reduce((sum, key) => sum + (usage[key] ?? 0), 0);
 }
 
+/**
+ * Dollars as the readouts show them: cents for anything a reader would
+ * budget, four places below ten cents so a cheap turn does not round to
+ * nothing.
+ */
+export function formatUsd(value: number): string {
+  return value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.1 ? 4 : 2 });
+}
+
 /** Tokens occupying the model's context window right now. */
 export function contextTokens(usage: TokenUsage): number {
   return (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);

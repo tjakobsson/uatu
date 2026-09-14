@@ -6992,6 +6992,22 @@ html[data-ui-mode="touch"] .chat-plan-pin,
   display: none;
 }
 
+.chat-plan-session-agents {
+  margin-top: 0.5rem;
+}
+
+.chat-plan-session-agents[hidden] {
+  display: none;
+}
+
+/* A subagent's model, under its label, so the row reads "what ran" without
+   a fifth column the readout has no room for. */
+.chat-plan-session-agents .chat-plan-session-agent-model {
+  display: block;
+  color: var(--text-subtle);
+  font-size: 0.85em;
+}
+
 /* The Usage pane: the same rows, in the sidebar's type size, with the
    report's time above them so a stale login is visibly stale. */
 .usage-pane {

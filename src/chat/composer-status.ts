@@ -142,14 +142,9 @@ export function planUtilizationLabel(plan: PlanUtilization): string | undefined 
   return parts.length ? parts.join(" · ") : undefined;
 }
 
-/**
- * Dollars as the readout shows them: cents for anything a reader would
- * budget, four places below ten cents so a cheap turn does not round to
- * nothing.
- */
-export function formatUsd(value: number): string {
-  return value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.1 ? 4 : 2 });
-}
+import { formatUsd } from "./usage";
+
+export { formatUsd };
 
 /** "$1.23 this conversation": the chip's words for a login that has no windows to report. */
 export function sessionCostLabel(session: SessionTotals): string {

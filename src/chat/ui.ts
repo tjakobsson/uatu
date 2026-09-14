@@ -20,7 +20,7 @@ import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pan
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
 import { totalTokens } from "./usage";
-import { resolveSessionTotals } from "./conversation-totals";
+import { resolveSessionTotals, type ConversationTotals } from "./conversation-totals";
 import {
   addAcceptedDraft,
   applyChatEvent,
@@ -125,6 +125,7 @@ export function initChat(api = new ChatApiClient()): void {
   const planSessionTitle = document.querySelector<HTMLElement>("#chat-plan-session-title");
   const planSessionCost = document.querySelector<HTMLElement>("#chat-plan-session-cost");
   const planSessionModels = document.querySelector<HTMLElement>("#chat-plan-session-models");
+  const planSessionAgents = document.querySelector<HTMLElement>("#chat-plan-session-agents");
   const composerChips = document.querySelector<HTMLElement>("#chat-composer-chips");
   // The reason the latest status event carried (a retry's attempt and HTTP
   // status), shown with the named state — per conversation, so a switch
@@ -754,7 +755,10 @@ export function initChat(api = new ChatApiClient()): void {
   // text — the track row and the timeline row must produce the same title.
   const subagentLabelFor = (conversationId: string, source: ChatProjection | null): string => {
     const entry = source ? subagentEntries(source.items).find(candidate => candidate.conversationId === conversationId) : undefined;
-    return entry ? subagentLabel(entry) : "Subagent";
+    if (!entry) return "Subagent";
+    // What the child session cost, beside its name, once it has reported a
+    // price — the same figure its timeline row and the Agents table state.
+    return entry.usage?.costUsd ? `${subagentLabel(entry)} · ${formatUsd(entry.usage.costUsd)}` : subagentLabel(entry);
   };
   subagentsItems?.addEventListener("click", event => {
     const open = (event.target as Element).closest<HTMLElement>("[data-open-conversation]");
@@ -1716,8 +1720,46 @@ export function initChat(api = new ChatApiClient()): void {
     const family = exact ?? models.find(model => !model.default && ids(model).some(candidate => bare.includes(strip(candidate))));
     return family?.name ?? id;
   };
-  const paintPlanSession = (session: SessionTotals | undefined, items: readonly ConversationItem[]) => {
+  // The per-agent split, when the conversation launched subagents: the main
+  // agent's own spend, then each subagent with the model it ran. An agent
+  // that reported no price is listed with a dash, not a zero.
+  const paintPlanAgents = (agents: ConversationTotals["agents"]) => {
+    const table = planSessionAgents?.closest("table");
+    if (!planSessionAgents || !table) return;
+    const shown = agents !== undefined && agents.some(agent => !agent.main);
+    table.hidden = !shown;
+    if (!shown) {
+      planSessionAgents.replaceChildren();
+      return;
+    }
+    planSessionAgents.replaceChildren(...agents.map(agent => {
+      const row = document.createElement("tr");
+      const name = document.createElement("td");
+      name.textContent = agent.label;
+      name.title = agent.label;
+      if (agent.model) {
+        const model = document.createElement("span");
+        model.className = "chat-plan-session-agent-model";
+        model.textContent = sessionModelName(agent.model);
+        name.append(model);
+      }
+      row.append(name);
+      for (const [text, title] of [
+        [formatTokens(agent.input + agent.cacheRead + agent.cacheWrite), `${agent.input.toLocaleString()} input · ${agent.cacheRead.toLocaleString()} cache read · ${agent.cacheWrite.toLocaleString()} cache write`],
+        [formatTokens(agent.output), `${agent.output.toLocaleString()} output`],
+        [agent.costUsd ? formatUsd(agent.costUsd) : "—", agent.costUsd ? "" : "No price reported"],
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = text!;
+        if (title) cell.title = title;
+        row.append(cell);
+      }
+      return row;
+    }));
+  };
+  const paintPlanSession = (session: ConversationTotals | undefined, items: readonly ConversationItem[]) => {
     if (!planSession || !planSessionCost || !planSessionModels) return;
+    paintPlanAgents(session?.agents);
     planSession.hidden = !session;
     if (!session) return;
     // "This conversation", or "since HH:MM" when the tally began after the
@@ -1792,7 +1834,7 @@ export function initChat(api = new ChatApiClient()): void {
     // Folded totals are a fresh object per fold, so they are keyed by what
     // they say: a restated carrier that moved the cost repaints, one that
     // did not is a no-op.
-    const totalsKey = totals ? `${totals.costUsd}\u0001${totals.models.map(model => `${model.id}:${model.costUsd}:${model.input}:${model.output}:${model.cacheRead}:${model.cacheWrite}`).join(",")}` : undefined;
+    const totalsKey = totals ? `${totals.costUsd}\u0001${totals.models.map(model => `${model.id}:${model.costUsd}:${model.input}:${model.output}:${model.cacheRead}:${model.cacheWrite}`).join(",")}\u0001${(totals.agents ?? []).map(agent => `${agent.id}:${agent.costUsd ?? ""}:${agent.input}:${agent.output}:${agent.cacheRead}:${agent.cacheWrite}`).join(",")}` : undefined;
     if (report === paintedPlanReport && totalsKey === paintedTotalsKey && sameStanding) return;
     paintedPlanReport = report;
     paintedTotalsKey = totalsKey;
