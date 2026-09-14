@@ -2705,6 +2705,47 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("a nested subagent's spend reaches the top-level row, from the store and live", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }];
+    const launcher = (id: string, target: string) => ({
+      id, type: "assistant", time: { created: 1 },
+      content: [{ id: `prt_${id}`, type: "tool", tool: "task", callID: id, state: { status: "completed", input: { description: `Run ${target}`, subagent_type: "explore" }, metadata: { sessionId: target }, output: "done" } }],
+    });
+    const priced = (id: string, cost: number) => ({ id, type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 2 }, tokens: { input: 100, output: 10 }, cost });
+    provider.pages.set("first", { items: [launcher("launch_child", "child")] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId === "child") return { items: [launcher("launch_grandchild", "grandchild"), priced("child_msg", 0.5)] as never[] };
+      if (sessionId === "grandchild") return { items: [priced("grandchild_msg", 0.25)] as never[] };
+      return listMessages(sessionId, options);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+
+    // From the store: the child's row on the parent carries the child's own
+    // spend and its subagent's.
+    const snapshot = await adapter.history("parent");
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      childConversationId: "child", usage: { input: 200, output: 20, costUsd: 0.75 },
+    }));
+
+    // Live: a grandchild message restates its price; the parent's row moves.
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({
+      id: "e-part", type: "message.part.updated",
+      data: { part: { id: "prt_g", messageID: "grandchild_msg", sessionID: "grandchild", type: "text", text: "more" } },
+    } as never);
+    provider.eventQueue.push({
+      id: "e-msg", type: "message.updated",
+      data: { info: { id: "grandchild_msg", sessionID: "grandchild", role: "assistant", modelID: "gpt-5.6-sol", time: { created: 2 }, tokens: { input: 300, output: 30 }, cost: 0.5 } },
+    } as never);
+    while (row()?.type === "tool" && row()!.usage?.costUsd !== 1) await Bun.sleep(1);
+    expect(row()).toEqual(expect.objectContaining({ usage: { input: 400, output: 40, costUsd: 1 } }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("removing a subagent message withdraws its usage now and after reopening", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

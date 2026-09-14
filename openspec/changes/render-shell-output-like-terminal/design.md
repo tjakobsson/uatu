@@ -59,6 +59,13 @@ line. `\b` steps back one column. Cursor-up (`\x1b[nA`) is dropped, so a
 multi-line redrawing UI degrades to its lines appended in order — readable,
 not exact, and better than the escapes shown raw.
 
+**D2b — Cells follow terminal widths.** A tab advances to the next
+eight-column stop; a combining mark, joiner, or variation selector rides the
+cell before it; East Asian wide/fullwidth forms and the emoji blocks take two
+cells, and overwriting either half blanks the glyph. Coarse ranges, not a full
+width table — enough that a progress line redrawn over accented or CJK text
+lands on the cells the terminal would use.
+
 **D3 — Streaming tail cuts the raw text first, converts second.** Today's
 tail walks back twelve `\n` in the raw string so a long stream is not
 re-scanned per chunk; that stays. The tail is then converted, so a rewritten

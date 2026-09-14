@@ -38,6 +38,35 @@ export type TerminalLine = TerminalRun[];
 const PLAIN: TerminalStyle = {};
 const TAB_STOP = 8;
 
+// How many cells a character takes, as a terminal lays it out: none for a
+// combining mark, joiner, or variation selector (it rides the cell before
+// it), two for East Asian wide and fullwidth forms and the emoji blocks
+// terminals draw double-width, one otherwise. Coarse by design — the
+// ranges are the ones ordinary command output meets, not a full Unicode
+// width table — but a progress line redrawn over accented or CJK text now
+// lands on the cells the terminal would put it on.
+const ZERO_WIDTH = /^(?:\p{M}|\u200b|\u200c|\u200d|\ufe0e|\ufe0f)$/u;
+const WIDE = [
+  [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf],
+  [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe4f], [0xff00, 0xff60], [0xffe0, 0xffe6],
+  [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff], [0x20000, 0x2fffd], [0x30000, 0x3fffd],
+] as const;
+
+function cellWidth(char: string): 0 | 1 | 2 {
+  if (ZERO_WIDTH.test(char)) return 0;
+  const point = char.codePointAt(0)!;
+  for (const [from, to] of WIDE) {
+    if (point < from) return 1;
+    if (point <= to) return 2;
+  }
+  return 1;
+}
+
+// The second cell of a wide character: no text of its own, skipped when
+// runs are built. Overwriting either half blanks the other, as a terminal
+// does, so a redraw never leaves half a glyph behind.
+const WIDE_TAIL = "";
+
 // One line under construction: parallel arrays of characters and the style
 // each was written with, plus the cursor column an overwrite resumes from.
 // Cells rather than runs, because `\r` puts the cursor back at column 0 and
@@ -64,10 +93,34 @@ export function renderTerminalText(text: string): TerminalLine[] {
   let style: TerminalStyle = PLAIN;
   const length = text.length;
   let index = 0;
+  const put = (column: number, char: string) => {
+    // Clearing a wide character's other half when one half is overwritten.
+    const previous = line.chars[column];
+    if (previous === WIDE_TAIL && column > 0) line.chars[column - 1] = " ";
+    else if (previous !== undefined && line.chars[column + 1] === WIDE_TAIL && cellWidth(previous) === 2) line.chars[column + 1] = " ";
+    line.chars[column] = char;
+    line.styles[column] = style;
+  };
   const write = (char: string) => {
-    line.chars[line.cursor] = char;
-    line.styles[line.cursor] = style;
+    const width = cellWidth(char);
+    if (width === 0) {
+      // A combining mark joins the cell before the cursor; with none, it
+      // stands in a cell of its own rather than vanishing.
+      if (line.cursor > 0 && line.chars[line.cursor - 1] !== undefined && line.chars[line.cursor - 1] !== WIDE_TAIL) {
+        line.chars[line.cursor - 1] += char;
+        return;
+      }
+      if (line.cursor > 1 && line.chars[line.cursor - 1] === WIDE_TAIL) {
+        line.chars[line.cursor - 2] += char;
+        return;
+      }
+    }
+    put(line.cursor, char);
     line.cursor += 1;
+    if (width === 2) {
+      put(line.cursor, WIDE_TAIL);
+      line.cursor += 1;
+    }
   };
   while (index < length) {
     const code = text.charCodeAt(index);
@@ -136,8 +189,8 @@ export function renderTerminalText(text: string): TerminalLine[] {
       index += 1;
       continue;
     }
-    // Surrogate pairs travel as one cell, or a `\r` overwrite would split
-    // an emoji in half.
+    // Surrogate pairs travel as one character, or a `\r` overwrite would
+    // split an emoji in half.
     if (code >= 0xd800 && code <= 0xdbff && index + 1 < length) {
       write(text.slice(index, index + 2));
       index += 2;
@@ -171,8 +224,10 @@ function toRuns(line: LineBuffer): TerminalLine {
   let current: TerminalRun | undefined;
   for (let column = 0; column < line.chars.length; column += 1) {
     // A column the cursor skipped past (it cannot, without cursor-forward,
-    // which is dropped) would be undefined; keep the guard anyway.
+    // which is dropped) would be undefined; keep the guard anyway. A wide
+    // character's tail cell has no text of its own.
     const char = line.chars[column] ?? " ";
+    if (char === WIDE_TAIL) continue;
     const style = line.styles[column] ?? PLAIN;
     if (current && current.style === style) current.text += char;
     else {

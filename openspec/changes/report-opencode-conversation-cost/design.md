@@ -78,7 +78,12 @@ returns an `agents` list beside `models` — a client-only extension of
 `SessionTotals` (`ConversationTotals`), never on the wire, so the closed
 `context_report.session` schema is untouched. The readout paints an Agents
 table when the conversation has subagent rows; the subagent's timeline row
-and drill-down header read the cost off the same tool item. The user asked
+and drill-down header read the cost off the same tool item. A subagent's
+aggregate is inclusive of its own subagents: the adapter banks each child's
+inclusive figure on the grandparent's tally under an `agent:<id>` key (live,
+climbing the ancestry; and in reconstruction, recursing into the child's
+launcher rows with a cycle guard), so the top-level chip is what the whole
+nested run cost. The user asked
 for the whole conversation's cost, so the chip counts subagents; OpenCode's
 own TUI figure (parent only) is the "This agent" row.
 

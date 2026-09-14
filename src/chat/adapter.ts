@@ -283,6 +283,12 @@ export class ChatAdapter {
   private readonly removedChildAttribution = new Map<string, Set<string>>();
   private readonly attributionReconstructions = new Map<string, Promise<void>>();
   private readonly attributionEpochs = new Map<string, number>();
+  // Children whose store is being read right now. A grandchild found in that
+  // read is reconstructed in turn, and a session that (through any loop in
+  // the data) leads back to one already on the stack is skipped rather than
+  // awaited — the in-flight dedupe would hand back the very promise being
+  // waited on.
+  private readonly attributionReadsInProgress = new Set<string>();
   // Attribution keys whose tally has been squared against the child's stored
   // history. A live tally alone is not proof of completeness: a parent evicted
   // mid-run loses its maps, and the child's next event recreates one holding
@@ -1605,6 +1611,15 @@ export class ChatAdapter {
   }
 
   private async reconstructAttributionOnce(key: string, childId: string, epoch: number): Promise<void> {
+    this.attributionReadsInProgress.add(childId);
+    try {
+      await this.reconstructAttributionRead(key, childId, epoch);
+    } finally {
+      this.attributionReadsInProgress.delete(childId);
+    }
+  }
+
+  private async reconstructAttributionRead(key: string, childId: string, epoch: number): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
     const byModel = new Map<string, MessageModel>();
     try {
@@ -1617,14 +1632,26 @@ export class ChatAdapter {
       // read; pages walk newest to oldest, so the first page's last-reported
       // model is the child's newest and is kept.
       let cursor: string | undefined;
+      const grandchildren = new Set<string>();
       do {
         const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
         for (const reported of page.accounting) {
           if (reported.usage) byMessage.set(reported.messageId, reported.usage);
           if (reported.model) byModel.set(reported.messageId, { model: reported.model, createdAt: reported.createdAt });
         }
+        for (const item of page.completeItems ?? page.items) {
+          if (item.type === "tool" && item.childConversationId && !this.attributionReadsInProgress.has(item.childConversationId)) grandchildren.add(item.childConversationId);
+        }
         cursor = page.nextCursor;
       } while (cursor !== undefined);
+      // The child's own subagents count toward it, so its figure here is
+      // inclusive: each grandchild is squared against its store the same
+      // way (recursively) and banked on this tally under its own key.
+      for (const grandchildId of grandchildren) {
+        await this.reconstructAttribution(childId, grandchildId);
+        const inclusive = sumUsage(this.childUsage.get(attributionKey(childId, grandchildId)));
+        if (inclusive !== undefined) byMessage.set(`agent:${grandchildId}`, inclusive);
+      }
     } catch {
       return;
     }
@@ -1734,12 +1761,44 @@ export class ChatAdapter {
         this.bankAttribution(this.removedChildAttribution, key, removed);
       }
     }
-    // Nothing to decorate if the parent is not projected — the row lives in
-    // its timeline, and an unprojected parent has no row on screen to carry
-    // the figure. The lookup walks the projection unordered: this runs per
-    // child event, and OpenCode restates a message's tokens many times a
-    // turn, so sorting the whole parent timeline each time (what `items()`
-    // does) would make a chatty subagent cost the parent's length per chunk.
+    this.decorateLauncherRow(parentId, conversationId, coalescer, removedMessageId);
+    // A subagent's spend counts toward every conversation above it: the
+    // child's inclusive figure — its own messages and its subagents' — is
+    // banked on the grandparent's tally for the child, under a key no
+    // message can collide with, and so on up. The chip on the top-level
+    // conversation is then what the whole run cost, nested or not.
+    await this.propagateInclusive(parentId, conversationId, coalescer);
+  }
+
+  private async propagateInclusive(parentId: string, childId: string, coalescer: ProviderUpdateCoalescer): Promise<void> {
+    let grandparentId: string | null;
+    try {
+      grandparentId = await this.parentOf(parentId);
+    } catch {
+      return;
+    }
+    if (!grandparentId) return;
+    const key = attributionKey(grandparentId, parentId);
+    const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
+    const inclusive = sumUsage(this.childUsage.get(attributionKey(parentId, childId)));
+    if (inclusive === undefined) byMessage.delete(`agent:${childId}`);
+    else byMessage.set(`agent:${childId}`, inclusive);
+    this.bankAttribution(this.childUsage, key, byMessage);
+    this.decorateLauncherRow(grandparentId, parentId, coalescer, undefined);
+    await this.propagateInclusive(grandparentId, parentId, coalescer);
+  }
+
+  /**
+   * Put the banked tally onto the row that launched the child, if the parent
+   * is projected — the row lives in its timeline, and an unprojected parent
+   * has no row on screen to carry the figure. The lookup walks the projection
+   * unordered: this runs per child event, and OpenCode restates a message's
+   * tokens many times a turn, so sorting the whole parent timeline each time
+   * (what `items()` does) would make a chatty subagent cost the parent's
+   * length per chunk.
+   */
+  private decorateLauncherRow(parentId: string, conversationId: string, coalescer: ProviderUpdateCoalescer, removedMessageId: string | undefined): void {
+    const key = attributionKey(parentId, conversationId);
     const parent = this.projections.get(parentId);
     const row = parent?.find(item => item.type === "tool" && item.childConversationId === conversationId);
     if (!row || row.type !== "tool") return;

@@ -67,8 +67,21 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText(`tail ${ESC}[3`).map(line => line.map(run => run.text).join(""))).toEqual(["tail "]);
   });
 
-  test("a surrogate pair is one cell under an overwrite", () => {
-    expect(renderTerminalText("🙂x\rY").map(line => line.map(run => run.text).join(""))).toEqual(["Yx"]);
+  test("cells follow terminal widths: combining marks ride the cell before, wide characters take two", () => {
+    const text = (input: string) => renderTerminalText(input).map(line => line.map(run => run.text).join(""));
+    // The accent occupies the same cell as its base, so the overwrite
+    // replaces the accented letter whole.
+    expect(text("e\u0301x\rA")).toEqual(["Ax"]);
+    // A wide character is two cells: the overwrite lands two columns on,
+    // and writing over either half blanks the glyph rather than leaving half.
+    expect(text("日本x\rAB")).toEqual(["AB本x"]);
+    expect(text("日本x\rA")).toEqual(["A 本x"]);
+    expect(text("🙂x\rY")).toEqual(["Y x"]);
+    expect(text("ab\r日")).toEqual(["日"]);
+    // Emoji with a variation selector or joiner stays one glyph.
+    expect(text("\u2705\ufe0f ok")).toEqual(["\u2705\ufe0f ok"]);
+    // A combining mark with nothing before it stands on its own.
+    expect(text("\u0301x")).toEqual(["\u0301x"]);
   });
 });
 
