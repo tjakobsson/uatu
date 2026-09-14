@@ -2608,22 +2608,24 @@ describe("pending permission recovery", () => {
       id: `e-part-${id}`, type: "message.part.updated",
       data: { part: { id: `prt_${id}`, messageID: id, sessionID: "child", type: "text", text: "findings" } },
     });
-    const message = (id: string, input: number, output: number) => ({
+    // The price restates with the tokens, and follows the same rule: the
+    // message's latest figure, counted once.
+    const message = (id: string, input: number, output: number, cost: number) => ({
       id: `e-${id}-${input}`, type: "message.updated",
-      data: { info: { id, sessionID: "child", role: "assistant", modelID: "claude-sonnet-4-5", time: { created: 2 }, tokens: { input, output, cache: { read: 100, write: 0 } } } },
+      data: { info: { id, sessionID: "child", role: "assistant", modelID: "claude-sonnet-4-5", time: { created: 2 }, tokens: { input, output, cache: { read: 100, write: 0 } }, cost } },
     });
     // Two messages, and one of them restated: `message.updated` reports a
     // message's growing tokens rather than a delta, so the restatement must
     // replace that message's figure and not add to it.
     provider.eventQueue.push(part("msg_a") as never);
-    provider.eventQueue.push(message("msg_a", 1_000, 10) as never);
-    provider.eventQueue.push(message("msg_a", 1_200, 20) as never);
+    provider.eventQueue.push(message("msg_a", 1_000, 10, 0.5) as never);
+    provider.eventQueue.push(message("msg_a", 1_200, 20, 0.75) as never);
     provider.eventQueue.push(part("msg_b") as never);
-    provider.eventQueue.push(message("msg_b", 800, 5) as never);
+    provider.eventQueue.push(message("msg_b", 800, 5, 0.25) as never);
     while (sumInput(row()) !== 2_000) await Bun.sleep(1);
     expect(row()).toEqual(expect.objectContaining({
       model: "claude-sonnet-4-5",
-      usage: { input: 2_000, output: 25, cacheRead: 200, cacheWrite: 0 },
+      usage: { input: 2_000, output: 25, cacheRead: 200, cacheWrite: 0, costUsd: 1 },
     }));
 
     // A message that emits a second text part reports the SAME cumulative
@@ -2633,7 +2635,7 @@ describe("pending permission recovery", () => {
       id: "e-part-msg_b-2", type: "message.part.updated",
       data: { part: { id: "prt_msg_b_2", messageID: "msg_b", sessionID: "child", type: "text", text: "and more" } },
     } as never);
-    provider.eventQueue.push(message("msg_b", 900, 7) as never);
+    provider.eventQueue.push(message("msg_b", 900, 7, 0.375) as never);
     while (sumInput(row()) === 2_000) await Bun.sleep(1);
     expect(sumInput(row())).toBe(2_100);
 
@@ -2643,7 +2645,7 @@ describe("pending permission recovery", () => {
     const reopened = await adapter.history("parent");
     expect(reopened.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
       model: "claude-sonnet-4-5",
-      usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0 },
+      usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0, costUsd: 1.125 },
     }));
 
     // The tool part's own later update knows nothing about attribution; it
@@ -2654,7 +2656,7 @@ describe("pending permission recovery", () => {
         status: "completed", input: { description: "Review renderer", subagent_type: "explore" }, metadata: { sessionId: "child" }, output: "done",
       } } },
     } as never);
-    expect(row()).toEqual(expect.objectContaining({ status: "completed", model: "claude-sonnet-4-5", usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0 } }));
+    expect(row()).toEqual(expect.objectContaining({ status: "completed", model: "claude-sonnet-4-5", usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0, costUsd: 1.125 } }));
 
     await adapter.stopEventPump();
     await pump;

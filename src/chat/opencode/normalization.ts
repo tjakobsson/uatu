@@ -33,20 +33,28 @@ function remember<T>(map: Map<string, T>, key: string, value: T): void {
  *
  * `tokens.total` is deliberately not read — it counts output, so it is not
  * what occupies the context window.
+ *
+ * `cost` is the message's price in USD, a sibling of `tokens` on the
+ * message rather than a member of it, so it arrives separately. OpenCode
+ * reports `0` for a model it has no price for; that is kept as zero (the
+ * readout decides that an all-zero conversation shows no cost) and only a
+ * missing or malformed figure stays absent.
  */
-export function tokensToUsage(value: unknown): TokenUsage | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const tokens = value as RecordValue;
-  const cache = record(tokens.cache);
+export function tokensToUsage(value: unknown, cost?: unknown): TokenUsage | undefined {
   const usage: TokenUsage = {};
   const put = (key: keyof TokenUsage, raw: unknown) => {
     if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) usage[key] = raw;
   };
-  put("input", tokens.input);
-  put("output", tokens.output);
-  put("reasoning", tokens.reasoning);
-  put("cacheRead", cache.read);
-  put("cacheWrite", cache.write);
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const tokens = value as RecordValue;
+    const cache = record(tokens.cache);
+    put("input", tokens.input);
+    put("output", tokens.output);
+    put("reasoning", tokens.reasoning);
+    put("cacheRead", cache.read);
+    put("cacheWrite", cache.write);
+  }
+  put("costUsd", cost);
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
@@ -62,7 +70,7 @@ export function storedMessageUsage(value: unknown): { messageId: string; created
   const { info } = unwrapStoredMessage(value);
   const messageId = optionalString(info.id);
   if (!messageId || (info.role !== "assistant" && info.type !== "assistant")) return undefined;
-  const usage = tokensToUsage(info.tokens);
+  const usage = tokensToUsage(info.tokens, info.cost);
   const model = messageModel(info);
   if (usage === undefined && model === undefined) return undefined;
   return { messageId, createdAt: timestamp(record(info.time).created, 0), ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }) };
@@ -518,7 +526,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       // and covers the message that produces no text part at all (a purely
       // agentic turn still fills the context window). Empty markdown is what
       // keeps it off the screen — the renderer draws no bubble for it.
-      const usage = role === "assistant" ? tokensToUsage(info.tokens) : undefined;
+      const usage = role === "assistant" ? tokensToUsage(info.tokens, info.cost) : undefined;
       let reported: { messageId: string; usage: TokenUsage } | undefined;
       if (usage && messageId) {
         reported = { messageId, usage };
@@ -700,7 +708,7 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model }, id, createdAt, mintUsageCarrier);
+    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, cost: info.cost, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model }, id, createdAt, mintUsageCarrier);
   }
   return [];
 }
@@ -717,7 +725,7 @@ function normalizeAssistant(message: RecordValue, messageId: string, createdAt: 
   // conversation, before any new turn is taken. Never attached to a text
   // part: a message can emit several, and a per-part figure is one message's
   // spend claimed by two items.
-  const usage = tokensToUsage(message.tokens);
+  const usage = tokensToUsage(message.tokens, message.cost);
   if (usage && mintUsageCarrier) {
     const model = messageModelSelection(message);
     items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) });

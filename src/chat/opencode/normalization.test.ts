@@ -546,6 +546,32 @@ describe("token usage", () => {
       .toEqual({ messageId: "msg_classic", createdAt: 0, usage: { input: 7 }, model: "claude-sonnet-4-5" });
   });
 
+  test("a message's price rides its usage, live and from history, and zero is kept", () => {
+    // `cost` is a sibling of `tokens` on the message, so it has to be read
+    // beside them rather than from them. History is what restores a
+    // reopened conversation's cost, so the stored reader must see it too.
+    expect(storedMessageUsage({ id: "msg_v2", type: "assistant", model: { id: "gpt-5.6-sol", providerID: "openai" }, tokens: { input: 5 }, cost: 0.0125 }))
+      .toEqual({ messageId: "msg_v2", createdAt: 0, usage: { input: 5, costUsd: 0.0125 }, model: "gpt-5.6-sol" });
+    const stored = normalizeProviderMessage({
+      info: { id: "msg_c", sessionID: "s1", role: "assistant", providerID: "openai", modelID: "gpt-5.6-sol", time: { created: 6 }, tokens: { input: 5 }, cost: 0.0125 },
+      parts: [{ id: "prt_c", type: "text", text: "Priced." }],
+    });
+    expect(stored.find(item => item.id === "usage:msg_c")).toEqual(expect.objectContaining({ usage: { input: 5, costUsd: 0.0125 } }));
+    const memory = createProviderEventMemory();
+    const live = normalizeProviderEvent({
+      id: "1", type: "message.updated",
+      data: { info: { id: "msg_l", sessionID: "s", role: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 3 }, tokens: { input: 100 }, cost: 0.02 } },
+    }, memory);
+    expect(live.updates.find(update => update.kind === "upsert" && update.item.id === "usage:msg_l"))
+      .toEqual(expect.objectContaining({ item: expect.objectContaining({ usage: { input: 100, costUsd: 0.02 } }) }));
+    // OpenCode reports 0 for a model it has no price for. That is a
+    // statement ("unpriced"), kept as zero for the readout to judge; only a
+    // missing or malformed figure is absent.
+    expect(storedMessageUsage({ id: "msg_free", type: "assistant", tokens: { input: 5 }, cost: 0 })?.usage).toEqual({ input: 5, costUsd: 0 });
+    expect(storedMessageUsage({ id: "msg_nan", type: "assistant", tokens: { input: 5 }, cost: "0.02" })?.usage).toEqual({ input: 5 });
+    expect(storedMessageUsage({ id: "msg_neg", type: "assistant", tokens: { input: 5 }, cost: -1 })?.usage).toEqual({ input: 5 });
+  });
+
   test("a stored message with only tool parts keeps its usage on a hidden carrier", () => {
     const items = normalizeProviderMessage({
       info: { id: "msg_t", sessionID: "s1", role: "assistant", time: { created: 6 }, tokens },

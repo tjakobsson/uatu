@@ -2,6 +2,18 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 5 / Workspace 18 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `TokenUsage` gains an optional `costUsd`: what the message cost in USD, where the agent prices its messages. OpenCode reports one per assistant message; it rides the message's usage record on the live stream, on snapshots, and on the subagent attribution mirrored onto the launching `tool` item. It is not a token component — token sums leave it out — and absent means unpriced, which is not zero.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 18: `TokenUsage` is a closed object, so a validator built from revision 17 rejects a usage record carrying `costUsd`. A consumer that sums the conversation's cost should count each `assistant_message` usage record once, by item id, since a message restates its cumulative figure while it streams; treat an all-zero sum as "no price known" rather than free.
+
 ## Hub 5 / Workspace 17 - v0.7.0
 
 Compatibility: breaking (workspace)

@@ -1,5 +1,6 @@
 import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
+import { renderTerminalText, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
 import { measureChatWork } from "./performance";
@@ -957,25 +958,35 @@ export const READER_CLOSED = "data-reader-closed";
 // carrying the whole log; once finished, a long output is bounded to a preview
 // with a native show-more that reveals the rest — from then on the full text
 // is present in the DOM.
-function renderActivityOutput(output: string | undefined, status: ActivityStatus): string {
+//
+// The text is terminal text: escape sequences are interpreted (colour, weight,
+// a progress line redrawn in place) rather than shown, for every tool —
+// anything that relays a process's output carries them. `terminal` adds the
+// terminal pane's own look, which the shell command row asks for.
+function renderActivityOutput(output: string | undefined, status: ActivityStatus, terminal = false): string {
   if (!output) return "";
+  const look = terminal ? " chat-tool-terminal" : "";
   if (status === "running") {
     // Search backward only as far as the visible tail. This runs for every
     // cumulative chunk, so counting every newline would make a long stream
-    // quadratic even though only twelve lines are rendered.
+    // quadratic even though only twelve lines are rendered. The cut is on
+    // the raw text, the tail is then interpreted: a redrawn progress line
+    // counts once, and a colour opened before the cut is lost to the tail —
+    // accepted while the command runs; the finished render sees it whole.
     let cut = output.length;
     for (let index = 0; index < OUTPUT_LINE_LIMIT; index += 1) {
       cut = output.lastIndexOf("\n", cut - 1);
-      if (cut === -1) return `<pre class="chat-tool-stream">${escapeHtml(output)}</pre>`;
+      if (cut === -1) return `<pre class="chat-tool-stream${look}">${terminalTextToHtml(output)}</pre>`;
     }
-    return `<p class="chat-output-elided">Earlier output omitted</p><pre class="chat-tool-stream">${escapeHtml(output.slice(cut + 1))}</pre>`;
+    return `<p class="chat-output-elided">Earlier output omitted</p><pre class="chat-tool-stream${look}">${terminalTextToHtml(output.slice(cut + 1))}</pre>`;
   }
-  const lines = output.split("\n");
-  if (lines.length <= OUTPUT_LINE_LIMIT) return `<pre>${escapeHtml(output)}</pre>`;
-  const preview = lines.slice(0, OUTPUT_LINE_LIMIT).join("\n");
-  const rest = lines.slice(OUTPUT_LINE_LIMIT).join("\n");
+  const block = terminal ? ' class="chat-tool-terminal"' : "";
+  const lines = renderTerminalText(output);
+  if (lines.length <= OUTPUT_LINE_LIMIT) return `<pre${block}>${terminalLinesToHtml(lines)}</pre>`;
+  const preview = terminalLinesToHtml(lines.slice(0, OUTPUT_LINE_LIMIT));
+  const rest = terminalLinesToHtml(lines.slice(OUTPUT_LINE_LIMIT));
   const more = lines.length - OUTPUT_LINE_LIMIT;
-  return `<pre>${escapeHtml(preview)}</pre><details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary><pre>${escapeHtml(rest)}</pre></details>`;
+  return `<pre${block}>${preview}</pre><details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary><pre${block}>${rest}</pre></details>`;
 }
 
 function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: TodoSummary | undefined, allowSubagents: boolean, deferClosed = false): string {
@@ -996,7 +1007,9 @@ function chatDiffMarkup(diff: DiffLine[]): string {
 }
 
 function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): string {
-  const error = item.error ? `<pre class="chat-tool-error">${escapeHtml(item.error)}</pre>` : "";
+  // An error is a process's stderr as often as not, escapes included.
+  const errorBlock = (terminal: boolean) => (item.error ? `<pre class="chat-tool-error${terminal ? " chat-tool-terminal" : ""}">${terminalTextToHtml(item.error)}</pre>` : "");
+  const error = errorBlock(false);
   // Every branch has to surface `item.output` somehow, because the auto-open
   // rule keys on output alone: a row that opens itself to show its live tail
   // and then renders a body without it is a row that opened for nothing. The
@@ -1029,15 +1042,15 @@ function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): 
     case "bash":
       // The command in full (the summary showed its first line), what the
       // agent said it was for, then the bounded output.
-      return `<pre class="chat-tool-command">${escapeHtml(detail.command)}</pre>${detail.description || detail.background ? `<p class="chat-tool-meta">${detail.description ? escapeHtml(detail.description) : ""}${detail.background ? `${detail.description ? " · " : ""}<span class="chat-tool-background">started in the background</span>` : ""}</p>` : ""}${outputBlock(item)}${error}`;
+      return `<pre class="chat-tool-command">${escapeHtml(detail.command)}</pre>${detail.description || detail.background ? `<p class="chat-tool-meta">${detail.description ? escapeHtml(detail.description) : ""}${detail.background ? `${detail.description ? " · " : ""}<span class="chat-tool-background">started in the background</span>` : ""}</p>` : ""}${outputBlock(item, true)}${errorBlock(true)}`;
     default:
       // An unknown tool: show its input, then bound its output like any other.
       return `${item.input ? `<pre>${escapeHtml(item.input)}</pre>` : ""}${outputBlock(item)}${error}`;
   }
 }
 
-function outputBlock(item: ToolItem): string {
-  return renderActivityOutput(item.output, item.status);
+function outputBlock(item: ToolItem, terminal = false): string {
+  return renderActivityOutput(item.output, item.status, terminal);
 }
 
 // Task output is prose rather than a raw log, but it obeys the same finished

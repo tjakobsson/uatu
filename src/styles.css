@@ -73,6 +73,12 @@
   --border-soft: light-dark(#e6eaef, #21262d);
   --border-medium: light-dark(#d0d7de, #30363d);
   --text-subtle: light-dark(#57606a, #8b949e);
+  /* The chat's activity chrome — working line, group summaries, member rows.
+     Between subtle and strong: strong enough to tell steps apart from each
+     other and from the prose (8.7:1 light and 9.6:1 dark on --surface,
+     8.8:1 on the dark --surface-raised; `chat/activity-contrast.test.ts`
+     holds it at 7:1 or better), still well short of prose weight. */
+  --chat-activity-fg: light-dark(#454c54, #b1bac4);
   --text-strong: light-dark(#1f2328, #e6edf3);
   --accent: light-dark(#0969da, #4493f8);
   --accent-soft: light-dark(#ddf4ff, #121d2f);
@@ -5862,7 +5868,7 @@ body.is-resizing-chat .chat-resizer {
   border-radius: 0.55rem;
   padding: 0.65rem 0.75rem;
   background: var(--surface-raised);
-  color: var(--text-subtle);
+  color: var(--chat-activity-fg);
 }
 
 /* Tool, command and reasoning rows are chrome, not content: one quiet line
@@ -5873,7 +5879,7 @@ body.is-resizing-chat .chat-resizer {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--text-subtle);
+  color: var(--chat-activity-fg);
   margin-bottom: 0.1rem;
 }
 
@@ -5892,7 +5898,7 @@ body.is-resizing-chat .chat-resizer {
   gap: 0.55rem;
   padding: 0.2rem 0;
   cursor: pointer;
-  color: var(--text-subtle);
+  color: var(--chat-activity-fg);
   font-size: 0.875em;
   list-style: none;
 }
@@ -5945,6 +5951,70 @@ body.is-resizing-chat .chat-resizer {
   border-left: 2px solid var(--accent, #3b7dd8);
 }
 
+/* A shell command's output, and its stderr: the embedded terminal's own
+   surface — its background, foreground, palette and font, read off the same
+   variables xterm builds its theme from — so the bytes a command wrote read
+   the same in Chat as in the terminal pane. Dark in both themes, as the pane
+   is. Lines are not wrapped: a table stays a table and a long line scrolls,
+   the way the terminal treats it. */
+.chat-activity pre.chat-tool-terminal {
+  background: var(--terminal-bg);
+  color: var(--terminal-fg);
+  font-family: var(--terminal-font-family);
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+  tab-size: 8;
+}
+
+.chat-activity pre.chat-tool-error.chat-tool-terminal {
+  color: var(--terminal-ansi-red);
+}
+
+/* SGR styling as the converter (`chat/ansi.ts`) emits it. Bold draws in the
+   bright half of the palette, matching xterm's drawBoldTextInBrightColors
+   default, so the two surfaces agree on what bold green looks like. */
+.ansi-fg-0 { color: var(--terminal-ansi-black); }
+.ansi-fg-1 { color: var(--terminal-ansi-red); }
+.ansi-fg-2 { color: var(--terminal-ansi-green); }
+.ansi-fg-3 { color: var(--terminal-ansi-yellow); }
+.ansi-fg-4 { color: var(--terminal-ansi-blue); }
+.ansi-fg-5 { color: var(--terminal-ansi-magenta); }
+.ansi-fg-6 { color: var(--terminal-ansi-cyan); }
+.ansi-fg-7 { color: var(--terminal-ansi-white); }
+.ansi-fg-8, .ansi-bold.ansi-fg-0 { color: var(--terminal-ansi-bright-black); }
+.ansi-fg-9, .ansi-bold.ansi-fg-1 { color: var(--terminal-ansi-bright-red); }
+.ansi-fg-10, .ansi-bold.ansi-fg-2 { color: var(--terminal-ansi-bright-green); }
+.ansi-fg-11, .ansi-bold.ansi-fg-3 { color: var(--terminal-ansi-bright-yellow); }
+.ansi-fg-12, .ansi-bold.ansi-fg-4 { color: var(--terminal-ansi-bright-blue); }
+.ansi-fg-13, .ansi-bold.ansi-fg-5 { color: var(--terminal-ansi-bright-magenta); }
+.ansi-fg-14, .ansi-bold.ansi-fg-6 { color: var(--terminal-ansi-bright-cyan); }
+.ansi-fg-15, .ansi-bold.ansi-fg-7 { color: var(--terminal-ansi-bright-white); }
+.ansi-fg-default { color: var(--terminal-bg); }
+.ansi-bg-0 { background-color: var(--terminal-ansi-black); }
+.ansi-bg-1 { background-color: var(--terminal-ansi-red); }
+.ansi-bg-2 { background-color: var(--terminal-ansi-green); }
+.ansi-bg-3 { background-color: var(--terminal-ansi-yellow); }
+.ansi-bg-4 { background-color: var(--terminal-ansi-blue); }
+.ansi-bg-5 { background-color: var(--terminal-ansi-magenta); }
+.ansi-bg-6 { background-color: var(--terminal-ansi-cyan); }
+.ansi-bg-7 { background-color: var(--terminal-ansi-white); }
+.ansi-bg-8 { background-color: var(--terminal-ansi-bright-black); }
+.ansi-bg-9 { background-color: var(--terminal-ansi-bright-red); }
+.ansi-bg-10 { background-color: var(--terminal-ansi-bright-green); }
+.ansi-bg-11 { background-color: var(--terminal-ansi-bright-yellow); }
+.ansi-bg-12 { background-color: var(--terminal-ansi-bright-blue); }
+.ansi-bg-13 { background-color: var(--terminal-ansi-bright-magenta); }
+.ansi-bg-14 { background-color: var(--terminal-ansi-bright-cyan); }
+.ansi-bg-15 { background-color: var(--terminal-ansi-bright-white); }
+.ansi-bg-default { background-color: var(--terminal-fg); }
+.ansi-bold { font-weight: 700; }
+.ansi-dim { opacity: 0.6; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }
+.ansi-strike { text-decoration: line-through; }
+.ansi-underline.ansi-strike { text-decoration: underline line-through; }
+
 /* What the tail dropped off the top while running, and the show-more that
    reveals a finished tool's remaining output — both quiet, both secondary to
    the output they bound. */
@@ -5982,7 +6052,7 @@ body.is-resizing-chat .chat-resizer {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-subtle);
+  color: var(--chat-activity-fg);
   font-family: var(--mono-font-family);
   font-size: 0.94em;
 }
@@ -8541,7 +8611,7 @@ html[data-ui-mode="touch"] .chat-header {
    first step arrives moves nothing). */
 .chat-activity-group {
   margin: 0.65rem 0 1rem;
-  color: var(--text-subtle);
+  color: var(--chat-activity-fg);
 }
 
 .chat-activity-group > summary,
@@ -8589,7 +8659,7 @@ html[data-ui-mode="touch"] .chat-header {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
-  background: var(--border-soft);
+  background: var(--border-medium);
 }
 
 .chat-activity-group[data-outcome="live"] .chat-group-dot {
@@ -8630,7 +8700,7 @@ html[data-ui-mode="touch"] .chat-header {
 .chat-group-items {
   margin: 0.2rem 0 0.4rem 0.2rem;
   padding-left: 0.9rem;
-  border-left: 2px solid var(--border-soft);
+  border-left: 2px solid var(--border-medium);
 }
 
 html[data-ui-mode="touch"] .chat-activity-group > summary,

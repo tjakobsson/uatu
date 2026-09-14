@@ -1686,6 +1686,46 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(more.textContent).toContain("line 30");
   });
 
+  test("a shell command's output is terminal text: escapes render, a redrawn line counts once", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    // Thirteen lines once the progress line has been redrawn in place; as raw
+    // bytes it is many more, and shown raw the colours are bracket codes.
+    const output = `\x1b[32mpass\x1b[0m one\n${Array.from({ length: 11 }, (_, i) => `line ${i + 2}`).join("\n")}\n` + "Downloading  10%\rDownloading  55%\rDownloading 100%";
+    const bash = (status: "running" | "completed"): ConversationItem => ({ id: "tool:sh", type: "tool", createdAt: 1, name: "bash", status, input: JSON.stringify({ command: "bun test" }), output });
+    renderer.render(host, projectionWith([bash("running")]), new Set());
+    const stream = host.querySelector(".chat-tool-stream")!;
+    expect(stream.classList.contains("chat-tool-terminal")).toBe(true);
+    // Twelve rendered lines in the tail: the first line falls off, and the
+    // redrawn progress line is the twelfth — not the thirty-somethingth.
+    expect(host.querySelector(".chat-output-elided")).not.toBeNull();
+    expect(stream.textContent).not.toContain("pass one");
+    expect(stream.textContent).toContain("line 2");
+    expect(stream.textContent).toContain("Downloading 100%");
+    expect(stream.textContent).not.toContain("55%");
+
+    renderer.render(host, projectionWith([bash("completed")]), new Set());
+    expect(host.querySelector(".chat-tool-stream")).toBeNull();
+    const more = host.querySelector(".chat-output-more")!;
+    expect(more.querySelector("summary")!.textContent).toContain("Show 1 more line");
+    expect(more.querySelector("pre")!.classList.contains("chat-tool-terminal")).toBe(true);
+    expect(more.querySelector("pre")!.textContent).toBe("Downloading 100%");
+    expect(host.querySelector("pre.chat-tool-terminal .ansi-fg-2")!.textContent).toBe("pass");
+  });
+
+  test("other tools interpret escapes but keep the plain block", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "tool:rd", type: "tool", createdAt: 1, name: "read", status: "completed", input: JSON.stringify({ filePath: "/tmp/a.log" }), output: "\x1b[31merr\x1b[0m fine", error: "\x1b[1mboom\x1b[0m" };
+    renderer.render(host, projectionWith([item]), new Set());
+    const block = host.querySelector('[data-chat-item-id="tool:rd"] pre:not(.chat-tool-error)')!;
+    expect(block.classList.contains("chat-tool-terminal")).toBe(false);
+    expect(block.querySelector(".ansi-fg-1")!.textContent).toBe("err");
+    const error = host.querySelector(".chat-tool-error")!;
+    expect(error.classList.contains("chat-tool-terminal")).toBe(false);
+    expect(error.querySelector(".ansi-bold")!.textContent).toBe("boom");
+  });
+
   test("a finished tool with short output shows it whole", () => {
     const renderer = new TimelineRenderer();
     const host = target();

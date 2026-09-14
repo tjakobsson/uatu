@@ -319,10 +319,12 @@ export function parseQuestionRequest(value: unknown): QuestionRequest {
 function expectTokenUsage(value: unknown, label: string): void {
   if (value === undefined) return;
   const usage = expectRecord(value, label);
-  expectKeys(usage, [...TOKEN_USAGE_COMPONENTS], label);
+  expectKeys(usage, [...TOKEN_USAGE_COMPONENTS, "costUsd"], label);
   for (const key of TOKEN_USAGE_COMPONENTS) {
     expectOptionalCount(usage[key], `${label} ${key}`);
   }
+  // Money, not a count: fractional cents are the normal case.
+  expectOptionalNonNegative(usage.costUsd, `${label} costUsd`);
 }
 
 export function parseConversationItem(value: unknown): ConversationItem {

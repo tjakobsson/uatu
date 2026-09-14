@@ -7,10 +7,11 @@
 import type { AssistantMessageItem, TokenUsage } from "./types";
 
 /**
- * Every component a `TokenUsage` can carry, as one list. Summing, comparing,
- * and validating all enumerate the components; a new one the agent starts
- * reporting is added here and every consumer follows, instead of each copy of
- * the list silently missing it.
+ * Every token component a `TokenUsage` can carry, as one list. Summing,
+ * comparing, and validating all enumerate the components; a new one the agent
+ * starts reporting is added here and every consumer follows, instead of each
+ * copy of the list silently missing it. `costUsd` is deliberately not a
+ * component: it is money, not tokens, so a token sum must not add it.
  */
 export const TOKEN_USAGE_COMPONENTS = ["input", "output", "reasoning", "cacheRead", "cacheWrite"] as const;
 
@@ -28,10 +29,14 @@ export function contextTokens(usage: TokenUsage): number {
   return (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
 }
 
-/** Component-by-component equality; absent components must match too. */
+/**
+ * Component-by-component equality; absent components must match too. Cost
+ * is compared as well — it rides the same record, and a restatement that
+ * only moved the price is still a change.
+ */
 export function sameUsage(left: TokenUsage | undefined, right: TokenUsage | undefined): boolean {
   if (left === undefined || right === undefined) return left === right;
-  return TOKEN_USAGE_COMPONENTS.every(key => left[key] === right[key]);
+  return TOKEN_USAGE_COMPONENTS.every(key => left[key] === right[key]) && left.costUsd === right.costUsd;
 }
 
 /**

@@ -26,7 +26,10 @@ src/
 │
 ├── chat/           the agent chat surface — shared seam + machinery at
 │                   the root (provider/types/adapter/agents/replay/
-│                   receipts/client/validation/timeline-renderer/ui);
+│                   receipts/client/validation/timeline-renderer/ui;
+│                   ansi renders tool output as terminal text against the
+│                   terminal's palette; conversation-totals folds priced
+│                   usage carriers into the cost readout);
 │                   agent-specific stacks below the seam in
 │                   chat/opencode/ (server runtime + SDK v2 provider +
 │                   normalization) and chat/claude/ (probe runtime,

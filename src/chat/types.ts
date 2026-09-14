@@ -263,6 +263,10 @@ export type TokenUsage = {
   reasoning?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  // What the message cost in USD, where the agent prices its messages
+  // (OpenCode does, per message). Not a token component: token sums leave
+  // it out, and absent means unpriced, which is not the same as free.
+  costUsd?: number;
 };
 
 export type AssistantMessageItem = TimelineItemBase & {

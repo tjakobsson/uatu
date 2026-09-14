@@ -2418,6 +2418,7 @@ function sumUsage(byMessage: Map<string, TokenUsage> | undefined): TokenUsage | 
       const value = usage[key];
       if (value !== undefined) total[key] = (total[key] ?? 0) + value;
     }
+    if (usage.costUsd !== undefined) total.costUsd = (total.costUsd ?? 0) + usage.costUsd;
   }
   return Object.keys(total).length > 0 ? total : undefined;
 }
