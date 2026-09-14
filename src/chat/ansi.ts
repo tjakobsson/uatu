@@ -205,8 +205,11 @@ export function renderTerminalText(text: string): TerminalLine[] {
 function eraseInLine(line: LineBuffer, params: string): void {
   const mode = params === "" ? 0 : Number.parseInt(params, 10);
   if (mode === 0) {
-    line.chars.length = line.cursor;
-    line.styles.length = line.cursor;
+    // A cursor on a wide glyph's second cell erases the glyph whole.
+    const cut = line.chars[line.cursor] === WIDE_TAIL ? line.cursor - 1 : line.cursor;
+    line.chars.length = cut;
+    line.styles.length = cut;
+    line.cursor = Math.min(line.cursor, cut);
   } else if (mode === 1) {
     // From the start of the line through the cursor cell, inclusive.
     for (let column = 0; column <= line.cursor && column < line.chars.length; column += 1) {

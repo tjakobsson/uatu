@@ -78,6 +78,9 @@ describe("renderTerminalText", () => {
     expect(text("日本x\rA")).toEqual(["A 本x"]);
     expect(text("🙂x\rY")).toEqual(["Y x"]);
     expect(text("ab\r日")).toEqual(["日"]);
+    // Erasing to the end from a wide glyph's second cell clears the glyph.
+    expect(text(`界x\b\b${ESC}[K`)).toEqual([""]);
+    expect(text(`a界\b${ESC}[Kz`)).toEqual(["az"]);
     // Emoji with a variation selector or joiner stays one glyph.
     expect(text("\u2705\ufe0f ok")).toEqual(["\u2705\ufe0f ok"]);
     // A combining mark with nothing before it stands on its own.

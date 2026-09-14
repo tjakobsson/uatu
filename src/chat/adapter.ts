@@ -283,12 +283,6 @@ export class ChatAdapter {
   private readonly removedChildAttribution = new Map<string, Set<string>>();
   private readonly attributionReconstructions = new Map<string, Promise<void>>();
   private readonly attributionEpochs = new Map<string, number>();
-  // Children whose store is being read right now. A grandchild found in that
-  // read is reconstructed in turn, and a session that (through any loop in
-  // the data) leads back to one already on the stack is skipped rather than
-  // awaited — the in-flight dedupe would hand back the very promise being
-  // waited on.
-  private readonly attributionReadsInProgress = new Set<string>();
   // Attribution keys whose tally has been squared against the child's stored
   // history. A live tally alone is not proof of completeness: a parent evicted
   // mid-run loses its maps, and the child's next event recreates one holding
@@ -1595,12 +1589,21 @@ export class ChatAdapter {
    * which is what stops a child that genuinely reported nothing from being
    * re-read on every open.
    */
-  private reconstructAttribution(parentId: string, childId: string): Promise<void> {
+  /**
+   * `ancestry` is the chain of sessions whose reads this one is nested in. A
+   * grandchild found in the read is reconstructed in turn; one that leads back
+   * into that chain (a loop in the data) is skipped rather than awaited, since
+   * the in-flight dedupe would hand back the very promise being waited on. An
+   * independent read of the same child already in flight — the child's own
+   * transcript opened at the same moment — is not on the chain, and is awaited
+   * like any other so its figure lands here too.
+   */
+  private reconstructAttribution(parentId: string, childId: string, ancestry: ReadonlySet<string> = new Set()): Promise<void> {
     const key = attributionKey(parentId, childId);
     const existing = this.attributionReconstructions.get(key);
     if (existing) return existing;
     const epoch = this.attributionEpochs.get(key) ?? 0;
-    const pending = this.reconstructAttributionOnce(key, childId, epoch).finally(() => {
+    const pending = this.reconstructAttributionRead(key, childId, epoch, new Set([...ancestry, childId])).finally(() => {
       if (this.attributionReconstructions.get(key) === pending) {
         this.attributionReconstructions.delete(key);
         this.attributionEpochs.delete(key);
@@ -1610,16 +1613,7 @@ export class ChatAdapter {
     return pending;
   }
 
-  private async reconstructAttributionOnce(key: string, childId: string, epoch: number): Promise<void> {
-    this.attributionReadsInProgress.add(childId);
-    try {
-      await this.reconstructAttributionRead(key, childId, epoch);
-    } finally {
-      this.attributionReadsInProgress.delete(childId);
-    }
-  }
-
-  private async reconstructAttributionRead(key: string, childId: string, epoch: number): Promise<void> {
+  private async reconstructAttributionRead(key: string, childId: string, epoch: number, ancestry: ReadonlySet<string>): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
     const byModel = new Map<string, MessageModel>();
     let descendantsIncomplete = false;
@@ -1641,7 +1635,7 @@ export class ChatAdapter {
           if (reported.model) byModel.set(reported.messageId, { model: reported.model, createdAt: reported.createdAt });
         }
         for (const item of page.completeItems ?? page.items) {
-          if (item.type === "tool" && item.childConversationId && !this.attributionReadsInProgress.has(item.childConversationId)) grandchildren.add(item.childConversationId);
+          if (item.type === "tool" && item.childConversationId && !ancestry.has(item.childConversationId)) grandchildren.add(item.childConversationId);
         }
         cursor = page.nextCursor;
       } while (cursor !== undefined);
@@ -1652,7 +1646,7 @@ export class ChatAdapter {
       // too — banked for what it holds, but not marked squared, so the next
       // open reads again rather than under-reporting the nest for good.
       for (const grandchildId of grandchildren) {
-        await this.reconstructAttribution(childId, grandchildId);
+        await this.reconstructAttribution(childId, grandchildId, ancestry);
         if (!this.completeAttributions.has(attributionKey(childId, grandchildId))) descendantsIncomplete = true;
         const inclusive = sumUsage(this.childUsage.get(attributionKey(childId, grandchildId)));
         if (inclusive !== undefined) byMessage.set(`agent:${grandchildId}`, inclusive);

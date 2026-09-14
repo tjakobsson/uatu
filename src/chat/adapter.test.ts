@@ -2779,6 +2779,45 @@ describe("pending permission recovery", () => {
     expect(grandchildReads).toBe(2);
   });
 
+  test("a grandchild already being read for its own transcript is awaited by the top-level open", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }];
+    const launcher = (id: string, target: string) => ({
+      id, type: "assistant", time: { created: 1 },
+      content: [{ id: `prt_${id}`, type: "tool", tool: "task", callID: id, state: { status: "completed", input: { description: `Run ${target}`, subagent_type: "explore" }, metadata: { sessionId: target }, output: "done" } }],
+    });
+    const priced = (id: string, cost: number) => ({ id, type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 2 }, tokens: { input: 100, output: 10 }, cost });
+    provider.pages.set("first", { items: [launcher("launch_child", "child")] });
+    let releaseGrandchild = () => {};
+    const gate = new Promise<void>(resolve => { releaseGrandchild = resolve; });
+    let grandchildReads = 0;
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId === "child") return { items: [launcher("launch_grandchild", "grandchild"), priced("child_msg", 0.5)] as never[] };
+      if (sessionId === "grandchild") {
+        grandchildReads += 1;
+        await gate;
+        return { items: [priced("grandchild_msg", 0.25)] as never[] };
+      }
+      return listMessages(sessionId, options);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // The child's transcript is opened first and is mid-read of its
+    // grandchild when the top-level conversation opens.
+    const childOpen = adapter.history("child");
+    while (grandchildReads === 0) await Bun.sleep(1);
+    const parentOpen = adapter.history("parent");
+    await Bun.sleep(5);
+    releaseGrandchild();
+    await childOpen;
+    const snapshot = await parentOpen;
+    expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({ usage: { input: 200, output: 20, costUsd: 0.75 } }));
+    // One read served both; the nest is squared, so a reopen reads nothing more.
+    expect(grandchildReads).toBe(1);
+    await adapter.history("parent");
+    expect(grandchildReads).toBe(1);
+  });
+
   test("removing a subagent message withdraws its usage now and after reopening", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
