@@ -1622,6 +1622,7 @@ export class ChatAdapter {
   private async reconstructAttributionRead(key: string, childId: string, epoch: number): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
     const byModel = new Map<string, MessageModel>();
+    let descendantsIncomplete = false;
     try {
       // Every message, in one read: banking a partial tally would permanently
       // underreport the child, because a banked key is never re-read. The
@@ -1646,9 +1647,13 @@ export class ChatAdapter {
       } while (cursor !== undefined);
       // The child's own subagents count toward it, so its figure here is
       // inclusive: each grandchild is squared against its store the same
-      // way (recursively) and banked on this tally under its own key.
+      // way (recursively) and banked on this tally under its own key. A
+      // grandchild whose read did not complete leaves this tally incomplete
+      // too — banked for what it holds, but not marked squared, so the next
+      // open reads again rather than under-reporting the nest for good.
       for (const grandchildId of grandchildren) {
         await this.reconstructAttribution(childId, grandchildId);
+        if (!this.completeAttributions.has(attributionKey(childId, grandchildId))) descendantsIncomplete = true;
         const inclusive = sumUsage(this.childUsage.get(attributionKey(childId, grandchildId)));
         if (inclusive !== undefined) byMessage.set(`agent:${grandchildId}`, inclusive);
       }
@@ -1675,6 +1680,7 @@ export class ChatAdapter {
     }
     this.bankAttribution(this.childUsage, key, byMessage);
     this.bankAttribution(this.childModels, key, byModel);
+    if (descendantsIncomplete) return;
     // Squared against the store from here on; only an eviction re-arms the read.
     this.completeAttributions.add(key);
     this.removedChildAttribution.delete(key);

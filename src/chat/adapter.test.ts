@@ -2746,6 +2746,39 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("a grandchild whose store read failed is read again on the next open", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }];
+    const launcher = (id: string, target: string) => ({
+      id, type: "assistant", time: { created: 1 },
+      content: [{ id: `prt_${id}`, type: "tool", tool: "task", callID: id, state: { status: "completed", input: { description: `Run ${target}`, subagent_type: "explore" }, metadata: { sessionId: target }, output: "done" } }],
+    });
+    const priced = (id: string, cost: number) => ({ id, type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 2 }, tokens: { input: 100, output: 10 }, cost });
+    provider.pages.set("first", { items: [launcher("launch_child", "child")] });
+    let grandchildReads = 0;
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId === "child") return { items: [launcher("launch_grandchild", "grandchild"), priced("child_msg", 0.5)] as never[] };
+      if (sessionId === "grandchild") {
+        grandchildReads += 1;
+        if (grandchildReads === 1) throw new Error("transient");
+        return { items: [priced("grandchild_msg", 0.25)] as never[] };
+      }
+      return listMessages(sessionId, options);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const row = (snapshot: { items: ConversationItem[] }) => snapshot.items.find(item => item.type === "tool");
+    // First open: the child's own spend is banked, the grandchild's is not
+    // yet known — and the tally is not marked squared.
+    expect(row(await adapter.history("parent"))).toEqual(expect.objectContaining({ usage: { input: 100, output: 10, costUsd: 0.5 } }));
+    // Next open reads the grandchild again and the nest is whole.
+    expect(row(await adapter.history("parent"))).toEqual(expect.objectContaining({ usage: { input: 200, output: 20, costUsd: 0.75 } }));
+    expect(grandchildReads).toBe(2);
+    // Squared now: a third open reads nothing more.
+    await adapter.history("parent");
+    expect(grandchildReads).toBe(2);
+  });
+
   test("removing a subagent message withdraws its usage now and after reopening", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

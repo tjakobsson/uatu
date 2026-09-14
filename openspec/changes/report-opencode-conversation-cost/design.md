@@ -114,3 +114,13 @@ locally.
   a child's cost appears.
 - [Revision bump touches four files and CI compatibility] → checklist in D5;
   run the compatibility step before pushing.
+
+## Open Questions
+
+- A nested subagent that runs a different model from its parent is folded
+  into the parent's tool row under the parent's model, so the per-model table
+  attributes the grandchild's spend to the wrong model (the total and the
+  per-agent rows are right). Fixing it means a model-keyed descendant
+  breakdown on the tool row's usage — a wire change — or descendant rows of
+  their own. Follow-up; nested subagents on mixed models are rare enough that
+  the whole-run total is the figure that matters first.

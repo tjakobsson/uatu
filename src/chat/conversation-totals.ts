@@ -75,7 +75,9 @@ export function conversationTotals(items: readonly ConversationItem[]): Conversa
     row.cacheWrite += usage.cacheWrite ?? 0;
     if (usage.costUsd !== undefined) {
       row.costUsd += usage.costUsd;
-      delete row.unpriced;
+      // Zero is OpenCode's "no price for this model", not free: the row
+      // stays unpriced until something positive is reported for it.
+      if (usage.costUsd > 0) delete row.unpriced;
     }
     byModel.set(id, row);
   };

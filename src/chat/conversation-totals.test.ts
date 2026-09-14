@@ -55,6 +55,12 @@ describe("conversationTotals", () => {
       ],
     }));
     expect(planChip({ session: totals }, undefined)?.text).toBe("$1.00 this conversation");
+    // A model OpenCode prices at zero beside a paid one stays unpriced.
+    expect(conversationTotals([carrier("m", { input: 5, costUsd: 0.5 }, "gpt-5.6-sol"), carrier("n", { input: 5, costUsd: 0 }, "local/llama")])?.models)
+      .toEqual([
+        { id: "gpt-5.6-sol", input: 5, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0.5 },
+        { id: "local/llama", input: 5, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: true },
+      ]);
     // A priced subagent alone is a priced conversation.
     expect(conversationTotals([carrier("m", { input: 5 }), subagent("tool:c", "Alone", { input: 1, costUsd: 0.5 })])?.costUsd).toBe(0.5);
   });
