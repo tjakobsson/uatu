@@ -892,7 +892,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // of truncating; "Shell" names the step and the command ellipsizes beside it.
   if (item.type === "command") {
     const auto = autoOpen(item.status, item.output) && !readerClosed;
-    return activityShell(id, item.status, "Shell", item.command, deferClosed && !open && !auto ? "" : renderActivityOutput(item.output, item.status), open, auto, readerClosed, stamp);
+    return activityShell(id, item.status, "Shell", item.command, deferClosed && !open && !auto ? "" : renderActivityOutput(item.output, item.status, true), open, auto, readerClosed, stamp);
   }
   // Reasoning has no streamed output to auto-open for; it opens only when the
   // reader says so.

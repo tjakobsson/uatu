@@ -47,6 +47,8 @@ const shellItems: ConversationItem[] = [
   { id: "message:u1", type: "user_message", createdAt: 1, text: "Run the unit tests and list the docs folder." },
   { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "I'll run the suite first, then list the folder.", completedAt: 2 },
   bash("tool:sh", 3, "bun test src/chat/ansi.test.ts && ls -la docs", "completed", TEST_OUTPUT),
+  // OpenCode's own shell step arrives as a `command` item rather than a tool.
+  { id: "tool:oc", type: "command", createdAt: 3.5, command: "git status --short", status: "completed", output: `${ESC}[31m M${ESC}[0m src/chat/ansi.ts\n${ESC}[32m??${ESC}[0m tests/e2e/chat-shell-output.e2e.ts`, exitCode: 0 },
   { id: "tool:rd", type: "tool", createdAt: 4, name: "read", status: "completed", input: JSON.stringify({ filePath: "docs/README.md" }), output: "# Docs\n\nStart here." },
   { id: "tool:gr", type: "tool", createdAt: 5, name: "grep", status: "completed", input: JSON.stringify({ pattern: "ansi", path: "src/chat" }), output: "src/chat/ansi.ts\nsrc/chat/ansi.test.ts" },
   { id: "message:a2", type: "assistant_message", createdAt: 6, markdown: "Two tests pass and one fails in the renderer — the running tail assertion. The docs folder has two files.", completedAt: 6 },
@@ -120,6 +122,14 @@ async function shellScenario(page: Page, request: APIRequestContext, testInfo: T
   // The wide table scrolls rather than wrapping.
   const overflows = await block.evaluate(element => element.scrollWidth > element.clientWidth);
   expect(overflows).toBe(true);
+
+  // The OpenCode-shaped command row gets the same look.
+  const commandRow = page.locator('[data-chat-item-id="tool:oc"]');
+  await commandRow.locator("> summary").click();
+  const commandBlock = commandRow.locator(shellOutput).first();
+  await expect(commandBlock).toBeVisible();
+  await expect(commandBlock.locator(".ansi-fg-1").first()).toHaveText(" M");
+  expect(await commandBlock.evaluate(element => getComputedStyle(element).whiteSpace)).toBe("pre");
 }
 
 test.describe("shell output reads as the terminal renders it", () => {

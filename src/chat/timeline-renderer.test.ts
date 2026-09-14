@@ -1750,6 +1750,9 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(stream.textContent!.split("\n")).toHaveLength(12);
     expect(stream.textContent).toContain("line 30");
     expect(stream.textContent).not.toContain("line 18\n");
+    // OpenCode's own shell step is a `command` item, not a bash tool: it
+    // gets the terminal look the same way.
+    expect(stream.classList.contains("chat-tool-terminal")).toBe(true);
   });
 
   test("a fast-completed shell retains inspectable output behind the existing bound", () => {
@@ -1766,5 +1769,6 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(more.querySelector("summary")!.textContent).toContain("Show 18 more lines");
     expect(more.hasAttribute("open")).toBe(false);
     expect(more.textContent).toContain("line 30");
+    expect(host.querySelectorAll('[data-chat-item-id="tool:fast-shell"] pre.chat-tool-terminal')).toHaveLength(2);
   });
 });
