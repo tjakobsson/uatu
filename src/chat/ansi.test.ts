@@ -40,6 +40,17 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText(`${ESC}[38;5;9mx`)[0]).toEqual([{ text: "x", style: { fg: 9 } }]);
   });
 
+  test("colon subparameters stay with their parameter", () => {
+    // `4:2` is an underline variant, not underline plus dim; `4:0` is off.
+    expect(renderTerminalText(`${ESC}[4:2mx${ESC}[4:0my`)[0]).toEqual([{ text: "x", style: { underline: true } }, { text: "y", style: {} }]);
+    // The colourspace slot of the six-item form is not a channel, and a
+    // trailing zero channel is not a reset.
+    expect(renderTerminalText(`${ESC}[38:2:0:255:0:0mx`)[0]).toEqual([{ text: "x", style: { fg: "rgb(255,0,0)" } }]);
+    expect(renderTerminalText(`${ESC}[48:5:196mx`)[0]).toEqual([{ text: "x", style: { bg: "rgb(255,0,0)" } }]);
+    // Subparameters on anything else are that parameter's own detail.
+    expect(renderTerminalText(`${ESC}[1;58:5:9mx`)[0]).toEqual([{ text: "x", style: { bold: true } }]);
+  });
+
   test("a carriage return rewrites the line in place", () => {
     // A progress bar: the same columns redrawn many times, the last write wins.
     const text = "Downloading  10%\rDownloading  55%\rDownloading 100%\ndone";
@@ -93,6 +104,12 @@ describe("renderTerminalText", () => {
     expect(text("👩‍💻x\rA")).toEqual(["A x"]);
     expect(text("👍🏽x\rAB")).toEqual(["ABx"]);
     expect(text("👩‍💻")).toEqual(["👩‍💻"]);
+    // Wide symbols outside the CJK blocks, and a narrow symbol given emoji
+    // presentation, take two cells as terminals draw them.
+    expect(text("✅x\rA")).toEqual(["A x"]);
+    expect(text("☑\ufe0fx\rA")).toEqual(["A x"]);
+    expect(text("☑x\rA")).toEqual(["Ax"]);
+    expect(text("🫠x\rA")).toEqual(["A x"]);
     // A combining mark with nothing before it stands on its own.
     expect(text("\u0301x")).toEqual(["\u0301x"]);
   });
