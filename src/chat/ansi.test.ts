@@ -93,8 +93,12 @@ describe("renderTerminalText", () => {
     // 8-bit C1 forms read as their ESC spellings; DEL and other C1 controls go.
     expect(renderTerminalText("\u009b31mred\u009b0m \u009d0;title\u009c ok\u007f \u0085x").map(line => line.map(run => run.text).join(""))).toEqual(["red  ok x"]);
     expect(renderTerminalText("\u009b32mgreen\u009bm")[0]).toEqual([{ text: "green", style: { fg: 2 } }]);
+    // BEL ends only OSC; inside DCS and kin it is payload, and so is what
+    // follows it up to ST. Other ESC sequences consume their intermediates.
+    expect(renderTerminalText(`before${ESC}Pabc\x07secret${ESC}\\after`).map(line => line.map(run => run.text).join(""))).toEqual(["beforeafter"]);
+    expect(renderTerminalText(`a${ESC}%Gb${ESC}*Bc${ESC}(Bd${ESC}7e`).map(line => line.map(run => run.text).join(""))).toEqual(["abcde"]);
     // Control strings — DCS, APC, PM, SOS — go whole, payload included.
-    expect(renderTerminalText(`before${ESC}P1;2|secret${ESC}\\after ${ESC}_apc\x07x ${ESC}^pm${ESC}\\y ${ESC}Xsos${ESC}\\z`).map(line => line.map(run => run.text).join(""))).toEqual(["beforeafter x y z"]);
+    expect(renderTerminalText(`before${ESC}P1;2|secret${ESC}\\after ${ESC}_apc${ESC}\\x ${ESC}^pm${ESC}\\y ${ESC}Xsos${ESC}\\z`).map(line => line.map(run => run.text).join(""))).toEqual(["beforeafter x y z"]);
     // A sequence cut off by the end of a streaming chunk is dropped, not shown.
     expect(renderTerminalText(`tail ${ESC}[3`).map(line => line.map(run => run.text).join(""))).toEqual(["tail "]);
   });
@@ -148,6 +152,9 @@ describe("tailStart", () => {
     // Unterminated so far (still streaming): nothing of the payload shows.
     const open = `${ESC}Ppayload\nmore`;
     expect(tailStart(open, open.indexOf("more"))).toBe(open.length);
+    // A BEL inside a DCS payload is not its end.
+    const dcs = `${ESC}Pone\x07two\nthree${ESC}\\shown`;
+    expect(dcs.slice(tailStart(dcs, dcs.indexOf("three")))).toBe("shown");
     // An 8-bit introducer and ST count too.
     const c1 = `\u009d0;a\nb\u009cvisible`;
     expect(text.length).toBeGreaterThan(0);

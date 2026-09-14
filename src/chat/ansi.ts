@@ -221,12 +221,14 @@ export function renderTerminalText(text: string): TerminalLine[] {
         continue;
       }
       if (next === "]" || next === "P" || next === "_" || next === "^" || next === "X") {
-        // A control string — OSC, DCS, APC, PM, SOS — runs to BEL or ST
-        // (ESC \ or 0x9C): the whole payload goes, not just its introducer.
+        // A control string runs to ST (ESC \ or 0x9C) — and, for OSC only,
+        // to BEL, which xterm accepts there and treats as payload in DCS,
+        // APC, PM and SOS. The whole payload goes, not just its introducer.
+        const bel = next === "]";
         let end = index + skip;
         while (end < length) {
           const c = text.charCodeAt(end);
-          if (c === 0x07 || c === 0x9c) { end += 1; break; }
+          if ((bel && c === 0x07) || c === 0x9c) { end += 1; break; }
           if (c === 0x1b && text[end + 1] === "\\") { end += 2; break; }
           end += 1;
         }
@@ -239,9 +241,12 @@ export function renderTerminalText(text: string): TerminalLine[] {
         index += 1;
         continue;
       }
-      // Charset designation (ESC ( B), keypad modes, save/restore cursor,
-      // reverse index: ESC plus one byte, or two for the charset forms.
-      index += next === "(" || next === ")" || next === "#" ? 3 : 2;
+      // Any other ESC sequence: intermediate bytes (0x20–0x2F) through a
+      // final byte — charset designations (ESC ( B, ESC % G), keypad modes,
+      // save/restore cursor, reverse index — consumed whole.
+      let end = index + 1;
+      while (end < length && text.charCodeAt(end) >= 0x20 && text.charCodeAt(end) <= 0x2f) end += 1;
+      index = end + 1;
       continue;
     }
     if (code === 0x0a) {
@@ -481,7 +486,9 @@ export function terminalLinesToHtml(lines: readonly TerminalLine[]): string {
 // the stream; a payload longer than this is exotic enough to accept.
 const CONTROL_STRING_LOOKBACK = 4096;
 const CONTROL_STRING_INTRODUCER = /\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f]/g;
-const CONTROL_STRING_TERMINATOR = /\x07|\x1b\\|\x9c/g;
+// ST ends any control string; BEL ends only OSC (elsewhere it is payload).
+const CONTROL_STRING_TERMINATOR = /\x1b\\|\x9c/g;
+const OSC_TERMINATOR = /\x07|\x1b\\|\x9c/g;
 
 /**
  * Where a tail taken at `at` should really begin: `at`, unless `at` falls
@@ -494,14 +501,19 @@ export function tailStart(text: string, at: number): number {
   const from = Math.max(0, at - CONTROL_STRING_LOOKBACK);
   const before = text.slice(from, at);
   let lastIntroducer = -1;
-  for (const match of before.matchAll(CONTROL_STRING_INTRODUCER)) lastIntroducer = match.index;
+  let osc = false;
+  for (const match of before.matchAll(CONTROL_STRING_INTRODUCER)) {
+    lastIntroducer = match.index;
+    osc = match[0] === "\x1b]" || match[0] === "\x9d";
+  }
   if (lastIntroducer === -1) return at;
+  const terminators = osc ? OSC_TERMINATOR : CONTROL_STRING_TERMINATOR;
   let lastTerminator = -1;
-  for (const match of before.matchAll(CONTROL_STRING_TERMINATOR)) lastTerminator = match.index;
+  for (const match of before.matchAll(terminators)) lastTerminator = match.index;
   if (lastTerminator > lastIntroducer) return at;
-  CONTROL_STRING_TERMINATOR.lastIndex = at;
-  const terminator = CONTROL_STRING_TERMINATOR.exec(text);
-  CONTROL_STRING_TERMINATOR.lastIndex = 0;
+  terminators.lastIndex = at;
+  const terminator = terminators.exec(text);
+  terminators.lastIndex = 0;
   return terminator ? terminator.index + terminator[0].length : text.length;
 }
 
