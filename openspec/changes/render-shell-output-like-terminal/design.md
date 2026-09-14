@@ -123,3 +123,10 @@ untouched.
   off, `ansi-bold` drops its colour swap in the same PR.
 - [Contrast values guessed by eye] → task requires a measured ratio in the
   CSS comment and before/after shots in both themes.
+
+## Open Questions
+
+- `ansi-dim` is whole-span opacity, so dim text over an SGR background
+  (`ESC[2;41m`) fades the background as well, where a terminal dims only the
+  foreground. Follow-up: dim the foreground alone (`color-mix` on
+  `currentColor`), keeping backgrounds opaque.
