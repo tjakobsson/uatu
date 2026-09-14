@@ -133,3 +133,10 @@ locally.
   task update that corrects a subagent's kind or description without moving
   its usage leaves an opened Agents table with the old label until the next
   figure moves. Follow-up: key on the rendered metadata too.
+- Reconstruction merges every live-banked per-message figure over what it
+  just read from storage ("the live figure wins" — a rule from before this
+  change). A partial figure observed live before a disconnect, with the
+  child finishing while the stream was down, would then overwrite the final
+  stored value and be marked squared. Follow-up: merge only the live updates
+  that arrived during the read (an epoch or sequence on the banked entries),
+  not everything banked before it began.
