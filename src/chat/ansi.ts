@@ -98,9 +98,13 @@ function codePointWidth(point: number): 0 | 1 | 2 {
  */
 function cellWidth(grapheme: string): 0 | 1 | 2 {
   let width: 0 | 1 | 2 = 0;
+  let regionalIndicators = 0;
   for (const char of grapheme) {
     const point = char.codePointAt(0)!;
     if (point === 0xfe0f && width === 1) return 2;
+    // A flag is a pair of regional indicators, each narrow on its own and
+    // two cells together.
+    if (point >= 0x1f1e6 && point <= 0x1f1ff && ++regionalIndicators === 2) return 2;
     const own = codePointWidth(point);
     if (own === 2) return 2;
     if (own === 1) width = 1;

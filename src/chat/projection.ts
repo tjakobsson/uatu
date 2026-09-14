@@ -54,13 +54,16 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
 }
 
 export function prependSnapshot(current: ChatProjection, page: ConversationSnapshot): ChatProjection {
-  const existing = new Set(current.items.map(item => item.id));
   // Merged by time, not merely prepended: the first page can carry rows
   // from before its own span (a subagent launcher backfilled for the cost
   // fold), and an older page's rows must land around such a row, not
-  // wholesale ahead of it. The sort is stable, so ties keep the provider's
-  // own order and the older page still precedes what was already held.
-  const items = [...page.items.filter(item => !existing.has(item.id)), ...current.items].sort((left, right) => left.createdAt - right.createdAt);
+  // wholesale ahead of it. Where both hold a row, the page's copy is kept
+  // in the page's order: parts of one message share its timestamp, and only
+  // the page that holds the whole message knows their order. The sort is
+  // stable, so ties keep that order and the older page still precedes what
+  // was already held.
+  const fromPage = new Set(page.items.map(item => item.id));
+  const items = [...page.items, ...current.items.filter(item => !fromPage.has(item.id))].sort((left, right) => left.createdAt - right.createdAt);
   return { ...current, items, olderCursor: page.olderCursor };
 }
 

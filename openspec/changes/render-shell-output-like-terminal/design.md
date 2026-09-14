@@ -134,5 +134,5 @@ colours ride a custom property so dim mixes them like palette colours;
 erase-in-line clears a wide glyph whole from either half; the wide table is
 the wcwidth East Asian Wide/Fullwidth set (binary-searched) rather than a
 few coarse ranges, with U+FE0F emoji presentation making a narrow symbol
-wide; colon-form SGR subparameters (`4:2`, `38:2:cs:r:g:b`) stay with their
+wide and a regional-indicator pair (a flag) taking two cells; colon-form SGR subparameters (`4:2`, `38:2:cs:r:g:b`) stay with their
 parameter instead of being flattened into top-level codes.

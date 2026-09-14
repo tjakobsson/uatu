@@ -110,6 +110,8 @@ describe("renderTerminalText", () => {
     expect(text("☑\ufe0fx\rA")).toEqual(["A x"]);
     expect(text("☑x\rA")).toEqual(["Ax"]);
     expect(text("🫠x\rA")).toEqual(["A x"]);
+    // A flag is two regional indicators drawn as one two-cell glyph.
+    expect(text("🇺🇸x\rA")).toEqual(["A x"]);
     // A combining mark with nothing before it stands on its own.
     expect(text("\u0301x")).toEqual(["\u0301x"]);
   });

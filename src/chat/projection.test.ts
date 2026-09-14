@@ -146,6 +146,13 @@ describe("chat projection", () => {
     const current = projectionFromSnapshot(snapshot([item("launcher", 2), item("new", 101)]));
     const page = snapshot([item("first", 1), item("mid", 50), item("launcher", 2)]);
     expect(prependSnapshot(current, page).items.map(entry => entry.id)).toEqual(["first", "launcher", "mid", "new"]);
+    // Parts of one message share its timestamp; the older page holds the
+    // whole message, so its order wins over the backfilled copy's position.
+    const part = (id: string, createdAt: number) => ({ id, type: "assistant_message" as const, createdAt, markdown: id });
+    const tool = (id: string, createdAt: number) => ({ id, type: "tool" as const, createdAt, name: "task", status: "completed" as const, childConversationId: "child" });
+    const held = projectionFromSnapshot(snapshot([tool("tool:launch", 5), item("new", 9)]));
+    const older = snapshot([part("part:a1", 5), tool("tool:launch", 5), part("part:a2", 5)]);
+    expect(prependSnapshot(held, older).items.map(entry => entry.id)).toEqual(["part:a1", "tool:launch", "part:a2", "new"]);
   });
 
   test("authoritative replacement removes a suffix and resets text reconciliation", () => {
