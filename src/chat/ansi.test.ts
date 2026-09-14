@@ -66,7 +66,7 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText(`abc\r${ESC}[41m${ESC}[Kz`)[0]).toEqual([{ text: "z  ", style: { bg: 1 } }]);
     // Erasing the whole line leaves the cursor where it was, the cells up
     // to it blank under the active background.
-    expect(renderTerminalText(`abc${ESC}[41m${ESC}[2Kz`)[0]).toEqual([{ text: "   ", style: { bg: 1 } }, { text: "z", style: { bg: 1 } }]);
+    expect(renderTerminalText(`abc${ESC}[41m${ESC}[2Kz`)[0]).toEqual([{ text: "   z", style: { bg: 1 } }]);
     expect(renderTerminalText(`123456\r12${ESC}[1Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["  ab56"]);
     // Erased cells take the active background, as a terminal fills them.
     expect(renderTerminalText(`abc\r${ESC}[41m${ESC}[1K`)[0]).toEqual([{ text: " ", style: { bg: 1 } }, { text: "bc", style: {} }]);

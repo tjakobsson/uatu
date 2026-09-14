@@ -331,13 +331,20 @@ function toRuns(line: LineBuffer): TerminalLine {
     const char = line.chars[column] ?? " ";
     if (char === WIDE_TAIL) continue;
     const style = line.styles[column] ?? PLAIN;
-    if (current && current.style === style) current.text += char;
+    if (current && sameStyle(current.style, style)) current.text += char;
     else {
       current = { text: char, style };
       runs.push(current);
     }
   }
   return runs;
+}
+
+// Runs merge on what a style says, not which object says it: an erased
+// blank and the text written over it under the same rendition are one run.
+function sameStyle(left: TerminalStyle, right: TerminalStyle): boolean {
+  return left === right || (left.fg === right.fg && left.bg === right.bg && !left.bold === !right.bold && !left.dim === !right.dim
+    && !left.italic === !right.italic && !left.underline === !right.underline && !left.inverse === !right.inverse && !left.strike === !right.strike);
 }
 
 /**
