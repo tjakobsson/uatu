@@ -1354,8 +1354,42 @@ export class ChatAdapter {
     // No buffered update from the discarded branch may apply after replace.
     this.eventCoalescer?.discard(conversationId);
     this.rememberReversibleHistory(conversationId, state);
-    if (changed) projection.replace(items);
+    if (changed) {
+      projection.replace(items);
+      // A revert in a subagent rewrote what its store holds: the tally its
+      // parent banked for it — and every ancestor's, through the inclusive
+      // figure — counts spend that is gone, and no removal event says so.
+      // Forget it, square against the rewritten store, and put the fresh
+      // figure on the launching row.
+      await this.rebuildChildAttribution(conversationId);
+    }
     return state;
+  }
+
+  private async rebuildChildAttribution(childId: string): Promise<void> {
+    let parentId: string | null;
+    try {
+      parentId = await this.parentOf(childId);
+    } catch {
+      return;
+    }
+    if (!parentId) return;
+    const key = attributionKey(parentId, childId);
+    // A read in flight for the old store must not bank what it finds.
+    this.attributionEpochs.set(key, (this.attributionEpochs.get(key) ?? 0) + 1);
+    this.childUsage.delete(key);
+    this.childModels.delete(key);
+    this.removedChildAttribution.delete(key);
+    this.attributionArrivals.delete(key);
+    this.completeAttributions.delete(key);
+    await this.reconstructAttribution(parentId, childId);
+    // The dedupe may have handed back that stale in-flight read; it banks
+    // nothing, so square once more from a clean start.
+    if (!this.completeAttributions.has(key)) await this.reconstructAttribution(parentId, childId);
+    const coalescer = this.eventCoalescer;
+    if (!coalescer) return;
+    this.decorateLauncherRow(parentId, childId, coalescer, true);
+    await this.propagateInclusive(parentId, childId, coalescer);
   }
 
   private scheduleRevertReconciliation(conversationId: string, lifecycle: RevertLifecycle): void {
@@ -1672,8 +1706,12 @@ export class ChatAdapter {
     // replay cursor. A figure banked before the read began is the older
     // one: the store may have overtaken it (a partial figure seen before a
     // disconnect, the child finishing while the stream was down), so it
-    // stands only where the store has nothing for that message. A model
-    // attributed live outranks the stored one either way.
+    // stands only where the store has nothing for that message — a tally
+    // rebuilt live after an eviction, which the store read is squaring, not
+    // replacing. A message the store dropped is handled where the drop is
+    // seen: a removal event withdraws it, and a revert invalidates the
+    // child's tally outright. A model attributed live outranks the stored
+    // one either way.
     const live = this.childUsage.get(key);
     const arrivals = this.attributionArrivals.get(key);
     if (live) for (const [messageId, usage] of live) {

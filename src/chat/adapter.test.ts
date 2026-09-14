@@ -2880,6 +2880,42 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("a revert inside a subagent takes the reverted spend off the parent's row", async () => {
+    const provider = new FakeProvider();
+    provider.agent.capabilities.push("reversible-history");
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const historyState = { staged: true, canUndo: false, canRedo: true, revertedMessages: [] };
+    provider.getReversibleHistoryState = async () => historyState;
+    provider.undo = async () => ({ outcome: "changed", state: historyState });
+    provider.redo = async () => ({ outcome: "changed", state: historyState });
+    provider.revert = async () => ({ outcome: "changed", state: historyState });
+    provider.restore = async () => ({ outcome: "changed", state: historyState });
+    const priced = (id: string, cost: number) => ({ id, type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 2 }, tokens: { input: 100, output: 10 }, cost, content: [{ id: `prt_${id}`, type: "text", text: id }] });
+    let childVisible = [priced("child_a", 0.5), priced("child_b", 0.25)];
+    provider.pages.set("first", { items: [{
+      id: "launch", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: { status: "completed", input: { description: "Review", subagent_type: "explore" }, metadata: { sessionId: "child" }, output: "done" } }],
+    }] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => (sessionId === "child" ? { items: childVisible as never[] } : listMessages(sessionId, options));
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool") as { usage?: { input?: number; output?: number; costUsd?: number } } | undefined;
+    await adapter.history("parent");
+    expect(row()?.usage?.costUsd).toBe(0.75);
+
+    // The child's second message is reverted: its store now holds one
+    // message, and the lifecycle event is all the parent hears about it.
+    const pump = adapter.startEventPump();
+    childVisible = [priced("child_a", 0.5)];
+    provider.eventQueue.push({ type: "session.next.revert.staged", data: { sessionID: "child" } } as never);
+    while (row()?.usage?.costUsd !== 0.5) await Bun.sleep(1);
+    expect(row()?.usage).toEqual({ input: 100, output: 10, costUsd: 0.5 });
+    // Squared against the rewritten store: a reopen reads the same figure.
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({ usage: { input: 100, output: 10, costUsd: 0.5 } }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("removing a subagent message withdraws its usage now and after reopening", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

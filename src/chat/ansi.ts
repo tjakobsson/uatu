@@ -373,8 +373,8 @@ function runToHtml(run: TerminalRun): string {
   // defaults, which the `fg-default`/`bg-default` classes name.
   const fg = style.inverse ? style.bg ?? "default" : style.fg;
   const bg = style.inverse ? style.fg ?? "default" : style.bg;
-  paint(fg, "fg", classes, inline, "color");
-  paint(bg, "bg", classes, inline, "background-color");
+  paint(fg, "fg", classes, inline);
+  paint(bg, "bg", classes, inline);
   if (style.bold) classes.push("ansi-bold");
   if (style.dim) classes.push("ansi-dim");
   if (style.italic) classes.push("ansi-italic");
@@ -386,9 +386,15 @@ function runToHtml(run: TerminalRun): string {
   return `<span${classAttribute}${styleAttribute}>${text}</span>`;
 }
 
-function paint(colour: TerminalColor | "default" | undefined, kind: "fg" | "bg", classes: string[], inline: string[], property: string): void {
+function paint(colour: TerminalColor | "default" | undefined, kind: "fg" | "bg", classes: string[], inline: string[]): void {
   if (colour === undefined) return;
   if (colour === "default") classes.push(`ansi-${kind}-default`);
   else if (typeof colour === "number") classes.push(`ansi-${kind}-${colour}`);
-  else if (/^rgb\(\d{1,3},\d{1,3},\d{1,3}\)$/.test(colour)) inline.push(`${property}:${colour}`);
+  else if (/^rgb\(\d{1,3},\d{1,3},\d{1,3}\)$/.test(colour)) {
+    // An extended colour rides a custom property rather than the colour
+    // declaration itself, so the stylesheet's dim rule can mix it like a
+    // palette colour instead of losing to an inline declaration.
+    classes.push(`ansi-${kind}-inline`);
+    inline.push(`--ansi-${kind}:${colour}`);
+  }
 }

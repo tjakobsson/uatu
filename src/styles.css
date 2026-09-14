@@ -6031,6 +6031,9 @@ body.is-resizing-chat .chat-resizer {
 .ansi-dim.ansi-fg-13 { color: color-mix(in srgb, var(--terminal-ansi-bright-magenta) 60%, transparent); }
 .ansi-dim.ansi-fg-14 { color: color-mix(in srgb, var(--terminal-ansi-bright-cyan) 60%, transparent); }
 .ansi-dim.ansi-fg-15 { color: color-mix(in srgb, var(--terminal-ansi-bright-white) 60%, transparent); }
+.ansi-fg-inline { color: var(--ansi-fg); }
+.ansi-bg-inline { background-color: var(--ansi-bg); }
+.ansi-dim.ansi-fg-inline { color: color-mix(in srgb, var(--ansi-fg) 60%, transparent); }
 .ansi-dim.ansi-fg-default { color: color-mix(in srgb, var(--surface) 60%, transparent); }
 .chat-tool-terminal .ansi-dim.ansi-fg-default { color: color-mix(in srgb, var(--terminal-bg) 60%, transparent); }
 .ansi-italic { font-style: italic; }

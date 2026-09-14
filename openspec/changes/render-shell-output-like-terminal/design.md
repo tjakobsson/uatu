@@ -129,5 +129,6 @@ untouched.
 None open. Resolved during review: `ansi-dim` lowers the foreground's
 intensity alone (`color-mix` on the palette colour), leaving an SGR
 background opaque as a terminal does, and its inverse-video default follows
-the enclosing block like the undimmed one; erase-in-line clears a wide glyph
-whole from either half.
+the enclosing block like the undimmed one, and extended (256/truecolour)
+colours ride a custom property so dim mixes them like palette colours;
+erase-in-line clears a wide glyph whole from either half.

@@ -104,7 +104,7 @@ describe("terminalLinesToHtml", () => {
     expect(html).toBe(
       '<span class="ansi-fg-2 ansi-bold">pass</span> '
       + '<span class="ansi-dim ansi-underline">dim</span> '
-      + '<span style="color:rgb(1,2,3)">true</span> '
+      + '<span class="ansi-fg-inline" style="--ansi-fg:rgb(1,2,3)">true</span> '
       + '<span class="ansi-fg-default ansi-bg-default">inv</span> '
       + '<span class="ansi-fg-default ansi-bg-1">red-inv</span>',
     );
@@ -122,8 +122,8 @@ describe("terminalLinesToHtml", () => {
       const classes = attribute.match(/class="([^"]*)"/)?.[1]?.split(" ") ?? [];
       const declarations = attribute.match(/style="([^"]*)"/)?.[1]?.split(";") ?? [];
       expect(attribute.replace(/class="[^"]*"/, "").replace(/style="[^"]*"/, "").trim()).toBe("");
-      for (const name of classes) expect(name).toMatch(/^ansi-(fg-(\d{1,3}|default)|bg-(\d{1,3}|default)|bold|dim|italic|underline|strike)$/);
-      for (const declaration of declarations) expect(declaration).toMatch(/^(color|background-color):rgb\(\d{1,3},\d{1,3},\d{1,3}\)$/);
+      for (const name of classes) expect(name).toMatch(/^ansi-(fg-(\d{1,3}|default|inline)|bg-(\d{1,3}|default|inline)|bold|dim|italic|underline|strike)$/);
+      for (const declaration of declarations) expect(declaration).toMatch(/^--ansi-(fg|bg):rgb\(\d{1,3},\d{1,3},\d{1,3}\)$/);
     }
   });
 
