@@ -303,8 +303,12 @@ function eraseInLine(line: LineBuffer, params: string, style: TerminalStyle): vo
     // From the start of the line through the cursor cell, inclusive — and
     // through a wide glyph's second cell when the cursor is on its first,
     // so no orphaned tail is left for the next write to trip over.
+    // The cursor cell is erased too, even one just past the stored cells:
+    // under a background it is painted, so it exists; under the default
+    // rendition it is nothing to keep.
     const last = line.chars[line.cursor + 1] === WIDE_TAIL ? line.cursor + 1 : line.cursor;
-    for (let column = 0; column <= last && column < line.chars.length; column += 1) {
+    const through = blank === PLAIN ? Math.min(last, line.chars.length - 1) : last;
+    for (let column = 0; column <= through; column += 1) {
       line.chars[column] = " ";
       line.styles[column] = blank;
     }

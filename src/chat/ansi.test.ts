@@ -68,8 +68,11 @@ describe("renderTerminalText", () => {
     // to it blank under the active background.
     expect(renderTerminalText(`abc${ESC}[41m${ESC}[2Kz`)[0]).toEqual([{ text: "   z", style: { bg: 1 } }]);
     expect(renderTerminalText(`123456\r12${ESC}[1Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["  ab56"]);
-    // Erased cells take the active background, as a terminal fills them.
+    // Erased cells take the active background, as a terminal fills them —
+    // the cursor cell included, even one just past the stored cells.
     expect(renderTerminalText(`abc\r${ESC}[41m${ESC}[1K`)[0]).toEqual([{ text: " ", style: { bg: 1 } }, { text: "bc", style: {} }]);
+    expect(renderTerminalText(`abc${ESC}[41m${ESC}[1K`)[0]).toEqual([{ text: "    ", style: { bg: 1 } }]);
+    expect(renderTerminalText(`abc${ESC}[1K`).map(line => line.map(run => run.text).join(""))).toEqual(["   "]);
     // Mode 1 includes the cell under the cursor, and a wide glyph whole.
     expect(renderTerminalText(`abc\r${ESC}[1K`).map(line => line.map(run => run.text).join(""))).toEqual([" bc"]);
     expect(renderTerminalText(`界\r${ESC}[1Kxy`).map(line => line.map(run => run.text).join(""))).toEqual(["xy"]);
