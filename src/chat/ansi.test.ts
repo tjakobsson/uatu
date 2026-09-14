@@ -79,7 +79,8 @@ describe("renderTerminalText", () => {
     expect(text("🙂x\rY")).toEqual(["Y x"]);
     expect(text("ab\r日")).toEqual(["日"]);
     // Erasing to the end from a wide glyph's second cell clears the glyph.
-    expect(text(`界x\b\b${ESC}[K`)).toEqual([""]);
+    // The glyph's first half is left blank, not removed: a blank line.
+    expect(text(`界x\b\b${ESC}[K`)).toEqual([" "]);
     // Erase never moves the cursor: the next write lands where it stood.
     expect(text(`a界\b${ESC}[Kz`)).toEqual(["a z"]);
     // Overwriting a styled wide glyph clears its other cell's style too.
