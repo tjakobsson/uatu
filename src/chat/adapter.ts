@@ -283,6 +283,13 @@ export class ChatAdapter {
   private readonly removedChildAttribution = new Map<string, Set<string>>();
   private readonly attributionReconstructions = new Map<string, Promise<void>>();
   private readonly attributionEpochs = new Map<string, number>();
+  // When each live-banked figure arrived, as a running sequence, so a
+  // reconstruction can tell an update that landed during its read (newer
+  // than the store) from one banked before it began (which the store may
+  // have overtaken — a partial figure seen before a disconnect, the child
+  // finishing while the stream was down).
+  private attributionSequence = 0;
+  private readonly attributionArrivals = new Map<string, Map<string, number>>();
   // Attribution keys whose tally has been squared against the child's stored
   // history. A live tally alone is not proof of completeness: a parent evicted
   // mid-run loses its maps, and the child's next event recreates one holding
@@ -1617,6 +1624,7 @@ export class ChatAdapter {
     const byMessage = new Map<string, TokenUsage>();
     const byModel = new Map<string, MessageModel>();
     let descendantsIncomplete = false;
+    const readStartedAt = this.attributionSequence;
     try {
       // Every message, in one read: banking a partial tally would permanently
       // underreport the child, because a banked key is never re-read. The
@@ -1658,13 +1666,19 @@ export class ChatAdapter {
     // from before that boundary must not repopulate the cleared maps and mark
     // a potentially incomplete answer authoritative.
     if ((this.attributionEpochs.get(key) ?? 0) !== epoch) return;
-    // Live events may have landed while the read was in flight, and they are
-    // newer than the stored snapshot — per message the live figure wins, and
-    // a model attributed live outranks the stored one. Overwriting instead
-    // would bank the stale snapshot permanently once the events fall behind
-    // the replay cursor.
+    // Live events that landed while the read was in flight are newer than
+    // the stored snapshot — for those the live figure wins, or the stale
+    // snapshot would be banked permanently once the events fall behind the
+    // replay cursor. A figure banked before the read began is the older
+    // one: the store may have overtaken it (a partial figure seen before a
+    // disconnect, the child finishing while the stream was down), so it
+    // stands only where the store has nothing for that message. A model
+    // attributed live outranks the stored one either way.
     const live = this.childUsage.get(key);
-    if (live) for (const [messageId, usage] of live) byMessage.set(messageId, usage);
+    const arrivals = this.attributionArrivals.get(key);
+    if (live) for (const [messageId, usage] of live) {
+      if (!byMessage.has(messageId) || (arrivals?.get(messageId) ?? 0) > readStartedAt) byMessage.set(messageId, usage);
+    }
     const liveModels = this.childModels.get(key);
     if (liveModels) for (const [messageId, model] of liveModels) byModel.set(messageId, model);
     const removed = this.removedChildAttribution.get(key);
@@ -1747,6 +1761,7 @@ export class ChatAdapter {
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
       byMessage.set(reported.messageId, reported.usage);
       this.bankAttribution(this.childUsage, key, byMessage);
+      this.stampArrival(key, reported.messageId);
       this.removedChildAttribution.get(key)?.delete(reported.messageId);
     }
     if (removedMessageId !== undefined) {
@@ -1761,7 +1776,7 @@ export class ChatAdapter {
         this.bankAttribution(this.removedChildAttribution, key, removed);
       }
     }
-    this.decorateLauncherRow(parentId, conversationId, coalescer, removedMessageId);
+    this.decorateLauncherRow(parentId, conversationId, coalescer, removedMessageId !== undefined);
     // A subagent's spend counts toward every conversation above it: the
     // child's inclusive figure — its own messages and its subagents' — is
     // banked on the grandparent's tally for the child, under a key no
@@ -1780,12 +1795,26 @@ export class ChatAdapter {
     if (!grandparentId) return;
     const key = attributionKey(grandparentId, parentId);
     const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
+    const agentKey = `agent:${childId}`;
+    const previous = byMessage.get(agentKey);
     const inclusive = sumUsage(this.childUsage.get(attributionKey(parentId, childId)));
-    if (inclusive === undefined) byMessage.delete(`agent:${childId}`);
-    else byMessage.set(`agent:${childId}`, inclusive);
+    if (inclusive === undefined) byMessage.delete(agentKey);
+    else byMessage.set(agentKey, inclusive);
     this.bankAttribution(this.childUsage, key, byMessage);
-    this.decorateLauncherRow(grandparentId, parentId, coalescer, undefined);
+    this.stampArrival(key, agentKey);
+    // A tally that shrank — a removed or reverted message below — must be
+    // put on the row as a replacement: an ordinary upsert keeps attribution
+    // the update omits, which is right for a tool's own progress and wrong
+    // for spend that is no longer there.
+    const shrank = previous !== undefined && (inclusive === undefined || shrankFrom(previous, inclusive));
+    this.decorateLauncherRow(grandparentId, parentId, coalescer, shrank);
     await this.propagateInclusive(grandparentId, parentId, coalescer);
+  }
+
+  private stampArrival(key: string, id: string): void {
+    const arrivals = this.attributionArrivals.get(key) ?? new Map<string, number>();
+    arrivals.set(id, ++this.attributionSequence);
+    this.bankAttribution(this.attributionArrivals, key, arrivals);
   }
 
   /**
@@ -1797,7 +1826,7 @@ export class ChatAdapter {
    * (what `items()` does) would make a chatty subagent cost the parent's
    * length per chunk.
    */
-  private decorateLauncherRow(parentId: string, conversationId: string, coalescer: ProviderUpdateCoalescer, removedMessageId: string | undefined): void {
+  private decorateLauncherRow(parentId: string, conversationId: string, coalescer: ProviderUpdateCoalescer, replace: boolean): void {
     const key = attributionKey(parentId, conversationId);
     const parent = this.projections.get(parentId);
     const row = parent?.find(item => item.type === "tool" && item.childConversationId === conversationId);
@@ -1808,7 +1837,7 @@ export class ChatAdapter {
     // token counts actually move, and an upsert that restates the row
     // verbatim still costs a replay frame for every subscriber.
     if ((model === undefined ? row.model === undefined : row.model === model) && (usage === undefined ? row.usage === undefined : sameUsage(row.usage, usage))) return;
-    if (removedMessageId !== undefined) {
+    if (replace) {
       const { usage: _usage, model: _model, ...withoutAttribution } = row;
       // Upserts deliberately preserve attribution omitted by ordinary tool
       // updates. Remove first so an intentional clear is not merged away.
@@ -2476,6 +2505,11 @@ export class ConversationProjection {
 const MAX_CHILD_ATTRIBUTIONS = 512;
 // NUL: a session id cannot contain one, so the two halves stay unambiguous.
 const ATTRIBUTION_SEPARATOR = "\u0000";
+
+/** Whether any figure in `next` is below the same figure in `previous`. */
+function shrankFrom(previous: TokenUsage, next: TokenUsage): boolean {
+  return TOKEN_USAGE_COMPONENTS.some(key => (next[key] ?? 0) < (previous[key] ?? 0)) || (next.costUsd ?? 0) < (previous.costUsd ?? 0);
+}
 
 function attributionKey(parentId: string, childId: string): string {
   return `${parentId}${ATTRIBUTION_SEPARATOR}${childId}`;

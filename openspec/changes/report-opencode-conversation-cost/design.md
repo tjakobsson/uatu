@@ -124,19 +124,11 @@ locally.
   breakdown on the tool row's usage — a wire change — or descendant rows of
   their own. Follow-up; nested subagents on mixed models are rare enough that
   the whole-run total is the figure that matters first.
-- A grandchild message that is removed (a revert in a nested subagent)
-  shrinks its inclusive tally, but the ancestor's row is decorated without a
-  removal signal, so a tally that shrank to nothing stays on the row until
-  the conversation is reopened. Follow-up: forward a replace signal up the
-  ancestry when an inclusive tally shrinks or disappears.
-- The totals repaint key covers each agent's id and figures, not its label; a
-  task update that corrects a subagent's kind or description without moving
-  its usage leaves an opened Agents table with the old label until the next
-  figure moves. Follow-up: key on the rendered metadata too.
-- Reconstruction merges every live-banked per-message figure over what it
-  just read from storage ("the live figure wins" — a rule from before this
-  change). A partial figure observed live before a disconnect, with the
-  child finishing while the stream was down, would then overwrite the final
-  stored value and be marked squared. Follow-up: merge only the live updates
-  that arrived during the read (an epoch or sequence on the banked entries),
-  not everything banked before it began.
+
+Resolved during review (kept for the record): a shrinking inclusive tally
+is forwarded up the ancestry as a replacement, so a removed grandchild
+message leaves the top-level row; live-banked figures carry an arrival
+sequence and a reconstruction merges only those that landed during its
+read, so a partial figure seen before a disconnect never overwrites the
+store's final one; the totals repaint key carries each agent's label and
+model.

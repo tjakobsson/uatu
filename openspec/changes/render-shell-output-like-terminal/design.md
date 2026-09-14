@@ -126,7 +126,6 @@ untouched.
 
 ## Open Questions
 
-- `ansi-dim` is whole-span opacity, so dim text over an SGR background
-  (`ESC[2;41m`) fades the background as well, where a terminal dims only the
-  foreground. Follow-up: dim the foreground alone (`color-mix` on
-  `currentColor`), keeping backgrounds opaque.
+None open. Resolved during review: `ansi-dim` lowers the foreground's
+intensity alone (`color-mix` on the palette colour), leaving an SGR
+background opaque as a terminal does.

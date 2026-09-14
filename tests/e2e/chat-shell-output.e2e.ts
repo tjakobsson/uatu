@@ -211,11 +211,12 @@ async function seedCost(request: APIRequestContext): Promise<string> {
   expect(response.ok()).toBe(true);
   const seeded = await response.json() as { conversation: { id: string } };
   const token = await request.get("/__e2e/terminal-token").then(reply => reply.json()) as { token: string };
-  return `${seeded.conversation.id}\u0001${token.token}`;
+  return `${seeded.conversation.id}\u0001${token.token}\u0001${childId}`;
 }
 
 async function costScenario(page: Page, request: APIRequestContext, testInfo: TestInfo, touch: boolean): Promise<void> {
   const seeded = await seedCost(request);
+  const childId = seeded.split("\u0001")[2]!;
   await openSeeded(page, seeded, touch);
   const summary = page.locator("#chat-plan-usage-summary");
   // Main agent $1.25 plus the subagent's $0.25: what the whole conversation cost.
@@ -247,21 +248,26 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   await expect(agents.nth(1).locator("td").last()).toHaveText("$0.25");
   await expect(page.locator("#chat-subagents-items")).toContainText("$0.25");
   await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-readout-desktop`);
+  // A label-only correction to the subagent repaints the open table.
+  const agentSeed = costItems.find(item => item.id === "tool:agent")!;
+  const relabelled = await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.split("\u0001")[0], item: { ...agentSeed, childConversationId: childId, input: JSON.stringify({ description: "Review renderer again", subagent_type: "explore" }) } } });
+  expect(relabelled.ok()).toBe(true);
+  await expect(agents.nth(1).locator("td").first()).toContainText("explore · Review renderer again");
   await page.keyboard.press("Escape");
 
   // In context: the subagent's timeline row, and the transcript it opens.
   const agentRow = page.locator('[data-chat-item-id="tool:agent"]');
-  await expect(agentRow.locator(".chat-activity-subject")).toHaveText("explore · Review renderer · $0.25");
+  await expect(agentRow.locator(".chat-activity-subject")).toHaveText("explore · Review renderer again · $0.25");
   await agentRow.locator("> summary").click();
   await agentRow.locator("[data-open-conversation]").click();
-  await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer · $0.25");
+  await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer again · $0.25");
   await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-subagent-drilldown-desktop`);
   // The child reports more while its transcript is open: the title follows.
   const agentItem = costItems.find(item => item.id === "tool:agent")!;
-  const restated = await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.split("\u0001")[0], item: { ...agentItem, childConversationId: await agentRow.locator("[data-open-conversation]").getAttribute("data-open-conversation"), usage: { input: 8_000, output: 400, cacheRead: 0, cacheWrite: 0, costUsd: 0.5 } } } });
+  const restated = await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.split("\u0001")[0], item: { ...agentItem, childConversationId: childId, input: JSON.stringify({ description: "Review renderer again", subagent_type: "explore" }), usage: { input: 8_000, output: 400, cacheRead: 0, cacheWrite: 0, costUsd: 0.5 } } } });
   expect(restated.ok()).toBe(true);
-  await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer · $0.50");
-  await expect(agentRow.locator(".chat-activity-subject")).toHaveText("explore · Review renderer · $0.50");
+  await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer again · $0.50");
+  await expect(agentRow.locator(".chat-activity-subject")).toHaveText("explore · Review renderer again · $0.50");
   await page.goBack();
 
   // Reopened: the cost is restored from history, still titled for the whole conversation.

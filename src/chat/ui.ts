@@ -1846,7 +1846,7 @@ export function initChat(api = new ChatApiClient()): void {
     // Folded totals are a fresh object per fold, so they are keyed by what
     // they say: a restated carrier that moved the cost repaints, one that
     // did not is a no-op.
-    const totalsKey = totals ? `${totals.costUsd}\u0001${totals.models.map(model => `${model.id}:${model.costUsd}:${model.input}:${model.output}:${model.cacheRead}:${model.cacheWrite}`).join(",")}\u0001${(totals.agents ?? []).map(agent => `${agent.id}:${agent.costUsd ?? ""}:${agent.input}:${agent.output}:${agent.cacheRead}:${agent.cacheWrite}`).join(",")}` : undefined;
+    const totalsKey = totals ? `${totals.costUsd}\u0001${totals.models.map(model => `${model.id}:${model.costUsd}:${model.input}:${model.output}:${model.cacheRead}:${model.cacheWrite}`).join(",")}\u0001${(totals.agents ?? []).map(agent => `${agent.id}:${agent.label}:${agent.model ?? ""}:${agent.costUsd ?? ""}:${agent.input}:${agent.output}:${agent.cacheRead}:${agent.cacheWrite}`).join(",")}` : undefined;
     if (report === paintedPlanReport && totalsKey === paintedTotalsKey && sameStanding) return;
     paintedPlanReport = report;
     paintedTotalsKey = totalsKey;

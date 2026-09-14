@@ -2818,6 +2818,68 @@ describe("pending permission recovery", () => {
     expect(grandchildReads).toBe(1);
   });
 
+  test("a figure seen live before a read does not overwrite what the store says now", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "launch", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: { status: "completed", input: { description: "Review", subagent_type: "explore" }, metadata: { sessionId: "child" }, output: "done" } }],
+    }] });
+    // The store already holds the child's final figure.
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId === "child") return { items: [{ id: "child_msg", type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 2 }, tokens: { input: 300, output: 30 }, cost: 0.75 }] as never[] };
+      return listMessages(sessionId, options);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    // A partial figure for that message was seen live earlier — before the
+    // stream dropped and the child finished — and banked with no parent open.
+    provider.eventQueue.push({
+      id: "e-part", type: "message.part.updated",
+      data: { part: { id: "prt_c", messageID: "child_msg", sessionID: "child", type: "text", text: "partial" } },
+    } as never);
+    provider.eventQueue.push({
+      id: "e-msg", type: "message.updated",
+      data: { info: { id: "child_msg", sessionID: "child", role: "assistant", modelID: "gpt-5.6-sol", time: { created: 2 }, tokens: { input: 100, output: 10 }, cost: 0.25 } },
+    } as never);
+    await Bun.sleep(30);
+    // Opening the parent reads the store: its final figure stands, the
+    // older live one does not overwrite it — and the tally is squared.
+    const snapshot = await adapter.history("parent");
+    expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({ usage: { input: 300, output: 30, costUsd: 0.75 } }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("removing a grandchild's message takes its spend off the top-level row", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }];
+    const launcher = (id: string, target: string) => ({
+      id, type: "assistant", time: { created: 1 },
+      content: [{ id: `prt_${id}`, type: "tool", tool: "task", callID: id, state: { status: "completed", input: { description: `Run ${target}`, subagent_type: "explore" }, metadata: { sessionId: target }, output: "done" } }],
+    });
+    provider.pages.set("first", { items: [launcher("launch_child", "child")] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId === "child") return { items: [launcher("launch_grandchild", "grandchild")] as never[] };
+      if (sessionId === "grandchild") return { items: [{ id: "grandchild_msg", type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created: 2 }, tokens: { input: 100, output: 10 }, cost: 0.25 }] as never[] };
+      return listMessages(sessionId, options);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool") as { usage?: { input?: number; output?: number; costUsd?: number } } | undefined;
+    await adapter.history("parent");
+    expect(row()?.usage).toEqual({ input: 100, output: 10, costUsd: 0.25 });
+    // The grandchild's only priced message is removed (a revert below):
+    // the child's inclusive tally shrinks to nothing, and so does the row.
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ id: "remove", type: "message.removed", properties: { sessionID: "grandchild", messageID: "grandchild_msg" } } as never);
+    while (row()?.usage !== undefined) await Bun.sleep(1);
+    expect(row()).not.toHaveProperty("usage");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("removing a subagent message withdraws its usage now and after reopening", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

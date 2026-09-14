@@ -6012,7 +6012,26 @@ body.is-resizing-chat .chat-resizer {
 .ansi-bg-default { background-color: var(--text-strong); }
 .chat-tool-terminal .ansi-bg-default { background-color: var(--terminal-fg); }
 .ansi-bold { font-weight: 700; }
-.ansi-dim { opacity: 0.6; }
+/* Dim lowers the foreground's intensity and leaves a background alone, as
+   SGR 2 does in a terminal; opacity on the span would fade both. */
+.ansi-dim { color: color-mix(in srgb, currentColor 60%, transparent); }
+.ansi-dim.ansi-fg-0 { color: color-mix(in srgb, var(--terminal-ansi-black) 60%, transparent); }
+.ansi-dim.ansi-fg-1 { color: color-mix(in srgb, var(--terminal-ansi-red) 60%, transparent); }
+.ansi-dim.ansi-fg-2 { color: color-mix(in srgb, var(--terminal-ansi-green) 60%, transparent); }
+.ansi-dim.ansi-fg-3 { color: color-mix(in srgb, var(--terminal-ansi-yellow) 60%, transparent); }
+.ansi-dim.ansi-fg-4 { color: color-mix(in srgb, var(--terminal-ansi-blue) 60%, transparent); }
+.ansi-dim.ansi-fg-5 { color: color-mix(in srgb, var(--terminal-ansi-magenta) 60%, transparent); }
+.ansi-dim.ansi-fg-6 { color: color-mix(in srgb, var(--terminal-ansi-cyan) 60%, transparent); }
+.ansi-dim.ansi-fg-7 { color: color-mix(in srgb, var(--terminal-ansi-white) 60%, transparent); }
+.ansi-dim.ansi-fg-8 { color: color-mix(in srgb, var(--terminal-ansi-bright-black) 60%, transparent); }
+.ansi-dim.ansi-fg-9 { color: color-mix(in srgb, var(--terminal-ansi-bright-red) 60%, transparent); }
+.ansi-dim.ansi-fg-10 { color: color-mix(in srgb, var(--terminal-ansi-bright-green) 60%, transparent); }
+.ansi-dim.ansi-fg-11 { color: color-mix(in srgb, var(--terminal-ansi-bright-yellow) 60%, transparent); }
+.ansi-dim.ansi-fg-12 { color: color-mix(in srgb, var(--terminal-ansi-bright-blue) 60%, transparent); }
+.ansi-dim.ansi-fg-13 { color: color-mix(in srgb, var(--terminal-ansi-bright-magenta) 60%, transparent); }
+.ansi-dim.ansi-fg-14 { color: color-mix(in srgb, var(--terminal-ansi-bright-cyan) 60%, transparent); }
+.ansi-dim.ansi-fg-15 { color: color-mix(in srgb, var(--terminal-ansi-bright-white) 60%, transparent); }
+.ansi-dim.ansi-fg-default { color: color-mix(in srgb, var(--terminal-bg) 60%, transparent); }
 .ansi-italic { font-style: italic; }
 .ansi-underline { text-decoration: underline; }
 .ansi-strike { text-decoration: line-through; }
