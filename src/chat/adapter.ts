@@ -413,6 +413,18 @@ export class ChatAdapter {
     // that complete source for recovery, never the bounded visible page.
     const configuration = await this.configuration(id);
     const items = [...page.items];
+    // A conversation's price is the sum of every message's, and the client
+    // folds it from the usage carriers it holds — so the newest page alone
+    // would present a partial figure that grows as older pages load. Where
+    // the provider exposes the complete transcript, every carrier rides the
+    // first page: hidden, small, keyed by message id, and idempotent when an
+    // older page later restates it.
+    if (page.completeItems && !cursor) {
+      const held = new Set(items.map(item => item.id));
+      for (const item of page.completeItems) {
+        if (item.type === "assistant_message" && item.markdown === "" && item.usage && !held.has(item.id)) items.push(item);
+      }
+    }
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
     // order (the order `flatMap` already produced). Comparing ids instead

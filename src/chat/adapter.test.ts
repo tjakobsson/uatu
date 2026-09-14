@@ -194,6 +194,35 @@ describe("OpenCode conversation inventory and history", () => {
     inventory.cancel();
   });
 
+  test("every priced usage carrier rides the first page, so the cost fold sees the whole conversation", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const priced = (id: string, created: number, cost: number) => ({
+      id, type: "assistant", time: { created }, modelID: "gpt-5.6-sol", providerID: "openai",
+      tokens: { input: 100, output: 10 }, cost, content: [{ id: `prt_${id}`, type: "text", text: `Reply ${id}` }],
+    });
+    const older = priced("older", 1, 0.5);
+    const newer = priced("newer", 101, 0.25);
+    // The provider pages locally over the complete transcript: the newest
+    // page holds one message, the transcript both.
+    provider.pages.set("first", { items: [newer], nextCursor: "older-page", configurationItems: [older, newer] });
+    provider.pages.set("older-page", { items: [older], configurationItems: [older, newer] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+
+    const first = await adapter.history("session");
+    const carriers = (items: readonly ConversationItem[]) => items.filter(item => item.type === "assistant_message" && item.markdown === "" && item.usage).map(item => item.id).sort();
+    // The older message's text is not on the page; its price is.
+    expect(first.items.some(item => item.id === "part:prt_older")).toBe(false);
+    expect(carriers(first.items)).toEqual(["usage:newer", "usage:older"]);
+    expect(first.olderCursor).toBeDefined();
+
+    // Loading the older page restates the carrier under the same id: one
+    // item in the projection, not two.
+    const older_page = await adapter.history("session", { cursor: first.olderCursor });
+    expect(older_page.items.some(item => item.id === "part:prt_older")).toBe(true);
+    expect(carriers(adapter.projectionForTests("session").items())).toEqual(["usage:newer", "usage:older"]);
+  });
+
   test("repairs a persisted default title from before the newest message page", async () => {
     const provider = new FakeProvider();
     provider.sessions = [{ ...fixtureSession("session"), title: "New session - 2026-08-15T12:00:00Z" }];

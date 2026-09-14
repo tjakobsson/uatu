@@ -142,7 +142,8 @@ function eraseInLine(line: LineBuffer, params: string): void {
     line.chars.length = line.cursor;
     line.styles.length = line.cursor;
   } else if (mode === 1) {
-    for (let column = 0; column < line.cursor && column < line.chars.length; column += 1) {
+    // From the start of the line through the cursor cell, inclusive.
+    for (let column = 0; column <= line.cursor && column < line.chars.length; column += 1) {
       line.chars[column] = " ";
       line.styles[column] = PLAIN;
     }

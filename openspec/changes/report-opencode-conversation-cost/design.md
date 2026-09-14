@@ -49,7 +49,11 @@ A `conversationTotals(items)` (new module beside `context-readout.ts`) sums
 `usage.costUsd` over assistant-message carriers, grouped by the carrier's
 `model` into `SessionModelTotals[]` (tokens summed per model too), returning
 `undefined` when no carrier has a cost or every cost is zero. `since` is
-omitted. Alternative: have the OpenCode provider emit a `context_report`
+omitted. History is paged (50 newest), so a fold over the loaded page alone
+would be partial and grow as older pages load; where the provider exposes the
+complete transcript (`completeItems`, which OpenCode's provider does), the
+adapter ships every usage carrier with the first page — hidden, small, keyed
+by message id, idempotent when an older page restates it. Alternative: have the OpenCode provider emit a `context_report`
 with `session` — needs a server ledger keyed by conversation, breaks on
 restart (the "since HH:MM" caveat Claude Code has), and restates what the
 carriers already say.

@@ -50,6 +50,8 @@ describe("renderTerminalText", () => {
     expect(renderTerminalText(`123456\r${ESC}[Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
     expect(renderTerminalText(`123456\r${ESC}[2Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["ab"]);
     expect(renderTerminalText(`123456\r12${ESC}[1Kab`).map(line => line.map(run => run.text).join(""))).toEqual(["  ab56"]);
+    // Mode 1 includes the cell under the cursor.
+    expect(renderTerminalText(`abc\r${ESC}[1K`).map(line => line.map(run => run.text).join(""))).toEqual([" bc"]);
     // Backspace steps back one cell; `\r\n` is one line break.
     expect(renderTerminalText("abc\b\bXY\r\nnext").map(line => line.map(run => run.text).join(""))).toEqual(["aXY", "next"]);
   });
