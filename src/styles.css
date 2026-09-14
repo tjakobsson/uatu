@@ -5989,7 +5989,10 @@ body.is-resizing-chat .chat-resizer {
 .ansi-fg-13, .ansi-bold.ansi-fg-5 { color: var(--terminal-ansi-bright-magenta); }
 .ansi-fg-14, .ansi-bold.ansi-fg-6 { color: var(--terminal-ansi-bright-cyan); }
 .ansi-fg-15, .ansi-bold.ansi-fg-7 { color: var(--terminal-ansi-bright-white); }
-.ansi-fg-default { color: var(--terminal-bg); }
+/* Inverse video swaps a block's own defaults: the terminal's in a shell
+   block, the plain block's text and surface colours elsewhere. */
+.ansi-fg-default { color: var(--surface); }
+.chat-tool-terminal .ansi-fg-default { color: var(--terminal-bg); }
 .ansi-bg-0 { background-color: var(--terminal-ansi-black); }
 .ansi-bg-1 { background-color: var(--terminal-ansi-red); }
 .ansi-bg-2 { background-color: var(--terminal-ansi-green); }
@@ -6006,7 +6009,8 @@ body.is-resizing-chat .chat-resizer {
 .ansi-bg-13 { background-color: var(--terminal-ansi-bright-magenta); }
 .ansi-bg-14 { background-color: var(--terminal-ansi-bright-cyan); }
 .ansi-bg-15 { background-color: var(--terminal-ansi-bright-white); }
-.ansi-bg-default { background-color: var(--terminal-fg); }
+.ansi-bg-default { background-color: var(--text-strong); }
+.chat-tool-terminal .ansi-bg-default { background-color: var(--terminal-fg); }
 .ansi-bold { font-weight: 700; }
 .ansi-dim { opacity: 0.6; }
 .ansi-italic { font-style: italic; }

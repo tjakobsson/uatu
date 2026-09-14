@@ -861,6 +861,16 @@ export function initChat(api = new ChatApiClient()): void {
       .join("\u0002");
     if (signature === paintedSubagents) return;
     paintedSubagents = signature;
+    // The open transcript's title states the same cost as the row: a running
+    // subagent's price moves while its transcript is open, and a title
+    // computed once at the click would keep the earlier figure.
+    if (child && drilldownTitle) {
+      const label = subagentLabelFor(child.conversationId, projection);
+      if (label !== child.label) {
+        child.label = label;
+        drilldownTitle.textContent = label;
+      }
+    }
     if (dismissButton) {
       dismissButton.hidden = !entries.some(entry => entry.status !== "running" && entry.status !== "pending");
     }

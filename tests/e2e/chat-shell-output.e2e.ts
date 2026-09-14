@@ -256,13 +256,20 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   await agentRow.locator("[data-open-conversation]").click();
   await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer · $0.25");
   await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-subagent-drilldown-desktop`);
+  // The child reports more while its transcript is open: the title follows.
+  const agentItem = costItems.find(item => item.id === "tool:agent")!;
+  const restated = await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.split("\u0001")[0], item: { ...agentItem, childConversationId: await agentRow.locator("[data-open-conversation]").getAttribute("data-open-conversation"), usage: { input: 8_000, output: 400, cacheRead: 0, cacheWrite: 0, costUsd: 0.5 } } } });
+  expect(restated.ok()).toBe(true);
+  await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer · $0.50");
+  await expect(agentRow.locator(".chat-activity-subject")).toHaveText("explore · Review renderer · $0.50");
   await page.goBack();
 
   // Reopened: the cost is restored from history, still titled for the whole conversation.
   await page.reload();
   await openChatPanel(page);
   await page.locator("#chat-conversation-select").selectOption(seeded.split("\u0001")[0]!);
-  await expect(summary).toHaveText("$1.50 this conversation");
+  // Main $1.25 plus the subagent's restated $0.50, from history alone.
+  await expect(summary).toHaveText("$1.75 this conversation");
   await summary.click();
   await expect(page.locator("#chat-plan-session-title")).toHaveText("This conversation");
   await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-reopen-desktop`);
