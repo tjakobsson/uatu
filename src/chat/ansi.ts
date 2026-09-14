@@ -38,6 +38,10 @@ export type TerminalLine = TerminalRun[];
 const PLAIN: TerminalStyle = {};
 const TAB_STOP = 8;
 
+// The C1 controls that have a two-byte ESC spelling, as that spelling's
+// second byte: CSI, DCS, SOS, OSC, PM, APC.
+const C1_AS_ESC: Record<number, string> = { 0x9b: "[", 0x90: "P", 0x98: "X", 0x9d: "]", 0x9e: "^", 0x9f: "_" };
+
 // How many cells a character takes, as a terminal lays it out: none for a
 // combining mark, joiner, or variation selector (it rides the cell before
 // it), two for East Asian wide and fullwidth forms and the emoji blocks
@@ -193,11 +197,16 @@ export function renderTerminalText(text: string): TerminalLine[] {
   };
   while (index < length) {
     const code = text.charCodeAt(index);
-    if (code === 0x1b) {
-      const next = text[index + 1];
+    // 8-bit C1 controls are the 7-bit ESC forms in one code point: CSI
+    // (0x9B), the control-string introducers, and ST (0x9C). Treated as
+    // their two-byte spellings so parameters never reach the text.
+    const c1 = code >= 0x80 && code <= 0x9f;
+    const next = c1 ? C1_AS_ESC[code] : text[index + 1];
+    const skip = c1 ? 1 : 2;
+    if (code === 0x1b || c1) {
       if (next === "[") {
         // CSI: parameter bytes, then a final byte in 0x40–0x7E.
-        let end = index + 2;
+        let end = index + skip;
         while (end < length) {
           const c = text.charCodeAt(end);
           if (c >= 0x40 && c <= 0x7e) break;
@@ -205,7 +214,7 @@ export function renderTerminalText(text: string): TerminalLine[] {
         }
         if (end >= length) break; // truncated sequence at the end of a chunk: drop it
         const final = text[end]!;
-        const params = text.slice(index + 2, end);
+        const params = text.slice(index + skip, end);
         if (final === "m") style = applySgr(style, params);
         else if (final === "K") eraseInLine(line, params, style);
         index = end + 1;
@@ -213,15 +222,21 @@ export function renderTerminalText(text: string): TerminalLine[] {
       }
       if (next === "]" || next === "P" || next === "_" || next === "^" || next === "X") {
         // A control string — OSC, DCS, APC, PM, SOS — runs to BEL or ST
-        // (ESC \): the whole payload goes, not just its introducer.
-        let end = index + 2;
+        // (ESC \ or 0x9C): the whole payload goes, not just its introducer.
+        let end = index + skip;
         while (end < length) {
           const c = text.charCodeAt(end);
-          if (c === 0x07) { end += 1; break; }
+          if (c === 0x07 || c === 0x9c) { end += 1; break; }
           if (c === 0x1b && text[end + 1] === "\\") { end += 2; break; }
           end += 1;
         }
         index = end;
+        continue;
+      }
+      if (c1) {
+        // Any other C1 control (a lone ST, NEL, and the rest) is a control,
+        // not text.
+        index += 1;
         continue;
       }
       // Charset designation (ESC ( B), keypad modes, save/restore cursor,
@@ -255,7 +270,7 @@ export function renderTerminalText(text: string): TerminalLine[] {
       index += 1;
       continue;
     }
-    if (code < 0x20) {
+    if (code < 0x20 || code === 0x7f) {
       index += 1;
       continue;
     }
@@ -263,8 +278,8 @@ export function renderTerminalText(text: string): TerminalLine[] {
     // modified emoji is one glyph, so a `\r` overwrite clears it whole.
     let end = index + 1;
     while (end < length) {
-      const next = text.charCodeAt(end);
-      if (next < 0x20 || next === 0x1b) break;
+      const ahead = text.charCodeAt(end);
+      if (ahead < 0x20 || ahead === 0x7f || (ahead >= 0x80 && ahead <= 0x9f)) break;
       end += 1;
     }
     for (const grapheme of graphemes(text.slice(index, end))) write(grapheme);

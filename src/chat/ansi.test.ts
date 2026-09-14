@@ -87,6 +87,9 @@ describe("renderTerminalText", () => {
   test("unknown sequences are dropped with the surrounding text intact", () => {
     const text = `${ESC}[2A${ESC}[?25lspin${ESC}[?25h ${ESC}]0;title${"\x07"}ok ${ESC}]8;;http://x${ESC}\\link${ESC}]8;;${ESC}\\ ${ESC}(Bplain${ESC}=${ESC}7\x07\x00end`;
     expect(renderTerminalText(text).map(line => line.map(run => run.text).join(""))).toEqual(["spin ok link plainend"]);
+    // 8-bit C1 forms read as their ESC spellings; DEL and other C1 controls go.
+    expect(renderTerminalText("\u009b31mred\u009b0m \u009d0;title\u009c ok\u007f \u0085x").map(line => line.map(run => run.text).join(""))).toEqual(["red  ok x"]);
+    expect(renderTerminalText("\u009b32mgreen\u009bm")[0]).toEqual([{ text: "green", style: { fg: 2 } }]);
     // Control strings — DCS, APC, PM, SOS — go whole, payload included.
     expect(renderTerminalText(`before${ESC}P1;2|secret${ESC}\\after ${ESC}_apc\x07x ${ESC}^pm${ESC}\\y ${ESC}Xsos${ESC}\\z`).map(line => line.map(run => run.text).join(""))).toEqual(["beforeafter x y z"]);
     // A sequence cut off by the end of a streaming chunk is dropped, not shown.
