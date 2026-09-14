@@ -328,12 +328,15 @@ function eraseInLine(line: LineBuffer, params: string, style: TerminalStyle): vo
       line.styles[column] = blank;
     }
   } else if (mode === 2) {
-    // The whole line, cursor unmoved: the cells up to it are blanks under
-    // the active background, so what is written next lands where the
-    // cursor stands, after them; nothing beyond is kept.
-    line.chars.length = line.cursor;
-    line.styles.length = line.cursor;
-    for (let column = 0; column < line.cursor; column += 1) {
+    // The whole line, cursor unmoved. Under a background every cell the
+    // line had — and the cells up to the cursor, if it stands beyond them —
+    // is painted blank, so what is written next lands where the cursor
+    // stands; under the default rendition only the cells up to the cursor
+    // are kept, as blanks, and the rest is nothing to keep.
+    const extent = blank === PLAIN ? line.cursor : Math.max(line.cursor, line.chars.length);
+    line.chars.length = extent;
+    line.styles.length = extent;
+    for (let column = 0; column < extent; column += 1) {
       line.chars[column] = " ";
       line.styles[column] = blank;
     }
