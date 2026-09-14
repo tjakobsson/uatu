@@ -97,6 +97,12 @@ describe("renderTerminalText", () => {
     // follows it up to ST. Other ESC sequences consume their intermediates.
     expect(renderTerminalText(`before${ESC}Pabc\x07secret${ESC}\\after`).map(line => line.map(run => run.text).join(""))).toEqual(["beforeafter"]);
     expect(renderTerminalText(`a${ESC}%Gb${ESC}*Bc${ESC}(Bd${ESC}7e`).map(line => line.map(run => run.text).join(""))).toEqual(["abcde"]);
+    // CAN or SUB cancels a CSI or a control string; a new ESC restarts a CSI.
+    const plain = (input: string) => renderTerminalText(input).map(line => line.map(run => run.text).join(""));
+    expect(plain(`before${ESC}[31\x18after`)).toEqual(["beforeafter"]);
+    expect(renderTerminalText(`before${ESC}[31${ESC}[32mafter`)[0]).toEqual([{ text: "before", style: {} }, { text: "after", style: { fg: 2 } }]);
+    expect(plain(`before${ESC}]0;title\x18after`)).toEqual(["beforeafter"]);
+    expect(plain(`before${ESC}Pdata\x1aafter`)).toEqual(["beforeafter"]);
     // Control strings — DCS, APC, PM, SOS — go whole, payload included.
     expect(renderTerminalText(`before${ESC}P1;2|secret${ESC}\\after ${ESC}_apc${ESC}\\x ${ESC}^pm${ESC}\\y ${ESC}Xsos${ESC}\\z`).map(line => line.map(run => run.text).join(""))).toEqual(["beforeafter x y z"]);
     // A sequence cut off by the end of a streaming chunk is dropped, not shown.
@@ -152,6 +158,9 @@ describe("tailStart", () => {
     // Unterminated so far (still streaming): nothing of the payload shows.
     const open = `${ESC}Ppayload\nmore`;
     expect(tailStart(open, open.indexOf("more"))).toBe(open.length);
+    // A cancelled control string ends at the CAN.
+    const cancelled = `${ESC}]0;a\nb\x18shown`;
+    expect(cancelled.slice(tailStart(cancelled, cancelled.indexOf("b\x18")))).toBe("shown");
     // A BEL inside a DCS payload is not its end.
     const dcs = `${ESC}Pone\x07two\nthree${ESC}\\shown`;
     expect(dcs.slice(tailStart(dcs, dcs.indexOf("three")))).toBe("shown");

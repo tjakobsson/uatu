@@ -205,13 +205,20 @@ export function renderTerminalText(text: string): TerminalLine[] {
     const skip = c1 ? 1 : 2;
     if (code === 0x1b || c1) {
       if (next === "[") {
-        // CSI: parameter bytes, then a final byte in 0x40–0x7E.
+        // CSI: parameter bytes, then a final byte in 0x40–0x7E. CAN or SUB
+        // cancels the sequence (the byte goes with it); another ESC cancels
+        // it too and starts afresh, so what follows is parsed as normal.
         let end = index + skip;
+        let cancelled: "restart" | "drop" | undefined;
         while (end < length) {
           const c = text.charCodeAt(end);
           if (c >= 0x40 && c <= 0x7e) break;
+          if (c === 0x18 || c === 0x1a) { cancelled = "drop"; break; }
+          if (c === 0x1b || (c >= 0x80 && c <= 0x9f)) { cancelled = "restart"; break; }
           end += 1;
         }
+        if (cancelled === "drop") { index = end + 1; continue; }
+        if (cancelled === "restart") { index = end; continue; }
         if (end >= length) break; // truncated sequence at the end of a chunk: drop it
         const final = text[end]!;
         const params = text.slice(index + skip, end);
@@ -224,11 +231,12 @@ export function renderTerminalText(text: string): TerminalLine[] {
         // A control string runs to ST (ESC \ or 0x9C) — and, for OSC only,
         // to BEL, which xterm accepts there and treats as payload in DCS,
         // APC, PM and SOS. The whole payload goes, not just its introducer.
+        // CAN or SUB aborts the string, and what follows is output again.
         const bel = next === "]";
         let end = index + skip;
         while (end < length) {
           const c = text.charCodeAt(end);
-          if ((bel && c === 0x07) || c === 0x9c) { end += 1; break; }
+          if ((bel && c === 0x07) || c === 0x9c || c === 0x18 || c === 0x1a) { end += 1; break; }
           if (c === 0x1b && text[end + 1] === "\\") { end += 2; break; }
           end += 1;
         }
@@ -486,9 +494,10 @@ export function terminalLinesToHtml(lines: readonly TerminalLine[]): string {
 // the stream; a payload longer than this is exotic enough to accept.
 const CONTROL_STRING_LOOKBACK = 4096;
 const CONTROL_STRING_INTRODUCER = /\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f]/g;
-// ST ends any control string; BEL ends only OSC (elsewhere it is payload).
-const CONTROL_STRING_TERMINATOR = /\x1b\\|\x9c/g;
-const OSC_TERMINATOR = /\x07|\x1b\\|\x9c/g;
+// ST ends any control string, and so does a CAN or SUB that aborts it; BEL
+// ends only OSC (elsewhere it is payload).
+const CONTROL_STRING_TERMINATOR = /\x1b\\|\x9c|\x18|\x1a/g;
+const OSC_TERMINATOR = /\x07|\x1b\\|\x9c|\x18|\x1a/g;
 
 /**
  * Where a tail taken at `at` should really begin: `at`, unless `at` falls
