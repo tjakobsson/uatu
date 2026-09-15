@@ -1,4 +1,3 @@
-import type { TimelineAnchorController } from "./anchor";
 import { tabBarBottomInset } from "../shell/tab-bar";
 
 export class ChatViewportController {
@@ -8,8 +7,7 @@ export class ChatViewportController {
   constructor(
     private readonly surface: HTMLElement,
     private readonly composer: HTMLElement,
-    private readonly timeline: HTMLElement,
-    private readonly anchor: TimelineAnchorController,
+    private readonly requestCorrection: () => void,
   ) {}
 
   start(): void {
@@ -41,7 +39,7 @@ export class ChatViewportController {
     const root = document.documentElement;
     const visible = document.visibilityState !== "hidden" && (root.getAttribute("data-ui-mode") === "touch"
       ? root.getAttribute("data-active-tab") === "chat" : root.getAttribute("data-chat-panel") === "open");
-    if (visible && this.anchor.isPinned()) this.timeline.scrollTop = Math.max(0, this.timeline.scrollHeight - this.timeline.clientHeight);
+    if (visible) this.requestCorrection();
   }
 }
 

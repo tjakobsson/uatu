@@ -15,6 +15,8 @@ export class TimelineAnchorController {
   // The position this controller last handed out. A scroll that lands there
   // is the caller's own assignment echoing back as an event.
   private expected: number | null = null;
+  private previous: AnchorGeometry | null = null;
+  private restoring = false;
 
   constructor(private readonly endThreshold = 48) {}
 
@@ -27,9 +29,8 @@ export class TimelineAnchorController {
    * threshold cannot apply on the way out — while a turn streams, a render
    * lands every few frames, and each one drags a still-pinned viewport back
    * to the end, so a reader nudging a trackpad never gets past 48px and
-   * feels every wheel tick reset. Only a decrease that still leaves the end
-   * in view stays pinned: that is the browser clamping scrollTop after the
-   * content shrank, not the reader leaving.
+   * feels every wheel tick reset. A decrease caused by a measured extent
+   * clamp preserves the existing intent, including paused intent.
    *
    * A scroll that lands where `afterMutation` or `jumpToLatest` just put it
    * is not the reader at all — it is that assignment echoing back, whether
@@ -42,17 +43,31 @@ export class TimelineAnchorController {
    */
   observe(geometry: AnchorGeometry, movement: ScrollMovement = "down"): void {
     const expected = this.expected;
-    this.expected = null;
-    const echo = expected !== null && Math.abs(geometry.scrollTop - expected) <= 1;
+    const maximum = Math.max(0, geometry.scrollHeight - geometry.clientHeight);
+    const echo = expected !== null && Math.abs(geometry.scrollTop - Math.max(0, Math.min(expected, maximum))) <= 1;
+    const previous = this.previous;
+    const clamped = previous !== null && maximum < previous.scrollHeight - previous.clientHeight
+      && previous.scrollTop > maximum && Math.abs(geometry.scrollTop - maximum) <= 1;
+    this.previous = geometry;
+    if (!echo) this.expected = null;
     const distance = geometry.scrollHeight - geometry.clientHeight - geometry.scrollTop;
-    if (!echo && movement === "up") this.pinned = distance <= 1;
-    else if (!echo && movement === "down") this.pinned = distance <= this.endThreshold;
+    if (!echo && !clamped && movement === "up") this.pinned = false;
+    else if (!echo && !clamped && movement === "down") this.pinned = distance <= this.endThreshold;
     if (this.pinned) {
       this.unseen = false;
       this.anchor = null;
     } else {
       this.anchor = captureAnchor(geometry);
     }
+  }
+
+  /** Input intent arrives before the browser's scroll event or default action. */
+  pause(geometry: AnchorGeometry): void {
+    this.expected = null;
+    this.previous = geometry;
+    this.pinned = false;
+    this.restoring = false;
+    this.anchor = captureAnchor(geometry);
   }
 
   beforeMutation(geometry: AnchorGeometry, preferredItemId?: string): void {
@@ -72,16 +87,25 @@ export class TimelineAnchorController {
     // gone here would turn a restored position into a jump to the end.
     if (geometry.items.length === 0) return this.handOut(geometry.scrollTop);
     const item = geometry.items.find(candidate => candidate.id === this.anchor!.itemId);
-    if (item) return this.handOut(geometry.scrollTop + item.top - this.anchor.offset);
+    if (item) {
+      this.restoring = false;
+      return this.handOut(geometry.scrollTop + item.top - this.anchor.offset);
+    }
+    if (!this.restoring) {
+      this.anchor = captureAnchor(geometry);
+      return this.handOut(geometry.scrollTop);
+    }
     this.pinned = true;
     this.anchor = null;
     this.unseen = false;
+    this.restoring = false;
     return this.handOut(Math.max(0, geometry.scrollHeight - geometry.clientHeight));
   }
 
   jumpToLatest(geometry: AnchorGeometry): number {
     this.pinned = true;
     this.unseen = false;
+    this.restoring = false;
     this.anchor = null;
     return this.handOut(Math.max(0, geometry.scrollHeight - geometry.clientHeight));
   }
@@ -94,7 +118,14 @@ export class TimelineAnchorController {
   isPinned(): boolean { return this.pinned; }
   hasUnseen(): boolean { return this.unseen; }
   currentAnchor(): TimelineAnchor | null { return this.anchor; }
-  restore(anchor: TimelineAnchor | null): void { this.anchor = anchor; this.pinned = anchor === null; }
+  restore(anchor: TimelineAnchor | null): void {
+    this.restoring = anchor !== null;
+    this.anchor = anchor;
+    this.pinned = anchor === null;
+    this.expected = null;
+    this.previous = null;
+    this.unseen = false;
+  }
 }
 
 export function captureAnchor(geometry: AnchorGeometry): TimelineAnchor | null {

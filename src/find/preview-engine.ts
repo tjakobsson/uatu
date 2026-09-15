@@ -27,6 +27,12 @@ export function createPreviewEngine(
     scrollRoot?: () => HTMLElement;
     prepareIndex?: () => void;
     prepareReveal?: (range: Range) => void;
+    target?: () => HTMLElement;
+    barHost?: () => HTMLElement;
+    focusTarget?: () => HTMLElement;
+    /** Return true when the handler has fully revealed the match. */
+    revealMatch?: (range: Range) => boolean;
+    watchRoot?: HTMLElement;
     includeClosedDetails?: boolean;
   } = {},
 ): FindEngine {
@@ -36,6 +42,14 @@ export function createPreviewEngine(
   let truncated = false;
   let onOutcome: ((outcome: FindOutcome) => void) | null = null;
   let observer: MutationObserver | null = null;
+  let indexedTarget: HTMLElement | null = null;
+
+  const revealMatch = (range: Range): void => {
+    config.prepareReveal?.(range);
+    if (!config.revealMatch?.(range)) {
+      revealRange(range, config.scrollRoot?.() ?? previewScrollRoot());
+    }
+  };
 
   const emit = (error: string | null): void => {
     onOutcome?.({ total: spans.length, index: currentIndex, truncated, error });
@@ -44,11 +58,10 @@ export function createPreviewEngine(
   const paint = (reveal: boolean): void => {
     paintMatches(ranges, currentIndex);
     if (reveal && currentIndex >= 0) {
-      config.prepareReveal?.(ranges[currentIndex]!);
       // Resolved per call rather than using the captured `shellElement`: the
       // shell stops being the scroller in touch mode and the stacked layout,
       // where scrolling it is a silent no-op.
-      revealRange(ranges[currentIndex]!, config.scrollRoot?.() ?? previewScrollRoot());
+      revealMatch(ranges[currentIndex]!);
     }
   };
 
@@ -60,18 +73,21 @@ export function createPreviewEngine(
   };
 
   return {
-    barHost: () => barSlot,
+    barHost: () => config.barHost?.() ?? barSlot,
     label: config.label ?? "document",
 
     run(query, options, opts) {
       config.prepareIndex?.();
+      const target = config.target?.() ?? previewElement;
+      if (target !== indexedTarget) reset();
+      indexedTarget = target;
       // Where the reader currently is, so a re-run after a live reload lands
       // near it rather than snapping to the top of the document.
       const anchor = currentIndex >= 0 ? spans[currentIndex]?.start ?? null : null;
       // Indexing `#preview` covers split layouts for free: both panes are its
       // children, so their text concatenates in document order and matches
       // come out as one ordered sequence across the pair.
-      const index = buildTextIndex(previewElement, config);
+      const index = buildTextIndex(target, config);
       const result = findMatches(index.text, query, options);
 
       if (!result.ok) {
@@ -90,7 +106,7 @@ export function createPreviewEngine(
         const located = locateSpan(index, span);
         if (located) {
           spans.push(span);
-          ranges.push(toRange(located, previewElement.ownerDocument));
+          ranges.push(toRange(located, target.ownerDocument));
         }
       }
       currentIndex = spans.length === 0 ? -1 : nearestSpan(spans, anchor ?? 0);
@@ -124,10 +140,9 @@ export function createPreviewEngine(
       const landing = currentIndex >= 0 ? ranges[currentIndex] ?? null : null;
       // Focus stays on the shell — it is the focusable surface whether or not
       // it is the scrolling one — while the reveal targets the real scroller.
-      shellElement.focus({ preventScroll: true });
+      (config.focusTarget?.() ?? shellElement).focus({ preventScroll: true });
       if (landing) {
-        config.prepareReveal?.(landing);
-        revealRange(landing, config.scrollRoot?.() ?? previewScrollRoot());
+        revealMatch(landing);
       }
     },
 
@@ -147,7 +162,9 @@ export function createPreviewEngine(
       if (observer) {
         return;
       }
-      observer = new MutationObserver(() => {
+      observer = new MutationObserver(records => {
+        const target = config.target?.() ?? previewElement;
+        if (target === indexedTarget && !records.some(record => target.contains(record.target))) return;
         // `diff.ts` clears then appends: two records, one logical swap.
         queueMicrotask(onChanged);
       });
@@ -156,11 +173,12 @@ export function createPreviewEngine(
       // one changes what is searchable and the run must repeat. Re-running
       // paints via `CSS.highlights` without touching the DOM, so the observer
       // cannot feed itself.
-      observer.observe(previewElement, {
+      observer.observe(config.watchRoot ?? previewElement, {
         childList: true,
+        characterData: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["open"],
+        attributeFilter: ["open", "hidden", "data-chat-drilldown"],
       });
     },
 

@@ -52,6 +52,31 @@ describe("semantic timeline anchoring", () => {
     expect(controller.isPinned()).toBe(true);
   });
 
+  test("a paused reader remains paused when shrink clamps them to the end", () => {
+    const controller = new TimelineAnchorController();
+    controller.observe(geometry(300));
+    controller.observe(geometry(296), "up");
+    controller.observe(geometry(250, 550), "up");
+    controller.observe(geometry(250, 550), "none");
+    expect(controller.isPinned()).toBe(false);
+  });
+
+  test("repeated clamped programmatic echoes preserve paused intent", () => {
+    const controller = new TimelineAnchorController();
+    controller.restore({ itemId: "i1", offset: -50 });
+    controller.afterMutation(geometry(280, 600, [-100, 0, 100]));
+    controller.observe(geometry(300), "down");
+    controller.observe(geometry(300), "down");
+    expect(controller.isPinned()).toBe(false);
+  });
+
+  test("removing a live reading anchor does not resume following", () => {
+    const controller = new TimelineAnchorController();
+    controller.pause(geometry(100));
+    expect(controller.afterMutation({ ...geometry(20, 400), items: [{ id: "replacement", top: 0, bottom: 100 }] })).toBe(20);
+    expect(controller.isPinned()).toBe(false);
+  });
+
   test("the echo of a restored near-end position does not re-pin", () => {
     const controller = new TimelineAnchorController();
     // A reader who left by 30px, saved, and came back after a reload: the

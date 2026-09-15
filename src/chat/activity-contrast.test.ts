@@ -41,9 +41,14 @@ describe("activity chrome contrast", () => {
 
   test("the shell block and the ansi classes draw only from the terminal variables", async () => {
     const css = await Bun.file(path.resolve(import.meta.dir, "../styles.css")).text();
-    const block = css.match(/\.chat-activity pre\.chat-tool-terminal \{[^}]*\}/)?.[0];
+    const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+    const rule = rules.find(match => match[1]!.split(",").map(selector => selector.trim()).includes(".chat-activity pre.chat-tool-terminal"));
+    expect(rule).toBeDefined();
+    expect(rule![1]!.split(",").map(selector => selector.trim())).toContain(".chat-shell-output pre.chat-tool-terminal");
+    const block = rule![2]!;
     expect(block).toContain("font-family: var(--terminal-font-family)");
     expect(block).toContain("background: var(--terminal-bg)");
+    expect(block).toContain("color: var(--terminal-fg)");
     expect(block).toContain("white-space: pre");
     const ansiRules = css.match(/^\.ansi-[^\n]*$/gm) ?? [];
     expect(ansiRules.length).toBeGreaterThanOrEqual(34);

@@ -62,6 +62,17 @@ function shellOf(): Document {
 }
 
 describe("findSurfaceRoot", () => {
+  test("body-mounted shell output claims chat, while its find controls do not", () => {
+    const document = shellOf();
+    const host = document.createElement("section");
+    host.className = "chat-shell-window";
+    host.innerHTML = '<pre>output</pre>';
+    document.body.append(host);
+    expect(findSurfaceRoot(host.firstElementChild)).toBe("chat");
+    host.append(document.querySelector("#find-bar")!);
+    expect(findSurfaceRoot(document.querySelector("#find-query"))).toBeNull();
+  });
+
   test("locates the root an interaction landed in", () => {
     const document = shellOf();
     expect(findSurfaceRoot(document.querySelector("#para"))).toBe("preview");
@@ -215,9 +226,12 @@ describe("a committed tab change claims its surface", () => {
   // which produce a tab-bar event, so the surface used to go stale on every
   // one of them. Driven through the real `setActiveTab` rather than by calling
   // the listener directly, so the subscription itself is what's under test.
-  test("switching tabs with no tab-bar event still moves the surface", async () => {
+  test.each(["desktop", "touch"] as const)("switching tabs with no tab-bar event still moves the surface (cached %s)", async cachedMode => {
     const savedDocument = Reflect.get(globalThis, "document");
     const savedWindow = Reflect.get(globalThis, "window");
+    const savedFrame = Reflect.get(globalThis, "requestAnimationFrame");
+    const savedTab = appState.activeTab;
+    const savedSurface = appState.activeSurface;
     const store = new Map<string, string>();
     Reflect.set(globalThis, "document", {
       documentElement: { setAttribute: () => {} },
@@ -234,10 +248,18 @@ describe("a committed tab change claims its surface", () => {
         },
         key: (index: number) => [...store.keys()][index] ?? null,
       },
-      // Coarse pointer => touch mode, where the tab decides the surface.
+      // Pointer detection only applies before uiMode has been cached.
       matchMedia: () => ({ matches: true }),
     });
+    // Mode changes schedule a layout notification, irrelevant to tab routing.
+    Reflect.set(globalThis, "requestAnimationFrame", () => 0);
+    const { setUiMode, uiMode } = await import("../shell/ui-mode");
+    const savedMode = uiMode();
     try {
+      setUiMode(cachedMode);
+      // This case exercises touch tab routing regardless of which mode a
+      // previously run suite resolved in the shared module instance.
+      setUiMode("touch");
       const { initActiveSurfaceTracking } = await import("./active-surface");
       const { setActiveTab } = await import("../shell/tab-bar");
       initActiveSurfaceTracking();
@@ -252,8 +274,12 @@ describe("a committed tab change claims its surface", () => {
       setActiveTab("files");
       expect(appState.activeSurface).toBe("preview");
     } finally {
+      setUiMode(savedMode);
+      appState.activeTab = savedTab;
+      appState.activeSurface = savedSurface;
       Reflect.set(globalThis, "document", savedDocument);
       Reflect.set(globalThis, "window", savedWindow);
+      Reflect.set(globalThis, "requestAnimationFrame", savedFrame);
     }
   });
 

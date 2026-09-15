@@ -127,7 +127,7 @@ test.describe("chat panels and navigation", () => {
     await line.locator("> summary").click();
     await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeVisible();
     await expect(page.locator('[data-chat-item-id="tool:4"]')).toHaveAttribute("open", "");
-    await expect(page.locator('[data-chat-item-id="tool:4"] .chat-tool-stream')).toContainText("still going");
+    await expect(page.locator('[data-chat-item-id="tool:4"] .chat-shell-viewport')).toContainText("still going");
     await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-working-line-open-desktop");
 
     // Finishing settles the same line into the group summary, still open.

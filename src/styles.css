@@ -5957,7 +5957,8 @@ body.is-resizing-chat .chat-resizer {
    the same in Chat as in the terminal pane. Dark in both themes, as the pane
    is. Lines are not wrapped: a table stays a table and a long line scrolls,
    the way the terminal treats it. */
-.chat-activity pre.chat-tool-terminal {
+.chat-activity pre.chat-tool-terminal,
+.chat-shell-output pre.chat-tool-terminal {
   background: var(--terminal-bg);
   color: var(--terminal-fg);
   font-family: var(--terminal-font-family);
@@ -5966,9 +5967,68 @@ body.is-resizing-chat .chat-resizer {
   overflow-x: auto;
 }
 
-.chat-activity pre.chat-tool-error.chat-tool-terminal {
+.chat-activity pre.chat-tool-error.chat-tool-terminal,
+.chat-shell-output pre.chat-tool-error.chat-tool-terminal {
   color: var(--terminal-ansi-red);
 }
+
+.chat-shell-slot, .chat-shell-output { min-width: 0; }
+.chat-shell-output { position: relative; }
+.chat-shell-output .chat-tool-command { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 6px; }
+.chat-shell-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.chat-shell-output .chat-shell-viewport {
+  box-sizing: border-box;
+  height: var(--shell-inline-height, 240px);
+  max-height: none;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+  scroll-behavior: auto;
+  font-size: 12px;
+  line-height: 20px;
+  tab-size: 8;
+}
+.chat-shell-lines { display: block; width: max-content; min-width: 100%; font: inherit; color: inherit; }
+.chat-shell-line { display: block; height: 20px; white-space: pre; }
+.chat-shell-output .chat-tool-error { white-space: pre; overflow: auto; max-height: 160px; padding: 10px; }
+.chat-shell-inline-resize { height: 16px; cursor: ns-resize; touch-action: none; display: grid; place-items: center; }
+.chat-shell-inline-resize::after { content: ""; width: 44px; height: 3px; border-radius: 2px; background: currentColor; opacity: .45; }
+.chat-shell-slot.is-popped-out { border: 1px dashed var(--border-color, #666); display: grid; place-items: center; }
+.chat-shell-output button, .chat-shell-window button { font: inherit; cursor: pointer; }
+.chat-shell-output :focus-visible, .chat-shell-window :focus-visible, .chat-shell-slot > button:focus-visible { outline: 2px solid var(--accent, #3b7dd8); outline-offset: 2px; }
+.chat-shell-window {
+  position: fixed;
+  z-index: 50;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+  border: 1px solid var(--border-color, #666);
+  border-radius: 8px;
+  background: var(--terminal-bg);
+  color: var(--terminal-fg);
+  box-shadow: 0 8px 36px #0006;
+  overflow: hidden;
+  font-size: 12px;
+}
+.chat-shell-window[hidden] { display: none; }
+.chat-shell-window-header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; padding: 2px 2px 8px; }
+.chat-shell-window-move { flex: 1 1 120px; min-width: 0; cursor: move; touch-action: none; }
+.chat-shell-window-title { font-family: var(--terminal-font-family); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-shell-window-metadata { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-shell-window-content { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.chat-shell-window-content > .chat-shell-output { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.chat-shell-window .chat-shell-viewport { flex: 1; height: 0; min-height: 0; }
+.chat-shell-window .chat-shell-inline-resize, .chat-shell-window .chat-shell-popout, .chat-shell-window .chat-tool-command { display: none; }
+.chat-shell-window .chat-shell-actions { flex-shrink: 0; margin: 0; }
+.chat-shell-window .chat-shell-actions:has(button:not([hidden]):not(.chat-shell-popout)) { margin-bottom: 6px; }
+.chat-shell-window-resize { align-self: flex-end; cursor: nwse-resize; touch-action: none; padding: 4px 8px 0; }
+.chat-shell-window.is-full-area { border-radius: 0; padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
+.chat-shell-window.is-full-area .chat-shell-window-move { cursor: default; }
 
 /* SGR styling as the converter (`chat/ansi.ts`) emits it. Bold draws in the
    bright half of the palette, matching xterm's drawBoldTextInBrightColors

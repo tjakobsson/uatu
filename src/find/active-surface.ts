@@ -33,7 +33,7 @@ const ROOT_SELECTORS: ReadonlyArray<readonly [SurfaceRoot, string]> = [
   // `.main-stack`, and checking it first keeps the match unambiguous if the
   // markup is ever nested differently.
   ["terminal", "#terminal-panel"],
-  ["chat", "#chat-surface"],
+  ["chat", "#chat-surface, .chat-shell-window"],
   ["preview", ".preview-shell"],
   // `.sidebar-rail` is the collapsed sidebar's expand button, which sits
   // outside `.sidebar` but is still sidebar chrome.

@@ -19,6 +19,10 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
     await page.locator("#chat-timeline").evaluate(el => { el.scrollTop = 300; });
     await page.waitForTimeout(100);
     const beforeTop = await page.locator("#chat-timeline").evaluate(el => el.scrollTop);
+    // Revealing earlier intrinsic-size rows can change the extent on the same
+    // scroll event. The reader must actually be paused here, not snapped back
+    // to a moving bottom before the hide/return assertion starts.
+    expect(beforeTop).toBeCloseTo(300, 0);
     await page.locator("#touch-tab-files").click();
     await page.waitForTimeout(100);
     const before = await page.evaluate(() => structuredClone(globalThis.__uatuChatPerformance));

@@ -48,6 +48,186 @@ function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjec
   };
 }
 
+describe("persistent shell rendering", () => {
+  test("renderer hide/restore after Home leaves the first downward arrival free to resume shell following", () => {
+    const oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>(); let sequence = 0, time = 0;
+    globalThis.requestAnimationFrame = callback => { frames.set(++sequence, callback); return sequence; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const flush = () => { const callbacks = [...frames.values()]; frames.clear(); time += 16; callbacks.forEach(callback => callback(time)); };
+    const renderer = new TimelineRenderer();
+    try {
+      const target = dom.document.createElement("div") as unknown as HTMLElement;
+      const item: ConversationItem = { id: "shell", type: "command", command: "test", createdAt: 1, status: "running", output: "output" };
+      renderer.render(target, projectionWith([item]), new Set());
+      const controller = renderer.getShellOutput(item.id)!;
+      Object.assign(controller.viewport, { scrollTop: 0, scrollLeft: 0, scrollHeight: 2000, clientHeight: 240, scrollWidth: 500, clientWidth: 500 }); flush();
+      const home = new dom.window.Event("keydown", { cancelable: true }); Object.assign(home, { key: "Home" }); controller.viewport.dispatchEvent(home); flush();
+      renderer.setShellOutputsHidden(true);
+      renderer.render(target, projectionWith([item]), new Set());
+      renderer.setShellOutputsHidden(false); flush(); controller.scroll.observe();
+      expect(controller.scroll.following).toBe(false);
+      const wheel = new dom.window.Event("wheel"); Object.assign(wheel, { deltaY: 2000 }); controller.viewport.dispatchEvent(wheel);
+      controller.viewport.scrollTop = 1760; controller.scroll.observe();
+      expect(controller.scroll.following).toBe(true);
+    } finally { renderer.reset(); globalThis.requestAnimationFrame = oldRequest; globalThis.cancelAnimationFrame = oldCancel; }
+  });
+  test("unrelated assistant updates do not paint or mutate retained shell bodies; renames still propagate", async () => {
+    const renderer = new TimelineRenderer(); renderer.conversationTitle = "Original title";
+    const target = dom.document.createElement("div") as unknown as HTMLElement;
+    const items: ConversationItem[] = Array.from({ length: 60 }, (_, index) => ({
+      id: `completed:${index}`, type: "tool", name: "Bash", status: "completed", createdAt: index + 1,
+      input: JSON.stringify({ command: `command ${index}`, description: `description ${index}` }), output: `output ${index}`,
+    }));
+    const assistant: ConversationItem = { id: "answer", type: "assistant_message", markdown: "Initial", createdAt: 100 };
+    renderer.render(target, projectionWith([...items, assistant]), new Set());
+    let paints = 0;
+    const commands = items.map(item => {
+      const controller = renderer.getShellOutput(item.id)!;
+      const update = controller.buffer.update.bind(controller.buffer);
+      controller.buffer.update = snapshot => { paints++; return update(snapshot); };
+      return controller.command.firstChild;
+    });
+    const mutations: MutationRecord[] = [];
+    const observer = new dom.window.MutationObserver(records => mutations.push(...records as unknown as MutationRecord[]));
+    for (const item of items) observer.observe(renderer.getShellOutput(item.id)!.element, { subtree: true, attributes: true, childList: true, characterData: true });
+    for (let index = 0; index < 10; index++) {
+      renderer.setShellOutputsHidden(false);
+      renderer.render(target, projectionWith([...items, { ...assistant, markdown: `Append ${index}` }]), new Set());
+    }
+    await Promise.resolve();
+    expect(paints).toBe(0); expect(mutations).toHaveLength(0);
+    for (const [index, item] of items.entries()) expect(renderer.getShellOutput(item.id)!.command.firstChild).toBe(commands[index]!);
+    renderer.conversationTitle = "Renamed conversation";
+    renderer.render(target, projectionWith([...items, assistant]), new Set());
+    expect(paints).toBe(items.length);
+    for (const item of items) expect(renderer.getShellOutput(item.id)!.metadata.conversation).toBe("Renamed conversation");
+    await Promise.resolve(); expect(mutations).toHaveLength(0);
+    observer.disconnect(); renderer.reset();
+  });
+
+  test("same-identity shell fast path respects reader close and inspection before regrouping", () => {
+    const renderer = new TimelineRenderer(); const expanded = new Set<string>();
+    const target = dom.document.createElement("div") as unknown as HTMLElement;
+    const item: ConversationItem = { id: "command", type: "command", command: "test", status: "running", output: "output", createdAt: 1 };
+    renderer.render(target, projectionWith([item]), expanded);
+    const row = target.querySelector('[data-chat-item-id="command"]')!;
+    row.removeAttribute("open"); row.removeAttribute("data-auto-open"); row.setAttribute("data-reader-closed", "");
+    renderer.render(target, projectionWith([item]), expanded);
+    expect(row.hasAttribute("open")).toBe(false);
+    renderer.getShellOutput(item.id)!.inspect();
+    renderer.render(target, projectionWith([item]), expanded);
+    expect(row.hasAttribute("open")).toBe(true);
+    expect(row.closest(".chat-activity-group")!.hasAttribute("open")).toBe(true);
+    renderer.reset();
+  });
+  test("navigation through a null projection retains per-conversation item presentation; explicit reset evicts", () => {
+    const renderer = new TimelineRenderer();
+    const target = dom.document.createElement("div") as unknown as HTMLElement;
+    const item: ConversationItem = { id: "shared-id", type: "command", command: "test", createdAt: 1, status: "completed", output: "line" };
+    renderer.render(target, projectionWith([item]), new Set());
+    const a = renderer.getShellOutput(item.id)!;
+    a.setInlineHeight(360); a.floatingGeometry = { x: 70, y: 40, width: 800, height: 400 }; a.scroll.following = false;
+    renderer.render(target, null, new Set());
+    expect(a.element.parentElement).toBeNull();
+    renderer.render(target, projectionWith([item], { conversationId: "c2" }), new Set());
+    const b = renderer.getShellOutput(item.id)!;
+    expect(b.inlineHeight).toBe(240); expect(b.floatingGeometry).toBeUndefined();
+    b.setInlineHeight(300); b.floatingGeometry = { x: 20, y: 30, width: 400, height: 200 };
+    renderer.reset(true);
+    renderer.render(target, projectionWith([item]), new Set());
+    const restored = renderer.getShellOutput(item.id)!;
+    expect(restored).not.toBe(a); expect(restored.inlineHeight).toBe(360);
+    expect(restored.floatingGeometry).toEqual(a.floatingGeometry); expect(restored.scroll.following).toBe(false);
+    expect(target.querySelector('[data-chat-item-id="shared-id"]')!.hasAttribute("open")).toBe(true);
+    renderer.render(target, projectionWith([item], { conversationId: "c2" }), new Set());
+    expect(renderer.getShellOutput(item.id)!.floatingGeometry).toEqual(b.floatingGeometry);
+    renderer.reset(); renderer.render(target, projectionWith([item]), new Set());
+    expect(renderer.getShellOutput(item.id)!.inlineHeight).toBe(240); expect(renderer.getShellOutput(item.id)!.floatingGeometry).toBeUndefined();
+    renderer.reset();
+  });
+  for (const shape of ["command", "bash"] as const) {
+    const shellItem = (status: "pending" | "running" | "completed" | "failed", output = "first\nlast"): ConversationItem => shape === "command"
+      ? { id: "shell", type: "command", command: "bun test", createdAt: 1, status, output }
+      : { id: "shell", type: "tool", name: "bash", input: JSON.stringify({ command: "bun test", description: "Run tests" }), createdAt: 1, status, output, ...(status === "failed" ? { error: "\x1b[31mseparate error\x1b[0m" } : {}) };
+
+    test(`${shape}: lazy materialization uses the latest snapshot and remains persistent through regrouping`, () => {
+      const renderer = new TimelineRenderer(); renderer.deferClosedActivity = true; renderer.conversationTitle = "Review";
+      const target = dom.document.createElement("div") as unknown as HTMLElement;
+      const expanded = new Set<string>();
+      renderer.render(target, projectionWith([shellItem("completed", "stale")], { status: "idle" }), expanded);
+      const row = target.querySelector('[data-chat-item-id="shell"]')!;
+      expect(row.hasAttribute("data-chat-lazy")).toBe(true); expect(renderer.getShellOutput("shell")).toBeUndefined();
+      renderer.render(target, projectionWith([shellItem("failed", "current")], { status: "idle" }), expanded);
+      expect(target.querySelector('[data-chat-item-id="shell"]')).toBe(row);
+      materializeChatActivity(target);
+      const controller = renderer.getShellOutput("shell")!;
+      expect(controller.viewport.textContent).toContain("current"); expect(controller.viewport.textContent).not.toContain("stale");
+      expect(controller.metadata.conversation).toBe("Review"); expect(controller.metadata.completedAt).toBeUndefined();
+      if (shape === "bash") { expect(controller.error.textContent).toBe("separate error"); expect(controller.description.textContent).toBe("Run tests"); }
+      controller.setInlineHeight(320);
+      const viewport = controller.viewport;
+      const siblings: ConversationItem[] = [1, 2].map(n => ({ id: `reason-${n}`, type: "reasoning", text: "thought", createdAt: 1, status: "completed" }));
+      renderer.render(target, projectionWith([shellItem("failed", "current\nmore"), ...siblings], { status: "idle" }), expanded);
+      expect(renderer.getShellOutput("shell")!.viewport).toBe(viewport);
+      expect(row.closest(".chat-activity-group")!.hasAttribute("open")).toBe(true);
+      expect(row.hasAttribute("open")).toBe(true); expect(row.hasAttribute("data-auto-open")).toBe(false);
+      expect(expanded.has("group:shell")).toBe(true);
+      row.removeAttribute("open"); row.setAttribute("data-reader-closed", "");
+      renderer.render(target, projectionWith([shellItem("failed", "current\nmore\nend"), ...siblings], { status: "idle" }), expanded);
+      expect(row.hasAttribute("open")).toBe(false);
+      renderer.reset(); expect(renderer.getShellOutput("shell")).toBeUndefined();
+    });
+
+    test(`${shape}: auto-open closes on completion but explicit reader-close survives streaming`, () => {
+      const renderer = new TimelineRenderer();
+      const target = dom.document.createElement("div") as unknown as HTMLElement;
+      renderer.render(target, projectionWith([shellItem("running")]), new Set());
+      const row = target.querySelector('[data-chat-item-id="shell"]')!;
+      expect(row.hasAttribute("data-auto-open")).toBe(true);
+      const viewport = renderer.getShellOutput("shell")!.viewport;
+      renderer.render(target, projectionWith([shellItem("completed")], { status: "idle" }), new Set());
+      expect(row.hasAttribute("open")).toBe(false); expect(renderer.getShellOutput("shell")!.viewport).toBe(viewport);
+      row.setAttribute("data-reader-closed", "");
+      renderer.render(target, projectionWith([shellItem("running", "new output")]), new Set());
+      expect(row.hasAttribute("open")).toBe(false);
+      renderer.reset();
+    });
+  }
+
+  test("hidden renderer shells reconcile current output on return and dispose on removal or conversation reset", () => {
+    const renderer = new TimelineRenderer();
+    const target = dom.document.createElement("div") as unknown as HTMLElement;
+    const item: ConversationItem = { id: "shell", type: "command", command: "x", createdAt: 1, status: "pending", output: "before" };
+    renderer.render(target, projectionWith([item]), new Set());
+    const controller = renderer.getShellOutput("shell")!;
+    expect(controller.metadata.status).toBe("pending");
+    renderer.setShellOutputsHidden(true);
+    renderer.render(target, projectionWith([{ ...item, status: "completed", output: "after" }]), new Set());
+    expect(controller.viewport.textContent).toContain("before");
+    renderer.setShellOutputsHidden(false); expect(controller.viewport.textContent).toContain("after");
+    renderer.render(target, projectionWith([]), new Set());
+    expect(renderer.getShellOutput("shell")).toBeUndefined(); expect(controller.element.parentElement).toBeNull();
+    renderer.render(target, projectionWith([item]), new Set());
+    renderer.render(target, projectionWith([item], { conversationId: "other" }), new Set());
+    expect(renderer.getShellOutput("shell")!.conversationId).toBe("other");
+    expect(renderer.getShellOutput("shell")!.inlineHeight).toBe(240);
+    renderer.reset();
+  });
+
+  test("a pending tool gaining shell input replaces its former generic body once", () => {
+    const renderer = new TimelineRenderer();
+    const target = dom.document.createElement("div") as unknown as HTMLElement;
+    const item: ConversationItem = { id: "shell", type: "tool", name: "bash", createdAt: 1, status: "pending", input: "{}", output: "before" };
+    renderer.render(target, projectionWith([item]), new Set());
+    renderer.render(target, projectionWith([{ ...item, input: '{"command":"bun test"}', status: "running", output: "current" }]), new Set());
+    expect(target.querySelectorAll(".chat-shell-viewport")).toHaveLength(1);
+    expect(target.textContent).not.toContain("before");
+    expect(target.textContent).toContain("current");
+    renderer.reset();
+  });
+});
+
 function target(): HTMLElement {
   const node = dom.document.createElement("div");
   return node as unknown as HTMLElement;
@@ -1694,22 +1874,20 @@ describe("tool output is streamed live and bounded when finished", () => {
     const output = `\x1b[32mpass\x1b[0m one\n${Array.from({ length: 11 }, (_, i) => `line ${i + 2}`).join("\n")}\n` + "Downloading  10%\rDownloading  55%\rDownloading 100%";
     const bash = (status: "running" | "completed"): ConversationItem => ({ id: "tool:sh", type: "tool", createdAt: 1, name: "bash", status, input: JSON.stringify({ command: "bun test" }), output });
     renderer.render(host, projectionWith([bash("running")]), new Set());
-    const stream = host.querySelector(".chat-tool-stream")!;
+    const stream = host.querySelector(".chat-shell-viewport")!;
     expect(stream.classList.contains("chat-tool-terminal")).toBe(true);
-    // Twelve rendered lines in the tail: the first line falls off, and the
-    // redrawn progress line is the twelfth — not the thirty-somethingth.
-    expect(host.querySelector(".chat-output-elided")).not.toBeNull();
-    expect(stream.textContent).not.toContain("pass one");
+    expect(stream.querySelectorAll(".chat-shell-line")).toHaveLength(13);
+    expect(host.querySelector(".chat-output-elided")).toBeNull();
+    expect(stream.textContent).toContain("pass one");
     expect(stream.textContent).toContain("line 2");
     expect(stream.textContent).toContain("Downloading 100%");
     expect(stream.textContent).not.toContain("55%");
 
     renderer.render(host, projectionWith([bash("completed")]), new Set());
     expect(host.querySelector(".chat-tool-stream")).toBeNull();
-    const more = host.querySelector(".chat-output-more")!;
-    expect(more.querySelector("summary")!.textContent).toContain("Show 1 more line");
-    expect(more.querySelector("pre")!.classList.contains("chat-tool-terminal")).toBe(true);
-    expect(more.querySelector("pre")!.textContent).toBe("Downloading 100%");
+    expect(host.querySelector(".chat-output-more")).toBeNull();
+    expect(host.querySelector(".chat-shell-viewport")).toBe(stream);
+    expect(stream.textContent).toContain("Downloading 100%");
     expect(host.querySelector("pre.chat-tool-terminal .ansi-fg-2")!.textContent).toBe("pass");
   });
 
@@ -1731,7 +1909,7 @@ describe("tool output is streamed live and bounded when finished", () => {
     const output = `start\n\x1b]0;secret title\nwith newline\x07${Array.from({ length: 11 }, (_, i) => `line ${i + 1}`).join("\n")}`;
     const item: ConversationItem = { id: "tool:osc", type: "tool", createdAt: 1, name: "bash", status: "running", input: JSON.stringify({ command: "x" }), output };
     renderer.render(host, projectionWith([item]), new Set());
-    const text = host.querySelector(".chat-tool-stream")!.textContent!;
+    const text = host.querySelector(".chat-shell-viewport")!.textContent!;
     expect(text).not.toContain("with newline");
     expect(text).not.toContain("secret");
     expect(text).toContain("line 1");
@@ -1760,7 +1938,7 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(host.querySelector('[data-chat-item-id="tool:t3"] pre')!.textContent).toContain("line 4");
   });
 
-  test("a running shell update keeps one keyed row and only its bounded tail", () => {
+  test("a running shell update keeps one viewport and every supplied line", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     const command = (output: string): ConversationItem => ({
@@ -1768,19 +1946,23 @@ describe("tool output is streamed live and bounded when finished", () => {
     });
 
     renderer.render(host, projectionWith([command(lines(20))]), new Set());
+    const viewport = host.querySelector(".chat-shell-viewport");
+    const first = viewport!.querySelector(".chat-shell-line");
     renderer.render(host, projectionWith([command(lines(30))]), new Set());
 
     expect(host.querySelectorAll('[data-chat-item-id="tool:shell"]')).toHaveLength(1);
-    const stream = host.querySelector(".chat-tool-stream")!;
-    expect(stream.textContent!.split("\n")).toHaveLength(12);
+    const stream = host.querySelector(".chat-shell-viewport")!;
+    expect(stream).toBe(viewport!);
+    expect(stream.querySelector(".chat-shell-line")).toBe(first);
+    expect(stream.querySelectorAll(".chat-shell-line")).toHaveLength(30);
     expect(stream.textContent).toContain("line 30");
-    expect(stream.textContent).not.toContain("line 18\n");
+    expect(stream.textContent).toContain("line 1\n");
     // OpenCode's own shell step is a `command` item, not a bash tool: it
     // gets the terminal look the same way.
     expect(stream.classList.contains("chat-tool-terminal")).toBe(true);
   });
 
-  test("a fast-completed shell retains inspectable output behind the existing bound", () => {
+  test("a fast-completed shell retains all output in one bounded viewport", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     const item: ConversationItem = {
@@ -1790,10 +1972,8 @@ describe("tool output is streamed live and bounded when finished", () => {
 
     expect(host.querySelectorAll('[data-chat-item-id="tool:fast-shell"]')).toHaveLength(1);
     expect(host.querySelector('[data-chat-item-id="tool:fast-shell"] .chat-activity-status')!.textContent).toBe("completed");
-    const more = host.querySelector(".chat-output-more") as HTMLDetailsElement;
-    expect(more.querySelector("summary")!.textContent).toContain("Show 18 more lines");
-    expect(more.hasAttribute("open")).toBe(false);
-    expect(more.textContent).toContain("line 30");
-    expect(host.querySelectorAll('[data-chat-item-id="tool:fast-shell"] pre.chat-tool-terminal')).toHaveLength(2);
+    expect(host.querySelector(".chat-output-more")).toBeNull();
+    expect(host.querySelectorAll(".chat-shell-viewport")).toHaveLength(1);
+    expect(host.querySelector(".chat-shell-viewport")!.textContent).toContain("line 30");
   });
 });

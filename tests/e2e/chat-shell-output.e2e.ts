@@ -12,6 +12,7 @@ import type { APIRequestContext, Page, TestInfo } from "@playwright/test";
 import type { ConversationItem } from "../../src/chat/types";
 import { captureScreenshot, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
+import { bootShell, log, shell } from "./chat-shell-helpers";
 
 const changeDir = (name: string) => path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes", name, "screenshots");
 const SHELL_SHOTS = changeDir("render-shell-output-like-terminal");
@@ -133,6 +134,42 @@ async function shellScenario(page: Page, request: APIRequestContext, testInfo: T
 }
 
 test.describe("shell output reads as the terminal renders it", () => {
+  for (const shape of ["command", "bash"] as const) test(`${shape} completed-only scrollback keeps every line and non-shell previews`, async ({ page, request }) => {
+    const output = log(80);
+    const { viewport, outputView } = await bootShell(page, request, { shape, output, status: "completed", extra: [{
+      id: "read:long", type: "tool", createdAt: 102, name: "read", status: "completed", output,
+      input: JSON.stringify({ filePath: "long.txt" }),
+    }] });
+    await expect(viewport.locator(".chat-shell-line")).toHaveCount(80);
+    await expect.poll(() => viewport.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2);
+    await expect(outputView.getByText(/Show .*lines|omitted/i)).toHaveCount(0);
+    await viewport.focus(); await page.keyboard.press("Home");
+    await expect.poll(() => viewport.evaluate(el => el.scrollTop)).toBe(0);
+    await expect(viewport.locator(".chat-shell-line").first()).toBeInViewport();
+    const read = page.locator('[data-chat-item-id="read:long"]');
+    await read.locator("> summary").click();
+    await expect(read.locator(".chat-shell-viewport")).toHaveCount(0);
+    await expect(read.locator("pre").first()).not.toContainText("line-00079");
+    await expect(read.locator(".chat-output-more")).not.toHaveAttribute("open", "");
+    await read.getByText(/Show .*lines/).click();
+    await expect(read).toContainText("line-00079");
+  });
+
+  test("streamed ANSI progress, split escapes and corrected snapshots remain inert", async ({ page, request }) => {
+    const { update, viewport } = await bootShell(page, request, { output: "first\n\x1b[3" });
+    const output = "first\n\x1b[32mprogress 10%\r\x1b[2Kprogress 100%\x1b[0m\n<script>window.shellPwned=1</script>\x1b]0;hidden title\x07";
+    await update(shell("command", output));
+    await expect(viewport.locator(".chat-shell-line")).toHaveCount(3);
+    await expect(viewport.locator(".ansi-fg-2")).toHaveText("progress 100%");
+    await expect(viewport).not.toContainText("10%");
+    await expect(viewport).not.toContainText("hidden title");
+    await expect(viewport.locator("script, a")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).shellPwned)).toBeUndefined();
+    await update(shell("command", "corrected\nshort", "failed"));
+    await expect(viewport.locator(".chat-shell-line")).toHaveCount(2);
+    await expect(viewport).toHaveText("corrected\nshort\n");
+  });
+
   test("desktop, light", async ({ page, request }, testInfo) => {
     await shellScenario(page, request, testInfo, "light", false);
   });

@@ -1,0 +1,38 @@
+{
+  "engine": "chromium",
+  "touch": true,
+  "child": true,
+  "before": {
+    "inputCodeUnits": 271439,
+    "segmentedCodeUnits": 542640,
+    "renderedCells": 271320,
+    "prefixCodeUnits": 0,
+    "resets": 1,
+    "lineWrites": 120,
+    "paints": 1,
+    "parseMs": 347.5,
+    "transcriptRenders": 5
+  },
+  "hidden": {
+    "inputCodeUnits": 271439,
+    "segmentedCodeUnits": 542640,
+    "renderedCells": 271320,
+    "prefixCodeUnits": 0,
+    "resets": 1,
+    "lineWrites": 120,
+    "paints": 1,
+    "parseMs": 347.5,
+    "transcriptRenders": 5
+  },
+  "restored": {
+    "inputCodeUnits": 271524,
+    "segmentedCodeUnits": 542793,
+    "renderedCells": 271396,
+    "prefixCodeUnits": 271439,
+    "resets": 1,
+    "lineWrites": 129,
+    "paints": 2,
+    "parseMs": 347.80000001192093,
+    "transcriptRenders": 7
+  }
+}

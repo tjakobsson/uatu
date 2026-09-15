@@ -1,3 +1,6 @@
+import { setChatInert } from "./inert";
+
+const deletedConversationInert = {};
 const DELETED_OPTION_ATTRIBUTE = "data-chat-deleted-conversation";
 const PREVIOUS_SELECTION_ATTRIBUTE = "data-chat-selection-before-deletion";
 const PREVIOUS_DISABLED_ATTRIBUTE = "data-chat-inventory-previously-disabled";
@@ -103,7 +106,7 @@ export function renderSelectedConversationDeleted(root: Document, deleted: boole
     }
   }
   if (composer) {
-    composer.toggleAttribute("inert", deleted);
+    setChatInert(composer, deletedConversationInert, deleted);
     if (deleted) composer.setAttribute("aria-disabled", "true");
     else composer.removeAttribute("aria-disabled");
   }

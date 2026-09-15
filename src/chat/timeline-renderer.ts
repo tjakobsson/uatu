@@ -3,6 +3,7 @@ import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
+import { retainShellSelection, ShellOutputController, type ShellMutationHooks, type ShellOutputMetadata, type ShellPresentation } from "./shell-output";
 import { measureChatWork } from "./performance";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
@@ -10,7 +11,7 @@ import type { AcceptedDraft, ChatProjection } from "./projection";
 import { formatUsd } from "./usage";
 import { isLiveConversationStatus, isRateLimitStanding, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
 
-type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
+type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string; shellVariant?: string };
 const deferredBodies = new WeakMap<HTMLElement, () => void>();
 
 export function materializeChatActivity(root: HTMLElement): void {
@@ -36,6 +37,22 @@ export class TimelineRenderer {
   private readonly draftEntries = new Map<string, { node: HTMLElement; draft: AcceptedDraft }>();
   private readonly groupEntries = new Map<string, HTMLElement>();
   private conversationId: string | null = null;
+  private readonly shells = new Map<string, ShellOutputController>();
+  private readonly shellPresentations = new Map<string, Map<string, { state: ShellPresentation; open: boolean; closed: boolean }>>();
+  private shellsHidden = false;
+  conversationTitle: string | undefined;
+  shellMutationHooks: ShellMutationHooks = {};
+
+  /** Call for both retained renderers when Chat/page visibility changes. */
+  setShellOutputsHidden(hidden: boolean): void {
+    if (hidden === this.shellsHidden) return;
+    this.shellsHidden = hidden;
+    for (const shell of this.shells.values()) shell.setHidden(hidden);
+  }
+
+  /** Explicit conversation/owning-child navigation closes, but retains inline state. */
+  closeShellOutputWindow(): void { for (const shell of this.shells.values()) shell.returnInline(); }
+  getShellOutput(itemId: string): ShellOutputController | undefined { return this.shells.get(itemId); }
 
   /** Reconciles the DOM under `target` and returns the created or changed nodes. */
   // The owning agent's persistent-approval sentence, set by the surface from
@@ -61,18 +78,19 @@ export class TimelineRenderer {
   // renders. Absent for a settled conversation — nothing is working.
   render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true, allowRevert = false, turnStartedAt?: number): HTMLElement[] {
     const finish = measureChatWork("transcript-render");
+    const selection = retainShellSelection(target);
     try { return this.renderTimeline(target, projection, expanded, allowSubagents, allowRevert, turnStartedAt); }
-    finally { finish(); }
+    finally { selection(); finish(); }
   }
 
   private renderTimeline(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents: boolean, allowRevert: boolean, turnStartedAt?: number): HTMLElement[] {
     if (!projection) {
-      this.reset();
+      this.reset(true);
       clearChildren(target);
       return [];
     }
     if (this.conversationId !== projection.conversationId) {
-      this.reset();
+      this.reset(true);
       clearChildren(target);
       this.conversationId = projection.conversationId;
     }
@@ -151,6 +169,19 @@ export class TimelineRenderer {
       const confirming = this.confirming.has(item.id) && item.type === "permission" && item.status === "pending" && active;
       if (!confirming) this.confirming.delete(item.id);
       const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming)].join("\u0001");
+      if (entry?.shellVariant !== undefined && entry.item === item && entry.active === active && entry.variant === variant
+        && entry.shellVariant === this.shellVariant(entry.node, item.id)) {
+        nodes.set(item.id, entry.node);
+        continue;
+      }
+      if (shellMetadata(item, this.conversationTitle ?? projection.conversationId)) {
+        const node = this.reconcileShell(item, entry, expanded, active, variant);
+        this.entries.get(item.id)!.shellVariant = this.shellVariant(node, item.id);
+        nodes.set(item.id, node);
+        dirty.push(node);
+        continue;
+      }
+      if (this.shells.has(item.id)) { this.shells.get(item.id)!.dispose(); this.shells.delete(item.id); }
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
@@ -255,6 +286,12 @@ export class TimelineRenderer {
         for (const item of segment.items) {
           const node = nodes.get(item.id);
           if (!node) continue;
+          if (this.shells.get(item.id)?.readerOpened && !groupNode.hasAttribute(READER_CLOSED)) {
+            groupNode.setAttribute("open", "");
+            groupNode.removeAttribute("data-auto-open");
+            groupNode.removeAttribute(READER_CLOSED);
+            expanded.add(segment.group.id);
+          }
           if (node === memberCursor) {
             memberCursor = memberCursor.nextElementSibling;
             continue;
@@ -282,6 +319,10 @@ export class TimelineRenderer {
     const liveIds = new Set(projection.items.map(item => item.id));
     for (const [id, entry] of this.entries) {
       if (!liveIds.has(id)) {
+        this.shellPresentations.get(this.conversationId!)?.delete(id);
+        this.shells.get(id)?.dispose();
+        this.shells.delete(id);
+        deferredBodies.delete(entry.node);
         entry.node.remove();
         this.entries.delete(id);
       }
@@ -311,10 +352,94 @@ export class TimelineRenderer {
         this.groupEntries.delete(id);
       }
     }
+    for (const node of dirty) {
+      const shell = this.shells.get(node.dataset.chatItemId ?? "");
+      if (shell) shell.attach(node);
+    }
     return dirty;
   }
 
-  reset(): void {
+  private shellVariant(node: HTMLElement, itemId: string): string {
+    return JSON.stringify([this.conversationTitle ?? this.conversationId, node.hasAttribute("open"), node.hasAttribute("data-auto-open"),
+      node.hasAttribute(READER_CLOSED), node.hasAttribute("data-chat-lazy"), this.shells.get(itemId)?.readerOpened ?? false]);
+  }
+
+  private reconcileShell(item: ConversationItem, previous: RenderedEntry | undefined, expanded: Set<string>, active: boolean, variant: string): HTMLElement {
+    const metadata = shellMetadata(item, this.conversationTitle ?? this.conversationId!)!;
+    const output = item.type === "command" || item.type === "tool" ? item.output : undefined;
+    const old = previous?.node;
+    const retained = this.shellPresentations.get(this.conversationId!)?.get(item.id);
+    const closed = old?.hasAttribute(READER_CLOSED) ?? retained?.closed ?? false;
+    const inspected = this.shells.get(item.id)?.readerOpened ?? retained?.state.readerOpened ?? false;
+    const open = (inspected && !closed) || (old ? old.hasAttribute("open") && !old.hasAttribute("data-auto-open") : retained?.open ?? expanded.has(item.id));
+    const auto = autoOpen(metadata.status, output) && !closed;
+    const label = item.type === "tool" ? describeToolDetail(item).label : "Shell";
+    const status = item.type === "tool" ? activityStatusText(item.status, item.elapsedMs) : metadata.status;
+    const template = buildNode(activityShell(escapeHtmlAttribute(item.id), metadata.status, label, metadata.command, "", open, auto, closed, timestampAttribute(item.createdAt), status));
+    const node = old ?? template;
+    if (old) {
+      if (previous && !shellMetadata(previous.item, metadata.conversation)) {
+        for (const child of Array.from(node.childNodes).slice(1)) child.remove();
+        deferredBodies.delete(node); node.removeAttribute("data-chat-lazy");
+      }
+      node.className = template.className;
+      for (const attr of ["open", "data-auto-open", READER_CLOSED]) {
+        if (template.hasAttribute(attr)) node.setAttribute(attr, ""); else node.removeAttribute(attr);
+      }
+      const summary = node.querySelector("summary")!;
+      if (summary.innerHTML !== template.querySelector("summary")!.innerHTML) summary.innerHTML = template.querySelector("summary")!.innerHTML;
+    }
+    this.entries.set(item.id, { node, item, active, variant });
+    const materialize = () => {
+      const current = this.entries.get(item.id);
+      if (!current || current.node !== node) return;
+      let shell = this.shells.get(item.id);
+      if (!shell) {
+        shell = new ShellOutputController(this.conversationId!, item.id, shellMetadata(current.item, this.conversationTitle ?? this.conversationId!)!, {
+          beforeMutation: () => this.shellMutationHooks.beforeMutation?.(),
+          afterMutation: () => this.shellMutationHooks.afterMutation?.(),
+          inspected: () => {
+            let ancestor: HTMLElement | null = node;
+            while (ancestor) {
+              if (ancestor.matches("details.chat-activity, details.chat-activity-group")) {
+                ancestor.setAttribute("open", ""); ancestor.removeAttribute("data-auto-open"); ancestor.removeAttribute(READER_CLOSED);
+                const id = ancestor.dataset.chatItemId; if (id) expanded.add(id);
+              }
+              ancestor = ancestor.parentElement;
+            }
+            this.shellMutationHooks.inspected?.();
+          },
+        });
+        this.shells.set(item.id, shell);
+        if (this.shellsHidden) shell.setHidden(true);
+        if (retained) shell.restorePresentation(retained.state);
+        shell.attach(node);
+      }
+      node.removeAttribute("data-chat-lazy"); deferredBodies.delete(node);
+      const value = current.item;
+      shell.update(value.type === "command" || value.type === "tool" ? value.output : undefined, shellMetadata(value, this.conversationTitle ?? this.conversationId!)!, value.type === "tool" ? value.error : undefined);
+    };
+    if (this.shells.has(item.id) || !this.deferClosedActivity || open || auto) materialize();
+    else {
+      node.setAttribute("data-chat-lazy", ""); deferredBodies.set(node, materialize);
+      if (!old) node.addEventListener("toggle", () => { if (node.hasAttribute("open")) deferredBodies.get(node)?.(); });
+    }
+    return node;
+  }
+
+  /** true detaches for navigation/loading; the default explicitly evicts state. */
+  reset(retainShellPresentation = false): void {
+    if (retainShellPresentation && this.conversationId) {
+      let retained = this.shellPresentations.get(this.conversationId);
+      if (!retained) this.shellPresentations.set(this.conversationId, retained = new Map());
+      for (const [id, shell] of this.shells) {
+        const node = this.entries.get(id)?.node;
+        retained.set(id, { state: shell.presentation(), open: !!node?.hasAttribute("open") && !node.hasAttribute("data-auto-open"), closed: !!node?.hasAttribute(READER_CLOSED) });
+      }
+    } else if (!retainShellPresentation) this.shellPresentations.clear();
+    for (const shell of this.shells.values()) shell.dispose();
+    this.shells.clear();
+    for (const entry of this.entries.values()) deferredBodies.delete(entry.node);
     this.entries.clear();
     this.draftEntries.clear();
     this.groupEntries.clear();
@@ -325,6 +450,22 @@ export class TimelineRenderer {
     this.focusAfterPaint = undefined;
     this.conversationId = null;
   }
+}
+
+function shellMetadata(item: ConversationItem, conversation: string): ShellOutputMetadata | null {
+  const detail = item.type === "tool" ? describeToolDetail(item) : undefined;
+  if (item.type !== "command" && detail?.kind !== "bash") return null;
+  if (item.type !== "command" && item.type !== "tool") return null;
+  // Shell providers currently omit this field. Honour it if a future normalized
+  // carrier supplies one; createdAt is the start and must never stand in for it.
+  const completedAt = "completedAt" in item && typeof item.completedAt === "number" ? item.completedAt : undefined;
+  return {
+    command: item.type === "command" ? item.command : detail!.kind === "bash" ? detail.command : "",
+    conversation, status: item.status,
+    ...(detail?.kind === "bash" ? { description: [detail.description, detail.background ? "started in the background" : ""].filter(Boolean).join(" · ") } : {}),
+    ...(item.type === "command" && item.exitCode !== undefined ? { exitCode: item.exitCode } : {}),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
 }
 
 /**
@@ -966,6 +1107,7 @@ export const READER_CLOSED = "data-reader-closed";
 // terminal pane's own look, which the shell command row asks for.
 function renderActivityOutput(output: string | undefined, status: ActivityStatus, terminal = false): string {
   if (!output) return "";
+  if (terminal) return `<pre class="chat-tool-output chat-tool-terminal chat-shell-viewport">${terminalTextToHtml(output)}</pre>`;
   const look = terminal ? " chat-tool-terminal" : "";
   if (status === "running") {
     // Search backward only as far as the visible tail. This runs for every

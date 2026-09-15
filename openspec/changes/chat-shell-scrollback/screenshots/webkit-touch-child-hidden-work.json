@@ -1,0 +1,38 @@
+{
+  "engine": "webkit",
+  "touch": true,
+  "child": true,
+  "before": {
+    "inputCodeUnits": 271439,
+    "segmentedCodeUnits": 542640,
+    "renderedCells": 271320,
+    "prefixCodeUnits": 0,
+    "resets": 1,
+    "lineWrites": 120,
+    "paints": 1,
+    "parseMs": 179,
+    "transcriptRenders": 4
+  },
+  "hidden": {
+    "inputCodeUnits": 271439,
+    "segmentedCodeUnits": 542640,
+    "renderedCells": 271320,
+    "prefixCodeUnits": 0,
+    "resets": 1,
+    "lineWrites": 120,
+    "paints": 1,
+    "parseMs": 179,
+    "transcriptRenders": 4
+  },
+  "restored": {
+    "inputCodeUnits": 271524,
+    "segmentedCodeUnits": 542793,
+    "renderedCells": 271396,
+    "prefixCodeUnits": 271439,
+    "resets": 1,
+    "lineWrites": 129,
+    "paints": 2,
+    "parseMs": 180,
+    "transcriptRenders": 6
+  }
+}

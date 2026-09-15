@@ -10,11 +10,12 @@ import { materializeChatActivity, revealChatMatch } from "../chat/timeline-rende
 import { findDocument } from "../shared/types";
 import type { FindEngine } from "./engine";
 import { clampSeed, describeStatus } from "./find-status";
-import { supportsHighlights } from "./highlight";
+import { revealRange, supportsHighlights } from "./highlight";
 import { DEFAULT_MATCH_OPTIONS, type MatchOptions } from "./matcher";
 import { createPreviewEngine } from "./preview-engine";
 import { setActiveTab } from "../shell/tab-bar";
 import { expandChatPanel } from "../chat/surface";
+import { currentFloatingShellOutput, revealShellOutputMatch, shellOutputWindow } from "../chat/shell-output-window";
 
 const findBarElementMaybe = document.querySelector<HTMLElement>("#find-bar");
 const queryInputMaybe = document.querySelector<HTMLInputElement>("#find-query");
@@ -72,9 +73,53 @@ const previewFindSlot: HTMLElement = previewFindSlotMaybe;
 const SEARCH_DEBOUNCE_MS = 120;
 
 const previewEngine = createPreviewEngine(previewElement, previewShellElement, previewFindSlot);
+function chatTarget(): HTMLElement {
+  const floating = currentFloatingShellOutput();
+  if (floating) return floating.owner.element;
+  const child = document.querySelector<HTMLElement>("#chat-drilldown");
+  return child && !child.hidden
+    ? document.querySelector<HTMLElement>("#chat-drilldown-items") ?? chatItemsMaybe!
+    : chatItemsMaybe!;
+}
+
+function chatScrollRoot(): HTMLElement {
+  return currentFloatingShellOutput()?.viewport
+    ?? (chatTarget().id === "chat-drilldown-items"
+      ? document.querySelector<HTMLElement>("#chat-drilldown-timeline")! : chatTimelineMaybe!);
+}
+
+function chatBarHost(): HTMLElement {
+  const host = currentFloatingShellOutput() && shellOutputWindow().element;
+  if (!host) return chatFindSlotMaybe!;
+  let slot = host.querySelector<HTMLElement>(".chat-shell-find-slot");
+  if (!slot) {
+    slot = document.createElement("div");
+    slot.className = "chat-shell-find-slot";
+    slot.setAttribute("data-shell-escape-priority", "");
+    slot.style.flexShrink = "0";
+    host.querySelector(".chat-shell-window-header")!.after(slot);
+  }
+  return slot;
+}
+
 const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFindSlotMaybe, {
-  prepareIndex: () => materializeChatActivity(chatItemsMaybe),
+  target: chatTarget,
+  barHost: chatBarHost,
+  focusTarget: chatScrollRoot,
+  watchRoot: document.body,
+  prepareIndex: () => materializeChatActivity(chatTarget()),
   prepareReveal: revealChatMatch,
+  revealMatch: range => {
+    if (revealShellOutputMatch(range)) return true;
+    const viewport = range.startContainer.parentElement?.closest(".chat-shell-viewport");
+    if (!viewport) return false;
+    // The shell schedules its own range reveal. Bring its viewport into the
+    // transcript now, rather than scrolling toward a still-clipped text rect.
+    const outerRange = document.createRange();
+    outerRange.selectNode(viewport);
+    revealRange(outerRange, chatScrollRoot());
+    return true;
+  },
   includeClosedDetails: true,
   label: "chat",
   revealSurface: () => {
@@ -83,7 +128,7 @@ const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFin
     expandChatPanel();
     if (document.documentElement.dataset.uiMode === "touch") setActiveTab("chat");
   },
-  scrollRoot: () => chatTimelineMaybe,
+  scrollRoot: chatScrollRoot,
 });
 
 let open = false;
@@ -141,6 +186,7 @@ function receiveOutcome(outcome: {
 }
 
 function run(reveal: boolean): void {
+  if (engine) mountOn(engine);
   lastRunQuery = queryInput.value;
   engine?.run(queryInput.value, options, { reveal });
 }
@@ -193,10 +239,10 @@ function refreshAfterContentChange(): void {
 
 // The reader's current selection, if it lies inside the searched surface — a
 // selection elsewhere is not a statement about this search. Only the preview
-// engine searches the DOM the selection lives in; a preview selection says
-// nothing about a terminal search.
+// and chat engines search DOM text; a DOM selection says nothing about a
+// terminal search.
 function selectionSeed(target: FindEngine): string {
-  if (target !== previewEngine) {
+  if (target !== previewEngine && target !== chatEngine) {
     return "";
   }
   const selection = window.getSelection();
@@ -204,7 +250,7 @@ function selectionSeed(target: FindEngine): string {
     return "";
   }
   const anchor = selection.anchorNode;
-  if (!anchor || !isWithinPreview(anchor)) {
+  if (!anchor || !(target === chatEngine ? chatTarget().contains(anchor) : isWithinPreview(anchor))) {
     return "";
   }
   return clampSeed(selection.toString());
@@ -294,6 +340,7 @@ export function closeFindBar(): void {
   // Hand focus back to the surface at the position the reader was left at, so
   // Space and PageDown keep working instead of falling through to the body.
   closing?.focusSurface();
+  if (closing === chatEngine) chatFindSlotMaybe!.append(findBarElement);
 }
 
 // Relocate the bar onto the surface being searched, and say which one that is.
@@ -329,6 +376,7 @@ export function initFindBar(): void {
     }
     if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       closeFindBar();
     }
   });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { chatViewportMetrics } from "./viewport";
+import { chatViewportMetrics, ChatViewportController } from "./viewport";
+import { parseHTML } from "linkedom";
 
 describe("chat visual viewport geometry", () => {
   test("reserves the visible touch bar and reclaims it when the keyboard covers it", () => {
@@ -9,5 +10,32 @@ describe("chat visual viewport geometry", () => {
 
   test("accounts for a panned iOS visual viewport", () => {
     expect(chatViewportMetrics(500, 40, 800, 70)).toEqual({ height: 500, tabInset: 0, keyboardVisible: true });
+  });
+
+  test("viewport changes request the shared owner only while Chat is visible", () => {
+    const { document, window } = parseHTML('<html data-ui-mode="desktop" data-chat-panel="open"><body><section></section><form></form></body></html>');
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+    Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+    Object.defineProperty(globalThis, "document", { configurable: true, value: document });
+    try {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+      let requests = 0;
+      const controller = new ChatViewportController(document.querySelector("section")! as unknown as HTMLElement,
+        document.querySelector("form")! as unknown as HTMLElement, () => requests++);
+      controller.apply();
+      expect(requests).toBe(1);
+      expect(document.querySelector("section")!.style.getPropertyValue("--chat-visual-height")).toBe("800px");
+      document.documentElement.setAttribute("data-chat-panel", "collapsed");
+      controller.apply();
+      expect(requests).toBe(1);
+      document.documentElement.setAttribute("data-ui-mode", "touch");
+      document.documentElement.setAttribute("data-active-tab", "chat");
+      controller.apply();
+      expect(requests).toBe(2);
+    } finally {
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow); else Reflect.deleteProperty(globalThis, "window");
+      if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument); else Reflect.deleteProperty(globalThis, "document");
+    }
   });
 });

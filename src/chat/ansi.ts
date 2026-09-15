@@ -155,12 +155,45 @@ function newLine(): LineBuffer {
  * they were, or spaces where nothing was. Other C0 controls are dropped.
  */
 export function renderTerminalText(text: string): TerminalLine[] {
-  const lines: LineBuffer[] = [newLine()];
-  let line = lines[0]!;
-  let style: TerminalStyle = PLAIN;
-  const length = text.length;
-  let index = 0;
-  const put = (column: number, char: string) => {
+  return [...new TerminalTextParser().feed(text).lines];
+}
+
+export type TerminalTextUpdate = {
+  /** Live read-only view; consume before the next feed/update. Lines before dirtyFrom retain identity. */
+  lines: readonly TerminalLine[];
+  /** First line to reconcile, or lines.length if there is no visible change. */
+  dirtyFrom: number;
+};
+
+export type TerminalOutputUpdate = TerminalTextUpdate & { reset: boolean };
+
+export type TerminalParserStats = {
+  inputCodeUnits: number;
+  segmentedCodeUnits: number;
+  renderedCells: number;
+};
+
+/** Stateful terminal text interpreter. Incomplete controls never become text.
+ * Only the last printable grapheme remains provisional: another chunk can
+ * extend it, including between UTF-16 surrogate halves. Completed lines are
+ * rendered once; a feed rebuilds only the mutable line and newly added lines.
+ */
+export class TerminalTextParser {
+  private line = newLine();
+  private style: TerminalStyle = PLAIN;
+  private readonly lines: TerminalLine[] = [[]];
+  private pending = "";
+  private mode: "text" | "escape" | "intermediate" | "csi" | "string" = "text";
+  private params = "";
+  private osc = false;
+  private stringEscape = false;
+  private changed = false;
+  private readonly work: TerminalParserStats = { inputCodeUnits: 0, segmentedCodeUnits: 0, renderedCells: 0 };
+
+  get stats(): Readonly<TerminalParserStats> { return { ...this.work }; }
+
+  private put(column: number, char: string): void {
+    const { line, style } = this;
     // Clearing a wide character's other half when one half is overwritten —
     // its style too, or a red background would outlive the glyph it was on.
     const previous = line.chars[column];
@@ -173,8 +206,10 @@ export function renderTerminalText(text: string): TerminalLine[] {
     }
     line.chars[column] = char;
     line.styles[column] = style;
-  };
-  const write = (char: string) => {
+  }
+
+  private write(char: string): void {
+    const { line } = this;
     const width = cellWidth(char);
     if (width === 0) {
       // A combining mark joins the cell before the cursor; with none, it
@@ -188,117 +223,176 @@ export function renderTerminalText(text: string): TerminalLine[] {
         return;
       }
     }
-    put(line.cursor, char);
+    this.put(line.cursor, char);
     line.cursor += 1;
     if (width === 2) {
-      put(line.cursor, WIDE_TAIL);
+      this.put(line.cursor, WIDE_TAIL);
       line.cursor += 1;
     }
-  };
-  while (index < length) {
-    const code = text.charCodeAt(index);
-    // 8-bit C1 controls are the 7-bit ESC forms in one code point: CSI
-    // (0x9B), the control-string introducers, and ST (0x9C). Treated as
-    // their two-byte spellings so parameters never reach the text.
-    const c1 = code >= 0x80 && code <= 0x9f;
-    const next = c1 ? C1_AS_ESC[code] : text[index + 1];
-    const skip = c1 ? 1 : 2;
-    if (code === 0x1b || c1) {
-      if (next === "[") {
-        // CSI: parameter bytes, then a final byte in 0x40–0x7E. CAN or SUB
-        // cancels the sequence (the byte goes with it); another ESC cancels
-        // it too and starts afresh, so what follows is parsed as normal.
-        let end = index + skip;
-        let cancelled: "restart" | "drop" | undefined;
-        while (end < length) {
-          const c = text.charCodeAt(end);
-          if (c >= 0x40 && c <= 0x7e) break;
-          if (c === 0x18 || c === 0x1a) { cancelled = "drop"; break; }
-          if (c === 0x1b || (c >= 0x80 && c <= 0x9f)) { cancelled = "restart"; break; }
+  }
+
+  private flush(): void {
+    if (this.pending) {
+      this.work.segmentedCodeUnits += this.pending.length;
+      for (const grapheme of graphemes(this.pending)) this.write(grapheme);
+    }
+    this.pending = "";
+  }
+
+  private publish(): void {
+    const original = this.line;
+    // Preview the unfinished grapheme without committing its cell width or
+    // destructive overwrite. A variation selector can still widen it later.
+    if (this.pending) {
+      this.line = { chars: [...original.chars], styles: [...original.styles], cursor: original.cursor };
+      this.work.segmentedCodeUnits += this.pending.length;
+      for (const grapheme of graphemes(this.pending)) this.write(grapheme);
+    }
+    this.work.renderedCells += this.line.chars.length;
+    const rendered = toRuns(this.line);
+    this.line = original;
+    const index = this.lines.length - 1;
+    const previous = this.lines[index]!;
+    if (previous.length !== rendered.length || previous.some((run, at) => run.text !== rendered[at]!.text || !sameStyle(run.style, rendered[at]!.style))) {
+      this.lines[index] = rendered;
+      this.changed = true;
+    }
+  }
+
+  private introduce(next: string | undefined): void {
+    if (next === "[") { this.mode = "csi"; this.params = ""; }
+    else if (next === "]" || next === "P" || next === "_" || next === "^" || next === "X") {
+      this.mode = "string";
+      this.osc = next === "]";
+      this.stringEscape = false;
+    } else this.mode = "text";
+  }
+
+  feed(text: string): TerminalTextUpdate {
+    this.work.inputCodeUnits += text.length;
+    let dirtyFrom = this.lines.length;
+    let needsPublish = false;
+    const publish = () => {
+      this.changed = false;
+      this.publish();
+      if (this.changed) dirtyFrom = Math.min(dirtyFrom, this.lines.length - 1);
+      needsPublish = false;
+    };
+    for (let index = 0; index < text.length;) {
+      const code = text.charCodeAt(index);
+      const char = text[index]!;
+      const c1 = code >= 0x80 && code <= 0x9f;
+      if (this.mode === "string") {
+        if ((this.stringEscape && char === "\\") || (this.osc && code === 7) || code === 0x9c || code === 0x18 || code === 0x1a) this.mode = "text";
+        this.stringEscape = code === 0x1b;
+      } else if (this.mode === "csi") {
+        if (code >= 0x40 && code <= 0x7e) {
+          if (char === "m") this.style = applySgr(this.style, this.params);
+          else if (char === "K") { eraseInLine(this.line, this.params, this.style); needsPublish = true; }
+          this.params = "";
+          this.mode = "text";
+        } else if (code === 0x18 || code === 0x1a || code === 0x1b || c1) {
+          this.params = "";
+          this.mode = "text";
+          if (code === 0x1b || c1) continue; // restart at this introducer
+        } else this.params += char;
+      } else if (this.mode === "escape" || this.mode === "intermediate") {
+        if (code >= 0x20 && code <= 0x2f) this.mode = "intermediate";
+        else if (this.mode === "escape") this.introduce(char);
+        else this.mode = "text";
+      } else if (code === 0x1b || c1) {
+        this.flush();
+        if (c1) this.introduce(C1_AS_ESC[code]);
+        else this.mode = "escape";
+      } else if (code < 0x20 || code === 0x7f) {
+        this.flush();
+        if (code === 0x0a) {
+          if (needsPublish) publish();
+          this.line = newLine();
+          dirtyFrom = Math.min(dirtyFrom, this.lines.length);
+          this.lines.push([]);
+        } else if (code === 0x0d) this.line.cursor = 0;
+        else if (code === 0x08) this.line.cursor = Math.max(0, this.line.cursor - 1);
+        else if (code === 0x09) {
+          const stop = (Math.floor(this.line.cursor / TAB_STOP) + 1) * TAB_STOP;
+          while (this.line.chars.length < stop) {
+            this.line.chars.push(" ");
+            this.line.styles.push(PLAIN);
+            needsPublish = true;
+          }
+          this.line.cursor = stop;
+        }
+      } else {
+        let end = index + 1;
+        while (end < text.length) {
+          const ahead = text.charCodeAt(end);
+          if (ahead < 0x20 || ahead === 0x7f || (ahead >= 0x80 && ahead <= 0x9f)) break;
           end += 1;
         }
-        if (cancelled === "drop") { index = end + 1; continue; }
-        if (cancelled === "restart") { index = end; continue; }
-        if (end >= length) break; // truncated sequence at the end of a chunk: drop it
-        const final = text[end]!;
-        const params = text.slice(index + skip, end);
-        if (final === "m") style = applySgr(style, params);
-        else if (final === "K") eraseInLine(line, params, style);
-        index = end + 1;
-        continue;
-      }
-      if (next === "]" || next === "P" || next === "_" || next === "^" || next === "X") {
-        // A control string runs to ST (ESC \ or 0x9C) — and, for OSC only,
-        // to BEL, which xterm accepts there and treats as payload in DCS,
-        // APC, PM and SOS. The whole payload goes, not just its introducer.
-        // CAN or SUB aborts the string, and what follows is output again.
-        const bel = next === "]";
-        let end = index + skip;
-        while (end < length) {
-          const c = text.charCodeAt(end);
-          if ((bel && c === 0x07) || c === 0x9c || c === 0x18 || c === 0x1a) { end += 1; break; }
-          if (c === 0x1b && text[end + 1] === "\\") { end += 2; break; }
-          end += 1;
+        const printable = this.pending + text.slice(index, end);
+        this.work.segmentedCodeUnits += printable.length;
+        this.pending = "";
+        // A trailing high surrogate is not yet a code point. Keep the last
+        // complete grapheme too, since the pair may extend that grapheme.
+        const last = printable.charCodeAt(printable.length - 1);
+        const surrogate = last >= 0xd800 && last <= 0xdbff ? printable.slice(-1) : "";
+        for (const grapheme of graphemes(surrogate ? printable.slice(0, -1) : printable)) {
+          this.flush();
+          this.pending = grapheme;
         }
+        this.pending += surrogate;
+        needsPublish = true;
         index = end;
         continue;
       }
-      if (c1) {
-        // Any other C1 control (a lone ST, NEL, and the rest) is a control,
-        // not text.
-        index += 1;
-        continue;
-      }
-      // Any other ESC sequence: intermediate bytes (0x20–0x2F) through a
-      // final byte — charset designations (ESC ( B, ESC % G), keypad modes,
-      // save/restore cursor, reverse index — consumed whole.
-      let end = index + 1;
-      while (end < length && text.charCodeAt(end) >= 0x20 && text.charCodeAt(end) <= 0x2f) end += 1;
-      index = end + 1;
-      continue;
-    }
-    if (code === 0x0a) {
-      line = newLine();
-      lines.push(line);
       index += 1;
-      continue;
     }
-    if (code === 0x0d) {
-      line.cursor = 0;
-      index += 1;
-      continue;
-    }
-    if (code === 0x08) {
-      if (line.cursor > 0) line.cursor -= 1;
-      index += 1;
-      continue;
-    }
-    if (code === 0x09) {
-      const stop = (Math.floor(line.cursor / TAB_STOP) + 1) * TAB_STOP;
-      while (line.chars.length < stop) {
-        line.chars.push(" ");
-        line.styles.push(PLAIN);
-      }
-      line.cursor = stop;
-      index += 1;
-      continue;
-    }
-    if (code < 0x20 || code === 0x7f) {
-      index += 1;
-      continue;
-    }
-    // A run of printable text is laid out grapheme by grapheme: a joined or
-    // modified emoji is one glyph, so a `\r` overwrite clears it whole.
-    let end = index + 1;
-    while (end < length) {
-      const ahead = text.charCodeAt(end);
-      if (ahead < 0x20 || ahead === 0x7f || (ahead >= 0x80 && ahead <= 0x9f)) break;
-      end += 1;
-    }
-    for (const grapheme of graphemes(text.slice(index, end))) write(grapheme);
-    index = end;
+    if (needsPublish) publish();
+    return { lines: this.lines, dirtyFrom };
   }
-  return lines.map(toRuns);
+}
+
+/** Accepts authoritative cumulative snapshots, parsing only verified suffixes.
+ * Prefix comparison is deliberately measured separately from parser work.
+ */
+export class TerminalOutputBuffer {
+  private output = "";
+  private parser = new TerminalTextParser();
+  private initialized = false;
+  private previousWork: TerminalParserStats = { inputCodeUnits: 0, segmentedCodeUnits: 0, renderedCells: 0 };
+  private prefixCodeUnits = 0;
+  private resets = 0;
+
+  get stats(): Readonly<TerminalParserStats & { prefixCodeUnits: number; resets: number }> {
+    const current = this.parser.stats;
+    return {
+      inputCodeUnits: this.previousWork.inputCodeUnits + current.inputCodeUnits,
+      segmentedCodeUnits: this.previousWork.segmentedCodeUnits + current.segmentedCodeUnits,
+      renderedCells: this.previousWork.renderedCells + current.renderedCells,
+      prefixCodeUnits: this.prefixCodeUnits,
+      resets: this.resets,
+    };
+  }
+
+  update(output: string): TerminalOutputUpdate {
+    let append = this.initialized && output.length >= this.output.length;
+    if (append && output !== this.output) {
+      // Count the comparison budget, not engine-specific startsWith internals.
+      this.prefixCodeUnits += this.output.length;
+      append = output.startsWith(this.output);
+    }
+    const reset = !append;
+    if (reset) {
+      const total = this.stats;
+      this.previousWork = { inputCodeUnits: total.inputCodeUnits, segmentedCodeUnits: total.segmentedCodeUnits, renderedCells: total.renderedCells };
+      this.parser = new TerminalTextParser();
+      this.resets += 1;
+    }
+    const result = this.parser.feed(reset ? output : output.slice(this.output.length));
+    this.output = output;
+    this.initialized = true;
+    return { ...result, dirtyFrom: reset ? 0 : result.dirtyFrom, reset };
+  }
 }
 
 // Erased cells take the active rendition, as a terminal fills them with the

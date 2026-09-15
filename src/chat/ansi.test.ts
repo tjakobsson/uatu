@@ -1,8 +1,125 @@
 import { describe, expect, test } from "bun:test";
 
-import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
+import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml, TerminalOutputBuffer, TerminalTextParser } from "./ansi";
 
 const ESC = "\x1b";
+
+describe("incremental terminal text", () => {
+  const fixtures = [
+    "", "one\n\ntwo\r\n", "123456\rab\bX\tY",
+    `${ESC}[1;2;3;4;7;9;31;44mstyled\nnext${ESC}[22;23;24;27;29;39;49mplain`,
+    `${ESC}[38;5;196mred${ESC}[48;2;10;20;30mbg${ESC}[38:2::1:2:3mcolon${ESC}[m`,
+    `first\nDownloading  10%\rDownloading 100%\r${ESC}[Kdone\n`,
+    `abc\r${ESC}[41m${ESC}[Kz${ESC}[2KQ${ESC}[1Kx`,
+    `a界\b${ESC}[Kz\n日本x\rA\n界\r${ESC}[1Kxy`,
+    "e\u0301x\rA\n👩‍💻x\rA\n👍🏽x\rAB\n☑️x\rA\n🇺🇸x\rA",
+    "\u0301x\n🇺🇸🇨🇦\n👨‍👩‍👧‍👦\nक्‍ष\n1️⃣\n\ud83dX\udc00",
+    `${ESC}]8;;javascript:alert(1)${ESC}\\<script>&\"'${ESC}]8;;${ESC}\\`,
+    `before${ESC}Psecret\x07still secret${ESC}${ESC}\\after${ESC}_hidden\x18shown`,
+    `${ESC}^hidden${ESC}\\${ESC}Xhidden\x1ashown${ESC}]title\x07ok`,
+    `a${ESC}[31\x18b${ESC}[31${ESC}[32mc${ESC}[12\u009b0md`,
+    `\u009b31mred\u009dtitle\u009cplain\u0090payload\u009cend\u0085`,
+    `a${ESC}%Gb${ESC}*Bc${ESC}(Bd${ESC}7e\x00\x7f`,
+    `tail${ESC}`, `tail${ESC}[38;2;1`, `tail${ESC}]hidden`, `tail${ESC}(`,
+  ];
+
+  test("every UTF-16 split and every single-unit feed matches one-shot lines and safe HTML", () => {
+    for (const input of fixtures) {
+      const expected = renderTerminalText(input);
+      for (let split = 0; split <= input.length; split += 1) {
+        const parser = new TerminalTextParser();
+        expect(parser.feed(input.slice(0, split)).lines).toEqual(renderTerminalText(input.slice(0, split)));
+        const result = parser.feed(input.slice(split));
+        expect(result.lines).toEqual(expected);
+        expect(terminalLinesToHtml(result.lines)).toBe(terminalTextToHtml(input));
+        expect(terminalLinesToHtml(result.lines)).not.toMatch(/<(?!\/?span[ >])/);
+      }
+      const parser = new TerminalTextParser();
+      for (let at = 0; at < input.length; at += 1) {
+        expect(parser.feed(input[at]!).lines).toEqual(renderTerminalText(input.slice(0, at + 1)));
+      }
+    }
+  });
+
+  test("provisional grapheme widths do not destroy overwritten cells", () => {
+    const parser = new TerminalTextParser();
+    parser.feed("abcd\r☑");
+    expect(terminalLinesToHtml(parser.feed("️").lines)).toBe("☑️cd");
+    expect(terminalLinesToHtml(parser.feed("X").lines)).toBe("☑️Xd");
+    const joined = new TerminalTextParser();
+    joined.feed("123456\r👩‍");
+    joined.feed("\ud83d");
+    expect(terminalLinesToHtml(joined.feed("\udcbbX").lines)).toBe("👩‍💻X456");
+  });
+
+  test("dirty ranges preserve unchanged lines, including controls and newline-only appends", () => {
+    const parser = new TerminalTextParser();
+    const first = parser.feed("fixed\nprogress");
+    const fixed = first.lines[0];
+    const progress = first.lines[1];
+    expect(first.dirtyFrom).toBe(0);
+    expect(parser.feed(`${ESC}[31m`).dirtyFrom).toBe(2);
+    expect(parser.feed("\r").dirtyFrom).toBe(2);
+    const rewrite = parser.feed("done");
+    expect(rewrite.dirtyFrom).toBe(1);
+    expect(rewrite.lines[0]).toBe(fixed);
+    expect(progress).toEqual([{ text: "progress", style: {} }]);
+    expect(parser.feed("\n").dirtyFrom).toBe(2);
+    expect(parser.feed("").dirtyFrom).toBe(3);
+  });
+
+  test("cumulative snapshots reset on corrections, shortening, and empty replacements", () => {
+    const buffer = new TerminalOutputBuffer();
+    let previous = "";
+    const snapshots = ["one\ntwo", "one\ntwo!", "one\nTWO!", "one", "", `${ESC}[31mred${ESC}]secret`, "plain", "plain\n", "plain\n"];
+    for (const [at, output] of snapshots.entries()) {
+      const result = buffer.update(output);
+      const reset = at === 0 || !output.startsWith(previous);
+      expect(result.reset).toBe(reset);
+      expect(result.lines).toEqual(renderTerminalText(output));
+      if (reset) expect(result.dirtyFrom).toBe(0);
+      previous = output;
+    }
+    const work = buffer.stats;
+    buffer.update(previous);
+    expect(buffer.stats).toEqual(work);
+  });
+
+  test("long cumulative logs parse suffixes with linear work and retain the first line", () => {
+    const buffer = new TerminalOutputBuffer();
+    let output = "earliest\n";
+    const first = buffer.update(output).lines[0];
+    const updates = 2000;
+    for (let at = 0; at < updates; at += 1) {
+      output += `${ESC}[32mline ${at}${ESC}[0m\n`;
+      const result = buffer.update(output);
+      expect(result.reset).toBe(false);
+      expect(result.dirtyFrom).toBe(at + 1);
+      expect(result.lines[0]).toBe(first);
+      expect(result.lines.length).toBe(at + 3);
+    }
+    expect(buffer.stats.inputCodeUnits).toBe(output.length);
+    expect(buffer.stats.segmentedCodeUnits).toBeLessThan(output.length * 3);
+    expect(buffer.stats.renderedCells).toBeLessThan(output.length);
+    expect(buffer.stats.prefixCodeUnits).toBeGreaterThan(output.length * 100);
+    expect(buffer.stats.resets).toBe(1);
+    expect(buffer.update(output).lines).toEqual(renderTerminalText(output));
+  });
+
+  test("unterminated hostile control payloads are consumed once without rendering work", () => {
+    const parser = new TerminalTextParser();
+    parser.feed(`visible${ESC}]`);
+    const before = parser.stats;
+    for (let at = 0; at < 1000; at += 1) {
+      const result = parser.feed("<script>hidden</script>\n");
+      expect(result.dirtyFrom).toBe(1);
+    }
+    expect(parser.stats.inputCodeUnits - before.inputCodeUnits).toBe(1000 * "<script>hidden</script>\n".length);
+    expect(parser.stats.segmentedCodeUnits).toBe(before.segmentedCodeUnits);
+    expect(parser.stats.renderedCells).toBe(before.renderedCells);
+    expect(terminalLinesToHtml(parser.feed(`${ESC}\\<b>shown</b>`).lines)).toBe("visible&lt;b&gt;shown&lt;/b&gt;");
+  });
+});
 
 describe("renderTerminalText", () => {
   test("styles runs by SGR and resets them", () => {

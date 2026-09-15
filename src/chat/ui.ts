@@ -8,7 +8,8 @@ import { registerBackInterceptor } from "../shell/history";
 import { onManualRecovery, registerRecoveryWork, requestManualRecovery } from "../shell/live";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type ChatEventStream } from "./client";
-import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor, type ScrollMovement } from "./anchor";
+import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
+import { CoordinatedScrollOwner } from "./coordinated-scroll";
 import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
@@ -163,7 +164,6 @@ export function initChat(api = new ChatApiClient()): void {
   if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !queueDockElement || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDetails || !configurationModeSummary || !configurationVariantSummary || !configurationVariantValue || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
 
   const anchor = new TimelineAnchorController();
-  const viewport = new ChatViewportController(surface, form, timeline, anchor);
   const renderer = new TimelineRenderer();
   renderer.deferClosedActivity = true;
   const readSignal = createLoadingSignal({ segment: null, barHost: timeline, busyHost: timeline, visibleLabel: true });
@@ -586,8 +586,48 @@ export function initChat(api = new ChatApiClient()): void {
   // reader experiences as dead.
   const extentsOf = (scroller: HTMLElement): AnchorGeometry =>
     ({ scrollTop: scroller.scrollTop, clientHeight: scroller.clientHeight, scrollHeight: scroller.scrollHeight, items: [] });
-  const anchorGeometry = (): AnchorGeometry => anchor.isPinned() ? extentsOf(timeline) : geometry();
-  const childAnchorGeometry = (): AnchorGeometry => childAnchor.isPinned() ? extentsOf(drilldownTimeline!) : childGeometry();
+  const parentScroll = new CoordinatedScrollOwner(timeline, {
+    anchor, measure: includeItems => includeItems ? geometry() : extentsOf(timeline), active: chatSurfaceActive,
+    onChange: () => {
+      if (projection) {
+        const current = anchor.currentAnchor();
+        if (current) presentation.anchors[projection.conversationId] = current;
+        else delete presentation.anchors[projection.conversationId];
+        save();
+      }
+      latestButton.hidden = !anchor.hasUnseen();
+      syncPromptRailActive();
+    },
+  });
+  const childLatest = drilldownTimeline ? document.createElement("button") : null;
+  if (childLatest && drilldownTimeline) {
+    childLatest.id = "chat-drilldown-latest";
+    childLatest.type = "button";
+    childLatest.className = latestButton.className;
+    childLatest.textContent = "Latest in subagent";
+    childLatest.hidden = true;
+    drilldownTimeline.after(childLatest);
+  }
+  const childScroll = drilldownTimeline ? new CoordinatedScrollOwner(drilldownTimeline, {
+    anchor: childAnchor, measure: includeItems => includeItems ? childGeometry() : extentsOf(drilldownTimeline),
+    active: () => chatSurfaceActive() && !!child,
+    onChange: () => { if (childLatest) childLatest.hidden = !childAnchor.hasUnseen(); },
+  }) : null;
+  childLatest?.addEventListener("click", () => childScroll?.latest());
+  renderer.shellMutationHooks = {
+    beforeMutation: () => parentScroll.beforeMutation(),
+    afterMutation: () => parentScroll.request(),
+    inspected: () => save(),
+  };
+  childRenderer.shellMutationHooks = {
+    beforeMutation: () => childScroll?.beforeMutation(),
+    afterMutation: () => childScroll?.request(),
+    inspected: () => save(),
+  };
+  const viewport = new ChatViewportController(surface, form, () => {
+    parentScroll.request();
+    childScroll?.request();
+  });
 
   const flushSave = () => {
     if (saveTimer !== null) {
@@ -1071,6 +1111,7 @@ export function initChat(api = new ChatApiClient()): void {
   const jumpToPrompt = (id: string, smooth: boolean): HTMLElement | null => {
     const node = items.querySelector<HTMLElement>(`[data-chat-item-id="${CSS.escape(id)}"]`);
     if (!node) return null;
+    parentScroll.pause();
     const bounds = timeline.getBoundingClientRect();
     timeline.scrollTo({
       top: timeline.scrollTop + node.getBoundingClientRect().top - bounds.top - 8,
@@ -1173,7 +1214,11 @@ export function initChat(api = new ChatApiClient()): void {
     rendering = true;
     // The card states the owning agent's own persistent-approval reach.
     renderer.permissionScopeNote = agent?.permissionScopeNote;
+    const conversation = conversations.find(value => value.id === projection?.conversationId);
+    renderer.conversationTitle = conversation ? displayConversationTitle(conversation) : chatHeading();
     const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
+    // Reconcile the current snapshot before revealing a retained output window.
+    renderer.setShellOutputsHidden(false);
     revertedDock?.render(projection?.reversibleHistory?.revertedMessages ?? []);
     queueDock.render(queueDockElement, projection?.queued ?? []);
     syncHistoryControls();
@@ -1184,7 +1229,7 @@ export function initChat(api = new ChatApiClient()): void {
     syncOutstandingRequests();
     syncContextIndicator();
     syncPromptRail();
-    timeline.scrollTop = anchor.afterMutation(anchorGeometry(), newContent);
+    parentScroll.request(newContent);
     latestButton.hidden = !anchor.hasUnseen();
     syncControls();
     for (const node of dirty) {
@@ -1213,12 +1258,13 @@ export function initChat(api = new ChatApiClient()): void {
     if (renderFrame !== null) return;
     // beforeMutation is a no-op while pinned — skipping the call skips the
     // full-geometry pass it would otherwise be handed for nothing.
-    if (captureCurrent && !anchor.isPinned()) anchor.beforeMutation(geometry());
-    renderFrame = requestAnimationFrame(() => {
+    if (captureCurrent) parentScroll.beforeMutation();
+    renderFrame = requestAnimationFrame(timestamp => {
       renderFrame = null;
       const content = pendingNewContent;
       pendingNewContent = false;
       renderNow(content);
+      parentScroll.flush(timestamp);
     });
   };
 
@@ -2125,6 +2171,7 @@ export function initChat(api = new ChatApiClient()): void {
     renderConfiguration();
     renderAttachments();
     announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
+    parentScroll.cancel();
     anchor.restore(presentation.anchors[snapshot.conversation.id] ?? null);
     scheduleRender(false, false);
     stream = openConversationStream(snapshot.conversation.id, snapshot.cursor, token);
@@ -2202,6 +2249,8 @@ export function initChat(api = new ChatApiClient()): void {
 
   const selectConversation = async (id: string): Promise<boolean> => {
     if (projection?.conversationId === id && stream && !historyRefreshRequired.has(id) && !selectedConversationDeleted) return true;
+    renderer.closeShellOutputWindow();
+    childRenderer.closeShellOutputWindow();
     readLane?.controller.abort();
     stopConversationRefreshRecovery();
     selectedConversationDeleted = false;
@@ -2627,7 +2676,7 @@ export function initChat(api = new ChatApiClient()): void {
     const current = projection;
     let changedHistory = false;
     olderButton.disabled = true;
-    if (chatSurfaceActive()) anchor.beforeMutation(anchorGeometry());
+    parentScroll.beforeMutation();
     try {
       await runConversationRead("Loading older messages...", () => {
         if (changedHistory) void refreshSelectedConversation(current.conversationId);
@@ -2639,51 +2688,15 @@ export function initChat(api = new ChatApiClient()): void {
         });
         if (signal.aborted || projection?.conversationId !== current.conversationId) return;
         projection = prependSnapshot(projection, page);
-        if (!chatSurfaceActive()) { scheduleRender(false, false); return; }
-        const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
-        timeline.scrollTop = anchor.afterMutation(geometry());
-        for (const node of dirty) { decorateFileLinks(node); decorateAttachmentImages(node); }
+        // Publish the prepended DOM and its anchor correction in one frame.
+        scheduleRender(false, false);
       });
     } catch { /* The read lane owns its error and retry. */ }
     finally { olderButton.disabled = false; syncControls(); }
   });
 
-  let lastParentScrollTop = 0;
-  let lastChildScrollTop = 0;
-  // Sub-pixel jitter in a fractional scrollTop is not a movement either way.
-  const scrollMovement = (top: number, last: number): ScrollMovement => top < last - 0.5 ? "up" : top > last + 0.5 ? "down" : "none";
-  timeline.addEventListener("scroll", () => {
-    if (rendering || !chatSurfaceActive()) return;
-    // Classified from the position as it arrived, before any correction
-    // below moves it: a sub-pixel upward step judged after a snap to the
-    // end would read as no movement at all.
-    const movement = scrollMovement(timeline.scrollTop, lastParentScrollTop);
-    // Revealing an intrinsic-size placeholder can grow the scroll extent
-    // before ResizeObserver runs (notably in WebKit). That is not a reader
-    // scrolling upward; preserve pinning until an actual upward movement.
-    if (anchor.isPinned() && movement !== "up") {
-      timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
-    }
-    // Cheap while pinned; the full pass runs once unpinned — and on the
-    // upward tick that unpins, since that tick must capture the anchor the
-    // position is saved under: a single wheel step followed by a reload has
-    // no later tick to heal a missing capture, and would come back pinned.
-    // Downward ticks while pinned stay extents-only, so a long chat pays no
-    // forced layout per scroll event of a streaming turn.
-    anchor.observe(movement === "up" ? geometry() : anchorGeometry(), movement);
-    lastParentScrollTop = timeline.scrollTop;
-    if (projection) {
-      const current = anchor.currentAnchor();
-      if (current) presentation.anchors[projection.conversationId] = current;
-      else delete presentation.anchors[projection.conversationId];
-      save();
-    }
-    latestButton.hidden = !anchor.hasUnseen();
-    syncPromptRailActive();
-  }, { passive: true });
   latestButton.addEventListener("click", () => {
-    timeline.scrollTo({ top: anchor.jumpToLatest(geometry()), behavior: reducedMotion() ? "auto" : "smooth" });
-    latestButton.hidden = true;
+    parentScroll.latest();
   });
 
   /**
@@ -2693,9 +2706,7 @@ export function initChat(api = new ChatApiClient()): void {
    */
   const wireExpansionToggle = (
     container: HTMLElement,
-    scroller: HTMLElement,
-    controller: TimelineAnchorController,
-    measure: () => AnchorGeometry,
+    scroll: CoordinatedScrollOwner,
   ) => {
     container.addEventListener("toggle", event => {
       const details = event.target as HTMLDetailsElement;
@@ -2709,7 +2720,7 @@ export function initChat(api = new ChatApiClient()): void {
       // The reader can only ever close an already-open row (open=false, which
       // passes) or open an unmarked one, so no real interaction is lost.
       if (details.open && details.hasAttribute("data-auto-open")) return;
-      controller.beforeMutation(measure(), details.dataset.chatItemId);
+      scroll.beforeMutation(details.dataset.chatItemId);
       // The reader has spoken, so the row is theirs from here. Clearing the
       // stream's auto-open marker stops the next render from undoing an
       // expansion they made on a row that had opened itself; recording a close
@@ -2720,7 +2731,7 @@ export function initChat(api = new ChatApiClient()): void {
       details.toggleAttribute(READER_CLOSED, !details.open);
       if (details.open) expanded.add(details.dataset.chatItemId!); else expanded.delete(details.dataset.chatItemId!);
       save();
-      requestAnimationFrame(() => { scroller.scrollTop = controller.afterMutation(measure()); });
+      scroll.request();
     }, true);
   };
 
@@ -2900,29 +2911,32 @@ export function initChat(api = new ChatApiClient()): void {
     }
     if (childIncrementalTimer !== null) { clearTimeout(childIncrementalTimer); childIncrementalTimer = null; }
     if (childRenderFrame !== null) return;
-    childRenderFrame = requestAnimationFrame(() => {
+    childRenderFrame = requestAnimationFrame(timestamp => {
       childRenderFrame = null;
       if (!chatSurfaceActive()) return;
       const content = childNewContent;
       childNewContent = false;
       childRenderDirty = false;
       renderChildNow(content);
+      childScroll?.flush(timestamp);
     });
   };
 
   const renderChildNow = (newContent: boolean) => {
     lastChildPaint = performance.now();
     if (!drilldownItems || !drilldownTimeline) return;
-    if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
+    childScroll?.beforeMutation();
     childRenderer.permissionScopeNote = agent?.permissionScopeNote;
+    childRenderer.conversationTitle = child?.label;
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"), false, turnStartedAt(child?.projection));
+    childRenderer.setShellOutputsHidden(false);
     syncWorkingTimer();
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
     // A subagent's report is the same login's plan: the Usage pane follows
     // it like the parent's (newest wins, by the report's own time).
     const childReport = child?.projection && declares("context") ? latestPlanReport(child.projection.items) : undefined;
     if (childReport?.plan) noteUsageReport({ plan: childReport.plan, reportedAt: childReport.createdAt });
-    drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
+    childScroll?.request(newContent);
     for (const node of dirty) {
       decorateFileLinks(node);
       decorateAttachmentImages(node);
@@ -2943,6 +2957,9 @@ export function initChat(api = new ChatApiClient()): void {
    * no-op.
    */
   const closeChildConversation = (popped = false) => {
+    childRenderer.closeShellOutputWindow();
+    childScroll?.cancel();
+    if (childLatest) childLatest.hidden = true;
     const open = child;
     if (!open) return;
     if (!popped && drilldownClosePending) return;
@@ -2987,7 +3004,7 @@ export function initChat(api = new ChatApiClient()): void {
     surface.removeAttribute("data-chat-drilldown");
     // Back to the parent at its live position: it never unmounted, so this is
     // only re-asserting the anchor the timeline was already holding.
-    timeline.scrollTop = anchor.afterMutation(geometry());
+    parentScroll.request();
     timeline.focus({ preventScroll: true });
     // A jump that was waiting on this close lands after the anchor restore,
     // never before it — see the requests-jump handler.
@@ -3098,6 +3115,7 @@ export function initChat(api = new ChatApiClient()): void {
       drilldownOlder.hidden = true;
       drilldownOlder.disabled = false;
     }
+    childScroll?.cancel();
     childAnchor.restore(retainedAnchor);
     announceChild("");
     drilldownBack?.focus();
@@ -3119,7 +3137,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (!open?.projection?.olderCursor) return;
     const generation = childGeneration;
     drilldownOlder.disabled = true;
-    childAnchor.beforeMutation(childGeometry());
+    childScroll?.beforeMutation();
     try {
       let changedHistory = false;
       await runChildRead(open, "Loading older messages...", () => {
@@ -3148,20 +3166,11 @@ export function initChat(api = new ChatApiClient()): void {
     closeChildConversation();
   });
 
-  wireExpansionToggle(items, timeline, anchor, geometry);
+  wireExpansionToggle(items, parentScroll);
   wireItemInteractions(items, () => projection, { renderer, rerender: () => scheduleRender(false) });
   if (drilldownItems && drilldownTimeline) {
-    wireExpansionToggle(drilldownItems, drilldownTimeline, childAnchor, childGeometry);
+    wireExpansionToggle(drilldownItems, childScroll!);
     wireItemInteractions(drilldownItems, () => child?.projection ?? null, { renderer: childRenderer, rerender: () => renderChild(false) });
-    drilldownTimeline.addEventListener("scroll", () => {
-      if (!chatSurfaceActive()) return;
-      const movement = scrollMovement(drilldownTimeline.scrollTop, lastChildScrollTop);
-      if (childAnchor.isPinned() && movement !== "up") {
-        drilldownTimeline.scrollTop = Math.max(0, drilldownTimeline.scrollHeight - drilldownTimeline.clientHeight);
-      }
-      childAnchor.observe(movement === "up" ? childGeometry() : childAnchorGeometry(), movement);
-      lastChildScrollTop = drilldownTimeline.scrollTop;
-    }, { passive: true });
   }
 
   const closeCommandMenu = () => {
@@ -3595,7 +3604,7 @@ export function initChat(api = new ChatApiClient()): void {
     // land in view — a reader who scrolled up to reread an earlier turn
     // before pressing Enter is not asking to stay there while the answer
     // arrives out of sight below the latest-content affordance.
-    timeline.scrollTop = anchor.jumpToLatest(extentsOf(timeline));
+    parentScroll.latest();
     latestButton.hidden = true;
     scheduleRender(true);
     try {
@@ -3682,21 +3691,15 @@ export function initChat(api = new ChatApiClient()): void {
     submitting = false;
     syncControls();
   });
-  let resizeFrame: number | null = null;
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
     if (!chatSurfaceActive()) return;
-    if (resizeFrame !== null) return;
-    resizeFrame = requestAnimationFrame(() => {
-      resizeFrame = null;
-      if (!chatSurfaceActive()) return;
-      const parentTop = anchor.afterMutation(anchorGeometry());
-      const childTop = child && drilldownTimeline ? childAnchor.afterMutation(childAnchorGeometry()) : undefined;
-      timeline.scrollTop = parentTop;
-      if (childTop !== undefined && drilldownTimeline) drilldownTimeline.scrollTop = childTop;
-    });
+    parentScroll.request();
+    childScroll?.request();
   }) : null;
   observer?.observe(items);
+  observer?.observe(timeline);
   if (drilldownItems) observer?.observe(drilldownItems);
+  if (drilldownTimeline) observer?.observe(drilldownTimeline);
   viewport.start();
   // The draft is saved on every hide, persisted or not: a frozen page can be
   // discarded later without ever running code again. Nothing else happens
@@ -4042,8 +4045,8 @@ export function initChat(api = new ChatApiClient()): void {
   let chatWasActive = false;
   const captureSurfaceAnchors = () => {
     if (!chatSurfaceActive()) return;
-    if (!anchor.isPinned()) anchor.beforeMutation(geometry());
-    if (child && !childAnchor.isPinned() && drilldownTimeline) childAnchor.beforeMutation(childGeometry());
+    parentScroll.beforeMutation();
+    childScroll?.beforeMutation();
   };
   document.addEventListener("uatu:before-surface-change", captureSurfaceAnchors);
   const handleChatSurfaceState = () => {
@@ -4053,6 +4056,10 @@ export function initChat(api = new ChatApiClient()): void {
     syncWorkingTimer();
     syncChatAttention();
     if (!active) {
+      renderer.setShellOutputsHidden(true);
+      childRenderer.setShellOutputsHidden(true);
+      parentScroll.cancel();
+      childScroll?.cancel();
       readSignal.cancel();
       childReadSignal?.cancel();
       if (incrementalTimer !== null) { clearTimeout(incrementalTimer); incrementalTimer = null; }
@@ -4065,8 +4072,10 @@ export function initChat(api = new ChatApiClient()): void {
       if (readLane) readLane.token = readSignal.start(readLane.label);
       else if (bootstrapping) bootstrapRead = readSignal.start("Loading conversations...");
       if (child?.read) child.read.token = childReadSignal?.start(child.read.label) ?? 0;
-      if (renderDirty) scheduleRender(false, false);
-      if (childRenderDirty) renderChild(false);
+      // Even an unchanged projection may own a hidden floating viewport.
+      // Its latest state is painted before its retained window becomes visible.
+      scheduleRender(false, false);
+      renderChild(false);
     }
     if (!bootstrapped) void bootstrap();
     else if (becameActive) {
