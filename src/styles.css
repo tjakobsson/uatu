@@ -6000,7 +6000,8 @@ body.is-resizing-chat .chat-resizer {
 .chat-shell-output :focus-visible, .chat-shell-window :focus-visible, .chat-shell-slot > button:focus-visible { outline: 2px solid var(--accent, #3b7dd8); outline-offset: 2px; }
 .chat-shell-window {
   position: fixed;
-  z-index: 50;
+  /* Above desktop-host frost/headers (90/91), below modal overlays (100). */
+  z-index: 95;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;

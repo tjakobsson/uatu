@@ -111,6 +111,10 @@ Presentation state needs no stored-data migration. The known-completion requirem
 
 ### PR review follow-up
 
+The fifth review identified two macOS-wrapper integration defects, reproduced in both Chromium and WebKit using the existing desktop-host DOM contract. The output work area now intersects the visual viewport with the native `--titlebar-inset` when `uatu-desktop-host` is present. Root class/style changes trigger layout so native tab-bar height changes update floating bounds and maximized height without a reload. Without the marker, the custom property does not affect browser layout.
+
+The output window now uses layer 95, above desktop frost and headers at 90/91 and below modal overlays at 100. Four new browser regressions verify top-edge pointer/keyboard clamping, changing inset values, usable controls over desktop headers, and a modal painting above the window. All four and the seven existing desktop-inset cases passed, as did 44 affected unit tests, typecheck, and whitespace validation. These verify the SPA side of the wrapper contract.
+
 The fourth review found three lifecycle gaps. Upward reader scrolling and Find reveal now record inspection through the existing coordinated scroll owner, keeping the activity open on completion without overriding explicit reader closure. Retained shell presentation includes the last-painted raw output string, so reconstructing unchanged output preserves `unseen=false`, while output received during absence sets the indicator. The retained value shares an immutable string reference; it can keep an older snapshot alive during navigation.
 
 Return-to-chat focus now checks semantic and layout reachability and falls back from Pop out to the visible owning row/group summary or timeline. It never opens a closed activity merely to focus it and continues to use `preventScroll`. Verification passed: 318 affected unit tests, 12 new Chromium/WebKit lifecycle browser cases, all 28 existing frame-stability/responsiveness cases, typecheck, and whitespace checks.

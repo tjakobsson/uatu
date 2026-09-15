@@ -42,6 +42,13 @@ function defaultWorkArea(): ShellWindowGeometry {
   let y = viewport?.offsetTop ?? 0;
   let right = x + (viewport?.width ?? window.innerWidth);
   let bottom = y + (viewport?.height ?? window.innerHeight);
+  const root = document.documentElement;
+  if (root.classList.contains("uatu-desktop-host")) {
+    // WKWebView's visual viewport does not account for the native titlebar.
+    // Intersect the visible viewport with the wrapper's unobscured region.
+    const inset = Number.parseFloat(window.getComputedStyle(root).getPropertyValue("--titlebar-inset"));
+    if (Number.isFinite(inset)) y = Math.max(y, inset);
+  }
   // Persistent navigation remains available, including the touch tab bar.
   for (const node of document.querySelectorAll<HTMLElement>("#touch-tab-bar, .sidebar-rail")) {
     const rect = node.getBoundingClientRect();
@@ -157,7 +164,7 @@ export class ShellOutputWindow {
     });
     if (typeof MutationObserver !== "undefined") {
       this.modeObserver = new MutationObserver(layout);
-      this.modeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-ui-mode"] });
+      this.modeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-ui-mode", "class", "style"] });
     }
   }
 
