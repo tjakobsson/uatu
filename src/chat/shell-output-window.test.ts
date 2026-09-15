@@ -102,6 +102,28 @@ test("closing preserves inertness that predates both owners", () => {
   a.dispose();
 });
 
+for (const configured of [false, true]) test(`covered prompt navigation is inert while persistent tabs remain available, configured roots: ${configured}`, () => {
+  const promptRail = dom.document.createElement("nav") as unknown as HTMLElement;
+  promptRail.id = "chat-prompt-rail";
+  promptRail.innerHTML = "<button>First prompt</button><button>Second prompt</button>";
+  const tabs = dom.document.createElement("nav") as unknown as HTMLElement;
+  tabs.id = "touch-tab-bar";
+  tabs.innerHTML = "<button>Files</button><button>Chat</button>";
+  dom.document.body.append(promptRail, tabs);
+  for (const node of [promptRail, tabs]) node.getBoundingClientRect = () => ({ ...area, left: area.x, top: area.y,
+    right: area.x + area.width, bottom: area.y + area.height, toJSON() {} });
+  window.configure({ workArea: () => area, touch: () => touch,
+    ...(configured ? { coveredRoots: () => [promptRail, tabs] } : {}) });
+  const a = shell("a"); window.open(a); window.toggleMaximize();
+  expect(promptRail.hasAttribute("inert")).toBe(true);
+  expect(tabs.hasAttribute("inert")).toBe(false);
+  window.toggleMaximize(); expect(promptRail.hasAttribute("inert")).toBe(false);
+  touch = true; window.layout(); expect(promptRail.hasAttribute("inert")).toBe(true);
+  expect(tabs.hasAttribute("inert")).toBe(false);
+  window.close(false); expect(promptRail.hasAttribute("inert")).toBe(false);
+  a.dispose();
+});
+
 test("covered Preview find is inert until moved into the active full-area window", () => {
   const find = dom.document.createElement("div") as unknown as HTMLElement;
   find.id = "find-bar";

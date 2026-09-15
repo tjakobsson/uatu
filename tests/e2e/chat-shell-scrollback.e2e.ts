@@ -4,6 +4,7 @@ import { chromium, webkit, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { captureScreenshot, openChatPanel } from "./chat-helpers";
 import { chatWorkload } from "../fixtures/chat-performance";
+import { armConversationCommit, conversationCommit, stopConversationCommit } from "./chat-shell-performance-helpers";
 import { bootShell, control, drag, expectBounded, expectReading, frames, log, openShellRow, position, settleScroll, shell } from "./chat-shell-helpers";
 
 const SHOTS = path.resolve(import.meta.dirname, "../../openspec/changes/chat-shell-scrollback/screenshots");
@@ -45,6 +46,40 @@ const work = (page: Page) => page.evaluate(() => {
 });
 
 for (const engine of ["chromium", "webkit"] as const) {
+  for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} full-area output protects covered prompt navigation`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
+      viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
+    try {
+      const { outputView } = await bootShell(page, request, { touch, extra: [
+        { id: "second-prompt", type: "user_message", text: "Second prompt to navigate to", createdAt: 2 },
+      ] });
+      const rail = page.locator("#chat-prompt-rail");
+      await expect(rail.locator("button")).toHaveCount(2);
+      await expect(rail).toBeVisible();
+      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      const window = floating(page);
+      if (!touch) await window.getByRole("button", { name: "Maximize", exact: true }).click();
+      await expect(window).toHaveClass(/is-full-area/);
+      await expect.poll(() => rail.evaluate(el => !!el.closest("[inert]"))).toBe(true);
+      await window.getByRole("button", { name: "Return to chat" }).focus();
+      for (let i = 0; i < 16; i++) {
+        await page.keyboard.press("Tab");
+        expect(await page.evaluate(() => !!document.activeElement?.closest("#chat-prompt-rail"))).toBe(false);
+      }
+      if (touch) {
+        expect(await page.locator("#touch-tab-bar").evaluate(el => !!el.closest("[inert]"))).toBe(false);
+      } else {
+        await window.getByRole("button", { name: "Restore size" }).click();
+        await expect.poll(() => rail.evaluate(el => !!el.closest("[inert]"))).toBe(false);
+      }
+      await window.getByRole("button", { name: "Return to chat" }).click();
+      await expect.poll(() => rail.evaluate(el => !!el.closest("[inert]"))).toBe(false);
+      await rail.locator("button").first().focus();
+      await expect(rail.locator("button").first()).toBeFocused();
+    } finally { await browser.close(); }
+  });
+
   test(`${engine} floating Find excludes hidden inline chrome and restores it on return`, async ({ request, baseURL }) => {
     const browser = await ({ chromium, webkit })[engine].launch();
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
@@ -306,30 +341,50 @@ for (const engine of ["chromium", "webkit"] as const) {
     const browser = await ({ chromium, webkit })[engine].launch();
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     const evidence: Record<string, unknown> = { engine, agent, initialLines: 5000, updates: 20, conversationWorkloadItems: 50 };
+    const requests: Record<string, unknown>[] = [];
+    evidence.controlRequests = requests;
+    const boundedControl = async (data: Record<string, unknown>) => {
+      const sample: Record<string, unknown> = { action: data.action, conversationId: data.conversationId,
+        update: evidence.updateIndex, phase: evidence.phase, timeoutMilliseconds: 10_000 };
+      requests.push(sample);
+      const start = Date.now();
+      try {
+        const response = await request.post("/__e2e/chat", { data, timeout: 10_000 });
+        sample.status = response.status();
+        expect(response.ok(), `fixture control ${data.action}`).toBe(true);
+        return await response.json();
+      } catch (error) {
+        sample.error = String(error);
+        throw error;
+      } finally { sample.milliseconds = Date.now() - start; }
+    };
     try {
       const checkInstrumentation = await instrumentShell(page);
       let output = log(5000);
       evidence.initialCodeUnits = output.length;
       const shape = agent === "claude" ? "bash" : "command";
       evidence.phase = "initial conversation selection";
-      const { outputView, viewport, update, parentId } = await test.step("Open the seeded long-output conversation", () => bootShell(page, request, { agent, shape, output,
+      const bootStart = Date.now();
+      const { outputView, viewport, id, parentId } = await test.step("Open the seeded long-output conversation", () => bootShell(page, request, { agent, shape, output,
         extra: chatWorkload(50).map((item, index) => ({ ...item, createdAt: index + 2 })) }));
+      evidence.bootMilliseconds = Date.now() - bootStart;
       checkInstrumentation();
       const firstNode = await viewport.locator(".chat-shell-line").first().elementHandle();
       const initial = await work(page); evidence.before = initial;
       const latencies: number[] = [];
+      evidence.updateToDOMMilliseconds = latencies;
       const startLength = output.length;
       evidence.phase = "streaming appends";
       for (let i = 0; i < 20; i++) {
+        evidence.updateIndex = i;
         output += `\nupdate-${i} ${"append-only ".repeat(20)}`;
         const start = Date.now();
-        await update(shell(shape, output));
+        await boundedControl({ action: "item", conversationId: id, item: shell(shape, output) });
         await expect(viewport.locator(".chat-shell-line").last()).toContainText(`update-${i}`);
         latencies.push(Date.now() - start);
       }
       const after = await work(page); evidence.after = after;
       evidence.appendedCodeUnits = output.length - startLength;
-      evidence.updateToDOMMilliseconds = latencies;
       expect(after.inputCodeUnits - initial.inputCodeUnits).toBe(output.length - startLength);
       expect(after.resets).toBe(initial.resets);
       expect(after.lineWrites - initial.lineWrites).toBeLessThanOrEqual(40);
@@ -354,25 +409,44 @@ for (const engine of ["chromium", "webkit"] as const) {
       expect(Date.now() - interactionStart).toBeLessThan(3000);
       // Navigate through the real inventory selector with a long log retained.
       evidence.phase = "seed navigation target";
-      const other = await control(request, { action: "seed", agent, title: "Other long-output view", items: [] });
+      const other = await boundedControl({ action: "seed", agent, title: "Other long-output view", items: [
+        { id: "navigation-target", type: "assistant_message", createdAt: 1, markdown: "Navigation target committed" },
+      ] });
       evidence.navigationTargetId = other.conversation.id;
       evidence.returnConversationId = parentId;
       const navigationStart = Date.now();
+      const navigate = async (conversationId: string, itemId: string, label: string) => {
+        await armConversationCommit(page, conversationId, itemId);
+        const start = Date.now();
+        try {
+          await test.step(label, () => page.locator("#chat-conversation-select").selectOption(conversationId));
+          await expect.poll(async () => (await conversationCommit(page)).milliseconds, `${label}: target transcript committed`).toBeDefined();
+          const sample = await conversationCommit(page);
+          expect(sample.milliseconds, `${label}: selector change to target transcript DOM commit`).toBeLessThan(3000);
+        } finally {
+          evidence[itemId === "navigation-target" ? "navigateAway" : "navigateBack"] = {
+            ...await conversationCommit(page), roundtripMilliseconds: Date.now() - start,
+          };
+          await stopConversationCommit(page);
+        }
+      };
       evidence.phase = "select navigation target";
-      await test.step("Select the newly seeded conversation", () => page.locator("#chat-conversation-select").selectOption(other.conversation.id));
+      await navigate(other.conversation.id, "navigation-target", "Select the newly seeded conversation");
       evidence.phase = "release floating window";
       await expect(window).toHaveCount(0);
       evidence.phase = "select original conversation";
-      await test.step("Return to the long-output conversation", () => page.locator("#chat-conversation-select").selectOption(parentId));
+      await navigate(parentId, "shell:a", "Return to the long-output conversation");
       evidence.phase = "inspect retained shell row";
       await test.step("Inspect the retained shell row", () => openShellRow(page.locator("#chat-timeline"), "shell:a"));
       await expect(viewport.locator(".chat-shell-line")).toHaveCount(5020);
+      expect((await viewport.locator(".chat-shell-line").allTextContents()).join("")).toBe(output + "\n");
       evidence.navigationMilliseconds = Date.now() - navigationStart;
-      expect(Date.now() - navigationStart).toBeLessThan(3000);
+      // The whole roundtrip also includes two actions, row expansion and protocol
+      // waits. Each navigation's browser response has its own unchanged 3s budget.
       evidence.phase = "complete";
     } finally {
       const report = JSON.stringify(evidence, null, 2);
-      await writeFile(path.join(SHOTS, `${engine}-${agent}-long-output-work.json`), report + "\n");
+      await writeFile(testInfo.outputPath("shell-long-output-work.json"), report + "\n");
       await testInfo.attach("shell-long-output-work.json", { body: report, contentType: "application/json" });
       await browser.close();
     }

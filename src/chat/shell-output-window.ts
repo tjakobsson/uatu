@@ -202,7 +202,7 @@ export class ShellOutputWindow {
     if (full && !this.hidden) {
       const roots = this.options.coveredRoots?.() ?? this.defaultCoveredRoots(area);
       for (const root of roots) {
-        if (root === this.host || root.contains(this.host) || root.matches('[role="dialog"], dialog, nav')) continue;
+        if (root === this.host || root.contains(this.host) || root.matches('[role="dialog"], dialog, #touch-tab-bar, .sidebar-rail')) continue;
         this.inert.add(root); setChatInert(root, this, true);
       }
       if (!this.host.contains(document.activeElement) && [...this.inert.keys()].some(root => root.contains(document.activeElement))) this.returnButton?.focus({ preventScroll: true });
@@ -212,7 +212,7 @@ export class ShellOutputWindow {
 
   private defaultCoveredRoots(area: ShellWindowGeometry): HTMLElement[] {
     const roots: HTMLElement[] = [];
-    const accessible = 'nav, dialog, [role="dialog"], [popover], #touch-tab-bar, .sidebar-rail';
+    const accessible = 'dialog, [role="dialog"], [popover], #touch-tab-bar, .sidebar-rail';
     const walk = (parent: HTMLElement) => {
       for (const node of Array.from(parent.children) as HTMLElement[]) {
         if (node === this.host || node.matches(accessible)) continue;
