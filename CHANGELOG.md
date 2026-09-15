@@ -4,6 +4,19 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.8.0](https://github.com/tjakobsson/uatu/compare/v0.7.0...v0.8.0) (2026-09-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **chat:** Workspace API revision 19 adds optional provider-reported completedAt fields to closed tool and command item schemas. Strict workspace consumers must regenerate; Hub API revision remains 5.
+* **chat:** TokenUsage is a closed wire object; the optional costUsd bumps the workspace API revision 17 -> 18 (contract, OpenAPI, runtime constant, changelog with migration).
+
+### Features
+
+* **chat:** add shell scrollback and a floating output window ([#372](https://github.com/tjakobsson/uatu/issues/372)) ([b206104](https://github.com/tjakobsson/uatu/commit/b20610428552de3a0b848908e3dd5e391b8b5e25))
+* **chat:** report OpenCode conversation cost per agent; render shell output as terminal text ([#368](https://github.com/tjakobsson/uatu/issues/368)) ([aba2428](https://github.com/tjakobsson/uatu/commit/aba24282879d1771101575a5a8df70be1c3ce235))
+
 ## [0.7.0](https://github.com/tjakobsson/uatu/compare/v0.6.2...v0.7.0) (2026-09-13)
 
 
