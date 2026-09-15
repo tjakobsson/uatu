@@ -111,6 +111,10 @@ Presentation state needs no stored-data migration. The known-completion requirem
 
 ### PR review follow-up
 
+The second review found that floating Find indexed CSS-hidden inline controls. Pop-out now marks the command block, Pop out button, and inline resize handle semantically hidden and restores them on return. A new Chromium/WebKit regression verifies invisible controls produce no matches and real output remains searchable. That test also exposed match selection moving when the Latest output control became visible; Find now retains the selected DOM text range when its text survives reindexing.
+
+The remaining hard CI failure was reproduced in the existing touch-scroll test: it opened the outline twice despite the first outline remaining open across the mode switch. The second click was blocked by the outline sheet. The test now asserts the retained open state and visible active headings, preserving the scroll expectations. Follow-up checks passed: 275 affected unit tests, both new browser regressions, all 24 existing Find/touch-scroll cases, typecheck, and whitespace validation. CI's six retry-passing cases were not treated as hard failures or silently assigned a cause.
+
 Addressed all three findings from PR #372: known provider completion timestamps now survive normalization, validation, and replay into shell metadata; inline error Find results scroll both the error pane and its outer transcript; covered Preview Find controls are inert in maximized and touch output, with that coverage released when the shared bar moves into the active window.
 
 The timestamp addition requires workspace API revision 19 because conversation item schemas reject unknown fields. Hub revision remains 5. Provider timestamps are retained only where genuinely supplied, including matching Claude tool-result envelopes; missing completion times are never inferred from receive time. Validation/schema/normalization and frontend checks passed: 397 affected unit tests, 18 Chromium/WebKit browser cases covering the review fixes and adjacent Find/selection paths, typecheck, API validation, and strict OpenSpec validation.

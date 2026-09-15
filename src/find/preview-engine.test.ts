@@ -4,6 +4,30 @@ import { createPreviewEngine } from "./preview-engine";
 import { DEFAULT_MATCH_OPTIONS } from "./matcher";
 import type { FindOutcome } from "./engine";
 
+test("revealing controls before unchanged output preserves the selected match", () => {
+  const { document } = parseHTML('<html><body><article><button hidden>Latest output</button><pre>needle needle</pre></article><aside></aside></body></html>');
+  document.createRange = () => {
+    const range = {
+      startContainer: null as unknown as Node, startOffset: 0,
+      endContainer: null as unknown as Node, endOffset: 0,
+      setStart(node: Node, offset: number) { range.startContainer = node; range.startOffset = offset; },
+      setEnd(node: Node, offset: number) { range.endContainer = node; range.endOffset = offset; },
+    };
+    return range as unknown as Range;
+  };
+  const root = document.querySelector("article") as unknown as HTMLElement;
+  const slot = document.querySelector("aside") as unknown as HTMLElement;
+  const engine = createPreviewEngine(root, root, slot, { revealMatch: () => true });
+  let outcome: FindOutcome | undefined;
+  engine.setOnOutcome(value => { outcome = value; });
+  engine.run("needle", DEFAULT_MATCH_OPTIONS, { reveal: false });
+  engine.step(1, "needle", DEFAULT_MATCH_OPTIONS);
+  expect(outcome).toMatchObject({ total: 2, index: 1 });
+  document.querySelector("button")!.removeAttribute("hidden");
+  engine.run("needle", DEFAULT_MATCH_OPTIONS, { reveal: false });
+  expect(outcome).toMatchObject({ total: 2, index: 1 });
+});
+
 test("dynamic targets reset match position and own bar, focus, and range reveal", () => {
   const { document } = parseHTML('<html><body><article>needle needle</article><section>needle</section><aside></aside><nav></nav></body></html>');
   const roots = Array.from(document.body.children) as unknown as HTMLElement[];

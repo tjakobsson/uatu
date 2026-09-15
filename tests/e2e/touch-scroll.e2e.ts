@@ -323,6 +323,8 @@ test("switching UI mode mid-session keeps every scroll path working", async ({ p
   // an observable claim while the panel is on screen, and asserting against the
   // hidden list would be asserting about something no reader can see.
   await page.locator("#outline-toggle").click();
+  await expect(page.locator("#outline-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".uatu-outline")).toBeVisible();
 
   // Touch mode: the page scrolls.
   await page.keyboard.press(FIND);
@@ -353,21 +355,21 @@ test("switching UI mode mid-session keeps every scroll path working", async ({ p
   // for a given offset is already pinned by the touch-mode test above; pinning
   // it again here would only couple this test to the exact document height,
   // which the docked outline's content gutter reflows underneath it.
-  // Opened here and only here — the outline's highlight is only an observable
-  // claim while the panel is on screen, and toggling twice would close it and
-  // leave the assertion reading a stale, hidden list.
-  await page.locator("#outline-toggle").click();
+  // The outline stays open across the mode switch. At this width it is a sheet
+  // covering the toggle, so a second click would not open it again.
+  await expect(page.locator("#outline-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".uatu-outline")).toBeVisible();
   const active = page.locator(".uatu-outline-link.is-active");
-  // Opening the docked outline reserves a content gutter and reflows the page,
-  // which moves the scroll position under any request issued in the same beat.
-  // Let that land before asking the page to go anywhere.
+  // Let the find reveal settle before asking the page to go anywhere.
   await settleScroll(page);
 
   await page.evaluate(() => window.scrollTo({ top: 0 }));
   await settleScroll(page);
   await expect(active).toHaveText("Tall Document");
+  await expect(active).toBeVisible();
 
   await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight }));
   await settleScroll(page);
   await expect(active).toHaveText("Landing Zone");
+  await expect(active).toBeVisible();
 });

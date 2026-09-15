@@ -77,6 +77,9 @@ export class ShellOutputWindow {
       this.placeholder.textContent = "Output is in floating window · Focus output";
       this.placeholder.addEventListener("click", () => this.returnButton?.focus({ preventScroll: true }));
       owner.slot.append(this.placeholder);
+      // Find indexes semantic visibility, not computed styles. These inline
+      // controls are absent from the floating output, including its index.
+      owner.command.hidden = owner.popout.hidden = owner.resize.hidden = true;
       this.content!.append(owner.element);
       this.layout();
     });
@@ -256,6 +259,7 @@ export class ShellOutputWindow {
     owner.mutate(() => {
       this.placeholder?.remove(); this.placeholder = undefined;
       owner.slot.classList.remove("is-popped-out"); owner.slot.style.minHeight = "";
+      owner.command.hidden = owner.popout.hidden = owner.resize.hidden = false;
       owner.slot.append(owner.element);
       this.host?.remove();
     });

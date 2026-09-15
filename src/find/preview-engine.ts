@@ -84,6 +84,7 @@ export function createPreviewEngine(
       // Where the reader currently is, so a re-run after a live reload lands
       // near it rather than snapping to the top of the document.
       const anchor = currentIndex >= 0 ? spans[currentIndex]?.start ?? null : null;
+      const selectedRange = currentIndex >= 0 ? ranges[currentIndex] : undefined;
       // Indexing `#preview` covers split layouts for free: both panes are its
       // children, so their text concatenates in document order and matches
       // come out as one ordered sequence across the pair.
@@ -109,7 +110,12 @@ export function createPreviewEngine(
           ranges.push(toRange(located, target.ownerDocument));
         }
       }
-      currentIndex = spans.length === 0 ? -1 : nearestSpan(spans, anchor ?? 0);
+      // Showing a control above retained output shifts flat offsets. Prefer the
+      // same text range so revealing a match cannot move Find to another one.
+      const retainedIndex = selectedRange ? ranges.findIndex(range => range.startContainer === selectedRange.startContainer
+        && range.startOffset === selectedRange.startOffset && range.endContainer === selectedRange.endContainer
+        && range.endOffset === selectedRange.endOffset) : -1;
+      currentIndex = retainedIndex >= 0 ? retainedIndex : spans.length === 0 ? -1 : nearestSpan(spans, anchor ?? 0);
       paint(opts.reveal);
       emit(null);
     },

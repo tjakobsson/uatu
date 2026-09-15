@@ -45,6 +45,41 @@ const work = (page: Page) => page.evaluate(() => {
 });
 
 for (const engine of ["chromium", "webkit"] as const) {
+  test(`${engine} floating Find excludes hidden inline chrome and restores it on return`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
+    try {
+      const { outputView, update } = await bootShell(page, request, { output: "visible-output-needle" });
+      const popout = outputView.getByRole("button", { name: "Pop out", exact: true });
+      await popout.click();
+      const window = floating(page);
+      await window.getByRole("button", { name: "Return to chat" }).focus();
+      await page.keyboard.press("Meta+f");
+      for (const query of ["Pop out", "fixture-shell:a"]) {
+        await page.locator("#find-query").fill(query);
+        await expect(page.locator("#find-status")).toHaveText("No results");
+      }
+      await update(shell("command", "visible-output-needle\nlater-output-needle"));
+      await page.locator("#find-query").fill("output-needle");
+      await expect(page.locator("#find-status")).toHaveText("1 of 2");
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#find-status")).toHaveText("2 of 2");
+      await page.keyboard.press("Escape");
+      await window.getByRole("button", { name: "Maximize", exact: true }).click();
+      await page.keyboard.press("Meta+f");
+      await page.locator("#find-query").fill("Pop out");
+      await expect(page.locator("#find-status")).toHaveText("No results");
+      await page.keyboard.press("Escape");
+      await window.getByRole("button", { name: "Return to chat" }).click();
+      await expect(popout).toBeVisible();
+      await expect(outputView.locator(".chat-tool-command")).toBeVisible();
+      await expect(outputView.getByRole("separator", { name: /Output height/ })).toBeVisible();
+      await page.keyboard.press("Meta+f");
+      await page.locator("#find-query").fill("fixture-shell:a");
+      await expect(page.locator("#find-status")).toHaveText(/\d+ of \d+/);
+    } finally { await browser.close(); }
+  });
+
   for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find reveals inline error matches on both axes`, async ({ request, baseURL }) => {
     const browser = await ({ chromium, webkit })[engine].launch();
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });

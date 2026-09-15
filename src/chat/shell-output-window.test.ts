@@ -36,9 +36,12 @@ test("one body-mounted host moves the same output, retains A/B geometry, and res
   expect(window.element!.parentElement).toBe(dom.document.body);
   expect(window.element!.contains(viewport)).toBe(true);
   expect(a.slot.querySelector(".chat-shell-viewport")).toBeNull();
+  for (const node of [a.command, a.popout, a.resize]) expect(node.hidden).toBe(true);
   window.setGeometry({ x: 80, y: 60, width: 1000, height: 600 });
   const boundsA = { ...a.floatingGeometry! };
   window.open(b); expect(a.slot.contains(viewport)).toBe(true);
+  for (const node of [a.command, a.popout, a.resize]) expect(node.hidden).toBe(false);
+  for (const node of [b.command, b.popout, b.resize]) expect(node.hidden).toBe(true);
   window.setGeometry({ x: 120, y: 90, width: 500, height: 300 });
   window.close(false); window.open(a);
   expect(a.floatingGeometry).toEqual(boundsA);
