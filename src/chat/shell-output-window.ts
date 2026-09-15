@@ -1,6 +1,10 @@
 import type { ShellOutputController } from "./shell-output";
 import { setChatInert } from "./inert";
 
+// These controls remain above or outside full-area output. Both coverage paths
+// share the exemption so recovery stays available alongside app navigation.
+const PERSISTENT_CONTROLS = "#touch-tab-bar, .sidebar-rail, .stale-client-notice";
+
 export type ShellWindowGeometry = { x: number; y: number; width: number; height: number };
 export type ShellWindowOptions = {
   workArea?: () => ShellWindowGeometry;
@@ -230,7 +234,7 @@ export class ShellOutputWindow {
     if (full && !this.hidden) {
       const roots = this.options.coveredRoots?.() ?? this.defaultCoveredRoots(area);
       for (const root of roots) {
-        if (root === this.host || root.contains(this.host) || root.matches('[role="dialog"], dialog, #touch-tab-bar, .sidebar-rail')) continue;
+        if (root === this.host || root.contains(this.host) || root.matches(`[role="dialog"], dialog, ${PERSISTENT_CONTROLS}`)) continue;
         this.inert.add(root); setChatInert(root, this, true);
       }
       if (!this.host.contains(document.activeElement) && [...this.inert.keys()].some(root => root.contains(document.activeElement))) this.returnButton?.focus({ preventScroll: true });
@@ -240,7 +244,7 @@ export class ShellOutputWindow {
 
   private defaultCoveredRoots(area: ShellWindowGeometry): HTMLElement[] {
     const roots: HTMLElement[] = [];
-    const accessible = 'dialog, [role="dialog"], [popover], #touch-tab-bar, .sidebar-rail';
+    const accessible = `dialog, [role="dialog"], [popover], ${PERSISTENT_CONTROLS}`;
     const walk = (parent: HTMLElement) => {
       for (const node of Array.from(parent.children) as HTMLElement[]) {
         if (node === this.host || node.matches(accessible)) continue;

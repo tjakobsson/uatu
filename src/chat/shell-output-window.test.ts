@@ -102,6 +102,24 @@ test("closing preserves inertness that predates both owners", () => {
   a.dispose();
 });
 
+for (const configured of [false, true]) test(`persistent recovery notice stays operable above full-area output, configured roots: ${configured}`, () => {
+  const notice = dom.document.createElement("div") as unknown as HTMLElement;
+  notice.className = "stale-client-notice";
+  notice.innerHTML = '<button class="stale-client-notice-action">Reload</button>';
+  dom.document.body.append(notice);
+  const button = notice.querySelector<HTMLElement>("button")!;
+  for (const node of [notice, button]) node.getBoundingClientRect = () => ({ ...area, left: area.x, top: area.y,
+    right: area.x + area.width, bottom: area.y + area.height, toJSON() {} });
+  window.configure({ workArea: () => area, touch: () => touch,
+    ...(configured ? { coveredRoots: () => [notice] } : {}) });
+  const a = shell("a"); window.open(a); window.toggleMaximize();
+  expect(button.closest("[inert]")).toBeNull();
+  window.toggleMaximize(); touch = true; window.layout();
+  expect(button.closest("[inert]")).toBeNull();
+  window.close(false); expect(button.closest("[inert]")).toBeNull();
+  a.dispose();
+});
+
 for (const configured of [false, true]) test(`covered prompt navigation is inert while persistent tabs remain available, configured roots: ${configured}`, () => {
   const promptRail = dom.document.createElement("nav") as unknown as HTMLElement;
   promptRail.id = "chat-prompt-rail";

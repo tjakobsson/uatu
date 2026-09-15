@@ -111,6 +111,8 @@ Presentation state needs no stored-data migration. The known-completion requirem
 
 ### PR review follow-up
 
+The sixth review found the visible stale-build recovery notice being made inert by full-area output. Both coverage paths now share an explicit persistent-control selector that includes `.stale-client-notice`. Two unit regressions failed before the fix and now pass. Browser cases use the notice's DOM/CSS contract and verify both pointer activation and keyboard activation above desktop/touch output in Chromium and WebKit. The reload effect is replaced by an activation counter for the test. The four recovery cases and four existing shell desktop-host cases passed, as did 57 affected unit tests and typecheck.
+
 The fifth review identified two macOS-wrapper integration defects, reproduced in both Chromium and WebKit using the existing desktop-host DOM contract. The output work area now intersects the visual viewport with the native `--titlebar-inset` when `uatu-desktop-host` is present. Root class/style changes trigger layout so native tab-bar height changes update floating bounds and maximized height without a reload. Without the marker, the custom property does not affect browser layout.
 
 The output window now uses layer 95, above desktop frost and headers at 90/91 and below modal overlays at 100. Four new browser regressions verify top-edge pointer/keyboard clamping, changing inset values, usable controls over desktop headers, and a modal painting above the window. All four and the seven existing desktop-inset cases passed, as did 44 affected unit tests, typecheck, and whitespace validation. These verify the SPA side of the wrapper contract.

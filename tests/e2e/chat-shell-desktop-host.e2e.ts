@@ -13,6 +13,43 @@ async function titlebar(page: Page, inset: number, hosted = true) {
 }
 
 for (const engine of ["chromium", "webkit"] as const) {
+  for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} stale-build recovery stays clickable above full-area output`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
+      viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
+    try {
+      const { outputView } = await bootShell(page, request, { touch });
+      // Use the recovery overlay's real DOM/CSS contract; count activation
+      // instead of navigating away so both pointer and keyboard can be checked.
+      await page.evaluate(() => {
+        const notice = document.createElement("div");
+        notice.className = "stale-client-notice"; notice.setAttribute("role", "alert");
+        const message = document.createElement("span"); message.className = "stale-client-notice-message";
+        message.textContent = "This page is running a different build than the server. Reload to update.";
+        const reload = document.createElement("button"); reload.type = "button";
+        reload.className = "stale-client-notice-action"; reload.textContent = "Reload";
+        reload.addEventListener("click", () => { notice.dataset.activations = String(Number(notice.dataset.activations ?? 0) + 1); });
+        notice.append(message, reload); document.body.append(notice);
+      });
+      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      const window = outputWindow(page);
+      if (!touch) await window.getByRole("button", { name: "Maximize", exact: true }).click();
+      const notice = page.locator(".stale-client-notice");
+      const reload = notice.getByRole("button", { name: "Reload", exact: true });
+      expect(await reload.evaluate(el => !!el.closest("[inert]"))).toBe(false);
+      await reload.click(); await expect(notice).toHaveAttribute("data-activations", "1");
+      await window.getByRole("button", { name: "Return to chat" }).focus();
+      // macOS WebKit's default keyboard policy uses Option-Tab to include buttons.
+      const tab = engine === "webkit" && process.platform === "darwin" ? "Alt+Tab" : "Tab";
+      for (let i = 0; i < 20 && !await reload.evaluate(el => el === document.activeElement); i++) await page.keyboard.press(tab);
+      await expect(reload).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(notice).toHaveAttribute("data-activations", "2");
+      await window.getByRole("button", { name: "Return to chat" }).click();
+      expect(await reload.evaluate(el => !!el.closest("[inert]"))).toBe(false);
+    } finally { await browser.close(); }
+  });
+
   test(`${engine} shell window respects native titlebar bounds and live inset changes`, async ({ request, baseURL }) => {
     const browser = await ({ chromium, webkit })[engine].launch();
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
