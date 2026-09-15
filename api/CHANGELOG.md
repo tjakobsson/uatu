@@ -2,6 +2,18 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 5 / Workspace 19 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `tool` and `command` conversation items gain optional `completedAt`, the provider-reported terminal timestamp in Unix epoch milliseconds. Live updates and history carry it when available. Unknown times remain absent.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 19. These item objects are closed, so revision 18 validators reject the optional field when present. Display the time only for a terminal status; pending or running items must not receive a completed label from a stale timestamp. Do not substitute creation time, duration, receive time, or silence for an absent completion time.
+
 ## Hub 5 / Workspace 18 - Unreleased
 
 Compatibility: breaking (workspace)

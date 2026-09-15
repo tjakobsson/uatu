@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { claudeProjectDir, foldCommandMarkup, listTranscriptSessions, parseTaskNotification, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
+import { normalizeTranscriptEntries } from "./normalization";
 
 function line(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -49,6 +50,29 @@ describe("project directory encoding", () => {
 });
 
 describe("reading one transcript", () => {
+  test("tool result record timestamps survive disk reading and normalization", async () => {
+    const { projectDir } = fixture();
+    const file = path.join(projectDir, "tool-times.jsonl");
+    writeFileSync(file, [
+      assistantLine("call", "", "2026-09-15T10:00:00.000Z", { message: { role: "assistant", content: [
+        { type: "tool_use", id: "bash", name: "Bash", input: { command: "pwd" } },
+        { type: "tool_use", id: "read", name: "Read", input: { file_path: "missing" } },
+      ] } }),
+      userLine("read-result", "", "2026-09-15T10:00:02.000Z", { message: { role: "user", content: [
+        { type: "tool_result", tool_use_id: "read", is_error: true, content: "missing" },
+      ] } }),
+      userLine("bash-result", "", "2026-09-15T10:00:04.000Z", { message: { role: "user", content: [
+        { type: "tool_result", tool_use_id: "bash", content: "/workspace" },
+      ] } }),
+    ].join(""));
+    const { entries, skipped } = await readSessionTranscript(file);
+    expect(skipped).toEqual({});
+    expect(normalizeTranscriptEntries(entries).items).toMatchObject([
+      { id: "tool:bash", status: "completed", createdAt: Date.parse("2026-09-15T10:00:00Z"), completedAt: Date.parse("2026-09-15T10:00:04Z") },
+      { id: "tool:read", status: "failed", completedAt: Date.parse("2026-09-15T10:00:02Z") },
+    ]);
+  });
+
   test("keeps user and assistant entries, skips and counts everything else", async () => {
     const { projectDir } = fixture();
     const file = path.join(projectDir, "session-1.jsonl");

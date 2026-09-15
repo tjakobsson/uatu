@@ -99,6 +99,26 @@ test("closing preserves inertness that predates both owners", () => {
   a.dispose();
 });
 
+test("covered Preview find is inert until moved into the active full-area window", () => {
+  const find = dom.document.createElement("div") as unknown as HTMLElement;
+  find.id = "find-bar";
+  find.innerHTML = '<input aria-label="Find in document"><button>Next</button>';
+  dom.document.querySelector("main")!.append(find);
+  find.getBoundingClientRect = () => ({ ...area, left: area.x, top: area.y,
+    right: area.x + area.width, bottom: area.y + area.height, toJSON() {} });
+  window.configure({ workArea: () => area, touch: () => touch });
+  const a = shell("a"); window.open(a); window.toggleMaximize();
+  expect(find.hasAttribute("inert")).toBe(true);
+  window.toggleMaximize(); expect(find.hasAttribute("inert")).toBe(false);
+  // The inactive Preview tab is display:none in touch mode.
+  find.getBoundingClientRect = () => ({ x: 0, y: 0, width: 0, height: 0,
+    left: 0, top: 0, right: 0, bottom: 0, toJSON() {} });
+  touch = true; window.layout(); expect(find.hasAttribute("inert")).toBe(true);
+  window.element!.append(find); window.layout();
+  expect(find.hasAttribute("inert")).toBe(false);
+  window.close(false); a.dispose();
+});
+
 test("provider outcomes stay on selected item, time is supplied only, hidden ownership returns latest", () => {
   const a = shell("a"), b = shell("b"); window.open(a);
   expect(window.element!.textContent).toContain("Child review · Running");

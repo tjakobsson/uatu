@@ -111,7 +111,7 @@ const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFin
   prepareReveal: revealChatMatch,
   revealMatch: range => {
     if (revealShellOutputMatch(range)) return true;
-    const viewport = range.startContainer.parentElement?.closest(".chat-shell-viewport");
+    const viewport = range.startContainer.parentElement?.closest(".chat-shell-viewport, .chat-shell-output .chat-tool-error");
     if (!viewport) return false;
     // The shell schedules its own range reveal. Bring its viewport into the
     // transcript now, rather than scrolling toward a still-clipped text rect.
@@ -352,6 +352,9 @@ function mountOn(target: FindEngine): void {
   const host = target.barHost();
   if (host && findBarElement.parentElement !== host) {
     host.appendChild(findBarElement);
+    // Moving Find out of a covered pane must release its previous coverage
+    // reason before focusing it inside the active output window.
+    if (currentFloatingShellOutput()) shellOutputWindow().layout();
   }
   const description = `Find in ${target.label}`;
   queryInput.placeholder = description;

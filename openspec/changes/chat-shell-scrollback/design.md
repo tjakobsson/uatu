@@ -79,6 +79,8 @@ Alternative: retain transcript-only expansion. Rejected because it cannot exceed
 
 The window header identifies the command and owning conversation and shows the provider-reported Running, Completed, Failed, or Cancelled state in text. Display a completion time only when the source supplies one. Do not stamp the current time onto an old completed log, and do not use connection loss or silence as evidence of completion.
 
+Carry known terminal timestamps as optional `completedAt` on normalized tool and command items, through validation and the wire schema. OpenCode supplies terminal event `data.timestamp`, classic tool `state.time.end`, v2 tool `part.time.completed`, and shell message `time.completed` or `time.end`. Claude supplies the timestamp of the user frame containing the matching `tool_result.tool_use_id`, live when reported and in stored transcripts. Call timestamps and turn durations do not establish tool completion. Unknown times stay absent; pending/running records must not acquire a completion time from stray terminal fields.
+
 When the command finishes, update the header and keep the window, dimensions, output, and reader state intact. Later commands and later turns never retarget it automatically. This makes a completed log recognizable without calling useful output "old". Explicit navigation follows the cleanup boundary above.
 
 Alternative: close the window on completion or replace it with the next command. Rejected because either interrupts inspection and makes it unclear which command produced the visible output.
@@ -103,11 +105,27 @@ Alternative: CSS `resize: vertical` alone. Rejected because it does not provide 
 
 ## Migration Plan
 
-This is client-side presentation with no stored-data or protocol migration. Reproduce the follow jitter first and record the evidence. Implement coordinated scrolling, the shell controller, and incremental parsing, wire both shell item shapes and timelines, then add inline resizing and the floating window. Run focused unit and browser checks plus frame-level jitter and long-output responsiveness checks before release. Rollback is a client-code revert; conversation data remains compatible.
+Presentation state needs no stored-data migration. The known-completion requirement adds optional `completedAt` data propagation; because tool and command wire objects are closed, strict consumers need workspace API revision 19 and regenerated validators. This does not change provider protocols or the product major version. Reproduce the follow jitter first and record the evidence. Implement coordinated scrolling, the shell controller, and incremental parsing, wire both shell item shapes and timelines, then add inline resizing and the floating window. Run focused unit and browser checks plus frame-level jitter and long-output responsiveness checks before release. A rollback must account for the wire contract as well as client code.
 
 ## Verification evidence
 
+### PR review follow-up
+
+Addressed all three findings from PR #372: known provider completion timestamps now survive normalization, validation, and replay into shell metadata; inline error Find results scroll both the error pane and its outer transcript; covered Preview Find controls are inert in maximized and touch output, with that coverage released when the shared bar moves into the active window.
+
+The timestamp addition requires workspace API revision 19 because conversation item schemas reject unknown fields. Hub revision remains 5. Provider timestamps are retained only where genuinely supplied, including matching Claude tool-result envelopes; missing completion times are never inferred from receive time. Validation/schema/normalization and frontend checks passed: 397 affected unit tests, 18 Chromium/WebKit browser cases covering the review fixes and adjacent Find/selection paths, typecheck, API validation, and strict OpenSpec validation.
+
+CI follow-up installs WebKit alongside Chromium, and the inventory presentation fixture now installs its stateful driver once per document. All five inventory presentation browser cases passed with that fixture correction. The earlier CI run's separate touch-scroll outline failure was not changed in this review follow-up.
+
 Final status: all 22 implementation tasks are complete. The chronological investigation below includes intermediate failures; the final verification section records their resolution. The original alternating oscillation remains unconfirmed, as agreed with the user.
+
+### PR 372 completion timestamp review, 2026-09-15
+
+Comment 4015437791 identified missing propagation for the existing known-completion requirement. `ToolItem`, `CommandItem`, and their validator now accept optional finite, non-negative `completedAt`; the OpenAPI item branches document the same epoch-millisecond field. The compatibility check against the pre-review contract reports exactly two closed response property additions on the conversation live topic, both charged to workspace. Workspace revision 19 and its migration entry cover them; Hub and product versions do not change.
+
+Provider evidence comes from installed SDK declarations. OpenCode SDK 1.18.30 declares classic `ToolStateCompleted`/`ToolStateError.time.end`, v2 `SessionMessageAssistantTool.time.completed`, and `data.timestamp` on `SessionNextShellEnded`, `SessionNextToolSuccess`, and `SessionNextToolFailed`. The shell history reader also preserves message `time.completed` or legacy `time.end`. Tool timestamps are admitted only for completed/error state, never pending/running state. Claude Agent SDK 0.3.252 declares optional `SDKUserMessage.timestamp` as the originating process's message timestamp. Only a user frame containing `tool_result` with a nonempty `tool_use_id` supplies the tool's terminal time; transcript reading parses that result entry's ISO timestamp to milliseconds. Call frames, progress heartbeats, and turn-level result durations cannot supply it. Older emitters and malformed times leave the field absent.
+
+Focused verification passed 347 tests with 1,529 assertions across OpenCode normalization/provider, Claude normalization/provider/transcript, shared validation, API contract, revision, and compatibility suites. Tests cover successful and failed results, separate call/result identities and times, classic/v2 live and history paths, disk transcript replay, missing/malformed timestamps, and stale running times. `bun run typecheck`, `bun run api:validate`, the actual contract compatibility check against `HEAD`, and `git diff --check` passed. API lint retains its existing `WorkspaceConflict.allOf` warning.
 
 ### Baseline investigation, 2026-09-15
 

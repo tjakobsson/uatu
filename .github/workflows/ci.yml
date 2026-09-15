@@ -154,9 +154,9 @@ jobs:
         # primary remediation path; this is the backstop.
         run: bun audit --audit-level=moderate
 
-      - name: Install Playwright Chromium
+      - name: Install Playwright Chromium and WebKit
         if: steps.changes.outputs.code == 'true'
-        run: bunx playwright install --with-deps chromium
+        run: bunx playwright install --with-deps chromium webkit
 
       - name: Run unit and integration tests
         if: steps.changes.outputs.code == 'true'

@@ -209,10 +209,13 @@ export class ShellOutputWindow {
 
   private defaultCoveredRoots(area: ShellWindowGeometry): HTMLElement[] {
     const roots: HTMLElement[] = [];
-    const accessible = 'nav, dialog, [role="dialog"], [popover], #find-bar, #touch-tab-bar, .sidebar-rail';
+    const accessible = 'nav, dialog, [role="dialog"], [popover], #touch-tab-bar, .sidebar-rail';
     const walk = (parent: HTMLElement) => {
       for (const node of Array.from(parent.children) as HTMLElement[]) {
         if (node === this.host || node.matches(accessible)) continue;
+        // Touch hides Preview entirely, so its shared Find bar has no bounds.
+        // Keep it inert until Find reparents it into the active window.
+        if (this.touch() && node.id === "find-bar") { roots.push(node); continue; }
         const rect = node.getBoundingClientRect();
         if (!node.querySelector(accessible) && rect.width && rect.height && rect.left >= area.x && rect.top >= area.y && rect.right <= area.x + area.width && rect.bottom <= area.y + area.height) roots.push(node);
         else walk(node);
@@ -285,6 +288,13 @@ export function revealShellOutputMatch(range: Range): boolean {
     const viewport = range.startContainer.parentElement?.closest<HTMLElement>(".chat-shell-viewport");
     if (viewport) {
       viewport.dispatchEvent(new CustomEvent("chat-shell-reveal", { detail: { range }, bubbles: true, cancelable: true }));
+    } else {
+      const error = range.startContainer.parentElement?.closest<HTMLElement>(".chat-shell-output .chat-tool-error");
+      if (error) {
+        const rect = range.getBoundingClientRect(), view = error.getBoundingClientRect();
+        error.scrollTop += rect.top - view.top - 10;
+        error.scrollLeft += rect.left - view.left - 10;
+      }
     }
     // Inline matches still need the outer timeline brought into view.
     return false;

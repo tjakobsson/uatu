@@ -41,8 +41,9 @@ async function bundledDriverSource(): Promise<string> {
 }
 
 export async function applyChatInventoryFixture(page: Page, state: ChatInventoryFixtureState): Promise<void> {
-  await page.locator("html").evaluate((root, fixture) => {
-    root.setAttribute("data-e2e-chat-inventory-fixture", JSON.stringify(fixture));
+  const installed = await page.evaluate(() => typeof Reflect.get(globalThis, "__uatuInventoryFixture") === "function");
+  if (!installed) await page.addScriptTag({ content: await bundledDriverSource() });
+  await page.evaluate(fixture => {
+    Reflect.get(globalThis, "__uatuInventoryFixture")(fixture);
   }, state);
-  await page.addScriptTag({ content: await bundledDriverSource() });
 }

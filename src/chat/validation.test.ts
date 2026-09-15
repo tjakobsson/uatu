@@ -17,6 +17,20 @@ import {
 } from "./validation";
 import type { ConversationItem } from "./types";
 
+test("tool and command completion timestamps are optional finite non-negative numbers", () => {
+  for (const shape of [{ type: "tool", name: "Bash" }, { type: "command", command: "pwd" }] as const) {
+    const item = { id: "t", createdAt: 1, status: "completed" as const, ...shape };
+    expect(parseConversationItem(item)).toEqual(item);
+    for (const completedAt of [0, 2, 1_789_466_400_000]) {
+      expect(parseConversationItem({ ...item, completedAt })).toEqual({ ...item, completedAt });
+    }
+    for (const completedAt of [null, -1, NaN, Infinity, "2026-09-15T10:00:00Z", true]) {
+      expect(() => parseConversationItem({ ...item, completedAt })).toThrow("completedAt must be a timestamp");
+    }
+    expect(() => parseConversationItem({ ...item, inventedAt: 2 })).toThrow();
+  }
+});
+
 const summary = {
   id: "opencode:session-1",
   title: "Implement chat",

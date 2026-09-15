@@ -356,7 +356,8 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.label !== undefined) expectNonEmptyString(record.label, "reasoning label");
       break;
     case "tool":
-      expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId", "model", "usage", "elapsedMs"], type);
+      expectKeys(record, ["id", "type", "createdAt", "name", "status", "completedAt", "input", "output", "error", "childConversationId", "model", "usage", "elapsedMs"], type);
+      expectOptionalTimestamp(record.completedAt, "completedAt");
       expectNonEmptyString(record.name, "tool name");
       parseActivityStatus(record.status);
       expectOptionalString(record.input, "tool input");
@@ -368,7 +369,8 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.elapsedMs, "tool elapsedMs");
       break;
     case "command":
-      expectKeys(record, ["id", "type", "createdAt", "command", "status", "output", "exitCode"], type);
+      expectKeys(record, ["id", "type", "createdAt", "command", "status", "completedAt", "output", "exitCode"], type);
+      expectOptionalTimestamp(record.completedAt, "completedAt");
       expectNonEmptyString(record.command, "command");
       parseActivityStatus(record.status);
       expectOptionalString(record.output, "command output");

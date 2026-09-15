@@ -456,9 +456,7 @@ function shellMetadata(item: ConversationItem, conversation: string): ShellOutpu
   const detail = item.type === "tool" ? describeToolDetail(item) : undefined;
   if (item.type !== "command" && detail?.kind !== "bash") return null;
   if (item.type !== "command" && item.type !== "tool") return null;
-  // Shell providers currently omit this field. Honour it if a future normalized
-  // carrier supplies one; createdAt is the start and must never stand in for it.
-  const completedAt = "completedAt" in item && typeof item.completedAt === "number" ? item.completedAt : undefined;
+  const completedAt = item.completedAt;
   return {
     command: item.type === "command" ? item.command : detail!.kind === "bash" ? detail.command : "",
     conversation, status: item.status,

@@ -610,14 +610,16 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
   return { items, accounting };
 }
 
-type Envelope = { uuid: string; createdAt: number };
+type Envelope = { uuid: string; createdAt: number; reportedAt?: number };
 
 function envelopeIdentity(record: RecordValue): Envelope | null {
   const uuid = typeof record.uuid === "string" && record.uuid ? record.uuid : null;
   if (!uuid) return null;
   const timestamp = typeof record.timestamp === "string" ? Date.parse(record.timestamp)
     : typeof record.timestamp === "number" ? record.timestamp : Date.now();
-  return { uuid, createdAt: Number.isNaN(timestamp) ? Date.now() : timestamp };
+  const reportedAt = record.timestamp !== undefined && Number.isFinite(timestamp) && timestamp >= 0
+    && (typeof record.timestamp === "string" || typeof record.timestamp === "number") ? timestamp : undefined;
+  return { uuid, createdAt: Number.isNaN(timestamp) ? Date.now() : timestamp, ...(reportedAt === undefined ? {} : { reportedAt }) };
 }
 
 type Block = { type?: string } & RecordValue;
@@ -708,6 +710,7 @@ function todoEntries(input: RecordValue): ConversationItem extends never ? never
 
 function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventMemory, toolOutcome: RecordValue = {}, parentSessionId?: string): NormalizedProviderUpdate | null {
   const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+  if (!toolUseId) return null;
   // A TodoWrite result confirms a surface the task-progress item already
   // shows; a row for it would be exactly the per-update spam D9 forbids.
   if (memory.todoTools.has(toolUseId)) return null;
@@ -729,6 +732,9 @@ function toolResultUpdate(block: Block, envelope: Envelope, memory: ClaudeEventM
     createdAt: known?.createdAt ?? envelope.createdAt,
     name: known?.name ?? "tool",
     status: failed ? "failed" : "completed",
+    // This user frame contains the result for tool_use_id, not the call or
+    // the turn's aggregate result. Older SDK emitters omit its timestamp.
+    ...(envelope.reportedAt === undefined ? {} : { completedAt: envelope.reportedAt }),
     ...(known?.input === undefined ? {} : { input: known.input }),
     ...(output === undefined ? {} : failed ? { error: output } : { output }),
     ...(childConversationId ? { childConversationId } : {}),

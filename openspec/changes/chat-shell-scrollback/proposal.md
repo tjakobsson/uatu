@@ -30,4 +30,4 @@ None.
 - Follow coordination in `src/chat/anchor.ts`, `src/chat/viewport.ts`, and their UI call sites, guided by browser reproduction evidence.
 - An app-level floating output host, layout, and terminal styles in `src/index.html` and `src/styles.css`.
 - Colocated renderer/controller/ANSI tests and shell-output browser scenarios in `tests/e2e/chat-shell-output.e2e.ts`, plus frame-level follow diagnostics and long-output responsiveness checks.
-- No wire protocol, provider, PTY, or dependency changes are expected. Scrollback covers output supplied by the provider; it cannot recover upstream truncation.
+- The known-completion requirement needs optional `completedAt` propagation through tool/command types, validation, provider normalization, and the wire schema. Closed response objects require workspace API revision 19 with migration guidance. No provider protocol, PTY, or dependency changes are needed. Scrollback covers output supplied by the provider; it cannot recover upstream truncation.

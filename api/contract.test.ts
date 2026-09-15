@@ -141,6 +141,25 @@ describe("streaming protocol is closed", () => {
 });
 
 describe("conversation configuration", () => {
+  test("tool and command optional completion timestamps agree with runtime validation", async () => {
+    const { parseConversationItem } = await import("../src/chat/validation");
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationItem, openapi.components.schemas));
+    for (const shape of [{ type: "tool", name: "Bash" }, { type: "command", command: "pwd" }]) {
+      const item = { id: "t", createdAt: 1, status: "completed", ...shape };
+      for (const fields of [{}, { completedAt: 0 }, { completedAt: 1_789_466_400_000 }]) {
+        const wire = { ...item, ...fields };
+        expect(validate(wire)).toBe(true);
+        expect(parseConversationItem(wire)).toEqual(wire);
+      }
+      // JSON has no NaN/Infinity; runtime validation tests cover those values.
+      for (const completedAt of [null, -1, "2026-09-15T10:00:00Z", true]) {
+        expect(validate({ ...item, completedAt })).toBe(false);
+        expect(() => parseConversationItem({ ...item, completedAt })).toThrow();
+      }
+    }
+  });
+
   test("configuration requires a model when a variant is present", async () => {
     const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
     const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationConfiguration, openapi.components.schemas));

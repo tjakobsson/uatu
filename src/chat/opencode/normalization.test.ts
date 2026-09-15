@@ -4,6 +4,65 @@ import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMes
 import { ConversationReplay } from "../replay";
 import { ProviderTextReconciler } from "../text-reconciler";
 import { ConversationProjection } from "../adapter";
+import { parseConversationItem } from "../validation";
+
+describe("OpenCode provider completion timestamps", () => {
+  test("classic live parts and history preserve each tool's terminal time, not the message completion", () => {
+    for (const tool of ["bash", "read"]) for (const status of ["completed", "error"]) {
+      const part = { id: "p", type: "tool", tool, state: { status, input: { command: "pwd" }, time: { start: 20, end: 40 } } };
+      const [stored] = normalizeProviderMessage({ info: { id: "m", role: "assistant", time: { created: 10, completed: 90 } }, parts: [part] });
+      const live = normalizeProviderEvent({ type: "message.part.updated", properties: { part } }).updates[0];
+      expect(stored).toMatchObject({ type: tool === "bash" ? "command" : "tool", completedAt: 40, status: status === "error" ? "failed" : "completed" });
+      expect(live).toMatchObject({ kind: "upsert", item: { completedAt: 40 } });
+      expect(parseConversationItem(JSON.parse(JSON.stringify(stored)))).toEqual(stored);
+    }
+  });
+
+  test("v2 stored tools use part.time.completed and shell messages use their own completion", () => {
+    for (const name of ["bash", "read"]) for (const status of ["completed", "error"]) {
+      const [item] = normalizeProviderMessage({ id: "m", type: "assistant", time: { created: 10, completed: 90 }, content: [
+        { id: "p", type: "tool", name, time: { created: 20, ran: 25, completed: 40 }, state: { status, input: { command: "pwd" } } },
+      ] });
+      expect(item).toMatchObject({ completedAt: 40, createdAt: 10 });
+    }
+    for (const time of [{ created: 10, completed: 40 }, { created: 10, end: 40 }]) {
+      expect(normalizeProviderMessage({ id: "m", type: "shell", callID: "c", command: "pwd", time })[0])
+        .toMatchObject({ type: "command", completedAt: 40, status: "completed" });
+    }
+  });
+
+  test("live shell and tool terminal events use data.timestamp, including failures", () => {
+    for (const type of ["session.next.shell.ended", "session.next.tool.success", "session.next.tool.failed"]) {
+      for (const tool of ["bash", "read"]) {
+        const event = normalizeProviderEvent({ type, data: { sessionID: "s", callID: "c", tool, timestamp: 40, command: "pwd", input: { command: "pwd" } } });
+        expect(event.updates[0]).toMatchObject({ kind: "upsert", item: { completedAt: 40, status: type.endsWith("failed") ? "failed" : "completed" } });
+      }
+    }
+  });
+
+  test("unknown or malformed terminal times and stale running times stay absent", () => {
+    for (const end of [undefined, null, -1, NaN, Infinity, "40"]) {
+      const [shell] = normalizeProviderMessage({ id: "m", type: "shell", callID: "c", time: { created: 10, completed: end } });
+      expect(shell).not.toHaveProperty("completedAt");
+      expect(shell).toMatchObject({ status: "running" });
+      const event = normalizeProviderEvent({ type: "session.next.tool.success", data: { callID: "c", timestamp: end, timeCreated: 10 } });
+      expect(event.updates[0]).toMatchObject({ kind: "upsert", item: { status: "completed" } });
+      if (event.updates[0]?.kind === "upsert") expect(event.updates[0].item).not.toHaveProperty("completedAt");
+    }
+    for (const name of ["bash", "read"]) for (const status of ["pending", "running", "completed"]) {
+      const [item] = normalizeProviderMessage({ id: "m", type: "assistant", time: { created: 10, completed: 90 }, content: [
+        { id: "p", type: "tool", name, time: { created: 20, ...(status === "completed" ? {} : { completed: 40 }) }, state: { status, time: { start: 20, ...(status === "completed" ? {} : { end: 40 }) } } },
+      ] });
+      expect(item).not.toHaveProperty("completedAt");
+      expect(item).toMatchObject({ status });
+    }
+    for (const type of ["session.next.shell.started", "session.next.tool.called", "session.next.tool.progress"]) {
+      const update = normalizeProviderEvent({ type, data: { callID: "c", timestamp: 40 } }).updates[0];
+      expect(update).toMatchObject({ kind: "upsert", item: { status: "running" } });
+      if (update?.kind === "upsert") expect(update.item).not.toHaveProperty("completedAt");
+    }
+  });
+});
 
 describe("OpenCode classic message store", () => {
   test("normalizes { info, parts } messages that the v2 store returns empty", () => {

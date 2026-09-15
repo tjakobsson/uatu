@@ -181,6 +181,7 @@ export function normalizeProviderMessage(value: unknown, mintUsageCarrier = true
         command: text(message.command),
         output: text(message.output),
         status: isFinishedTime(message.time) ? "completed" : "running",
+        ...completionTime(finishedTime(message.time)),
       }];
     case "synthetic":
     case "system":
@@ -340,6 +341,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
         output: optionalString(data.output),
         exitCode,
         status: String(event.type).endsWith("ended") ? (exitCode === undefined || exitCode === 0 ? "completed" : "failed") : "running",
+        ...(event.type === "session.next.shell.ended" ? completionTime(data.timestamp) : {}),
       } }] };
     }
     case "session.next.tool.called":
@@ -769,6 +771,10 @@ function normalizePart(part: RecordValue, createdAt: number): NormalizedProvider
 
 function normalizeToolPart(part: RecordValue, createdAt: number): NormalizedProviderUpdate {
   const state = record(part.state);
+  // Classic parts keep the terminal time on state; v2 keeps it on the part.
+  // A stray end time on pending/running state is not a completion signal.
+  const completed = state.status === "completed" || state.status === "error"
+    ? completionTime(finishedTime(state.time) ?? finishedTime(part.time)) : {};
   const metadata = record(state.metadata);
   const name = text(part.name ?? part.tool) || "tool";
   const id = optionalString(part.id) ?? optionalString(part.callID) ?? name;
@@ -786,6 +792,7 @@ function normalizeToolPart(part: RecordValue, createdAt: number): NormalizedProv
       type: "command",
       createdAt,
       command: commandText(state),
+      ...completed,
       status: exitCode !== undefined && exitCode !== 0 ? "failed" : status,
       output,
       exitCode,
@@ -800,6 +807,7 @@ function normalizeToolPart(part: RecordValue, createdAt: number): NormalizedProv
     createdAt,
     name,
     status: activityStatus(state.status),
+    ...completed,
     input,
     output,
     error,
@@ -817,6 +825,7 @@ function normalizeToolEvent(event: RecordValue, data: RecordValue, conversationI
     result: data.result,
     error: data.error,
     metadata: data.metadata,
+    time: { end: data.timestamp },
   };
   return {
     conversationId,
@@ -943,8 +952,16 @@ function errorMessage(value: unknown): string | undefined {
  * replayed history claiming it is still running.
  */
 function isFinishedTime(value: unknown): boolean {
+  return finishedTime(value) !== undefined;
+}
+
+function finishedTime(value: unknown): number | undefined {
   const time = record(value);
-  return time.completed !== undefined || time.end !== undefined;
+  return completionTime(time.completed).completedAt ?? completionTime(time.end).completedAt;
+}
+
+function completionTime(value: unknown): { completedAt?: number } {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? { completedAt: value } : {};
 }
 
 function record(value: unknown): RecordValue {

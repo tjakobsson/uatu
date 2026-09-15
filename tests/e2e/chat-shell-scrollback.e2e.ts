@@ -2,7 +2,7 @@ import path from "node:path";
 import { writeFile } from "node:fs/promises";
 import { chromium, webkit, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
-import { captureScreenshot } from "./chat-helpers";
+import { captureScreenshot, openChatPanel } from "./chat-helpers";
 import { chatWorkload } from "../fixtures/chat-performance";
 import { bootShell, control, drag, expectBounded, expectReading, frames, log, openShellRow, position, settleScroll, shell } from "./chat-shell-helpers";
 
@@ -45,6 +45,99 @@ const work = (page: Page) => page.evaluate(() => {
 });
 
 for (const engine of ["chromium", "webkit"] as const) {
+  for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find reveals inline error matches on both axes`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
+    try {
+      const { update, outputView, timeline } = await bootShell(page, request, { shape: "bash", child });
+      const needle = "unique-inline-error-match";
+      const errorText = `${"earlier error line\n".repeat(60)}${"wide-column ".repeat(50)}${needle}`;
+      await update({ ...shell("bash", "stdout stays available", "failed"), error: errorText });
+      const error = outputView.getByLabel("Error output");
+      await expect(error).toContainText(needle);
+      await expect(outputView).toHaveAttribute("data-status", "failed");
+      await openShellRow(timeline, "shell:a");
+      await outputView.getByRole("button", { name: "Pop out", exact: true }).focus();
+      await page.keyboard.press("Meta+f");
+      await page.locator("#find-query").fill(needle);
+      await expect(page.locator("#find-status")).toHaveText("1 of 1");
+      await expect.poll(() => error.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+      await expect.poll(() => error.evaluate(el => el.scrollLeft)).toBeGreaterThan(0);
+      await expect.poll(() => error.evaluate((el, text) => {
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          const offset = node.textContent!.indexOf(text);
+          if (offset < 0) continue;
+          const range = document.createRange(); range.setStart(node, offset); range.setEnd(node, offset + text.length);
+          const match = range.getBoundingClientRect(), pane = el.getBoundingClientRect();
+          return match.top >= pane.top && match.bottom <= pane.bottom && match.left >= pane.left && match.right <= pane.right;
+        }
+        return false;
+      }, needle)).toBe(true);
+      await expect(error).toBeInViewport();
+    } finally { await browser.close(); }
+  });
+
+  test(`${engine} covered Preview find cannot receive focus behind full-area shell output`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, hasTouch: true, viewport: { width: 1440, height: 1000 } });
+    const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+    try {
+      // The mode toggle is available only on coarse-pointer devices.
+      await page.addInitScript(() => localStorage.setItem("uatu:presentation:v1:%2F:uatu:ui-mode", "desktop"));
+      const { outputView } = await bootShell(page, request);
+      await page.locator(".preview-shell").focus();
+      await page.keyboard.press("Meta+f");
+      await expect(page.locator("#find-query")).toHaveAttribute("aria-label", "Find in document");
+      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      const window = floating(page);
+      await window.getByRole("button", { name: "Maximize", exact: true }).click();
+      await expect.poll(() => page.locator("#find-query").evaluate(el => !!el.closest("[inert]"))).toBe(true);
+      for (let i = 0; i < 12; i++) {
+        await page.keyboard.press("Tab");
+        expect(await page.evaluate(() => !!document.activeElement?.closest("#find-bar"))).toBe(false);
+      }
+      await window.getByRole("button", { name: "Restore size" }).click();
+      await expect.poll(() => page.locator("#find-query").evaluate(el => !!el.closest("[inert]"))).toBe(false);
+      await page.locator("#find-query").focus();
+      await expect(page.locator("#find-query")).toBeFocused();
+      const modeToggle = page.getByRole("button", { name: "Switch to touch layout" });
+      await expect(modeToggle).toBeVisible();
+      await modeToggle.focus();
+      await expect(modeToggle).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+      await page.locator("#touch-tab-chat").click();
+      await expect(window).toHaveClass(/is-full-area/);
+      await expect.poll(() => page.locator("#find-query").evaluate(el => !!el.closest("[inert]"))).toBe(true);
+      await window.getByRole("button", { name: "Return to chat" }).focus();
+      await page.keyboard.press("Meta+f");
+      await expect(window.locator("#find-query")).toBeFocused();
+      await expect(window.locator("#find-query")).toHaveAttribute("aria-label", "Find in chat");
+      expect(await window.locator("#find-query").evaluate(el => !!el.closest("[inert]"))).toBe(false);
+      expect(errors).toEqual([]);
+    } finally { await browser.close(); }
+  });
+
+  for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} normalized completion time reaches the floating header`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
+    try {
+      const { update, outputView } = await bootShell(page, request, { shape });
+      const completedAt = Date.UTC(2026, 8, 15, 10, 30);
+      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      await update({ ...shell(shape, "finished output", "completed"), completedAt });
+      const formatted = await page.evaluate(time => new Date(time).toLocaleString(), completedAt);
+      await expect(floating(page).locator(".chat-shell-window-metadata")).toContainText(formatted);
+      await page.reload();
+      await openChatPanel(page);
+      await openShellRow(page.locator("#chat-timeline"), "shell:a");
+      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      await expect(floating(page).locator(".chat-shell-window-metadata")).toContainText(formatted);
+    } finally { await browser.close(); }
+  });
+
   for (const agent of ["opencode", "claude"] as const) {
     for (const shape of ["command", "bash"] as const) {
       for (const child of [false, true]) test(`${engine} ${agent} ${shape} ${child ? "child" : "parent"} full running scrollback flow`, async ({ request, baseURL }, testInfo) => {

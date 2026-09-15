@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 5.18.0-experimental
+  version: 5.19.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 5 and workspace revision 18
+  summary: Hub revision 5 and workspace revision 19
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves one family itself, personal
@@ -21,7 +21,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 5
-    workspaceApiRevision: 18
+    workspaceApiRevision: 19
 servers:
   - url: https://{hubHost}
     variables:
@@ -1430,14 +1430,18 @@ components:
       properties: { id: { type: string, minLength: 1, maxLength: 512 }, title: { type: string }, createdAt: { type: number, minimum: 0 }, updatedAt: { type: number, minimum: 0 }, status: { $ref: '#/components/schemas/ConversationStatus' }, agent: { $ref: '#/components/schemas/ChatAgentDescriptor' } }
       additionalProperties: false
     ConversationInventoryEvent: { type: object, required: [type], properties: { type: { const: conversation.inventory } }, additionalProperties: false }
+    ActivityCompletionTime:
+      type: number
+      minimum: 0
+      description: "Provider-reported terminal timestamp in Unix epoch milliseconds. Omitted when unknown; never inferred from creation time, duration, receive time, or silence. Display only for a terminal item status, not pending or running."
     TimelineBase: { type: object, required: [id, type, createdAt], properties: { id: { type: string }, type: { type: string }, createdAt: { type: number, minimum: 0 } } }
     ConversationItem:
       oneOf:
         - { type: object, required: [id, type, createdAt, text], properties: { id: { type: string }, type: { const: user_message }, createdAt: { type: number }, text: { type: string }, requestId: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, completedAt: { type: number }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "Message-level tokens. Normalization emits exactly one dedicated carrier per reported provider message: its id is `usage:<provider-message-id>` and its markdown is empty, so clients MUST treat it as data rather than render it as a message bubble. Present only where the agent declares the context capability and reported usage." }, model: { allOf: [{ $ref: '#/components/schemas/ModelSelection' }], description: "The model that reported this usage carrier, when known. Context percentages MUST use this model's context limit rather than a newly selected model that has not produced usage yet." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, text, status], properties: { id: { type: string }, type: { const: reasoning }, createdAt: { type: number }, text: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, durationMs: { type: number }, label: { type: string, minLength: 1, description: "The row's label when it is recalled context rather than the model's own thinking (\"Recalled from memory\"). Absent for ordinary reasoning." } }, additionalProperties: false }
-        - { type: object, required: [id, type, createdAt, name, status], properties: { id: { type: string }, type: { const: tool }, createdAt: { type: number }, name: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, input: { type: string }, output: { type: string }, error: { type: string }, childConversationId: { type: string }, model: { type: string, description: "For a task tool: the model the subagent's own session ran, mirrored from that child session. A subagent may run a different model from its parent." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "For a task tool: the tokens the subagent consumed, aggregated across its child session's messages. Absent until it has reported any." }, elapsedMs: { type: number, minimum: 0, description: "How long the tool has been running, from the agent's own progress heartbeat, for a tool still producing no output." } }, additionalProperties: false }
-        - { type: object, required: [id, type, createdAt, command, status], properties: { id: { type: string }, type: { const: command }, createdAt: { type: number }, command: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, output: { type: string }, exitCode: { type: integer } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, name, status], properties: { id: { type: string }, type: { const: tool }, createdAt: { type: number }, name: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, completedAt: { $ref: '#/components/schemas/ActivityCompletionTime' }, input: { type: string }, output: { type: string }, error: { type: string }, childConversationId: { type: string }, model: { type: string, description: "For a task tool: the model the subagent's own session ran, mirrored from that child session. A subagent may run a different model from its parent." }, usage: { allOf: [{ $ref: '#/components/schemas/TokenUsage' }], description: "For a task tool: the tokens the subagent consumed, aggregated across its child session's messages. Absent until it has reported any." }, elapsedMs: { type: number, minimum: 0, description: "How long the tool has been running, from the agent's own progress heartbeat, for a tool still producing no output." } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, command, status], properties: { id: { type: string }, type: { const: command }, createdAt: { type: number }, command: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, completedAt: { $ref: '#/components/schemas/ActivityCompletionTime' }, output: { type: string }, exitCode: { type: integer } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, path, operation], properties: { id: { type: string }, type: { const: file_change }, createdAt: { type: number }, path: { type: string }, operation: { enum: [create, update, delete] }, additions: { type: integer, minimum: 0 }, deletions: { type: integer, minimum: 0 } }, additionalProperties: false }
         - { $ref: '#/components/schemas/PermissionItem' }
         - { $ref: '#/components/schemas/QuestionItem' }

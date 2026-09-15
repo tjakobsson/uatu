@@ -297,6 +297,8 @@ export type ToolItem = TimelineItemBase & {
   type: "tool";
   name: string;
   status: ActivityStatus;
+  // Provider-reported terminal time in epoch milliseconds; absent when unknown.
+  completedAt?: number;
   input?: string;
   output?: string;
   error?: string;
@@ -318,6 +320,8 @@ export type CommandItem = TimelineItemBase & {
   type: "command";
   command: string;
   status: ActivityStatus;
+  // Provider-reported terminal time in epoch milliseconds; absent when unknown.
+  completedAt?: number;
   output?: string;
   exitCode?: number;
 };
