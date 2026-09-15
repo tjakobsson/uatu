@@ -14,13 +14,15 @@ export type ShellOutputMetadata = {
 };
 
 /** Hooks capture the CURRENT outer anchor for each mutation, including return. */
-export type ShellMutationHooks = { beforeMutation?: () => void; afterMutation?: () => void; inspected?: () => void };
+export type ShellMutationHooks = { beforeMutation?: () => void; afterMutation?: () => void; inspected?: (preserveClosed?: boolean) => void };
 export type ShellPresentation = {
   inlineHeight: number;
   floatingGeometry?: ShellWindowGeometry;
   readerOpened: boolean;
   scroll: { top: number; left: number; following: boolean; unseen: boolean };
   anchorHtml?: string;
+  /** Exact last-painted raw output, shared as an immutable string, without a lossy hash or cap. */
+  outputSnapshot: string;
 };
 
 /** Reparenting can clear a browser selection even when its text nodes survive. */
@@ -56,7 +58,7 @@ export class ShellScrollOwner {
     this.request(); this.changed();
   }
 
-  constructor(readonly viewport: HTMLElement, private readonly changed: () => void = () => {}, active: () => boolean = () => true) {
+  constructor(readonly viewport: HTMLElement, private readonly changed: () => void = () => {}, active: () => boolean = () => true, private readonly inspected: () => void = () => {}) {
     this.left = this.observedLeft = viewport.scrollLeft || 0;
     this.horizontalMaximum = this.maximumLeft();
     const maximum = (geometry: AnchorGeometry) => Math.max(0, geometry.scrollHeight - geometry.clientHeight);
@@ -84,11 +86,12 @@ export class ShellScrollOwner {
       pause: geometry => {
         this.following = false; this.top = geometry.scrollTop;
         this.captureHorizontal();
+        this.inspected();
       },
       observe: (geometry, movement) => {
         // The shared owner filters extent clamps and records each applied top.
         // An echo has no movement and must not replace the desired line anchor.
-        if (movement === "up") this.following = false;
+        if (movement === "up") { this.following = false; this.inspected(); }
         else if (movement === "down" && maximum(geometry) - geometry.scrollTop <= 1) { this.following = true; this.unseen = false; }
         if (movement !== "none") this.top = geometry.scrollTop;
         this.captureHorizontal();
@@ -125,6 +128,7 @@ export class ShellScrollOwner {
   correct(): void { this.owner.flush(performance.now()); }
 
   reveal(top: number, left?: number): void {
+    this.inspected();
     this.owner.cancel();
     this.following = false;
     this.top = Math.max(0, top);
@@ -162,6 +166,7 @@ export class ShellOutputController {
   readerOpened = false;
   private hidden = false;
   private snapshot = "";
+  private paintedOutput = "";
   private errorSnapshot = "";
   private paintedError = "";
   private painted = false;
@@ -247,8 +252,9 @@ export class ShellOutputController {
     this.scroll = new ShellScrollOwner(this.viewport, () => {
       this.latest.hidden = this.scroll.following;
       this.latest.textContent = this.scroll.unseen ? "New output · Latest output" : "Latest output";
-    }, () => !this.hidden && !this.disposed);
+    }, () => !this.hidden && !this.disposed, () => { if (!this.readerOpened) this.inspect(true); });
     this.viewport.addEventListener("chat-shell-reveal", event => {
+      if (this.hidden || this.disposed) return;
       const range = (event as CustomEvent<{ range: Range }>).detail?.range;
       if (!range || !this.viewport.contains(range.startContainer) || !this.viewport.contains(range.endContainer)) return;
       const rect = range.getBoundingClientRect(), view = this.viewport.getBoundingClientRect();
@@ -256,6 +262,7 @@ export class ShellOutputController {
       event.preventDefault();
     });
     this.viewport.addEventListener("keydown", event => {
+      if (this.hidden || this.disposed) return;
       if (!["Home", "End", "PageUp", "PageDown"].includes(event.key) || event.altKey || event.metaKey || event.ctrlKey) return;
       // WebKit's native Home on a focused pre can target the page instead of
       // this scroller. Page keys also animate against a moving viewport height.
@@ -288,8 +295,8 @@ export class ShellOutputController {
     if (!this.hidden) this.scroll.request();
   }
 
-  inspect(): void {
-    this.mutate(() => { this.readerOpened = true; this.hooks.inspected?.(); });
+  inspect(preserveClosed = false): void {
+    this.mutate(() => { this.readerOpened = true; this.hooks.inspected?.(preserveClosed); });
   }
 
   mutate(fn: () => void): void {
@@ -306,7 +313,7 @@ export class ShellOutputController {
   presentation(): ShellPresentation {
     const scroll = this.scroll.snapshot();
     return { inlineHeight: this.inlineHeight, floatingGeometry: this.floatingGeometry && { ...this.floatingGeometry }, readerOpened: this.readerOpened,
-      scroll, anchorHtml: this.html[Math.floor(Math.max(0, scroll.top - 10) / 20)] };
+      scroll, anchorHtml: this.html[Math.floor(Math.max(0, scroll.top - 10) / 20)], outputSnapshot: this.restored?.outputSnapshot ?? this.paintedOutput };
   }
 
   restorePresentation(state: ShellPresentation): void {
@@ -336,8 +343,12 @@ export class ShellOutputController {
       while (this.lines.children.length > update.lines.length) this.lines.lastElementChild!.remove();
       this.html.length = update.lines.length;
       if (update.reset) this.scroll.replaced(replacementAnchor === undefined ? undefined : replacementAnchor - anchorIndex);
-      this.scroll.updated();
+      this.scroll.request();
     }
+    // Reconstructing DOM is not incoming output. Compare the retained raw value
+    // even when ANSI controls change without producing different rendered lines.
+    if (this.snapshot !== (this.restored?.outputSnapshot ?? this.paintedOutput)) this.scroll.updated();
+    this.paintedOutput = this.snapshot;
     this.restored = undefined;
     if (this.paintedError !== this.errorSnapshot) {
       this.error.innerHTML = terminalTextToHtml(this.errorSnapshot);

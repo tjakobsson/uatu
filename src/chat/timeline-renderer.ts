@@ -398,10 +398,10 @@ export class TimelineRenderer {
         shell = new ShellOutputController(this.conversationId!, item.id, shellMetadata(current.item, this.conversationTitle ?? this.conversationId!)!, {
           beforeMutation: () => this.shellMutationHooks.beforeMutation?.(),
           afterMutation: () => this.shellMutationHooks.afterMutation?.(),
-          inspected: () => {
+          inspected: preserveClosed => {
             let ancestor: HTMLElement | null = node;
             while (ancestor) {
-              if (ancestor.matches("details.chat-activity, details.chat-activity-group")) {
+              if (ancestor.matches("details.chat-activity, details.chat-activity-group") && !(preserveClosed && ancestor.hasAttribute(READER_CLOSED))) {
                 ancestor.setAttribute("open", ""); ancestor.removeAttribute("data-auto-open"); ancestor.removeAttribute(READER_CLOSED);
                 const id = ancestor.dataset.chatItemId; if (id) expanded.add(id);
               }

@@ -231,7 +231,49 @@ test("inline find reveals through the coordinated owner and consumes its reveal 
   shell.viewport.dispatchEvent(event);
   expect(event.defaultPrevented).toBe(true); frame();
   expect(shell.viewport.scrollTop).toBe(200); expect(shell.viewport.scrollLeft).toBe(100);
-  expect(shell.scroll.following).toBe(false); shell.dispose();
+  expect(shell.scroll.following).toBe(false); expect(shell.readerOpened).toBe(true); shell.dispose();
+});
+
+for (const unseen of [false, true]) for (const changed of [false, true]) test(`paused completed restoration retains unseen=${unseen}, changed=${changed}`, () => {
+  const completed = { ...metadata, status: "completed" as const };
+  const first = new ShellOutputController("c1", "a", completed);
+  first.update("before", completed);
+  first.scroll.following = false; first.scroll.unseen = unseen;
+  const state = first.presentation(); first.dispose();
+  const restored = new ShellOutputController("c1", "a", completed);
+  restored.restorePresentation(state);
+  restored.update(changed ? "after" : "before", completed); frame();
+  expect(restored.scroll.unseen).toBe(unseen || changed);
+  expect(restored.scroll.following).toBe(false);
+  expect(restored.readerOpened).toBe(false);
+  expect(restored.latest.textContent).toBe(unseen || changed ? "New output · Latest output" : "Latest output");
+  restored.update(`${changed ? "after" : "before"}\nappend`, completed); frame();
+  expect(restored.scroll.unseen).toBe(true);
+  restored.dispose();
+});
+
+test("hidden unpainted output remains new through presentation reconstruction", () => {
+  const first = new ShellOutputController("c1", "a", metadata);
+  first.update("before", metadata); frame(); first.scroll.following = false;
+  first.setHidden(true); first.update("before\nafter", metadata);
+  const state = first.presentation(); first.dispose();
+  const restored = new ShellOutputController("c1", "a", metadata);
+  restored.restorePresentation(state); restored.update("before\nafter", metadata); frame();
+  expect(restored.scroll.unseen).toBe(true); restored.dispose();
+});
+
+test("layout clamps, correction echoes and hidden keyboard input do not inspect output", () => {
+  const shell = new ShellOutputController("c1", "a", metadata);
+  Object.assign(shell.viewport, { scrollTop: 0, scrollLeft: 0, scrollHeight: 2000, clientHeight: 240 });
+  shell.update("output", metadata); frame(); shell.scroll.observe();
+  Object.assign(shell.viewport, { scrollHeight: 200, scrollTop: 0 }); shell.scroll.observe(); frame(); shell.scroll.observe();
+  expect(shell.readerOpened).toBe(false);
+  shell.setHidden(true);
+  for (const key of ["Home", "PageUp", "ArrowUp"]) {
+    const event = new dom.window.Event("keydown"); Object.assign(event, { key }); shell.viewport.dispatchEvent(event);
+  }
+  shell.setHidden(false); frame();
+  expect(shell.readerOpened).toBe(false); expect(shell.scroll.unseen).toBe(false); shell.dispose();
 });
 
 test("Home then PageDown before a frame uses the requested shell anchor rather than native page scrolling", () => {

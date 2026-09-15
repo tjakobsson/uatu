@@ -49,6 +49,36 @@ function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjec
 }
 
 describe("persistent shell rendering", () => {
+  for (const input of ["wheel", "touch", "keyboard", "scrollbar", "untouched", "closed"]) test(`${input} inspection controls row and group completion`, () => {
+    const oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>(); let sequence = 0, time = 0;
+    globalThis.requestAnimationFrame = callback => { frames.set(++sequence, callback); return sequence; };
+    globalThis.cancelAnimationFrame = id => { frames.delete(id); };
+    const flush = () => { const callbacks = [...frames.values()]; frames.clear(); time += 16; callbacks.forEach(callback => callback(time)); };
+    const renderer = new TimelineRenderer();
+    try {
+      const target = dom.document.createElement("div") as unknown as HTMLElement, expanded = new Set<string>();
+      const item: ConversationItem = { id: "shell", type: "command", command: "test", createdAt: 1, status: "running", output: "output" };
+      const siblings: ConversationItem[] = [1, 2].map(n => ({ id: `reason-${n}`, type: "reasoning", text: "thought", createdAt: 1, status: "completed" }));
+      renderer.render(target, projectionWith([item, ...siblings]), expanded);
+      const shell = renderer.getShellOutput(item.id)!, row = target.querySelector('[data-chat-item-id="shell"]')!;
+      const group = row.closest(".chat-activity-group")!;
+      Object.assign(shell.viewport, { scrollTop: 0, scrollLeft: 0, scrollHeight: 2000, clientHeight: 240 }); flush();
+      const fire = (type: string, props: Record<string, unknown>) => {
+        const event = new dom.window.Event(type, { bubbles: true }); Object.assign(event, props); shell.viewport.dispatchEvent(event);
+      };
+      if (input === "closed") for (const node of [row, group]) { node.removeAttribute("open"); node.removeAttribute("data-auto-open"); node.setAttribute("data-reader-closed", ""); }
+      if (input === "wheel" || input === "closed") fire("wheel", { deltaY: -4 });
+      else if (input === "keyboard") fire("keydown", { key: "ArrowUp" });
+      else if (input === "touch") { fire("touchstart", { touches: [{ clientY: 100 }] }); fire("touchmove", { touches: [{ clientY: 104 }] }); }
+      if (input !== "untouched") { shell.viewport.scrollTop -= 4; shell.scroll.observe(); }
+      expect(shell.readerOpened).toBe(input !== "untouched");
+      renderer.render(target, projectionWith([{ ...item, status: "completed" }, ...siblings], { status: "idle" }), expanded); flush();
+      const staysOpen = input !== "untouched" && input !== "closed";
+      expect(row.hasAttribute("open")).toBe(staysOpen);
+      expect(row.closest(".chat-activity-group")!.hasAttribute("open")).toBe(staysOpen);
+    } finally { renderer.reset(); globalThis.requestAnimationFrame = oldRequest; globalThis.cancelAnimationFrame = oldCancel; }
+  });
   test("renderer hide/restore after Home leaves the first downward arrival free to resume shell following", () => {
     const oldRequest = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;
     const frames = new Map<number, FrameRequestCallback>(); let sequence = 0, time = 0;
@@ -139,6 +169,7 @@ describe("persistent shell rendering", () => {
     const restored = renderer.getShellOutput(item.id)!;
     expect(restored).not.toBe(a); expect(restored.inlineHeight).toBe(360);
     expect(restored.floatingGeometry).toEqual(a.floatingGeometry); expect(restored.scroll.following).toBe(false);
+    expect(restored.scroll.unseen).toBe(false);
     expect(target.querySelector('[data-chat-item-id="shared-id"]')!.hasAttribute("open")).toBe(true);
     renderer.render(target, projectionWith([item], { conversationId: "c2" }), new Set());
     expect(renderer.getShellOutput(item.id)!.floatingGeometry).toEqual(b.floatingGeometry);

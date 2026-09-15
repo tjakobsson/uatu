@@ -111,6 +111,10 @@ Presentation state needs no stored-data migration. The known-completion requirem
 
 ### PR review follow-up
 
+The fourth review found three lifecycle gaps. Upward reader scrolling and Find reveal now record inspection through the existing coordinated scroll owner, keeping the activity open on completion without overriding explicit reader closure. Retained shell presentation includes the last-painted raw output string, so reconstructing unchanged output preserves `unseen=false`, while output received during absence sets the indicator. The retained value shares an immutable string reference; it can keep an older snapshot alive during navigation.
+
+Return-to-chat focus now checks semantic and layout reachability and falls back from Pop out to the visible owning row/group summary or timeline. It never opens a closed activity merely to focus it and continues to use `preventScroll`. Verification passed: 318 affected unit tests, 12 new Chromium/WebKit lifecycle browser cases, all 28 existing frame-stability/responsiveness cases, typecheck, and whitespace checks.
+
 The third review identified covered prompt navigation being exempt solely because it used a `nav` element. Full-area coverage now exempts the explicit persistent touch-tab and sidebar-rail controls, not arbitrary navigation. Unit coverage checks default and configured coverage roots; Chromium/WebKit desktop and touch cases verify covered prompt buttons cannot receive Tab focus and become usable after Restore or Return to chat.
 
 CI run 34974701541 had one hard failure: the long-output test measured two navigations plus Playwright actionability/protocol work against a combined 3,000ms budget, observing 3,134ms and 3,057ms. The test now measures each navigation in the browser from the actual selector change event through a unique target row's DOM commit, including the application handler and snapshot fetch. Each retains a 3,000ms response budget. Total automation roundtrip time remains diagnostic. The 5,000-line workload, 20 appends, deterministic parser/DOM work assertions, 60-second overall timeout, and move/resize budget remain unchanged; exact retained-output equality was added.

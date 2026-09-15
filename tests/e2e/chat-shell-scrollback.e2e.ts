@@ -46,6 +46,67 @@ const work = (page: Page) => page.evaluate(() => {
 });
 
 for (const engine of ["chromium", "webkit"] as const) {
+  for (const child of [false, true]) for (const collapsed of ["row", "group"] as const) test(`${engine} ${child ? "child" : "parent"} return focuses the visible collapsed ${collapsed} summary`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
+    try {
+      const { outputView, timeline } = await bootShell(page, request, { child, extra: [98, 99].map(createdAt => ({
+        id: `read:${createdAt}`, type: "tool" as const, name: "read", status: "completed" as const, createdAt, output: "Earlier step",
+      })) });
+      const row = timeline.locator('[data-chat-item-id="shell:a"]');
+      const group = row.locator("xpath=ancestor::details[contains(@class,'chat-activity-group')]");
+      const container = collapsed === "row" ? row : group;
+      const summary = container.locator(":scope > summary");
+      await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
+      await summary.focus(); await summary.press("Enter");
+      await expect(container).not.toHaveAttribute("open", "");
+      const top = await timeline.evaluate(el => el.scrollTop);
+      const window = floating(page);
+      if (collapsed === "row") await window.getByRole("button", { name: "Return to chat" }).click();
+      else {
+        await window.getByRole("button", { name: "Return to chat" }).focus();
+        await page.keyboard.press("Escape");
+      }
+      await expect(window).toHaveCount(0);
+      await expect(container).not.toHaveAttribute("open", "");
+      await expect(summary).toBeFocused();
+      expect(await timeline.evaluate(el => el.scrollTop)).toBe(top);
+      if (child) await expect(page.locator("#chat-drilldown")).toBeVisible();
+    } finally { await browser.close(); }
+  });
+
+  for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} scrolling alone preserves inspection through completion and unchanged reconstruction`, async ({ request, baseURL }) => {
+    const browser = await ({ chromium, webkit })[engine].launch();
+    const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
+    try {
+      const output = log(200);
+      const { outputView, viewport, timeline, update, parentId } = await bootShell(page, request, { shape, output });
+      await viewport.hover(); await page.mouse.wheel(0, -800); await frames(page);
+      const anchor = await position(viewport);
+      expect(anchor.bottom).toBeGreaterThan(100);
+      await update(shell(shape, output, "completed"));
+      await expect(outputView).toHaveAttribute("data-status", "completed");
+      await expect(timeline.locator('[data-chat-item-id="shell:a"]')).toHaveAttribute("open", "");
+      await expectReading(viewport, anchor);
+      await expect(outputView.getByRole("button", { name: "Latest output", exact: true })).toBeVisible();
+      const other = await control(request, { action: "seed", title: "Inspect another conversation", items: [] });
+      const chooser = page.locator("#chat-conversation-select");
+      await chooser.selectOption(other.conversation.id);
+      await expect(outputView).toHaveCount(0);
+      await chooser.selectOption(parentId);
+      await expect(outputView).toBeVisible();
+      await expect(outputView.getByRole("button", { name: "Latest output", exact: true })).toBeVisible();
+      await expectReading(viewport, anchor);
+      await chooser.selectOption(other.conversation.id);
+      await expect(outputView).toHaveCount(0);
+      await update(shell(shape, `${output}\noutput received while away`, "completed"));
+      await chooser.selectOption(parentId);
+      await expect(viewport).toContainText("output received while away");
+      await expect(outputView.getByRole("button", { name: /New output.*Latest output/ })).toBeVisible();
+      await expectReading(viewport, anchor);
+    } finally { await browser.close(); }
+  });
+
   for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} full-area output protects covered prompt navigation`, async ({ request, baseURL }) => {
     const browser = await ({ chromium, webkit })[engine].launch();
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,

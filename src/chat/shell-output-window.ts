@@ -15,6 +15,27 @@ export function clampShellWindow(rect: ShellWindowGeometry, area: ShellWindowGeo
   return { width, height, x: Math.max(area.x, Math.min(rect.x, area.x + area.width - width)), y: Math.max(area.y, Math.min(rect.y, area.y + area.height - height)) };
 }
 
+function reachableFocusTarget(element: HTMLElement): boolean {
+  if (!element.isConnected || element.closest("[hidden], [inert]") || element.hasAttribute("disabled")) return false;
+  for (let details = element.closest("details:not([open])"); details; details = details.parentElement?.closest("details:not([open])") ?? null) {
+    if (!details.querySelector(":scope > summary")?.contains(element)) return false;
+  }
+  const style = element.ownerDocument.defaultView?.getComputedStyle?.(element);
+  if (style?.visibility === "hidden" || style?.visibility === "collapse" || style?.display === "none") return false;
+  return typeof element.getClientRects !== "function" || element.getClientRects().length > 0;
+}
+
+function restoreOwnerFocus(owner: ShellOutputController): void {
+  const candidates = [owner.popout as HTMLElement];
+  for (let details = owner.slot.closest("details"); details; details = details.parentElement?.closest("details") ?? null) {
+    const summary = details.querySelector<HTMLElement>(":scope > summary");
+    if (summary) candidates.push(summary);
+  }
+  const timeline = owner.slot.closest<HTMLElement>(".chat-timeline");
+  if (timeline) candidates.push(timeline);
+  candidates.find(reachableFocusTarget)?.focus({ preventScroll: true });
+}
+
 function defaultWorkArea(): ShellWindowGeometry {
   const viewport = window.visualViewport;
   let x = viewport?.offsetLeft ?? 0;
@@ -264,7 +285,7 @@ export class ShellOutputWindow {
       this.host?.remove();
     });
     this.owner = null; this.host = undefined; this.hidden = false;
-    if (restoreFocus && owner.popout.isConnected) owner.popout.focus({ preventScroll: true });
+    if (restoreFocus) restoreOwnerFocus(owner);
   }
 
   private restoreInert(): void { for (const node of this.inert) setChatInert(node, this, false); this.inert.clear(); }
