@@ -5,7 +5,7 @@ import path from "node:path";
 
 import type { SessionBackend } from "./backend";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
-import { HubSessionStore } from "./auth";
+import { HubSessionStore, hubCookieName } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
@@ -51,7 +51,7 @@ async function startFixture() {
   const cookie = async (user: string): Promise<string> => {
     let value = cookies.get(user);
     if (!value) {
-      value = `uatu_hub=${(await sessionStore.issue(user, "test")).id}`;
+      value = `${hubCookieName(new URL(`http://127.0.0.1:${server.port}`))}=${(await sessionStore.issue(user, "test")).id}`;
       cookies.set(user, value);
     }
     return value;

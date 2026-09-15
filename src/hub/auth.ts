@@ -14,7 +14,22 @@ import { promises as fs } from "node:fs";
 
 import type { HubConfig, HubUser } from "./config";
 
+// The session cookie's base name. It is the whole name when the hub is
+// reached at its scheme's default port; see hubCookieName for the rest.
 export const HUB_COOKIE_NAME = "uatu_hub";
+
+// Cookies are scoped per host, never per port. Every hub reached at
+// `127.0.0.1:<port>` (several port-forwarded hubs, say) shares one jar, and
+// the last login would overwrite the others. Suffixing the name with the
+// port of the request's Host header keeps each hub's session independent.
+// A default-port host (`https://hub.example`, where the browser sends no
+// port and the URL parser reports "") keeps the bare name, so the common
+// TLS deployment and every session it already issued are untouched. The
+// Host port is used, not the listen port. A hub behind a port mapping is
+// named for the port the browser sees, which is the only jar that matters.
+export function hubCookieName(requestUrl: URL): string {
+  return requestUrl.port === "" ? HUB_COOKIE_NAME : `${HUB_COOKIE_NAME}_${requestUrl.port}`;
+}
 export const HUB_SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
 export type HubSessionRecord = {
@@ -196,10 +211,14 @@ export function readPresentedSession(request: Request): PresentedSession | null 
   }
   const header = request.headers.get("cookie");
   if (header) {
+    // Only the port-scoped name is read; a bare `uatu_hub` cookie left by
+    // an older hub on a non-default port is ignored and that browser signs
+    // in once more.
+    const name = hubCookieName(new URL(request.url));
     for (const part of header.split(";")) {
       const eq = part.indexOf("=");
       if (eq < 0) continue;
-      if (part.slice(0, eq).trim() !== HUB_COOKIE_NAME) continue;
+      if (part.slice(0, eq).trim() !== name) continue;
       const value = part.slice(eq + 1).trim();
       if (value === "") continue;
       return { id: value, transport: "cookie" };
@@ -300,9 +319,9 @@ export async function verifyLogin(config: HubConfig, name: string, password: str
 // browser-facing scheme; loopback exposure keeps the omission harmless
 // there, and an https-terminating proxy still transports the cookie only
 // over TLS.
-export function formatHubCookie(value: string, options: { secure: boolean }): string {
+export function formatHubCookie(value: string, requestUrl: URL, options: { secure: boolean }): string {
   const parts = [
-    `${HUB_COOKIE_NAME}=${value}`,
+    `${hubCookieName(requestUrl)}=${value}`,
     "Path=/",
     `Max-Age=${HUB_SESSION_MAX_AGE}`,
     "HttpOnly",
@@ -316,8 +335,8 @@ export function formatHubCookie(value: string, options: { secure: boolean }): st
 
 // The logout Set-Cookie: same attributes, empty value, Max-Age=0 so the
 // browser drops the session immediately.
-export function formatHubCookieClear(options: { secure: boolean }): string {
-  const parts = [`${HUB_COOKIE_NAME}=`, "Path=/", "Max-Age=0", "HttpOnly", "SameSite=Lax"];
+export function formatHubCookieClear(requestUrl: URL, options: { secure: boolean }): string {
+  const parts = [`${hubCookieName(requestUrl)}=`, "Path=/", "Max-Age=0", "HttpOnly", "SameSite=Lax"];
   if (options.secure) {
     parts.push("Secure");
   }

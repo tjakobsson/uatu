@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { assertOpenApiResponse, loadContract } from "../../tests/contracts/contract-harness";
-import { hashPassword, HubSessionStore, HUB_COOKIE_NAME } from "./auth";
+import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
 import type { HubConfig } from "./config";
 import {
   EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
@@ -192,7 +192,7 @@ async function login(origin: string, name: string, password: string): Promise<st
   });
   expect(response.status).toBe(200);
   const sessionId = ((await response.json()) as { sessionId: string }).sessionId;
-  return `${HUB_COOKIE_NAME}=${sessionId}`;
+  return `${hubCookieName(new URL(origin))}=${sessionId}`;
 }
 
 function post(origin: string, cookie: string, endpoint: string, body: unknown, requestOrigin = origin) {

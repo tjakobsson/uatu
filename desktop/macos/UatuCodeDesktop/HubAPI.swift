@@ -221,14 +221,30 @@ struct HubAPI {
 /// is harmless: the hub revokes server-side, so a dead id stays dead no
 /// matter who still carries it.
 enum HubCookies {
-    /// The hub's session cookie name, spelled once.
-    static let name = "uatu_hub"
+    /// The hub's session cookie base name, spelled once.
+    static let baseName = "uatu_hub"
+
+    /// The cookie name the hub reads for this URL. Browsers scope cookies
+    /// by host, never by port, so the hub names its cookie for the port
+    /// the browser sends: bare `uatu_hub` at the scheme's default port,
+    /// `uatu_hub_<port>` otherwise, so several port-forwarded hubs on
+    /// `127.0.0.1` keep separate sessions. An explicit default port
+    /// (`https://h:443`) is bare too. WebKit, like every browser, drops it
+    /// from `Host`, so that is the name the hub derives.
+    static func name(for hubURL: URL) -> String {
+        guard let port = hubURL.port else { return baseName }
+        let scheme = hubURL.scheme?.lowercased()
+        if (scheme == "https" && port == 443) || (scheme == "http" && port == 80) {
+            return baseName
+        }
+        return "\(baseName)_\(port)"
+    }
 
     @MainActor
     static func inject(value: String, for hubURL: URL) async {
         guard let host = hubURL.host else { return }
         var properties: [HTTPCookiePropertyKey: Any] = [
-            .name: name,
+            .name: name(for: hubURL),
             .value: value,
             .domain: host,
             .path: "/",
@@ -257,7 +273,7 @@ enum HubCookies {
         guard let host = hubURL.host else { return }
         let store = WKWebsiteDataStore.default().httpCookieStore
         let cookies = await store.allCookies()
-        for cookie in cookies where cookie.name == name && matches(cookie, host: host) {
+        for cookie in cookies where cookie.name == name(for: hubURL) && matches(cookie, host: host) {
             guard stillWanted() else { return }
             await store.deleteCookie(cookie)
         }

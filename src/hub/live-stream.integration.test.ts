@@ -12,7 +12,7 @@ import path from "node:path";
 
 import { MetricsRegistry } from "../debug/metrics";
 import { LIVE_STREAM_PATH, parseLiveEnvelope, parseLiveHello, type LiveEnvelope } from "../shared/live-protocol";
-import { hashPassword, HubSessionStore } from "./auth";
+import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
 import { LocalProcessBackend } from "./backend";
 import type { HubConfig } from "./config";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
@@ -79,7 +79,7 @@ beforeAll(async () => {
   });
   server = startHubServer({ config, registry, sessions, sessionStore, personalState, liveBroker, metrics: hubMetrics });
   origin = `http://127.0.0.1:${server.port}`;
-  cookie = `uatu_hub=${(await sessionStore.issue("t", "test")).id}`;
+  cookie = `${hubCookieName(new URL(origin))}=${(await sessionStore.issue("t", "test")).id}`;
 }, 60_000);
 
 afterAll(async () => {

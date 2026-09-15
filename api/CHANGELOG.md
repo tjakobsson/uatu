@@ -2,6 +2,18 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 6 / Workspace 19 - Unreleased
+
+Compatibility: breaking (Hub)
+
+### Changes
+
+- The `hubCookie` session cookie is named for the port of the request's `Host`. It is `uatu_hub` at the scheme's default port and `uatu_hub_<port>` otherwise, so `uatu_hub_4701` for a Hub reached at `127.0.0.1:4701`. Login sets, every request reads, and sign-out clears the cookie under that name. Hubs reached on different ports of one host, as through local port forwards, no longer overwrite each other's session. Bearer authentication and Hubs at a default port are unchanged.
+
+### Migration
+
+Cookie clients of a Hub at a non-default port must present and clear the port-named cookie. A bare `uatu_hub` is ignored there. A client that writes the cookie by name from a natively held session id (UatuCode Desktop before this revision) gets 401 from web views on such a Hub until it derives the name the same way. Browsers sign in once more. Clients of a Hub at a default port, and every bearer client, need no change.
+
 ## Hub 5 / Workspace 19 - Unreleased
 
 Compatibility: breaking (workspace)

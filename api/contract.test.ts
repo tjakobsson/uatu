@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 
 import { createAjv, openApiOperations, readJson, readYaml, schemaForAjv, validateApi } from "../scripts/validate-api";
+import { HUB_COOKIE_NAME, hubCookieName } from "../src/hub/auth";
 import { isVisibleFolderName } from "../src/hub/folder-manager";
 import {
   formatLiveEnvelope,
@@ -44,8 +45,14 @@ describe("API contract structure", () => {
   });
 
   test("Hub cookie authentication matches the runtime cookie name", async () => {
-    const openapi = await readYaml<{ components: { securitySchemes: { hubCookie: { name: string } } } }>("api/openapi.yaml");
-    expect(openapi.components.securitySchemes.hubCookie.name).toBe("uatu_hub");
+    const openapi = await readYaml<{ components: { securitySchemes: { hubCookie: { name: string; description: string } } } }>("api/openapi.yaml");
+    // The literal is the default-port name; the port-suffixed form the
+    // runtime derives elsewhere cannot be an apiKey `name`, so the scheme's
+    // description carries the rule.
+    expect(openapi.components.securitySchemes.hubCookie.name).toBe(HUB_COOKIE_NAME);
+    expect(openapi.components.securitySchemes.hubCookie.name).toBe(hubCookieName(new URL("https://hub.example/")));
+    expect(openapi.components.securitySchemes.hubCookie.description).toContain("uatu_hub_<port>");
+    expect(hubCookieName(new URL("http://127.0.0.1:4701/"))).toBe("uatu_hub_4701");
   });
 
   test("public logout uses the bearer JSON transport", async () => {

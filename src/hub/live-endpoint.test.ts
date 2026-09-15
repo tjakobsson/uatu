@@ -15,7 +15,7 @@ import {
   type LiveSubscription,
 } from "../shared/live-protocol";
 import type { RunningSession, SessionBackend } from "./backend";
-import { hashPassword, HubSessionStore } from "./auth";
+import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
 import type { HubConfig } from "./config";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { LiveBroker, setLiveUpstreamDiagnostics, type LiveUpstreamDiagnostic, type LiveUpstreamSource } from "./live-broker";
@@ -551,7 +551,7 @@ describe("hub live routes", () => {
     hub = startHubServer({ config, registry, sessions, sessionStore, personalState });
     origin = `http://127.0.0.1:${hub.port}`;
     sessionId = (await sessionStore.issue("t", "test")).id;
-    cookie = `uatu_hub=${sessionId}`;
+    cookie = `${hubCookieName(new URL(origin))}=${sessionId}`;
   });
 
   afterAll(async () => {
@@ -686,7 +686,7 @@ describe("hub live routes", () => {
     const otherSession = (await sessionStore.issue("t", "other device")).id;
     const other = await fetch(`${origin}${liveSubscriptionsPath(stream.hello!)}`, {
       method: "POST",
-      headers: { cookie: `uatu_hub=${otherSession}`, origin, "content-type": "application/json" },
+      headers: { cookie: `${hubCookieName(new URL(origin))}=${otherSession}`, origin, "content-type": "application/json" },
       body,
     });
     expect(other.status).toBe(403);
@@ -729,9 +729,9 @@ describe("hub live routes", () => {
 
   test("sign-out ends that session's live streams", async () => {
     const doomed = (await sessionStore.issue("t", "doomed device")).id;
-    const stream = await openStream("ws=project", { cookie: `uatu_hub=${doomed}` });
+    const stream = await openStream("ws=project", { cookie: `${hubCookieName(new URL(origin))}=${doomed}` });
     await stream.waitFor(r => r.hello !== null, "hello");
-    const logout = await fetch(`${origin}/logout`, { method: "POST", headers: { cookie: `uatu_hub=${doomed}`, origin }, redirect: "manual" });
+    const logout = await fetch(`${origin}/logout`, { method: "POST", headers: { cookie: `${hubCookieName(new URL(origin))}=${doomed}`, origin }, redirect: "manual" });
     expect(logout.status).toBe(303);
     await stream.waitFor(r => r.ended, "stream ended on sign-out");
   });

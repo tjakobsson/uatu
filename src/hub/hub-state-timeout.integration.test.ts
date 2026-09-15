@@ -8,7 +8,7 @@ import path from "node:path";
 
 import type { RunningSession, SessionBackend } from "./backend";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
-import { hashPassword, HubSessionStore } from "./auth";
+import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
@@ -72,7 +72,8 @@ describe("hub state with a wedged child", () => {
   test(
     "/api/hub/state completes with the shell summary omitted",
     async () => {
-      const cookie = `uatu_hub=${(await sessionStore.issue("t", "test")).id}`;
+      const name = hubCookieName(new URL(`http://127.0.0.1:${hub!.port}`));
+      const cookie = `${name}=${(await sessionStore.issue("t", "test")).id}`;
       const started = Date.now();
       const response = await fetch(`http://127.0.0.1:${hub!.port}/api/hub/state`, {
         headers: { cookie },
