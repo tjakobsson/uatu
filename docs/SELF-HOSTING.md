@@ -446,8 +446,10 @@ server {
     location / {
         proxy_pass http://127.0.0.1:4700;
         proxy_http_version 1.1;
-        # REQUIRED: the hub's origin gate compares Origin against this.
-        proxy_set_header Host $host;
+        # REQUIRED: the hub's origin gate compares Origin against this, and
+        # the session cookie is named for its port. $http_host is the
+        # browser's header verbatim; $host would drop a non-default port.
+        proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         # WebSockets (the terminal) and SSE (the live stream).
