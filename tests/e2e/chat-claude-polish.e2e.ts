@@ -3,41 +3,21 @@
 // real model — the context readout's sources, compaction, versioned model
 // names and the app-only set, typed model ids, Bash rows naming their
 // commands, agent-specific permission copy, and dialog cards. Each test that
-// changes what the user sees ends by saving a screenshot into the change's
-// screenshots folder (see its README), so review reads the folder instead of
-// running a session.
+// changes what the user sees ends by capturing a screenshot as evidence
+// (see evidence.ts), so review reads the shots instead of running a session.
 
-import { existsSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-import type { APIRequestContext, Page, TestInfo } from "@playwright/test";
+import type { APIRequestContext } from "@playwright/test";
 
 import { withMoreModels } from "../../src/chat/claude/models";
 import type { ChatModel, ConversationItem } from "../../src/chat/types";
 import { openChatConfiguration, openChatPanel } from "./chat-helpers";
+import { captureScreenshot as capture } from "./evidence";
 import { expect, test } from "./fixtures";
-
-const CHANGE_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/polish-claude-code-chat/screenshots");
-// Shots for the change in flight land in its own folder, not the archived
-// one the rest of this file was written for.
-const RATE_LIMIT_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/quiet-rate-limit-signals/screenshots");
-// The plan-usage readout landed as its own change; its evidence goes to its
-// own folder while the change is open and to the test output once archived.
-const USAGE_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/claude-usage-readout/screenshots");
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<any> {
   const response = await request.post("/__e2e/chat", { data: body });
   expect(response.ok()).toBe(true);
   return response.json();
-}
-
-async function capture(page: Page, testInfo: TestInfo, name: string, folder = CHANGE_SCREENSHOTS): Promise<void> {
-  await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(150);
-  const target = existsSync(folder) ? path.join(folder, `${name}.png`) : testInfo.outputPath(`${name}.png`);
-  await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
-  await testInfo.attach(name, { path: target, contentType: "image/png" });
 }
 
 // The catalog as Claude Code 2.1.258 answered it on 2026-09-02, after the
@@ -486,14 +466,14 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(page.locator("#chat-plan-readout-standing")).toHaveText(/^Approaching your 7-day \(overage included\) rate limit \(77% used\)\. Resets /);
     // The windows are still there to read beneath it.
     await expect(page.locator("#chat-plan-readout-rows")).toBeVisible();
-    await capture(page, testInfo, "rate-limit-warning-folded-into-plan-chip", RATE_LIMIT_SCREENSHOTS);
+    await capture(page, testInfo, "rate-limit-warning-folded-into-plan-chip");
     await summary.click();
 
     // A rejection displaces the figures: blocked is the fact that matters.
     await control(request, { action: "item", conversationId: id, item: standing("rate-limit-rejected", "Rate limit reached for your 7-day window.") });
     await expect(summary).toHaveText(/^Rate limited · resets /);
     await expect(chip).toHaveAttribute("data-level", "rejected");
-    await capture(page, testInfo, "rate-limit-rejected-folded-into-plan-chip", RATE_LIMIT_SCREENSHOTS);
+    await capture(page, testInfo, "rate-limit-rejected-folded-into-plan-chip");
 
     // Retired: the chip returns to the plan it was showing all along.
     await control(request, { action: "removeItem", conversationId: id, itemId: "notice:rate-limit" });
@@ -600,7 +580,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await summary.click();
     await expect(page.locator("#chat-plan-readout-standing")).toHaveText(/^Approaching your 5-hour rate limit \(91% used\)\. Resets /);
     await expect(page.locator("#chat-plan-readout-rows")).toBeHidden();
-    await capture(page, testInfo, "rate-limit-without-a-plan", RATE_LIMIT_SCREENSHOTS);
+    await capture(page, testInfo, "rate-limit-without-a-plan");
   });
 
   test("a login without plan limits keeps the conversation's cost reachable: the chip states it and the readout is this conversation alone", async ({ page, request }, testInfo) => {
@@ -630,7 +610,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     const modelRows = page.locator("#chat-plan-session-models tr");
     await expect(modelRows).toHaveCount(2);
     await expect(modelRows.nth(0).locator("td")).toHaveText(["Opus 5 (1M context)", "55k", "200", "$1.10"]);
-    await capture(page, testInfo, "after-cost-chip-readout-desktop", USAGE_SCREENSHOTS);
+    await capture(page, testInfo, "after-cost-chip-readout-desktop");
     // The pane hears the empty plan and says so, rather than waiting.
     await page.locator("#panels-toggle").click();
     await page.locator('#panels-menu label:has-text("Usage") input').check();
@@ -657,7 +637,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     const summary = page.locator("#chat-plan-usage-summary");
     await expect(summary).toHaveText("Session 9% · Week 25%");
     await expect(plan).toHaveAttribute("data-level", "normal");
-    await capture(page, testInfo, "after-plan-chip-desktop", USAGE_SCREENSHOTS);
+    await capture(page, testInfo, "after-plan-chip-desktop");
 
     await summary.click();
     const readout = page.locator("#chat-plan-readout");
@@ -678,7 +658,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(modelRows).toHaveCount(2);
     await expect(modelRows.nth(0).locator("td")).toHaveText(["Opus 5 (1M context)", "55k", "200", "$1.10"]);
     await expect(modelRows.nth(1).locator("td")).toHaveText(["Haiku 4.5", "300", "40", "$0.13"]);
-    await capture(page, testInfo, "after-plan-readout-desktop", USAGE_SCREENSHOTS);
+    await capture(page, testInfo, "after-plan-readout-desktop");
 
     // A later report with a bucket at 83% turns the summary to a warning
     // and repaints the open readout in place.
@@ -686,7 +666,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(plan).toHaveAttribute("data-level", "warning");
     await expect(rows.nth(4).locator(".plan-row-figure")).toHaveText("83%");
     await expect(rows.nth(4)).toHaveAttribute("data-level", "warning");
-    await capture(page, testInfo, "after-plan-readout-warning-desktop", USAGE_SCREENSHOTS);
+    await capture(page, testInfo, "after-plan-readout-warning-desktop");
 
     // The pin reveals the Usage pane beside the chat and then retires,
     // leaving the other panes' arrangement alone.
@@ -706,7 +686,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(usagePane.locator(".plan-row-label")).toHaveText(["Session", "Week", "Week · Opus", "Week · Sonnet", "Week · Fable", "Extra usage"]);
     await expect(pin).toBeHidden();
     await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
-    await capture(page, testInfo, "after-usage-pane-desktop", USAGE_SCREENSHOTS);
+    await capture(page, testInfo, "after-usage-pane-desktop");
     // Hiding the pane from its own chrome brings the pin back; pinning
     // again reveals the pane once more.
     await usagePane.getByRole("button", { name: "Hide Usage" }).click();
@@ -813,7 +793,7 @@ test.describe("Claude Code plan readout at phone width", () => {
     const composerTop = await page.locator("#chat-composer").evaluate(element => element.getBoundingClientRect().top);
     const readoutBottom = await readout.evaluate(element => element.getBoundingClientRect().bottom);
     expect(readoutBottom).toBeLessThanOrEqual(composerTop + 8);
-    await capture(page, testInfo, "after-plan-readout-phone", USAGE_SCREENSHOTS);
+    await capture(page, testInfo, "after-plan-readout-phone");
 
     // A live switch to the desktop layout puts the sidebar beside the chat
     // and the still-open readout gains its pin; switching back retires it.

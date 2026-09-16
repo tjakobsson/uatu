@@ -1,22 +1,18 @@
 // Shell output rendered as terminal text, the activity chrome's contrast,
 // and an OpenCode conversation's cost — fixture-driven, with the evidence
-// screenshots each change's tasks call for. `UATU_SHOT_PREFIX=before` names
-// the shots as the baseline and skips the assertions the change introduces,
-// so the same scenario can be shot against the pre-change build.
-
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+// screenshots the changes' tasks called for (see evidence.ts).
+// `UATU_SHOT_PREFIX=before` names the shots as the baseline and skips the
+// assertions a change introduces, so the same scenario can be shot against
+// the pre-change build.
 
 import type { APIRequestContext, Page, TestInfo } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
-import { captureScreenshot, openChatPanel } from "./chat-helpers";
+import { openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 import { bootShell, log, shell } from "./chat-shell-helpers";
 
-const changeDir = (name: string) => path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes", name, "screenshots");
-const SHELL_SHOTS = changeDir("render-shell-output-like-terminal");
-const COST_SHOTS = changeDir("report-opencode-conversation-cost");
 const PREFIX = process.env.UATU_SHOT_PREFIX ?? "after";
 const BASELINE = PREFIX === "before";
 
@@ -89,7 +85,7 @@ async function shellScenario(page: Page, request: APIRequestContext, testInfo: T
   // The finished group's summary between the two answers, then its rows.
   await group.locator("> summary").click();
   await expect(page.locator('[data-chat-item-id="tool:sh"]')).toBeVisible();
-  await captureScreenshot(page, testInfo, SHELL_SHOTS, `${PREFIX}-activity-chrome-${suffix}`);
+  await captureScreenshot(page, testInfo, `${PREFIX}-activity-chrome-${suffix}`);
 
   const row = page.locator('[data-chat-item-id="tool:sh"]');
   await row.locator("> summary").click();
@@ -97,7 +93,7 @@ async function shellScenario(page: Page, request: APIRequestContext, testInfo: T
   const block = BASELINE ? row.locator("pre").nth(1) : row.locator(shellOutput).first();
   await expect(block).toBeVisible();
   await block.scrollIntoViewIfNeeded();
-  await captureScreenshot(page, testInfo, SHELL_SHOTS, `${PREFIX}-shell-output-${suffix}`);
+  await captureScreenshot(page, testInfo, `${PREFIX}-shell-output-${suffix}`);
   if (BASELINE) return;
 
   // Escapes are interpreted, not shown; the redrawn line shows once.
@@ -213,7 +209,7 @@ test.describe("shell output reads as the terminal renders it", () => {
     await page.keyboard.press("Enter");
     await expect.poll(async () => (await rows.allTextContents()).some(line => line.includes("Downloading 100%")), { timeout: 10_000 }).toBe(true);
     await page.waitForTimeout(300);
-    await captureScreenshot(page, testInfo, SHELL_SHOTS, `${PREFIX}-shell-output-vs-terminal`);
+    await captureScreenshot(page, testInfo, `${PREFIX}-shell-output-vs-terminal`);
   });
 });
 
@@ -258,7 +254,7 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   const summary = page.locator("#chat-plan-usage-summary");
   // Main agent $1.25 plus the subagent's $0.25: what the whole conversation cost.
   await expect(summary).toHaveText("$1.50 this conversation");
-  await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-chip-${touch ? "phone" : "desktop"}`);
+  await captureScreenshot(page, testInfo, `${PREFIX}-chip-${touch ? "phone" : "desktop"}`);
   if (touch) return;
   await summary.click();
   const readout = page.locator("#chat-plan-readout");
@@ -284,7 +280,7 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   await expect(agents.nth(1).locator(".chat-plan-session-agent-model")).toHaveText("GPT-5");
   await expect(agents.nth(1).locator("td").last()).toHaveText("$0.25");
   await expect(page.locator("#chat-subagents-items")).toContainText("$0.25");
-  await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-readout-desktop`);
+  await captureScreenshot(page, testInfo, `${PREFIX}-readout-desktop`);
   // A label-only correction to the subagent repaints the open table.
   const agentSeed = costItems.find(item => item.id === "tool:agent")!;
   const relabelled = await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.split("\u0001")[0], item: { ...agentSeed, childConversationId: childId, input: JSON.stringify({ description: "Review renderer again", subagent_type: "explore" }) } } });
@@ -298,7 +294,7 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   await agentRow.locator("> summary").click();
   await agentRow.locator("[data-open-conversation]").click();
   await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer again · $0.25");
-  await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-subagent-drilldown-desktop`);
+  await captureScreenshot(page, testInfo, `${PREFIX}-subagent-drilldown-desktop`);
   // The child reports more while its transcript is open: the title follows.
   const agentItem = costItems.find(item => item.id === "tool:agent")!;
   const restated = await request.post("/__e2e/chat", { data: { action: "item", conversationId: seeded.split("\u0001")[0], item: { ...agentItem, childConversationId: childId, input: JSON.stringify({ description: "Review renderer again", subagent_type: "explore" }), usage: { input: 8_000, output: 400, cacheRead: 0, cacheWrite: 0, costUsd: 0.5 } } } });
@@ -315,7 +311,7 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   await expect(summary).toHaveText("$1.75 this conversation");
   await summary.click();
   await expect(page.locator("#chat-plan-session-title")).toHaveText("This conversation");
-  await captureScreenshot(page, testInfo, COST_SHOTS, `${PREFIX}-reopen-desktop`);
+  await captureScreenshot(page, testInfo, `${PREFIX}-reopen-desktop`);
 }
 
 test.describe("an OpenCode conversation reports its cost", () => {

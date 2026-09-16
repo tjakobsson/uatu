@@ -4,12 +4,12 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
-import { captureScreenshot, changeScreenshotsDir, openChatPanel } from "./chat-helpers";
+import { openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import type { FakeE2EChatService } from "./chat-service";
 import { expect, test } from "./fixtures";
 
 // Where the confirm-always-allow-scope change keeps its evidence.
-const CONFIRM_SCREENSHOTS = changeScreenshotsDir("confirm-always-allow-scope");
 
 test("outstanding requests are counted, reachable, and clear at zero", async ({ page, request }) => {
   await request.post("/__e2e/reset");
@@ -190,7 +190,7 @@ test.describe("Allow always asks for confirmation", () => {
     await expect(stage.locator(".chat-request-scope")).toContainText("until OpenCode restarts");
     await expect(stage.getByRole("button", { name: "Cancel" })).toBeFocused();
     expect(await replies(request)).toEqual([]);
-    await captureScreenshot(page, testInfo, CONFIRM_SCREENSHOTS, "after-confirmation-prefix-desktop");
+    await captureScreenshot(page, testInfo, "after-confirmation-prefix-desktop");
 
     // Cancel returns to the pending choices; still nothing sent.
     await stage.getByRole("button", { name: "Cancel" }).click();
@@ -225,7 +225,7 @@ test.describe("Allow always asks for confirmation", () => {
     await expect(wildcard.locator(".chat-request-confirm-lead")).toContainText("every");
     await expect(wildcard.locator(".chat-request-confirm-action")).toHaveText("webfetch");
     await expect(wildcard.locator(".chat-request-always")).toHaveCount(0);
-    await captureScreenshot(page, testInfo, CONFIRM_SCREENSHOTS, "after-confirmation-wildcard-desktop");
+    await captureScreenshot(page, testInfo, "after-confirmation-wildcard-desktop");
     await wildcard.getByRole("button", { name: "Cancel" }).click();
 
     // A newer request with nothing reusable becomes the answerable one.
@@ -237,7 +237,7 @@ test.describe("Allow always asks for confirmation", () => {
     await expect(bare.locator(".chat-request-confirm-lead")).toContainText("only this request");
     await expect(bare.locator(".chat-request-always")).toHaveCount(0);
     await expect(bare.locator(".chat-request-scope")).toHaveCount(0);
-    await captureScreenshot(page, testInfo, CONFIRM_SCREENSHOTS, "after-confirmation-no-pattern-desktop");
+    await captureScreenshot(page, testInfo, "after-confirmation-no-pattern-desktop");
     expect(await replies(request)).toEqual([]);
   });
 
@@ -277,7 +277,7 @@ test.describe("Allow always asks for confirmation", () => {
       const stage = card.locator("[data-permission-confirming]");
       await expect(stage.locator(".chat-request-always code")).toHaveText(["git status *"]);
       await expect(stage.getByRole("button", { name: "Confirm" })).toBeVisible();
-      await captureScreenshot(page, testInfo, CONFIRM_SCREENSHOTS, "after-confirmation-phone");
+      await captureScreenshot(page, testInfo, "after-confirmation-phone");
       expect(await replies(request)).toEqual([]);
     });
   });

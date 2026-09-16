@@ -3,7 +3,7 @@
 // clears the covered strip while scrolled content flows beneath it; without
 // the marker, layout is byte-identical to the plain browser. The Swift side
 // (script injection, contentLayoutRect tracking) is verified manually in
-// the app. Spec: openspec/changes/add-desktop-glass-titlebar/specs/.
+// the app. Spec: openspec/specs/desktop-titlebar-inset/spec.md.
 
 import { expect, test } from "./fixtures";
 import type { Page } from "@playwright/test";

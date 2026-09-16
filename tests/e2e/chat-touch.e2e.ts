@@ -1,11 +1,8 @@
-import { existsSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-import type { APIRequestContext, Page, TestInfo } from "@playwright/test";
+import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
 import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -377,8 +374,8 @@ test("a permission's long paths wrap instead of running off the screen", async (
     id: "permission:p-long", type: "permission", createdAt: 10, requestId: "p-long",
     action: "bash",
     resources: [
-      "cat /Users/tobias/src/github.com/tjakobsson/uatu/openspec/changes/chat-context-usage/design.md",
-      "sed -n '1,80p' /Users/tobias/src/github.com/tjakobsson/uatu/README.md",
+      "cat /workspace/packages/preview/src/components/markdown/code-block-decorations/language-detection-heuristics.ts",
+      "sed -n '1,80p' /workspace/README.md",
     ],
     status: "pending",
   };
@@ -441,18 +438,6 @@ test("rotation and live mode switching retain Chat without remounting", async ({
 // The folded rate-limit chip in the layout where composer room is scarcest:
 // a second chip beside it used to compete for the same row.
 test.describe("rate-limit standing in touch mode", () => {
-  // The change these shots were evidence for is archived; while its folder
-  // existed the shots landed there, and now they go to the test output rather
-  // than resurrecting an empty change folder on every run.
-  const SHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/quiet-rate-limit-signals/screenshots");
-
-  async function shoot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
-    await page.evaluate(() => document.fonts.ready);
-    await page.waitForTimeout(150);
-    const target = existsSync(SHOTS) ? path.join(SHOTS, `${name}.png`) : testInfo.outputPath(`${name}.png`);
-    await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
-  }
-
   test("the standing rides the plan chip and opens, with no timeline row", async ({ page, request }, testInfo) => {
     const id = await boot(page, request, { items: [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
@@ -465,16 +450,16 @@ test.describe("rate-limit standing in touch mode", () => {
     await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 3, level: "warning", message: "Approaching your 7-day (overage included) rate limit (77% used).", code: "rate-limit-warning", resetsAt: Date.now() + 3_600_000 } });
     await expect(chip).toHaveAttribute("data-level", "warning");
     await expect(page.locator('[data-chat-item-id="notice:rate-limit"]')).toHaveCount(0);
-    await shoot(page, testInfo, "touch-rate-limit-warning");
+    await captureScreenshot(page, testInfo, "touch-rate-limit-warning");
     // It opens here too, and the readout stays clear of the composer.
     await summary.click();
     await expect(page.locator("#chat-plan-readout-standing")).toBeVisible();
-    await shoot(page, testInfo, "touch-rate-limit-warning-readout");
+    await captureScreenshot(page, testInfo, "touch-rate-limit-warning-readout");
     await summary.click();
 
     await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 3, level: "error", message: "Rate limit reached for your 7-day window.", code: "rate-limit-rejected", resetsAt: Date.now() + 3_600_000 } });
     await expect(summary).toHaveText(/^Rate limited · resets /);
     await expect(chip).toHaveAttribute("data-level", "rejected");
-    await shoot(page, testInfo, "touch-rate-limit-rejected");
+    await captureScreenshot(page, testInfo, "touch-rate-limit-rejected");
   });
 });
