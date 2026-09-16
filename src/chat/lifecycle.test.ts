@@ -225,6 +225,42 @@ describe("chat lifecycle recovery", () => {
     expect(f.reads).toEqual([f.saved]);
   });
 
+  for (const failed of [false, true]) {
+    test(`creation after ${failed ? "failed" : "pending"} deferred opening keeps ordinary deletion recovery`, async () => {
+      const f = await startupFixture();
+      await f.boot([]);
+      await f.inventory([f.saved]);
+      if (failed) {
+        f.pendingReads[0]!.result.reject(new Error("synthetic startup failure"));
+        await waitUntil(() => !f.readError.hidden);
+        await f.settle();
+      }
+      f.newButton.dispatchEvent(new Event("click"));
+      await waitUntil(() => f.creations.length === 1);
+      await f.inventory([f.saved, f.created]);
+      f.creation.resolve(f.history(f.created));
+      await waitUntil(() => f.reads.length === 2);
+      f.pendingReads[1]!.result.reject(new Error("synthetic created history failure"));
+      await waitUntil(() => f.readError.textContent!.includes("synthetic created history failure"));
+      await f.settle();
+      await f.inventory([f.saved]);
+      expect(f.select.value).toBe("");
+      await f.inventory([f.saved, f.created]);
+      expect(f.reads).toEqual([f.saved, f.created, f.created]);
+      if (!failed) {
+        expect(f.pendingReads[0]!.signal?.aborted).toBe(true);
+        f.pendingReads[0]!.result.resolve(f.history(f.saved));
+        await f.settle();
+        expect(f.streams).toEqual([]);
+        expect(f.select.value).toBe(f.created);
+      }
+      await f.finishRead(f.created, 2);
+      expect(f.streams.map(s => s.id)).toEqual([f.created]);
+      expect(f.items.textContent).toContain(`history for ${f.created}`);
+      expect(f.items.textContent).not.toContain(`history for ${f.saved}`);
+    });
+  }
+
   test("confirming an agent choice cancels restoration before creation responds", async () => {
     const f = await startupFixture({ multipleAgents: true });
     await f.boot([]);
@@ -249,7 +285,7 @@ describe("chat lifecycle recovery", () => {
     f.pendingReads[0]!.result.reject(new Error("synthetic history failure"));
     await waitUntil(() => !f.readError.hidden);
     await f.settle();
-    for (let i = 0; i < 3; i++) await f.inventory([f.saved, f.other]);
+    for (const ids of [[f.saved, f.other], [f.other], [f.saved, f.other]]) await f.inventory(ids);
     expect(f.readError.textContent).toContain("synthetic history failure");
     expect(f.readError.querySelector("button")!.textContent).toBe("Retry read");
     expect(f.reads).toEqual([f.saved]);
@@ -263,6 +299,66 @@ describe("chat lifecycle recovery", () => {
     expect(f.creations).toEqual([]);
     expect(f.prompts).toEqual([]);
   });
+
+  test("pending deferred read survives inventory omission and reappearance without reopening", async () => {
+    const f = await startupFixture();
+    await f.boot([]);
+    await f.inventory([f.saved, f.other]);
+    await f.inventory([f.other]);
+    const selectedWhileAbsent = f.select.value;
+    await f.inventory([f.saved, f.other]);
+    expect(f.reads).toEqual([f.saved]);
+    expect(selectedWhileAbsent).toBe(f.saved);
+    expect(f.input.value).toBe("saved draft");
+    await f.finishRead(f.saved);
+    expect(f.streams.map(s => s.id)).toEqual([f.saved]);
+    expect(f.send.disabled).toBe(false);
+  });
+
+  for (const failed of [false, true]) {
+    test(`${failed ? "failed" : "pending"} deferred opening keeps unrelated chooser inventory current while absent`, async () => {
+      const f = await startupFixture();
+      await f.boot([]);
+      await f.inventory([f.saved, f.created]);
+      if (failed) {
+        f.pendingReads[0]!.result.reject(new Error("synthetic history failure"));
+        await waitUntil(() => !f.readError.hidden);
+        await f.settle();
+      }
+      await f.inventory([f.other]);
+      expect(Array.from(f.select.options).map(option => option.value).sort()).toEqual([f.other, f.saved].sort());
+      expect(f.select.value).toBe(f.saved);
+      expect(f.input.value).toBe("saved draft");
+      f.choose(f.other);
+      await f.finishRead(f.other, 1);
+      if (!failed) {
+        f.pendingReads[0]!.result.resolve(f.history(f.saved));
+        await f.settle();
+      }
+      expect(f.select.value).toBe(f.other);
+      expect(f.streams.map(s => s.id)).toEqual([f.other]);
+    });
+
+    test(`${failed ? "failed" : "pending"} deferred opening retains its persisted draft across an absent inventory flush`, async () => {
+      const f = await startupFixture();
+      await f.boot([]);
+      await f.inventory([f.saved]);
+      if (failed) {
+        f.pendingReads[0]!.result.reject(new Error("synthetic history failure"));
+        await waitUntil(() => !f.readError.hidden);
+        await f.settle();
+      }
+      await f.inventory([f.other]);
+      f.window.dispatchEvent(new Event("pagehide"));
+      const { presentationLocalStorage } = await import("../shell/presentation-storage");
+      expect(JSON.parse(presentationLocalStorage()!.getItem("uatu:chat-presentation")!).drafts[f.saved]).toBe("saved draft");
+      await f.inventory([f.saved, f.other]);
+      if (failed) f.readError.querySelector("button")!.dispatchEvent(new Event("click"));
+      await f.finishRead(f.saved, failed ? 1 : 0);
+      expect(f.input.value).toBe("saved draft");
+      expect(f.streams.map(s => s.id)).toEqual([f.saved]);
+    });
+  }
 
   test("obsolete deferred history cannot replace a newer manual selection", async () => {
     const f = await startupFixture();
@@ -280,6 +376,51 @@ describe("chat lifecycle recovery", () => {
     expect(f.input.value).toBe("other draft");
     expect(f.reads).toEqual([f.saved, f.other]);
     expect(f.streams.map(s => s.id)).toEqual([f.other]);
+  });
+
+  for (const retry of [false, true]) {
+    test(`deferred ${retry ? "retry" : "original"} success while absent establishes ordinary deletion recovery`, async () => {
+      const f = await startupFixture();
+      await f.boot([]);
+      await f.inventory([f.saved, f.other]);
+      if (retry) {
+        f.pendingReads[0]!.result.reject(new Error("synthetic history failure"));
+        await waitUntil(() => !f.readError.hidden);
+        await f.settle();
+        f.readError.querySelector("button")!.dispatchEvent(new Event("click"));
+      }
+      await f.inventory([f.other]);
+      expect(f.select.value).toBe(f.saved);
+      await f.finishRead(f.saved, retry ? 1 : 0);
+      expect(f.streams.map(s => s.id)).toEqual([f.saved]);
+      await f.inventory([f.saved, f.other]);
+      expect(f.reads).toHaveLength(retry ? 2 : 1);
+      await f.inventory([f.other]);
+      expect(f.streams[0]!.closed).toBe(true);
+      expect(f.select.value).toBe("");
+      await f.inventory([f.saved, f.other]);
+      await f.finishRead(f.saved, retry ? 2 : 1);
+      expect(f.streams.filter(s => !s.closed).map(s => s.id)).toEqual([f.saved]);
+      expect(f.input.value).toBe("saved draft");
+    });
+  }
+
+  test("obsolete startup success cannot change a newer manual opening's deletion semantics", async () => {
+    const f = await startupFixture();
+    await f.boot([]);
+    await f.inventory([f.saved, f.other]);
+    f.choose(f.other);
+    f.pendingReads[0]!.result.resolve(f.history(f.saved));
+    await f.settle();
+    await f.inventory([f.saved]);
+    expect(f.select.value).toBe("");
+    await f.inventory([f.saved, f.other]);
+    expect(f.reads).toEqual([f.saved, f.other, f.other]);
+    await f.finishRead(f.other, 2);
+    f.pendingReads[1]!.result.resolve(f.history(f.other));
+    await f.settle();
+    expect(f.streams.map(s => s.id)).toEqual([f.other]);
+    expect(f.input.value).toBe("other draft");
   });
 
   test("empty bootstrap without a saved id never auto-selects later arrivals", async () => {

@@ -231,6 +231,11 @@ export function initChat(api = new ChatApiClient()): void {
   // A stored reference is not an opened selection. Keep it inert across
   // missing inventories, even if creation cancels startup before it finishes.
   let hasSelectedConversation = false;
+  // A consumed startup restore is not deletion-recovery eligible until its
+  // opening read succeeds. Keep this scoped to its current selection epoch.
+  let unestablishedStartup: { conversationId: string; generation: number } | null = null;
+  const isUnestablishedStartup = (id: string | null | undefined) =>
+    unestablishedStartup?.generation === selectionGeneration && unestablishedStartup.conversationId === id;
   let startupOwnsSelection = true;
   let pendingStartupId: string | null = null;
   const supersedeStartupSelection = () => {
@@ -651,7 +656,9 @@ export function initChat(api = new ChatApiClient()): void {
       projection?.conversationId ?? null,
       selectedConversationDeleted ? presentation.selectedId ?? null : null,
     );
-    if (!hasSelectedConversation && presentation.selectedId) known.add(presentation.selectedId);
+    if ((!hasSelectedConversation || isUnestablishedStartup(presentation.selectedId)) && presentation.selectedId) {
+      known.add(presentation.selectedId);
+    }
     // Prune only once the inventory has actually loaded — an empty list at
     // boot must not wipe every stored draft.
     if (conversations.length > 0) {
@@ -2257,7 +2264,8 @@ export function initChat(api = new ChatApiClient()): void {
     }
   }
 
-  const selectConversation = async (id: string): Promise<boolean> => {
+  const selectConversation = async (id: string, deferredStartup = false): Promise<boolean> => {
+    const openingStartup = deferredStartup || isUnestablishedStartup(id);
     supersedeStartupSelection();
     hasSelectedConversation = true;
     if (projection?.conversationId === id && stream && !historyRefreshRequired.has(id) && !selectedConversationDeleted) return true;
@@ -2272,6 +2280,7 @@ export function initChat(api = new ChatApiClient()): void {
     closeChildConversation();
     if (renameForm) renameForm.hidden = true;
     const token = ++selectionGeneration;
+    unestablishedStartup = openingStartup ? { conversationId: id, generation: token } : null;
     stream?.close();
     stream = null;
     const acceptedDrafts = projection?.conversationId === id ? projection.acceptedDrafts : [];
@@ -2314,6 +2323,7 @@ export function initChat(api = new ChatApiClient()): void {
         const snapshot = await api.snapshot(id, undefined, signal);
         if (token !== selectionGeneration) return false;
         installConversationSnapshot(snapshot, acceptedDrafts, token);
+        unestablishedStartup = null;
         // The selection is settled; a ready agent stops polling, so this is
         // the moment mid-session command discoveries reach the completion
         // menu (background, after the chooser is done).
@@ -2327,10 +2337,17 @@ export function initChat(api = new ChatApiClient()): void {
 
   const patchChooser = (selectedId: string | null, deleted = false) => {
     renderSelectedConversationDeleted(document, deleted);
+    // Keep only the unresolved startup selection across a transient omission;
+    // all other options must continue to reflect the latest inventory.
+    const retainedStartupOption = isUnestablishedStartup(selectedId)
+      && selectedId && !conversations.some(conversation => conversation.id === selectedId)
+      ? Array.from(select.options).find(option => option.value === selectedId)
+      : undefined;
     patchConversationOptions(select, conversations, conversation =>
       agentStatuses.length > 1 && conversation.agent
         ? `${displayConversationTitle(conversation)} · ${conversation.agent.name}`
         : displayConversationTitle(conversation));
+    if (retainedStartupOption) select.append(retainedStartupOption);
     const genericPlaceholder = select.querySelector<HTMLOptionElement>("option[data-chat-inventory-placeholder]");
     if (deleted || selectedId) {
       genericPlaceholder?.remove();
@@ -2347,7 +2364,7 @@ export function initChat(api = new ChatApiClient()): void {
       select.disabled = false;
     } else {
       select.value = selectedId ?? "";
-      select.disabled = conversations.length === 0;
+      select.disabled = conversations.length === 0 && !retainedStartupOption;
     }
   };
 
@@ -2413,7 +2430,7 @@ export function initChat(api = new ChatApiClient()): void {
       pendingStartupId = null;
       conversations = next;
       patchChooser(id);
-      void selectConversation(id);
+      void selectConversation(id, true);
       syncInventoryAwareness(tracked.increased);
       syncControls();
       save();
@@ -2421,7 +2438,10 @@ export function initChat(api = new ChatApiClient()): void {
     }
     const selectedId = hasSelectedConversation ? presentation.selectedId ?? null : null;
     const selectedMissing = selectedId !== null && !next.some(conversation => conversation.id === selectedId);
-    if (selectedMissing) enterSelectedConversationDeleted();
+    // A transient omission cannot invalidate this one-shot read or turn its
+    // failure into an automatic retry. Preserve its chooser and draft too.
+    const startupOpeningMissing = selectedMissing && isUnestablishedStartup(selectedId);
+    if (selectedMissing && !startupOpeningMissing) enterSelectedConversationDeleted();
 
     // The successful response replaces inventory truth. It does not install a
     // snapshot or touch the selected projection unless an unavailable

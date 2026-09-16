@@ -183,7 +183,17 @@ test.describe("live conversation inventory", () => {
         const retry = page.getByRole("button", { name: "Retry read" });
         await expect(page.locator(".chat-read-error").filter({ visible: true })).toContainText("Remembered history temporarily unavailable");
         await expect(retry).toBeEnabled();
-        for (let i = 0; i < 2; i++) await publish([saved.conversation]);
+        await publish([saved.conversation]);
+        const other = await control<ConversationSnapshot>(request, {
+          action: "seed", title: "Available while restoration failed", items: [],
+        });
+        // A bounded inventory may temporarily omit the failed selection. It
+        // must neither turn failure into deletion recovery nor freeze the list.
+        await publish([other.conversation]);
+        await expect(page.locator("#chat-conversation-select")).toHaveValue(saved.conversation.id);
+        await expect(page.locator("#chat-conversation-select option").filter({ hasText: other.conversation.title })).toHaveCount(1);
+        await expect(retry).toBeVisible();
+        await publish([saved.conversation, other.conversation]);
         expect(openingReads).toHaveLength(1);
         await expect(retry).toBeVisible();
         fail = false;
