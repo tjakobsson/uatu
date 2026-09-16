@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1810" viewBox="0 0 1600 1810" role="img" aria-labelledby="title desc">
+  <title id="title">Proposed Uatu worktree architecture and lifecycle</title>
+  <desc id="desc">Uatu UI and an agent-invoked CLI call a shared Hub worktree service. The service safely creates Git worktrees, records provenance and registers independent workspaces. Native agent and external Git worktrees are discovered without claiming ownership. Uatu-managed worktrees can be safely deleted while keeping their branches by default; forgetting a workspace never deletes its files.</desc>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #e8eef8; }
+      .title { font-size: 34px; font-weight: 750; }
+      .subtitle { font-size: 17px; fill: #acbbd2; }
+      .section { font-size: 23px; font-weight: 700; }
+      .heading { font-size: 19px; font-weight: 700; }
+      .body { font-size: 16px; fill: #c4d0e2; }
+      .small { font-size: 14px; fill: #acbbd2; }
+      .label { font-size: 14px; font-weight: 650; fill: #85dfd1; }
+      .panel { fill: #111d30; stroke: #2b3c55; stroke-width: 1.5; }
+      .box { fill: #1a2940; stroke: #405571; stroke-width: 1.5; }
+      .managed { fill: #103b3b; stroke: #54ccba; stroke-width: 1.8; }
+      .external { fill: #302942; stroke: #b09bdf; stroke-width: 1.8; }
+      .caution { fill: #382f20; stroke: #d9af61; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #71d9c7; stroke-width: 2.5; marker-end: url(#arrow); }
+      .discovery { fill: none; stroke: #b8a5e7; stroke-width: 2.5; stroke-dasharray: 7 5; marker-end: url(#purpleArrow); }
+      .neutral { fill: none; stroke: #9cacc4; stroke-width: 2; marker-end: url(#grayArrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L9 5 L0 10 Z" fill="#71d9c7"/></marker>
+    <marker id="purpleArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L9 5 L0 10 Z" fill="#b8a5e7"/></marker>
+    <marker id="grayArrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L9 5 L0 10 Z" fill="#9cacc4"/></marker>
+  </defs>
+
+  <rect width="1600" height="1810" fill="#0a1322"/>
+  <text x="48" y="60" class="title">Uatu worktrees</text>
+  <text x="48" y="91" class="subtitle">Proposed architecture · shared UI / CLI operations · native agent isolation stays native</text>
+  <rect x="1310" y="34" width="242" height="38" rx="19" class="caution"/>
+  <text x="1431" y="59" text-anchor="middle" class="small">DESIGN · NOT IMPLEMENTED</text>
+
+  <!-- Architecture: managed creation and independent discovery. -->
+  <rect x="32" y="120" width="1536" height="844" rx="20" class="panel"/>
+  <text x="56" y="160" class="section">1 / Architecture</text>
+  <text x="56" y="187" class="subtitle">One Hub operation, two entry points. Discovery is separate from lifecycle ownership.</text>
+
+  <rect x="64" y="218" width="250" height="114" rx="12" class="box"/>
+  <text x="84" y="250" class="heading">Uatu UI</text>
+  <text x="84" y="278" class="body">Create / list / delete</text>
+  <text x="84" y="304" class="small">Branch, base and destination</text>
+
+  <rect x="390" y="218" width="530" height="114" rx="12" class="box"/>
+  <text x="410" y="250" class="heading">Claude Code / OpenCode chat + Uatu skill</text>
+  <text x="410" y="278" class="body">Explicit request for a persistent Uatu workspace</text>
+  <text x="410" y="304" class="small">Skill guides usage; CLI / Hub enforce safety</text>
+
+  <rect x="390" y="366" width="530" height="90" rx="12" class="managed"/>
+  <text x="410" y="399" class="heading">Uatu CLI · worktree commands</text>
+  <text x="410" y="428" class="body">Structured results · Hub context supplied by Uatu</text>
+  <path d="M655 332 V366" class="flow"/>
+
+  <rect x="1010" y="218" width="526" height="114" rx="12" class="external"/>
+  <text x="1030" y="250" class="heading">Native agents / terminal / external tools</text>
+  <text x="1030" y="278" class="body">Git worktrees and native subagent isolation</text>
+  <text x="1030" y="304" class="small">No replaced hooks or intercepted provider lifecycle</text>
+
+  <rect x="1010" y="366" width="526" height="90" rx="12" class="external"/>
+  <text x="1030" y="399" class="heading">Git worktree inventory</text>
+  <text x="1030" y="428" class="body">Authoritative list of linked checkouts</text>
+  <path d="M1273 332 V366" class="discovery"/>
+
+  <rect x="64" y="506" width="856" height="158" rx="12" class="managed"/>
+  <text x="86" y="539" class="heading">Hub worktree service · shared operation</text>
+  <text x="86" y="568" class="body">Validate branch / ref / path → reserve destination → coordinate by repository</text>
+  <text x="86" y="596" class="body">Git operation → verify result → record provenance → register workspace</text>
+  <text x="86" y="632" class="label">Safety and recovery live here, not in the skill or the UI</text>
+  <path d="M189 332 V506" class="flow"/>
+  <text x="202" y="408" class="small">Hub request</text>
+  <path d="M655 456 V506" class="flow"/>
+
+  <rect x="1010" y="506" width="526" height="158" rx="12" class="external"/>
+  <text x="1030" y="539" class="heading">Discovery / reconciliation</text>
+  <text x="1030" y="568" class="body">Scan on open, after agent activity, periodically</text>
+  <text x="1030" y="596" class="body">Manual refresh; provider events are optional hints</text>
+  <text x="1030" y="632" class="small">Discovered ≠ Uatu-owned · do not infer from names</text>
+  <path d="M1273 456 V506" class="discovery"/>
+
+  <rect x="64" y="714" width="856" height="102" rx="12" class="box"/>
+  <text x="86" y="746" class="heading">Hub registry + live updates → worktree / workspace navigator</text>
+  <text x="86" y="775" class="body">Uatu creation appears immediately; discovered worktrees offer “Open”</text>
+  <text x="86" y="800" class="small">Opening an external checkout does not transfer cleanup ownership</text>
+  <path d="M492 664 V714" class="flow"/>
+  <path d="M1273 664 V764 H920" class="discovery"/>
+
+  <rect x="64" y="854" width="1472" height="82" rx="12" class="box"/>
+  <text x="86" y="886" class="heading">Each opened worktree = an independent Uatu workspace</text>
+  <text x="86" y="915" class="body">Own child / watch root / terminal · Claude cwd · OpenCode directory · conversation scope · explicit credential policy</text>
+  <path d="M492 816 V854" class="flow"/>
+
+  <!-- Lifecycle: creation modes, active state, and guarded removal. -->
+  <rect x="32" y="988" width="1536" height="630" rx="20" class="panel"/>
+  <text x="56" y="1028" class="section">2 / Worktree lifecycle</text>
+  <text x="56" y="1055" class="subtitle">Create deliberately. Keep conversations bound to their checkout. Delete only through an explicit safe operation.</text>
+
+  <rect x="64" y="1084" width="320" height="150" rx="12" class="managed"/>
+  <text x="84" y="1116" class="heading">Choose creation mode</text>
+  <text x="84" y="1146" class="body">New branch + starting revision</text>
+  <text x="84" y="1174" class="body">Existing local branch</text>
+  <text x="84" y="1202" class="body">Remote → local tracking branch</text>
+
+  <rect x="438" y="1084" width="320" height="150" rx="12" class="managed"/>
+  <text x="458" y="1116" class="heading">Validate → create → register</text>
+  <text x="458" y="1146" class="body">No force / branch reset</text>
+  <text x="458" y="1174" class="body">Branch in use? Offer existing tree</text>
+  <text x="458" y="1202" class="body">Record Uatu creation provenance</text>
+  <path d="M384 1159 H438" class="flow"/>
+
+  <rect x="812" y="1084" width="322" height="150" rx="12" class="managed"/>
+  <text x="832" y="1116" class="heading">Ready / open / working</text>
+  <text x="832" y="1146" class="body">Independent workspace context</text>
+  <text x="832" y="1174" class="body">No silent conversation migration</text>
+  <text x="832" y="1202" class="body">Native agent isolation unchanged</text>
+  <path d="M758 1159 H812" class="flow"/>
+
+  <rect x="1188" y="1084" width="348" height="150" rx="12" class="external"/>
+  <text x="1208" y="1116" class="heading">External tree discovered</text>
+  <text x="1208" y="1146" class="body">List → user chooses Open</text>
+  <text x="1208" y="1174" class="body">Registration ≠ ownership</text>
+  <text x="1208" y="1202" class="body">Agent cleanup remains native</text>
+  <path d="M1188 1159 H1134" class="discovery"/>
+
+  <rect x="64" y="1270" width="694" height="90" rx="12" class="caution"/>
+  <text x="84" y="1302" class="heading">Failure / recovery</text>
+  <text x="84" y="1331" class="body">Report partial creation; retain checkout if registration fails; allow retry.</text>
+  <path d="M598 1234 V1270" class="neutral"/>
+
+  <rect x="812" y="1270" width="724" height="90" rx="12" class="box"/>
+  <text x="832" y="1302" class="heading">Remove from Uatu / forget</text>
+  <text x="832" y="1331" class="body">Stop Uatu use → unregister only. Worktree, branch and files remain.</text>
+  <path d="M973 1234 V1270" class="neutral"/>
+
+  <text x="64" y="1404" class="label">MANUAL DELETE · UATU-MANAGED WORKTREES · SEPARATE FROM FORGET</text>
+  <rect x="64" y="1426" width="320" height="150" rx="12" class="caution"/>
+  <text x="84" y="1458" class="heading">Inspect + confirm</text>
+  <text x="84" y="1488" class="body">Path / branch / changes</text>
+  <text x="84" y="1516" class="body">Account for ignored local files</text>
+  <text x="84" y="1544" class="body">External use may be unknown</text>
+
+  <rect x="438" y="1426" width="320" height="150" rx="12" class="caution"/>
+  <text x="458" y="1458" class="heading">Quiesce + check</text>
+  <text x="458" y="1488" class="body">Stop Uatu agents / terminal</text>
+  <text x="458" y="1516" class="body">Respect existing Git locks</text>
+  <text x="458" y="1544" class="body">Revalidate checkout identity</text>
+  <path d="M384 1501 H438" class="neutral"/>
+
+  <rect x="812" y="1426" width="322" height="150" rx="12" class="caution"/>
+  <text x="832" y="1458" class="heading">Git worktree remove</text>
+  <text x="832" y="1488" class="body">No force by default</text>
+  <text x="832" y="1516" class="body">Refused? Keep registration</text>
+  <text x="832" y="1544" class="body">Explain and resolve the blocker</text>
+  <path d="M758 1501 H812" class="neutral"/>
+
+  <rect x="1188" y="1426" width="348" height="150" rx="12" class="box"/>
+  <text x="1208" y="1458" class="heading">Removed → unregister</text>
+  <text x="1208" y="1488" class="body">Keep branch by default</text>
+  <text x="1208" y="1516" class="body">Branch deletion: separate choice</text>
+  <text x="1208" y="1544" class="body">Use safe Git deletion checks</text>
+  <path d="M1134 1501 H1188" class="neutral"/>
+
+  <!-- Architectural boundaries. -->
+  <rect x="32" y="1642" width="1536" height="136" rx="16" class="panel"/>
+  <text x="56" y="1677" class="heading">Compatibility boundaries</text>
+  <text x="56" y="1707" class="body">No Claude hook replacement · No OpenCode experimental remove/reset for general cleanup · No automatic cleanup of discovered trees</text>
+  <text x="56" y="1735" class="body">Guard unsafe folder renames, including main checkout / ancestors · No implicit secret copying or setup · Worktrees are not security sandboxes</text>
+  <text x="56" y="1761" class="small">Design detail / sources: WORKTREE-RESEARCH.md · Skill packaging, command syntax and refresh cadence remain implementation decisions.</text>
+</svg>
