@@ -505,7 +505,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       evidence.phase = "complete";
     } finally {
       const report = JSON.stringify(evidence, null, 2);
-      await saveEvidence(testInfo, "shell-long-output-work.json", report + "\n");
+      await saveEvidence(testInfo, `${engine}-${agent}-shell-long-output-work.json`, report + "\n");
       await testInfo.attach("shell-long-output-work.json", { body: report, contentType: "application/json" });
       await browser.close();
     }

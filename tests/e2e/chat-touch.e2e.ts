@@ -374,7 +374,7 @@ test("a permission's long paths wrap instead of running off the screen", async (
     id: "permission:p-long", type: "permission", createdAt: 10, requestId: "p-long",
     action: "bash",
     resources: [
-      "cat /workspace/docs/design.md",
+      "cat /workspace/packages/preview/src/components/markdown/code-block-decorations/language-detection-heuristics.ts",
       "sed -n '1,80p' /workspace/README.md",
     ],
     status: "pending",
