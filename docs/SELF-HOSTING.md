@@ -545,7 +545,9 @@ tail -f /tmp/uatu-hub.log
   as `127.0.0.1:4700`, `:4701`, and so on keep separate logins. Browsers
   scope cookies by host, not port, so the hub names its session cookie for
   the port the browser used (`uatu_hub_4701`). At a default port the name
-  stays `uatu_hub`. Nothing to configure. A fronting proxy must still pass
-  `Host` through unchanged (see Path C).
+  stays `uatu_hub`. Nothing to configure. Browsers still send every hub's
+  cookie to every port on that host (cookies never isolate by port), so
+  forward only hubs you would hand your password to. A fronting proxy must
+  still pass `Host` through unchanged (see Path C).
 - **Sizing**: each running session is one Bun process (plus a watchdog and
   your shells). A handful of sessions is well within a small homelab box.
