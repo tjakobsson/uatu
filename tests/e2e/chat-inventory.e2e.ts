@@ -2,6 +2,7 @@ import type { APIRequestContext, Browser, BrowserContext, Page } from "@playwrig
 
 import type { ConversationItem, ConversationSnapshot } from "../../src/chat/types";
 import { chooseChatModel, openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 
 const PNG = Buffer.from(
@@ -110,8 +111,276 @@ async function inventoryFrames(page: Page): Promise<number> {
   return page.evaluate(() => (window as typeof window & { __e2eInventoryFrames?: number }).__e2eInventoryFrames ?? 0);
 }
 
+// Persist through the real UI, then start a fresh page with an explicitly
+// controlled inventory. No global presentation keys or provider timing assumptions.
+async function bootRememberedStartup(previousPage: Page, request: APIRequestContext, mode: "desktop" | "touch", agents = 1) {
+  await request.post("/__e2e/reset");
+  if (agents > 1) await control(request, { action: "agents", count: agents });
+  const saved = await control<ConversationSnapshot>(request, {
+    action: "seed", title: "Remembered conversation", items: [
+      { id: "message:remembered", type: "assistant_message", createdAt: 1, markdown: "Remembered history loaded." },
+    ],
+  });
+  const credential = await token(request);
+  const activate = async (page: Page) => {
+    if (mode === "touch") await page.locator("#touch-tab-chat").click();
+    else await openChatPanel(page);
+  };
+  await previousPage.goto(`/?t=${encodeURIComponent(credential)}`);
+  await activate(previousPage);
+  await expect(previousPage.locator("#chat-items")).toContainText("Remembered history loaded.");
+  const draft = "Keep the remembered draft";
+  await previousPage.locator("#chat-input").fill(draft);
+  await expect.poll(() => previousPage.evaluate(({ id, draft }) =>
+    Object.keys(localStorage).some(key => {
+      if (!key.includes("chat-presentation")) return false;
+      const value = JSON.parse(localStorage.getItem(key)!);
+      return value.selectedId === id && value.drafts?.[id] === draft;
+    }), { id: saved.conversation.id, draft })).toBe(true);
+  const page = await previousPage.context().newPage();
+  await previousPage.close();
+  let inventory: ConversationSnapshot["conversation"][] = [];
+  const openingReads: string[] = [];
+  const mutations: string[] = [];
+  page.on("request", req => {
+    const path = new URL(req.url()).pathname;
+    if (req.method() === "GET" && /^\/api\/chat\/conversations\/[^/]+$/.test(path)) openingReads.push(path);
+    if (req.method() === "POST" && path.startsWith("/api/chat/conversations")) mutations.push(path);
+  });
+  await page.route("**/api/chat/conversations", route => route.request().method() === "GET"
+    ? route.fulfill({ json: { conversations: inventory } }) : route.continue());
+  await page.goto(`/?t=${encodeURIComponent(credential)}`);
+  await activate(page);
+  await expect(page.locator("#chat-state")).toContainText("No conversations yet");
+  await waitForInventoryIdle(request);
+  const publish = async (conversations: typeof inventory) => {
+    inventory = conversations;
+    const response = page.waitForResponse(res => res.request().method() === "GET"
+      && new URL(res.url()).pathname === "/api/chat/conversations");
+    await control(request, { action: "inventoryInvalidate" });
+    await (await response).finished();
+    // Flush the response's UI update before checking that no opening was issued.
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  };
+  return { page, saved, draft, publish, openingReads, mutations };
+}
+
 test.describe("live conversation inventory", () => {
   test.describe.configure({ mode: "serial" });
+
+  for (const mode of ["desktop", "touch"] as const) {
+    test.describe(`${mode} cold startup`, () => {
+      test.use(mode === "touch"
+        ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }
+        : { viewport: { width: 1440, height: 1000 }, hasTouch: false, isMobile: false });
+
+      test("failed restoration stays actionable until explicit read retry", async ({ page: previousPage, request }) => {
+        const { page, saved, draft, publish, openingReads, mutations } = await bootRememberedStartup(previousPage, request, mode);
+        let fail = true;
+        await page.route(`**/api/chat/conversations/${encodeURIComponent(saved.conversation.id)}?*`, route => fail
+          ? route.fulfill({ status: 503, json: { error: "Remembered history temporarily unavailable" } }) : route.continue());
+        await publish([saved.conversation]);
+        const retry = page.getByRole("button", { name: "Retry read" });
+        await expect(page.locator(".chat-read-error").filter({ visible: true })).toContainText("Remembered history temporarily unavailable");
+        await expect(retry).toBeEnabled();
+        for (let i = 0; i < 2; i++) await publish([saved.conversation]);
+        expect(openingReads).toHaveLength(1);
+        await expect(retry).toBeVisible();
+        fail = false;
+        await retry.click();
+        await expect(page.locator("#chat-items")).toContainText("Remembered history loaded.");
+        await expect(page.locator("#chat-input")).toHaveValue(draft);
+        await expect(page.locator("#chat-send")).toBeEnabled();
+        await expect(retry).toBeHidden();
+        expect(openingReads).toHaveLength(2);
+        expect(mutations).toEqual([]);
+      });
+
+      test("manual selection keeps its draft when the remembered conversation arrives", async ({ page: previousPage, request }) => {
+        const { page, saved, publish, openingReads, mutations } = await bootRememberedStartup(previousPage, request, mode);
+        const other = await control<ConversationSnapshot>(request, { action: "seed", title: "Chosen manually", items: [
+          { id: "message:manual", type: "assistant_message", createdAt: 1, markdown: "Manually chosen history." },
+        ] });
+        await publish([other.conversation]);
+        await page.locator("#chat-conversation-select").selectOption(other.conversation.id);
+        await expect(page.locator("#chat-items")).toContainText("Manually chosen history.");
+        await page.locator("#chat-input").fill("My manual selection draft");
+        await publish([saved.conversation, other.conversation]);
+        await expect(page.locator("#chat-conversation-select")).toHaveValue(other.conversation.id);
+        await expect(page.locator("#chat-input")).toHaveValue("My manual selection draft");
+        await expect(page.locator("#chat-items")).not.toContainText("Remembered history loaded.");
+        expect(openingReads).toEqual([`/api/chat/conversations/${encodeURIComponent(other.conversation.id)}`]);
+        expect(mutations).toEqual([]);
+      });
+
+      test("confirmed creation prevents restoration both in flight and after failure", async ({ page: previousPage, request }) => {
+        const { page, saved, publish, openingReads } = await bootRememberedStartup(previousPage, request, mode);
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        await page.route("**/api/chat/conversations", async route => {
+          if (route.request().method() !== "POST") return route.fallback();
+          await gate;
+          await route.fulfill({ status: 503, json: { error: "Creation temporarily unavailable" } });
+        });
+        try {
+          const creating = page.waitForRequest(req => req.method() === "POST" && new URL(req.url()).pathname === "/api/chat/conversations");
+          await page.getByRole("button", { name: "New conversation" }).click();
+          await creating;
+          await publish([]);
+          await publish([saved.conversation]);
+          expect(openingReads).toEqual([]);
+          await expect(page.locator("#chat-items")).not.toContainText("Remembered history loaded.");
+          release();
+          await expect(page.locator("#chat-state")).toContainText("Creation temporarily unavailable");
+          await publish([]);
+          await publish([saved.conversation]);
+          expect(openingReads).toEqual([]);
+          await expect(page.locator("#chat-state")).toContainText("Creation temporarily unavailable");
+          await expect(page.getByRole("button", { name: "New conversation", exact: true })).toBeEnabled();
+          await expect(page.locator("#chat-conversation-select")).toBeEnabled();
+          await page.locator("#chat-conversation-select").selectOption(saved.conversation.id);
+          await expect(page.locator("#chat-items")).toContainText("Remembered history loaded.");
+        } finally { release(); }
+      });
+
+      test("dismissing agent choice preserves remembered restoration", async ({ page: previousPage, request }) => {
+        const { page, saved, draft, publish, openingReads, mutations } = await bootRememberedStartup(previousPage, request, mode, 2);
+        await page.getByRole("button", { name: "New conversation" }).click();
+        const menu = page.locator("#chat-agent-menu");
+        await expect(menu).toBeVisible();
+        await expect(menu.locator(".chat-agent-menu__item")).toHaveCount(2);
+        await page.keyboard.press("Escape");
+        await expect(menu).toBeHidden();
+        await publish([saved.conversation]);
+        await expect(page.locator("#chat-items")).toContainText("Remembered history loaded.");
+        await expect(page.locator("#chat-input")).toHaveValue(draft);
+        await expect(page.locator("#chat-send")).toBeEnabled();
+        expect(openingReads).toHaveLength(1);
+        expect(mutations).toEqual([]);
+      });
+
+      test("restores the exact remembered conversation after empty inventory without taking focus", async ({ page: previousPage, context, request }, testInfo) => {
+        await request.post("/__e2e/reset");
+        const saved = await control<ConversationSnapshot>(request, {
+          action: "seed", title: "Remembered startup conversation",
+          items: [{ id: "message:saved-startup", type: "assistant_message", createdAt: 1,
+            markdown: "Saved history: the synthetic startup checklist is ready." }],
+        });
+        // Newest inventory entry is deliberately NOT the remembered one.
+        const fallback = await control<ConversationSnapshot>(request, {
+          action: "seed", title: "Unrelated newer conversation", items: [],
+        });
+        const credential = await token(request);
+        await previousPage.goto(`/?t=${encodeURIComponent(credential)}`);
+        if (mode === "touch") await previousPage.locator("#touch-tab-chat").click();
+        else await openChatPanel(previousPage);
+        await expect(previousPage.locator("#chat-conversation-select")).toHaveValue(fallback.conversation.id);
+        await previousPage.locator("#chat-conversation-select").selectOption(saved.conversation.id);
+        await expect(previousPage.locator("#chat-items")).toContainText("Saved history:");
+        const draft = "Please review the saved startup checklist.";
+        await previousPage.locator("#chat-input").fill(draft);
+        // Let the real UI persist its workspace-scoped presentation; do not
+        // inject a global storage key or clear storage between page lifetimes.
+        await expect.poll(() => previousPage.evaluate(({ id, draft }) =>
+          Object.keys(localStorage).some(key => {
+            if (!key.includes("chat-presentation")) return false;
+            const value = JSON.parse(localStorage.getItem(key)!);
+            return value.selectedId === id && value.drafts?.[id] === draft;
+          }), { id: saved.conversation.id, draft })).toBe(true);
+        if (mode === "touch") {
+          await previousPage.locator("#chat-input").blur();
+          await previousPage.locator("#touch-tab-files").click();
+        } else await previousPage.locator("#chat-collapse").click();
+        await previousPage.close();
+
+        const page = await context.newPage();
+        let populated = false;
+        let emptyReads = 0;
+        let documentNavigations = 0;
+        let openingReads = 0;
+        const mutations: string[] = [];
+        page.on("request", request => {
+          if (request.isNavigationRequest() && request.frame() === page.mainFrame()) documentNavigations += 1;
+          if (request.method() === "GET" && new URL(request.url()).pathname === `/api/chat/conversations/${encodeURIComponent(saved.conversation.id)}`) openingReads += 1;
+          if (request.method() === "POST" && new URL(request.url()).pathname.startsWith("/api/chat/conversations")) mutations.push(request.url());
+        });
+        await page.route("**/api/chat/conversations", async route => {
+          if (route.request().method() !== "GET" || populated) return route.continue();
+          emptyReads += 1;
+          await route.fulfill({ json: { conversations: [] } });
+        });
+        await page.goto(`/?t=${encodeURIComponent(credential)}`);
+        await expect(page.locator("html")).toHaveAttribute("data-ui-mode", mode);
+        // Chat initializes lazily on activation; hide it again while the
+        // controlled startup inventory is still empty.
+        if (mode === "touch") await page.locator("#touch-tab-chat").click();
+        else await openChatPanel(page);
+        await expect.poll(() => emptyReads).toBeGreaterThan(0);
+        await expect(page.locator("#chat-state")).toContainText("No conversations yet");
+        await expect(page.locator("#chat-items")).not.toContainText("Saved history:");
+        await waitForInventoryIdle(request);
+        if (mode === "touch") await page.locator("#touch-tab-files").click();
+        else await page.locator("#chat-collapse").click();
+        const otherControl = page.locator(mode === "touch" ? "#touch-tab-files" : "#chat-expand");
+        await otherControl.focus();
+        await expect(otherControl).toBeFocused();
+
+        // From this point through background subscription proof there are no UI actions,
+        // reloads, chooser changes, or new-conversation requests.
+        const restoredSnapshot = page.waitForResponse(response => response.request().method() === "GET"
+          && new URL(response.url()).pathname === `/api/chat/conversations/${encodeURIComponent(saved.conversation.id)}`);
+        const restoredSubscription = page.waitForResponse(response => {
+          const request = response.request();
+          if (request.method() !== "POST" || !new URL(request.url()).pathname.endsWith("/subscriptions")) return false;
+          const body = request.postDataJSON() as { add?: { topic: string; key?: string }[] };
+          return body.add?.some(entry => entry.topic === "conversation" && entry.key === saved.conversation.id) ?? false;
+        });
+        populated = true;
+        await control(request, { action: "inventoryInvalidate" });
+        const snapshotResponse = await restoredSnapshot;
+        expect(snapshotResponse.ok()).toBe(true);
+        const snapshot = await snapshotResponse.json() as ConversationSnapshot;
+        expect(snapshot.conversation.id).toBe(saved.conversation.id);
+        expect(snapshot.items).toEqual(expect.arrayContaining([expect.objectContaining({ id: "message:saved-startup" })]));
+        expect((await restoredSubscription).ok()).toBe(true);
+        expect(openingReads).toBe(1);
+        await expect(page.locator("#chat-conversation-select")).toHaveValue(saved.conversation.id);
+        await expect(page.locator("#chat-conversation-select")).not.toHaveValue(fallback.conversation.id);
+        await expect(page.locator("#chat-input")).toHaveValue(draft);
+        await expect(otherControl).toBeFocused();
+        await expect(page.locator("#chat-timeline")).toBeHidden();
+        if (mode === "touch") await expect(page.locator("#touch-tab-files")).toHaveAttribute("aria-selected", "true");
+        else await expect(page.locator("html")).toHaveAttribute("data-chat-panel", "collapsed");
+
+        expect(documentNavigations).toBe(1);
+        expect(mutations).toEqual([]);
+
+        // Hidden surfaces intentionally defer timeline/control rendering.
+        // Reveal the already-read and subscribed conversation, not a selection.
+        if (mode === "touch") await page.locator("#touch-tab-chat").click();
+        else await openChatPanel(page);
+        await expect(page.locator("#chat-items")).toContainText("Saved history: the synthetic startup checklist is ready.");
+        await expect(page.locator("#chat-composer")).not.toHaveAttribute("inert", "");
+        await expect(page.locator("#chat-input")).toHaveValue(draft);
+        await expect(page.locator("#chat-send")).toBeEnabled();
+
+        // Published only AFTER history rendered: this cannot have come from
+        // the opening snapshot, and proves live delivery after restoration.
+        await control(request, { action: "item", conversationId: saved.conversation.id, item: {
+          id: "message:startup-live", type: "assistant_message", createdAt: 2,
+          markdown: "Live update: restoration is subscribed and ready.",
+        } });
+        await expect(page.locator("#chat-items")).toContainText("Live update: restoration is subscribed and ready.");
+        expect(documentNavigations).toBe(1);
+        expect(mutations).toEqual([]);
+        expect(openingReads).toBe(1);
+        await expect(page.locator("#chat-conversation-select")).toHaveValue(saved.conversation.id);
+        await expect(page.locator("#chat-input")).toHaveValue(draft);
+        await expect(page.locator("#chat-send")).toBeEnabled();
+        await captureScreenshot(page, testInfo, `conversation-startup-restored-${mode}`);
+      });
+    });
+  }
 
   test("remote creation preserves the selected presentation and is unseen only on the other client", async ({ browser, page, request }) => {
     await request.post("/__e2e/reset");
