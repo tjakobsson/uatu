@@ -136,7 +136,7 @@ supervises nothing. Each configured hub (`HubRoster.swift` — which may be
 authenticated natively (`HubAPI.swift`): a JSON login yields a session id
 held only in the Keychain, native API calls present it as `Authorization:
 Bearer`, and the id is written into the WebView's cookie store as the
-`uatu_hub` cookie before navigation so web and native surfaces share one
+hub session cookie before navigation so web and native surfaces share one
 server-side session. A 401 means the session is dead at the hub (expired or
 revoked — revocation is server-side); the app silently re-logs-in once with
 the Keychain password, then prompts. A sign-out observed in a web view
@@ -192,10 +192,13 @@ reverse-proxies HTTP and WebSockets under `/s/<id>/` from a single
 TLS-terminating, login-gated port (`hub/proxy.ts`, `hub/auth.ts`,
 `hub/server.ts`). Authentication is a server-side session store in the hub's
 state dir: login mints an opaque session id (recorded with user, issue time,
-and a device label), browsers carry it in the `uatu_hub` cookie, native
+and a device label), browsers carry it in the session cookie, native
 clients carry the same id as `Authorization: Bearer`, and both transports
 resolve through one store lookup — so sign-out and the dashboard's
-per-device revocation kill a session everywhere, immediately. Login is
+per-device revocation kill a session everywhere, immediately. The cookie
+is `uatu_hub` at the scheme's default port and `uatu_hub_<port>` on any
+other port (`hub/auth.ts`). Browsers scope cookies by host, so without the
+suffix port-forwarded hubs on one host would share a jar. Login is
 required on every interface, loopback included; there is no trusted local
 mode. The hub is a trusted intermediary: it authenticates the client and
 validates its Origin (bearer requests are exempt — they carry no ambient

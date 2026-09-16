@@ -407,7 +407,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       user.name,
       sanitizeDeviceLabel(requestedLabel, request.headers.get("user-agent")),
     );
-    const setCookie = formatHubCookie(record.id, { secure: secureCookies(request) });
+    const setCookie = formatHubCookie(record.id, new URL(request.url), { secure: secureCookies(request) });
     if (isJson) {
       // The session id doubles as the bearer credential for native
       // clients; the cookie is set too so a web view sharing the client's
@@ -1257,7 +1257,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         status: 303,
         headers: {
           location: "/login",
-          "set-cookie": formatHubCookieClear({ secure: secureCookies(request) }),
+          "set-cookie": formatHubCookieClear(new URL(request.url), { secure: secureCookies(request) }),
         },
       });
     }
@@ -1654,7 +1654,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         const current = record.id === session.sessionId;
         if (current && session.transport === "cookie") {
           return json(200, { revoked: true, current }, {
-            "set-cookie": formatHubCookieClear({ secure: secureCookies(request) }),
+            "set-cookie": formatHubCookieClear(new URL(request.url), { secure: secureCookies(request) }),
           });
         }
         return json(200, { revoked: true, current });

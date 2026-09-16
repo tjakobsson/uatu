@@ -17,7 +17,7 @@ import {
   type CloneCredentialProcessContext,
   type ResolvedCloneCredential,
 } from "./credential-context";
-import { hashPassword, HubSessionStore, HUB_COOKIE_NAME } from "./auth";
+import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
 import { CloneJobManager } from "./clone-jobs";
 import { CloneProcessAdapter, type CloneProcessFactory } from "./clone-process";
 import type { HubConfig } from "./config";
@@ -320,7 +320,7 @@ describe("hub end to end", () => {
     expect(payload.user).toBe("tobias");
     expect(payload.sessionId.length).toBeGreaterThanOrEqual(32);
     const setCookie = response.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain(`uatu_hub=${payload.sessionId}`);
+    expect(setCookie).toContain(`${hubCookieName(new URL(origin))}=${payload.sessionId}`);
     expect(setCookie).toContain("HttpOnly");
     cookie = setCookie.split(";")[0]!;
     // Session ids never appear in URLs; the id in the body is the bearer
@@ -1777,7 +1777,7 @@ describe("hub end to end", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          cookie: `${HUB_COOKIE_NAME}=${(await localSessionStore.issue("tobias", "test")).id}`,
+          cookie: `${hubCookieName(new URL(localOrigin))}=${(await localSessionStore.issue("tobias", "test")).id}`,
           origin: localOrigin,
         },
         body: JSON.stringify({ path: folder, ...body }),
@@ -2690,7 +2690,7 @@ describe("hub end to end", () => {
     const jobId = ((await created.json()) as { jobId: string }).jobId;
 
     const aliceSession = await sessionStore.issue("alice", "integration test");
-    const aliceCookie = `${HUB_COOKIE_NAME}=${aliceSession.id}`;
+    const aliceCookie = `${hubCookieName(new URL(origin))}=${aliceSession.id}`;
     const visibleHead = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
       method: "HEAD",
       headers: { cookie },
@@ -3064,7 +3064,7 @@ describe("hub end to end", () => {
 
   test("a live session for a user removed from the config is rejected", async () => {
     const ghost = await sessionStore.issue("departed-user", "old laptop");
-    const ghostCookie = `uatu_hub=${ghost.id}`;
+    const ghostCookie = `${hubCookieName(new URL(origin))}=${ghost.id}`;
     const response = await fetch(`${origin}/api/hub/state`, { headers: { cookie: ghostCookie } });
     expect(response.status).toBe(401);
     const proxied = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie: ghostCookie } });
@@ -3180,7 +3180,7 @@ describe("hub end to end", () => {
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toContain("/login");
     const setCookie = response.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain("uatu_hub=;");
+    expect(setCookie).toContain(`${hubCookieName(new URL(origin))}=;`);
     expect(setCookie).toContain("Max-Age=0");
 
     // Revocation is server-side: the captured cookie value is dead even if
@@ -3200,7 +3200,7 @@ describe("hub end to end", () => {
     });
     expect(relogin.status).toBe(200);
     const payload = (await relogin.json()) as { sessionId: string };
-    cookie = `uatu_hub=${payload.sessionId}`;
+    cookie = `${hubCookieName(new URL(origin))}=${payload.sessionId}`;
     bearerId = payload.sessionId;
   });
 

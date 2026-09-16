@@ -541,5 +541,11 @@ tail -f /tmp/uatu-hub.log
 - **Login lockout**: five failed attempts per minute per address; wait a
   minute. Revoke a single device from the dashboard's Devices pane; rotate
   everyone's sessions by deleting `sessions.json` in the state dir.
+- **Several hubs through port forwards** (`ssh -L`, AWS SSM, WSL2) reached
+  as `127.0.0.1:4700`, `:4701`, and so on keep separate logins. Browsers
+  scope cookies by host, not port, so the hub names its session cookie for
+  the port the browser used (`uatu_hub_4701`). At a default port the name
+  stays `uatu_hub`. Nothing to configure. A fronting proxy must still pass
+  `Host` through unchanged (see Path C).
 - **Sizing**: each running session is one Bun process (plus a watchdog and
   your shells). A handful of sessions is well within a small homelab box.

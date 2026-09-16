@@ -17,7 +17,7 @@ import { encodeReplayCursor } from "../chat/replay";
 import { LIVE_STREAM_PATH, liveSubscriptionsPath, parseLiveEnvelope, parseLiveHello, type LiveEnvelope, type LiveSubscription } from "../shared/live-protocol";
 import type { RunningSession, SessionBackend } from "./backend";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
-import { hashPassword, HubSessionStore } from "./auth";
+import { hashPassword, HubSessionStore, hubCookieName } from "./auth";
 import type { HubConfig } from "./config";
 import { LiveBroker } from "./live-broker";
 import { createHubUpstreamSource } from "./live-source";
@@ -148,7 +148,7 @@ beforeAll(async () => {
   const liveBroker = new LiveBroker(createHubUpstreamSource({ sessions, registry }), { lingerMs: LINGER_MS });
   hub = startHubServer({ config, registry, sessions, sessionStore, personalState, liveBroker });
   origin = `http://127.0.0.1:${hub.port}`;
-  cookie = `uatu_hub=${(await sessionStore.issue("t", "test")).id}`;
+  cookie = `${hubCookieName(new URL(origin))}=${(await sessionStore.issue("t", "test")).id}`;
 });
 
 afterAll(async () => {

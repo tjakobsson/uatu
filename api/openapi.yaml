@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 5.19.0-experimental
+  version: 6.19.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 5 and workspace revision 19
+  summary: Hub revision 6 and workspace revision 19
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves one family itself, personal
@@ -20,7 +20,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 5
+    hubApiRevision: 6
     workspaceApiRevision: 19
 servers:
   - url: https://{hubHost}
@@ -84,7 +84,7 @@ paths:
               schema: { $ref: '#/components/schemas/HubState' }
               example:
                 version: 0.5.1 (abcdef0)
-                hubApiRevision: 5
+                hubApiRevision: 6
                 workspaceApiRevision: 10
                 workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 10, shells: [{ attached: false, label: zsh }] }]
                 workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
@@ -869,7 +869,12 @@ paths:
 components:
   securitySchemes:
     hubBearer: { type: http, scheme: bearer, description: Session ID returned by native JSON login. }
-    hubCookie: { type: apiKey, in: cookie, name: uatu_hub }
+    hubCookie:
+      type: apiKey
+      in: cookie
+      name: uatu_hub
+      description: |
+        The browser session cookie. `uatu_hub` is its name when the Hub is reached at the scheme's default port. At any other port the name carries that port as `uatu_hub_<port>`, so `uatu_hub_4701` for a Hub reached at `127.0.0.1:4701`. Browsers scope cookies by host, not port, and Hubs on different ports of one host would otherwise overwrite each other's session. Login sets, every request reads, and sign-out clears the cookie under that name. A bare `uatu_hub` presented at a non-default port is ignored.
   parameters:
     WorkspaceId: { name: workspaceId, in: path, required: true, schema: { $ref: '#/components/schemas/WorkspaceId' } }
     CredentialId: { name: credentialId, in: path, required: true, schema: { $ref: '#/components/schemas/CredentialId' } }

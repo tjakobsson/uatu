@@ -79,7 +79,8 @@ describe("hub over HTTPS", () => {
     });
     expect(response.status).toBe(200);
     const setCookie = response.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain("uatu_hub=");
+    // The TLS port is not 443, so the name carries it.
+    expect(setCookie).toContain(`uatu_hub_${server!.port}=`);
     expect(setCookie).toContain("Secure");
   });
 });
