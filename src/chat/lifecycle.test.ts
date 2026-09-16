@@ -29,6 +29,298 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
   });
 } else {
 describe("chat lifecycle recovery", () => {
+  test("cold restore loads the saved conversation when bounded empty inventory arrives late", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    const storage = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", { configurable: true, value: {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    } });
+    const { presentationLocalStorage } = await import("../shell/presentation-storage");
+    const selectedId = "opencode:previous";
+    presentationLocalStorage()!.setItem("uatu:chat-presentation", JSON.stringify({
+      selectedId, lastAgentId: "opencode", drafts: { [selectedId]: "restored draft" },
+    }));
+    const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selected = "";
+    Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
+    const agent = { id: "opencode", name: "OpenCode", capabilities: ["models", "modes", "commands"] };
+    const previous = { ...conversation(selectedId), agent };
+    const other = { ...conversation("opencode:newest"), agent };
+    const inventory = [other, previous]; // Restore the stored id, not the first entry.
+    const catalog = Promise.withResolvers<void>();
+    const firstInventory = Promise.withResolvers<typeof inventory>();
+    const streamInventory = Promise.withResolvers<typeof inventory>();
+    const snapshotCalls: string[] = [];
+    const streams: string[] = [];
+    let inventoryReads = 0;
+    let catalogReads = 0;
+    let statusReads = 0;
+    let inventoryHandlers: { invalidation: () => void } | undefined;
+    const api = {
+      status: async () => [{ agent, availability: ++statusReads === 1
+        ? { state: "idle" } : { state: "ready", version: "test", agent } }],
+      conversations: () => ++inventoryReads === 1 ? firstInventory.promise : streamInventory.promise,
+      models: async () => { catalogReads++; await catalog.promise; return []; },
+      modes: async () => { await catalog.promise; return []; },
+      commands: async () => { await catalog.promise; return []; },
+      snapshot: async (id: string) => {
+        snapshotCalls.push(id);
+        return {
+          ...snapshot(id), conversation: inventory.find(item => item.id === id)!,
+          items: [{ id: `message:${id}`, type: "user_message", createdAt: 1, text: `synthetic history for ${id}` }],
+        };
+      },
+      stream: (id: string) => { streams.push(id); return { close() {} }; },
+      inventoryStream: (handlers: typeof inventoryHandlers) => { inventoryHandlers = handlers; return { close() {} }; },
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?cold-restore-late-inventory=${Date.now()}`);
+    initChat(api);
+    await waitUntil(() => catalogReads === 1 && inventoryReads === 1);
+    // MultiAgentChatService.listConversations bounds a cold agent's
+    // contribution and returns [] successfully, then ticks inventory when
+    // the late nonempty contribution arrives (agents.ts). No read fails.
+    firstInventory.resolve([]);
+    await waitUntil(() => !!inventoryHandlers && statusReads === 2);
+    expect(select.value).toBe("");
+    expect(snapshotCalls).toEqual([]);
+    // Catalogs were launched concurrently by bootstrap. Their successful
+    // settlement makes the form visible, even before late inventory lands.
+    catalog.resolve();
+    await waitUntil(() => !document.querySelector<HTMLFormElement>("#chat-composer")!.hidden);
+    inventoryHandlers!.invalidation();
+    await waitUntil(() => inventoryReads === 2);
+    streamInventory.resolve(inventory);
+    await waitUntil(() => select.value === selectedId);
+    await Bun.sleep(20); // Drain scheduled timeline frames after reconciliation.
+    await waitUntil(() => document.querySelector("#chat-timeline")!.getAttribute("aria-busy") !== "true");
+    const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+    const restoredDraft = input.value;
+    // Nonempty input rules out the ordinary empty-draft Send guard.
+    input.value = "a message typed after loading finishes";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const startup = {
+      selectedId: select.value,
+      history: document.querySelector("#chat-items")!.textContent,
+      formHidden: document.querySelector<HTMLFormElement>("#chat-composer")!.hidden,
+      sendDisabled: document.querySelector<HTMLButtonElement>("#chat-send")!.disabled,
+      snapshotCalls: [...snapshotCalls],
+      streams: [...streams],
+    };
+    expect(document.querySelector<HTMLElement>(".chat-read-error")!.hidden).toBe(true);
+    // Exercise the reported workaround before asserting the captured
+    // startup state, so a red test still verifies switching repairs it.
+    for (const id of [other.id, selectedId]) {
+      select.value = id;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await waitUntil(() => (document.querySelector("#chat-items")!.textContent ?? "").includes(`synthetic history for ${id}`));
+    }
+    expect(snapshotCalls.slice(-2)).toEqual([other.id, selectedId]);
+    expect(input.value).toBe("a message typed after loading finishes");
+    expect(document.querySelector<HTMLFormElement>("#chat-composer")!.hidden).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>("#chat-send")!.disabled).toBe(false);
+    await Bun.sleep(10); // Let read-lane animation frames settle before teardown.
+    expect(restoredDraft).toBe("restored draft");
+    expect(startup).toEqual({
+      selectedId,
+      history: expect.stringContaining(`synthetic history for ${selectedId}`),
+      formHidden: false,
+      sendDisabled: false,
+      snapshotCalls: [selectedId],
+      streams: [selectedId],
+    });
+  });
+
+  test("deferred startup restores only the saved id once across empty, unrelated, and duplicate inventories", async () => {
+    const f = await startupFixture();
+    await f.boot([]);
+    for (const ids of [[], [f.other], [], [f.other]]) await f.inventory(ids);
+    expect(f.reads).toEqual([]);
+    expect(f.select.value).toBe("");
+    // A persistence flush while discovery is incomplete must keep the draft.
+    f.window.dispatchEvent(new Event("pagehide"));
+    await f.inventory([f.other, f.saved]);
+    expect(f.reads).toEqual([f.saved]);
+    expect(f.input.value).toBe("saved draft");
+    expect(f.timeline.getAttribute("aria-busy")).toBe("true");
+    await f.inventory([f.other, f.saved]);
+    await f.inventory([f.saved, f.other]);
+    expect(f.reads).toEqual([f.saved]);
+    expect(f.streams).toEqual([]);
+    await f.finishRead(f.saved);
+    await f.inventory([f.other, f.saved]);
+    expect(f.reads).toEqual([f.saved]);
+    expect(f.streams.map(s => s.id)).toEqual([f.saved]);
+    expect(f.send.disabled).toBe(false);
+    expect(f.creations).toEqual([]);
+    expect(f.prompts).toEqual([]);
+  });
+
+  test("manual selection cancels pending startup and keeps its own draft", async () => {
+    const f = await startupFixture();
+    await f.boot([]);
+    await f.inventory([f.other]);
+    f.choose(f.other);
+    await f.finishRead(f.other);
+    await f.inventory([f.other]);
+    await f.inventory([f.saved, f.other]);
+    expect(f.reads).toEqual([f.other]);
+    expect(f.select.value).toBe(f.other);
+    expect(f.input.value).toBe("other draft");
+    expect(f.streams.map(s => s.id)).toEqual([f.other]);
+  });
+
+  for (const beforeBootstrap of [false, true]) {
+    for (const fail of [false, true]) {
+      test(`confirmed creation ${fail ? "failure" : "success"} owns selection ${beforeBootstrap ? "before bootstrap resolves" : "during deferred discovery"}`, async () => {
+        const f = await startupFixture();
+        if (!beforeBootstrap) await f.boot([]);
+        f.newButton.dispatchEvent(new Event("click"));
+        await waitUntil(() => f.creations.length === 1);
+        if (beforeBootstrap) await f.boot([]);
+        // Absence after cancellation must not manufacture deletion recovery.
+        await f.inventory([]);
+        await f.inventory([f.other]);
+        await f.inventory([f.saved, f.other]);
+        expect(f.reads).toEqual([]);
+        expect(f.streams).toEqual([]);
+        if (fail) {
+          f.creation.reject(new Error("synthetic creation failure"));
+          await waitUntil(() => f.state.textContent!.includes("synthetic creation failure"));
+          await f.inventory([]);
+          await f.inventory([f.saved, f.other]);
+          expect(f.state.textContent).toContain("synthetic creation failure");
+          expect(f.reads).toEqual([]);
+          expect(f.select.value).toBe("");
+        } else {
+          await f.inventory([f.saved, f.other, f.created]);
+          f.creation.resolve(f.history(f.created));
+          await f.finishRead(f.created);
+          await f.inventory([f.saved, f.other, f.created]);
+          expect(f.select.value).toBe(f.created);
+          expect(f.reads).toEqual([f.created]);
+          expect(f.streams.map(s => s.id)).toEqual([f.created]);
+        }
+        expect(f.creations).toEqual(["opencode"]);
+        expect(f.prompts).toEqual([]);
+      });
+    }
+  }
+
+  test("dismissing agent choice preserves deferred startup", async () => {
+    const f = await startupFixture({ multipleAgents: true });
+    await f.boot([]);
+    f.newButton.dispatchEvent(new Event("click"));
+    expect(f.document.querySelector("#chat-agent-menu")).not.toBeNull();
+    f.document.dispatchEvent(Object.assign(new Event("keydown", { bubbles: true }), { key: "Escape" }));
+    await f.inventory([f.other, f.saved]);
+    await f.finishRead(f.saved);
+    expect(f.document.querySelector("#chat-agent-menu")).toBeNull();
+    expect(f.creations).toEqual([]);
+    expect(f.reads).toEqual([f.saved]);
+  });
+
+  test("confirming an agent choice cancels restoration before creation responds", async () => {
+    const f = await startupFixture({ multipleAgents: true });
+    await f.boot([]);
+    f.newButton.dispatchEvent(new Event("click"));
+    f.document.querySelector<HTMLButtonElement>('#chat-agent-menu [data-agent-id="claude"]')!.dispatchEvent(new Event("click"));
+    await waitUntil(() => f.creations.length === 1);
+    await f.inventory([]);
+    await f.inventory([f.saved, f.other]);
+    expect(f.reads).toEqual([]);
+    expect(f.creations).toEqual(["claude"]);
+    f.creation.reject(new Error("synthetic creation failure"));
+    await waitUntil(() => f.state.textContent!.includes("synthetic creation failure"));
+    await f.inventory([f.saved, f.other]);
+    expect(f.reads).toEqual([]);
+    expect(f.streams).toEqual([]);
+  });
+
+  test("failed deferred read requires explicit retry despite repeated inventory", async () => {
+    const f = await startupFixture();
+    await f.boot([]);
+    await f.inventory([f.other, f.saved]);
+    f.pendingReads[0]!.result.reject(new Error("synthetic history failure"));
+    await waitUntil(() => !f.readError.hidden);
+    await f.settle();
+    for (let i = 0; i < 3; i++) await f.inventory([f.saved, f.other]);
+    expect(f.readError.textContent).toContain("synthetic history failure");
+    expect(f.readError.querySelector("button")!.textContent).toBe("Retry read");
+    expect(f.reads).toEqual([f.saved]);
+    expect(f.streams).toEqual([]);
+    f.readError.querySelector("button")!.dispatchEvent(new Event("click"));
+    await f.finishRead(f.saved, 1);
+    expect(f.reads).toEqual([f.saved, f.saved]);
+    expect(f.readError.hidden).toBe(true);
+    expect(f.streams.map(s => s.id)).toEqual([f.saved]);
+    expect(f.send.disabled).toBe(false);
+    expect(f.creations).toEqual([]);
+    expect(f.prompts).toEqual([]);
+  });
+
+  test("obsolete deferred history cannot replace a newer manual selection", async () => {
+    const f = await startupFixture();
+    await f.boot([]);
+    await f.inventory([f.saved, f.other]);
+    f.choose(f.other);
+    await f.finishRead(f.other, 1);
+    expect(f.pendingReads[0]!.signal?.aborted).toBe(true);
+    f.pendingReads[0]!.result.resolve(f.history(f.saved));
+    await f.settle();
+    await f.inventory([f.saved, f.other]);
+    expect(f.select.value).toBe(f.other);
+    expect(f.items.textContent).toContain(`history for ${f.other}`);
+    expect(f.items.textContent).not.toContain(`history for ${f.saved}`);
+    expect(f.input.value).toBe("other draft");
+    expect(f.reads).toEqual([f.saved, f.other]);
+    expect(f.streams.map(s => s.id)).toEqual([f.other]);
+  });
+
+  test("empty bootstrap without a saved id never auto-selects later arrivals", async () => {
+    const f = await startupFixture({ savedId: null });
+    await f.boot([]);
+    await f.inventory([f.other, f.saved]);
+    await f.inventory([f.saved]);
+    expect(f.select.value).toBe("");
+    expect(f.reads).toEqual([]);
+    expect(f.streams).toEqual([]);
+  });
+
+  for (const savedId of ["opencode:saved", "opencode:missing", null]) {
+    test(`nonempty bootstrap preserves saved/fallback selection (${savedId}) with delayed catalogs`, async () => {
+      const f = await startupFixture({ savedId, delayedCatalogs: true });
+      await f.boot([f.other, f.saved]);
+      const expected = savedId === f.saved ? f.saved : f.other;
+      await f.finishRead(expected);
+      expect(f.select.value).toBe(expected);
+      f.catalog.resolve();
+      await f.inventory([f.saved, f.other]);
+      expect(f.reads).toEqual([expected]);
+      expect(f.streams.map(s => s.id)).toEqual([expected]);
+    });
+  }
+
+  test("an actually opened conversation still recovers after disappearance and reappearance", async () => {
+    const f = await startupFixture();
+    await f.boot([]);
+    await f.inventory([f.saved, f.other]);
+    await f.finishRead(f.saved);
+    await f.inventory([f.other]);
+    expect(f.streams[0]!.closed).toBe(true);
+    expect(f.select.value).toBe("");
+    await f.inventory([f.saved, f.other]);
+    await f.finishRead(f.saved, 1);
+    expect(f.reads).toEqual([f.saved, f.saved]);
+    expect(f.streams.filter(s => !s.closed).map(s => s.id)).toEqual([f.saved]);
+    expect(f.input.value).toBe("saved draft");
+  });
+
   test("a resumed page reconciles inventory over the one channel without replacing its subscriptions or losing the draft", async () => {
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
@@ -581,6 +873,109 @@ describe("chat lifecycle recovery", () => {
 afterAll(() => {
   for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
 });
+}
+
+// Control each inventory and opening read independently: no real provider,
+// startup timeout, model request, or stream replay participates in these races.
+async function startupFixture(options: { savedId?: string | null; multipleAgents?: boolean; delayedCatalogs?: boolean } = {}) {
+  const { document, window } = parseHTML(html);
+  installDomGlobals(document, window);
+  document.documentElement.setAttribute("data-ui-mode", "desktop");
+  document.documentElement.setAttribute("data-chat-panel", "open");
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+  const storage = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", { configurable: true, value: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+  } });
+  const saved = "opencode:saved", other = "opencode:other", created = "opencode:created";
+  const { presentationLocalStorage } = await import("../shell/presentation-storage");
+  presentationLocalStorage()!.setItem("uatu:chat-presentation", JSON.stringify({
+    selectedId: options.savedId === undefined ? saved : options.savedId,
+    lastAgentId: "opencode", drafts: { [saved]: "saved draft", [other]: "other draft" },
+  }));
+  const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+  let selected = "";
+  Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
+  const agent = { id: "opencode", name: "OpenCode", capabilities: ["models", "modes", "commands"] };
+  const summary = (id: string) => ({ ...conversation(id), agent });
+  const history = (id: string): ConversationSnapshot => ({
+    ...snapshot(id), conversation: summary(id),
+    items: [{ id: `message:${id}`, type: "user_message", createdAt: 1, text: `history for ${id}` }],
+  });
+  const first = Promise.withResolvers<ReturnType<typeof summary>[]>();
+  const catalog = Promise.withResolvers<void>();
+  if (!options.delayedCatalogs) catalog.resolve();
+  const creation = Promise.withResolvers<ConversationSnapshot>();
+  let inventoryReads = 0;
+  let current: ReturnType<typeof summary>[] = [];
+  let handlers: { invalidation(): void } | undefined;
+  const reads: string[] = [], creations: (string | undefined)[] = [], prompts: unknown[] = [];
+  const pendingReads: { id: string; signal?: AbortSignal; result: ReturnType<typeof Promise.withResolvers<ConversationSnapshot>> }[] = [];
+  const streams: { id: string; closed: boolean }[] = [];
+  const api = {
+    status: async () => [agent, ...(options.multipleAgents ? [{ ...agent, id: "claude", name: "Claude" }] : [])]
+      .map(agent => ({ agent, availability: { state: "ready", version: "test", agent } })),
+    conversations: async () => ++inventoryReads === 1 ? first.promise : current,
+    models: async () => { await catalog.promise; return []; },
+    modes: async () => { await catalog.promise; return []; },
+    commands: async () => { await catalog.promise; return []; },
+    snapshot: (id: string, _before: unknown, signal?: AbortSignal) => {
+      reads.push(id);
+      const result = Promise.withResolvers<ConversationSnapshot>();
+      pendingReads.push({ id, signal, result });
+      return result.promise;
+    },
+    stream: (id: string) => {
+      const entry = { id, closed: false };
+      streams.push(entry);
+      return { close() { entry.closed = true; } };
+    },
+    inventoryStream: (value: typeof handlers) => { handlers = value; return { close() {} }; },
+    createConversation: (id?: string) => { creations.push(id); return creation.promise; },
+    prompt: (...args: unknown[]) => { prompts.push(args); throw new Error("unexpected prompt"); },
+    attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+  } as unknown as ChatApiClient;
+  const { initChat } = await import("./ui");
+  initChat(api);
+  await waitUntil(() => inventoryReads === 1);
+  const timeline = document.querySelector<HTMLElement>("#chat-timeline")!;
+  const settle = async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  };
+  return {
+    document, window, saved, other, created, select, reads, pendingReads, streams, creations, prompts, creation, catalog, history, timeline, settle,
+    input: document.querySelector<HTMLTextAreaElement>("#chat-input")!,
+    send: document.querySelector<HTMLButtonElement>("#chat-send")!,
+    newButton: document.querySelector<HTMLButtonElement>("#chat-new-conversation")!,
+    state: document.querySelector<HTMLElement>("#chat-state")!,
+    items: document.querySelector<HTMLElement>("#chat-items")!,
+    readError: document.querySelector<HTMLElement>("#chat-surface > .chat-read-error")!,
+    async boot(ids: string[]) {
+      current = ids.map(summary);
+      first.resolve(current);
+      await waitUntil(() => !!handlers);
+      await settle();
+    },
+    async inventory(ids: string[]) {
+      current = ids.map(summary);
+      const before = inventoryReads;
+      handlers!.invalidation();
+      await waitUntil(() => inventoryReads > before);
+      await settle();
+    },
+    choose(id: string) {
+      select.value = id;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+    async finishRead(id: string, index = 0) {
+      await waitUntil(() => pendingReads.length > index);
+      expect(pendingReads[index]!.id).toBe(id);
+      pendingReads[index]!.result.resolve(history(id));
+      await waitUntil(() => streams.some(s => s.id === id && !s.closed));
+      await settle();
+    },
+  };
 }
 
 function conversation(id: string) {

@@ -228,6 +228,15 @@ export function initChat(api = new ChatApiClient()): void {
   let stream: ChatEventStream | null = null;
   let inventoryStream: ChatEventStream | null = null;
   let selectionGeneration = 0;
+  // A stored reference is not an opened selection. Keep it inert across
+  // missing inventories, even if creation cancels startup before it finishes.
+  let hasSelectedConversation = false;
+  let startupOwnsSelection = true;
+  let pendingStartupId: string | null = null;
+  const supersedeStartupSelection = () => {
+    startupOwnsSelection = false;
+    pendingStartupId = null;
+  };
   let selectedConversationDeleted = false;
   type ConversationRefreshRecovery = {
     conversationId: string;
@@ -642,6 +651,7 @@ export function initChat(api = new ChatApiClient()): void {
       projection?.conversationId ?? null,
       selectedConversationDeleted ? presentation.selectedId ?? null : null,
     );
+    if (!hasSelectedConversation && presentation.selectedId) known.add(presentation.selectedId);
     // Prune only once the inventory has actually loaded — an empty list at
     // boot must not wipe every stored draft.
     if (conversations.length > 0) {
@@ -2248,6 +2258,8 @@ export function initChat(api = new ChatApiClient()): void {
   }
 
   const selectConversation = async (id: string): Promise<boolean> => {
+    supersedeStartupSelection();
+    hasSelectedConversation = true;
     if (projection?.conversationId === id && stream && !historyRefreshRequired.has(id) && !selectedConversationDeleted) return true;
     renderer.closeShellOutputWindow();
     childRenderer.closeShellOutputWindow();
@@ -2345,6 +2357,7 @@ export function initChat(api = new ChatApiClient()): void {
       : conversations[0]?.id ?? null;
     patchChooser(selected);
     if (!selected) {
+      if (startupOwnsSelection) pendingStartupId = presentation.selectedId ?? null;
       form.hidden = true;
       if (chatTitle) chatTitle.textContent = chatHeading();
       return;
@@ -2393,7 +2406,20 @@ export function initChat(api = new ChatApiClient()): void {
 
   const applyConversationInventory = (next: ConversationSummary[]) => {
     const tracked = inventoryTracker.reconcile(next);
-    const selectedId = presentation.selectedId ?? null;
+    // Consume before starting any asynchronous read. Inventory is discovery,
+    // not a retry mechanism for a failed opening read.
+    if (pendingStartupId && startupOwnsSelection && next.some(item => item.id === pendingStartupId)) {
+      const id = pendingStartupId;
+      pendingStartupId = null;
+      conversations = next;
+      patchChooser(id);
+      void selectConversation(id);
+      syncInventoryAwareness(tracked.increased);
+      syncControls();
+      save();
+      return;
+    }
+    const selectedId = hasSelectedConversation ? presentation.selectedId ?? null : null;
     const selectedMissing = selectedId !== null && !next.some(conversation => conversation.id === selectedId);
     if (selectedMissing) enterSelectedConversationDeleted();
 
@@ -2564,6 +2590,7 @@ export function initChat(api = new ChatApiClient()): void {
   newButton.addEventListener("click", async () => {
     const chosenAgent = await chooseAgentForCreation();
     if (chosenAgent === null) return;
+    supersedeStartupSelection();
     newButton.disabled = true;
     announce("Creating conversation...");
     try {
@@ -3990,8 +4017,8 @@ export function initChat(api = new ChatApiClient()): void {
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
       // A selection made mid-bootstrap is the user's; the initial chooser
       // pass must not replace it with this snapshot's newest entry.
-      if (selectionGeneration === selectionAtStart) installInitialChooser();
-      else patchChooser(presentation.selectedId ?? null);
+      if (startupOwnsSelection && selectionGeneration === selectionAtStart) installInitialChooser();
+      else patchChooser(hasSelectedConversation ? presentation.selectedId ?? null : null);
       void contextReady;
       bootstrapped = true;
       // The enumeration above probed every agent; the pre-probe snapshot
