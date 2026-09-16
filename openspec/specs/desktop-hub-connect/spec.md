@@ -35,11 +35,16 @@ For each configured hub the app SHALL derive one of three states from an authent
 - **THEN** the app performs no periodic hub state requests
 
 ### Requirement: The native layer holds the hub session id and injects it into web views
-The app SHALL authenticate to hubs natively — a JSON login request without an `Origin` header — and SHALL hold the returned session id as the single credential, stored only in the macOS Keychain. Native API calls SHALL present it as `Authorization: Bearer`. Before any web view navigates to a hub origin, the app SHALL write the session id into the web view's cookie store as the hub session cookie, scoped to that hub's origin, so web and native surfaces share one server-side session. When either surface receives a 401, the session is dead server-side: the app SHALL attempt at most one silent re-login with the Keychain password per signed-out transition (respecting the hub's login rate limit), then present a sign-in prompt. Observing a sign-out navigation in a web view SHALL cause the app to discard the session id and stored password for that hub — the hub's server-side revocation makes further client-side verification unnecessary. TLS validation SHALL use system trust; certificate exceptions are not offered.
+The app SHALL authenticate to hubs natively — a JSON login request without an `Origin` header — and SHALL hold the returned session id as the single credential, stored only in the macOS Keychain. Native API calls SHALL present it as `Authorization: Bearer`. Before any web view navigates to a hub origin, the app SHALL write the session id into the web view's cookie store as the hub session cookie, scoped to that hub's origin and named by the hub's port rule (`uatu_hub` at the scheme's default port, `uatu_hub_<port>` otherwise), so web and native surfaces share one server-side session. Clearing a hub's cookie SHALL use the same name. When either surface receives a 401, the session is dead server-side: the app SHALL attempt at most one silent re-login with the Keychain password per signed-out transition (respecting the hub's login rate limit), then present a sign-in prompt. Observing a sign-out navigation in a web view SHALL cause the app to discard the session id and stored password for that hub — the hub's server-side revocation makes further client-side verification unnecessary. TLS validation SHALL use system trust; certificate exceptions are not offered.
 
 #### Scenario: Opening a session is seamless when signed in
 - **WHEN** the user opens a workspace on a signed-in hub
 - **THEN** the web view loads the session without showing the hub's login page
+
+#### Scenario: A hub on a non-default port gets its port-named cookie
+- **WHEN** the app injects the session cookie for a hub configured as `http://127.0.0.1:4701`
+- **THEN** the cookie is named `uatu_hub_4701`
+- **AND** a hub configured as `https://hub.example` receives `uatu_hub`
 
 #### Scenario: Revoked session recovers or prompts
 - **WHEN** a hub responds 401 because the session was revoked and the password is in the Keychain
