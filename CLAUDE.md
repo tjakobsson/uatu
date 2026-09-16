@@ -119,6 +119,13 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   root-relative `/api`/`/assets` literal; `shared/app-url-discipline.test.ts`
   enforces it. This is what makes a session relocatable under
   `--base-path` (which the hub relies on).
+- **Tests never write into `openspec/`.** E2E screenshots and evidence
+  reports go to Playwright's `test-results/` and the HTML report through
+  `tests/e2e/evidence.ts`. A change's `screenshots/` folder is PR evidence,
+  assembled at PR time by running the relevant suite with
+  `UATU_E2E_SCREENSHOTS_DIR=openspec/changes/<change>/screenshots`; it
+  travels with the change to the archive. `tests/evidence-discipline.test.ts`
+  fails any test that names a change folder.
 - E2E tests live in `tests/e2e/` under feature-named files
   (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.) —
   there is no monolithic `uatu.e2e.ts`.

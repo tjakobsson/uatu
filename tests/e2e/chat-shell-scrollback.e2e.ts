@@ -1,13 +1,11 @@
-import path from "node:path";
-import { writeFile } from "node:fs/promises";
 import { chromium, webkit, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
-import { captureScreenshot, openChatPanel } from "./chat-helpers";
+import { openChatPanel } from "./chat-helpers";
+import { captureScreenshot, saveEvidence } from "./evidence";
 import { chatWorkload } from "../fixtures/chat-performance";
 import { armConversationCommit, conversationCommit, stopConversationCommit } from "./chat-shell-performance-helpers";
 import { bootShell, control, drag, expectBounded, expectReading, frames, log, openShellRow, position, settleScroll, shell } from "./chat-shell-helpers";
 
-const SHOTS = path.resolve(import.meta.dirname, "../../openspec/changes/chat-shell-scrollback/screenshots");
 const floating = (page: Page) => page.getByRole("region", { name: "Shell output window" });
 
 /** Expose existing buffer statistics in the served test bundle, never product code. */
@@ -352,7 +350,7 @@ for (const engine of ["chromium", "webkit"] as const) {
           await window.getByRole("button", { name: "Restore size" }).click();
           expect(await window.boundingBox()).toEqual(rect);
           await expectReading(viewport, anchor);
-          if (agent === "opencode" && shape === "command" && !child) await captureScreenshot(page, testInfo, SHOTS, `${engine}-desktop-floating`);
+          if (agent === "opencode" && shape === "command" && !child) await captureScreenshot(page, testInfo, `${engine}-desktop-floating`);
           await window.getByRole("button", { name: "Return to chat" }).focus();
           await page.keyboard.press("Escape");
           await expect(window).toHaveCount(0);
@@ -507,7 +505,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       evidence.phase = "complete";
     } finally {
       const report = JSON.stringify(evidence, null, 2);
-      await writeFile(testInfo.outputPath("shell-long-output-work.json"), report + "\n");
+      await saveEvidence(testInfo, "shell-long-output-work.json", report + "\n");
       await testInfo.attach("shell-long-output-work.json", { body: report, contentType: "application/json" });
       await browser.close();
     }
@@ -551,7 +549,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       expect(await window.boundingBox()).toEqual(geometry);
       await expectReading(viewport, anchor);
       const report = JSON.stringify({ engine, touch, child, before, hidden, restored: await work(page) }, null, 2);
-      await writeFile(path.join(SHOTS, `${engine}-${touch ? "touch" : "desktop"}-${child ? "child" : "parent"}-hidden-work.json`), report + "\n");
+      await saveEvidence(testInfo, `${engine}-${touch ? "touch" : "desktop"}-${child ? "child" : "parent"}-hidden-work.json`, report + "\n");
       await testInfo.attach("hidden-shell-work.json", { body: report, contentType: "application/json" });
       await window.getByRole("button", { name: "Return to chat" }).click();
       await expect(window).toHaveCount(0);
@@ -614,7 +612,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         await drag(page, window.getByRole("group", { name: /^Resize output/ }), 3000, 3000);
         await expectBounded(page, window);
       }
-      await captureScreenshot(page, testInfo, SHOTS, `${engine}-${touch ? "touch" : "desktop"}-${theme}`);
+      await captureScreenshot(page, testInfo, `${engine}-${touch ? "touch" : "desktop"}-${theme}`);
       await test.step("inventory refresh keeps covered controls unfocusable", async () => {
         if (!touch) await window.getByRole("button", { name: "Maximize", exact: true }).click();
         const seeded = await control(request, { action: "seed", title: "Inventory refresh while maximized", items: [] });
@@ -646,7 +644,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         }
       });
       await expectBounded(page, window);
-      await captureScreenshot(page, testInfo, SHOTS, `${engine}-${touch ? "touch" : "desktop"}-${theme}-small`);
+      await captureScreenshot(page, testInfo, `${engine}-${touch ? "touch" : "desktop"}-${theme}-small`);
       await window.getByRole("button", { name: "Return to chat" }).focus();
       await page.keyboard.press("Escape");
       await expect(window).toHaveCount(0);

@@ -7,14 +7,11 @@
 // at desktop and phone sizes; the phone run is touch mode, where the
 // switcher lives in the Files tab.
 
-import { existsSync } from "node:fs";
-import path from "node:path";
 
-import { changeScreenshotsDir } from "./chat-helpers";
+import { evidencePath, recordEvidence } from "./evidence";
 import { childChatControl, expect, openSessionTab, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
 import type { BrowserContext, Page, TestInfo } from "@playwright/test";
 
-const SCREENSHOTS = changeScreenshotsDir("hub-brokered-live-stream");
 
 // alpha: the session on screen. beta: a permission request pending
 // (awaiting). gamma: a turn in flight (working). delta: stopped.
@@ -55,14 +52,14 @@ async function finishWork(staged: Staged): Promise<void> {
   await childChatControl(staged.gamma, { action: "status", conversationId: staged.gammaConversation, status: "completed" });
 }
 
-// Into the change's folder while it exists (review reads it from there); into
-// the test output once the change is archived, so a run does not resurrect
-// an empty change folder.
+// A clip-aware capture: the chip and its menu are small, and the review
+// wants them close up. Same evidence path as captureScreenshot otherwise.
 async function shot(page: Page, testInfo: TestInfo, name: string, clip?: { x: number; y: number; width: number; height: number }): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(200);
-  const target = existsSync(SCREENSHOTS) ? path.join(SCREENSHOTS, `${name}.png`) : testInfo.outputPath(`${name}.png`);
+  const target = evidencePath(testInfo, `${name}.png`);
   await page.screenshot({ path: target, animations: "disabled", caret: "hide", ...(clip ? { clip } : {}) });
+  await recordEvidence(testInfo, target);
 }
 
 // A close-up of the chip and, when open, its menu — the review needs the

@@ -1,15 +1,12 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationConfiguration, ConversationItem } from "../../src/chat/types";
-import { captureScreenshot, chooseChatModel, openChatConfiguration, openChatPanel } from "./chat-helpers";
+import { chooseChatModel, openChatConfiguration, openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 
 // Where the zen-chat-activity change keeps its evidence: the working line's
 // closed and open forms, a failed dot, and the phone width.
-const ZEN_SCREENSHOTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/zen-chat-activity/screenshots");
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   await request.post("/__e2e/reset");
@@ -120,7 +117,7 @@ test.describe("chat panels and navigation", () => {
     await expect(line).toHaveCount(1);
     await expect(line.locator("> summary .chat-activity-subject")).toHaveText("Bash sleep 20 && echo done");
     await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeHidden();
-    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-working-line-closed-desktop");
+    await captureScreenshot(page, testInfo, "after-working-line-closed-desktop");
 
     // Opened: the member rows with their state, and the running member with
     // output already open so its tail shows.
@@ -128,7 +125,7 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeVisible();
     await expect(page.locator('[data-chat-item-id="tool:4"]')).toHaveAttribute("open", "");
     await expect(page.locator('[data-chat-item-id="tool:4"] .chat-shell-viewport')).toContainText("still going");
-    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-working-line-open-desktop");
+    await captureScreenshot(page, testInfo, "after-working-line-open-desktop");
 
     // Finishing settles the same line into the group summary, still open.
     await control(request, { action: "item", conversationId: id, item: bash("tool:4", at(7), "sleep 20 && echo done", "completed", "done") });
@@ -176,7 +173,7 @@ test.describe("chat panels and navigation", () => {
     await expect(worded).toHaveText("1 failed");
     await expect(line).not.toHaveAttribute("open", "");
     expect(await dot.evaluate(node => getComputedStyle(node).backgroundColor)).toBe(danger);
-    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-finished-group-failed-dot-desktop");
+    await captureScreenshot(page, testInfo, "after-finished-group-failed-dot-desktop");
   });
 
   test("reduced motion stills the working line's pulse", async ({ page, request }) => {
@@ -696,6 +693,6 @@ test.describe("the working line at phone width", () => {
     await expect(line).toHaveAttribute("data-outcome", "live");
     await expect(line.locator("> summary .chat-activity-subject")).toHaveText("Bash sleep 20 && echo done");
     await expect(page.locator('[data-chat-item-id="tool:1"]')).toBeHidden();
-    await captureScreenshot(page, testInfo, ZEN_SCREENSHOTS, "after-working-line-phone");
+    await captureScreenshot(page, testInfo, "after-working-line-phone");
   });
 });

@@ -2,7 +2,7 @@
 // Playwright's colorScheme), restyles live on a flip without a reload,
 // re-renders mermaid diagrams, updates the theme-color meta, and keeps
 // the terminal palette dark in both schemes. Spec:
-// openspec/changes/add-system-theme/specs/system-theme/spec.md
+// openspec/specs/system-theme/spec.md
 
 import { expect, test } from "./fixtures";
 import type { Page } from "@playwright/test";

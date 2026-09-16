@@ -1,10 +1,7 @@
-import { existsSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import { captureScreenshot, changeScreenshotsDir, openChatPanel } from "./chat-helpers";
+import { openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<unknown> {
@@ -80,11 +77,7 @@ test.describe("multi-agent chat", () => {
     // that agent) — the OpenCode sentence must not leak onto a Claude card.
     await expect(card.locator(".chat-request-scope")).toContainText("rest of this turn");
     await expect(card).not.toContainText("OpenCode");
-    await page.evaluate(() => document.fonts.ready);
-    const shots = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../openspec/changes/polish-claude-code-chat/screenshots");
-    const target = existsSync(shots) ? path.join(shots, "phase1-permission-card-claude.png") : testInfo.outputPath("phase1-permission-card-claude.png");
-    await page.screenshot({ path: target, animations: "disabled", caret: "hide" });
-    await testInfo.attach("phase1-permission-card-claude", { path: target, contentType: "image/png" });
+    await captureScreenshot(page, testInfo, "phase1-permission-card-claude");
 
     // The confirmation lists Claude Code's rule under Claude Code's own
     // lifetime sentence, and again never names OpenCode.
@@ -94,7 +87,7 @@ test.describe("multi-agent chat", () => {
     await expect(claudeStage.locator(".chat-request-scope")).toContainText("rest of this turn");
     await expect(claudeStage).not.toContainText("OpenCode");
     await page.setViewportSize({ width: 1400, height: 1000 });
-    await captureScreenshot(page, testInfo, changeScreenshotsDir("confirm-always-allow-scope"), "after-confirmation-claude-desktop");
+    await captureScreenshot(page, testInfo, "after-confirmation-claude-desktop");
     await claudeStage.getByRole("button", { name: "Cancel" }).click();
     await expect(claudeStage).toBeHidden();
 
