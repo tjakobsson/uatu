@@ -47,6 +47,18 @@ describe("workspaceIdFromBasePath", () => {
 });
 
 describe("sortHubWorkspaces", () => {
+  test("explicit repository parents override child activity ordering, not display names", () => {
+    const a = { ...summary("a", true, "Same name"), repositoryId: "repo-a" };
+    const b = { ...summary("b", true, "Same name"), repositoryId: "repo-b" };
+    const childA = { ...summary("child-a", false, "Old label"), repositoryId: "repo-a", parentId: "a", branch: "feature/login" };
+    const childB = { ...summary("child-b", true, "Old label"), repositoryId: "repo-b", parentId: "b", branch: "feature/login" };
+    const rows = [childB, childA, b, a];
+    expect(sortHubWorkspaces(rows, "child-a").map(row => row.id)).toEqual(["a", "child-a", "b", "child-b"]);
+    expect(workspaceMenuLabel(childA)).toBe("feature/login");
+    expect(workspaceMenuDetail(rows, childA)).toBeNull();
+    expect(workspaceMenuDetail(rows, a)).toBe("/src/a");
+    expect(parseHubState({ workspaces: rows })?.workspaces[0]).toMatchObject(childB);
+  });
   test("orders current first, then running, then stopped, alphabetically within groups", () => {
     const sorted = sortHubWorkspaces(
       [
@@ -222,6 +234,17 @@ describe("chipLabel", () => {
 });
 
 describe("parseHubState", () => {
+  test("preserves only explicit string source snapshots, never infers from upstream", () => {
+    const workspaces = [
+      { ...summary("new", false), sourceRef: "release" },
+      { ...summary("remote", false), sourceRef: "origin/topic", upstream: "upstream/topic" },
+      { ...summary("existing", false), upstream: "origin/main", base: "main" },
+      { ...summary("invalid", false), sourceRef: { ref: "main" } },
+      { ...summary("empty", false), sourceRef: "" },
+    ];
+    expect(parseHubState({ workspaces })!.workspaces.map(row => row.sourceRef)).toEqual(["release", "origin/topic", undefined, undefined, undefined]);
+  });
+
   test("extracts well-formed workspace entries with display names and paths", () => {
     const state = parseHubState({
       workspaces: [

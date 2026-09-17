@@ -23,6 +23,7 @@ import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import type { WorkspaceActivity } from "../shared/live-protocol";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
+import { openWorktreeFork } from "./worktree-picker";
 
 export type HubWorkspaceSummary = {
   id: string;
@@ -31,10 +32,15 @@ export type HubWorkspaceSummary = {
   displayName: string;
   path: string;
   running: boolean;
+  parentId?: string;
+  repositoryId?: string;
+  branch?: string;
+  readonly sourceRef?: string;
+  createWorktree?: string;
 };
 
 export function workspaceMenuLabel(workspace: HubWorkspaceSummary): string {
-  return workspace.displayName || workspace.id;
+  return (workspace.parentId && workspace.branch) || workspace.displayName || workspace.id;
 }
 
 // Duplicate display names are legal; the menu disambiguates them with the
@@ -44,7 +50,8 @@ export function workspaceMenuDetail(
   workspace: HubWorkspaceSummary,
 ): string | null {
   const label = workspaceMenuLabel(workspace);
-  const duplicates = workspaces.filter(candidate => workspaceMenuLabel(candidate) === label);
+  const duplicates = workspaces.filter(candidate => workspaceMenuLabel(candidate) === label
+    && (!workspace.parentId || (candidate.parentId === workspace.parentId && candidate.repositoryId === workspace.repositoryId)));
   if (duplicates.length < 2) return null;
   return workspace.path || workspace.id;
 }
@@ -159,10 +166,18 @@ export function sortHubWorkspaces(
     if (workspace.id === currentId) return 0;
     return workspace.running ? 1 : 2;
   };
-  return [...workspaces].sort((a, b) =>
+  const sorted = [...workspaces].sort((a, b) =>
     rank(a) - rank(b)
     || workspaceMenuLabel(a).localeCompare(workspaceMenuLabel(b))
-    || a.id.localeCompare(b.id));
+     || a.id.localeCompare(b.id));
+  const children = new Map<string, HubWorkspaceSummary[]>();
+  for (const workspace of sorted) {
+    if (!workspace.parentId || !workspace.repositoryId) continue;
+    const parent = workspaces.find(candidate => candidate.id === workspace.parentId && !candidate.parentId && candidate.repositoryId === workspace.repositoryId);
+    if (parent) children.set(parent.id, [...(children.get(parent.id) ?? []), workspace]);
+  }
+  const nested = new Set([...children.values()].flat().map(workspace => workspace.id));
+  return sorted.filter(workspace => !nested.has(workspace.id)).flatMap(workspace => [workspace, ...(children.get(workspace.id) ?? [])]);
 }
 
 // Signs out by submitting a real form POST, exactly as the hub dashboard's
@@ -270,18 +285,20 @@ export function submitHubSignOut(doc: Document): void {
 
 export type HubStateSummary = {
   workspaces: HubWorkspaceSummary[];
+  worktreeNavigation?: string;
 };
 
 export function parseHubState(payload: unknown): HubStateSummary | null {
-  const record = payload as { workspaces?: unknown } | null;
+  const record = payload as { workspaces?: unknown; worktreeNavigation?: unknown } | null;
   const workspaces = record?.workspaces;
   if (!Array.isArray(workspaces)) {
     return null;
   }
   return {
+    ...(typeof record?.worktreeNavigation === "string" ? { worktreeNavigation: record.worktreeNavigation } : {}),
     workspaces: workspaces
       .filter(
-        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown } =>
+        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown; parentId?: unknown; repositoryId?: unknown; branch?: unknown; sourceRef?: unknown; createWorktree?: unknown } =>
           typeof entry === "object" &&
           entry !== null &&
           typeof (entry as { id?: unknown }).id === "string" &&
@@ -292,6 +309,11 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
         displayName: typeof entry.displayName === "string" && entry.displayName !== "" ? entry.displayName : entry.id,
         path: typeof entry.path === "string" ? entry.path : "",
         running: entry.running,
+        ...(typeof entry.parentId === "string" ? { parentId: entry.parentId } : {}),
+        ...(typeof entry.repositoryId === "string" ? { repositoryId: entry.repositoryId } : {}),
+        ...(typeof entry.branch === "string" ? { branch: entry.branch } : {}),
+        ...(typeof entry.sourceRef === "string" && entry.sourceRef !== "" ? { sourceRef: entry.sourceRef } : {}),
+        ...(typeof entry.createWorktree === "string" ? { createWorktree: entry.createWorktree } : {}),
       })),
   };
 }
@@ -323,6 +345,7 @@ export function initHubNav(): void {
   }
 
   let latest: HubWorkspaceSummary[] = [];
+  let worktreeNavigation: string | undefined;
   const activity = new Map<string, WorkspaceActivity>();
   // What the hub's list last said about the current session, apart from
   // `latest`, which folds the stream's activity in. `Stopped` is asserted
@@ -361,6 +384,10 @@ export function initHubNav(): void {
   const rowStartWords = { starting: "starting…", unlock: "unlock in Hub…", failed: "start failed" } as const;
 
   const renderMenu = () => {
+    // Background inventory/activity refresh must not discard keyboard focus or
+    // the anchor of an open fork menu.
+    if (document.querySelector('[role="menu"][aria-label="Create worktree"]')) return;
+    const focusedLabel = menu.contains(document.activeElement) ? document.activeElement?.getAttribute("aria-label") : null;
     menu.replaceChildren();
 
     const dashboard = document.createElement("a");
@@ -379,6 +406,8 @@ export function initHubNav(): void {
     for (const workspace of sortHubWorkspaces(latest, currentId)) {
       const item = document.createElement("a");
       item.className = "hub-menu-item";
+      item.dataset.workspaceId = workspace.id;
+      if (workspace.parentId) item.style.paddingInlineStart = "28px";
       item.href = `/s/${encodeURIComponent(workspace.id)}/`;
       if (workspace.id === currentId) {
         item.setAttribute("aria-current", "true");
@@ -390,6 +419,13 @@ export function initHubNav(): void {
       const itemLabel = document.createElement("span");
       itemLabel.className = "hub-menu-label";
       itemLabel.textContent = workspaceMenuLabel(workspace);
+      if (workspace.parentId) {
+        const provenance = document.createElement("span");
+        provenance.className = "hub-menu-provenance";
+        provenance.textContent = workspace.sourceRef ? `from ${workspace.sourceRef}` : "origin unknown";
+        provenance.title = provenance.textContent;
+        itemLabel.appendChild(provenance);
+      }
       item.appendChild(itemLabel);
       const detail = workspaceMenuDetail(latest, workspace);
       if (detail !== null) {
@@ -440,6 +476,24 @@ export function initHubNav(): void {
         });
       }
       menu.appendChild(item);
+      if (worktreeNavigation) {
+        const group = document.createElement("div");
+        group.style.cssText = "display:flex;align-items:center";
+        item.style.flex = "1";
+        item.style.minWidth = "0";
+        item.replaceWith(group); group.append(item);
+      }
+      if (!workspace.parentId && workspace.createWorktree) {
+        const fork = document.createElement("button");
+        fork.className = "hub-menu-item";
+        fork.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6"/></svg>';
+        fork.style.cssText = "flex:0 0 44px;min-height:44px;justify-content:center;background:transparent;border:0;color:inherit";
+        fork.setAttribute("aria-label", `Add worktree to ${workspaceMenuLabel(workspace)}`);
+        fork.title = `Add worktree to ${workspaceMenuLabel(workspace)}`;
+        fork.setAttribute("aria-haspopup", "menu");
+        item.parentElement!.append(fork);
+        fork.addEventListener("click", () => openWorktreeFork(workspace.createWorktree!, fork, toggle));
+      }
     }
 
     menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
@@ -455,6 +509,7 @@ export function initHubNav(): void {
       submitHubSignOut(document);
     });
     menu.appendChild(signOut);
+    if (focusedLabel) [...menu.querySelectorAll<HTMLElement>("[aria-label]")].find(item => item.getAttribute("aria-label") === focusedLabel)?.focus();
   };
 
   const close = () => {
@@ -518,6 +573,7 @@ export function initHubNav(): void {
     }
     applied = request;
     latest = foldCurrent(fresh.workspaces, reportsBefore);
+    worktreeNavigation = fresh.worktreeNavigation;
     for (const ws of [...activity.keys()]) {
       if (!isListed(ws) && (reportedAt.get(ws) ?? 0) <= reportsBefore) {
         activity.delete(ws);
@@ -537,6 +593,7 @@ export function initHubNav(): void {
   // last read): read the list again, and again while an answer still lacks
   // one reported after that request went out. The next answer lists it or,
   // no longer predating the report, prunes it.
+  window.addEventListener("uatu:worktrees-changed", () => { void refreshHubState(); });
   let refreshPending = false;
   const refreshForUnlisted = () => {
     if (refreshPending || [...activity.keys()].every(isListed)) return;
@@ -604,6 +661,7 @@ export function initHubNav(): void {
     }
     latest = state.workspaces;
     applyListedRunning(state.workspaces);
+    worktreeNavigation = state.worktreeNavigation;
     updateChip();
     control.hidden = false;
 

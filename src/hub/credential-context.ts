@@ -16,8 +16,9 @@ import type {
 import { normalizeProviderHost } from "./credential-types";
 import { createProviderRuntime } from "./provider-runtime";
 
-export const LOCAL_CREDENTIAL_ASSIGNMENT_WARNING =
-  "Local workspace credential assignments configure normal tools only. All workspaces run as the Hub OS user, so same-UID processes can inspect runtime files, reach shared agents, unset the configuration, and use credentials assigned elsewhere.";
+export { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING } from "./credential-presentation";
+import { SCP_REMOTE_PATTERN } from "./credential-presentation";
+export { SCP_REMOTE_PATTERN } from "./credential-presentation";
 
 export type ResolvedAuthenticationCredential =
   | { host: string; credential: SshCredentialRecord }
@@ -91,7 +92,6 @@ type CloneRemote = { transport: "ssh" | "https" | "other"; host?: string };
 // form must derive the same host from the same spelling: pages.ts inlines
 // this source into its client script rather than keeping a second regex
 // that can drift from what the server accepts.
-export const SCP_REMOTE_PATTERN = /^(?:[^@/:\s]+@)?(\[[^\]]+\]|[^/:\s]+):(.+)$/;
 
 export function parseCloneRemote(remote: string): CloneRemote {
   const scp = SCP_REMOTE_PATTERN.exec(remote);

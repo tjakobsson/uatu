@@ -12,7 +12,9 @@ import { Buffer } from "node:buffer";
 
 import { escapeHtml } from "../shared/html";
 import { PWA_ICON_VERSION } from "../pwa/icons";
-import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, SCP_REMOTE_PATTERN } from "./credential-context";
+import { worktreePickerScript } from "../shell/worktree-picker";
+import { createDashboardGroups, dashboardGroupsStyle } from "./dashboard-groups";
+import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, SCP_REMOTE_PATTERN } from "./credential-presentation";
 
 // Inline the brand SVG (the file ships a fixed navy fill; the dark-scheme
 // retint below only reaches presentation attributes when the markup is
@@ -164,6 +166,8 @@ const SHARED_STYLE = `
   }
   .row-detail { color: var(--text-subtle); font-size: 0.72rem; }
   .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+  .row[data-workspace] .row-title a, .row[data-workspace] .row-title strong { white-space: normal; overflow-wrap: anywhere; overflow: visible; }
+  @media(max-width:600px) { .row[data-workspace] { flex-wrap: wrap; } .row[data-workspace] .row-main { flex-basis: calc(100% - 2rem); } .row[data-workspace] .row-actions { flex: 1 0 100%; } }
 
   /* Indicator dot — mirrors .indicator-dot/.connection-state. */
   .indicator-dot {
@@ -425,6 +429,11 @@ function authenticatedChrome(current: AuthenticatedPage): string {
 import { mountNotifications } from "/hub-assets/notifications.js";
 mountNotifications({ apiUrl: "/api/hub/notifications", stateUrl: "/api/hub/state", workerUrl: "/push-worker.js", hosts: ".hub-nav" });
 </script>`;
+}
+
+/** Shared server-rendered Hub shell; callers supply trusted presentation markup. */
+export function hubPresentationPage(title: string, body: string, current: AuthenticatedPage = "dashboard"): string {
+  return page(title, authenticatedChrome(current) + body);
 }
 
 export function loginPage(options: { error?: string; next?: string } = {}): string {
@@ -691,6 +700,11 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
 ${content}
 </div>
 <script>
+${worktreePickerScript}
+const renderDashboardGroups = (${createDashboardGroups.toString()})();
+const dashboardGroupsStyle = document.createElement("style");
+dashboardGroupsStyle.textContent = ${JSON.stringify(dashboardGroupsStyle)};
+document.head.append(dashboardGroupsStyle);
 const pageMode = document.querySelector("[data-hub-page]").dataset.hubPage;
 const errorEl = document.getElementById("action-error");
 const sharedUidDismissalKey = ${sharedUidDismissalKey};
@@ -776,6 +790,7 @@ function row({ title, href, titleClick, path, detail, live, chip, chipWarn, butt
   const actions = el("div", "row-actions");
   for (const spec of specs) {
     const action = el("button", spec.className || null, spec.label);
+    if (spec.icon === "fork") action.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6"/></svg>';
     if (spec.ariaLabel) action.setAttribute("aria-label", spec.ariaLabel);
     action.onclick = () => spec.onClick(action);
     actions.appendChild(action);
@@ -1327,7 +1342,7 @@ async function prepareWorkspaceResume(workspace, errorTarget) {
   const locked = lockedWorkspaceCredentials(workspace.id);
   return !locked.length || await unlockForWorkspace(workspace, locked);
 }
-function workspaceLabel(w) { return w.displayName || w.id; }
+function workspaceLabel(w) { return (w.parentId && w.branch) || w.displayName || w.id; }
 function workspaceById(id) {
   return dashboardWorkspaces.find(entry => entry.id === id)
     || { id, displayName: id, credentialAssignments: { authentication: [], signing: [] } };
@@ -1570,6 +1585,7 @@ async function loadBrowser({ fallbackToParent = false } = {}) {
 }
 async function refresh(force) {
   if (!force && uiBusy > 0) return;
+  if (!force && document.querySelector('dialog[open], [role="menu"][aria-label="Create worktree"]')) return;
   let state;
   try {
     const stateResponse = await fetch("/api/hub/state");
@@ -1653,6 +1669,53 @@ async function refresh(force) {
     rows,
     "No stopped workspaces — use Add workspace to configure one.",
   );
+  if (state.worktreeNavigation) {
+    const nodes = new Map();
+    for (const [container, entries] of [["sessions", running], ["workspaces", stopped]]) {
+      const rendered = document.getElementById(container).querySelectorAll(".row");
+      entries.forEach((w, index) => {
+        const node = rendered[index]; if (!node) return;
+        nodes.set(w.id, node); node.dataset.workspace = w.id;
+        const target = new URL(state.dashboardWorktreeNavigation || state.worktreeNavigation, location.href);
+        if (target.origin !== location.origin) return;
+        target.searchParams.set("source", w.parentId || w.id); target.searchParams.set("id", w.id);
+        const actions = node.querySelector(".row-actions");
+        if (!w.parentId && w.branch) node.querySelector(".row-title").append(el("span", "chip", w.branch));
+        const action = (label, view) => {
+          const button = el("button", null, label);
+          button.onclick = () => { const url = new URL(target); url.searchParams.set("view", view); openWorktreePicker(url.href, button); };
+          actions.append(button); return button;
+        };
+        if (!w.parentId) action("Configure", "settings");
+        const forget = actions.querySelector('[aria-label^="Remove "]');
+        if (forget) {
+          forget.textContent = "Remove from Uatu";
+          forget.setAttribute("aria-label", "Remove " + workspaceLabel(w) + " from Uatu");
+          forget.onclick = () => { const url = new URL(target); url.searchParams.set("view", "forget"); openWorktreePicker(url.href, forget); };
+        }
+        if (w.availability) {
+          const warning = el("p", "action-error", (w.availability === "missing" ? "Missing checkout" : "Identity conflict — path replaced") + ". Restore the original checkout externally, then retry. Nothing will be recreated.");
+          warning.setAttribute("role", "alert"); node.append(warning);
+          const start = actions.querySelector('[aria-label^="Start "]'); if (start) start.remove();
+          const title = node.querySelector("a.row-title"); if (title) title.removeAttribute("href");
+          const retry = el("button", null, "Retry refresh"); retry.onclick = () => refresh(true); actions.append(retry);
+        }
+        if (w.parentId) {
+          const provenance = el("span", "worktree-provenance", w.sourceRef ? "from " + w.sourceRef : "origin unknown");
+          provenance.style.cssText = "font-size:11px;font-weight:400;color:var(--text-subtle);overflow-wrap:anywhere";
+          node.querySelector(".row-title").append(provenance);
+          node.dataset.parent = w.parentId; node.style.marginInlineStart = "24px";
+          const rename = actions.querySelector('[aria-label^="Rename workspace"]'); if (rename) rename.remove();
+          if (w.ownership === "uatu" && !w.availability) action("Delete worktree", "delete");
+        } else if (w.createWorktree) {
+          const fork = el("button"); fork.setAttribute("aria-label", "Add worktree to " + workspaceLabel(w)); fork.setAttribute("aria-haspopup", "menu");
+          fork.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6"/></svg>';
+          fork.onclick = () => { const url = new URL(w.createWorktree, location.href); url.pathname = target.pathname; openWorktreeFork(url.href, fork); }; actions.append(fork);
+        }
+      });
+    }
+    renderDashboardGroups(dashboardWorkspaces, nodes);
+  }
 }
 // The device-session list: every active session of the signed-in user,
 // with per-session revocation. Revoking the current session IS sign-out and
@@ -2533,6 +2596,7 @@ if (pageMode === "dashboard") {
   });
   loadDashboardCredentials().catch(() => {});
   refresh();
+  window.addEventListener("uatu:worktrees-changed", () => refresh(true));
   setInterval(refresh, 5000);
 } else if (pageMode === "settings") {
   initSettingsPage();
