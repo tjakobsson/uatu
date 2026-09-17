@@ -1,0 +1,4 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": ["../../src/**/*.ts", "worktree-demo-build.ts", "worktree-demo-chat.ts", "worktree-demo-client.ts", "worktree-demo-context.ts", "worktree-demo-layout.ts", "worktree-layout.e2e.ts", "worktree-demo-server.ts", "worktree-demo-server.test.ts", "worktree-demo-state.ts", "worktree-demo-fixtures.ts", "worktree-demo.e2e.ts", "worktree-context.e2e.ts", "worktree-gallery.e2e.ts", "worktree-gallery-server.ts"]
+}
