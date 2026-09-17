@@ -2997,6 +2997,15 @@ describe("pending permission recovery", () => {
     await waitUntil(() => row()?.descendants?.[0]?.usage?.costUsd === 0.25);
     expect(row()?.usage?.costUsd).toBe(0.5);
     expect(row()?.descendants).toEqual([{ id: "tool:prt_g", parentId: "tool:prt_c", description: "Find files", subagent: "explore", conversationId: "grandchild", model: "gpt-5.6-sol", usage: { input: 100, output: 1, costUsd: 0.25 } }]);
+
+    // The nested task's tool part is removed (outside any revert): its line
+    // and its cost leave the row above, and — the tally being squared — a
+    // reopen must not bring them back from the launcher record.
+    provider.eventQueue.push({ id: "e-unlaunch", type: "message.part.removed", properties: { sessionID: "child", messageID: "mc", partID: "prt_g" } } as never);
+    await waitUntil(() => row()?.descendants === undefined);
+    expect(row()).not.toHaveProperty("descendants");
+    expect(row()?.usage?.costUsd).toBe(0.5);
+    expect(rowsOf((await adapter.history("parent")).items)[0]).not.toHaveProperty("descendants");
     await adapter.stopEventPump();
     await pump;
   });

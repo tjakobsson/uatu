@@ -104,15 +104,20 @@ export function conversationTotals(items: readonly ConversationItem[]): Conversa
   const count = (line: ReceiptLine, modelId: string | undefined, usage: Usage | undefined) => {
     add(line, usage);
     note(line.models, modelId);
-    if (usage?.costUsd !== undefined) priced = true;
+    // A line that reported nothing — a subagent that delegated all its work,
+    // a nested one whose spend is not known yet — has nothing to put under a
+    // model. Counting it anyway would mint a row, "unknown" at worst, for a
+    // model that contributed nothing.
+    if (usage === undefined) return;
+    if (usage.costUsd !== undefined) priced = true;
     const id = modelId ?? "unknown";
     const row = byModel.get(id) ?? { id, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, unpriced: true as const, mains: [], kinds: new Map() };
     const before = row.costUsd;
     add(row as ReceiptAmount, usage);
-    row.costUsd = usage?.costUsd === undefined ? before : before + usage.costUsd;
+    row.costUsd = usage.costUsd === undefined ? before : before + usage.costUsd;
     // Zero is OpenCode's "no price for this model", not free: the row stays
     // unpriced until something positive is reported for it.
-    if ((usage?.costUsd ?? 0) > 0) delete row.unpriced;
+    if ((usage.costUsd ?? 0) > 0) delete row.unpriced;
     if (line.kind === "task") {
       const kind = line.agent ?? "subagent";
       row.kinds.set(kind, (row.kinds.get(kind) ?? new Set()).add(line.conversationId ?? line.id));

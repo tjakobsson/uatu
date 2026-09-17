@@ -1885,7 +1885,13 @@ export class ChatAdapter {
    */
   private async trackLaunchers(conversationId: string, updates: readonly NormalizedProviderUpdate[], coalescer: ProviderUpdateCoalescer): Promise<void> {
     const rows = updates.flatMap(update => update.kind === "upsert" && update.item.type === "tool" && update.item.childConversationId ? [update.item] : []);
-    if (rows.length === 0) return;
+    // A launcher that is removed takes its line with it. OpenCode's part
+    // removal names the part, not the row made from it, so both spellings of
+    // the id are read as the row's. Without this the record never forgets: the
+    // line and its cost stay on every ancestor, and — the tally being marked
+    // squared — a reopen keeps them too.
+    const removed = new Set(updates.flatMap(update => update.kind === "remove" ? [update.itemId.replace(/^part:/, "tool:")] : []));
+    if (rows.length === 0 && removed.size === 0) return;
     let parentId: string | null;
     try {
       parentId = await this.parentOf(conversationId);
@@ -1895,8 +1901,8 @@ export class ChatAdapter {
     if (!parentId) return;
     const key = attributionKey(parentId, conversationId);
     const transcript = this.childTranscripts.get(key) ?? { prompts: [], launchers: [] };
-    const launchers = [...transcript.launchers];
-    let changed = false;
+    const launchers = transcript.launchers.filter(launcher => !removed.has(launcher.id));
+    let changed = launchers.length !== transcript.launchers.length;
     for (const row of rows) {
       const known = launchers.findIndex(launcher => launcher.id === row.id);
       // The prompt being answered when the launcher first appeared is the

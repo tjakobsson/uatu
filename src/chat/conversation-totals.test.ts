@@ -201,6 +201,21 @@ describe("the receipt, from a real conversation", () => {
     ])!.receipt!;
     expect(partial.lines.map(line => [line.id, line.costUsd])).toEqual([["main:build", 0.5], ["tool:free", undefined], ["tool:idle", undefined], ["tool:worker", 0.25]]);
     expect(partial.total.costUsd).toBe(0.75);
+    // A line that reported nothing contributes to no model: the delegator
+    // names no model and must not mint an "unknown" row, and neither it nor
+    // the worker (which named none either, but DID spend) is lost from the sum.
+    expect(partial.models.map(model => [model.id, model.input, model.costUsd, model.agents])).toEqual([
+      [Q, 5, 0.5, ["build"]],
+      ["local/llama", 300, 0, ["general"]],
+      ["unknown", 9, 0.25, ["explore"]],
+    ]);
+    // A nested line that names its model but has reported no spend yet adds no empty row either.
+    const silent = conversationTotals([carrier("b", { input: 5, costUsd: 0.5 }, Q, "build"), subagent("tool:p", "Parent", { input: 1, costUsd: 0.1 }, Q, { kind: "general", descendants: [
+      { id: "tool:quiet", parentId: "tool:p", description: "Not yet", subagent: "explore", conversationId: "ses_q", model: "other/model" },
+    ] })])!.receipt!;
+    expect(silent.models.map(model => model.id)).toEqual([Q]);
+    expect(silent.lines.map(line => line.id)).toEqual(["main:build", "tool:p", "tool:quiet"]);
+    for (const itemization of [partial.lines, partial.types, partial.models]) expect(sumCost(itemization)).toBeCloseTo(0.75, 10);
   });
 
   test("a subagent's own spend across its tasks leaves out what it launched", () => {
