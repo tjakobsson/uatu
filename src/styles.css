@@ -705,7 +705,7 @@ html.uatu-desktop-host
   white-space: nowrap;
 }
 
-.hub-menu-provenance {
+.hub-menu-provenance, .hub-menu-branch {
   display: block;
   color: var(--text-subtle);
   font-size: 0.7rem;

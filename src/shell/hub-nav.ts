@@ -35,6 +35,7 @@ export type HubWorkspaceSummary = {
   parentId?: string;
   repositoryId?: string;
   branch?: string;
+  detached?: boolean;
   readonly sourceRef?: string;
   createWorktree?: string;
 };
@@ -298,7 +299,7 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
     ...(typeof record?.worktreeNavigation === "string" ? { worktreeNavigation: record.worktreeNavigation } : {}),
     workspaces: workspaces
       .filter(
-        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown; parentId?: unknown; repositoryId?: unknown; branch?: unknown; sourceRef?: unknown; createWorktree?: unknown } =>
+        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown; parentId?: unknown; repositoryId?: unknown; branch?: unknown; detached?: unknown; sourceRef?: unknown; createWorktree?: unknown } =>
           typeof entry === "object" &&
           entry !== null &&
           typeof (entry as { id?: unknown }).id === "string" &&
@@ -313,6 +314,7 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
         ...(typeof entry.repositoryId === "string" ? { repositoryId: entry.repositoryId } : {}),
         ...(typeof entry.branch === "string" ? { branch: entry.branch } : {}),
         ...(typeof entry.sourceRef === "string" && entry.sourceRef !== "" ? { sourceRef: entry.sourceRef } : {}),
+        ...(entry.detached === true ? { detached: true } : {}),
         ...(typeof entry.createWorktree === "string" ? { createWorktree: entry.createWorktree } : {}),
       })),
   };
@@ -419,6 +421,13 @@ export function initHubNav(): void {
       const itemLabel = document.createElement("span");
       itemLabel.className = "hub-menu-label";
       itemLabel.textContent = workspaceMenuLabel(workspace);
+      if (!workspace.parentId && workspace.createWorktree) {
+        const branch = document.createElement("span");
+        branch.className = "hub-menu-branch";
+        branch.textContent = workspace.detached ? "Detached HEAD" : workspace.branch || "Branch unknown";
+        branch.title = `Current checkout: ${branch.textContent}`;
+        itemLabel.appendChild(branch);
+      }
       if (workspace.parentId) {
         const provenance = document.createElement("span");
         provenance.className = "hub-menu-provenance";

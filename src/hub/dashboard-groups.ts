@@ -1,6 +1,6 @@
 /** Capability-scoped presentation; rows retain their existing action handlers. */
 export function createDashboardGroups() {
-  type Workspace = { id: string; displayName?: string; branch?: string; parentId?: string; repositoryId?: string; running: boolean };
+  type Workspace = { id: string; displayName?: string; branch?: string; detached?: boolean; parentId?: string; repositoryId?: string; running: boolean };
   const expanded = new Map<string, boolean>();
   const make = (tag: string, text = "", className = "") => {
     const node = document.createElement(tag); node.textContent = text; node.className = className; return node;
@@ -30,7 +30,7 @@ export function createDashboardGroups() {
         if (button.textContent === "Configure" || button.getAttribute("aria-label")?.startsWith("Rename workspace") || button.getAttribute("aria-label")?.startsWith("Add worktree")) actions.append(button);
       }
       heading.append(actions); group.append(heading);
-      main.querySelector<HTMLElement>(".row-title")!.replaceChildren(document.createTextNode(parent.branch || parent.displayName || parent.id), make("span", "Main checkout", "chip"));
+      main.querySelector<HTMLElement>(".row-title")!.replaceChildren(document.createTextNode(parent.detached ? "Detached HEAD" : parent.branch || "Branch unknown"), make("span", "Main checkout", "chip"));
       group.append(main);
       const count = children.filter(w => !w.running).length;
       const hidden = count ? details(`${parent.id}-stopped`, `${count} stopped worktree${count === 1 ? "" : "s"}`) : null;

@@ -1,6 +1,16 @@
 // Optional server-rendered lifecycle presentation inside the workspace picker.
 // These DOM-only functions are also embedded in the server-rendered dashboard;
 // both entry points deliberately use the same menu and popup controller.
+import { validWorktreeBranch } from "../shared/worktree-branches";
+
+export function updateWorktreeCreate(root: ParentNode): void {
+  const button = root.querySelector<HTMLButtonElement>("[data-create]");
+  if (!button) return;
+  const name = root.querySelector<HTMLInputElement>('[name="branch"]');
+  const selection = root.querySelector<HTMLInputElement>('[name="selection"]');
+  button.disabled = Boolean((root as Element).hasAttribute?.("data-operation-busy") || root.querySelector('[data-operation-busy]')) || !selection?.value || Boolean(name && !validWorktreeBranch(name.value));
+}
+
 export function openWorktreeFork(target: string, anchor: HTMLElement, returnFocus: HTMLElement = anchor): void {
   const menu = document.createElement("div");
   menu.setAttribute("role", "menu");
@@ -65,7 +75,7 @@ export function bindWorktreeBranches(root: ParentNode): void {
     selected.value = option.dataset.value!;
     input.value = option.dataset.search!;
     options.forEach(item => item.setAttribute("aria-selected", String(item === option)));
-    submit.disabled = false;
+    updateWorktreeCreate(root);
     // A committed value is not a filter. Reopening allows reviewing all refs.
     options.forEach(item => item.hidden = false);
     empty.hidden = true;
@@ -103,11 +113,18 @@ export function bindWorktreeBranches(root: ParentNode): void {
     option.addEventListener("pointerdown", event => event.preventDefault());
     option.addEventListener("click", () => { input.focus(); choose(option); });
   });
+  // Blur collapses the list and moves the footer. Keep it stationary until a
+  // pointer click completes; otherwise Cancel/Create move out from under the
+  // pointer between down and up. Keyboard focus still uses normal blur behavior.
+  root.querySelectorAll<HTMLElement>(".wt-actions button").forEach(button => {
+    button.addEventListener("pointerdown", event => event.preventDefault());
+  });
   input.addEventListener("blur", () => expand(false));
   const initial = options.find(option => option.dataset.value === selected.value);
   if (initial) choose(initial);
   else { selected.value = ""; filter(); }
-  submit.disabled = !selected.value;
+  root.querySelector('[name="branch"]')?.addEventListener("input", () => updateWorktreeCreate(root));
+  updateWorktreeCreate(root);
 }
 // The caller supplies a same-origin presentation URL; this module owns only
 // navigation, focus and submission, never Git or workspace startup policy.
@@ -208,6 +225,7 @@ export function openWorktreePicker(target: string, returnFocus: HTMLElement): vo
       if (creation) for (const [key, value] of new FormData(creation)) data.set(key, value);
     }
     busy = true;
+    main.setAttribute("data-operation-busy", "");
     main.querySelectorAll<HTMLButtonElement>("button").forEach(button => button.disabled = true);
     const status = main.querySelector<HTMLElement>("#operation-status")!;
     status.hidden = false;
@@ -253,7 +271,9 @@ export function openWorktreePicker(target: string, returnFocus: HTMLElement): vo
       }
     } finally {
       busy = false;
+      main.removeAttribute("data-operation-busy");
       main.querySelectorAll<HTMLButtonElement>("button").forEach(button => button.disabled = button.hasAttribute("data-create") && Boolean(main.querySelector('[name="selection"]')) && !main.querySelector<HTMLInputElement>('[name="selection"]')!.value);
+      updateWorktreeCreate(main);
     }
   });
   document.body.append(dialog);
@@ -266,11 +286,11 @@ export function showWorktreeConfirmation(message: string, open?: (button: HTMLBu
   const notice = document.createElement("div");
   notice.dataset.worktreeConfirmation = "";
   notice.setAttribute("role", "status");
-  notice.style.cssText = "position:fixed;z-index:2100;bottom:calc(64px + var(--tab-bar-total,env(safe-area-inset-bottom)));left:50%;transform:translateX(-50%);max-width:calc(100vw - 32px);display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid var(--border-medium,#888);border-radius:8px;background:var(--surface,#fff);color:var(--text-strong,inherit);box-shadow:0 4px 24px #0003;font:14px system-ui";
-  const label = document.createElement("span"); label.textContent = message; label.style.overflowWrap = "anywhere"; notice.append(label);
-  if (open) { const button = document.createElement("button"); button.type = "button"; button.textContent = "Open"; button.style.cssText = "min-height:44px;padding:8px;border:0;background:transparent;color:inherit;cursor:pointer;font:inherit"; button.onclick = () => open(button); notice.append(button); }
-  const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.textContent = "×"; dismiss.setAttribute("aria-label", "Dismiss confirmation"); dismiss.style.cssText = "min-height:44px;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer"; dismiss.onclick = () => notice.remove(); notice.append(dismiss);
+  notice.style.cssText = "position:fixed;z-index:2100;bottom:calc(16px + var(--tab-bar-total,env(safe-area-inset-bottom,0px)));left:50%;transform:translateX(-50%);box-sizing:border-box;width:max-content;max-width:calc(100vw - 32px);display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid var(--border-medium,#888);border-radius:8px;background:var(--surface,#fff);color:var(--text-strong,inherit);box-shadow:0 4px 24px #0003;font:14px/20px system-ui";
+  const label = document.createElement("span"); label.textContent = message; label.style.cssText = "min-width:0;overflow-wrap:anywhere"; notice.append(label);
+  if (open) { const button = document.createElement("button"); button.type = "button"; button.textContent = "Open"; button.style.cssText = "flex-shrink:0;min-width:44px;min-height:44px;padding:8px;border:0;background:transparent;color:inherit;cursor:pointer;font:inherit"; button.onclick = () => open(button); notice.append(button); }
+  const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.textContent = "×"; dismiss.setAttribute("aria-label", "Dismiss confirmation"); dismiss.style.cssText = "flex-shrink:0;min-width:44px;min-height:44px;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer"; dismiss.onclick = () => notice.remove(); notice.append(dismiss);
   document.body.append(notice);
 }
 
-export const worktreePickerScript = [bindWorktreeBranches, showWorktreeConfirmation, openWorktreePicker, openWorktreeFork].map(fn => fn.toString()).join(";\n");
+export const worktreePickerScript = [validWorktreeBranch, updateWorktreeCreate, bindWorktreeBranches, showWorktreeConfirmation, openWorktreePicker, openWorktreeFork].map(fn => fn.toString()).join(";\n");

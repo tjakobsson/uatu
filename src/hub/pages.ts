@@ -1593,6 +1593,16 @@ async function refresh(force) {
     state = await stateResponse.json();
   } catch { return; }
 
+  // Capture at render time, not before the request: the user may have moved
+  // focus while it was in flight. Rebuilt rows are matched by owner + action.
+  const focused = document.activeElement;
+  const dashboardFocus = focused instanceof HTMLElement && focused.closest('#sessions, #workspaces');
+  const focusOwner = dashboardFocus && focused.closest('[data-workspace], [data-disclosure], [data-repository]');
+  const ownerAttribute = focusOwner && ['data-workspace', 'data-disclosure', 'data-repository'].find(key => focusOwner.hasAttribute(key));
+  const ownerValue = ownerAttribute && focusOwner.getAttribute(ownerAttribute);
+  const focusLabel = dashboardFocus && (focused.getAttribute('aria-label') || focused.textContent);
+  const focusTag = dashboardFocus && focused.tagName;
+
   document.getElementById("hub-version").textContent = state.version || "";
   dashboardWorkspaces = state.workspaces || [];
 
@@ -1715,6 +1725,11 @@ async function refresh(force) {
       });
     }
     renderDashboardGroups(dashboardWorkspaces, nodes);
+  }
+  if (ownerAttribute && !focused.isConnected && document.activeElement === document.body && !document.querySelector('dialog[open], [role="menu"]')) {
+    const owner = Array.from(document.querySelectorAll('[' + ownerAttribute + ']')).find(node => node.getAttribute(ownerAttribute) === ownerValue);
+    const replacement = owner && Array.from(owner.querySelectorAll('button, a, summary')).find(node => node.tagName === focusTag && (focusTag === 'SUMMARY' || (node.getAttribute('aria-label') || node.textContent) === focusLabel));
+    if (replacement) replacement.focus({ preventScroll: true });
   }
 }
 // The device-session list: every active session of the signed-in user,
