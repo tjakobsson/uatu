@@ -214,8 +214,11 @@ describe("authentication and CSRF", () => {
   });
 
   test("an unknown operation is refused rather than guessed", async () => {
-    const response = await post("delete", { source: parentId, id: parentId }, authenticated());
-    expect(response.status).toBe(405);
+    // Display-name rename and parent settings live on the Hub dashboard.
+    for (const action of ["rename", "settings", "branch-delete"]) {
+      const response = await post(action, { source: parentId, id: parentId }, authenticated());
+      expect(response.status).toBe(405);
+    }
   });
 
   test("a presentation POST and an operation GET are refused", async () => {
@@ -256,8 +259,9 @@ describe("presentation", () => {
   test("an unknown view or workspace is not found", async () => {
     expect((await fetch(`${origin}/worktrees?view=nope&source=${parentId}`, authenticated())).status).toBe(404);
     expect((await fetch(`${origin}/worktrees?view=inventory&source=ghost`, authenticated())).status).toBe(404);
-    // Section 5's views are absent rather than rendered without an operation.
-    expect((await fetch(`${origin}/worktrees?view=delete&source=${parentId}`, authenticated())).status).toBe(404);
+    // Views the dashboard owns are absent rather than rendered without an operation.
+    expect((await fetch(`${origin}/worktrees?view=settings&source=${parentId}&id=${parentId}`, authenticated())).status).toBe(404);
+    expect((await fetch(`${origin}/worktrees?view=rename&source=${parentId}&id=${parentId}`, authenticated())).status).toBe(404);
   });
 
   test("a message carried across a redirect is sanitized before it is rendered", async () => {

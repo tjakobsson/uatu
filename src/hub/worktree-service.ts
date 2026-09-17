@@ -9,8 +9,13 @@
 // records the initiator, and progress is only ever reported to them.
 
 import {
+  canDeleteWorktree,
   toWorktreeError,
+  unknownWorktreeInventory,
   WorktreeOperationError,
+  type WorktreeDeleteRequest,
+  type WorktreeDeletionPreflight,
+  type WorktreeForgetRequest,
   type WorktreeCheckout,
   type WorktreeCreateRequest,
   type WorktreeInventory,
@@ -42,14 +47,20 @@ import {
   listWorktrees,
   probeGitCapabilities,
   repositoryContext,
+  stampCheckoutIdentity,
   type CheckoutInspection,
   type GitRunner,
   type WorktreeGitOptions,
   type WorktreeRecord,
 } from "./worktree-git";
+import { inspectRemovalSafety, runWorktreeRemove } from "./worktree-delete";
 import {
   ownershipForCheckout,
   recoverWorktreeOperation,
+  clearRemovalMarker,
+  removalMarkerPresent,
+  writeRemovalMarker,
+  type WorktreeDeleteIntent,
   registerCreatedWorktree,
   WorktreeJournal,
   WorktreeProvenanceStore,
@@ -60,10 +71,19 @@ import {
 // A repository with an implausible number of linked trees must not turn one
 // inventory read into hundreds of subprocesses.
 const INVENTORY_LIMIT = 64;
+const AVAILABILITY_CACHE_MS = 2_000;
+
+// The Hub-side registration cleanup a removal or a forget ends in: the
+// registry entry, its personal state and its credential assignments. Called
+// while the caller ALREADY holds the workspace's lifecycle queue, so it must
+// not take that queue itself. Never touches the filesystem.
+export type WorktreeUnregister = (workspaceId: string) => Promise<void>;
 
 export type WorktreeServiceOptions = {
   registry: Pick<WorkspaceRegistry, "byId" | "byPath" | "list">;
-  sessions: Pick<SessionManager, "isRunning">;
+  sessions: Pick<SessionManager, "isRunning"> & Partial<Pick<SessionManager, "isStarting" | "runWithSessionsStopped" | "runExclusive">>;
+  // Absent: deletion and forgetting are unavailable rather than half-done.
+  unregister?: WorktreeUnregister;
   journal: WorktreeJournal;
   provenance: WorktreeProvenanceStore;
   registrar: WorktreeRegistrar;
@@ -102,6 +122,8 @@ export class WorktreeService {
   // Freshness is per repository and in memory: after a restart a listing is
   // truthfully "cached" again rather than claiming a fetch nobody made.
   private readonly fetchedAt = new Map<string, number>();
+  // The state list is polled; a child's identity probe is cached briefly.
+  private readonly availabilityCache = new Map<string, { at: number; path: string; value: "present" | "missing" | "replaced" }>();
 
   constructor(private readonly options: WorktreeServiceOptions) {
     this.coordinator = options.coordinator ?? new WorktreeOperationCoordinator();
@@ -173,6 +195,11 @@ export class WorktreeService {
         : {}),
     });
     const checkoutId = probe.identity?.checkoutId ?? registered?.worktree?.checkoutId ?? record.path;
+    // The branch's recorded creation history — the checkout's own record
+    // first, then the branch's surviving history. Never inferred.
+    const sourceRef = main || record.detached || record.branch === null
+      ? undefined
+      : resolved.record?.sourceRef ?? await this.options.provenance.branchOrigin(view.repositoryId, record.branch);
     return {
       checkoutId,
       repositoryId: view.repositoryId,
@@ -185,9 +212,11 @@ export class WorktreeService {
       ownership: resolved.ownership,
       availability: resolved.availability,
       registered: registered !== undefined,
-      running: registered !== undefined && this.options.sessions.isRunning(registered.id),
+      // An unavailable checkout is never reported running: nothing can be
+      // opened there until the identity conflict is resolved.
+      running: registered !== undefined && resolved.availability === "present" && this.options.sessions.isRunning(registered.id),
       locked: record.locked,
-      ...(resolved.record?.sourceRef === undefined ? {} : { sourceRef: resolved.record.sourceRef }),
+      ...(sourceRef === undefined ? {} : { sourceRef }),
       ...(record.head === null ? {} : { head: record.head.slice(0, 12) }),
     };
   }
@@ -206,22 +235,13 @@ export class WorktreeService {
     try {
       view = await this.repositoryView(sourceWorkspaceId);
     } catch (error) {
-      // The repository could not be identified at all, so there is no
-      // identity to report: an explicitly stale, empty listing carrying the
-      // sanitized reason. (When this DTO is published over the wire in
-      // section 5, the empty identity needs a wire-legal spelling — the
-      // contract parser requires a non-empty repositoryId.)
-      return {
-        repositoryId: "",
-        sourceWorkspaceId,
-        status: "error",
-        checkouts: [],
-        refs: { local: [], remote: [], fetchedAt: null },
-        error: toWorktreeError(error, "The worktree inventory is unavailable."),
-      };
+      // The repository could not be identified at all: the contract's one
+      // "identity unknown" spelling, explicitly stale and empty.
+      return unknownWorktreeInventory(sourceWorkspaceId, toWorktreeError(error, "The worktree inventory is unavailable."));
     }
     const checkouts: WorktreeCheckout[] = [];
     for (const record of view.records) checkouts.push(await this.checkoutFor(view, record));
+    checkouts.push(...await this.unlistedRegistrations(view, checkouts));
     return {
       repositoryId: view.repositoryId,
       sourceWorkspaceId,
@@ -229,6 +249,50 @@ export class WorktreeService {
       checkouts,
       refs: this.refsFor(view),
     };
+  }
+
+  // Registered children Git no longer lists at their path (the folder was
+  // deleted and pruned, or something else now lives there). They stay
+  // visible as missing or replaced — never recreated, never forgotten,
+  // never silently dropped from the picker.
+  private async unlistedRegistrations(view: RepositoryView, listed: readonly WorktreeCheckout[]): Promise<WorktreeCheckout[]> {
+    const listedPaths = new Set(listed.map(checkout => checkout.path));
+    const rows: WorktreeCheckout[] = [];
+    for (const entry of this.options.registry.list()) {
+      const link = entry.worktree;
+      if (!link || link.repositoryId !== view.repositoryId || listedPaths.has(entry.path)) continue;
+      const inspection = await inspectCheckout(entry.path, { ...this.options.git, run: this.run });
+      const resolved = await ownershipForCheckout({
+        provenance: this.options.provenance,
+        inspection,
+        checkoutPath: entry.path,
+        registeredIdentity: { repositoryId: link.repositoryId, checkoutId: link.checkoutId },
+      });
+      // A path that holds a readable checkout Git does not list for this
+      // repository is somebody else's tree: an identity conflict, whatever
+      // ownership arithmetic says.
+      const availability = resolved.availability === "present" ? "replaced" : resolved.availability;
+      const origin = await this.options.provenance.branchOrigin(view.repositoryId, entry.displayName);
+      rows.push({
+        checkoutId: link.checkoutId,
+        repositoryId: view.repositoryId,
+        workspaceId: entry.id,
+        parentWorkspaceId: link.parentWorkspaceId,
+        path: entry.path,
+        // Git cannot report a branch for a tree it no longer lists; the
+        // registration's name IS the branch it was registered with.
+        branch: entry.displayName,
+        detached: false,
+        main: false,
+        ownership: availability === "replaced" ? "uncertain" : resolved.ownership,
+        availability,
+        registered: true,
+        running: false,
+        locked: false,
+        ...(origin === undefined ? {} : { sourceRef: origin }),
+      });
+    }
+    return rows;
   }
 
   async refs(sourceWorkspaceId: string): Promise<WorktreeRefs> {
@@ -303,6 +367,9 @@ export class WorktreeService {
         refs: view.refs,
         records: view.records,
         occupied: destinationOccupied,
+        ...(request.mode === "existing-local"
+          ? await this.options.provenance.branchOrigin(view.repositoryId, request.base.ref).then(origin => origin === undefined ? {} : { branchOrigin: origin })
+          : {}),
       });
     } catch (error) {
       // Nothing was journaled and nothing ran: a pure refusal.
@@ -323,7 +390,7 @@ export class WorktreeService {
       mode: plan.mode,
       branch: plan.branch,
       base: { kind: plan.base.kind, ref: plan.base.ref },
-      sourceRef: plan.sourceRef,
+      ...(plan.sourceRef === undefined ? {} : { sourceRef: plan.sourceRef }),
     });
     await this.options.journal.advance(operationId, "reserving");
     await this.options.journal.advance(operationId, "creating");
@@ -338,6 +405,9 @@ export class WorktreeService {
       return { ok: false, operationId, kind: "create", phase: "creating", error: outcome.error.detail };
     }
 
+    // Stamp the new tree before its identity is recorded anywhere, so a
+    // later tree at this path can never inherit it (worktree-git).
+    await stampCheckoutIdentity(plan.destination, { ...this.options.git, run: this.run }).catch(() => undefined);
     const inspection = await inspectCheckout(plan.destination, { ...this.options.git, run: this.run });
     if (!inspection.present || !inspection.identityReadable || !inspection.identity) {
       return {
@@ -435,6 +505,418 @@ export class WorktreeService {
     }
   }
 
+  // --- Registering an existing checkout ----------------------------------------
+
+  // Explicit registration of a checkout Git lists but Hub does not: an
+  // external discovery, or a Uatu-created tree that was removed from Uatu
+  // earlier. It stays where it is, keeps whatever provenance its IDENTITY
+  // has (none for an external tree), is named by its exact branch, and is
+  // governed live by the parent's policy. Nothing is moved or copied.
+  async registerExisting(user: string, sourceWorkspaceId: string, reference: string, start = false): Promise<WorktreeOperationResult> {
+    const pending = await this.options.journal.read().catch(() => undefined);
+    if (pending?.kind === "create" && (pending.operationId === reference || pending.checkoutId === reference)) {
+      return this.retryRegistration(user, reference, start);
+    }
+    const operationId = this.newOperationId();
+    try {
+      await this.options.assertOperationsAllowed?.();
+      const view = await this.repositoryView(sourceWorkspaceId);
+      return await this.coordinator.run({ repositoryId: view.repositoryId }, async () => {
+        const current = await this.repositoryView(sourceWorkspaceId);
+        let target: { record: WorktreeRecord; inspection: CheckoutInspection; checkout: WorktreeCheckout } | undefined;
+        for (const record of current.records) {
+          const inspection = await inspectCheckout(record.path, { ...this.options.git, run: this.run });
+          if (inspection.identity?.checkoutId !== reference) continue;
+          target = { record, inspection, checkout: await this.checkoutFor(current, record, inspection) };
+          break;
+        }
+        if (!target) throw WorktreeOperationError.of("not-found", "That checkout is no longer listed by Git. Refresh the inventory.", { retry: "refresh" });
+        const { checkout, inspection } = target;
+        if (checkout.main) throw WorktreeOperationError.of("invalid-input", "The main checkout is registered as the repository itself.");
+        if (checkout.registered) throw WorktreeOperationError.of("conflict", "That checkout is already registered. Open it instead.", { retry: "open-existing" });
+        if (checkout.ownership === "uncertain" || checkout.availability !== "present" || !inspection.identity) {
+          throw WorktreeOperationError.of("identity-uncertain", "Uatu cannot confirm this checkout's identity, so it was not registered.", { retry: "refresh" });
+        }
+        if (checkout.branch === null) {
+          throw WorktreeOperationError.of("invalid-input", "A detached checkout has no branch to name it by. Check out a branch outside Uatu first.");
+        }
+        // A tree Uatu created keeps the identity its provenance names; an
+        // external tree is stamped now, so a replacement at its path is
+        // recognized as one rather than inheriting the registration.
+        const identity = checkout.ownership === "uatu"
+          ? inspection.identity
+          : await stampCheckoutIdentity(checkout.path, { ...this.options.git, run: this.run });
+        const registration = await this.options.registrar.register({
+          path: checkout.path,
+          displayName: checkout.branch,
+          parentWorkspaceId: current.source.id,
+          identity,
+          start,
+        });
+        return {
+          ok: true as const,
+          operationId,
+          kind: "register" as const,
+          phase: "complete" as const,
+          checkout: { ...checkout, checkoutId: identity.checkoutId, workspaceId: registration.workspaceId, parentWorkspaceId: current.source.id, registered: true, running: registration.started },
+          registered: true,
+          started: registration.started,
+          ...(registration.startError === undefined
+            ? {}
+            : { startError: WorktreeOperationError.of("start-failed", `The workspace could not be started: ${registration.startError}. It remains stopped; retry Start.`, { retry: "retry-start" }).detail }),
+        };
+      });
+    } catch (error) {
+      return { ok: false, operationId, kind: "register", error: toWorktreeError(error, "The checkout could not be registered. Nothing changed.") };
+    }
+  }
+
+  // --- Removal --------------------------------------------------------------
+
+  private deletionUnavailable(): WorktreeOperationError | undefined {
+    const { sessions } = this.options;
+    if (!this.options.unregister || !sessions.runWithSessionsStopped || !sessions.isStarting) {
+      return WorktreeOperationError.of("internal", "Worktree deletion is unavailable on this Hub.");
+    }
+    return undefined;
+  }
+
+  // The checkout a delete/forget reference names, resolved against a FRESH
+  // Git listing: a registered workspace id, or a canonical checkout id for
+  // a retained, unregistered tree. A path is never accepted as a reference.
+  private async resolveTarget(view: RepositoryView, reference: string): Promise<{ record: WorktreeRecord; checkout: WorktreeCheckout; inspection: CheckoutInspection } | undefined> {
+    const entry = this.options.registry.byId(reference);
+    for (const record of view.records) {
+      const registered = this.options.registry.byPath(record.path);
+      const inspection = await inspectCheckout(record.path, { ...this.options.git, run: this.run });
+      const matches = entry !== undefined
+        ? registered?.id === entry.id
+        : inspection.identity?.checkoutId === reference;
+      if (!matches) continue;
+      return { record, checkout: await this.checkoutFor(view, record, inspection), inspection };
+    }
+    return undefined;
+  }
+
+  // What the confirmation dialog shows: may this checkout be deleted, and
+  // does proceeding need the explicit "Stop and delete". Read-only.
+  async preflightDelete(request: WorktreeDeleteRequest): Promise<WorktreeDeletionPreflight> {
+    try {
+      const unavailable = this.deletionUnavailable();
+      if (unavailable) throw unavailable;
+      const view = await this.repositoryView(request.sourceWorkspaceId);
+      return await this.preflightIn(view, request.reference);
+    } catch (error) {
+      return { ok: false, error: toWorktreeError(error, "Deletion could not be checked. Nothing was removed.") };
+    }
+  }
+
+  private async preflightIn(view: RepositoryView, reference: string): Promise<WorktreeDeletionPreflight> {
+    const target = await this.resolveTarget(view, reference);
+    if (!target) {
+      // A registered child Git no longer lists is missing or replaced; it
+      // is never deletable, only restorable or forgettable.
+      return { ok: false, error: WorktreeOperationError.of("identity-uncertain", "This worktree is not available at its recorded location. Nothing was removed.", { retry: "refresh" }).detail };
+    }
+    const { checkout } = target;
+    if (checkout.main) {
+      return { ok: false, checkout, error: WorktreeOperationError.of("ownership-required", "The main checkout cannot be deleted.").detail };
+    }
+    if (!canDeleteWorktree(checkout)) {
+      const error = checkout.ownership === "uncertain" || checkout.availability !== "present"
+        ? WorktreeOperationError.of("identity-uncertain", "Uatu cannot confirm this worktree's identity, so it will not delete it. Restore or verify it outside Uatu.")
+        : WorktreeOperationError.of("ownership-required", "Only a worktree Uatu created can be deleted. Remove it from Uatu instead; its files stay.");
+      return { ok: false, checkout, error: error.detail };
+    }
+    const blocker = await inspectRemovalSafety({ run: this.run, checkoutPath: checkout.path, records: view.records });
+    if (blocker) return { ok: false, checkout, error: blocker.detail };
+    const workspaceId = checkout.workspaceId;
+    const active = workspaceId !== undefined
+      && (this.options.sessions.isRunning(workspaceId) || this.options.sessions.isStarting?.(workspaceId) === true);
+    return { ok: true, checkout, requiresStop: active };
+  }
+
+  // confirm → fence → stop → recheck → non-force remove → verify → clean up.
+  // Every failure before the removal leaves files AND registration exactly
+  // as they were. The branch is never an argument to anything here.
+  async delete(user: string, request: WorktreeDeleteRequest): Promise<WorktreeOperationResult> {
+    const operationId = this.newOperationId();
+    const refuse = (error: unknown, phase?: WorktreeDeleteIntent["phase"], fallback = "The worktree could not be deleted. Files and registration were kept."): WorktreeOperationResult => ({
+      ok: false, operationId, kind: "delete", ...(phase === undefined ? {} : { phase }), error: toWorktreeError(error, fallback),
+    });
+    try {
+      const unavailable = this.deletionUnavailable();
+      if (unavailable) throw unavailable;
+      // A removal whose files are already gone but whose Hub cleanup did not
+      // finish is retried here — never re-run against the path.
+      const pending = await this.options.journal.read();
+      if (pending?.kind === "delete" && (pending.workspaceId === request.reference || pending.checkoutId === request.reference)) {
+        if (pending.user !== user) throw WorktreeOperationError.of("permission-denied", "That operation belongs to another user.");
+        const outcome = await this.recover();
+        if (outcome?.kind === "removed") return { ok: true, operationId: pending.operationId, kind: "delete", phase: "complete", registered: false, started: false };
+        throw WorktreeOperationError.of("internal", "The worktree's files were removed and its branch kept, but Hub cleanup has not finished. Retry shortly.", { retry: "retry-delete", phase: "unregistering" });
+      }
+      await this.options.assertOperationsAllowed?.();
+      const view = await this.repositoryView(request.sourceWorkspaceId);
+      const target = await this.resolveTarget(view, request.reference);
+      const paths = target ? [target.checkout.path] : [];
+      return await this.coordinator.run({ repositoryId: view.repositoryId, paths }, () => this.deleteWhileFenced(user, operationId, request, refuse));
+    } catch (error) {
+      return refuse(error);
+    }
+  }
+
+  private async deleteWhileFenced(
+    user: string,
+    operationId: string,
+    request: WorktreeDeleteRequest,
+    refuse: (error: unknown, phase?: WorktreeDeleteIntent["phase"], fallback?: string) => WorktreeOperationResult,
+  ): Promise<WorktreeOperationResult> {
+    const sessions = this.options.sessions as Required<WorktreeServiceOptions["sessions"]>;
+    // Re-read under the repository fence: nothing Uatu does can change it
+    // between here and the removal.
+    const view = await this.repositoryView(request.sourceWorkspaceId);
+    const preflight = await this.preflightIn(view, request.reference);
+    if (!preflight.ok) return refuse(new WorktreeOperationError(preflight.error), "preflight");
+    const checkout = preflight.checkout;
+    if (preflight.requiresStop && request.stop !== true) {
+      return refuse(WorktreeOperationError.of("conflict", "This worktree is running. Choose Stop and delete to stop its Uatu sessions first. Nothing was removed.", { retry: "retry-delete", phase: "preflight" }), "preflight");
+    }
+    const context = await repositoryContext(checkout.path, { ...this.options.git, run: this.run });
+    if (context.kind !== "checkout" || context.identity.checkoutId !== checkout.checkoutId || context.main) {
+      return refuse(WorktreeOperationError.of("identity-uncertain", "The worktree could not be verified, so it was not removed.", { retry: "refresh", phase: "preflight" }), "preflight");
+    }
+    const administrativeDirectory = context.gitDirectory;
+    await this.options.journal.begin({
+      operationId,
+      kind: "delete",
+      administrativeDirectory,
+      phase: "preflight",
+      user,
+      repositoryId: view.repositoryId,
+      sourceWorkspaceId: view.source.id,
+      sourcePath: view.mainPath,
+      destination: checkout.path,
+      checkoutId: checkout.checkoutId,
+      branch: checkout.branch ?? "detached",
+      ...(checkout.workspaceId === undefined ? {} : { workspaceId: checkout.workspaceId }),
+    });
+    const clear = async () => { await this.options.journal.clear(); };
+    // Held in an object: the closure below advances it, and the catch reads it.
+    // `retained` marks a journal kept on purpose for recovery to reconcile.
+    const progress: { phase: WorktreeDeleteIntent["phase"]; retained: boolean } = { phase: "fencing", retained: false };
+    try {
+      await this.options.journal.advance(operationId, "fencing");
+      if (request.stop === true) {
+        progress.phase = "stopping";
+        await this.options.journal.advance(operationId, "stopping");
+      }
+      const ids = checkout.workspaceId === undefined ? [] : [checkout.workspaceId];
+      // Holding the workspace's lifecycle queue is the start fence: a start
+      // already in flight finishes first (and is then stopped, when
+      // authorized), and a start requested now waits until this returns —
+      // by which time the registration is gone or intact, never half-removed.
+      const outcome = await sessions.runWithSessionsStopped(ids, request.stop === true, async () => {
+        progress.phase = "rechecking";
+        await this.options.journal.advance(operationId, "rechecking");
+        await this.options.assertOperationsAllowed?.();
+        const current = await this.repositoryView(request.sourceWorkspaceId);
+        const recheck = await this.preflightIn(current, request.reference);
+        if (!recheck.ok) throw new WorktreeOperationError({ ...recheck.error, phase: "rechecking" });
+        if (recheck.checkout.checkoutId !== checkout.checkoutId || recheck.checkout.path !== checkout.path) {
+          throw WorktreeOperationError.of("identity-uncertain", "The worktree changed while deletion was prepared. Nothing was removed.", { retry: "refresh", phase: "rechecking" });
+        }
+        progress.phase = "removing";
+        await this.options.journal.advance(operationId, "removing");
+        // Written into Git's administrative directory for this tree, which
+        // `git worktree remove` deletes with it: its survival is what proves
+        // "not removed" even when a new tree reuses the same name.
+        await writeRemovalMarker(administrativeDirectory, operationId);
+        const removed = await runWorktreeRemove(this.run, current.mainPath, checkout.path);
+        const after = await inspectCheckout(checkout.path, { ...this.options.git, run: this.run });
+        if (after.present && !after.identityReadable) {
+          progress.retained = true;
+          throw WorktreeOperationError.of("identity-uncertain", "The worktree's folder could not be verified after removal. Nothing more was changed; refresh the inventory.", { retry: "refresh", phase: "removing" });
+        }
+        const marker = await removalMarkerPresent(administrativeDirectory, operationId);
+        if (marker === null) {
+          progress.retained = true;
+          throw WorktreeOperationError.of("identity-uncertain", "The removal could not be verified. Nothing more was changed; refresh the inventory.", { retry: "refresh", phase: "removing" });
+        }
+        const stillOurs = marker && after.present && after.identity?.checkoutId === checkout.checkoutId;
+        if (!removed.ok || stillOurs) {
+          if (!removed.ok && !stillOurs && after.present) {
+            // Git failed AND the path now holds something else: uncertain;
+            // the journal stays for recovery to reconcile.
+            progress.retained = true;
+            throw WorktreeOperationError.of("identity-uncertain", "The worktree's location changed during removal. Nothing more was removed; refresh the inventory.", { retry: "refresh", phase: "removing" });
+          }
+          // Still ours: nothing was removed, so nothing is left to recover.
+          if (stillOurs) await clearRemovalMarker(administrativeDirectory);
+          else progress.retained = true;
+          throw removed.ok
+            ? WorktreeOperationError.of("conflict", "Git reported success but the worktree is still present. Nothing was unregistered.", { retry: "refresh", phase: "removing" })
+            : removed.error;
+        }
+        // Verified gone. From here only Hub metadata is touched.
+        progress.phase = "unregistering";
+        progress.retained = true;
+        const intent = await this.options.journal.advance(operationId, "unregistering") as WorktreeDeleteIntent;
+        try {
+          await this.completeRemoval(intent, true);
+        } catch (error) {
+          throw WorktreeOperationError.of("internal", "The worktree's files were removed and its branch kept, but Hub cleanup did not finish. Retry to finish it.", { retry: "retry-delete", phase: "unregistering" }, { cause: error });
+        }
+        await this.options.journal.advance(operationId, "complete");
+        await clear();
+      });
+      if (outcome.status === "needs-stop") {
+        await clear();
+        return refuse(WorktreeOperationError.of("conflict", "This worktree started running. Choose Stop and delete to stop its Uatu sessions first. Nothing was removed.", { retry: "retry-delete", phase: "fencing" }), "fencing");
+      }
+      return { ok: true, operationId, kind: "delete", phase: "complete", checkout: { ...checkout, registered: false, running: false }, registered: false, started: false };
+    } catch (error) {
+      if (!progress.retained) await clear().catch(() => undefined);
+      if (progress.phase === "stopping" && !(error instanceof WorktreeOperationError)) {
+        return refuse(WorktreeOperationError.of("stop-failed", "Its Uatu sessions could not be stopped, so nothing was removed.", { retry: "retry-delete", phase: "stopping" }), "stopping");
+      }
+      return refuse(error, progress.phase);
+    }
+  }
+
+  // The Hub side of a verified removal. Provenance FIRST: Git reuses a
+  // removed tree's administrative name, so a later tree at the same path
+  // carries the same checkout identity and must not find our record. The
+  // registration is removed only while it still names that checkout; a
+  // workspace that has since taken the id or the path is left alone.
+  private async completeRemoval(intent: WorktreeDeleteIntent, queueHeld: boolean): Promise<void> {
+    await this.options.provenance.forgetCheckout(intent.checkoutId);
+    const workspaceId = intent.workspaceId;
+    if (workspaceId === undefined) return;
+    const unregister = async () => {
+      const entry = this.options.registry.byId(workspaceId);
+      if (!entry || entry.worktree?.checkoutId !== intent.checkoutId || entry.path !== intent.destination) return;
+      await this.options.unregister!(workspaceId);
+    };
+    if (queueHeld || !this.options.sessions.runExclusive) await unregister();
+    else await this.options.sessions.runExclusive(workspaceId, unregister);
+  }
+
+  // --- Forget ("Remove from Uatu") --------------------------------------------
+
+  // Unregisters a STOPPED workspace and nothing else: checkout, branch,
+  // files and creation provenance all stay, so re-registering the same
+  // verified tree later recovers its Uatu ownership.
+  async forget(user: string, request: WorktreeForgetRequest): Promise<WorktreeOperationResult> {
+    const operationId = this.newOperationId();
+    const refuse = (error: unknown): WorktreeOperationResult => ({
+      ok: false, operationId, kind: "forget", error: toWorktreeError(error, "The workspace could not be removed from Uatu. Nothing changed."),
+    });
+    void user;
+    try {
+      const { sessions } = this.options;
+      if (!this.options.unregister || !sessions.runWithSessionsStopped || !sessions.isStarting) {
+        throw WorktreeOperationError.of("internal", "Removing a worktree from Uatu is unavailable on this Hub.");
+      }
+      const entry = this.options.registry.byId(request.reference);
+      if (!entry) throw WorktreeOperationError.of("not-found", "That workspace is not registered. Refresh and try again.", { retry: "refresh" });
+      const source = this.options.registry.byId(request.sourceWorkspaceId);
+      const family = entry.worktree?.parentWorkspaceId ?? entry.id;
+      if (!source || (source.worktree?.parentWorkspaceId ?? source.id) !== family) {
+        throw WorktreeOperationError.of("not-found", "That workspace does not belong to this repository.");
+      }
+      // A main workspace owns its children's live policy: removing it first
+      // would leave them governed by nothing.
+      if (!entry.worktree && this.options.registry.list().some(candidate => candidate.worktree?.parentWorkspaceId === entry.id)) {
+        throw WorktreeOperationError.of("conflict", "Remove this repository's worktrees from Uatu first; they inherit its settings.");
+      }
+      // Holding the lifecycle queue fences starts; the stop (when authorized)
+      // happens under it, and unregistration runs only once stopped.
+      const outcome = await sessions.runWithSessionsStopped([entry.id], request.stop === true, async () => {
+        await this.options.assertOperationsAllowed?.();
+        const current = this.options.registry.byId(entry.id);
+        if (!current || current.path !== entry.path) {
+          throw WorktreeOperationError.of("not-found", "That workspace changed. Refresh and try again.", { retry: "refresh" });
+        }
+        await this.options.unregister!(entry.id);
+      });
+      if (outcome.status === "needs-stop") {
+        throw WorktreeOperationError.of("conflict", "Stop this workspace before removing it from Uatu. Nothing changed.");
+      }
+      return { ok: true, operationId, kind: "forget", phase: "complete", registered: false, started: false };
+    } catch (error) {
+      if (error instanceof AggregateError) {
+        return refuse(WorktreeOperationError.of("stop-failed", "Its Uatu sessions could not be stopped, so it was not removed from Uatu.", { retry: "none" }));
+      }
+      return refuse(error);
+    }
+  }
+
+  // --- Start guard -------------------------------------------------------------
+
+  // A registered child starts only while its recorded checkout is the one at
+  // its path: a missing tree cannot start, and a replaced one must never
+  // start a session inside somebody else's checkout.
+  async assertStartable(workspaceId: string): Promise<void> {
+    const entry = this.options.registry.byId(workspaceId);
+    if (!entry?.worktree) return;
+    const inspection = await inspectCheckout(entry.path, { ...this.options.git, run: this.run });
+    if (!inspection.present) {
+      throw WorktreeOperationError.of("identity-uncertain", "This worktree's folder is missing. Restore it outside Uatu, then refresh; nothing will be recreated.", { retry: "refresh" });
+    }
+    if (!inspection.identityReadable || inspection.identity?.checkoutId !== entry.worktree.checkoutId) {
+      throw WorktreeOperationError.of("identity-uncertain", "This worktree's folder now holds a different checkout. Resolve it outside Uatu before starting.", { retry: "refresh" });
+    }
+  }
+
+  // Cheap facts for the Hub state list: provenance by the registration's
+  // recorded identity plus a filesystem/identity probe of its path. The
+  // probe runs Git only for a present path, once per registered child.
+  async registeredOwnership(workspaceId: string): Promise<"uatu" | "external" | "uncertain"> {
+    const entry = this.options.registry.byId(workspaceId);
+    const link = entry?.worktree;
+    if (!link) return "external";
+    const record = await this.options.provenance.byCheckoutId(link.checkoutId);
+    if (!record || record.repositoryId !== link.repositoryId) return "external";
+    return (await this.registeredAvailability(workspaceId)) === "present" ? "uatu" : "uncertain";
+  }
+
+  async registeredAvailability(workspaceId: string): Promise<"present" | "missing" | "replaced"> {
+    const entry = this.options.registry.byId(workspaceId);
+    const link = entry?.worktree;
+    if (!entry || !link) return "present";
+    const cached = this.availabilityCache.get(workspaceId);
+    const now = this.now();
+    if (cached && now - cached.at < AVAILABILITY_CACHE_MS && cached.path === entry.path) return cached.value;
+    const inspection = await inspectCheckout(entry.path, { ...this.options.git, run: this.run });
+    const value = !inspection.present
+      ? "missing"
+      : inspection.identity?.checkoutId === link.checkoutId ? "present" : "replaced";
+    this.availabilityCache.set(workspaceId, { at: now, path: entry.path, value });
+    return value;
+  }
+
+  branchOrigin(repositoryId: string, branch: string): Promise<string | undefined> {
+    return this.options.provenance.branchOrigin(repositoryId, branch);
+  }
+
+  // Maps any registered workspace to the main workspace its repository's
+  // operations run against.
+  sourceFor(workspaceId: string): string | undefined {
+    const entry = this.options.registry.byId(workspaceId);
+    if (!entry) return undefined;
+    const parent = entry.worktree?.parentWorkspaceId;
+    if (parent === undefined) return entry.id;
+    return this.options.registry.byId(parent) ? parent : undefined;
+  }
+
+  // Every registered workspace whose picker shows this repository.
+  familyOf(sourceWorkspaceId: string): string[] {
+    return [sourceWorkspaceId, ...this.options.registry.list()
+      .filter(entry => entry.worktree?.parentWorkspaceId === sourceWorkspaceId)
+      .map(entry => entry.id)];
+  }
+
   // Progress for the ONE pending operation, reported only to the user who
   // started it. An operation belonging to someone else is not found, not
   // described.
@@ -446,12 +928,23 @@ export class WorktreeService {
   }
 
   // Startup reconciliation. Never deletes, never claims an uncertain tree.
-  recover(): Promise<WorktreeRecoveryOutcome | undefined> {
+  async recover(): Promise<WorktreeRecoveryOutcome | undefined> {
+    const pending = await this.options.journal.read();
+    // A crash between `git worktree add` and the identity stamp: the tree
+    // recovery is about to claim gets its stamp first, so its recorded
+    // identity is the durable one.
+    if (pending?.kind === "create" && pending.phase === "creating" && pending.checkoutId === undefined) {
+      const context = await repositoryContext(pending.destination, { ...this.options.git, run: this.run });
+      if (context.kind === "checkout" && !context.main && context.identity.repositoryId === pending.repositoryId && context.topLevel === pending.destination) {
+        await stampCheckoutIdentity(pending.destination, { ...this.options.git, run: this.run }).catch(() => undefined);
+      }
+    }
     return recoverWorktreeOperation({
       journal: this.options.journal,
       provenance: this.options.provenance,
       inspect: checkoutPath => inspectCheckout(checkoutPath, { ...this.options.git, run: this.run }),
       registeredWorkspaceId: checkoutPath => this.options.registry.byPath(checkoutPath)?.id,
+      ...(this.options.unregister ? { completeRemoval: (intent: WorktreeDeleteIntent) => this.completeRemoval(intent, false) } : {}),
     });
   }
 
@@ -477,7 +970,7 @@ export class WorktreeService {
       registered: workspaceId !== undefined,
       running: false,
       locked: false,
-      sourceRef: plan.sourceRef,
+      ...(plan.sourceRef === undefined ? {} : { sourceRef: plan.sourceRef }),
       ...(plan.upstream === undefined ? {} : { upstream: plan.upstream }),
     };
     return checkout;

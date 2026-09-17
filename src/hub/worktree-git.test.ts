@@ -13,6 +13,8 @@ import {
   listWorktrees,
   parseWorktreeListPorcelain,
   probeGitCapabilities,
+  checkoutGitLink,
+  readCheckoutHead,
   repositoryContext,
   WORKTREE_GIT_MINIMUM_VERSION,
 } from "./worktree-git";
@@ -355,5 +357,24 @@ describe("concurrent operations against one repository", () => {
     expect(results.every(result => result.kind === "inventory")).toBe(true);
     expect(order.indexOf("a:end")).toBeLessThan(order.indexOf("b:start"));
     expect(coordinator.busy(left.identity.repositoryId)).toBe(false);
+  });
+});
+
+describe("subprocess-free HEAD reading", () => {
+  test("reports the main and linked branch, detached HEAD and an unknown folder", async () => {
+    const repository = await createRepository("head");
+    const linked = `${repository}.worktrees/feature-x`;
+    await git(repository, ["worktree", "add", "-b", "feature/x", linked]);
+    expect(await checkoutGitLink(repository)).toBe("directory");
+    expect(await checkoutGitLink(linked)).toBe("file");
+    expect(await readCheckoutHead(repository)).toEqual({ kind: "branch", branch: "main" });
+    expect(await readCheckoutHead(linked)).toEqual({ kind: "branch", branch: "feature/x" });
+    await git(linked, ["checkout", "--detach"]);
+    expect(await readCheckoutHead(linked)).toEqual({ kind: "detached" });
+    const plain = await temporaryDirectory("plain");
+    expect(await checkoutGitLink(plain)).toBe("none");
+    expect(await readCheckoutHead(plain)).toEqual({ kind: "unknown" });
+    await writeFile(path.join(plain, ".git"), "not a pointer\n");
+    expect(await readCheckoutHead(plain)).toEqual({ kind: "unknown" });
   });
 });

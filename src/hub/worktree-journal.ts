@@ -22,6 +22,7 @@ import path from "node:path";
 import {
   canAdvanceWorktreePhase,
   isWorktreePhase,
+  type WorktreeDeletePhase,
   resolveWorktreeOwnership,
   WorktreeOperationError,
   type WorktreeCreateMode,
@@ -36,7 +37,9 @@ const PROVENANCE_VERSION = 1 as const;
 
 type FileSystem = Pick<typeof nodeFs, "lstat" | "readFile" | "open" | "unlink" | "chmod" | "rm" | "rename">;
 
-export type WorktreeOperationIntent = {
+export type WorktreeOperationIntent = WorktreeCreateIntent | WorktreeDeleteIntent;
+
+export type WorktreeCreateIntent = {
   readonly version: typeof JOURNAL_VERSION;
   readonly operationId: string;
   readonly kind: "create";
@@ -59,6 +62,59 @@ export type WorktreeOperationIntent = {
   readonly checkoutId?: string;
   readonly workspaceId?: string;
 };
+
+// A guarded removal (task 5.4). Recorded before the non-force `git worktree
+// remove`, so a restart can tell "removal never ran", "the tree is gone and
+// only the Hub cleanup is left", and "something else now occupies the path"
+// apart — the last never being cleaned up, whatever the record says.
+export type WorktreeDeleteIntent = {
+  readonly version: typeof JOURNAL_VERSION;
+  readonly operationId: string;
+  readonly kind: "delete";
+  readonly phase: WorktreeDeletePhase;
+  readonly user: string;
+  readonly repositoryId: string;
+  readonly sourceWorkspaceId: string;
+  // The main checkout `git worktree remove` runs from.
+  readonly sourcePath: string;
+  // The checkout being removed, and its VERIFIED identity.
+  readonly destination: string;
+  readonly checkoutId: string;
+  // The checkout's Git administrative directory. Git reuses its name for a
+  // later tree at the same path, so the checkout identity alone cannot tell
+  // "not removed" from "removed and re-added"; the removal marker written
+  // here before the removal can (see removalMarkerPath).
+  readonly administrativeDirectory: string;
+  readonly branch: string;
+  // The registration to clean up once removal is verified, when registered.
+  readonly workspaceId?: string;
+};
+
+export const REMOVAL_MARKER = "uatu-removal";
+
+export function removalMarkerPath(administrativeDirectory: string): string {
+  return path.join(administrativeDirectory, REMOVAL_MARKER);
+}
+
+// True only when THIS operation's marker is in the administrative directory,
+// i.e. Git has not removed the tree the operation was about. Unreadable is
+// reported as `null` so callers fail closed.
+export async function removalMarkerPresent(administrativeDirectory: string, operationId: string, fs: Pick<typeof nodeFs, "readFile"> = nodeFs): Promise<boolean | null> {
+  try {
+    return (await fs.readFile(removalMarkerPath(administrativeDirectory), "utf8")).trim() === operationId;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? false : null;
+  }
+}
+
+export async function writeRemovalMarker(administrativeDirectory: string, operationId: string): Promise<void> {
+  await nodeFs.writeFile(removalMarkerPath(administrativeDirectory), `${operationId}\n`, { mode: 0o600 });
+}
+
+export async function clearRemovalMarker(administrativeDirectory: string): Promise<void> {
+  await nodeFs.rm(removalMarkerPath(administrativeDirectory), { force: true });
+}
 
 export type WorktreeProvenanceRecord = {
   readonly version: typeof PROVENANCE_VERSION;
@@ -96,41 +152,62 @@ function closed(value: unknown, fields: readonly string[], label: string): Recor
 export function parseWorktreeIntent(value: unknown): WorktreeOperationIntent {
   const record = closed(
     value,
-    ["version", "operationId", "kind", "phase", "user", "repositoryId", "sourceWorkspaceId", "sourcePath", "destination", "mode", "branch", "base", "sourceRef", "checkoutId", "workspaceId"],
+    ["version", "operationId", "kind", "phase", "user", "repositoryId", "sourceWorkspaceId", "sourcePath", "destination", "mode", "branch", "base", "sourceRef", "checkoutId", "workspaceId", "administrativeDirectory"],
     "pending worktree operation",
   );
   if (record.version !== JOURNAL_VERSION) throw new Error("unsupported pending worktree operation version");
-  if (record.kind !== "create") throw new Error("unsupported pending worktree operation kind");
+  if (record.kind !== "create" && record.kind !== "delete") throw new Error("unsupported pending worktree operation kind");
+  const kind = record.kind;
   // An unrecognized phase must never be read as "somewhere harmless": it
   // would re-enable exactly the ambiguity the bounded vocabulary removes.
-  if (!isWorktreePhase("create", record.phase)) throw new Error("unsupported pending worktree operation phase");
+  if (!isWorktreePhase(kind, record.phase)) throw new Error("unsupported pending worktree operation phase");
+  for (const field of ["sourcePath", "destination"]) {
+    if (!path.isAbsolute(requireString(record, field, "pending worktree operation"))) {
+      throw new Error("pending worktree operation paths must be absolute");
+    }
+  }
+  const common = {
+    version: JOURNAL_VERSION,
+    operationId: requireString(record, "operationId", "pending worktree operation"),
+    user: requireString(record, "user", "pending worktree operation"),
+    repositoryId: requireString(record, "repositoryId", "pending worktree operation"),
+    sourceWorkspaceId: requireString(record, "sourceWorkspaceId", "pending worktree operation"),
+    sourcePath: record.sourcePath as string,
+    destination: record.destination as string,
+    branch: requireString(record, "branch", "pending worktree operation"),
+    ...(record.workspaceId === undefined ? {} : { workspaceId: requireString(record, "workspaceId", "pending worktree operation") }),
+  };
+  if (kind === "delete") {
+    // A removal names exactly one verified checkout and nothing about how a
+    // branch was made: creation fields on it are a tampered record.
+    if (record.mode !== undefined || record.base !== undefined || record.sourceRef !== undefined) {
+      throw new Error("a pending worktree removal cannot carry creation fields");
+    }
+    const administrativeDirectory = requireString(record, "administrativeDirectory", "pending worktree operation");
+    if (!path.isAbsolute(administrativeDirectory)) throw new Error("pending worktree operation paths must be absolute");
+    return {
+      ...common,
+      kind: "delete",
+      phase: record.phase as WorktreeDeletePhase,
+      checkoutId: requireString(record, "checkoutId", "pending worktree operation"),
+      administrativeDirectory,
+    };
+  }
+  if (record.administrativeDirectory !== undefined) throw new Error("a pending worktree creation cannot carry removal fields");
   const base = closed(record.base, ["kind", "ref"], "pending worktree operation base");
   if (base.kind !== "local" && base.kind !== "remote") throw new Error("invalid pending worktree operation base kind");
   const mode = record.mode;
   if (mode !== "new-branch" && mode !== "existing-local" && mode !== "remote-tracking") {
     throw new Error("invalid pending worktree operation mode");
   }
-  for (const field of ["sourcePath", "destination"]) {
-    if (!path.isAbsolute(requireString(record, field, "pending worktree operation"))) {
-      throw new Error("pending worktree operation paths must be absolute");
-    }
-  }
   return {
-    version: JOURNAL_VERSION,
-    operationId: requireString(record, "operationId", "pending worktree operation"),
+    ...common,
     kind: "create",
     phase: record.phase as WorktreeCreatePhase,
-    user: requireString(record, "user", "pending worktree operation"),
-    repositoryId: requireString(record, "repositoryId", "pending worktree operation"),
-    sourceWorkspaceId: requireString(record, "sourceWorkspaceId", "pending worktree operation"),
-    sourcePath: record.sourcePath as string,
-    destination: record.destination as string,
     mode: mode as WorktreeCreateMode,
-    branch: requireString(record, "branch", "pending worktree operation"),
     base: { kind: base.kind, ref: requireString(base, "ref", "pending worktree operation base") },
     ...(record.sourceRef === undefined ? {} : { sourceRef: requireString(record, "sourceRef", "pending worktree operation") }),
     ...(record.checkoutId === undefined ? {} : { checkoutId: requireString(record, "checkoutId", "pending worktree operation") }),
-    ...(record.workspaceId === undefined ? {} : { workspaceId: requireString(record, "workspaceId", "pending worktree operation") }),
   };
 }
 
@@ -259,7 +336,11 @@ export class WorktreeJournal {
   // operation while one is pending is refused rather than queued: the record
   // is the fence. Re-recording the SAME operation id is idempotent, which is
   // what makes a retry safe after a failure whose outcome is unknown.
-  async begin(intent: Omit<WorktreeOperationIntent, "version">): Promise<WorktreeOperationIntent> {
+  begin(intent: Omit<WorktreeCreateIntent, "version">): Promise<WorktreeCreateIntent>;
+  begin(intent: Omit<WorktreeDeleteIntent, "version">): Promise<WorktreeDeleteIntent>;
+  async begin(
+    intent: Omit<WorktreeCreateIntent, "version"> | Omit<WorktreeDeleteIntent, "version">,
+  ): Promise<WorktreeOperationIntent> {
     const pending = await this.read();
     if (pending && pending.operationId !== intent.operationId) {
       throw WorktreeOperationError.of(
@@ -268,7 +349,11 @@ export class WorktreeJournal {
         { retry: "refresh" },
       );
     }
-    if (pending) return pending;
+    // The same operation id is the same operation: its kind cannot change.
+    if (pending) {
+      if (pending.kind !== intent.kind) throw invalid("a pending worktree operation cannot change its kind");
+      return pending;
+    }
     const record = parseWorktreeIntent({ ...intent, version: JOURNAL_VERSION });
     await this.file.write(record);
     return record;
@@ -278,14 +363,14 @@ export class WorktreeJournal {
   // tampered or stale record can never replay a mutation already performed.
   async advance(
     operationId: string,
-    phase: WorktreeCreatePhase,
-    fields: Partial<Pick<WorktreeOperationIntent, "checkoutId" | "workspaceId" | "sourceRef">> = {},
+    phase: WorktreeCreatePhase | WorktreeDeletePhase,
+    fields: Partial<Pick<WorktreeCreateIntent, "checkoutId" | "workspaceId" | "sourceRef">> = {},
   ): Promise<WorktreeOperationIntent> {
     const pending = await this.read();
     if (!pending || pending.operationId !== operationId) {
       throw invalid("no pending worktree operation matches this operation id");
     }
-    if (!canAdvanceWorktreePhase("create", pending.phase, phase)) {
+    if (!isWorktreePhase(pending.kind, phase) || !canAdvanceWorktreePhase(pending.kind, pending.phase, phase)) {
       throw invalid(`a worktree operation cannot move from ${pending.phase} to ${phase}`);
     }
     const record = parseWorktreeIntent({ ...pending, ...fields, phase });
@@ -298,9 +383,32 @@ export class WorktreeJournal {
   }
 }
 
+// Branch creation history (design §3): the immutable `sourceRef` snapshot of
+// a branch Uatu created, keyed by repository and exact branch. It outlives
+// the checkout — deleting a worktree keeps its branch, and so keeps the
+// record of where that branch came from — while CHECKOUT provenance is
+// dropped on verified removal, so a later tree at a reused path (Git reuses
+// the administrative directory name, and with it the checkout identity)
+// never inherits ownership.
+export type WorktreeBranchOrigin = {
+  readonly repositoryId: string;
+  readonly branch: string;
+  readonly sourceRef: string;
+};
+
+function parseBranchOrigin(value: unknown): WorktreeBranchOrigin {
+  const record = closed(value, ["repositoryId", "branch", "sourceRef"], "worktree branch origin");
+  return {
+    repositoryId: requireString(record, "repositoryId", "worktree branch origin"),
+    branch: requireString(record, "branch", "worktree branch origin"),
+    sourceRef: requireString(record, "sourceRef", "worktree branch origin"),
+  };
+}
+
 export class WorktreeProvenanceStore {
   private readonly file: DurableJsonFile;
   private records: WorktreeProvenanceRecord[] | undefined;
+  private branches: WorktreeBranchOrigin[] = [];
 
   constructor(filePath: string, options: WorktreeJournalOptions = {}) {
     const fs = options.fs ?? nodeFs;
@@ -314,11 +422,24 @@ export class WorktreeProvenanceStore {
       this.records = [];
       return this.records;
     }
-    const record = closed(value, ["version", "records"], "worktree provenance store");
+    const record = closed(value, ["version", "records", "branches"], "worktree provenance store");
     if (record.version !== PROVENANCE_VERSION) throw new Error("unsupported worktree provenance version");
     if (!Array.isArray(record.records)) throw new Error("invalid worktree provenance records");
-    this.records = record.records.map(parseWorktreeProvenance);
+    if (record.branches !== undefined && !Array.isArray(record.branches)) throw new Error("invalid worktree branch origins");
+    const records = record.records.map(parseWorktreeProvenance);
+    // Stores written before branch history existed derive it from their
+    // checkout records, which carry the same snapshot.
+    this.branches = record.branches === undefined
+      ? records.flatMap(entry => entry.sourceRef === undefined ? [] : [{ repositoryId: entry.repositoryId, branch: entry.branch, sourceRef: entry.sourceRef }])
+      : (record.branches as unknown[]).map(parseBranchOrigin);
+    this.records = records;
     return this.records;
+  }
+
+  private async persist(records: WorktreeProvenanceRecord[], branches: WorktreeBranchOrigin[]): Promise<void> {
+    await this.file.write({ version: PROVENANCE_VERSION, records, branches });
+    this.records = records;
+    this.branches = branches;
   }
 
   async record(entry: Omit<WorktreeProvenanceRecord, "version">): Promise<WorktreeProvenanceRecord> {
@@ -329,24 +450,39 @@ export class WorktreeProvenanceStore {
     // duplicates, so an idempotent retry leaves exactly one.
     if (existing >= 0) records[existing] = parsed;
     else records.push(parsed);
-    await this.file.write({ version: PROVENANCE_VERSION, records });
-    this.records = records;
+    const branches = this.branches.filter(origin => !(origin.repositoryId === parsed.repositoryId && origin.branch === parsed.branch));
+    if (parsed.sourceRef !== undefined) {
+      branches.push({ repositoryId: parsed.repositoryId, branch: parsed.branch, sourceRef: parsed.sourceRef });
+    } else {
+      // A checkout of an existing branch carries no snapshot of its own; the
+      // branch's earlier history, when there is one, is kept as it was.
+      const previous = this.branches.find(origin => origin.repositoryId === parsed.repositoryId && origin.branch === parsed.branch);
+      if (previous) branches.push(previous);
+    }
+    await this.persist(records, branches);
     return parsed;
   }
 
   // Removed only after a removal has been VERIFIED (task 5.4). Nothing else
-  // deletes provenance — least of all forgetting a registration.
+  // deletes provenance — least of all forgetting a registration. The
+  // branch's creation history stays: the branch itself is never deleted.
   async forgetCheckout(checkoutId: string): Promise<boolean> {
     const records = await this.load();
     const remaining = records.filter(record => record.checkoutId !== checkoutId);
     if (remaining.length === records.length) return false;
-    await this.file.write({ version: PROVENANCE_VERSION, records: remaining });
-    this.records = remaining;
+    await this.persist(remaining, [...this.branches]);
     return true;
   }
 
   async byCheckoutId(checkoutId: string): Promise<WorktreeProvenanceRecord | undefined> {
     return (await this.load()).find(record => record.checkoutId === checkoutId);
+  }
+
+  // The recorded creation source of a branch, whatever checkout (if any)
+  // holds it now. Never inferred: absent means "origin unknown".
+  async branchOrigin(repositoryId: string, branch: string): Promise<string | undefined> {
+    await this.load();
+    return this.branches.find(origin => origin.repositoryId === repositoryId && origin.branch === branch)?.sourceRef;
   }
 
   // Path lookup exists for diagnostics and for recognizing OUR OWN retained
@@ -393,7 +529,15 @@ export type WorktreeRecoveryOutcome =
   | { readonly kind: "completed"; readonly operationId: string; readonly workspaceId: string }
   // The destination holds something we cannot prove is ours. Content is kept
   // and reconciliation is required; nothing is deleted, nothing is claimed.
-  | { readonly kind: "uncertain"; readonly operationId: string; readonly checkoutPath: string; readonly detail: string };
+  | { readonly kind: "uncertain"; readonly operationId: string; readonly checkoutPath: string; readonly detail: string }
+  // A removal whose `git worktree remove` provably never took the checkout:
+  // files and registration are exactly as they were.
+  | { readonly kind: "removal-not-performed"; readonly operationId: string }
+  // The checkout is gone and only the Hub cleanup (registration, provenance)
+  // remains. The journal stays at `unregistering` until that cleanup lands.
+  | { readonly kind: "removal-cleanup-pending"; readonly operationId: string; readonly intent: WorktreeDeleteIntent }
+  // The removal and its cleanup are both complete.
+  | { readonly kind: "removed"; readonly operationId: string };
 
 export type WorktreeRecoveryOptions = {
   journal: WorktreeJournal;
@@ -402,11 +546,68 @@ export type WorktreeRecoveryOptions = {
   inspect(checkoutPath: string): Promise<CheckoutInspection>;
   // The Hub registration at that path, if any.
   registeredWorkspaceId?(checkoutPath: string): string | undefined;
+  // Finishes a verified removal's Hub cleanup. Must be idempotent and must
+  // never touch the filesystem. Absent: cleanup is reported as pending.
+  completeRemoval?(intent: WorktreeDeleteIntent): Promise<void>;
 };
+
+async function recoverRemoval(options: WorktreeRecoveryOptions, pending: WorktreeDeleteIntent): Promise<WorktreeRecoveryOutcome> {
+  if (pending.phase === "complete") {
+    await options.journal.clear();
+    return { kind: "removed", operationId: pending.operationId };
+  }
+  const inspection = await options.inspect(pending.destination);
+  const removalMayHaveRun = pending.phase === "removing" || pending.phase === "unregistering";
+  if (inspection.present && !inspection.identityReadable) {
+    // Something is there and Git cannot say what: nothing is cleaned up and
+    // the record stays, so no later operation acts on a guess.
+    return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: inspection.detail ?? "the checkout's identity could not be read" };
+  }
+  const sameIdentity = inspection.present && inspection.identity?.checkoutId === pending.checkoutId;
+  // Same identity is not proof of the same tree: Git reuses a removed tree's
+  // administrative name. The marker written before the removal is.
+  const marker = sameIdentity ? await removalMarkerPresent(pending.administrativeDirectory, pending.operationId) : false;
+  if (marker === null) {
+    return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: "the removal marker could not be read" };
+  }
+  const stillOurs = sameIdentity && (marker || !removalMayHaveRun);
+  if (stillOurs) {
+    if (pending.phase === "unregistering") {
+      // Recorded as verified-removed, yet the same checkout is there. The
+      // record is wrong or Git re-created it; either way nothing is removed
+      // and nothing is unregistered.
+      return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: "the checkout recorded as removed is still present" };
+    }
+    await clearRemovalMarker(pending.administrativeDirectory).catch(() => undefined);
+    await options.journal.clear();
+    return { kind: "removal-not-performed", operationId: pending.operationId };
+  }
+  if (!removalMayHaveRun) {
+    // Git was never asked to remove anything. A tree that vanished or was
+    // replaced meanwhile is someone else's doing: it surfaces as missing or
+    // replaced in the inventory, and Uatu cleans up nothing on its behalf.
+    await options.journal.clear();
+    return { kind: "removal-not-performed", operationId: pending.operationId };
+  }
+  // Our checkout is gone (a new occupant, if any, is left strictly alone).
+  const intent = pending.phase === "unregistering"
+    ? pending
+    : await options.journal.advance(pending.operationId, "unregistering") as WorktreeDeleteIntent;
+  if (!options.completeRemoval) return { kind: "removal-cleanup-pending", operationId: pending.operationId, intent };
+  try {
+    await options.completeRemoval(intent);
+  } catch {
+    return { kind: "removal-cleanup-pending", operationId: pending.operationId, intent };
+  }
+  await options.journal.advance(pending.operationId, "complete");
+  await options.journal.clear();
+  return { kind: "removed", operationId: pending.operationId };
+}
 
 export async function recoverWorktreeOperation(options: WorktreeRecoveryOptions): Promise<WorktreeRecoveryOutcome | undefined> {
   const pending = await options.journal.read();
   if (!pending) return undefined;
+  if (pending.kind === "delete") return recoverRemoval(options, pending);
   const inspection = await options.inspect(pending.destination);
   const uncertain = async (detail: string): Promise<WorktreeRecoveryOutcome> => {
     // The record is kept: an operation whose outcome cannot be established
@@ -500,7 +701,7 @@ export type RegisterCreatedWorktreeResult = {
 // second one. The child's display name is its exact local branch.
 export async function registerCreatedWorktree(options: RegisterCreatedWorktreeOptions): Promise<RegisterCreatedWorktreeResult> {
   const pending = await options.journal.read();
-  if (!pending || pending.operationId !== options.operationId) {
+  if (!pending || pending.operationId !== options.operationId || pending.kind !== "create") {
     throw invalid("no pending worktree operation matches this operation id");
   }
   if (pending.checkoutId === undefined) throw invalid("the checkout has not been verified yet");

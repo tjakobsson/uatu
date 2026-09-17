@@ -1,0 +1,14 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "worktrees",
+    "cursor": "",
+    "event": {
+      "kind": "data",
+      "data": {
+        "type": "worktree.inventory"
+      }
+    }
+  }
+}

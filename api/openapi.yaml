@@ -147,6 +147,18 @@ paths:
                 workspaceApiRevision: 10
                 workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 10, shells: [{ attached: false, label: zsh }] }]
                 workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
+            examples:
+              worktrees:
+                summary: A main workspace and one linked worktree
+                value:
+                  version: 0.5.1 (abcdef0)
+                  hubApiRevision: 6
+                  workspaceApiRevision: 19
+                  worktreeNavigation: /worktrees
+                  worktreeConfigureNavigation: /settings
+                  workspaces:
+                    - { id: atlas, displayName: Atlas, path: /src/atlas, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [] }, workspaceApiRevision: 19, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: main, createWorktree: /worktrees?view=create&source=atlas }
+                    - { id: feature-login, displayName: feature/login, path: /src/atlas.worktrees/feature-login, backend: local, running: false, credentialRestartRequired: false, credentialAssignments: { authentication: [], signing: [] }, workspaceApiRevision: 19, parentId: atlas, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: feature/login, sourceRef: main, ownership: uatu }
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -808,7 +820,8 @@ paths:
       description: |
         One long-lived Server-Sent Events connection per client. It carries
         every pushed update for one workspace, meaning document state, the
-        conversation inventory, and conversation events. On request it also
+        conversation inventory, conversation events, and worktree inventory
+        invalidations. On request it also
         carries an activity summary of every workspace the caller may access.
         streaming.yaml#channels.live defines the frames, envelopes, topics,
         cursors, and signals.
@@ -825,7 +838,7 @@ paths:
           in: query
           required: true
           schema: { $ref: '#/components/schemas/WorkspaceId' }
-          description: "Workspace whose document, inventory, and conversation topics the stream carries. Required. An absent or empty id, or one longer than 256 UTF-8 bytes, answers 400 (absent: `workspace id required`). An id that is unknown, or that the caller may not access, answers 404."
+          description: "Workspace whose document, inventory, conversation, and worktrees topics the stream carries. Required. An absent or empty id, or one longer than 256 UTF-8 bytes, answers 400 (absent: `workspace id required`). An id that is unknown, or that the caller may not access, answers 404."
         - name: activity
           in: query
           schema: { type: string, enum: ['0', '1'], default: '0' }
@@ -1116,6 +1129,8 @@ components:
           type: array
           items: { $ref: '#/components/schemas/HubWorkspace' }
         workspaceDefaults: { $ref: '#/components/schemas/WorkspaceDefaults' }
+        worktreeNavigation: { type: string, minLength: 1, description: "Present when this Hub serves worktree operations. The origin-rooted path of the server-rendered worktree presentation the workspace picker and dashboard open. Its operations are a browser form flow, not part of this contract." }
+        worktreeConfigureNavigation: { type: string, minLength: 1, description: "Present with worktreeNavigation. The origin-rooted page where a main workspace's credentials, which its linked worktrees inherit, are managed." }
       additionalProperties: false
     HubWorkspace:
       type: object
@@ -1130,6 +1145,14 @@ components:
         credentialAssignments: { $ref: '#/components/schemas/WorkspaceCredentialAssignmentSummary' }
         workspaceApiRevision: { type: integer, minimum: 1, description: "Workspace API revision spoken by this workspace's child. Matches the top-level workspaceApiRevision for the local backend; backends running children of other builds report the child's own revision." }
         shells: { type: array, items: { type: object, required: [attached, label], properties: { attached: { type: boolean }, label: { type: string } }, additionalProperties: false } }
+        parentId: { $ref: '#/components/schemas/WorkspaceId', description: "Present for a registered linked worktree. The main workspace it belongs to, whose credentials and shared configuration it inherits live. Its own `credentialAssignments` stay its own rows, normally none; read the parent's for the inherited policy." }
+        repositoryId: { type: string, minLength: 1, description: "Opaque canonical repository identity shared by a main workspace and its linked worktrees. Group by this and `parentId`, never by names or paths. Absent when unknown." }
+        branch: { type: string, minLength: 1, description: "The checkout's current local branch, read from its HEAD. For a linked worktree it is also its name. Absent when detached or unknown." }
+        detached: { type: boolean, const: true, description: "Present when the checkout's HEAD is detached." }
+        sourceRef: { type: string, minLength: 1, description: "Linked worktrees only. The recorded ref the branch was created from, when Uatu created it. Never inferred from upstream or history; absent means origin unknown." }
+        ownership: { type: string, enum: [uatu, external, uncertain], description: "Linked worktrees only. `uatu` for a checkout with verified Uatu creation provenance, which alone can be deleted through Uatu." }
+        availability: { type: string, enum: [missing, replaced], description: "Linked worktrees only, present when the registered checkout is not at its path (`missing`) or the path holds a different checkout (`replaced`). Such a workspace cannot start until resolved outside Uatu." }
+        createWorktree: { type: string, minLength: 1, description: "Present for a main checkout that can host linked worktrees. The origin-rooted presentation path the fork action opens." }
       additionalProperties: false
     WorkspaceCredentialAssignmentSummary:
       type: object
@@ -1676,6 +1699,11 @@ components:
             topic: { type: string, const: conversation }
             key: { $ref: '#/components/schemas/LiveConversationKey' }
           additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: worktrees }
+          additionalProperties: false
     LiveSubscription:
       description: A subscription and the cursor to resume it from.
       oneOf:
@@ -1698,6 +1726,12 @@ components:
             topic: { type: string, const: conversation }
             key: { $ref: '#/components/schemas/LiveConversationKey' }
             cursor: { $ref: '#/components/schemas/LiveCursor' }
+          additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: worktrees }
+            cursor: { $ref: '#/components/schemas/LiveCursor', description: "Ignored. The worktrees topic has no replay cursor; every attach receives a fresh invalidation." }
           additionalProperties: false
     LiveSubscriptionList:
       type: array

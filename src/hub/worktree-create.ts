@@ -51,8 +51,9 @@ export type WorktreeCreationPlan = {
   // The exact local branch, slashes included. Also the child's display name.
   readonly branch: string;
   readonly base: { readonly kind: "local" | "remote"; readonly ref: string };
-  // The immutable creation snapshot recorded before the mutation.
-  readonly sourceRef: string;
+  // The immutable creation snapshot recorded before the mutation. Absent for
+  // an existing branch with no recorded history: its origin is unknown.
+  readonly sourceRef?: string;
   // The upstream this creation establishes, set only for remote-tracking.
   readonly upstream?: string;
   readonly destination: string;
@@ -70,6 +71,9 @@ export type WorktreeCreationInput = {
   // Whether a filesystem entry exists at a candidate destination. Injected
   // so the rules are testable without a filesystem.
   readonly occupied: (candidate: string) => Promise<boolean>;
+  // The recorded creation source of an EXISTING local branch, if Uatu
+  // created that branch earlier. Only used by existing-local mode.
+  readonly branchOrigin?: string;
 };
 
 function refuse(
@@ -136,8 +140,12 @@ export async function planWorktreeCreation(input: WorktreeCreationInput): Promis
     branch,
     base: request.base,
     // The snapshot is the ref the user explicitly selected, remote-qualified
-    // spelling included — never the parent's current checkout.
-    sourceRef: request.base.ref,
+    // spelling included — never the parent's current checkout. Checking out
+    // an existing branch creates no branch, so it snapshots nothing: its
+    // origin is whatever history was recorded when it WAS created, if any.
+    ...(request.mode === "existing-local"
+      ? (input.branchOrigin === undefined ? {} : { sourceRef: input.branchOrigin })
+      : { sourceRef: request.base.ref }),
     ...(request.mode === "remote-tracking" ? { upstream: request.base.ref } : {}),
     destination,
     disambiguated,

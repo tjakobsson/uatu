@@ -7,7 +7,11 @@ import {
   isWorktreePhase,
   parseWorktreeCheckout,
   parseWorktreeCreateRequest,
+  parseWorktreeDeleteRequest,
+  parseWorktreeForgetRequest,
   parseWorktreeError,
+  unknownWorktreeInventory,
+  WORKTREE_UNKNOWN_REPOSITORY,
   parseWorktreeInventory,
   parseWorktreeOperationResult,
   resolveWorktreeOwnership,
@@ -409,5 +413,37 @@ describe("contract validation refuses shapes the UI could not trust", () => {
   test("a successful result cannot also carry a failure", () => {
     expect(() => parseWorktreeOperationResult({ ok: true, operationId: "o", kind: "create", phase: "complete", registered: true, started: false, error: { code: "internal", message: "x", retry: "none" } }))
       .toThrow(/cannot carry an error/);
+  });
+});
+
+describe("identity unknown (section 4 review item a)", () => {
+  test("an unidentifiable repository has one wire-legal spelling that round-trips", () => {
+    const inventory = unknownWorktreeInventory("atlas", worktreeError("inventory-unavailable", "The repository could not be inspected.", { retry: "refresh" }));
+    expect(inventory.repositoryId).toBe(WORKTREE_UNKNOWN_REPOSITORY);
+    expect(parseWorktreeInventory(JSON.parse(JSON.stringify(inventory)))).toEqual(inventory);
+  });
+
+  test("the reserved identity cannot pose as a settled listing or carry checkouts", () => {
+    const base = unknownWorktreeInventory("atlas", worktreeError("not-found", "Not a repository."));
+    const { error: _error, ...withoutError } = base;
+    expect(() => parseWorktreeInventory({ ...withoutError, status: "ready" })).toThrow();
+    const checkout = {
+      checkoutId: "c", repositoryId: WORKTREE_UNKNOWN_REPOSITORY, path: "/r", branch: "main", detached: false, main: true,
+      ownership: "main", availability: "present", registered: false, running: false, locked: false,
+    };
+    expect(() => parseWorktreeInventory({ ...base, checkouts: [checkout] })).toThrow();
+    // An empty identity is still refused outright.
+    expect(() => parseWorktreeInventory({ ...base, repositoryId: "" })).toThrow();
+  });
+});
+
+describe("removal requests", () => {
+  test("delete and forget requests are closed and typed", () => {
+    expect(parseWorktreeDeleteRequest({ sourceWorkspaceId: "atlas", reference: "feature-x", stop: true })).toEqual({ sourceWorkspaceId: "atlas", reference: "feature-x", stop: true });
+    expect(parseWorktreeForgetRequest({ sourceWorkspaceId: "atlas", reference: "feature-x" })).toEqual({ sourceWorkspaceId: "atlas", reference: "feature-x" });
+    expect(() => parseWorktreeDeleteRequest({ sourceWorkspaceId: "atlas", reference: "x", force: true })).toThrow();
+    expect(() => parseWorktreeDeleteRequest({ sourceWorkspaceId: "atlas", reference: "x", deleteBranch: true })).toThrow();
+    expect(() => parseWorktreeDeleteRequest({ sourceWorkspaceId: "atlas", reference: "", stop: false })).toThrow();
+    expect(() => parseWorktreeForgetRequest({ sourceWorkspaceId: "atlas", reference: "x", stop: "yes" })).toThrow();
   });
 });

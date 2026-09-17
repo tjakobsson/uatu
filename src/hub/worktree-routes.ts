@@ -27,11 +27,14 @@ import type { WorktreeService } from "./worktree-service";
 
 export const WORKTREE_PREFIX = "/worktrees";
 
-// Views this section serves. Deletion, forget, rename and parent settings
-// are section 5 operations; their views are deliberately absent rather than
-// rendered with no working action behind them.
-const VIEWS = new Set(["inventory", "create", "result", "configure"]);
-const ACTIONS = new Set(["refresh", "fetch", "create", "register", "start"]);
+// Views and operations the real Hub serves. `folder` is the read-only
+// explanation of the Git-dependency rename guard. Display-name rename and
+// parent credential settings are managed on the Hub dashboard's own rows,
+// so the picker presentation is told not to link them (see `capabilities`)
+// rather than rendering forms with no operation behind them.
+const VIEWS = new Set(["inventory", "create", "result", "configure", "delete", "forget", "folder"]);
+const ACTIONS = new Set(["refresh", "fetch", "create", "register", "start", "delete", "forget"]);
+const CAPABILITIES = { settings: false, rename: false } as const;
 
 // Draft fields carried across a redirect. Everything else in the query
 // string is ignored, so a crafted link cannot inject an unexpected field.
@@ -47,6 +50,15 @@ export type WorktreeRouteDeps = {
   startWorkspace: (workspaceId: string) => Promise<WorktreeStartOutcome>;
   // The parent's live credential policy, for the inherited-policy notice.
   credentialSummary?: (workspaceId: string) => { authentication: string; signing: string };
+  // The authoritative inventory read, through the reconciler when the Hub
+  // has one (so a read also updates the change baseline). Defaults to the
+  // service directly.
+  inventory?: (sourceWorkspaceId: string, reason: "open" | "manual") => Promise<WorktreeInventory>;
+  // A Uatu operation committed: invalidate every page that shows this
+  // repository, immediately.
+  // `also` names workspaces an operation just unregistered, whose own open
+  // pages the family lookup can no longer find.
+  changed?: (sourceWorkspaceId: string, also?: string[]) => void;
 };
 
 function json(status: number, body: unknown): Response {
@@ -153,6 +165,7 @@ export function presentationFor(options: {
     },
     defaults: { branch: "", parent: "", folder: "", name: "" },
     prefix: WORKTREE_PREFIX,
+    capabilities: CAPABILITIES,
   };
 }
 
@@ -215,7 +228,15 @@ export function createRequestFrom(form: FormData, sourceWorkspaceId: string): Wo
 }
 
 export function createWorktreeRoutes(deps: WorktreeRouteDeps) {
-  const inventoryFor = (sourceWorkspaceId: string) => deps.service.inventory(sourceWorkspaceId);
+  const inventoryFor = async (sourceWorkspaceId: string, reason: "open" | "manual" = "open"): Promise<WorktreeInventory> =>
+    (await deps.inventory?.(sourceWorkspaceId, reason)) ?? deps.service.inventory(sourceWorkspaceId);
+  const committed = (sourceWorkspaceId: string, also?: string[]) => {
+    try {
+      deps.changed?.(sourceWorkspaceId, also);
+    } catch {
+      // Invalidation is a notification; it never fails the operation.
+    }
+  };
 
   // The main workspace a fork targets: a child's operations are performed
   // against its parent, which is the repository's policy owner.
@@ -249,6 +270,18 @@ export function createWorktreeRoutes(deps: WorktreeRouteDeps) {
       model.message = inventory.error?.message;
       model.error = true;
     }
+    if (view === "delete" && model.selected && !model.error) {
+      // The dialog's consequences come from a fresh preflight: a blocker
+      // replaces them, and a running (or starting) tree asks for Stop and
+      // delete. Nothing here mutates.
+      const preflight = await deps.service.preflightDelete({ sourceWorkspaceId, reference: model.selected.id });
+      if (!preflight.ok) {
+        model.message = preflight.error.message;
+        model.error = true;
+      } else {
+        model.selected = { ...model.selected, running: preflight.requiresStop };
+      }
+    }
     return html(worktreePage(model, "", "", url.searchParams.get("fragment") === "1"));
   };
 
@@ -277,7 +310,7 @@ export function createWorktreeRoutes(deps: WorktreeRouteDeps) {
     if (!deps.registry.byId(source)) return json(404, { error: "unknown workspace" });
 
     if (action === "refresh") {
-      const inventory = await inventoryFor(source);
+      const inventory = await inventoryFor(source, "manual");
       return json(200, {
         redirect: redirectTo({
           view: "inventory",
@@ -332,6 +365,8 @@ export function createWorktreeRoutes(deps: WorktreeRouteDeps) {
         });
       }
       const result = await deps.service.create(user, createRequest);
+      // A retained checkout is a committed change too: the picker must show it.
+      if (result.ok || result.retainedCheckout) committed(source);
       if (!result.ok) {
         // A retained checkout keeps its own recovery view, so the retry acts
         // on that same tree instead of creating another one.
@@ -362,15 +397,57 @@ export function createWorktreeRoutes(deps: WorktreeRouteDeps) {
 
     if (action === "register") {
       const reference = String(form.get("id") ?? "");
-      const result = await deps.service.retryRegistration(user, reference, form.get("start") !== null);
+      const result = await deps.service.registerExisting(user, source, reference, form.get("start") !== null);
+      if (result.ok) committed(source);
       if (!result.ok) {
         return json(200, {
           redirect: redirectTo({ view: "configure", source, id: reference, message: result.error.message, error: true }),
         });
       }
+      const verb = result.checkout!.ownership === "uatu" ? "Created" : "Registered";
       return json(200, {
         redirect: redirectTo({ view: "result", source, id: result.checkout!.workspaceId! }),
-        completion: { message: `Created ${result.checkout!.branch}`, id: result.checkout!.workspaceId!, source },
+        completion: { message: `${verb} ${result.checkout!.branch}`, id: result.checkout!.workspaceId!, source },
+      });
+    }
+
+    if (action === "delete") {
+      const reference = String(form.get("id") ?? "");
+      // The destructive button is the authorization; a request without it
+      // is not a confirmed deletion.
+      if (form.get("confirm") !== "1") {
+        return json(200, { redirect: redirectTo({ view: "delete", source, id: reference, message: "Confirm deletion to continue. Nothing was removed.", error: true }) });
+      }
+      const result = await deps.service.delete(user, { sourceWorkspaceId: source, reference, stop: form.get("stop") === "1" });
+      if (!result.ok) {
+        // A cleanup that failed after verified removal still changed what
+        // the picker must show.
+        if (result.phase === "unregistering") committed(source, [reference]);
+        return json(200, { redirect: redirectTo({ view: "delete", source, id: reference, message: result.error.message, error: true }) });
+      }
+      committed(source, [reference]);
+      return json(200, {
+        redirect: redirectTo({ view: "inventory", source, message: "Worktree deleted. Branch kept." }),
+        completion: { message: "Worktree deleted. Branch kept.", deleted: reference, source },
+      });
+    }
+
+    if (action === "forget") {
+      const reference = String(form.get("id") ?? "");
+      if (form.get("confirm") === null) {
+        return json(200, { redirect: redirectTo({ view: "forget", source, id: reference, message: "Confirm to continue. Nothing changed.", error: true }) });
+      }
+      // The confirmation's wording is "Stop Uatu activity and remove only the
+      // Hub registration": it authorizes the stop, and nothing more.
+      const result = await deps.service.forget(user, { sourceWorkspaceId: source, reference, stop: true });
+      if (!result.ok) {
+        return json(200, { redirect: redirectTo({ view: "forget", source, id: reference, message: result.error.message, error: true }) });
+      }
+      committed(source, [reference]);
+      const message = "Removed from Uatu. Checkout, branch and files were kept.";
+      return json(200, {
+        redirect: redirectTo({ view: "inventory", source, message }),
+        completion: { message, deleted: reference, source },
       });
     }
 
@@ -378,6 +455,7 @@ export function createWorktreeRoutes(deps: WorktreeRouteDeps) {
     const entry = deps.registry.byId(workspaceId);
     if (!entry) return json(404, { error: "unknown workspace" });
     const started = await deps.startWorkspace(workspaceId);
+    committed(source);
     if (!started.ok) {
       return json(200, {
         redirect: redirectTo({ view: "result", source, id: workspaceId, message: started.message, error: true }),

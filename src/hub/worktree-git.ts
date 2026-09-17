@@ -218,7 +218,7 @@ export async function probeGitCapabilities(directory: string, options: WorktreeG
 // through /var vs /private/var) keeps one identity. A repository whose
 // common directory itself moves is a different repository identity; that is
 // the same boundary Git's own gitdir pointers have.
-export function worktreeIdentityFor(commonDirectory: string, gitDirectory: string): WorktreeIdentity {
+export function worktreeIdentityFor(commonDirectory: string, gitDirectory: string): { repositoryId: string; checkoutId: string } {
   return {
     repositoryId: digest(commonDirectory),
     checkoutId: digest(gitDirectory),
@@ -227,6 +227,44 @@ export function worktreeIdentityFor(commonDirectory: string, gitDirectory: strin
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
+}
+
+// Git names a linked tree's administrative directory after the checkout's
+// folder and REUSES that name once the tree is removed, so the path-derived
+// identity above is not unique over time: a different tree added later at
+// the same path would inherit it — and with it any ownership recorded for
+// the old tree. Uatu therefore stamps the trees it creates or registers with
+// a random token inside that administrative directory. Git deletes the
+// token together with the directory, so a later tree at the same path has
+// no token and a different identity. Unstamped trees (external, never
+// registered) keep the path-derived identity.
+export const CHECKOUT_IDENTITY_FILE = "uatu-checkout";
+const TOKEN_PATTERN = /^uatu-checkout-[0-9a-f-]{36}$/;
+
+async function readIdentityToken(gitDirectory: string): Promise<string | null | "unreadable"> {
+  try {
+    const token = (await fs.readFile(path.join(gitDirectory, CHECKOUT_IDENTITY_FILE), "utf8")).trim();
+    return TOKEN_PATTERN.test(token) ? token : "unreadable";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? null : "unreadable";
+  }
+}
+
+// Idempotent: an existing valid token is kept. Only ever written into a
+// LINKED tree's own administrative directory, never a main checkout's.
+export async function stampCheckoutIdentity(checkoutPath: string, options: WorktreeGitOptions = {}): Promise<WorktreeIdentity> {
+  const context = await repositoryContext(checkoutPath, options);
+  if (context.kind !== "checkout") throw WorktreeOperationError.of("identity-uncertain", "The checkout could not be identified.");
+  if (context.main) return context.identity;
+  const existing = await readIdentityToken(context.gitDirectory);
+  if (existing === "unreadable") throw WorktreeOperationError.of("identity-uncertain", "The checkout's identity could not be read.");
+  if (existing === null) {
+    await fs.writeFile(path.join(context.gitDirectory, CHECKOUT_IDENTITY_FILE), `uatu-checkout-${crypto.randomUUID()}\n`, { mode: 0o600, flag: "wx" });
+  }
+  const stamped = await repositoryContext(checkoutPath, options);
+  if (stamped.kind !== "checkout") throw WorktreeOperationError.of("identity-uncertain", "The checkout could not be identified.");
+  return stamped.identity;
 }
 
 export type RepositoryContext =
@@ -288,13 +326,20 @@ export async function repositoryContext(directory: string, options: WorktreeGitO
     canonical(gitDirectory),
     topLevel === null ? Promise.resolve(null) : canonical(topLevel),
   ]);
+  const main = canonicalCommon === canonicalGit;
+  const identity = worktreeIdentityFor(canonicalCommon, canonicalGit);
+  if (!main) {
+    const token = await readIdentityToken(canonicalGit);
+    if (token === "unreadable") return { kind: "indeterminate", detail: "the checkout's identity stamp could not be read" };
+    if (token !== null) identity.checkoutId = digest(`${canonicalGit}\n${token}`);
+  }
   return {
     kind: "checkout",
-    identity: worktreeIdentityFor(canonicalCommon, canonicalGit),
+    identity,
     commonDirectory: canonicalCommon,
     gitDirectory: canonicalGit,
     topLevel: canonicalTop,
-    main: canonicalCommon === canonicalGit,
+    main,
     bare: isBare,
   };
 }
@@ -451,4 +496,64 @@ export async function inspectCheckout(checkoutPath: string, options: WorktreeGit
   }
   if (context.kind === "not-a-repository") return { present: true, identityReadable: true, detail: "path is not a Git checkout" };
   return { present: true, identityReadable: false, detail: context.detail };
+}
+
+export type CheckoutHead =
+  | { readonly kind: "branch"; readonly branch: string }
+  | { readonly kind: "detached" }
+  | { readonly kind: "unknown" };
+
+export type CheckoutGitLink = "directory" | "file" | "none";
+
+const HEAD_LIMIT = 4096;
+
+async function readSmall(file: string): Promise<string | null> {
+  try {
+    const handle = await fs.open(file, "r");
+    try {
+      const buffer = Buffer.alloc(HEAD_LIMIT);
+      const { bytesRead } = await handle.read(buffer, 0, HEAD_LIMIT, 0);
+      return buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+// What `<checkout>/.git` is: a directory for a main checkout, a `gitdir:`
+// file for a linked worktree (or a separate-git-dir main checkout). A cheap,
+// subprocess-free fact for list views that must not run Git per row.
+export async function checkoutGitLink(checkoutPath: string): Promise<CheckoutGitLink> {
+  try {
+    const stats = await fs.lstat(path.join(checkoutPath, ".git"));
+    if (stats.isDirectory()) return "directory";
+    if (stats.isFile()) return "file";
+    return "none";
+  } catch {
+    return "none";
+  }
+}
+
+// The checkout's CURRENT HEAD, read from the Git administrative files
+// without spawning Git — for the Hub state list, which is polled. Anything
+// unexpected is "unknown", never a guessed `main`. A symbolic ref outside
+// refs/heads (rare, hand-edited) is also unknown.
+export async function readCheckoutHead(checkoutPath: string): Promise<CheckoutHead> {
+  const link = await checkoutGitLink(checkoutPath);
+  let gitDirectory: string;
+  if (link === "directory") gitDirectory = path.join(checkoutPath, ".git");
+  else if (link === "file") {
+    const pointer = await readSmall(path.join(checkoutPath, ".git"));
+    const match = pointer === null ? null : /^gitdir: (.+)$/m.exec(pointer);
+    if (!match?.[1]) return { kind: "unknown" };
+    gitDirectory = path.resolve(checkoutPath, match[1].trim());
+  } else return { kind: "unknown" };
+  const head = (await readSmall(path.join(gitDirectory, "HEAD")))?.trim();
+  if (!head) return { kind: "unknown" };
+  const symbolic = /^ref: refs\/heads\/(.+)$/.exec(head);
+  if (symbolic?.[1]) return { kind: "branch", branch: symbolic[1] };
+  if (/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(head)) return { kind: "detached" };
+  return { kind: "unknown" };
 }

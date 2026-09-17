@@ -58,6 +58,21 @@ channels:
           own. A workspace whose child does not answer reports not running.
           The summary carries no content, titles, paths, or per-conversation
           detail.
+      worktrees:
+        domain: hub
+        dataSchema: WorktreeInventoryEvent
+        cursor: none
+        description: >-
+          The worktree inventory of the stream's workspace's repository may
+          have changed: a Uatu worktree operation committed, or a Hub
+          reconciliation observed a changed inventory. Read the inventory
+          again on every data event. There is no replay cursor. Every
+          subscription and every reconnect receives one fresh invalidation,
+          so changes missed while disconnected are recovered by the read that
+          follows. The event carries no paths, branches, identities,
+          credentials, or conversation content, and never changes the active
+          workspace or its selections. The topic does not depend on the
+          workspace's session running.
     signals:
       ready: >-
         The subscription is attached to a live upstream, and the Hub has
@@ -146,8 +161,8 @@ schemas:
     required: [ws, topic, cursor, event]
     properties:
       ws: { type: string, minLength: 1, description: "The workspace the event belongs to. For the activity topic, the workspace the summary describes, which may be any workspace the caller may access." }
-      topic: { enum: [document, inventory, conversation, activity] }
-      key: { type: string, description: "The subscription key. The watch context for document and the conversation id for conversation. Absent for inventory and activity." }
+      topic: { enum: [document, inventory, conversation, activity, worktrees] }
+      key: { type: string, description: "The subscription key. The watch context for document and the conversation id for conversation. Absent for inventory, activity, and worktrees." }
       cursor: { type: string, description: "The subscription's cursor. It advances only on data events." }
       event: { $ref: '#/schemas/LiveEvent' }
     additionalProperties: false
@@ -157,6 +172,13 @@ schemas:
       - { type: object, required: [kind], properties: { kind: { const: ready } }, additionalProperties: false }
       - { type: object, required: [kind], properties: { kind: { const: resync }, data: { description: "Present for the conversation topic when the workspace sent a resync event. Its schema is topics.conversation.resyncDataSchema." } }, additionalProperties: false }
       - { type: object, required: [kind], properties: { kind: { const: unavailable } }, additionalProperties: false }
+  WorktreeInventoryEvent:
+    type: object
+    required: [type]
+    properties:
+      type: { const: worktree.inventory }
+    additionalProperties: false
+    description: A content-free invalidation of the worktree inventory. Read the inventory again.
   WorkspaceActivity:
     type: object
     required: [running, working, awaiting]

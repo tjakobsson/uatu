@@ -69,7 +69,10 @@ export class SessionManager {
     // operation (see start()). Injected rather than imported because the
     // folder manager that owns the recovery journal takes this manager as a
     // dependency and is therefore assembled after it.
-    private readonly assertStartAllowed?: () => Promise<void>,
+    // Receives the workspace being started, so a per-workspace precondition
+    // (a worktree whose checkout went missing or was replaced) is checked
+    // under the same queue.
+    private readonly assertStartAllowed?: (workspaceId: string) => Promise<void>,
   ) {}
 
   get(workspaceId: string): RunningSession | undefined {
@@ -276,7 +279,7 @@ export class SessionManager {
       // cleanup unregisters, which is itself fenced while recovery is
       // pending). Skipped for a caller that already owns this queue from an
       // earlier fence of its own — see startWhileLifecycleQueueHeld.
-      if (fencePendingMutation) await this.assertStartAllowed?.();
+      if (fencePendingMutation) await this.assertStartAllowed?.(workspaceId);
 
       let workspace: WorkspaceEntry;
       let session: RunningSession;

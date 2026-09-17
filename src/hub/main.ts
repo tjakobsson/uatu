@@ -477,7 +477,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     // inside the queued lifecycle operation. Reached through the closure
     // because the folder manager below takes `sessions` as a dependency; the
     // first start can only come from the server assembled after it.
-    () => folderManager.assertNoPendingMutation(),
+    async workspaceId => {
+      await folderManager.assertNoPendingMutation();
+      // A registered worktree starts only in the checkout it was registered
+      // with: never in a missing folder, never in a replacement.
+      await worktrees.assertStartable(workspaceId);
+    },
   );
   const cloneCredentials = createStoredCloneCredentialResolver({
     metadata: credentialMetadata,
@@ -531,6 +536,16 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     journal: new WorktreeJournal(worktreeJournalPath(stateRoot)),
     provenance: new WorktreeProvenanceStore(worktreeProvenancePath(stateRoot)),
     registrar: createOnboardingWorktreeRegistrar({ onboarding, registry }),
+    // Removal and "Remove from Uatu" end in the same Hub cleanup the
+    // dashboard's forget performs: registration, personal state and
+    // credential assignments. Checkout, branch and files are never touched.
+    unregister: async workspaceId => {
+      await personalState.forgetWorkspace(
+        workspaceId,
+        () => registry.remove(workspaceId),
+        async () => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
+      );
+    },
     // The same Hub-wide path fence every other folder mutation takes, so a
     // rename, a clone and a worktree creation cannot race for one hierarchy.
     coordinator: new WorktreeOperationCoordinator(reservations),

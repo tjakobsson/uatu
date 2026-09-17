@@ -1037,7 +1037,9 @@ function workspaceAssignmentForm(actionError) {
   form.appendChild(el("h4", null, "Assign workspace credentials"));
   const workspaceLabel = el("label", null, "Workspace");
   const workspace = document.createElement("select");
-  for (const item of dashboardWorkspaces) workspace.appendChild(new Option((item.displayName || item.id) + " · " + item.path, item.id));
+  // A linked worktree inherits its parent's credentials live and holds no
+  // assignments of its own, so it is not offered here.
+  for (const item of dashboardWorkspaces.filter(item => !item.parentId)) workspace.appendChild(new Option((item.displayName || item.id) + " · " + item.path, item.id));
   workspaceLabel.appendChild(workspace);
   const authenticationLabel = el("label", null, "🔑 Authentication");
   const authentication = document.createElement("select");
@@ -1696,7 +1698,15 @@ async function refresh(force) {
           button.onclick = () => { const url = new URL(target); url.searchParams.set("view", view); openWorktreePicker(url.href, button); };
           actions.append(button); return button;
         };
-        if (!w.parentId) action("Configure", "settings");
+        // Parent policy is managed where the Hub manages credentials when the
+        // Hub names that place; otherwise (the isolated review host) in the
+        // worktree presentation's own settings view. Children never get one.
+        if (!w.parentId && state.worktreeConfigureNavigation) {
+          const configure = el("button", null, "Configure");
+          configure.setAttribute("aria-label", "Configure " + workspaceLabel(w) + " credentials and shared settings");
+          configure.onclick = () => { const next = new URL(state.worktreeConfigureNavigation, location.href); if (next.origin === location.origin) location.assign(next.href); };
+          actions.append(configure);
+        } else if (!w.parentId) action("Configure", "settings");
         const forget = actions.querySelector('[aria-label^="Remove "]');
         if (forget) {
           forget.textContent = "Remove from Uatu";

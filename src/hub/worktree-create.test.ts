@@ -217,6 +217,9 @@ describe("existing local branch", () => {
     });
     expect(outcome.ok).toBe(true);
     expect(created.branch).toBe("fix/navigation");
+    // An existing branch's origin is unknown unless recorded history exists;
+    // the branch's own name is never its origin.
+    expect(created.sourceRef).toBeUndefined();
     expect(buildWorktreeAddArguments(created)).toEqual(["worktree", "add", created.destination, "fix/navigation"]);
     expect((await git(created.destination, ["rev-parse", "HEAD"])).trim()).toBe(revision);
   });
@@ -443,5 +446,19 @@ describe("bounded failures", () => {
     expect(raced.error.detail.code).toBe("branch-in-use");
     // Sanitized: no absolute host path reaches the user.
     expect(raced.error.detail.message).not.toContain(repository);
+  });
+});
+
+describe("existing local branch history", () => {
+  test("a recorded branch origin is carried, never re-derived", async () => {
+    const planned = await planWorktreeCreation({
+      request: { mode: "existing-local", base: { kind: "local", ref: "feature/x" } },
+      mainPath: "/tmp/uatu-history/atlas",
+      refs: { local: ["main", "feature/x"], remote: [] },
+      records: [],
+      occupied: async () => false,
+      branchOrigin: "release",
+    });
+    expect(planned.sourceRef).toBe("release");
   });
 });

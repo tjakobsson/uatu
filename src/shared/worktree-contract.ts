@@ -80,6 +80,18 @@ export type WorktreeRefs = {
   readonly fetchedAt: number | null;
 };
 
+// The repositoryId an inventory carries when the repository could not be
+// identified at all — a Git probe that failed, a workspace that is not a
+// repository. It is a reserved word, not a digest, so it can never collide
+// with a real canonical identity; it is legal ONLY on an explicitly stale
+// `status: "error"` listing with no checkouts, which is what keeps "we do
+// not know which repository this is" from being read as a repository.
+export const WORKTREE_UNKNOWN_REPOSITORY = "unknown";
+
+export function isWorktreeIdentityUnknown(repositoryId: string): boolean {
+  return repositoryId === WORKTREE_UNKNOWN_REPOSITORY;
+}
+
 export type WorktreeInventory = {
   readonly repositoryId: string;
   readonly sourceWorkspaceId: string;
@@ -115,6 +127,38 @@ export type WorktreeCreateRequest = {
   // failure leaves the configured workspace stopped.
   readonly start?: boolean;
 };
+
+// Deletion and forgetting are addressed by the CHECKOUT, not by a path: a
+// path reused by another tree must never be deletable through an older
+// reference. `reference` is a registered workspace id or a canonical
+// checkout id — a retained, unregistered checkout has only the latter.
+export type WorktreeDeleteRequest = {
+  readonly sourceWorkspaceId: string;
+  readonly reference: string;
+  // The destructive button IS the authorization. `stop` additionally
+  // authorizes stopping the KNOWN Uatu activity the dialog named; it never
+  // claims Uatu can stop an external application.
+  readonly stop?: boolean;
+};
+
+export type WorktreeForgetRequest = {
+  readonly sourceWorkspaceId: string;
+  readonly reference: string;
+  // Authorizes stopping the workspace's Uatu sessions first; without it a
+  // running workspace is refused. Unregistration only ever happens stopped.
+  readonly stop?: boolean;
+};
+
+// What preflight found. `ok: false` carries the ONE blocker that replaces
+// the dialog's normal consequences; there is no force path past it.
+export type WorktreeDeletionPreflight =
+  | {
+    readonly ok: true;
+    readonly checkout: WorktreeCheckout;
+    // Whether proceeding needs the caller's explicit stop authorization.
+    readonly requiresStop: boolean;
+  }
+  | { readonly ok: false; readonly checkout?: WorktreeCheckout; readonly error: WorktreeError };
 
 // Bounded, ordered, and never re-entered. A phase names the last boundary an
 // operation provably passed, which is what restart recovery reconciles
@@ -532,7 +576,14 @@ export function parseWorktreeInventory(value: unknown): WorktreeInventory {
   if ((status === "error") !== (record.error !== undefined)) fail("worktree inventory status and error must agree");
   const checkouts = record.checkouts.map(parseWorktreeCheckout);
   const repositoryId = requiredString(record, "repositoryId", "worktree inventory");
-  if (checkouts.some(checkout => checkout.repositoryId !== repositoryId)) fail("worktree inventory mixes repositories");
+  if (isWorktreeIdentityUnknown(repositoryId)) {
+    // "Identity unknown" is a refusal to name a repository, so it may not
+    // carry checkouts and may not be presented as a settled listing.
+    if (status !== "error") fail("an unidentified worktree inventory must report an error");
+    if (checkouts.length > 0) fail("an unidentified worktree inventory cannot list checkouts");
+  } else if (checkouts.some(checkout => checkout.repositoryId !== repositoryId)) {
+    fail("worktree inventory mixes repositories");
+  }
   return {
     repositoryId,
     sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree inventory"),
@@ -540,6 +591,20 @@ export function parseWorktreeInventory(value: unknown): WorktreeInventory {
     checkouts,
     refs: parseRefs(record.refs),
     ...(record.error === undefined ? {} : { error: parseWorktreeError(record.error) }),
+  };
+}
+
+// The one spelling for "the repository could not be identified": an
+// explicitly stale, empty listing that names no repository and carries the
+// sanitized reason. Round-trips through parseWorktreeInventory.
+export function unknownWorktreeInventory(sourceWorkspaceId: string, error: WorktreeError): WorktreeInventory {
+  return {
+    repositoryId: WORKTREE_UNKNOWN_REPOSITORY,
+    sourceWorkspaceId,
+    status: "error",
+    checkouts: [],
+    refs: { local: [], remote: [], fetchedAt: null },
+    error,
   };
 }
 
@@ -580,6 +645,24 @@ export function parseWorktreeOperationResult(value: unknown): WorktreeOperationR
     registered: flag(record, "registered", "worktree operation result"),
     started,
     ...(record.startError === undefined ? {} : { startError: parseWorktreeError(record.startError) }),
+  };
+}
+
+export function parseWorktreeDeleteRequest(value: unknown): WorktreeDeleteRequest {
+  const record = closed(value, ["sourceWorkspaceId", "reference", "stop"], "worktree delete request");
+  return {
+    sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree delete request"),
+    reference: requiredString(record, "reference", "worktree delete request"),
+    ...(record.stop === undefined ? {} : { stop: flag(record, "stop", "worktree delete request") }),
+  };
+}
+
+export function parseWorktreeForgetRequest(value: unknown): WorktreeForgetRequest {
+  const record = closed(value, ["sourceWorkspaceId", "reference", "stop"], "worktree forget request");
+  return {
+    sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree forget request"),
+    reference: requiredString(record, "reference", "worktree forget request"),
+    ...(record.stop === undefined ? {} : { stop: flag(record, "stop", "worktree forget request") }),
   };
 }
 

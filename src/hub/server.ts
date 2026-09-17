@@ -54,8 +54,11 @@ import {
 } from "./proxy";
 import { LiveBroker } from "./live-broker";
 import { NotificationRequestError, type HubNotifications } from "./notifications";
-import { createWorktreeRoutes, type WorktreeStartOutcome } from "./worktree-routes";
+import { createWorktreeRoutes, WORKTREE_PREFIX, type WorktreeStartOutcome } from "./worktree-routes";
 import type { WorktreeService } from "./worktree-service";
+import { WorktreeReconciler } from "./worktree-reconciler";
+import { checkoutGitLink, readCheckoutHead } from "./worktree-git";
+import { WorktreeOperationError } from "../shared/worktree-contract";
 import { LiveEndpoint } from "./live-endpoint";
 import { createHubUpstreamSource } from "./live-source";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
@@ -95,9 +98,46 @@ export type HubDeps = {
   // a handler built directly gets its own pair.
   live?: LiveEndpoint;
   liveBroker?: LiveBroker;
+  // Git reconciliation for the worktree inventory. startHubServer assembles
+  // one when `worktrees` is present.
+  worktreeReconciler?: WorktreeReconciler;
+  // Test seam for the reconciler's cadence.
+  worktreeReconcilerOptions?: Pick<ConstructorParameters<typeof WorktreeReconciler>[0], "minIntervalMs" | "periodMs" | "now" | "timers">;
   metrics?: MetricsRegistry;
   notifications?: HubNotifications;
 };
+
+// The Hub-side worktree invalidation loop (tasks 5.1–5.2): the reconciler
+// reads Git when a page opens the topic, when observed activity or a
+// session start/stop suggests something changed, and on a bounded cadence
+// while any page holds the topic; a changed inventory — or a committed Uatu
+// operation — invalidates every page showing that repository over the
+// existing live stream.
+function assembleWorktreeReconciler(deps: HubDeps, liveBroker: LiveBroker): WorktreeReconciler | undefined {
+  const service = deps.worktrees;
+  if (!service) return undefined;
+  if (deps.worktreeReconciler) return deps.worktreeReconciler;
+  const reconciler = new WorktreeReconciler({
+    inventory: source => service.inventory(source),
+    sourceFor: workspaceId => service.sourceFor(workspaceId),
+    onChange: source => liveBroker.publishWorktrees(service.familyOf(source)),
+    onError: error => console.error(`uatu hub: worktree reconciliation failed: ${error instanceof Error ? error.message : String(error)}`),
+    ...deps.worktreeReconcilerOptions,
+  });
+  const retained = new Map<string, () => void>();
+  liveBroker.observeWorktrees({
+    attached: workspaceId => { void reconciler.request(workspaceId, "subscribe").catch(() => undefined); },
+    interest: (workspaceId, interested) => {
+      retained.get(workspaceId)?.();
+      retained.delete(workspaceId);
+      if (interested) retained.set(workspaceId, reconciler.retain(workspaceId));
+    },
+    // An agent that started or finished working may have run `git worktree`.
+    activity: workspaceId => { void reconciler.request(workspaceId, "activity").catch(() => undefined); },
+  });
+  deps.sessions.onChange(change => { void reconciler.request(change.workspaceId, "activity").catch(() => undefined); });
+  return reconciler;
+}
 
 type HubServer = UpgradableServer & {
   requestIP?(request: Request): { address: string } | null;
@@ -198,7 +238,8 @@ export function createHubFetchHandler(deps: HubDeps) {
     credentials: deps.cloneCredentials,
     reservations: deps.reservations,
   });
-  const { live } = assembleLive(deps);
+  const { live, liveBroker } = assembleLive(deps);
+  const worktreeReconciler = assembleWorktreeReconciler(deps, liveBroker);
   const limiter = new LoginRateLimiter();
   const credentialLimiter = new CredentialOperationRateLimiter();
   const credentialApi = deps.credentialApi ? new CredentialApi(deps.credentialApi) : null;
@@ -439,7 +480,50 @@ export function createHubFetchHandler(deps: HubDeps) {
     });
   };
 
+  // The worktree presentation facts for the state list, read WITHOUT running
+  // Git: this endpoint is polled. `repositoryId` comes from the registry's
+  // worktree links (a main workspace takes its children's shared identity),
+  // the branch from the checkout's HEAD file, and `sourceRef` only from
+  // recorded creation history. `createWorktree` marks a main checkout that
+  // can host worktrees (a `.git` directory) — it is the fork entry point.
+  const worktreeStateFacts = async (): Promise<Map<string, Record<string, unknown>>> => {
+    const facts = new Map<string, Record<string, unknown>>();
+    const service = deps.worktrees;
+    if (!service) return facts;
+    const entries = registry.list();
+    const familyRepository = new Map<string, string>();
+    for (const entry of entries) {
+      if (entry.worktree) familyRepository.set(entry.worktree.parentWorkspaceId, entry.worktree.repositoryId);
+    }
+    await Promise.all(entries.map(async entry => {
+      const head = await readCheckoutHead(entry.path);
+      const link = entry.worktree;
+      const repositoryId = link?.repositoryId ?? familyRepository.get(entry.id);
+      const fact: Record<string, unknown> = {
+        ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(head.kind === "branch" ? { branch: head.branch } : {}),
+        ...(head.kind === "detached" ? { detached: true } : {}),
+      };
+      if (link) {
+        fact.parentId = link.parentWorkspaceId;
+        fact.ownership = await service.registeredOwnership(entry.id);
+        // A child is named by the branch it was registered on; its current
+        // HEAD, when readable, is the truthful label.
+        fact.branch = head.kind === "branch" ? head.branch : entry.displayName;
+        const origin = await service.branchOrigin(link.repositoryId, String(fact.branch));
+        if (origin !== undefined) fact.sourceRef = origin;
+        const availability = await service.registeredAvailability(entry.id);
+        if (availability !== "present") fact.availability = availability;
+      } else if (await checkoutGitLink(entry.path) === "directory") {
+        fact.createWorktree = `${WORKTREE_PREFIX}?view=create&source=${encodeURIComponent(entry.id)}`;
+      }
+      facts.set(entry.id, fact);
+    }));
+    return facts;
+  };
+
   const hubState = async (): Promise<Response> => {
+    const worktreeFacts = await worktreeStateFacts();
     const credentialState = deps.credentialApi?.metadata.snapshot();
     const credentialNames = new Map(credentialState?.credentials.map(credential => [credential.id, credential.name]));
     const workspaces = await Promise.all(
@@ -475,10 +559,17 @@ export function createHubFetchHandler(deps: HubDeps) {
           backend: entry.backend,
           running: running !== undefined,
           credentialRestartRequired: sessions.credentialRestartRequired(entry.id),
+          // A linked worktree's OWN assignment rows — normally none. Its
+          // effective credentials are its parent's, inherited live through
+          // `parentId` (credential-context's policyWorkspaceId); they are
+          // deliberately NOT substituted here, so this field never claims
+          // the child holds assignments it does not, and clients show the
+          // inherited policy by reading the parent named in `parentId`.
           credentialAssignments: {
             authentication: [...authentication],
             signing: [...signing],
           },
+          ...(worktreeFacts.get(entry.id) ?? {}),
           // The local-process backend always spawns this build's binary, so
           // every child speaks this constant. A backend that runs children
           // of other builds (the deferred container backend) must report
@@ -498,6 +589,9 @@ export function createHubFetchHandler(deps: HubDeps) {
       ...compatibility,
       workspaces,
       ...(workspaceDefaults === undefined ? {} : { workspaceDefaults }),
+      // Present only when this Hub serves worktree operations: the picker
+      // and dashboard read it to mount their worktree affordances.
+      ...(deps.worktrees === undefined ? {} : { worktreeNavigation: WORKTREE_PREFIX, worktreeConfigureNavigation: "/settings" }),
     });
   };
 
@@ -1243,13 +1337,26 @@ export function createHubFetchHandler(deps: HubDeps) {
       return { ok: true };
     } catch (error) {
       if (error instanceof FolderManagerError) return { ok: false, response: folderError(error) };
+      // A worktree whose checkout is missing or replaced is refused before
+      // any spawn; the sanitized reason is the answer.
+      if (error instanceof WorktreeOperationError) return { ok: false, response: json(409, { error: error.detail.message }) };
       return { ok: false, response: json(500, { error: error instanceof Error ? error.message : String(error) }) };
     }
   };
 
-  const worktrees = deps.worktrees === undefined ? undefined : createWorktreeRoutes({
-    service: deps.worktrees,
+  const worktreeService = deps.worktrees;
+  const worktrees = worktreeService === undefined ? undefined : createWorktreeRoutes({
+    service: worktreeService,
     registry,
+    async inventory(sourceWorkspaceId, reason) {
+      return (await worktreeReconciler?.request(sourceWorkspaceId, reason)) ?? worktreeService.inventory(sourceWorkspaceId);
+    },
+    // Immediate, then a silent re-read so the reconciler's baseline already
+    // includes this change and does not announce it a second time.
+    changed(sourceWorkspaceId, also = []) {
+      liveBroker.publishWorktrees([...worktreeService.familyOf(sourceWorkspaceId), ...also]);
+      void worktreeReconciler?.rebaseline(sourceWorkspaceId).catch(() => undefined);
+    },
     async startWorkspace(workspaceId): Promise<WorktreeStartOutcome> {
       const outcome = await startWorkspaceSession(workspaceId);
       if (outcome.ok) return { ok: true };
@@ -1982,7 +2089,8 @@ export function startHubServer(deps: HubDeps) {
     reservations: deps.reservations,
   });
   const { live, liveBroker } = assembleLive(deps);
-  const handler = createHubFetchHandler({ ...deps, cloneJobs, live, liveBroker });
+  const worktreeReconciler = assembleWorktreeReconciler(deps, liveBroker);
+  const handler = createHubFetchHandler({ ...deps, cloneJobs, live, liveBroker, ...(worktreeReconciler ? { worktreeReconciler } : {}) });
   const server = Bun.serve<BridgeData>({
     hostname: deps.config.host,
     port: deps.config.port,
@@ -2004,5 +2112,5 @@ export function startHubServer(deps: HubDeps) {
       },
     },
   });
-  return Object.assign(server, { cloneJobs, live, liveBroker });
+  return Object.assign(server, { cloneJobs, live, liveBroker, worktreeReconciler });
 }
