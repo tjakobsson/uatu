@@ -41,6 +41,7 @@ import {
   sessionsPath,
 } from "./state-dir";
 import { HubPreferencesStore } from "./preferences";
+import { createWorktreeRenameGuard } from "./worktree-rename-guard";
 import { WorkspaceOnboardingCoordinator } from "./onboarding";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -488,6 +489,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     personalState,
     credentials: credentialMetadata,
     reservations,
+    // Renames that would break Git worktree links are refused before any
+    // filesystem mutation, including links to checkouts Uatu never
+    // registered. An unestablished verdict fails closed.
+    worktreeDependencies: createWorktreeRenameGuard({
+      gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
+    }),
   });
   await folderManager.recover();
   const onboarding = new WorkspaceOnboardingCoordinator({

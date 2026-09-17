@@ -6,6 +6,7 @@ import type { PersonalWorkspaceStateStore } from "./personal-state";
 import { isPathAtOrBelow, normalizeAbsolutePath, PathReservationCoordinator } from "./path-reservations";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceEntry, type WorkspaceRegistry } from "./registry";
 import { loadNoReplaceRename, type NoReplaceRename } from "./rename-no-replace";
+import type { WorktreeDependencyProbe } from "./worktree-rename-guard";
 import type { SessionManager, SessionsStoppedResult } from "./sessions";
 
 const JOURNAL_VERSION = 1 as const;
@@ -96,6 +97,10 @@ export type FolderManagerOptions = {
   personalState: PersonalState;
   credentials: CredentialState;
   reservations: PathReservationCoordinator;
+  // The Git worktree-dependency guard consulted before a rename. Absent in
+  // fixtures that have no Git concern at all; present in the real Hub, where
+  // an unestablished verdict must refuse the move.
+  worktreeDependencies?: WorktreeDependencyProbe;
   fs?: FileSystem;
   // Test seam for the kernel no-replace rename; defaults to the platform
   // primitive on the real filesystem and to none with an injected fs.
@@ -555,6 +560,10 @@ export class FolderManager {
       if (destination === source) throw new FolderManagerError("conflict", "source and destination are the same folder");
       const reservation = this.reserve([source, destination]);
       try {
+        // Before anything else, and before any stop authorization is even
+        // considered: stopping Uatu sessions cannot make a move that breaks
+        // Git links safe, and an inconclusive answer fails closed.
+        await this.assertNoWorktreeDependencies(source);
         await this.assertMissing(destination);
         const collided = await this.reconcileRegisteredAliases();
         this.assertNoCollidedOverlap(collided, source);
@@ -867,6 +876,28 @@ export class FolderManager {
       }
     }
     return false;
+  }
+
+  // Generic folder renames are refused when a Git worktree dependency would
+  // break: linked checkouts, main checkouts, common Git directories, or an
+  // ancestor of any of them — registered in Uatu or not. Uncertainty is
+  // refused too; Uatu never repairs or moves Git structures on the user's
+  // behalf. Display-name edits do not reach this path.
+  private async assertNoWorktreeDependencies(source: string): Promise<void> {
+    const probe = this.options.worktreeDependencies;
+    if (!probe) return;
+    let verdict: Awaited<ReturnType<WorktreeDependencyProbe>>;
+    try {
+      verdict = await probe(source);
+    } catch (error) {
+      throw new FolderManagerError(
+        "conflict",
+        "Uatu could not establish whether moving this folder would break Git worktree links, so the rename was refused. Nothing was moved.",
+        { cause: error },
+      );
+    }
+    if (verdict.kind === "safe") return;
+    throw new FolderManagerError("conflict", verdict.reason);
   }
 
   private async renameWithoutReplacement(source: string, destination: string): Promise<void> {
