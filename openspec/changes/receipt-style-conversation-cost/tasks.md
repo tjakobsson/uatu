@@ -11,6 +11,7 @@
 - [x] 2.3 Remove `propagateInclusive` and the `agent:<id>` roll-up; build `descendants` on the top-level launcher row from the recursive reconstruction and from live events at any depth; verify with the existing nested adapter tests rewritten to expect own-spend rows plus a three-deep `descendants` list
 - [x] 2.4 Keep removal, revert invalidation, eviction epochs and the completeness mark correct under the new fold; verify the existing attribution race tests pass and add one for a revert inside a reused child
 - [x] 2.5 Add `descendants` to the tool item type, merge/replace path (`projection.ts`, the adapter's tool merge) and `validation.ts`; verify with validation and projection tests including a shrinking descendants list
+- [x] 2.6 Pair a child's prompts to its task rows by prompt text rather than position, so OpenCode's compaction request and synthetic "continue" (and anything typed into the child) stay with the task before them; place nested launchers through the same pairing; fall back to position where nothing can be compared or nothing matches; verify with adapter tests built from a real compacted session's figures (stored and live), a nested launcher after a compaction, and the no-match fallback
 
 ## 3. Receipt model
 

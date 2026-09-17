@@ -2839,12 +2839,19 @@ describe("pending permission recovery", () => {
 
   // A subagent handed a further task (OpenCode's `task_id`) is ONE session and
   // TWO rows. These fixtures are that shape: a prompt per task, a row per task.
-  const taskRow = (part: string, created: number, description: string, target = "child", resumed = false) => ({
+  const taskRow = (part: string, created: number, description: string, target = "child", resumed = false, gave?: string) => ({
     id: `launch_${part}`, type: "assistant", time: { created },
     content: [{ id: part, type: "tool", tool: "task", callID: part, state: {
-      status: "completed", input: { description, subagent_type: "general", ...(resumed ? { task_id: target } : {}) }, metadata: { sessionId: target }, output: "done",
+      status: "completed", input: { description, subagent_type: "general", ...(gave === undefined ? {} : { prompt: gave }), ...(resumed ? { task_id: target } : {}) }, metadata: { sessionId: target }, output: "done",
     } }],
   });
+  // Classic-store records, the shape a compacting subagent's session has: a
+  // user message per task, plus the two OpenCode adds when the subagent
+  // summarises itself — a compaction request and a synthetic "continue".
+  const asked = (id: string, created: number, text: string) => ({ info: { id, role: "user", time: { created } }, parts: [{ type: "text", text }] });
+  const compactionRequest = (id: string, created: number) => ({ info: { id, role: "user", time: { created } }, parts: [{ type: "compaction" }] });
+  const continued = (id: string, created: number) => ({ info: { id, role: "user", time: { created } }, parts: [{ type: "text", text: "Continue if you have next steps, or stop and ask for clarification.", synthetic: true }] });
+  const answered = (id: string, created: number, promptId: string, input: number, cost: number) => ({ info: { id, role: "assistant", parentID: promptId, modelID: "gpt-5.6-sol", providerID: "openai", time: { created }, tokens: { input, output: 0 }, cost }, parts: [] });
   const prompt = (id: string, created: number) => ({ id, type: "user", time: { created }, text: "do it" });
   const reply = (id: string, created: number, input: number, cost: number) => ({ id, type: "assistant", modelID: "gpt-5.6-sol", providerID: "openai", time: { created }, tokens: { input, output: input / 100 }, cost });
   const rowsOf = (items: ConversationItem[]) => items.filter((item): item is ToolItem => item.type === "tool").sort((left, right) => left.createdAt - right.createdAt);
@@ -2895,6 +2902,94 @@ describe("pending permission recovery", () => {
     expect(reopened.map(row => row.usage)).toEqual([{ input: 1_000, output: 10, costUsd: 0.5 }, { input: 600, output: 6, costUsd: 0.3 }]);
     // Together the rows are what the session spent — no more.
     expect(reopened.reduce((sum, row) => sum + (row.usage?.costUsd ?? 0), 0)).toBeCloseTo(0.8);
+  });
+
+  test("a subagent that compacted during its first task bills the compaction to that task, not the next", async () => {
+    // A real session's shape and figures: one `general`, two tasks, one
+    // compaction partway through the first. Four user messages, two rows:
+    // paired by position, the compaction request and the "continue" — and the
+    // 258k tokens answering them — were handed to the SECOND task.
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [
+      taskRow("prt_t1", 1, "Audit", "child", false, "Read-only audit, do not edit."),
+      taskRow("prt_t2", 9, "Re-audit", "child", true, "Re-audit the current files after fixes."),
+    ] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => (sessionId === "child" ? { items: [
+      asked("p1", 2, "Read-only audit, do not edit."), answered("m1", 3, "p1", 270_923, 0.27),
+      compactionRequest("pc", 4), answered("mc", 5, "pc", 38_970, 0.04),
+      continued("ps", 6), answered("ms", 7, "ps", 218_840, 0.22),
+      asked("p2", 10, "Re-audit the current files after fixes."), answered("m2", 11, "p2", 23_000, 0.02),
+    ] as never[] } : listMessages(sessionId, options));
+    const rows = rowsOf((await new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" }).history("parent")).items);
+    expect(rows.map(row => row.usage?.input)).toEqual([528_733, 23_000]);
+    expect(rows.map(row => row.usage?.costUsd)).toEqual([expect.closeTo(0.53, 10), 0.02]);
+  });
+
+  test("live, a compaction between two tasks stays with the first as the second task's row and prompt arrive", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [taskRow("prt_t1", 1, "Audit", "child", false, "Read-only audit, do not edit.")] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    await adapter.history("parent");
+    const rows = () => rowsOf(adapter.projectionForTests("parent").items());
+    const user = (id: string) => ({ id: `e-u-${id}`, type: "message.updated", data: { info: { id, sessionID: "child", role: "user", time: { created: 2 } } } });
+    const typed = (id: string, text: string, synthetic = false) => ({ id: `e-t-${id}`, type: "message.part.updated", data: { part: { id: `prt_${id}`, messageID: id, sessionID: "child", type: "text", text, ...(synthetic ? { synthetic: true } : {}) } } });
+    const spent = (id: string, promptId: string, input: number) => ({ id: `e-a-${id}`, type: "message.updated", data: { info: { id, sessionID: "child", role: "assistant", parentID: promptId, modelID: "gpt-5.6-sol", time: { created: 3 }, tokens: { input, output: 0 }, cost: input / 1_000_000 } } });
+    const pump = adapter.startEventPump();
+    for (const event of [
+      user("p1"), typed("p1", "Read-only audit, do not edit."), spent("m1", "p1", 270_923),
+      // The subagent summarises itself: a request with no text, then OpenCode's own "continue".
+      user("pc"), spent("mc", "pc", 38_970),
+      user("ps"), typed("ps", "Continue if you have next steps, or stop and ask for clarification.", true), spent("ms", "ps", 218_840),
+    ]) provider.eventQueue.push(event as never);
+    await waitUntil(() => rows()[0]?.usage?.input === 528_733);
+
+    // The second task: its row in the parent, then its prompt and reply in the child.
+    provider.eventQueue.push({
+      id: "e-row-2", type: "message.part.updated",
+      data: { part: { id: "prt_t2", messageID: "launch_prt_t2", sessionID: "parent", type: "tool", tool: "task", callID: "prt_t2", state: {
+        status: "running", input: { description: "Re-audit", subagent_type: "general", prompt: "Re-audit the current files after fixes.", task_id: "child" }, metadata: { sessionId: "child" },
+      } } },
+    } as never);
+    for (const event of [user("p2"), typed("p2", "Re-audit the current files after fixes."), spent("m2", "p2", 23_000)]) provider.eventQueue.push(event as never);
+    await waitUntil(() => rows()[1]?.usage?.input === 23_000);
+    expect(rows().map(row => row.usage?.input)).toEqual([528_733, 23_000]);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a nested subagent launched after a compaction still hangs off the task it was launched during", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }];
+    provider.pages.set("first", { items: [taskRow("prt_t1", 1, "Audit", "child", false, "Audit."), taskRow("prt_t2", 9, "Re-audit", "child", true, "Re-audit.")] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      // Still the FIRST task when the helper is launched: two of the child's
+      // user messages so far are OpenCode's own, not tasks.
+      if (sessionId === "child") return { items: [asked("p1", 2, "Audit."), compactionRequest("pc", 3), continued("ps", 4), taskRow("prt_g", 5, "Help", "grandchild"), answered("m1", 6, "ps", 1_000, 0.5), asked("p2", 10, "Re-audit."), answered("m2", 11, "p2", 400, 0.2)] as never[] };
+      if (sessionId === "grandchild") return { items: [prompt("pg", 5), reply("mg", 6, 100, 0.1)] as never[] };
+      return listMessages(sessionId, options);
+    };
+    const rows = rowsOf((await new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" }).history("parent")).items);
+    expect(rows[0]?.descendants).toEqual([expect.objectContaining({ id: "tool:prt_g", parentId: "tool:prt_t1", usage: { input: 100, output: 1, costUsd: 0.1 } })]);
+    expect(rows[1]).not.toHaveProperty("descendants");
+    expect(rows.map(row => row.usage?.costUsd)).toEqual([0.5, 0.2]);
+  });
+
+  test("when no prompt matches any task's, pairing falls back to position rather than piling everything on one row", async () => {
+    // Texts that cannot be compared usefully (a provider that rewrites the
+    // prompt it stores) must not make the second task vanish into the first.
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [taskRow("prt_t1", 1, "First", "child", false, "Do the first thing."), taskRow("prt_t2", 5, "Second", "child", true, "Do the second thing.")] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => (sessionId === "child"
+      ? { items: [asked("p1", 2, "[rewritten] first"), answered("m1", 3, "p1", 1_000, 0.5), asked("p2", 6, "[rewritten] second"), answered("m2", 7, "p2", 400, 0.2)] as never[] }
+      : listMessages(sessionId, options));
+    const rows = rowsOf((await new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" }).history("parent")).items);
+    expect(rows.map(row => row.usage?.costUsd)).toEqual([0.5, 0.2]);
   });
 
   test("an older page's row keeps its place among all the rows that launched the child", async () => {

@@ -1695,7 +1695,7 @@ export class ChatAdapter {
       // each under the prompt it followed. A launcher that leads back into
       // the chain being read (a loop in the data) is not listed.
       transcript = readChildTranscript(complete ?? paged, ancestry);
-      for (const promptId of byPrompt.values()) if (!transcript.prompts.includes(promptId)) transcript.prompts.push(promptId);
+      for (const promptId of byPrompt.values()) if (!transcript.prompts.some(prompt => prompt.id === promptId)) transcript.prompts.push({ id: promptId });
       // The child's own subagents are squared against their stores the same
       // way (recursively), each under its own key: nothing is rolled up into
       // this tally, and the lines beneath a row are assembled from those keys
@@ -1740,7 +1740,7 @@ export class ChatAdapter {
     if (livePrompts) for (const [messageId, promptId] of livePrompts) if (!byPrompt.has(messageId)) byPrompt.set(messageId, promptId);
     const liveTranscript = this.childTranscripts.get(key);
     if (liveTranscript) {
-      for (const promptId of liveTranscript.prompts) if (!transcript.prompts.includes(promptId)) transcript.prompts.push(promptId);
+      for (const prompt of liveTranscript.prompts) if (!transcript.prompts.some(known => known.id === prompt.id)) transcript.prompts.push(prompt);
       for (const launcher of liveTranscript.launchers) if (!transcript.launchers.some(known => known.id === launcher.id)) transcript.launchers.push(launcher);
     }
     // A launcher removed while this read was in flight is newer than the
@@ -1842,8 +1842,8 @@ export class ChatAdapter {
       // A prompt first heard of here is newer than every prompt already
       // known: prompts reach a session one at a time, in order.
       const transcript = this.childTranscripts.get(key) ?? { prompts: [], launchers: [] };
-      if (!transcript.prompts.includes(answered.promptId)) {
-        this.bankAttribution(this.childTranscripts, key, { ...transcript, prompts: [...transcript.prompts, answered.promptId] });
+      if (!transcript.prompts.some(prompt => prompt.id === answered.promptId)) {
+        this.bankAttribution(this.childTranscripts, key, { ...transcript, prompts: [...transcript.prompts, { id: answered.promptId }] });
       }
     }
     if (removedMessageId !== undefined) {
@@ -1901,7 +1901,10 @@ export class ChatAdapter {
     // line and its cost stay on every ancestor, and — the tally being marked
     // squared — a reopen keeps them too.
     const removed = new Set(updates.flatMap(update => update.kind === "remove" ? [update.itemId.replace(/^part:/, "tool:")] : []));
-    if (rows.length === 0 && removed.size === 0) return;
+    // The child's own prompts, with their text: what tells a task's prompt
+    // from a compaction request or a "continue" OpenCode put there itself.
+    const prompted = updates.flatMap(update => update.kind === "upsert" && update.item.type === "user_message" ? [{ id: update.item.id.replace(/^message:/, ""), text: update.item.text }] : []);
+    if (rows.length === 0 && removed.size === 0 && prompted.length === 0) return;
     let parentId: string | null;
     try {
       parentId = await this.parentOf(conversationId);
@@ -1913,6 +1916,16 @@ export class ChatAdapter {
     const transcript = this.childTranscripts.get(key) ?? { prompts: [], launchers: [] };
     const launchers = transcript.launchers.filter(launcher => !removed.has(launcher.id));
     let changed = launchers.length !== transcript.launchers.length;
+    const prompts = [...transcript.prompts];
+    for (const prompt of prompted) {
+      const known = prompts.findIndex(candidate => candidate.id === prompt.id);
+      if (known < 0) prompts.push(prompt);
+      // A restatement of the message arrives with no parts, and so no text:
+      // it must not blank a text already heard.
+      else if (prompts[known]!.text === prompt.text || (prompt.text === "" && prompts[known]!.text !== undefined)) continue;
+      else prompts[known] = prompt;
+      changed = true;
+    }
     // Not yet squared against the store: a read may be in flight, or still to
     // come, holding the launcher this removal names — even when no record of
     // it exists here yet. Remember the removal so that read cannot bank it.
@@ -1926,14 +1939,14 @@ export class ChatAdapter {
       const known = launchers.findIndex(launcher => launcher.id === row.id);
       // The prompt being answered when the launcher first appeared is the
       // newest one known; later restatements of the row do not move it.
-      const next = launcherOf(row, known >= 0 ? launchers[known]!.promptIndex : Math.max(0, transcript.prompts.length - 1), known >= 0 ? launchers[known] : undefined);
+      const next = launcherOf(row, known >= 0 ? launchers[known]!.promptIndex : Math.max(0, prompts.length - 1), known >= 0 ? launchers[known] : undefined);
       if (known < 0) launchers.push(next);
       else if (sameLauncher(launchers[known]!, next)) continue;
       else launchers[known] = next;
       changed = true;
     }
     if (!changed) return;
-    this.bankAttribution(this.childTranscripts, key, { ...transcript, launchers });
+    this.bankAttribution(this.childTranscripts, key, { prompts, launchers });
     this.decorateLauncherRows(parentId, conversationId, coalescer);
     await this.refreshAncestors(parentId, coalescer);
   }
@@ -1949,16 +1962,16 @@ export class ChatAdapter {
    * the spend of the k-th task the child was given, and beneath it the lines
    * of every subagent launched while answering that task, at any depth.
    */
-  private rowAttributions(parentId: string, childId: string, rowIds: readonly string[]): RowAttribution[] {
+  private rowAttributions(parentId: string, childId: string, rows: readonly TaskRow[]): RowAttribution[] {
     const key = attributionKey(parentId, childId);
-    const folds = foldByTask(rowIds.length, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
+    const folds = foldByTask(rows, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
     const beneath = new Map<string, SubagentLine[]>();
-    for (const line of this.descendantLines(parentId, childId, rowIds, new Set([parentId, childId]))) {
+    for (const line of this.descendantLines(parentId, childId, rows, new Set([parentId, childId]))) {
       beneath.set(line.parentId, [...(beneath.get(line.parentId) ?? []), line]);
     }
     const branch = (id: string): SubagentLine[] => (beneath.get(id) ?? []).flatMap(line => [line, ...branch(line.id)]);
     return folds.map((fold, index) => {
-      const descendants = branch(rowIds[index]!);
+      const descendants = branch(rows[index]!.id);
       return { ...fold, ...(descendants.length > 0 ? { descendants } : {}) };
     });
   }
@@ -1966,11 +1979,15 @@ export class ChatAdapter {
   /**
    * The lines beneath the rows that launched `sessionId`: one per task the
    * session gave a subagent of its own, stating that task's own spend, then
-   * the same one level further down. `ancestry` stops a loop in the data.
+   * the same one level further down. A nested launcher hangs off the row of
+   * the task during which it was launched — the prompt it follows, paired the
+   * way the spend is. `ancestry` stops a loop in the data.
    */
-  private descendantLines(parentId: string, sessionId: string, rowIds: readonly string[], ancestry: ReadonlySet<string>): SubagentLine[] {
-    const launchers = this.childTranscripts.get(attributionKey(parentId, sessionId))?.launchers ?? [];
-    if (launchers.length === 0 || rowIds.length === 0) return [];
+  private descendantLines(parentId: string, sessionId: string, rows: readonly TaskRow[], ancestry: ReadonlySet<string>): SubagentLine[] {
+    const transcript = this.childTranscripts.get(attributionKey(parentId, sessionId));
+    const launchers = transcript?.launchers ?? [];
+    if (launchers.length === 0 || rows.length === 0) return [];
+    const pairing = pairPrompts(rows, transcript?.prompts ?? []);
     const byChild = new Map<string, Launcher[]>();
     for (const launcher of launchers) {
       if (ancestry.has(launcher.conversationId)) continue;
@@ -1979,16 +1996,17 @@ export class ChatAdapter {
     const lines: SubagentLine[] = [];
     for (const [childId, own] of byChild) {
       const key = attributionKey(sessionId, childId);
-      const folds = foldByTask(own.length, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
+      const tasks: TaskRow[] = own.map(launcher => ({ id: launcher.id, ...(launcher.prompt === undefined ? {} : { prompt: launcher.prompt }) }));
+      const folds = foldByTask(tasks, this.childTranscripts.get(key)?.prompts, this.childUsage.get(key), this.childModels.get(key), this.childPrompts.get(key));
       own.forEach((launcher, index) => lines.push({
         id: launcher.id,
-        parentId: rowIds[Math.min(launcher.promptIndex, rowIds.length - 1)]!,
+        parentId: rows[Math.min(pairing[launcher.promptIndex] ?? launcher.promptIndex, rows.length - 1)]!.id,
         description: launcher.description,
         ...(launcher.subagent === undefined ? {} : { subagent: launcher.subagent }),
         conversationId: childId,
         ...folds[index],
       }));
-      lines.push(...this.descendantLines(sessionId, childId, own.map(launcher => launcher.id), new Set([...ancestry, childId])));
+      lines.push(...this.descendantLines(sessionId, childId, tasks, new Set([...ancestry, childId])));
     }
     return lines;
   }
@@ -2016,7 +2034,7 @@ export class ChatAdapter {
   private launcherRowUpdates(parentId: string, conversationId: string, parent: ConversationProjection): NormalizedProviderUpdate[][] {
     const rows = launcherRows(parent.filter(item => item.type === "tool" && item.childConversationId === conversationId));
     if (rows.length === 0) return [];
-    const attributions = this.rowAttributions(parentId, conversationId, rows.map(row => row.id));
+    const attributions = this.rowAttributions(parentId, conversationId, rows.map(taskRow));
     return rows.flatMap((row, index) => {
       const attribution = attributions[index]!;
       // Nothing new to say: most restatements change nothing until the turn's
@@ -2204,13 +2222,13 @@ export class ChatAdapter {
     // the same child — the k-th row states the k-th task. A page holds only
     // some of them, so the order is taken from the complete transcript where
     // the provider exposes it, and from the page alone only where it does not.
-    const rowsByChild = new Map<string, string[]>();
+    const rowsByChild = new Map<string, TaskRow[]>();
     for (const row of launcherRows([...(complete ?? items)])) {
-      rowsByChild.set(row.childConversationId, [...(rowsByChild.get(row.childConversationId) ?? []), row.id]);
+      rowsByChild.set(row.childConversationId, [...(rowsByChild.get(row.childConversationId) ?? []), taskRow(row)]);
     }
     const attributions = new Map<string, RowAttribution>();
-    for (const [childId, rowIds] of rowsByChild) {
-      this.rowAttributions(id, childId, rowIds).forEach((attribution, index) => attributions.set(rowIds[index]!, attribution));
+    for (const [childId, rows] of rowsByChild) {
+      this.rowAttributions(id, childId, rows).forEach((attribution, index) => attributions.set(rows[index]!.id, attribution));
     }
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index]!;
@@ -2724,8 +2742,14 @@ const ATTRIBUTION_SEPARATOR = "\u0000";
 
 /** Whether any figure in `next` is below the same figure in `previous`. */
 /** A subagent launched by a subagent: a row in the launching subagent's own timeline. */
-type Launcher = { id: string; description: string; subagent?: string; conversationId: string; promptIndex: number };
-type ChildTranscript = { prompts: string[]; launchers: Launcher[] };
+type Launcher = { id: string; description: string; subagent?: string; conversationId: string; promptIndex: number; prompt?: string };
+// A user message in a child session. `text` is what decides whether it is a
+// task's prompt: undefined when never seen, empty for a message that carries
+// none (OpenCode's compaction request, or its synthetic "continue").
+type Prompt = { id: string; text?: string };
+// A row (or nested launcher) that gave a subagent a task, with the prompt it gave.
+type TaskRow = { id: string; prompt?: string };
+type ChildTranscript = { prompts: Prompt[]; launchers: Launcher[] };
 type RowAttribution = { model?: string; usage?: TokenUsage; descendants?: SubagentLine[] };
 type LauncherRow = ToolItem & { childConversationId: string };
 
@@ -2736,24 +2760,36 @@ function launcherRows(items: ConversationItem[]): LauncherRow[] {
     .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }
 
+/** The prompt a task row gave its subagent, where the row still carries its input. */
+function taskPrompt(row: ToolItem): string | undefined {
+  const detail = describeToolDetail(row);
+  return detail.kind === "agent" && detail.prompt !== "" ? detail.prompt : undefined;
+}
+
+function taskRow(row: ToolItem): TaskRow {
+  const prompt = taskPrompt(row);
+  return { id: row.id, ...(prompt === undefined ? {} : { prompt }) };
+}
+
 function launcherOf(row: ToolItem & { childConversationId?: string }, promptIndex: number, known?: Launcher): Launcher {
   const detail = describeToolDetail(row);
   // A restatement that has lost its input says nothing new about the task.
   const description = detail.kind === "agent" ? detail.description : known?.description ?? row.name;
   const subagent = detail.kind === "agent" ? detail.subagent : known?.subagent;
-  return { id: row.id, description, ...(subagent === undefined ? {} : { subagent }), conversationId: row.childConversationId!, promptIndex };
+  const prompt = taskPrompt(row) ?? known?.prompt;
+  return { id: row.id, description, ...(subagent === undefined ? {} : { subagent }), conversationId: row.childConversationId!, promptIndex, ...(prompt === undefined ? {} : { prompt }) };
 }
 
 function sameLauncher(left: Launcher, right: Launcher): boolean {
-  return left.description === right.description && left.subagent === right.subagent && left.conversationId === right.conversationId && left.promptIndex === right.promptIndex;
+  return left.description === right.description && left.subagent === right.subagent && left.conversationId === right.conversationId && left.promptIndex === right.promptIndex && left.prompt === right.prompt;
 }
 
 /** A child's prompts in order and the subagents it launched, each under the prompt it followed. */
 function readChildTranscript(items: readonly ConversationItem[], ancestry: ReadonlySet<string>): ChildTranscript {
-  const prompts: string[] = [];
+  const prompts: Prompt[] = [];
   const launchers: Launcher[] = [];
   for (const item of items) {
-    if (item.type === "user_message") prompts.push(item.id.replace(/^message:/, ""));
+    if (item.type === "user_message") prompts.push({ id: item.id.replace(/^message:/, ""), text: item.text });
     else if (item.type === "tool" && item.childConversationId && !ancestry.has(item.childConversationId)) {
       launchers.push(launcherOf(item, Math.max(0, prompts.length - 1)));
     }
@@ -2762,31 +2798,61 @@ function readChildTranscript(items: readonly ConversationItem[], ancestry: Reado
 }
 
 /**
+ * Which task row each of a child's prompts belongs to. A subagent's session
+ * holds more user messages than the tasks it was given: OpenCode adds a
+ * compaction request and a synthetic "continue" every time a long-running
+ * subagent summarises itself, and someone can type into it. Pairing by
+ * position alone would hand everything after the first such message to the
+ * NEXT task — a compaction during task one billed to task two.
+ *
+ * So a prompt opens the next task row only when it IS that task's prompt: its
+ * text is the prompt the row gave. Any other prompt belongs to the task
+ * before it. A prompt whose text was never seen is taken to be a task's — the
+ * position it would have had. Where nothing can be compared (an agent that
+ * reports no texts, rows that have lost their input) or nothing matched at
+ * all, pairing falls back to position, which is right whenever the counts agree.
+ */
+function pairPrompts(rows: readonly TaskRow[], prompts: readonly Prompt[]): number[] {
+  const positional = prompts.map((_, index) => Math.min(index, rows.length - 1));
+  if (!rows.some(row => row.prompt !== undefined) || !prompts.some(prompt => prompt.text !== undefined)) return positional;
+  let row = -1;
+  const paired = prompts.map(prompt => {
+    const next = rows[row + 1];
+    const opens = next !== undefined && (prompt.text === undefined
+      || (next.prompt === undefined ? prompt.text !== "" : prompt.text.trim() === next.prompt.trim()));
+    if (opens) row += 1;
+    return Math.max(row, 0);
+  });
+  return row < 0 ? positional : paired;
+}
+
+/**
  * A child's tally, split over the rows that launched it. A subagent handed a
- * further task is one session and two rows, with a prompt per task: a message
- * belongs to the row in its prompt's position. Messages that name no prompt
- * belong to the first row (an agent that reports none has one row per child),
- * and a prompt beyond the last row — typed into the child from outside — to
- * the last, so every message is counted on exactly one row and the rows
- * always sum to the session.
+ * further task is one session and several rows: a message belongs to the row
+ * its prompt is paired with (`pairPrompts`). Messages that name no prompt
+ * belong to the first row (an agent that reports none has one row per child).
+ * Every message is counted on exactly one row, so the rows always sum to the
+ * session.
  */
 function foldByTask(
-  rows: number,
-  prompts: readonly string[] | undefined,
+  rows: readonly TaskRow[],
+  prompts: readonly Prompt[] | undefined,
   usage: Map<string, TokenUsage> | undefined,
   models: Map<string, MessageModel> | undefined,
   answered: Map<string, string> | undefined,
 ): Array<{ model?: string; usage?: TokenUsage }> {
-  if (rows === 0) return [];
+  if (rows.length === 0) return [];
+  // Prompts only heard of through a reply are newer than every known one.
   const order = [...(prompts ?? [])];
+  if (answered) for (const promptId of answered.values()) if (!order.some(prompt => prompt.id === promptId)) order.push({ id: promptId });
+  const pairing = pairPrompts(rows, order);
+  const rowOfPrompt = new Map(order.map((prompt, index) => [prompt.id, pairing[index]!]));
   const rowOf = (messageId: string): number => {
     const promptId = answered?.get(messageId);
-    if (promptId === undefined) return 0;
-    if (!order.includes(promptId)) order.push(promptId);
-    return Math.min(order.indexOf(promptId), rows - 1);
+    return promptId === undefined ? 0 : rowOfPrompt.get(promptId) ?? 0;
   };
-  const usageByRow = Array.from({ length: rows }, () => new Map<string, TokenUsage>());
-  const modelsByRow = Array.from({ length: rows }, () => new Map<string, MessageModel>());
+  const usageByRow = rows.map(() => new Map<string, TokenUsage>());
+  const modelsByRow = rows.map(() => new Map<string, MessageModel>());
   if (usage) for (const [messageId, value] of usage) usageByRow[rowOf(messageId)]!.set(messageId, value);
   if (models) for (const [messageId, value] of models) modelsByRow[rowOf(messageId)]!.set(messageId, value);
   return usageByRow.map((byMessage, index) => {

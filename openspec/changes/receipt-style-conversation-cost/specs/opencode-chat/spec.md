@@ -53,6 +53,11 @@ A subagent's timeline row and its row in the composer's subagent list SHALL stat
 - **AND** the two lines together equal what that subagent's session reported, and the total counts it once
 - **AND** this holds while the second task streams and after the conversation is reopened
 
+#### Scenario: Work between two tasks belongs to the task before it
+- **WHEN** a subagent given two tasks summarised its own conversation partway through the first, so that its session holds prompts that are not tasks
+- **THEN** the first task's line includes what the subagent spent summarising and continuing
+- **AND** the second task's line states only what the subagent spent answering the second task
+
 #### Scenario: Nested subagents are listed beneath their launcher
 - **WHEN** a subagent launched a subagent, which launched a further subagent
 - **THEN** each has its own line beneath its launcher's line, visibly subordinate to it
