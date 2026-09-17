@@ -43,7 +43,7 @@ for (const narrow of [false, true]) test.describe(narrow ? "narrow touch" : "des
     // Exercise the same mock mutations used by compact forms, then both actual renderers.
     await page.request.post("/__demo/reset", { form: { scenario: "populated" } });
     const creations: Record<string, string>[] = [
-      { mode: "new", branch: "feature/provenance" },
+      { mode: "new", selection: "local:main", branch: "feature/provenance" },
       { mode: "existing", selection: "remote:origin/feature/search" },
       { mode: "existing", selection: "local:fix/navigation" },
     ];
@@ -212,7 +212,7 @@ for (const narrow of [false, true]) test.describe(narrow ? "narrow touch" : "des
     await page.emulateMedia({ colorScheme: "light" });
     await page.keyboard.press("Escape"); await expect(fork).toBeFocused();
     await page.keyboard.press("Enter"); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter");
-    const dialog = page.getByRole("dialog", { name: "Existing branch", exact: true });
+    const dialog = page.getByRole("dialog", { name: "Existing branch · Atlas", exact: true });
     const search = dialog.getByRole("combobox", { name: "Branch" });
     await expect(search).toBeFocused();
     await expect(dialog.getByRole("option")).toHaveCount(8);
@@ -243,11 +243,12 @@ for (const narrow of [false, true]) test.describe(narrow ? "narrow touch" : "des
     await expect(dialog).toHaveCount(0);
     if (entry === "selector") await page.locator("#hub-toggle").click();
     await fork.click(); await page.getByRole("menuitem", { name: "New branch / worktree" }).click();
-    const newDialog = page.getByRole("dialog", { name: "New branch / worktree", exact: true });
-    await expect(newDialog.locator("input:not([type=hidden])")).toHaveCount(1);
-    await expect(newDialog.getByRole("button")).toHaveCount(2);
+    const newDialog = page.getByRole("dialog", { name: "New branch / worktree · Atlas", exact: true });
+    await expect(newDialog.locator("input:not([type=hidden])")).toHaveCount(2);
+    await expect(newDialog.getByRole("combobox", { name: "Create from", exact: true })).toHaveValue("main");
+    await expect(newDialog.getByRole("button")).toHaveCount(3);
     await newDialog.getByLabel("Name", { exact: true }).fill("feature/cancelled");
-    await captureScreenshot(page, info, `${entry}-one-field-popup`);
+    await captureScreenshot(page, info, `${entry}-name-and-base-popup`);
     await page.keyboard.press("Escape");
     const state = await ledger(page);
     expect(state.rows).toHaveLength(5);
@@ -378,7 +379,7 @@ for (const narrow of [false, true]) test.describe(narrow ? "narrow touch" : "des
     const original = page.url();
     await page.route("**/worktrees/create", route => route.abort());
     await create(page);
-    const dialog = page.getByRole("dialog", { name: "New branch / worktree", exact: true });
+    const dialog = page.getByRole("dialog", { name: "New branch / worktree · Atlas", exact: true });
     await expect(dialog.getByRole("alert")).toBeVisible();
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("feature/checkout");
     await expect(dialog.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
@@ -410,8 +411,7 @@ for (const narrow of [false, true]) test.describe(narrow ? "narrow touch" : "des
     await reset(page, "fetch-auth", "1200");
     await page.getByRole("link", { name: "Create worktree", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("--bad");
-    await page.getByRole("button", { name: "Create", exact: true }).click();
-    await expect(page.getByRole("alert")).toContainText("Invalid branch");
+    await expect(page.getByRole("button", { name: "Create", exact: true })).toBeDisabled();
     await page.getByLabel("Name", { exact: true }).fill("feature/checkout");
     await expect(page.getByLabel("Destination parent")).toHaveCount(0);
     await page.getByRole("button", { name: "Cancel", exact: true }).click();

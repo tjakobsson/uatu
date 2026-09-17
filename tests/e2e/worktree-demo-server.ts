@@ -139,7 +139,7 @@ export function createWorktreeDemo(options: { publicOrigin?: string } = {}) {
     if (request.method === "GET" && path === "/api/hub/credentials") return json({ credentials: [] });
     if (request.method === "GET" && path === "/api/hub/state") return json({ worktreeNavigation: "/worktrees", dashboardWorktreeNavigation: "/hub-worktrees", workspaces: state.rows.filter(row => row.registered).map(row => {
       const policy = state.effective(row);
-      return { id: row.id, displayName: row.name, path: row.path, running: row.running, parentId: row.parentId, repositoryId: row.repositoryId, branch: row.branch, sourceRef: row.sourceRef, ownership: row.ownership, availability: row.availability,
+      return { id: row.id, displayName: row.name, path: row.path, running: row.running, parentId: row.parentId, repositoryId: row.repositoryId, branch: row.branch, detached: row.detached, sourceRef: row.sourceRef, ownership: row.ownership, availability: row.availability,
         credentialAssignments: { authentication: policy.authentication && policy.authentication !== "none" ? [policy.authentication] : [], signing: policy.signing && policy.signing !== "none" ? [policy.signing] : [] },
         ...(row.ownership === "main" ? { createWorktree: `/worktrees?view=create&source=${row.id}` } : {}), policy };
     }) });

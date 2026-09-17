@@ -3,7 +3,7 @@ import { createWorktreeDemo } from "./worktree-demo-server";
 import { WorktreeDemoState, scenarios, validBranch, type Scenario } from "./worktree-demo-state";
 import { DemoWorkspaceContext } from "./worktree-demo-context";
 
-const creation = {mode:"new",branch:"feature/checkout",base:"main · a1b2c3d",parent:"/demo/workspaces",folder:"atlas-checkout",name:"Atlas · Checkout",authentication:"none",signing:"none"};
+const creation = {mode:"new",selection:"local:main",branch:"feature/checkout",base:"main · a1b2c3d",parent:"/demo/workspaces",folder:"atlas-checkout",name:"Atlas · Checkout",authentication:"none",signing:"none"};
 
 describe("isolated worktree adapter",()=>{
   test("layout navigation is read-only and independent main/child lifecycles retain parent policy", async () => {
@@ -30,7 +30,7 @@ describe("isolated worktree adapter",()=>{
     demo.close();
   });
   test("all creation modes return compact completion without starting; retained registration retry keeps identity", async () => {
-    for (const prefix of ["/worktrees", "/hub-worktrees"]) for (const fields of [{ mode: "new", branch: "feature/compact" }, { mode: "existing", selection: "local:fix/navigation" }, { mode: "existing", selection: "remote:origin/feature/search" }]) {
+    for (const prefix of ["/worktrees", "/hub-worktrees"]) for (const fields of [{ mode: "new", selection: "local:main", branch: "feature/compact" }, { mode: "existing", selection: "local:fix/navigation" }, { mode: "existing", selection: "remote:origin/feature/search" }]) {
       const demo = createWorktreeDemo();
       const result = await (await demo.fetch(new Request(`http://127.0.0.1${prefix}/create`, { method: "POST", body: new URLSearchParams(Object.entries(fields)) }))).json();
       expect(result.completion).toMatchObject({ id: "atlas-created-1", source: "atlas", message: `Created ${demo.state.rows.at(-1)!.branch}` });
@@ -40,7 +40,7 @@ describe("isolated worktree adapter",()=>{
     }
     const demo = createWorktreeDemo(); demo.state.reset("registration-failure");
     const post = async (action: string, fields: Record<string, string>) => (await demo.fetch(new Request(`http://127.0.0.1/worktrees/${action}`, { method: "POST", body: new URLSearchParams(fields) }))).json();
-    expect((await post("create", { mode: "new", branch: "feature/retained" })).completion).toBeUndefined();
+    expect((await post("create", { mode: "new", selection: "local:main", branch: "feature/retained" })).completion).toBeUndefined();
     const retained = demo.state.rows.at(-1)!;
     expect(demo.state.message).not.toContain(retained.path);
     expect(demo.state.message).not.toContain(retained.checkout);
@@ -77,7 +77,7 @@ describe("isolated worktree adapter",()=>{
     const state = demo.state;
     const parent = state.rows.find(row => row.id === "beacon")!;
     parent.branch = "release";
-    state.mutate("create", { source: parent.id, mode: "new", branch: "feature/provenance", base: "invented", sourceRef: "invented" });
+    state.mutate("create", { source: parent.id, mode: "new", selection: "local:release", branch: "feature/provenance", base: "invented", sourceRef: "invented" });
     const child = state.rows.at(-1)!;
     expect(child).toMatchObject({ sourceRef: "release", base: "release" });
     parent.branch = "fix/navigation";
@@ -100,7 +100,7 @@ describe("isolated worktree adapter",()=>{
     state.mutate("delete", { id: child.id, confirm: "1" });
     state.mutate("create", { source: "beacon", mode: "existing", selection: "local:feature/provenance" });
     expect(state.rows.at(-1)!.sourceRef).toBe("release");
-    state.mutate("create", { source: "atlas", mode: "new", branch: "feature/provenance" });
+    state.mutate("create", { source: "atlas", mode: "new", selection: "local:main", branch: "feature/provenance" });
     expect(state.rows.at(-1)!.sourceRef).toBe("main");
     const payload = await (await demo.fetch(new Request("http://127.0.0.1/api/hub/state"))).json();
     expect(payload.workspaces.find((row: { id: string }) => row.id === remote.id).sourceRef).toBe("origin/feature/search");
@@ -110,7 +110,7 @@ describe("isolated worktree adapter",()=>{
   test("recorded branch origin survives forget, retry and checkout deletion", () => {
     const state = new WorktreeDemoState();
     state.reset("registration-failure");
-    state.mutate("create", { mode: "new", branch: "feature/recorded" });
+    state.mutate("create", { mode: "new", selection: "local:main", branch: "feature/recorded" });
     const child = state.rows.at(-1)!;
     state.rows[0]!.branch = "release";
     state.mutate("register", { id: child.id });
@@ -123,12 +123,12 @@ describe("isolated worktree adapter",()=>{
     expect(state.rows.at(-1)!.sourceRef).toBe("main");
   });
 
-  test("compact creation fixes source HEAD and combines all local and remote refs without silent reset", () => {
+  test("compact creation validates selected base and combines all local and remote refs without silent reset", () => {
     const state = new WorktreeDemoState();
     const refs = state.presentation("create").refs;
     expect(refs.local.map(([ref]) => ref)).toEqual(expect.arrayContaining(["main", "feature/sidebar", "fix/navigation", "review/accessibility", "release"]));
     expect(refs.remote.map(([ref]) => ref)).toEqual(["origin/feature/search", "origin/release", "upstream/release"]);
-    state.mutate("create", { source: "beacon", mode: "new", branch: "feature/minimal", base: "ignored choice" });
+    state.mutate("create", { source: "beacon", mode: "new", selection: "local:main", branch: "feature/minimal", base: "ignored choice" });
     expect(state.rows.at(-1)).toMatchObject({ parentId: "beacon", branch: "feature/minimal", base: "main", sourceRef: "main", running: false });
     state.mutate("create", { source: "atlas", mode: "existing", selection: "remote:origin/feature/search" });
     expect(state.rows.at(-1)).toMatchObject({ branch: "feature/search", upstream: "origin/feature/search", running: false });

@@ -86,7 +86,7 @@ test("desktop worktree review gallery", async ({ page, browser, demoOrigin }, in
     await page.emulateMedia({ colorScheme: "light" });
     await page.getByRole("menuitem", { name: "New branch / worktree", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("feature/login");
-    await shot(`${entry}-new-name`, `${entry} · one-field new worktree form`, "Name only, Create and Cancel. No destination/base/configuration readouts in the compact form.");
+    await shot(`${entry}-new-name`, `${entry} · Name and Create from`, "Name plus shared editable starting-branch combobox, initial main selection and explicit Fetch. No destination/settings/metadata panels.");
      await page.getByRole("button", { name: "Create", exact: true }).click();
      await created();
      await shot(`${entry}-created-closed`, `${entry} · creation closes the popup`, "Small Created feature/login confirmation with explicit Open. Source stays selected; the new workspace remains stopped and lists refresh without a Details screen.");
@@ -228,6 +228,76 @@ test("desktop worktree review gallery", async ({ page, browser, demoOrigin }, in
   await page.goto("/clone");
   await shot("secondary-entry", "Appendix · secondary onboarding entry");
 
+  // Fresh review findings: target identity in title only; responsive confirmation
+  // with usable touch targets, captured in the actual source workspace.
+  for (const touch of [false, true]) {
+    const context = await browser.newContext({ baseURL: demoOrigin, viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 }, hasTouch: touch, isMobile: touch, colorScheme: "dark" });
+    const review = await context.newPage();
+    await review.request.post("/__demo/reset", { form: { scenario: "populated" } });
+    await review.goto("/s/atlas/");
+    if (touch) await review.getByRole("tab", { name: "Files", exact: true }).click();
+    const forkBeacon = async (mode: string) => {
+      await review.locator("#hub-toggle").click();
+      await review.getByRole("button", { name: "Add worktree to Beacon", exact: true }).click();
+      await review.getByRole("menuitem", { name: mode, exact: true }).click();
+    };
+    await forkBeacon("Existing branch");
+    await expect(review.getByRole("dialog").getByRole("heading")).toHaveText("Existing branch · Beacon");
+    await expect(review.getByRole("option", { name: "origin/feature/search Remote", exact: true })).toBeVisible();
+    await shot(`ux-${touch ? "touch" : "desktop"}-target-title`, "UX review · target parent named in compact title", "Atlas remains the source workspace; the title identifies Beacon as the creation target. No new field or metadata panel.", review, true);
+    await review.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(review.getByRole("dialog")).toHaveCount(0);
+    for (const branch of ["feature/ux-review", "feature/long-branch-name-for-accessibility-and-layout-review"]) {
+      await forkBeacon("New branch / worktree");
+      await review.getByRole("textbox", { name: "Name", exact: true }).fill(branch);
+      await review.getByRole("button", { name: "Create", exact: true }).click();
+      await expect(review.getByRole("dialog")).toHaveCount(0);
+      await expect(review.locator("[data-worktree-confirmation]")).toContainText(branch);
+      await shot(`ux-${touch ? "touch" : "desktop"}-${branch.includes("long-") ? "long" : "short"}-confirmation`, "UX review · responsive creation confirmation", "Source stays Atlas; Beacon child remains stopped. Explicit Open and dismissal remain touch-sized above navigation and the test-only review strip.", review, true);
+      await review.getByRole("button", { name: "Dismiss confirmation", exact: true }).click();
+    }
+    await context.close();
+  }
+
+  for (const touch of [false, true]) {
+    const context = await browser.newContext({ baseURL: demoOrigin, viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 }, hasTouch: touch, isMobile: touch });
+    const review = await context.newPage();
+    const size = touch ? "touch" : "desktop";
+    await review.request.post("/__demo/reset", { form: { scenario: "non-main" } });
+    await review.goto("/");
+    await expect(review.locator('[data-workspace="atlas"] .row-title')).toContainText("feature/current");
+    await shot(`base-${size}-dashboard`, "Current checkout · feature/current", "Repository identity remains Atlas; current checkout is not assumed main and is not child provenance.", review, true);
+    await review.goto("/s/atlas/");
+    if (touch) await review.getByRole("tab", { name: "Files", exact: true }).click();
+    await review.locator("#hub-toggle").click();
+    await expect(review.locator('[data-workspace-id="atlas"] .hub-menu-branch')).toHaveText("feature/current");
+    await shot(`base-${size}-selector`, "Selector · actual parent branch", "Current branch is compact and distinct from repository label and immutable child from-main history.", review, true);
+    await review.getByRole("button", { name: "Add worktree to Atlas", exact: true }).click();
+    await review.getByRole("menuitem", { name: "New branch / worktree", exact: true }).click();
+    await review.getByLabel("Name", { exact: true }).fill("feature/from-choice");
+    const base = review.getByRole("combobox", { name: "Create from", exact: true });
+    await expect(base).toHaveValue("main");
+    await shot(`base-${size}-default`, "New branch · default main, not current checkout", "Local main is preferred. No destination/settings/details.", review, true);
+    await base.click();
+    await shot(`base-${size}-expanded`, "Create from · local and remote choices", "Shared fuzzy/keyboard/touch combobox; a checked-out starting branch is valid for a different new branch.", review, true);
+    await review.getByRole("option", { name: "upstream/release Remote", exact: true }).click();
+    await review.getByRole("button", { name: "Fetch remote branches", exact: true }).click();
+    await expect(base).toHaveValue("upstream/release");
+    await shot(`base-${size}-explicit`, "Explicit remote base survives Fetch", "Create records upstream/release exactly, independently of feature/current. Fetch never redefaults to main.", review, true);
+    await review.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(review.getByRole("dialog")).toHaveCount(0);
+    expect((await review.request.get("/__demo/ledger").then(r => r.json())).rows.at(-1).sourceRef).toBe("upstream/release");
+    for (const scenario of ["remote-main", "ambiguous-main", "no-main"]) {
+      await review.goto("/"); await review.request.post("/__demo/reset", { form: { scenario } }); await review.reload();
+      await review.getByRole("button", { name: "Add worktree to Atlas", exact: true }).click();
+      await review.getByRole("menuitem", { name: "New branch / worktree", exact: true }).click();
+      await review.getByLabel("Name", { exact: true }).fill("feature/main-choice");
+      await expect(base).toHaveValue(scenario === "remote-main" ? "origin/main" : "");
+      await shot(`base-${size}-${scenario}`, `Create from · ${scenario}`, "Only a unique remote main defaults when local main is absent; ambiguity or no main requires an explicit choice.", review, true);
+    }
+    await context.close();
+  }
+
   // Opt-in verification of already-running reviewer endpoints. Never change
   // proxy routes or launch another service. Origins are explicitly supplied by
   // the operator; each endpoint is the same ephemeral mock, reset after review.
@@ -248,7 +318,7 @@ test("desktop worktree review gallery", async ({ page, browser, demoOrigin }, in
       expect((await page.request.get(`${origin}/__demo/ledger`).then(r => r.json())).rows).toEqual(comparisonState.rows);
       await shot(`served-${index}-active-groups`, `Served ${index + 1} · Active groups`, `Actual updated dashboard at ${origin}; main stopped and child running. Selected layout, final UX gate open.`, page, true);
     }
-    await resetServed();
+    await resetServed("non-main");
     await page.goto(`${origin}/s/atlas/`);
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
     const source = page.url();
@@ -256,6 +326,8 @@ test("desktop worktree review gallery", async ({ page, browser, demoOrigin }, in
     await page.getByRole("button", { name: "Add worktree to Atlas", exact: true }).click();
     await page.getByRole("menuitem", { name: "New branch / worktree", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("feature/served-review");
+    await expect(page.getByRole("combobox", { name: "Create from", exact: true })).toHaveValue("main");
+    await shot(`served-${index}-create-from`, `Served ${index + 1} · new starting-branch choice`, "Actual served bundle defaults to local main while parent checkout is feature/current; explicit Fetch and shared combobox.");
     await page.getByRole("button", { name: "Create", exact: true }).click();
     await created(); expect(page.url()).toBe(source);
     const state = await page.request.get(`${origin}/__demo/ledger`).then(response => response.json());

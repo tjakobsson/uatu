@@ -1,11 +1,9 @@
 // Test-only HTTP/state adapter. No filesystem, subprocess, credentials, Git or
 // production service imports. All paths and credential labels are synthetic.
 import type { WorktreePresentation, WorktreeRow } from "../../src/hub/worktree-pages";
+import { validWorktreeBranch } from "../../src/shared/worktree-branches";
 
-export function validBranch(branch: string): boolean {
-  return Boolean(branch) && branch !== "@" && !/^[-/]|[\s\x00-\x1f\x7f~^:?*\\\[]|\.\.|@\{|\/\//.test(branch)
-    && !/[/.]$/.test(branch) && branch.split("/").every(part => !part.startsWith(".") && !part.endsWith(".lock"));
-}
+export const validBranch = validWorktreeBranch;
 export function branchFolder(branch: string): string {
   return branch.replace(/[^a-zA-Z0-9_-]/g, "-").toLowerCase().slice(0, 100) || "branch";
 }
@@ -16,6 +14,7 @@ function suffix(branch: string): string {
 }
 
 export const scenarios = {
+  "non-main": "Main checkout on feature/current", "remote-main": "Only origin/main available", "ambiguous-main": "Multiple remote main branches", "no-main": "No main branch available", "detached": "Detached main checkout", "unknown-branch": "Unknown main checkout branch",
   "mixed-lifecycle": "Mixed repositories · main stopped, child running", "all-stopped": "All checkouts stopped",
   populated: "Populated inventory", empty: "Empty linked inventory", loading: "Loading inventory",
   "branch-conflict": "Branch collision", "path-conflict": "Destination collision", "checked-out": "Branch already checked out",
@@ -71,6 +70,12 @@ export class WorktreeDemoState {
     this.rows.push({ id:"beacon-sidebar", name:"feature/sidebar", path:"/demo/workspaces/beacon.worktrees/feature-sidebar", branch:"feature/sidebar", ownership:"uatu", registered:true, running:false, checkout:"checkout-beacon-sidebar", repositoryId:"repository-beacon", parentId:"beacon", sourceRef:"main" });
     if (scenario === "mixed-lifecycle") { this.rows[0]!.running = false; this.rows[1]!.running = true; this.rows[3]!.running = false; }
     if (scenario === "all-stopped") for (const row of this.rows) row.running = false;
+    if (["non-main", "remote-main", "ambiguous-main", "no-main"].includes(scenario)) this.rows[0]!.branch = "feature/current";
+    if (["remote-main", "ambiguous-main", "no-main"].includes(scenario)) this.repositoryBranches.get("repository-atlas")!.delete("main");
+    if (scenario === "remote-main") this.repositoryRemoteRefs.set("repository-atlas", ["origin/main", "origin/release"]);
+    if (scenario === "ambiguous-main") this.repositoryRemoteRefs.set("repository-atlas", ["origin/main", "upstream/main", "origin/release"]);
+    if (scenario === "detached") { this.rows[0]!.branch = ""; this.rows[0]!.detached = true; }
+    if (scenario === "unknown-branch") this.rows[0]!.branch = "";
     if(scenario === "missing" || scenario === "replaced") this.rows[2]!.availability = scenario;
     if(scenario === "replaced") this.rows[2]!.ownership = "uncertain";
     if(scenario === "stop-failure") this.rows[1]!.running = true;
@@ -89,7 +94,7 @@ export class WorktreeDemoState {
       fresh:this.fresh, draft:this.draft, message:view === "delete" ? this.deletionBlocker() ?? (this.error ? this.message : "") : this.message, error:this.error || (view === "delete" && Boolean(this.deletionBlocker())), conflictId:this.conflictId,
       empty:this.scenario === "empty", loading:this.scenario === "loading", prefix:"/worktrees",
       defaults: { branch:"feature/checkout", parent:"/demo/workspaces", folder:"atlas-checkout", name:"Atlas · Checkout" },
-      refs: { bases:[[source.branch,`${source.branch} (source HEAD)`]], local:[...new Set([...this.repositoryBranches.get(source.repositoryId!) ?? [], ...this.rows.filter(row => row.repositoryId === source.repositoryId).map(row => row.branch), "release"])].map(ref => [ref, ref]), remote:(this.repositoryRemoteRefs.get(source.repositoryId!) ?? []).map(ref => [ref, ref]), freshness:"Cached refs · last fetched 2 days ago · remote may have changed" },
+      refs: { bases:[], local:[...new Set([...this.repositoryBranches.get(source.repositoryId!) ?? [], ...this.rows.filter(row => row.repositoryId === source.repositoryId && !row.detached).map(row => row.branch), "release"])].filter(Boolean).map(ref => [ref, ref]), remote:(this.repositoryRemoteRefs.get(source.repositoryId!) ?? []).map(ref => [ref, ref]), freshness:"Cached refs · last fetched 2 days ago · remote may have changed" },
       credentials:[{id:"demo-auth",label:"Demo HTTPS · ready (synthetic)",purpose:"authentication"},{id:"demo-signing",label:"Demo signing · ready (synthetic)",purpose:"signing"},{id:"locked",label:"Demo locked · unlock required",disabled:true},{id:"disabled",label:"Demo disabled · unavailable",disabled:true}],
     };
   }
@@ -133,7 +138,7 @@ export class WorktreeDemoState {
           this.fail("The selected branch is no longer available. Choose another branch.");
         }
       }
-      this.draft.mode = "existing";
+      this.draft.mode = data.mode === "new" ? "new" : "existing";
       return go("create");
     }
     if(action === "create") {
@@ -143,7 +148,14 @@ export class WorktreeDemoState {
         if ((mode !== "local" && mode !== "remote") || !this.presentation("create", undefined, source.id).refs[mode].some(([value]) => value === ref)) { this.draft = { ...data }; this.fail("Select an available branch."); return go("create"); }
         data = { ...data, mode, [mode]: ref!, branch: mode === "remote" ? ref!.slice(ref!.indexOf("/") + 1) : ref!, cached: "1" };
       }
-      if (data.mode === "new") data = { ...data, base: source.branch };
+      if (data.mode === "new") {
+        const separator = data.selection?.indexOf(":") ?? -1;
+        const kind = data.selection?.slice(0, separator), ref = data.selection?.slice(separator + 1);
+        if ((kind !== "local" && kind !== "remote") || !this.presentation("create", undefined, source.id).refs[kind].some(([value]) => value === ref)) {
+          this.draft = { ...data, selection: "" }; this.fail("Select an available starting branch."); return go("create");
+        }
+        data = { ...data, base: ref! };
+      }
       this.draft = { ...data };
       const branch = data.mode === "local" ? data.local : data.branch;
       let path = `${source.path}.worktrees/${branchFolder(branch ?? "")}`;
@@ -157,7 +169,7 @@ export class WorktreeDemoState {
       if(data.mode === "remote" && (!data.cached || !this.presentation("create", undefined, source.id).refs.remote.some(([value]) => value === data.remote))) { this.fail("Select an available remote branch. No ref was substituted."); return go("create"); }
       const id = `${source.id}-created-${++this.sequence}`;
       const sources = this.branchSources.get(source.repositoryId!)!;
-      const sourceRef = data.mode === "new" ? source.branch : data.mode === "remote" ? data.remote : sources.get(branch);
+      const sourceRef = data.mode === "new" ? data.base : data.mode === "remote" ? data.remote : sources.get(branch);
       const created: WorktreeRow = {id, name:branch, path, branch, parentId:source.id, repositoryId:source.repositoryId, ownership:"uatu", registered:this.scenario !== "registration-failure", running:false,checkout:`checkout-created-${this.sequence}`,base:data.mode === "new" ? data.base : data.mode === "remote" ? (data.remote === "origin/release" ? "d4e5f6a" : "b7c8d9e") : data.local, sourceRef, upstream:data.mode === "remote" ? data.remote : undefined};
       if (sourceRef) sources.set(branch, sourceRef);
       this.rows.push(created); if(!this.branches.includes(branch)) this.branches.push(branch);

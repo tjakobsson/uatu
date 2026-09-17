@@ -8,7 +8,9 @@ worktree-capable dashboard layout, not a product preference. The discarded layou
 and toggle are removed. Scenario controls remain test-only; the selected renderer
 is reusable actual dashboard presentation. Legacy no-capability behavior is unchanged.
 Compact creation/deletion, focused selector, immutable provenance and editable
-branch combobox with explicit fetch remain in place. No real integration is approved.
+branch combobox with explicit fetch remain in place. New creation now has **Name +
+Create from**. The main workspace shows its **actual checkout branch**, not an
+assumed main. No real integration is approved.
 
 ## Review Active groups
 
@@ -37,7 +39,17 @@ the optional proxy; these example URLs are not live reviewer endpoints.
    (Local) or `origin/feature/search` (Remote) fills the input exactly and enables
    Create, on both dashboard and selector. Creation closes with a confirmation;
    only explicit Open starts/navigates. New stopped children appear in the stopped
-   disclosure, not as additional running sessions.
+    disclosure, not as additional running sessions.
+6. In **SIMULATION · scenarios and reset**, choose **Main checkout on
+   feature/current**. Atlas's dashboard checkout row and selector show
+   `feature/current`; children still show their recorded `from main`. Open New:
+   **Create from defaults to main**, not feature/current. Click the field to review
+   all local/remote options without typing, choose `upstream/release`, Fetch, and
+   create a new name. The child records `from upstream/release`, not current HEAD.
+7. Review **Only origin/main available**, **Multiple remote main branches**, and
+   **No main branch available**. Only the first automatically selects origin/main;
+   the latter two require explicit choice. Detached/unknown scenarios label the
+   main checkout truthfully on both surfaces. No default guesses from checkout.
 
 The first four gallery images show mixed and all-stopped states on desktop and
 touch. Later lifecycle captures expand stopped rows where needed. Touch is
@@ -92,8 +104,13 @@ Never use Funnel for this review gallery.
    Details or global worktree button**. Muted `from main`, `from origin/foo` or
    `origin unknown` labels retain immutable provenance without changing names.
 3. **Add worktree to Beacon** targets Beacon even while Atlas is active. Its menu
-   contains only **New branch / worktree** and **Existing branch**. New creation
-   has one Name field and Create/Cancel, based on that parent's simulated HEAD.
+    contains only **New branch / worktree** and **Existing branch**. New creation
+     has Name plus **Create from**, with the same editable fuzzy local/remote
+     combobox and explicit Fetch as Existing. Initial choice prefers local main,
+     then sole remote main; ambiguity or no main requires a choice. Refetch never
+     reapplies defaults. Editing the base or an invalid name disables Create.
+    Both compact creation titles name the selected parent (for example,
+    **Existing branch · Beacon**), even when Atlas is the current workspace.
 4. Existing branch opens cached local/remote refs immediately, without fetching.
    Type `rls` to fuzzy-filter `release`, `origin/release`, `upstream/release`.
    Badges and full refs disambiguate them. Arrows move; Enter or tapping an option
@@ -144,7 +161,8 @@ Never use Funnel for this review gallery.
     without duplicate creation. There is no Worktree ready or automatic Details/
     inventory popup after any successful creation pathway.
 
-No creation popup contains destination/base/configuration/ownership readouts.
+No creation popup contains destination/configuration/ownership or extra metadata.
+Create from is an editable selection, not a guessed or immutable-parent readout.
 Conflicts offer direct existing-checkout Open/Start/registration, never force/reset.
 Source history is explicit fixture history or a creation-time snapshot, not inferred
 from upstream, merge-base or a parent's current policy. Surviving branches retain
@@ -155,7 +173,9 @@ their recorded history when their checkout is removed and recreated.
 | Area | Required review behavior |
 | --- | --- |
 | Selector/dashboard | Two parent groups, exact child branches, muted truthful provenance, parent-only forks, no Details |
-| Compact creation | Name or branch field, fetch icon only for branches, list as needed, Create/Cancel, actionable errors |
+| Compact creation | Name + Create from for New; Branch for Existing; shared combobox/Fetch, list as needed, Create/Cancel, actionable errors |
+| Initial base | Local main preferred despite non-main checkout; sole remote main fallback; ambiguous/none stays unselected |
+| Current checkout | Actual branch in dashboard + selector, distinct repository/provenance; detached/unknown explicit, no guessed main |
 | Combobox | Fuzzy filter, exact selected input, selected highlight, edit invalidation, keyboard/touch, empty state, cancel cleanup |
 | Fetch | Cached immediate list, explicit loading/success/auth/network, query/valid-ref retention, disappearance invalidation |
 | Parent target/policy | Exact selected parent, fixed sibling path, live inherited policy with no child Configure or runtime copying |
@@ -172,15 +192,74 @@ their recorded history when their checkout is removed and recreated.
 
 ## Verification
 
+### Current revision 1.17 — selected base and current checkout (2026-09-17)
+
+Three focused acceptance tests were observed red before implementation (missing
+Create from/defaults, unvalidated base), then green. Main label and base-selection
+browser coverage includes desktop/touch, both entry points, initial local/unique
+remote/ambiguous/absent main, explicit alternate base, name/query preservation,
+Fetch success/auth/network/disappearance, and truthful detached/unknown state.
+Full and dedicated typechecks passed. The complete worktree browser suite passed
+**128 tests in 1.9 minutes**, including all **24 existing UX-review journeys**.
+Old assertions requiring one input or clickable invalid Create were revised to
+the expressly approved behavior; all original safety/navigation coverage remains.
+
+The gallery's new `base-desktop-*` and `base-touch-*` sequences show the actual
+non-main parent on both surfaces, compact default-main form, expanded choices,
+explicit remote base after Fetch, and unique/ambiguous/missing main scenarios.
+The existing focus/title/toast/first-click Cancel fixes are preserved. Final UX
+approval 2.2 stays open; all real integration remains blocked.
+
+### Historical: fresh UX review revision 1.16 (2026-09-17)
+
+Fresh desktop/touch dark-mode journeys found and fixed four issues:
+
+- Dashboard polling replaced focused DOM nodes. Focus now returns by stable
+  disclosure/workspace/repository identity plus action, with `preventScroll`;
+  disclosure counts may change without losing focus. Outside, menu and modal focus
+  remain untouched. Expanded state was already preserved.
+- Cross-parent creation hid the selected repository after closing the selector.
+  The title now names the target; no fields or metadata panels were added.
+- A shrink-to-fit fixed confirmation squeezed a modest branch into four lines on
+  phone. Explicit intrinsic width bounded by 16px viewport gutters fixes this;
+  long refs wrap while Open and dismiss retain 44px touch targets. It clears safe
+  bottom navigation. Test-only chrome reserves its own review-strip clearance.
+- First-click Cancel (and Create after reopening a selected list) moved out from
+  under the pointer when input blur collapsed the branch list. Footer pointer
+  activation now keeps layout stable until click; keyboard blur still collapses.
+
+All four had observed red browser regressions before correction (including the
+count-changing focus case). The last was discovered during the new gallery
+journey, not inferred from a green legacy suite. Fresh journeys additionally
+verified clean/running deletion, cancel/focus restoration, dirty/locked/external-
+activity/failed-stop blockers, same-checkout registration retry, Retry Open,
+duplicate-checkout Start, independent main Stop and missing-path refresh without
+recreation. No additional unresolved material defect was observed in these paths.
+
+Full and dedicated typechecks passed. Targeted unit suite: **161 tests, 1188
+assertions, zero failures**. Complete worktree browser suite: **106 tests passed
+in 2.0 minutes**, including **24 new review regressions/journeys**. Gallery ran
+last: **one passed in 44.8 seconds (45.9 total), 86 images**. Inspected fresh
+desktop/touch target-title and short/long confirmation screenshots.
+
+Existing demo and read-only gallery processes were refreshed with their unchanged
+exact HTTPS origins; no proxy changes. Local/HTTPS dashboard and running-child
+SPA returned 200 with no browser errors; wrong-Origin mutation returned 403.
+Both gallery origins showed 86 images and served the new phone confirmation (200),
+refused POST (405), and returned 404 for unknown paths. Demo is reset to the
+five-row mixed-lifecycle scenario. Initial isolated review output directories
+were removed; current evidence uses normal Playwright output. Gate 2.2 is open.
+
 ```sh
 bun run typecheck
 bunx tsc --noEmit -p tests/e2e/tsconfig.worktree.json
 bun test src/shell/worktree-picker.test.ts tests/e2e/worktree-demo-server.test.ts tests/evidence-discipline.test.ts src/shell/hub-nav.test.ts src/shell/personal-state.test.ts src/shell/live-channel.test.ts src/shared/app-url-discipline.test.ts src/hub/pages.test.ts
-bunx playwright test tests/e2e/worktree-layout.e2e.ts tests/e2e/worktree-demo.e2e.ts tests/e2e/worktree-context.e2e.ts --workers=1
+bun test tests/e2e/worktree-base.test.ts
+bunx playwright test tests/e2e/worktree-layout.e2e.ts tests/e2e/worktree-demo.e2e.ts tests/e2e/worktree-context.e2e.ts tests/e2e/worktree-ux-review.e2e.ts tests/e2e/worktree-base.e2e.ts --workers=4
 git diff --check
 ```
 
-Revision 1.15 verified 2026-09-17: full/dedicated typechecks passed; **161 targeted
+Historical revision 1.15 verified 2026-09-17: full/dedicated typechecks passed; **161 targeted
 tests, 1188 assertions, zero failures**; **82 desktop/touch browser tests passed in
 1.4 minutes** (four workers). Twelve selected-layout regressions cover default
 Active groups, safe old-link handling, independent main/child lifecycle,
@@ -212,23 +291,26 @@ mixed-lifecycle scenario: Atlas main is intentionally stopped, so its direct
 is available at `/s/atlas-sidebar/`; the dashboard links above remain the review entry.
 Runtime PIDs/logs are reported with the handoff, not durable repository config.
 
-Final gallery test passed in **44.5 seconds** (46.1 seconds total), after the complete browser suite:
-**80 screenshots**, including four desktop/touch Active groups scenario images
-and 18 images captured against the actual localhost/tailnet demo. The snapshot
-was restarted; both origins returned the new 80-image index and fresh Active groups
+Historical revision 1.16 gallery passed in **44.8 seconds** (45.9 seconds total), after its complete browser suite:
+**86 screenshots**, including four desktop/touch Active groups scenario images,
+six fresh target-title/confirmation images and 18 images captured against the actual localhost/tailnet demo. The snapshot
+was restarted; both origins returned the new 86-image index and fresh Active groups
 image URLs (200), POST was refused (405), unknown paths returned 404. Gallery
 browser loaded its first Active groups image with zero page errors. Tailscale
 services were not changed. No later Playwright suite has replaced the captures.
 
-All paths below are relative to
+Historical 1.16 paths below are relative to (current gallery numbering differs after image 68)
 `test-results/worktree-gallery.e2e.ts-desktop-worktree-review-gallery/`:
 
 - `01-active-groups-desktop-mixed-lifecycle.png` / `02-active-groups-desktop-all-stopped.png` — desktop states.
 - `03-active-groups-touch-mixed-lifecycle.png` / `04-active-groups-touch-all-stopped.png` — touch-emulated states.
-- `63-served-0-active-groups.png` / `72-served-1-active-groups.png` — actual localhost/tailnet dashboard.
-- `73-served-1-spa-created.png` / `74-served-1-explicit-open.png` / `75-served-1-dashboard-created.png` — compact completion and explicit Open.
-- `76-served-1-phone-delete-populated.png` / `77-served-1-phone-delete-running.png` — exact stopped/running dialogs.
-- `78-served-1-phone-delete-stop-failure.png` / `79-served-1-phone-delete-dirty.png` / `80-served-1-phone-registration-retry.png` — blockers/recovery.
+- `63-ux-desktop-target-title.png` / `66-ux-touch-target-title.png` — target repository in title only.
+- `64-ux-desktop-short-confirmation.png` / `67-ux-touch-short-confirmation.png` — readable short confirmation.
+- `65-ux-desktop-long-confirmation.png` / `68-ux-touch-long-confirmation.png` — long branch wrapping and touch targets.
+- `69-served-0-active-groups.png` / `78-served-1-active-groups.png` — actual localhost/tailnet dashboard.
+- `79-served-1-spa-created.png` / `80-served-1-explicit-open.png` / `81-served-1-dashboard-created.png` — compact completion and explicit Open.
+- `82-served-1-phone-delete-populated.png` / `83-served-1-phone-delete-running.png` — exact stopped/running dialogs.
+- `84-served-1-phone-delete-stop-failure.png` / `85-served-1-phone-delete-dirty.png` / `86-served-1-phone-registration-retry.png` — blockers/recovery.
 
 Inspected desktop mixed, touch mixed/all-stopped, inherited-policy and served
 phone stopped-deletion screenshots. Dialog bounds checks passed without scrolling.

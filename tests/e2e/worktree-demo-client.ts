@@ -78,6 +78,8 @@ window.addEventListener("DOMContentLoaded", () => {
   const chromeStyle = document.createElement("style");
   chromeStyle.textContent = `
     #demo-controls{bottom:0;left:0;right:0;max-width:none;min-height:36px;box-sizing:border-box;border-radius:0;padding:8px 12px}
+    /* Keep the test-only review strip accessible below product confirmations. */
+    [data-worktree-confirmation]{bottom:calc(52px + var(--tab-bar-total,env(safe-area-inset-bottom,0px)))!important}
     html[data-ui-mode="desktop"] .app-shell{height:calc(100dvh - 36px)}
     html[data-ui-mode="touch"] #demo-controls{bottom:var(--tab-bar-total)}
     html[data-ui-mode="touch"][data-active-tab="chat"] .chat-surface,
