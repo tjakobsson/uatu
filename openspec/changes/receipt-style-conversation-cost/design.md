@@ -65,6 +65,8 @@ Within a child session, assistant messages are grouped by the user message they 
 - [Older conversations stored before OpenCode wrote `agent`/`parentID`] → absent agent falls back to "This agent"; absent `parentID` falls back to one group per session attributed to the first row, which is today's figure without the duplication.
 - [Released v0.7.0 shows the duplicated token figure] → this change corrects it; release-note handling is in proposal.md Impact.
 
+- [A stream gap after a tally is squared] → unchanged from before this change: once squared against the store, live events are trusted until an eviction re-arms the read, so a reconnect that drops events under-reports that subagent until then — direct or nested. Nested launchers make it slightly wider: their keys are only read as part of their ancestor's reconstruction, so a launcher that appears after the ancestor was squared (or is merged from live during the ancestor's first read) is never itself squared. Deferred as a follow-up: the narrow fix leaves an ancestor unmarked when a launcher merged from live has an unsquared key of its own; the general one re-squares on stream reconnect, and is the one worth designing. Nesting needs OpenCode's `subagent_depth` raised; the production store holds no nested sessions.
+
 ## Migration Plan
 
 Ships as one change; no stored data to migrate (the receipt is rebuilt from OpenCode's history on open). A revision-19 client against a revision-20 server is caught by the existing build-identity handshake. Rollback is a revert.
