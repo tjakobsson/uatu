@@ -471,6 +471,11 @@ export type WorktreeRegistrar = {
     path: string;
     displayName: string;
     parentWorkspaceId: string;
+    // The VERIFIED Git identity of the tree being registered. The
+    // registration records it, so a later retry recognizes the same
+    // checkout instead of registering a second one, and a path reused by
+    // another tree never inherits the relationship.
+    identity: WorktreeIdentity;
     start: boolean;
   }): Promise<{ workspaceId: string; started: boolean; startError?: string }>;
 };
@@ -536,6 +541,7 @@ export async function registerCreatedWorktree(options: RegisterCreatedWorktreeOp
       path: pending.destination,
       displayName: pending.branch,
       parentWorkspaceId: pending.sourceWorkspaceId,
+      identity: inspection.identity,
       start: options.start === true,
     });
   } catch (error) {

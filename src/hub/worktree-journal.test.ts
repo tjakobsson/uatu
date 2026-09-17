@@ -294,7 +294,10 @@ describe("registration and assignment", () => {
     });
     const result = await registerCreatedWorktree(context);
     expect(result).toEqual({ workspaceId: "atlas-feature-login", started: false });
-    expect(calls).toEqual([{ path: INTENT.destination, displayName: "feature/login", parentWorkspaceId: "atlas", start: false }]);
+    // The VERIFIED identity travels with the registration: it is what the
+    // registrar records as the child's relationship, so a later retry
+    // recognizes the same checkout instead of registering a second one.
+    expect(calls).toEqual([{ path: INTENT.destination, displayName: "feature/login", parentWorkspaceId: "atlas", identity: IDENTITY, start: false }]);
     expect(await context.journal.read()).toBeUndefined();
     expect((await context.provenance.byCheckoutId(IDENTITY.checkoutId))?.branch).toBe("feature/login");
   });

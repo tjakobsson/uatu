@@ -54,6 +54,8 @@ import {
 } from "./proxy";
 import { LiveBroker } from "./live-broker";
 import { NotificationRequestError, type HubNotifications } from "./notifications";
+import { createWorktreeRoutes, type WorktreeStartOutcome } from "./worktree-routes";
+import type { WorktreeService } from "./worktree-service";
 import { LiveEndpoint } from "./live-endpoint";
 import { createHubUpstreamSource } from "./live-source";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
@@ -83,6 +85,9 @@ export type HubDeps = {
   folderManager?: Pick<FolderManager, "create" | "rename" | "remove" | "assertNoPendingMutation">;
   reservations?: PathReservationCoordinator;
   cloneJobs?: CloneJobManager;
+  // The worktree operation service. Absent (tests, the e2e harness) leaves
+  // the worktree routes unmounted rather than half-answering.
+  worktrees?: WorktreeService;
   cloneCredentials?: CloneCredentialResolver;
   credentialApi?: CredentialApiServices;
   gitCommand?: () => string;
@@ -1202,6 +1207,71 @@ export function createHubFetchHandler(deps: HubDeps) {
     });
   };
 
+  // One workspace start, with the recovery fences that must run before a
+  // child can spawn. Shared by POST /api/hub/sessions/<id>/start and the
+  // worktree flow's Open action, so neither of them can drift from the
+  // other's safety checks.
+  const startWorkspaceSession = async (workspaceId: string): Promise<{ ok: true } | { ok: false; response: Response }> => {
+    // A pending onboarding journal can cover a partially configured
+    // registration (an assignment commit whose rollback also failed);
+    // starting it would project the previous or empty assignment set.
+    // Frozen until recovery, like assignment mutations and folder changes.
+    if (deps.onboarding && await deps.onboarding.hasPendingRecovery()) {
+      return { ok: false, response: json(409, { error: "a pending onboarding requires Hub recovery before session starts" }, NO_STORE_HEADERS) };
+    }
+    // A pending folder mutation freezes starts for the mirror-image reason:
+    // a registered rename or removal whose filesystem and registry halves
+    // diverged leaves the registry pointing at the journaled source path.
+    // Starting now either fails against a directory that is gone or — if
+    // something recreated that path — serves the workspace from unrelated
+    // content. Failing closed on an uninspectable journal, as the mutation
+    // routes do.
+    try {
+      await deps.folderManager?.assertNoPendingMutation();
+    } catch (error) {
+      return { ok: false, response: folderError(error) };
+    }
+    try {
+      // Starting is fenced by the folder-mutation journal from inside the
+      // workspace's lifecycle operation (see SessionManager.start): a
+      // journal that outlived its mutation means the registry may still
+      // point at a path recovery has to move or restore, and a child
+      // spawned there would carry this workspace's credentials and personal
+      // identity into unrelated content. The refusal arrives as a
+      // FolderManagerError and answers 409.
+      await sessions.start(workspaceId);
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof FolderManagerError) return { ok: false, response: folderError(error) };
+      return { ok: false, response: json(500, { error: error instanceof Error ? error.message : String(error) }) };
+    }
+  };
+
+  const worktrees = deps.worktrees === undefined ? undefined : createWorktreeRoutes({
+    service: deps.worktrees,
+    registry,
+    async startWorkspace(workspaceId): Promise<WorktreeStartOutcome> {
+      const outcome = await startWorkspaceSession(workspaceId);
+      if (outcome.ok) return { ok: true };
+      const body = await outcome.response.clone().json().catch(() => ({})) as { error?: string };
+      return { ok: false, message: body.error ?? "The workspace could not be started." };
+    },
+    // The live policy the child inherits, read from its parent at render
+    // time rather than stored anywhere per child.
+    credentialSummary(workspaceId) {
+      const state = deps.credentialApi?.metadata.snapshot();
+      const names = new Map(state?.credentials.map(credential => [credential.id, credential.name]));
+      const owned = (state?.assignments ?? []).filter(assignment => assignment.workspaceId === workspaceId);
+      const label = (role: "authentication" | "signing") => {
+        const selected = owned.filter(assignment => assignment.role === role)
+          .map(assignment => names.get(assignment.credentialId))
+          .filter((name): name is string => name !== undefined);
+        return selected.length === 0 ? "none" : selected.join(", ");
+      };
+      return { authentication: label("authentication"), signing: label("signing") };
+    },
+  });
+
   const mutateFolder = async (
     request: Request,
     operation: "create" | "rename" | "remove",
@@ -1485,6 +1555,30 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (pathname === "/settings" && request.method === "GET") {
       return htmlResponse(settingsPage(session.user));
     }
+    // The worktree flow. Its presentation is HTML (a whole page for the
+    // secondary Hub entry, a fragment for the in-workspace picker) and its
+    // operations are form-encoded POSTs answering { redirect, completion? },
+    // which is exactly what the approved picker speaks. Both sit behind the
+    // same gate as the dashboard; the mutations additionally require the
+    // Hub's same-origin check for cookie transports.
+    if (worktrees && pathname === "/worktrees") {
+      if (request.method !== "GET") return json(405, { error: "method not allowed" }, NO_STORE_HEADERS);
+      return worktrees.render(url);
+    }
+    if (worktrees && pathname.startsWith("/worktrees/")) {
+      const operation = pathname.slice("/worktrees/".length);
+      if (operation === "operation") {
+        if (request.method !== "GET") return json(405, { error: "method not allowed" }, NO_STORE_HEADERS);
+        // Scoped to the initiating user: someone else's pending operation is
+        // reported as absent rather than described.
+        return worktrees.operation(session.user);
+      }
+      if (request.method !== "POST") return json(405, { error: "method not allowed" }, NO_STORE_HEADERS);
+      if (!csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      return worktrees.act(request, operation, session.user);
+    }
     if (pathname === "/api/hub/state" && request.method === "GET") {
       return hubState();
     }
@@ -1750,40 +1844,9 @@ export function createHubFetchHandler(deps: HubDeps) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
         }
         if (action[2] === "start") {
-          // A pending onboarding journal can cover a partially configured
-          // registration (an assignment commit whose rollback also
-          // failed); starting it would project the previous or empty
-          // assignment set. Frozen until recovery, like assignment
-          // mutations and folder changes.
-          if (deps.onboarding && await deps.onboarding.hasPendingRecovery()) {
-            return json(409, { error: "a pending onboarding requires Hub recovery before session starts" }, NO_STORE_HEADERS);
-          }
-          // A pending folder mutation freezes starts for the mirror-image
-          // reason: a registered rename or removal whose filesystem and
-          // registry halves diverged leaves the registry pointing at the
-          // journaled source path. Starting now either fails against a
-          // directory that is gone or — if something recreated that path —
-          // serves the workspace from unrelated content. Failing closed on
-          // an uninspectable journal, as the mutation routes do.
-          try {
-            await deps.folderManager?.assertNoPendingMutation();
-          } catch (error) {
-            return folderError(error);
-          }
-          try {
-            // Starting is fenced by the folder-mutation journal from inside
-            // the workspace's lifecycle operation (see SessionManager.start):
-            // a journal that outlived its mutation means the registry may
-            // still point at a path recovery has to move or restore, and a
-            // child spawned there would carry this workspace's credentials
-            // and personal identity into unrelated content. The refusal
-            // arrives as a FolderManagerError and answers 409.
-            await sessions.start(workspaceId);
-            return json(200, { id: workspaceId, running: true });
-          } catch (error) {
-            if (error instanceof FolderManagerError) return folderError(error);
-            return json(500, { error: error instanceof Error ? error.message : String(error) });
-          }
+          const outcome = await startWorkspaceSession(workspaceId);
+          if (!outcome.ok) return outcome.response;
+          return json(200, { id: workspaceId, running: true });
         }
         const stopped = await sessions.stop(workspaceId);
         return json(200, { id: workspaceId, running: false, wasRunning: stopped });

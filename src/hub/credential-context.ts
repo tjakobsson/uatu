@@ -255,14 +255,25 @@ export type StoredCredentialContextResolverOptions = {
   openPgpCredentialUsable: (credentialId: string) => Promise<boolean>;
   tools: ResolvedCredentialContext["tools"];
   runExclusive?: <T>(operation: () => Promise<T>) => Promise<T>;
+  // Which workspace's assignments govern this workspace. A registered
+  // linked worktree names its parent: credentials and shared configuration
+  // are managed only on the parent and inherited LIVE, so a parent change
+  // reaches every child with no per-child assignment to update and no
+  // secret copied anywhere (design §3). Defaults to identity.
+  policyWorkspaceId?: (workspaceId: string) => string;
 };
+
+function policyWorkspace(options: StoredCredentialContextResolverOptions, workspaceId: string): string {
+  return options.policyWorkspaceId?.(workspaceId) ?? workspaceId;
+}
 
 function workspaceState(options: StoredCredentialContextResolverOptions, workspaceId: string): {
   assignments: CredentialAssignment[];
   credentials: Array<SshCredentialRecord | OpenPgpCredentialRecord | TokenCredentialRecord>;
 } {
   const state = options.metadata.snapshot();
-  const assignments = state.assignments.filter(item => item.workspaceId === workspaceId);
+  const owner = policyWorkspace(options, workspaceId);
+  const assignments = state.assignments.filter(item => item.workspaceId === owner);
   const ids = new Set(assignments.map(item => item.credentialId));
   return {
     assignments,
@@ -270,6 +281,9 @@ function workspaceState(options: StoredCredentialContextResolverOptions, workspa
   };
 }
 
+// The revision a running session is compared against. Resolved through the
+// policy owner too, so a parent policy change marks its running children
+// restart-required exactly as it does the parent.
 function contextRevision(options: StoredCredentialContextResolverOptions, workspaceId: string): string {
   const state = workspaceState(options, workspaceId);
   const tokens = state.credentials
