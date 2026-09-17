@@ -1835,15 +1835,25 @@ export class ChatAdapter {
       this.removedChildAttribution.get(key)?.delete(reported.messageId);
     }
     const answered = reported ?? assistantModel;
-    if (answered?.promptId !== undefined) {
+    // Which prompt the message answers: named by the event where it can be.
+    // An event that names none (a record shape with no `parentID`, and a
+    // normalizer whose own memory of the session's prompts began empty — a
+    // restart or reconnect mid-task) answers the newest prompt the child is
+    // known to have received, from the store or live; without this a reused
+    // subagent's new spend would fall to its FIRST task's row. A message that
+    // is already paired keeps its pairing: a restatement of an earlier task's
+    // message must not move to the task running now.
+    const promptId = answered === undefined ? undefined
+      : answered.promptId ?? (this.childPrompts.get(key)?.has(answered.messageId) ? undefined : this.childTranscripts.get(key)?.prompts.at(-1)?.id);
+    if (answered !== undefined && promptId !== undefined) {
       const byMessage = this.childPrompts.get(key) ?? new Map<string, string>();
-      byMessage.set(answered.messageId, answered.promptId);
+      byMessage.set(answered.messageId, promptId);
       this.bankAttribution(this.childPrompts, key, byMessage);
       // A prompt first heard of here is newer than every prompt already
       // known: prompts reach a session one at a time, in order.
       const transcript = this.childTranscripts.get(key) ?? { prompts: [], launchers: [] };
-      if (!transcript.prompts.some(prompt => prompt.id === answered.promptId)) {
-        this.bankAttribution(this.childTranscripts, key, { ...transcript, prompts: [...transcript.prompts, { id: answered.promptId }] });
+      if (!transcript.prompts.some(prompt => prompt.id === promptId)) {
+        this.bankAttribution(this.childTranscripts, key, { ...transcript, prompts: [...transcript.prompts, { id: promptId }] });
       }
     }
     if (removedMessageId !== undefined) {

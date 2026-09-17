@@ -2992,6 +2992,40 @@ describe("pending permission recovery", () => {
     expect(rows.map(row => row.usage?.costUsd)).toEqual([0.5, 0.2]);
   });
 
+  test("after a restart mid-task, a reply that names no prompt answers the newest prompt the store knows", async () => {
+    // The workspace comes up while a reused subagent is on its SECOND task:
+    // the store already holds that task's prompt, the event stream's own
+    // memory of prompts starts empty, and the live record names no `parentID`.
+    // Unpaired, the second task's spend would fall to the first task's row.
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [taskRow("prt_t1", 1, "First task"), taskRow("prt_t2", 5, "Second task", "child", true)] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => (sessionId === "child"
+      ? { items: [prompt("p1", 2), reply("m1", 3, 1_000, 0.5), prompt("p2", 6)] as never[] }
+      : listMessages(sessionId, options));
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const rows = () => rowsOf(adapter.projectionForTests("parent").items());
+    await adapter.history("parent");
+    expect(rows().map(row => row.usage?.costUsd)).toEqual([0.5, undefined]);
+
+    const unnamed = (id: string, input: number, cost: number) => ({
+      id: `e-${id}-${input}`, type: "message.updated",
+      data: { info: { id, sessionID: "child", role: "assistant", modelID: "gpt-5.6-sol", time: { created: 7 }, tokens: { input, output: input / 100 }, cost } },
+    });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push(unnamed("m2", 400, 0.2) as never);
+    await waitUntil(() => rows()[1]?.usage?.input === 400);
+    expect(rows().map(row => row.usage)).toEqual([{ input: 1_000, output: 10, costUsd: 0.5 }, { input: 400, output: 4, costUsd: 0.2 }]);
+    // A restatement of the FIRST task's message, equally unnamed, stays where
+    // the store paired it rather than moving to the task running now.
+    provider.eventQueue.push(unnamed("m1", 1_200, 0.6) as never);
+    await waitUntil(() => rows()[0]?.usage?.input === 1_200);
+    expect(rows().map(row => row.usage?.costUsd)).toEqual([0.6, 0.2]);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("an older page's row keeps its place among all the rows that launched the child", async () => {
     // Paged history returns some of a child's rows at a time. Placed among
     // only the rows on its page, the first task's row would be the only row
