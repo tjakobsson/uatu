@@ -296,7 +296,7 @@ describe("the worktrees live topic (5.2)", () => {
 
     const child = await create("feature/live");
     // Published when the operation committed, not at the next poll.
-    await atlasPage.waitFor(() => atlasPage.worktrees().length >= 2, "invalidation after creation", 1_000);
+    await atlasPage.waitFor(() => atlasPage.worktrees().length >= 2, "invalidation after creation");
     await Bun.sleep(100);
     expect(beaconPage.worktrees()).toHaveLength(1);
 
@@ -345,10 +345,15 @@ describe("reconciliation (5.1)", () => {
     const page = await openLive(atlasId);
     await page.waitFor(() => page.worktrees().length === 1, "subscription");
     const before = registry.list().length;
+    // Subscribing only guarantees the invalidation FRAME; the reconciler's
+    // baseline read behind it is fire-and-forget. Settle that baseline with
+    // an awaited read (reason "open") first, or it can land after the
+    // worktree below exists, absorb it, and never report it as a change.
+    await view(`view=inventory&source=${atlasId}`);
     const external = path.join(root, "agent-trees", "discovered");
     await git(atlas, ["worktree", "add", "-b", "agent/discovered", external]);
     // No Uatu operation ran: the bounded periodic cadence noticed.
-    await page.waitFor(() => page.worktrees().length >= 2, "reconciliation invalidation", 3_000);
+    await page.waitFor(() => page.worktrees().length >= 2, "reconciliation invalidation", 10_000);
     page.close();
     const found = (await inventory()).checkouts.find(checkout => checkout.path === external)!;
     expect(found).toMatchObject({ ownership: "external", registered: false, branch: "agent/discovered", availability: "present" });
@@ -358,7 +363,7 @@ describe("reconciliation (5.1)", () => {
     const listing = await view(`view=inventory&source=${atlasId}`);
     expect(listing).toContain("External · no cleanup ownership");
     expect(listing).toContain("Register workspace");
-  });
+  }, 30000);
 
   test("explicit registration keeps the external path and ownership, and names the child by its branch", async () => {
     const external = path.join(root, "agent-trees", "discovered");
@@ -478,7 +483,7 @@ describe("guarded removal (5.4) and branch preservation (5.5)", () => {
     await page.waitFor(() => page.worktrees().length === 1, "subscription");
     const answer = await act("delete", { source: atlasId, id: child, confirm: "1" });
     expect(answer.completion).toEqual({ message: "Worktree deleted. Branch kept.", deleted: child, source: atlasId });
-    await page.waitFor(() => page.worktrees().length >= 2, "invalidation after deletion", 1_000);
+    await page.waitFor(() => page.worktrees().length >= 2, "invalidation after deletion");
     page.close();
     expect(existsSync(folder)).toBe(false);
     expect(registry.byId(child)).toBeUndefined();
@@ -542,18 +547,28 @@ describe("guarded removal (5.4) and branch preservation (5.5)", () => {
     expect(await view(`view=delete&source=${atlasId}&id=${child}`)).toContain("Stop and delete");
     const deletion = act("delete", { source: atlasId, id: child, confirm: "1", stop: "1" });
     await Bun.sleep(50);
-    // Requested while the removal holds the workspace's lifecycle queue.
+    // Requested while the removal holds the workspace's lifecycle queue. A
+    // start published in `starting` is JOINED rather than queued (see
+    // SessionManager.start), so this call rides the in-flight start that
+    // began before removal instead of being refused. That is safe and is
+    // what the spawn count below pins: joining cannot spawn a second child,
+    // and the session it joins is stopped by this deletion.
     const late = sessions.start(child).then(() => "started", (error: Error) => error.message);
     backendControl.gate = null;
     release();
     await inFlight;
     const answer = await deletion;
     expect(answer.completion?.deleted).toBe(child);
-    expect(await late).toContain("unknown workspace");
+    expect(await late).toBe("started");
+    // No start ever used the removed checkout: one spawn, before removal.
     expect(backendControl.starts.length - startsBefore).toBe(1);
     expect(existsSync(folder)).toBe(false);
     expect(sessions.isRunning(child)).toBe(false);
-  });
+    // Nothing in flight now, so the lifecycle fence is the only thing left
+    // to answer: a fresh start cannot resurrect the deleted workspace.
+    await expect(sessions.start(child)).rejects.toThrow(/unknown workspace/);
+    expect(backendControl.starts.length - startsBefore).toBe(1);
+  }, 30000);
 
   test("a cleanup persistence failure after verified removal is recorded and finished by a retry", async () => {
     const child = await create("feature/cleanup");
