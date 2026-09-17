@@ -11,7 +11,7 @@ import type { ConversationItem } from "../../src/chat/types";
 import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
-import { bootShell, log, shell } from "./chat-shell-helpers";
+import { bootShell, log, openSeeded, seed, shell } from "./chat-shell-helpers";
 
 const PREFIX = process.env.UATU_SHOT_PREFIX ?? "after";
 const BASELINE = PREFIX === "before";
@@ -52,30 +52,6 @@ const shellItems: ConversationItem[] = [
 ];
 
 const shellOutput = "pre.chat-tool-terminal";
-
-async function seed(request: APIRequestContext, title: string, items: ConversationItem[]): Promise<string> {
-  await request.post("/__e2e/reset");
-  const response = await request.post("/__e2e/chat", { data: { action: "seed", title, items } });
-  expect(response.ok()).toBe(true);
-  const seeded = await response.json() as { conversation: { id: string } };
-  const token = await request.get("/__e2e/terminal-token").then(reply => reply.json()) as { token: string };
-  return `${seeded.conversation.id}\u0001${token.token}`;
-}
-
-async function openSeeded(page: Page, seededAndToken: string, touch: boolean): Promise<void> {
-  const [conversationId, token] = seededAndToken.split("\u0001");
-  await page.goto(`/?t=${encodeURIComponent(token!)}`);
-  if (touch) {
-    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
-    await page.locator("#touch-tab-chat").click();
-    await expect(page.locator("#chat-surface")).toBeVisible();
-  } else {
-    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-    await openChatPanel(page);
-  }
-  await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
-  await page.locator("#chat-conversation-select").selectOption(conversationId!);
-}
 
 async function shellScenario(page: Page, request: APIRequestContext, testInfo: TestInfo, theme: "light" | "dark", touch: boolean): Promise<void> {
   const suffix = `${theme}${touch ? "-phone" : ""}`;
@@ -216,7 +192,7 @@ test.describe("shell output reads as the terminal renders it", () => {
 // An OpenCode conversation: priced usage carriers, one per message, on two
 // models, plus a subagent whose child session reported its own price.
 const carrier = (id: string, createdAt: number, modelId: string, input: number, output: number, costUsd: number): ConversationItem => ({
-  id: `usage:${id}`, type: "assistant_message", createdAt, markdown: "", usage: { input, output, cacheRead: 2_000, cacheWrite: 0, costUsd }, model: { providerId: "openai", modelId },
+  id: `usage:${id}`, type: "assistant_message", createdAt, markdown: "", usage: { input, output, cacheRead: 2_000, cacheWrite: 0, costUsd }, model: { providerId: "openai", modelId }, agent: "build",
 });
 const costItems: ConversationItem[] = [
   { id: "message:u1", type: "user_message", createdAt: 1, text: "Review the renderer for double counting." },
@@ -264,21 +240,33 @@ async function costScenario(page: Page, request: APIRequestContext, testInfo: Te
   await expect(page.locator("#chat-plan-readout-head")).toBeHidden();
   await expect(page.locator("#chat-plan-session-title")).toHaveText("This conversation");
   await expect(page.locator("#chat-plan-session-cost")).toHaveText("$1.50");
+  // A receipt: itemized by agent to begin with — the named main agent's own
+  // spend, then the subagent's task with the model it ran — closed by a total.
+  const views = page.locator("#chat-plan-session-views");
+  await expect(views).toBeVisible();
+  await expect(views.getByRole("radio", { name: "Agents" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#chat-plan-session-heading")).toHaveText("Agent");
   const rows = page.locator("#chat-plan-session-models tr");
+  const agents = rows;
   await expect(rows).toHaveCount(2);
-  // The subagent ran GPT-5 too: its $0.25 lands in that model's row.
-  await expect(rows.nth(0).locator("td").first()).toHaveText("GPT-5");
+  await expect(rows.nth(0).locator("td").first()).toContainText("build");
+  await expect(rows.nth(0).locator(".chat-plan-session-agent-model")).toHaveText("GPT-5, Claude Sonnet · main agent");
+  await expect(rows.nth(0).locator("td").last()).toHaveText("$1.25");
+  await expect(rows.nth(1).locator("td").first()).toContainText("explore · Review renderer");
+  await expect(rows.nth(1).locator(".chat-plan-session-agent-model")).toHaveText("GPT-5");
+  await expect(rows.nth(1).locator("td").last()).toHaveText("$0.25");
+  await expect(page.locator("#chat-plan-session-total td").last()).toHaveText("$1.50");
+  // The same total by model. The subagent ran GPT-5 too: its $0.25 lands in that model's row.
+  await views.getByRole("radio", { name: "Models" }).click();
+  await expect(page.locator("#chat-plan-session-heading")).toHaveText("Model");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).locator("td").first()).toContainText("GPT-5");
+  await expect(rows.nth(0).locator(".chat-plan-session-agent-model")).toHaveText("build · explore");
   await expect(rows.nth(0).locator("td").last()).toHaveText("$1.38");
-  await expect(rows.nth(1).locator("td").first()).toHaveText("Claude Sonnet");
+  await expect(rows.nth(1).locator("td").first()).toContainText("Claude Sonnet");
   await expect(rows.nth(1).locator("td").last()).toHaveText("$0.13");
-  // Per agent: the main agent's own spend, then the subagent with its model.
-  const agents = page.locator("#chat-plan-session-agents tr");
-  await expect(agents).toHaveCount(2);
-  await expect(agents.nth(0).locator("td").first()).toHaveText("This agent");
-  await expect(agents.nth(0).locator("td").last()).toHaveText("$1.25");
-  await expect(agents.nth(1).locator("td").first()).toContainText("explore · Review renderer");
-  await expect(agents.nth(1).locator(".chat-plan-session-agent-model")).toHaveText("GPT-5");
-  await expect(agents.nth(1).locator("td").last()).toHaveText("$0.25");
+  await expect(page.locator("#chat-plan-session-total td").last()).toHaveText("$1.50");
+  await views.getByRole("radio", { name: "Agents" }).click();
   await expect(page.locator("#chat-subagents-items")).toContainText("$0.25");
   await captureScreenshot(page, testInfo, `${PREFIX}-readout-desktop`);
   // A label-only correction to the subagent repaints the open table.

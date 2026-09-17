@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage } from "./normalization";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId } from "./normalization";
 import { ConversationReplay } from "../replay";
 import { ProviderTextReconciler } from "../text-reconciler";
 import { ConversationProjection } from "../adapter";
@@ -592,6 +592,65 @@ describe("token usage", () => {
     expect(removed.updates).toContainEqual({ kind: "remove", itemId: "usage:msg" });
     for (const update of removed.updates) projection.apply(update);
     expect(projection.has("usage:msg")).toBe(false);
+  });
+
+  test("a stored assistant message names the prompt it answers where the record does", () => {
+    // Classic records carry `parentID`; the v2 record has no such field, so
+    // its prompt is left for the transcript walk to supply. A record naming
+    // neither prompt nor agent still reports its usage.
+    expect(storedMessageUsage({ info: { id: "msg_c", role: "assistant", parentID: "msg_prompt", agent: "general", tokens: { input: 7 } }, parts: [] }))
+      .toEqual({ messageId: "msg_c", createdAt: 0, usage: { input: 7 }, promptId: "msg_prompt" });
+    expect(storedMessageUsage({ id: "msg_v2", type: "assistant", agent: "general", tokens: { input: 5 } }))
+      .toEqual({ messageId: "msg_v2", createdAt: 0, usage: { input: 5 } });
+    expect(storedMessageUsage({ info: { id: "msg_bare", role: "assistant", tokens: { input: 1 } }, parts: [] }))
+      .toEqual({ messageId: "msg_bare", createdAt: 0, usage: { input: 1 } });
+  });
+
+  test("only a stored user message is a prompt, in either store shape", () => {
+    expect(storedPromptId({ info: { id: "msg_u", role: "user" }, parts: [] })).toBe("msg_u");
+    expect(storedPromptId({ id: "msg_u2", type: "user", text: "hi" })).toBe("msg_u2");
+    expect(storedPromptId({ info: { id: "msg_a", role: "assistant" }, parts: [] })).toBeUndefined();
+    expect(storedPromptId({ id: "msg_s", type: "synthetic", text: "note" })).toBeUndefined();
+  });
+
+  test("a live assistant message reports the prompt it answers, and a restatement keeps it", () => {
+    const memory = createProviderEventMemory();
+    const event = (id: string, tokens: object) => ({ id, type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", parentID: "msg_prompt", modelID: "m", time: { created: 3 }, tokens } } });
+    const first = normalizeProviderEvent(event("1", { input: 10 }), memory);
+    expect(first.assistantUsage).toEqual({ messageId: "msg", usage: { input: 10 }, promptId: "msg_prompt" });
+    expect(first.assistantModel).toEqual({ messageId: "msg", model: "m", createdAt: 3, promptId: "msg_prompt" });
+    const restated = normalizeProviderEvent(event("2", { input: 25 }), memory);
+    expect(restated.assistantUsage).toEqual({ messageId: "msg", usage: { input: 25 }, promptId: "msg_prompt" });
+  });
+
+  test("a live assistant message that names no prompt answers the newest one its session received", () => {
+    const memory = createProviderEventMemory();
+    const user = (id: string, sessionID: string) => ({ id: `u:${id}`, type: "message.updated", data: { info: { id, sessionID, role: "user", time: { created: 1 } } } });
+    const assistant = (id: string, sessionID: string) => ({ id: `a:${id}`, type: "message.updated", data: { info: { id, sessionID, role: "assistant", time: { created: 2 }, tokens: { input: 1 } } } });
+    normalizeProviderEvent(user("prompt_1", "s"), memory);
+    normalizeProviderEvent(user("other_prompt", "elsewhere"), memory);
+    expect(normalizeProviderEvent(assistant("reply_1", "s"), memory).assistantUsage?.promptId).toBe("prompt_1");
+    // A further task given to the same session is a further prompt.
+    normalizeProviderEvent(user("prompt_2", "s"), memory);
+    expect(normalizeProviderEvent(assistant("reply_2", "s"), memory).assistantUsage?.promptId).toBe("prompt_2");
+    // A session that was never seen to receive one names none.
+    expect(normalizeProviderEvent(assistant("reply_x", "unseen"), memory).assistantUsage).toEqual({ messageId: "reply_x", usage: { input: 1 } });
+  });
+
+  test("the usage carrier names the agent that produced the message, live and stored", () => {
+    const memory = createProviderEventMemory();
+    const live = normalizeProviderEvent({ id: "1", type: "message.updated", data: { info: { id: "msg_l", sessionID: "s", role: "assistant", agent: "compaction", time: { created: 3 }, tokens: { input: 9 } } } }, memory);
+    expect(live.updates).toContainEqual({ kind: "upsert", item: expect.objectContaining({ id: "usage:msg_l", agent: "compaction" }) });
+    const classic = normalizeProviderMessage({ info: { id: "msg_c", role: "assistant", agent: "build", tokens: { input: 5 } }, parts: [] });
+    expect(classic.find(item => item.id === "usage:msg_c")).toEqual(expect.objectContaining({ agent: "build" }));
+    // Older classic records named it `mode`.
+    const older = normalizeProviderMessage({ info: { id: "msg_o", role: "assistant", mode: "plan", tokens: { input: 5 } }, parts: [] });
+    expect(older.find(item => item.id === "usage:msg_o")).toEqual(expect.objectContaining({ agent: "plan" }));
+    const v2 = normalizeProviderMessage({ id: "msg_v2", type: "assistant", agent: "build", content: [], tokens: { input: 5 } });
+    expect(v2.find(item => item.id === "usage:msg_v2")).toEqual(expect.objectContaining({ agent: "build" }));
+    // No agent named: the carrier asserts none.
+    const bare = normalizeProviderMessage({ id: "msg_b", type: "assistant", content: [], tokens: { input: 5 } });
+    expect(bare.find(item => item.id === "usage:msg_b")).not.toHaveProperty("agent");
   });
 
   test("a flat v2 stored record names its model as a reference, not a modelID field", () => {

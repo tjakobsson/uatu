@@ -7079,20 +7079,74 @@ html[data-ui-mode="touch"] .chat-plan-pin,
   display: none;
 }
 
-.chat-plan-session-agents {
-  margin-top: 0.5rem;
+/* The title and the itemization control share a line: the control is a view
+   of the block, not a row in it. */
+.chat-plan-session-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.2rem;
 }
 
-.chat-plan-session-agents[hidden] {
+.chat-plan-session-head .chat-plan-session-title {
+  margin: 0;
+}
+
+.chat-plan-session-views[hidden] {
   display: none;
 }
 
-/* A subagent's model, under its label, so the row reads "what ran" without
-   a fifth column the readout has no room for. */
-.chat-plan-session-agents .chat-plan-session-agent-model {
+/* What ran, and what the line is, under its label — so a row says it without
+   a fifth column the readout has no room for. It wraps: "same agent as …"
+   names another task, and clipping it would clip the one thing it says. */
+.chat-plan-session-models .chat-plan-session-agent-model {
   display: block;
   color: var(--text-subtle);
   font-size: 0.85em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.chat-receipt-count {
+  color: var(--text-subtle);
+}
+
+/* A subagent launched by a subagent sits under its launcher, a step in per
+   level, with a guide so the step reads as "launched by" and not as a gap. */
+.chat-receipt-row[data-depth] td:first-child {
+  position: relative;
+}
+
+.chat-receipt-row[data-depth="1"] td:first-child { padding-left: 1rem; }
+.chat-receipt-row[data-depth="2"] td:first-child { padding-left: 2rem; }
+.chat-receipt-row[data-depth="3"] td:first-child { padding-left: 3rem; }
+.chat-receipt-row[data-depth="4"] td:first-child { padding-left: 4rem; }
+
+.chat-receipt-row[data-depth] td:first-child::before {
+  content: "└";
+  position: absolute;
+  margin-left: -0.95rem;
+  color: var(--text-subtle);
+  opacity: 0.7;
+}
+
+/* The total closes the list the way a receipt's does: ruled off, and heavier
+   than the lines it sums. */
+.chat-plan-session-models tfoot[hidden] {
+  display: none;
+}
+
+.chat-plan-session-models .chat-receipt-total th,
+.chat-plan-session-models .chat-receipt-total td {
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border-medium);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.chat-plan-session-models tbody tr:last-child td {
+  padding-bottom: 0.3rem;
 }
 
 /* The Usage pane: the same rows, in the sidebar's type size, with the

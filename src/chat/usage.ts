@@ -33,6 +33,17 @@ export function formatUsd(value: number): string {
   return value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.1 ? 4 : 2 });
 }
 
+/**
+ * Token counts at a glance: `840`, `12.4k`, `1.2M`. The exact figure is always
+ * one hover or one expansion away (the title attribute and the breakdown), so
+ * the compact form never has to be the only statement.
+ */
+export function formatTokens(value: number): string {
+  if (value < 1_000) return String(value);
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
 /** Tokens occupying the model's context window right now. */
 export function contextTokens(usage: TokenUsage): number {
   return (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);

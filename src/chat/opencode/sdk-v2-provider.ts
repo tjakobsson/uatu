@@ -20,7 +20,7 @@ import type {
   ProviderSession,
   StoredMessageAccounting,
 } from "../provider";
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, pendingPermissionFields, storedMessageUsage, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, pendingPermissionFields, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
 import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../types";
 
 type Result<T> = { data?: T; error?: unknown };
@@ -295,10 +295,18 @@ export class SdkV2Provider implements ChatProvider {
     const end = historyPageEnd(options.cursor, version, visible.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const page = visible.slice(start, end);
+    // Each assistant message is paired with the prompt it answers. The classic
+    // record names it; the v2 record does not, so the newest user message
+    // before it in the transcript stands in — walked from the start, because
+    // a page's first assistant message may answer a prompt on an older page.
     const accounting: StoredMessageAccounting[] = [];
-    for (const message of page) {
+    let newestPrompt: string | undefined;
+    for (let index = 0; index < end; index += 1) {
+      const message = visible[index]!;
+      newestPrompt = storedPromptId(message) ?? newestPrompt;
+      if (index < start) continue;
       const reported = storedMessageUsage(message);
-      if (reported) accounting.push(reported);
+      if (reported) accounting.push(reported.promptId === undefined && newestPrompt !== undefined ? { ...reported, promptId: newestPrompt } : reported);
     }
     return {
       items: page.flatMap(message => normalizeProviderMessage(message)),

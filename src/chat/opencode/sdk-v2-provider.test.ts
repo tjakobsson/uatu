@@ -696,6 +696,21 @@ describe("history across both OpenCode message stores", () => {
     expect(page.nextCursor).toBeUndefined();
   });
 
+  test("pairs each assistant message with the prompt it answers, across store shapes and pages", async () => {
+    // One subagent session given two tasks: a prompt per task. The classic
+    // reply names its prompt; the v2 replies name none, so the newest user
+    // message before them stands in — even when it sits on an older page.
+    const reply = (id: string, created: number) => ({ id, type: "assistant", agent: "general", time: { created }, content: [], tokens: { input: created }, cost: 0.01 });
+    const named = { info: { id: "msg_2", role: "assistant", parentID: "msg_1", time: { created: 2 }, tokens: { input: 2 }, cost: 0.01 }, parts: [] };
+    // The fake serves its v2 pages once, so each read gets its own provider.
+    const fresh = () => new SdkV2Provider(client([{ data: [modern("msg_4", 4), reply("msg_5", 5), reply("msg_3", 3)] }], [classic("msg_1", 1), named]), "/workspace");
+    const all = await fresh().listMessages("ses_mixed", { limit: 50 });
+    expect(all.accounting.map(entry => [entry.messageId, entry.promptId])).toEqual([["msg_2", "msg_1"], ["msg_3", "msg_1"], ["msg_5", "msg_4"]]);
+    // The newest page holds only the second task's reply; its prompt is on the page before.
+    const newest = await fresh().listMessages("ses_mixed", { limit: 1 });
+    expect(newest.accounting.map(entry => [entry.messageId, entry.promptId])).toEqual([["msg_5", "msg_4"]]);
+  });
+
   test("merges both stores, deduplicates by id, and orders by creation", async () => {
     const provider = new SdkV2Provider(client([{ data: [modern("msg_new", 3)] }], [classic("msg_old", 1), classic("msg_new", 3)]), "/workspace");
     const page = await provider.listMessages("ses_mixed", { limit: 50 });

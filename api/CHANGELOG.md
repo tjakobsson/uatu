@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 6 / Workspace 20 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- A task `tool` item's `usage` changes meaning. It was the subagent's whole child session, with every subagent beneath it added in; it is now what the subagent spent on the task that row represents — the messages it produced answering that task's prompt — and nothing else. A subagent handed a further task (OpenCode's `task_id` continuation) is one `childConversationId` on several rows: those rows used to restate the session's total, so a sum over rows counted the subagent once per task, and they now state one task each and sum to the session.
+- Task `tool` items gain optional `descendants`: the subagents launched beneath the row, at any depth, as a flat ordered list of `SubagentLine` objects (`id`, `parentId`, `description`, optional `subagent`, `conversationId`, optional `model` and `usage`). Each line's `usage` is that task's own spend, and `parentId` names the row or an earlier line.
+- `assistant_message` usage carriers gain optional `agent`: the agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind).
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 20: `tool` and `assistant_message` items are closed objects, so a revision 19 validator rejects `descendants` and `agent` when present. A consumer that totals a conversation's cost must now add each task row's `descendants[].usage` to the row's own `usage` — subagents launched by subagents are no longer folded into their launcher's figure — and must stop treating rows that share a `childConversationId` as separate subagents: they are one subagent's tasks. With both changes, carriers plus rows plus lines count every priced message exactly once. Group carriers by `agent` to itemize the main agent's spend; treat an absent `agent` as unnamed rather than as a distinct agent.
+
 ## Hub 6 / Workspace 19 - Unreleased
 
 Compatibility: breaking (Hub)

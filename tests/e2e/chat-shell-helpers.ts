@@ -116,3 +116,27 @@ export async function expectBounded(page: Page, view: Locator) {
   expect(rect.y + rect.height).toBeLessThanOrEqual(size.height + 1);
   await expect(view.getByRole("button", { name: "Return to chat" })).toBeInViewport();
 }
+
+export async function seed(request: APIRequestContext, title: string, items: ConversationItem[]): Promise<string> {
+  await request.post("/__e2e/reset");
+  const response = await request.post("/__e2e/chat", { data: { action: "seed", title, items } });
+  expect(response.ok()).toBe(true);
+  const seeded = await response.json() as { conversation: { id: string } };
+  const token = await request.get("/__e2e/terminal-token").then(reply => reply.json()) as { token: string };
+  return `${seeded.conversation.id}\u0001${token.token}`;
+}
+
+export async function openSeeded(page: Page, seededAndToken: string, touch: boolean): Promise<void> {
+  const [conversationId, token] = seededAndToken.split("\u0001");
+  await page.goto(`/?t=${encodeURIComponent(token!)}`);
+  if (touch) {
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-surface")).toBeVisible();
+  } else {
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await openChatPanel(page);
+  }
+  await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
+  await page.locator("#chat-conversation-select").selectOption(conversationId!);
+}

@@ -86,11 +86,11 @@ export type NormalizedProviderEvent = {
   // the envelope rather than on an item: it belongs to the message, and the
   // one thing that needs it — attributing a subagent on its parent's row —
   // reads it from the child's event stream, not from the child's timeline.
-  assistantModel?: { messageId: string; model: string; createdAt: number };
+  assistantModel?: { messageId: string; model: string; createdAt: number; promptId?: string };
   // The tokens a message reported, with the message's own id. A message can
   // produce several parts, so aggregation keys on this id rather than counting
   // the dedicated usage carrier as though it were another content part.
-  assistantUsage?: { messageId: string; usage: TokenUsage };
+  assistantUsage?: { messageId: string; usage: TokenUsage; promptId?: string };
   // A deleted assistant message must also leave any aggregate keyed by its
   // provider id; timeline removes alone cannot reach the adapter's tally.
   removedMessageId?: string;
@@ -109,7 +109,10 @@ export type NormalizedProviderEvent = {
 // message's own provider id — the aggregation input for subagent attribution,
 // which the timeline's usage carriers cannot serve (they are items, not
 // per-message records).
-export type StoredMessageAccounting = { messageId: string; createdAt: number; usage?: TokenUsage; model?: string };
+// `promptId` is the user message an assistant message answers: a subagent
+// given several tasks has one prompt per task, and it is what lets a task's
+// row state that task's spend rather than the whole session's.
+export type StoredMessageAccounting = { messageId: string; createdAt: number; usage?: TokenUsage; model?: string; promptId?: string };
 
 export type ProviderHistoryPage = {
   // Normalized timeline items for this page, in the provider's part order.

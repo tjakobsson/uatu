@@ -13,10 +13,13 @@ type RecordValue = Record<string, unknown>;
 
 export type ProviderEventMemory = {
   roles: Map<string, string>;
+  // The newest user message seen per session: the prompt an assistant message
+  // answers when the event does not name it (the v2 record has no `parentID`).
+  prompts: Map<string, string>;
 };
 
 export function createProviderEventMemory(): ProviderEventMemory {
-  return { roles: new Map() };
+  return { roles: new Map(), prompts: new Map() };
 }
 
 const MEMORY_LIMIT = 2_048;
@@ -66,14 +69,36 @@ export function tokensToUsage(value: unknown, cost?: unknown): TokenUsage | unde
  * for it is gone. Returns nothing for a user message, or for one that reported
  * neither.
  */
-export function storedMessageUsage(value: unknown): { messageId: string; createdAt: number; usage?: TokenUsage; model?: string } | undefined {
+export function storedMessageUsage(value: unknown): { messageId: string; createdAt: number; usage?: TokenUsage; model?: string; promptId?: string } | undefined {
   const { info } = unwrapStoredMessage(value);
   const messageId = optionalString(info.id);
   if (!messageId || (info.role !== "assistant" && info.type !== "assistant")) return undefined;
   const usage = tokensToUsage(info.tokens, info.cost);
   const model = messageModel(info);
   if (usage === undefined && model === undefined) return undefined;
-  return { messageId, createdAt: timestamp(record(info.time).created, 0), ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }) };
+  const promptId = answeredPrompt(info);
+  return { messageId, createdAt: timestamp(record(info.time).created, 0), ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }), ...(promptId === undefined ? {} : { promptId }) };
+}
+
+/**
+ * The id of a stored USER message, or nothing for any other kind. The v2
+ * record names no prompt on an assistant message, so a reader walking the
+ * transcript in order pairs each assistant message with the newest user
+ * message before it; this is how it recognises one.
+ */
+export function storedPromptId(value: unknown): string | undefined {
+  const { info } = unwrapStoredMessage(value);
+  return info.role === "user" || info.type === "user" ? optionalString(info.id) : undefined;
+}
+
+/** The user message an assistant message answers, where the record names it (classic: `parentID`). */
+function answeredPrompt(info: RecordValue): string | undefined {
+  return optionalString(info.parentID ?? info.parentId);
+}
+
+/** The agent that produced a message: `agent` in both stores, `mode` in older classic records. */
+function messageAgent(info: RecordValue): string | undefined {
+  return optionalString(info.agent ?? info.mode);
 }
 
 /**
@@ -226,8 +251,8 @@ function conversationIdOf(value: unknown): string | undefined {
 type KnownEvent = {
   conversationId?: string;
   updates: NormalizedProviderUpdate[];
-  assistantModel?: { messageId: string; model: string; createdAt: number };
-  assistantUsage?: { messageId: string; usage: TokenUsage };
+  assistantModel?: { messageId: string; model: string; createdAt: number; promptId?: string };
+  assistantUsage?: { messageId: string; usage: TokenUsage; promptId?: string };
   removedMessageId?: string;
   configuration?: ConversationConfiguration;
   replaceModel?: boolean;
@@ -516,6 +541,11 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       const messageId = optionalString(info.id);
       const role = optionalString(info.role) ?? optionalString(info.type);
       if (messageId && role && memory) remember(memory.roles, messageId, role);
+      const sessionId = conversationId ?? optionalString(info.sessionID);
+      if (messageId && role === "user" && sessionId && memory) remember(memory.prompts, sessionId, messageId);
+      // Named by the event where it can be (classic `parentID`); otherwise the
+      // newest prompt this session was seen to receive.
+      const promptId = role === "assistant" ? answeredPrompt(info) ?? (sessionId ? memory?.prompts.get(sessionId) : undefined) : undefined;
       const updates: NormalizedProviderUpdate[] = normalizeProviderMessage({ info, parts: [] }, false)
         .map(item => ({ kind: "upsert" as const, item }));
       // A message's tokens are the message's, so they ride one item keyed by
@@ -531,12 +561,12 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       const usage = role === "assistant" ? tokensToUsage(info.tokens, info.cost) : undefined;
       let reported: { messageId: string; usage: TokenUsage } | undefined;
       if (usage && messageId) {
-        reported = { messageId, usage };
-        updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage, messageModelSelection(info)));
+        reported = { messageId, usage, ...(promptId === undefined ? {} : { promptId }) };
+        updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage, messageModelSelection(info), messageAgent(info)));
       }
       const model = role === "assistant" ? messageModel(info) : undefined;
       const assistantModel = model && messageId
-        ? { messageId, model, createdAt: timestamp(record(info.time).created, createdAt) }
+        ? { messageId, model, createdAt: timestamp(record(info.time).created, createdAt), ...(promptId === undefined ? {} : { promptId }) }
         : undefined;
       return {
         conversationId: conversationId ?? optionalString(info.sessionID),
@@ -620,8 +650,8 @@ function configurationFromRecord(value: RecordValue): ConversationConfiguration 
  * merge both the server and client projections apply, keeps the earlier
  * timestamp rather than resorting the timeline as the figure is restated.
  */
-function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage, model?: { providerId: string; modelId: string }): NormalizedProviderUpdate {
-  return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) } };
+function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage, model?: { providerId: string; modelId: string }, agent?: string): NormalizedProviderUpdate {
+  return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}), ...(agent ? { agent } : {}) } };
 }
 
 // V2 user messages echo `files: [{uri, mime, name}]` with the `file:` uri we
@@ -710,7 +740,7 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, cost: info.cost, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model }, id, createdAt, mintUsageCarrier);
+    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, cost: info.cost, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model, agent: info.agent ?? info.mode }, id, createdAt, mintUsageCarrier);
   }
   return [];
 }
@@ -730,7 +760,8 @@ function normalizeAssistant(message: RecordValue, messageId: string, createdAt: 
   const usage = tokensToUsage(message.tokens, message.cost);
   if (usage && mintUsageCarrier) {
     const model = messageModelSelection(message);
-    items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) });
+    const agent = messageAgent(message);
+    items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}), ...(agent ? { agent } : {}) });
   }
   const error = errorMessage(message.error);
   if (error) items.push({ id: `notice:${messageId}:error`, type: "notice", createdAt, level: "error", message: error });

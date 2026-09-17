@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 import type { ChatProjection } from "./projection";
-import { RATE_LIMIT_ITEM_ID, type ConversationItem, type TokenUsage } from "./types";
+import { RATE_LIMIT_ITEM_ID, type ConversationItem, type TokenUsage, type ToolItem } from "./types";
 
 const dom = parseHTML("<!doctype html><html><body><div id=\"items\"></div></body></html>");
 beforeAll(() => {
@@ -1930,6 +1930,28 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(host.querySelector('[data-chat-item-id="tool:ag"] .chat-activity-subject')!.textContent).toBe("explore · Review renderer");
     renderer.render(host, projectionWith([agent({ input: 10, costUsd: 0.13 })]), new Set());
     expect(host.querySelector('[data-chat-item-id="tool:ag"] .chat-activity-subject')!.textContent).toBe("explore · Review renderer · $0.13");
+  });
+
+  test("each task's row states that task's own cost: a reused subagent's rows differ, and a launcher's row leaves out what it launched", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const task = (id: string, description: string, costUsd: number, extra: Partial<ToolItem> = {}): ConversationItem => ({
+      id, type: "tool", createdAt: 1, name: "task", status: "completed", input: JSON.stringify({ description, subagent_type: "general" }), childConversationId: "child", usage: { input: 10, costUsd }, ...extra,
+    });
+    const subject = (id: string) => host.querySelector(`[data-chat-item-id="${id}"] .chat-activity-subject`)!.textContent;
+    renderer.render(host, projectionWith([
+      // One subagent, two tasks: two rows, two figures — neither the agent's total.
+      task("tool:t1", "Summarise README", 0.0113),
+      task("tool:t2", "Shorten README summary", 0.0057),
+      // A subagent that launched its own: the row is its own spend, and the
+      // $0.0255 beneath it is the receipt's to list, not this row's to add.
+      task("tool:t3", "Audit mermaid docs", 0.0116, { childConversationId: "other", descendants: [
+        { id: "tool:g", parentId: "tool:t3", description: "Find mermaid files", subagent: "explore", conversationId: "grandchild", usage: { costUsd: 0.0255 } },
+      ] }),
+    ]), new Set());
+    expect(subject("tool:t1")).toBe("general · Summarise README · $0.0113");
+    expect(subject("tool:t2")).toBe("general · Shorten README summary · $0.0057");
+    expect(subject("tool:t3")).toBe("general · Audit mermaid docs · $0.0116");
   });
 
   test("a control string spanning the running tail's cut does not leak its payload", () => {

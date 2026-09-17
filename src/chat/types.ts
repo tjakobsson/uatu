@@ -278,6 +278,11 @@ export type AssistantMessageItem = TimelineItemBase & {
   // The model that reported this carrier's usage, so a context percentage is
   // measured against that model's window even after another model is selected.
   model?: ModelSelection;
+  // The agent that produced the message, as the provider names it (OpenCode:
+  // `build`, `plan`, `compaction`, a subagent's kind). Rides the usage carrier
+  // so the cost receipt can name the main agent's lines instead of lumping
+  // them as "This agent". Absent where the provider names none.
+  agent?: string;
 };
 
 export type ReasoningItem = TimelineItemBase & {
@@ -291,6 +296,22 @@ export type ReasoningItem = TimelineItemBase & {
   // thinking ("Recalled from memory"): shown as the row's label in place of
   // "Thought". Absent for ordinary reasoning.
   label?: string;
+};
+
+/**
+ * A subagent launched by a subagent, as a line beneath the row that launched
+ * its branch. `id` is the launching row's id in its own conversation and
+ * `parentId` the row or line above it; `usage` is that task's own spend.
+ * Lines sharing a `conversationId` are one subagent given several tasks.
+ */
+export type SubagentLine = {
+  id: string;
+  parentId: string;
+  description: string;
+  subagent?: string;
+  conversationId: string;
+  model?: string;
+  usage?: TokenUsage;
 };
 
 export type ToolItem = TimelineItemBase & {
@@ -311,6 +332,11 @@ export type ToolItem = TimelineItemBase & {
   // row that launched it. Absent until the child has reported something.
   model?: string;
   usage?: TokenUsage;
+  // The subagents launched beneath this row, at any depth, flat with a link to
+  // the row or line that launched each. `usage` above is this task's OWN
+  // spend — nothing below is added into it — so these lines are what makes
+  // the conversation's receipt whole. Absent when the subagent launched none.
+  descendants?: SubagentLine[];
   // How long the tool has been running, from the agent's own progress
   // heartbeat, when it reports one for a tool still producing no output.
   elapsedMs?: number;

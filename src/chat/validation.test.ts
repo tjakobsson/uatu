@@ -232,6 +232,30 @@ describe("chat domain validation", () => {
     })).toThrow(/unknown/);
   });
 
+  test("a subagent row's nested lines parse as a closed tree hanging off the row", () => {
+    const row = { ...items[3], childConversationId: "child" };
+    const line = { id: "tool:g", parentId: row.id, description: "Find files", subagent: "explore", conversationId: "grandchild", model: "gpt-5", usage: { input: 5, costUsd: 0.01 } };
+    const deeper = { id: "tool:gg", parentId: "tool:g", description: "Count lines", conversationId: "great" };
+    expect(parseConversationItem({ ...row, descendants: [line, deeper] })).toBeDefined();
+    // A subagent that launched nothing sends an empty list or none at all,
+    // and a list that shrank simply replaces the longer one.
+    expect(parseConversationItem({ ...row, descendants: [] })).toBeDefined();
+    expect(parseConversationItem({ ...row, descendants: [line] })).toBeDefined();
+    // Closed like the row: no stray keys, and the figures obey the usage rules.
+    expect(() => parseConversationItem({ ...row, descendants: [{ ...line, status: "running" }] })).toThrow(/unknown/);
+    expect(() => parseConversationItem({ ...row, descendants: [{ ...line, usage: { input: -1 } }] })).toThrow(/non-negative/);
+    expect(() => parseConversationItem({ ...row, descendants: [{ ...line, description: "" }] })).toThrow(/description/);
+    expect(() => parseConversationItem({ ...row, descendants: "none" })).toThrow(/array/);
+    // The receipt draws a tree from the links: an orphan, a line ahead of its
+    // parent, a repeated id, or a line naming itself is refused, not drawn.
+    expect(() => parseConversationItem({ ...row, descendants: [{ ...line, parentId: "tool:elsewhere" }] })).toThrow(/parentId/);
+    expect(() => parseConversationItem({ ...row, descendants: [deeper, line] })).toThrow(/parentId/);
+    expect(() => parseConversationItem({ ...row, descendants: [line, { ...deeper, id: "tool:g" }] })).toThrow(/unique/);
+    expect(() => parseConversationItem({ ...row, descendants: [{ ...line, id: row.id }] })).toThrow(/unique/);
+    // Lines belong to tool rows only.
+    expect(() => parseConversationItem({ ...items[1], descendants: [] })).toThrow(/unknown/);
+  });
+
   test("token usage parses on assistant and tool items and stays a closed shape", () => {
     const usage = { input: 12_000, output: 400, reasoning: 90, cacheRead: 8_000, cacheWrite: 512 };
     expect(parseConversationItem({ ...items[1], usage, model: { providerId: "anthropic", modelId: "claude" } })).toBeDefined();
@@ -249,6 +273,12 @@ describe("chat domain validation", () => {
     expect(() => parseConversationItem({ ...items[1], usage: { costUsd: "0.01" } })).toThrow(/non-negative/);
     expect(() => parseConversationItem({ ...items[1], usage: { input: "12000" } })).toThrow(/non-negative/);
     expect(() => parseConversationItem({ ...items[1], usage: { total: 12_400 } })).toThrow(/unknown/);
+    // The carrier may name the agent that produced the message; a name that
+    // is present must be one, and the tool mirror takes no such field.
+    expect(parseConversationItem({ ...items[1], usage, agent: "build" })).toBeDefined();
+    expect(() => parseConversationItem({ ...items[1], usage, agent: "" })).toThrow(/assistant agent/);
+    expect(() => parseConversationItem({ ...items[1], usage, agent: 7 })).toThrow(/assistant agent/);
+    expect(() => parseConversationItem({ ...items[3], agent: "build" })).toThrow(/unknown/);
     expect(() => parseConversationItem({ ...items[1], usage: 12_400 })).toThrow();
     expect(() => parseConversationItem({ ...items[1], model: { providerId: "anthropic" } })).toThrow();
     expect(() => parseConversationItem({ ...items[3], model: 5 })).toThrow();

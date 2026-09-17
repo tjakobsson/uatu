@@ -29,7 +29,8 @@ src/
 │                   receipts/client/validation/timeline-renderer/ui;
 │                   ansi renders tool output as terminal text against the
 │                   terminal's palette; conversation-totals folds priced
-│                   usage carriers into the cost readout);
+│                   usage carriers and task rows into the cost receipt, which
+│                   receipt-view itemizes by agent, type, or model);
 │                   agent-specific stacks below the seam in
 │                   chat/opencode/ (server runtime + SDK v2 provider +
 │                   normalization) and chat/claude/ (probe runtime,

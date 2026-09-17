@@ -227,3 +227,30 @@ describe("sparse user-message updates preserve attachments", () => {
     expect(authoritative.projection.items[0]).toMatchObject({ attachments: replaced });
   });
 });
+
+describe("a subagent row's nested lines", () => {
+  const row = { id: "tool:c", type: "tool" as const, createdAt: 1, name: "task", status: "completed" as const, childConversationId: "child", usage: { input: 10, costUsd: 0.5 } };
+  const line = (id: string, parentId: string, costUsd?: number) => ({ id, parentId, description: id, conversationId: `ses_${id}`, ...(costUsd === undefined ? {} : { usage: { costUsd } }) });
+
+  test("the workspace keeps them through the tool's own updates and replaces them when they change", () => {
+    const projection = new ConversationProjection(new ConversationReplay("g", "c1", 10_000));
+    projection.apply({ kind: "upsert", item: { ...row, descendants: [line("g", "tool:c", 0.25), line("gg", "g", 0.1)] } });
+    // The tool part's own later update knows nothing about attribution.
+    projection.apply({ kind: "upsert", item: { id: "tool:c", type: "tool", createdAt: 1, name: "task", status: "completed", output: "done" } });
+    const kept = projection.items()[0];
+    expect(kept).toEqual(expect.objectContaining({ output: "done", usage: { input: 10, costUsd: 0.5 }, descendants: [line("g", "tool:c", 0.25), line("gg", "g", 0.1)] }));
+    // A list that shrank is the new list, not merged into the old one.
+    projection.apply({ kind: "upsert", item: { ...row, descendants: [line("g", "tool:c", 0.3)] } });
+    expect(projection.items()[0]).toEqual(expect.objectContaining({ descendants: [line("g", "tool:c", 0.3)] }));
+  });
+
+  test("the client takes the published row as it is", () => {
+    const initial = projectionFromSnapshot(snapshot([{ ...row, descendants: [line("g", "tool:c", 0.25), line("gg", "g", 0.1)] }]));
+    const shrunk = applyChatEvent(initial, { generation: "g1", sequence: 5, conversationId: "c1", type: "item.upsert", item: { ...row, descendants: [line("g", "tool:c", 0.25)] } });
+    expect(shrunk.outcome).toBe("applied");
+    expect(shrunk.projection.items[0]).toEqual(expect.objectContaining({ descendants: [line("g", "tool:c", 0.25)] }));
+    // Withdrawn outright: the workspace publishes the row without them.
+    const bare = applyChatEvent(shrunk.projection, { generation: "g1", sequence: 6, conversationId: "c1", type: "item.upsert", item: row });
+    expect(bare.projection.items[0]).not.toHaveProperty("descendants");
+  });
+});

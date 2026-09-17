@@ -434,6 +434,142 @@ describe("chat permission confirmation", () => {
   });
 });
 
+describe("chat cost receipt", () => {
+  test("itemizes three ways, remembers the choice across conversations and a reload, and leaves an agent's own totals alone", async () => {
+    // One storage across two boots: the second boot is the reload.
+    const stored = new Map<string, string>();
+    const storage = {
+      get length() { return stored.size; },
+      clear() { stored.clear(); },
+      getItem: (key: string) => stored.get(key) ?? null,
+      key: (index: number) => [...stored.keys()][index] ?? null,
+      removeItem: (key: string) => { stored.delete(key); },
+      setItem: (key: string, value: string) => { stored.set(key, String(value)); },
+    };
+    const Q = { providerId: "berget", modelId: "qwen" };
+    const carrier = (id: string, costUsd: number, agent: string) => ({ id: `usage:${id}`, type: "assistant_message" as const, createdAt: 1, markdown: "", usage: { input: 1_000, output: 10, costUsd }, model: Q, agent });
+    const task = (id: string, description: string, kind: string, conversationId: string, costUsd: number, descendants?: unknown[]) => ({
+      id, type: "tool" as const, createdAt: 2, name: "task", status: "completed" as const, input: JSON.stringify({ description, subagent_type: kind }),
+      childConversationId: conversationId, model: "qwen", usage: { input: 500, output: 5, costUsd }, ...(descendants ? { descendants } : {}),
+    });
+    const itemsOf: Record<string, unknown[]> = {
+      one: [
+        { id: "message:u", type: "user_message", createdAt: 0, text: "review the docs" },
+        carrier("b", 0.5, "build"),
+        task("tool:a", "Summarise README", "general", "ses_a", 0.2),
+        task("tool:c", "Audit docs", "general", "ses_c", 0.1, [{ id: "tool:g", parentId: "tool:c", description: "Find files", subagent: "explore", conversationId: "ses_g", model: "qwen", usage: { input: 100, output: 1, costUsd: 0.05 } }]),
+        task("tool:a2", "Shorten summary", "general", "ses_a", 0.15),
+      ],
+      two: [{ id: "message:u", type: "user_message", createdAt: 0, text: "hi" }, carrier("p", 2, "plan")],
+      // An agent that tallies the session itself: totals on its report, per model, no receipt.
+      tallied: [
+        { id: "message:u", type: "user_message", createdAt: 0, text: "hi" },
+        { id: "report", type: "context_report", createdAt: 3, total: 10, session: { costUsd: 9, apiDurationMs: 0, durationMs: 0, linesAdded: 0, linesRemoved: 0, models: [
+          { id: "opus", input: 1_000, output: 100, cacheRead: 0, cacheWrite: 0, costUsd: 9 }, { id: "haiku", input: 10, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0 },
+        ] } },
+      ],
+    };
+    const boot = async (tag: string) => {
+      const { document, window } = parseHTML(html);
+      installDomGlobals(document, window);
+      Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+      document.documentElement.setAttribute("data-ui-mode", "desktop");
+      document.documentElement.setAttribute("data-chat-panel", "open");
+      const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+      let selected = "";
+      Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
+      const api = {
+        status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["context", "subagents"] } } }]),
+        conversations: async () => [conversation("one"), conversation("two"), conversation("tallied")],
+        commands: async () => [],
+        snapshot: async (id: string) => ({ ...snapshot(id), items: itemsOf[id] ?? [] }),
+        stream: () => ({ close() {} }),
+        inventoryStream: () => ({ close() {} }),
+        attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+      } as unknown as ChatApiClient;
+      const { initChat } = await import(`./ui.ts?receipt-ui-test-${tag}=${Date.now()}`);
+      initChat(api);
+      const open = async (id: string, cost: string) => {
+        if (selected !== id) { select.value = id; select.dispatchEvent(new Event("change", { bubbles: true })); }
+        await waitUntil(() => document.querySelector("#chat-plan-session-cost")?.textContent === cost, () => `cost ${document.querySelector("#chat-plan-session-cost")?.textContent} for ${id}`);
+      };
+      const views = document.querySelector<HTMLElement>("#chat-plan-session-views")!;
+      return {
+        document, window, open, views,
+        heading: () => document.querySelector("#chat-plan-session-heading")!.textContent,
+        rows: () => [...document.querySelectorAll("#chat-plan-session-models tr")].map(row => [row.querySelector("td")!.firstChild!.textContent === null ? "" : row.querySelector("td")!.textContent, row.querySelector("td:last-child")!.textContent]),
+        total: () => document.querySelector<HTMLElement>("#chat-plan-session-total")!,
+        checked: () => [...views.querySelectorAll<HTMLElement>("[data-receipt-view]")].filter(button => button.getAttribute("aria-checked") === "true").map(button => button.dataset.receiptView),
+        choose: (view: string) => views.querySelector(`[data-receipt-view="${view}"]`)!.dispatchEvent(new Event("click", { bubbles: true })),
+      };
+    };
+
+    const first = await boot("first");
+    try {
+      await first.open("one", "$1.00");
+      // By agent, to begin with: the named main agent, a line per task each
+      // with its own cost, the nested subagent under its launcher.
+      expect(first.heading()).toBe("Agent");
+      expect(first.views.hidden).toBe(false);
+      expect(first.checked()).toEqual(["agents"]);
+      expect(first.rows()).toEqual([
+        ["buildqwen · main agent", "$0.50"],
+        ["general · Summarise READMEqwen", "$0.20"],
+        ["general · Audit docsqwen", "$0.10"],
+        ["explore · Find filesqwen", "$0.05"],
+        ["general · Shorten summaryqwen · same agent as “Summarise README”", "$0.15"],
+      ]);
+      expect(first.total().hidden).toBe(false);
+      expect(first.total().textContent).toContain("Total");
+      expect(first.total().querySelector("td:last-child")!.textContent).toBe("$1.00");
+
+      // By type: two generals (one given two tasks) and one explore.
+      first.choose("types");
+      expect(first.heading()).toBe("Type");
+      expect(first.checked()).toEqual(["types"]);
+      expect(first.rows()).toEqual([["buildqwen · main agent", "$0.50"], ["2 × generalqwen · 3 tasks", "$0.45"], ["1 × exploreqwen", "$0.05"]]);
+      // The arrow keys move the choice, as a radiogroup's do.
+      first.views.dispatchEvent(Object.assign(new Event("keydown", { bubbles: true, cancelable: true }), { key: "ArrowRight" }));
+      expect(first.heading()).toBe("Model");
+      expect(first.rows()).toEqual([["qwenbuild · 2 × general · explore", "$1.00"]]);
+      expect(first.total().querySelector("td:last-child")!.textContent).toBe("$1.00");
+
+      // The choice is the reader's, not the conversation's.
+      await first.open("two", "$2.00");
+      expect(first.heading()).toBe("Model");
+      expect(first.checked()).toEqual(["models"]);
+
+      // An agent that tallies the session itself reports per model only:
+      // nothing to switch between, no total line, its rows as reported.
+      await first.open("tallied", "$9.00");
+      expect(first.views.hidden).toBe(true);
+      expect(first.total().hidden).toBe(true);
+      expect(first.heading()).toBe("Model");
+      expect(first.rows()).toEqual([["opus", "$9.00"], ["haiku", "$0.00"]]);
+      // Back on an itemizable conversation the control returns, still on the reader's choice.
+      await first.open("one", "$1.00");
+      expect(first.views.hidden).toBe(false);
+      expect(first.checked()).toEqual(["models"]);
+      first.choose("types");
+      expect(first.checked()).toEqual(["types"]);
+    } finally {
+      await Bun.sleep(20);
+      first.window.dispatchEvent(new Event("pagehide"));
+    }
+
+    // Reload: a fresh page over the same storage opens on the remembered choice.
+    const second = await boot("second");
+    try {
+      await second.open("one", "$1.00");
+      expect(second.checked()).toEqual(["types"]);
+      expect(second.heading()).toBe("Type");
+    } finally {
+      await Bun.sleep(20);
+      second.window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+});
+
 afterAll(() => {
   for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
 });

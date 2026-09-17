@@ -311,6 +311,32 @@ export function parseQuestionRequest(value: unknown): QuestionRequest {
 }
 
 /**
+ * The subagents launched beneath a row, closed like the row itself. Each line
+ * hangs off the row or off an earlier line — the receipt draws a tree from
+ * these links, so a line pointing nowhere, at itself, or at a later line is
+ * refused rather than drawn as an orphan or a loop.
+ */
+function expectSubagentLines(value: unknown, rowId: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) throw new Error("tool descendants must be an array");
+  const known = new Set<unknown>([rowId]);
+  for (const entry of value) {
+    const line = expectRecord(entry, "subagent line");
+    expectKeys(line, ["id", "parentId", "description", "subagent", "conversationId", "model", "usage"], "subagent line");
+    expectNonEmptyString(line.id, "subagent line id");
+    expectNonEmptyString(line.parentId, "subagent line parentId");
+    expectNonEmptyString(line.description, "subagent line description");
+    expectOptionalString(line.subagent, "subagent line subagent");
+    expectNonEmptyString(line.conversationId, "subagent line conversationId");
+    expectOptionalString(line.model, "subagent line model");
+    expectTokenUsage(line.usage, "subagent line usage");
+    if (known.has(line.id)) throw new Error("subagent line id must be unique");
+    if (!known.has(line.parentId)) throw new Error("subagent line parentId must name the row or an earlier line");
+    known.add(line.id);
+  }
+}
+
+/**
  * Token usage, closed like every other item field. Each component is optional
  * because an agent reports what it measures — but an absent component must
  * stay absent, not arrive as some other type, since the readouts do
@@ -341,11 +367,12 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "user message attachment");
       break;
     case "assistant_message":
-      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model"], type);
+      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model", "agent"], type);
       expectString(record.markdown, "assistant markdown");
       expectOptionalTimestamp(record.completedAt, "completedAt");
       expectTokenUsage(record.usage, "assistant usage");
       if (record.model !== undefined) expectModelSelection(record.model);
+      if (record.agent !== undefined) expectNonEmptyString(record.agent, "assistant agent");
       break;
     case "reasoning":
       expectKeys(record, ["id", "type", "createdAt", "text", "status", "durationMs", "label"], type);
@@ -356,7 +383,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.label !== undefined) expectNonEmptyString(record.label, "reasoning label");
       break;
     case "tool":
-      expectKeys(record, ["id", "type", "createdAt", "name", "status", "completedAt", "input", "output", "error", "childConversationId", "model", "usage", "elapsedMs"], type);
+      expectKeys(record, ["id", "type", "createdAt", "name", "status", "completedAt", "input", "output", "error", "childConversationId", "model", "usage", "descendants", "elapsedMs"], type);
       expectOptionalTimestamp(record.completedAt, "completedAt");
       expectNonEmptyString(record.name, "tool name");
       parseActivityStatus(record.status);
@@ -366,6 +393,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalString(record.childConversationId, "tool child conversation id");
       expectOptionalString(record.model, "tool model");
       expectTokenUsage(record.usage, "tool usage");
+      expectSubagentLines(record.descendants, record.id);
       expectOptionalTimestamp(record.elapsedMs, "tool elapsedMs");
       break;
     case "command":

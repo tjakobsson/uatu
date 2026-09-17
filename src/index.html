@@ -895,23 +895,27 @@
                     <p id="chat-plan-readout-standing" class="chat-plan-standing" hidden></p>
                     <div id="chat-plan-readout-rows" class="plan-rows"></div>
                     <section id="chat-plan-readout-session" class="chat-plan-session" aria-label="This conversation" hidden>
-                      <h3 id="chat-plan-session-title" class="chat-plan-session-title">This conversation</h3>
+                      <div class="chat-plan-session-head">
+                        <h3 id="chat-plan-session-title" class="chat-plan-session-title">This conversation</h3>
+                        <!-- One receipt, itemized three ways: the same total
+                             by agent, by kind of agent, or by model. Only
+                             where the cost is itemizable per agent — an agent
+                             that tallies the session itself reports per model
+                             alone, and has nothing to switch between. -->
+                        <div id="chat-plan-session-views" class="files-pane-filter chat-plan-session-views" role="radiogroup" aria-label="Itemize by" hidden>
+                          <button class="files-pane-filter-segment is-active" type="button" role="radio" aria-checked="true" data-receipt-view="agents" title="One line per agent and task">Agents</button>
+                          <button class="files-pane-filter-segment" type="button" role="radio" aria-checked="false" tabindex="-1" data-receipt-view="types" title="One line per kind of agent">Types</button>
+                          <button class="files-pane-filter-segment" type="button" role="radio" aria-checked="false" tabindex="-1" data-receipt-view="models" title="One line per model">Models</button>
+                        </div>
+                      </div>
                       <p id="chat-plan-session-cost" class="chat-plan-session-cost"></p>
                       <table class="chat-plan-session-models">
                         <thead>
-                          <tr><th scope="col">Model</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cost</th></tr>
+                          <tr><th id="chat-plan-session-heading" scope="col">Model</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cost</th></tr>
                         </thead>
                         <tbody id="chat-plan-session-models"></tbody>
-                      </table>
-                      <!-- Per agent: the main agent's own spend and each
-                           subagent's, from the row that launched it. Only
-                           when the conversation launched subagents; alone,
-                           the main agent's row would restate the total. -->
-                      <table class="chat-plan-session-models chat-plan-session-agents" hidden>
-                        <thead>
-                          <tr><th scope="col">Agent</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cost</th></tr>
-                        </thead>
-                        <tbody id="chat-plan-session-agents"></tbody>
+                        <!-- What the lines above sum to. -->
+                        <tfoot id="chat-plan-session-total" hidden></tfoot>
                       </table>
                     </section>
                   </div>
