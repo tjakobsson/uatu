@@ -291,6 +291,10 @@ export class ChatAdapter {
   // launcher belongs to the prompt it follows. Same key and lifetime as the
   // tallies, so an eviction re-arms the stored read for all of them together.
   private readonly childTranscripts = new Map<string, ChildTranscript>();
+  // Launchers removed before the tally was squared against the store. A
+  // stored read in flight would otherwise hand the removed launcher back and
+  // bank it — the same race `removedChildAttribution` closes for messages.
+  private readonly removedLaunchers = new Map<string, Set<string>>();
   // Deletions that race a stored-history reconstruction must win over that
   // stale read just as newer live usage does.
   private readonly removedChildAttribution = new Map<string, Set<string>>();
@@ -1381,6 +1385,7 @@ export class ChatAdapter {
     this.childModels.delete(key);
     this.childPrompts.delete(key);
     this.childTranscripts.delete(key);
+    this.removedLaunchers.delete(key);
     this.removedChildAttribution.delete(key);
     this.attributionArrivals.delete(key);
     this.completeAttributions.delete(key);
@@ -1738,6 +1743,10 @@ export class ChatAdapter {
       for (const promptId of liveTranscript.prompts) if (!transcript.prompts.includes(promptId)) transcript.prompts.push(promptId);
       for (const launcher of liveTranscript.launchers) if (!transcript.launchers.some(known => known.id === launcher.id)) transcript.launchers.push(launcher);
     }
+    // A launcher removed while this read was in flight is newer than the
+    // transcript it returned, and must not come back with it.
+    const removedLaunchers = this.removedLaunchers.get(key);
+    if (removedLaunchers) transcript.launchers = transcript.launchers.filter(launcher => !removedLaunchers.has(launcher.id));
     const removed = this.removedChildAttribution.get(key);
     if (removed) for (const messageId of removed) {
       byMessage.delete(messageId);
@@ -1752,6 +1761,7 @@ export class ChatAdapter {
     // Squared against the store from here on; only an eviction re-arms the read.
     this.completeAttributions.add(key);
     this.removedChildAttribution.delete(key);
+    this.removedLaunchers.delete(key);
     if (this.completeAttributions.size > MAX_CHILD_ATTRIBUTIONS) {
       this.completeAttributions.delete(this.completeAttributions.values().next().value!);
     }
@@ -1903,6 +1913,15 @@ export class ChatAdapter {
     const transcript = this.childTranscripts.get(key) ?? { prompts: [], launchers: [] };
     const launchers = transcript.launchers.filter(launcher => !removed.has(launcher.id));
     let changed = launchers.length !== transcript.launchers.length;
+    // Not yet squared against the store: a read may be in flight, or still to
+    // come, holding the launcher this removal names — even when no record of
+    // it exists here yet. Remember the removal so that read cannot bank it.
+    if (removed.size > 0 && !this.completeAttributions.has(key)) {
+      const tombstones = this.removedLaunchers.get(key) ?? new Set<string>();
+      for (const id of removed) tombstones.add(id);
+      this.bankAttribution(this.removedLaunchers, key, tombstones);
+    }
+    for (const row of rows) this.removedLaunchers.get(key)?.delete(row.id);
     for (const row of rows) {
       const known = launchers.findIndex(launcher => launcher.id === row.id);
       // The prompt being answered when the launcher first appeared is the
@@ -2430,6 +2449,7 @@ export class ChatAdapter {
       forgetAttributions(this.childModels, candidateId);
       forgetAttributions(this.childPrompts, candidateId);
       forgetAttributions(this.childTranscripts, candidateId);
+      forgetAttributions(this.removedLaunchers, candidateId);
       forgetAttributions(this.removedChildAttribution, candidateId);
       forgetAttributions(this.completeAttributions, candidateId);
     }

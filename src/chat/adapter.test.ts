@@ -3010,6 +3010,43 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("a nested launcher removed while its ancestor's stored read is in flight is not banked from that read", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }, { ...fixtureSession("grandchild"), parentId: "child" }];
+    provider.pages.set("first", { items: [taskRow("prt_c", 1, "Audit docs")] });
+    let releaseChild = () => {};
+    const gate = new Promise<void>(resolve => { releaseChild = resolve; });
+    let childReads = 0;
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => {
+      if (sessionId === "child") {
+        childReads += 1;
+        // The store as it was when the read began: the nested launcher is still in it.
+        const stale = { items: [prompt("pc", 2), taskRow("prt_g", 3, "Find files", "grandchild"), reply("mc", 4, 100, 0.5)] as never[] };
+        await gate;
+        return stale;
+      }
+      if (sessionId === "grandchild") return { items: [prompt("pg", 4), reply("mg", 5, 100, 0.25)] as never[] };
+      return listMessages(sessionId, options);
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    const opening = adapter.history("parent");
+    await waitUntil(() => childReads === 1);
+    // The removal lands mid-read, when no launcher record exists to edit yet.
+    provider.eventQueue.push({ id: "e-unlaunch", type: "message.part.removed", properties: { sessionID: "child", messageID: "mc", partID: "prt_g" } } as never);
+    await Bun.sleep(20);
+    releaseChild();
+    const opened = rowsOf((await opening).items)[0];
+    expect(opened?.usage?.costUsd).toBe(0.5);
+    expect(opened).not.toHaveProperty("descendants");
+    // Squared without it: a reopen reads nothing more and lists nothing more.
+    expect(rowsOf((await adapter.history("parent")).items)[0]).not.toHaveProperty("descendants");
+    expect(childReads).toBe(1);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("a figure seen live before a read does not overwrite what the store says now", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
