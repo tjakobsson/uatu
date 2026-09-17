@@ -48,7 +48,7 @@ Alternative provider delegation was rejected because hooks/experimental APIs dif
 
 ### 3. Creation and credential semantics
 
-Both parent fork icons open a small two-option dropdown: **New branch / worktree** and **Existing branch**. New opens only a title, Name field and Create/Cancel; source HEAD is predetermined. Existing is a true editable accessible combobox combining local and remote branches with badges and remote-qualified names. Typing fuzzy-filters; click/Enter commits the exact displayed ref into the field, confirms/highlights selection and collapses the list. Editing always clears the underlying choice and disables Create until a valid option is picked again. Reopening a committed field offers all refs, not a list accidentally filtered to that value. Arrows navigate, Enter selects rather than submits, Escape closes the list before the dialog, and blur/click-away closes the list. Touch uses the same options. Cancel/reopen starts without an old hidden choice. No base, destination, configuration, ownership or informational readouts belong in either popup. Conflicts offer direct Open/Start/registration actions.
+Both parent fork icons open a small two-option dropdown: **New branch / worktree** and **Existing branch**. Titles name the selected parent. New contains Name and **Create from**, then Create/Cancel; Existing contains Branch and Create/Cancel. Both share one editable accessible combobox/controller combining local and remote branches with badges and qualified names. New's initial base prefers local `main`, else the sole remote named `main`; ambiguous/missing mains leave it unselected. Current checkout never controls that default. Defaulting occurs only on initial opening, never on submitted draft/refetch. Typing fuzzy-filters; click/Enter commits the exact ref, confirms/highlights selection and collapses the list. Editing clears the choice and disables Create until another valid option is picked. Create also requires a valid new name and no pending operation. Reopening offers all refs. Arrows navigate, Enter selects rather than submits, Escape closes list before dialog, blur/click-away closes list, and first-click Cancel/Create stays stable. Cancel/reopen removes old drafts and reapplies initial rules. No destination, configuration, ownership or extra metadata belongs in either popup. A checked-out base is valid for a new branch; occupancy/conflicts apply to the target branch and offer direct Open/Start/registration.
 
 The child workspace name is its exact current local branch, including slashes; no independent child display-name form or branch rename is offered. Existing-local mode never resets a branch. Remote selection derives the local tracking name by removing the remote prefix; an existing local name conflicts rather than resets. A small icon beside the branch field is labeled and titled **Fetch remote branches**. Cached options are immediate; opening never triggers a fetch. Explicit fetch uses parent policy, reports loading and inline auth/network errors, preserves query and a still-valid choice, and clears selection if the ref disappears. No duplicate fetch control is on the dashboard. Selecting a cached remote does not claim network freshness. Revalidate refs and occupancy in the exact selected repository.
 
@@ -60,11 +60,11 @@ Credential assignments and shared workspace configuration belong only to the exp
 
 Nested children in the actual workspace selector and original-style dashboard
 show a small muted `from main`, `from origin/foo`, or `origin unknown` label,
-keeping the exact current branch primary. Compact menus/popups are unchanged.
+keeping the exact current branch primary.
 The optional `sourceRef` presentation field is an immutable branch-creation
 snapshot, separate from `upstream`, checkout starting revision and live parent
-configuration. New branch creation records the selected parent's current
-simulated HEAD ref, never a hardcoded `main`; a newly created tracking branch
+configuration. New branch creation validates and records the exact selected
+starting ref, independent of the parent's current checkout; a newly created tracking branch
 records the selected remote-qualified ref. Explicit synthetic fixture history and
 the in-memory repository/branch history retain known origins across checkout
 removal/recreation while the branch survives. Existing-local branches and
@@ -83,7 +83,7 @@ Expose bounded operation progress and sanitized errors. After Git creates a chec
 
 #### Selected Active groups dashboard; independent lifecycle
 
-The repository heading owns parent configuration, rename and fork controls, not a runtime session. Its main checkout has its own row, actual branch label and explicit Main checkout identity. Stopping main stops only main; a child may start while main remains stopped. Parent policy ownership is independent of runtime availability.
+The repository heading owns parent configuration, rename and fork controls, not a runtime session. Its main checkout has its own row, actual branch label and explicit Main checkout identity. The selector also shows that current branch compactly beside repository identity. Detached HEAD and Branch unknown are explicit, never guessed main. Refresh reflects a changed checkout branch without rewriting any child's immutable sourceRef. Stopping main stops only main; a child may start while main remains stopped. Parent policy ownership is independent of runtime availability.
 
 The user selected **A · Active groups** on 2026-09-17 ("Lets go on A"). It is the sole worktree-capable dashboard layout, not a preference. The alternate renderer and layout toggle are removed. Old layout query links safely resolve to Active groups; mock URLs canonicalize without resetting state. Scenario controls remain test-only. The selected renderer belongs to reusable actual dashboard presentation, not a permanent test-only override.
 

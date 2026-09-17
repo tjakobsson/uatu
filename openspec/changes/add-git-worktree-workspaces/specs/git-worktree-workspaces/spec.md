@@ -26,9 +26,9 @@ The worktree experience SHALL first be presented as a resettable mock-backed pro
 - **THEN** implementation pauses before real Git/backend, CLI, and provider-skill integration
 
 ### Requirement: Creation supports explicit branch modes without force
-The Hub SHALL create an ordinary linked worktree from a selected repository using either a new local branch from source HEAD, an existing local branch, or a new local tracking branch from an explicitly selected remote ref. It SHALL validate paths, refs, names, availability and occupancy without replacing content or resetting branches. It MUST NOT force a checked-out branch into another checkout. The branch popup SHALL show cached refs immediately with no automatic network call, and an adjacent icon labeled/titled Fetch remote branches SHALL explicitly refresh them. Loading and auth/network errors SHALL be inline. Fetch SHALL preserve query and a valid selected ref, clearing a disappeared selection without silent substitution or false freshness. No dashboard fetch duplicate SHALL exist.
+The Hub SHALL create an ordinary linked worktree from a selected repository using either a new local branch from an explicitly selected starting branch, an existing local branch, or a new local tracking branch from an explicitly selected remote ref. It SHALL validate paths, refs, names, availability and occupancy without replacing content or resetting branches. It MUST NOT force a checked-out target branch into another checkout; a checked-out starting branch SHALL remain a valid base for a different new branch. Both branch comboboxes SHALL show cached refs with no automatic network call and adjacent Fetch remote branches. Loading/errors SHALL be inline. Fetch SHALL preserve name/query/valid selection, invalidate disappeared refs, and MUST NOT reapply initial defaults or silently substitute refs.
 
-Each parent fork SHALL open a two-option menu: New branch / worktree and Existing branch. New creation SHALL show title, name and Create/Cancel only. Existing creation SHALL use an accessible editable combobox with fuzzy filtering, local/remote badges, qualified refs, keyboard/touch and empty results. Click/Enter SHALL commit the exact displayed ref into the input and confirm selection; Enter MUST NOT submit. Editing SHALL clear the underlying selection and disable Create until another valid option is picked. Reopening a committed input SHALL offer all refs rather than filter to the selection. Escape SHALL close the list before dismissing the popup; blur/click-away SHALL close the list. Cancel/reopen SHALL not retain a stale choice. Apart from the adjacent explicit fetch icon, necessary list and actionable errors, popups SHALL contain only the field and Create/Cancel, with no predetermined path/configuration/ownership/base readouts.
+Each parent fork SHALL open a two-option menu: New branch / worktree and Existing branch. New creation SHALL show target title, Name, Create from and Create/Cancel. Create from and Existing's Branch SHALL share the accessible editable fuzzy local/remote combobox semantics, badges, qualified refs, keyboard/touch and empty results. Initial Create from SHALL prefer local main, otherwise select the sole remote named main; ambiguous or absent mains SHALL require explicit choice, never fallback to current HEAD. Click/Enter SHALL commit the exact ref and confirm selection; Enter MUST NOT submit. Editing SHALL clear selection and disable Create; invalid/empty Name or pending operation SHALL also disable new Create. Reopening SHALL offer all refs. Escape SHALL close list before popup; blur/click-away SHALL close list without losing first-click footer actions. Cancel/reopen SHALL discard old drafts and apply initial defaults only. No destination/settings/details/ownership or extra metadata SHALL appear. Expanded lists SHALL remain within compact viewport-safe dialogs with safe reachable buttons.
 
 New checkout destinations SHALL be predetermined siblings `<main-folder>.worktrees/<safe-branch-folder>`. The child workspace name SHALL equal the exact current local branch, not its sanitized folder name. No destination/name form or child branch rename SHALL be offered. Sanitized folder collisions SHALL be handled deterministically without overwrite, including refusal when a disambiguated destination remains occupied. Branch occupancy SHALL be scoped to repository identity, not globally to the displayed branch string.
 
@@ -40,9 +40,17 @@ New checkout destinations SHALL be predetermined siblings `<main-folder>.worktre
 - **WHEN** two different main repository identities have children on `feature/login`
 - **THEN** each displays that exact branch beneath its own main parent and neither conflicts with the other's checkout
 
-#### Scenario: New branch starts from source HEAD
-- **WHEN** a user enters a name and confirms Create with an available predetermined destination
-- **THEN** the new checkout uses the approved source HEAD and branch and becomes a distinct stopped workspace with its own stable ID, without a base-selection UI
+#### Scenario: New branch defaults independently of current checkout
+- **WHEN** the parent checkout is on feature/current and local main exists
+- **THEN** initial Create from selects main, and creation uses that chosen base, not feature/current
+- **WHEN** local main is absent
+- **THEN** only a sole remote main is selected automatically; multiple remote mains or none leave the choice empty and Create disabled
+
+#### Scenario: Explicit base and refetch retain intent
+- **WHEN** a user selects another local or remote starting branch and explicitly fetches
+- **THEN** name/query/valid selection remain exact, including after auth/network errors; a disappeared choice is cleared without redefaulting
+- **WHEN** creation succeeds
+- **THEN** the stopped child records the exact selected sourceRef, independently of subsequent parent checkout changes
 
 #### Scenario: Existing branch can be selected
 - **WHEN** a user selects an existing local branch not checked out elsewhere
@@ -64,7 +72,7 @@ New checkout destinations SHALL be predetermined siblings `<main-folder>.worktre
 ### Requirement: Branch creation origin is a historical snapshot
 Nested worktree rows SHALL expose recorded branch creation source separately from
 current tracking/upstream and live parent policy. A new branch SHALL snapshot the
-selected parent's actual HEAD ref at creation; a newly created tracking branch
+explicitly selected starting ref at creation; a newly created tracking branch
 SHALL snapshot its selected remote-qualified source. Existing-local and external
 branches SHALL remain origin unknown unless explicit trustworthy creation history
 exists. Git upstream, merge-base, parent identity and checkout starting revision
@@ -72,7 +80,7 @@ MUST NOT be used to guess historical branch origin. The prototype SHALL use only
 explicit fixture history and simulated creation records, with no real Git inference.
 
 #### Scenario: Parent ref or configuration changes after creation
-- **WHEN** a branch is created from a parent on `release`, then that parent changes ref or configuration
+- **WHEN** a branch is created with `release` explicitly selected as its base, then that parent changes checkout ref or configuration
 - **THEN** the child's recorded source remains `release`, while shared configuration still inherits live
 
 #### Scenario: Remote tracking and unknown existing history

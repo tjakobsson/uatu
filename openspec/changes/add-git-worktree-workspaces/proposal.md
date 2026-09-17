@@ -10,7 +10,7 @@ Users need parallel repository checkouts that they can create and navigate as or
 - New checkouts use the predetermined sibling `<main-folder>.worktrees/<safe-branch-folder>` destination, with deterministic collision handling and no destination/name form. External discoveries retain their existing paths and provenance. Already-checked-out branches offer opening their checkout; branch rename remains out of scope.
 - Credentials and shared workspace configuration are managed only on the parent and inherited live, not copied at creation. Parent changes propagate to children. Files, terminal/chat runtimes, selected documents/conversations, and personal/per-device preferences remain independent; no child credential/settings form is provided.
 - Preserve the original dashboard rows/actions/status/style, adding nesting, branch labels and parent forks. The switcher is focused on switching and parent forks: no Details action or global worktree button. Remove generic dashboard Details navigation. Retain Open/Start/Stop, parent Configure and Remove from Uatu (unregister); children have no Configure. Verified Uatu-created children offer guarded Delete worktree as a secondary action. Recovery and unavailable-path errors offer relevant inline actions, not generic navigation.
-- Each parent fork opens only **New branch / worktree** and **Existing branch**. The first opens a compact single-name Create/Cancel popup using source HEAD. The second opens an editable accessible combobox: fuzzy typing filters local/remote refs; click/Enter commits the exact display ref into the input. Editing clears selection and disables Create until another choice is made. Reopening a committed value offers the full list. A small adjacent **Fetch remote branches** icon explicitly refreshes cached refs, with loading and inline auth/network errors; opening never fetches. Fetch preserves query and valid selection, clearing a disappeared selection. No dashboard fetch duplicate, base/destination/configuration/ownership readouts or stale hidden selection. Conflicts offer the existing checkout directly; no force/reset.
+- Each parent fork opens only **New branch / worktree** and **Existing branch**. New has Name plus **Create from**, using the same editable local/remote fuzzy combobox and adjacent explicit **Fetch remote branches** as Existing. Initial base prefers local `main`, else the sole remote branch named `main`; multiple remote mains or none require explicit selection, never a current-checkout fallback. Refetch never redefaults. Click/Enter commits an exact ref; editing clears selection, reopening offers all refs, and Create requires valid name/base and no pending operation. Fetch preserves name/query/valid selection, invalidates disappeared refs, and reports loading/errors inline. Titles retain target parent. No destination/settings/details or extra metadata; conflicts concern the new target branch, not a checked-out base.
 - Share authoritative operations between the Hub UI and a proposed agent-invoked Uatu CLI. Thin Claude/OpenCode skills guide persistent workspace creation without replacing native hooks, subagent isolation, or provider lifecycle APIs.
 - Notify immediately after Uatu creation; reconcile Git inventory on open, after activity, periodically, and on manual refresh. External discovery neither transfers ownership nor silently changes the active workspace/conversation.
 - Provide manual, guarded deletion only for durably identified Uatu-created linked trees, always preserving branches. No branch-deletion UI or operation is in scope. Keep forgetting separate; never automatically clean up external trees.
@@ -31,10 +31,12 @@ This layout decision does not approve real integration. Task 2.2 remains unappro
 
 The approved mock-only provenance revision adds a muted `from <source-ref>` (or
 `origin unknown`) label to nested child rows in both actual surfaces. New branch
-creation snapshots the selected parent's actual simulated HEAD ref; remote-created
+creation snapshots its explicitly selected starting ref; remote-created
 tracking branches snapshot the selected remote ref. Existing-local and external
 origins are unknown absent explicitly recorded history. This is immutable creation
-history, not live parent policy or upstream, and adds no creation fields/readouts.
+history, not live parent policy or upstream. Main checkout rows in dashboard and
+selector show the actual mutable branch, distinct from repository identity and
+child provenance; detached/unknown states never guess `main`.
 It does not approve real integration or satisfy the final UX gate.
 
 ### New Capabilities

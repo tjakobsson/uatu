@@ -21,13 +21,14 @@ The existing workspace picker SHALL focus on switching and parent-only creation 
 - **THEN** a small two-option dropdown offers New branch / worktree and Existing branch, and creation targets that parent only without a source/path readout in the popup
 - **AND** neither child has a fork action or independent credential/settings form
 
-#### Scenario: Compact creation supersedes the previous information-heavy form
+#### Scenario: Compact creation has an explicit starting branch
 - **WHEN** New branch / worktree is selected
-- **THEN** the popup contains only its title, one name field, Create/Cancel and any necessary error; the approved source HEAD is predetermined with no base-choice UI
+- **THEN** the popup contains target title, Name, Create from and Create/Cancel; Create from uses the shared local/remote editable fuzzy combobox plus adjacent Fetch
+- **AND** initial choice prefers local main then sole remote main, otherwise stays empty; current checkout does not control defaults and refetch never reapplies them
 - **WHEN** Existing branch is selected
 - **THEN** an editable fuzzy combobox covers all local/remote branches with badges and qualified names; picking fills the input exactly, edits clear selection and disable Create, reopening permits reviewing all refs, and arrows/Enter/Escape, focus, touch and empty results are supported
 - **AND** the adjacent Fetch remote branches icon explicitly refreshes cached refs, preserving query and a valid choice or invalidating a disappeared choice, with loading and inline errors; opening does not fetch
-- **AND** neither popup contains source/base/destination/configuration/ownership readouts; cancellation and no submission do not mutate
+- **AND** neither popup contains extra metadata/destination/configuration/ownership readouts; cancellation and no submission do not mutate
 - **AND** clicking an initial local or remote row without typing commits the exact input value and enables successful Create
 
 #### Scenario: Preserve dashboard and existing lifecycle access
@@ -39,8 +40,14 @@ The existing workspace picker SHALL focus on switching and parent-only creation 
 #### Scenario: Nested rows show unobtrusive truthful provenance
 - **WHEN** child workspaces appear in the actual workspace selector or original-style dashboard
 - **THEN** their exact branch remains primary and a small muted label shows `from <recorded-source-ref>` or `origin unknown`
-- **AND** new branch sources reflect the actual simulated parent HEAD, remote-created tracking branches show their selected remote ref, and existing-local/external branches without recorded history remain unknown
-- **AND** labels do not change with parent ref/configuration or upstream updates, and compact menus/popups gain no fields or instructions
+- **AND** new branch sources reflect the exact selected starting ref, remote-created tracking branches show their selected remote ref, and existing-local/external branches without recorded history remain unknown
+- **AND** labels do not change with parent checkout/configuration or upstream updates
+
+#### Scenario: Current main checkout is not creation provenance
+- **WHEN** the main workspace is checked out on feature/foo
+- **THEN** dashboard and selector display feature/foo compactly, distinct from repository identity and child origin labels
+- **WHEN** the checkout changes, is detached, or its branch is unknown
+- **THEN** refresh reflects the current ref or explicit Detached HEAD / Branch unknown state without guessing main or modifying child sourceRef
 
 #### Scenario: Worktree actions are available without leaving the workspace
 - **WHEN** a user opens the existing workspace picker while viewing a document or conversation
