@@ -6,6 +6,7 @@ import { DEFAULT_HUB_PORT, defaultHubConfigPath } from "../hub/config";
 import { DEFAULT_RESPECT_GITIGNORE } from "../server/roots";
 import { normalizeBasePath } from "../shared/base-path";
 import { BUILD, formatBuildIdentifier, type BuildInfo } from "../shared/version";
+import { parseWorktreeCommand, type WorktreeCommand } from "./worktree-parse";
 
 // Stable default so the eventual PWA install identity (origin =
 // http://127.0.0.1:<port>) is consistent across restarts. If 4711 is taken,
@@ -68,6 +69,9 @@ export type ParsedCommand =
   // `uatu hub hash-password` — reads the password from stdin and prints the
   // hash to paste into the config's users list.
   | { kind: "hub-hash-password" }
+  // `uatu worktree …` — the agent-invoked Hub client. It is a THIN client:
+  // every operation is performed by the Hub, and it runs no Git itself.
+  | { kind: "worktree"; command: WorktreeCommand }
   | { kind: "help" }
   | { kind: "version" };
 
@@ -79,6 +83,7 @@ export function usageText(build: BuildInfo = BUILD): string {
 Usage:
   uatu hub [--config <PATH>] [--port <PORT>] [--exit-on-stdin-close]
   uatu hub hash-password
+  uatu worktree <list|create|open|remove> [...]
   uatu --help
   uatu --version
 
@@ -87,6 +92,12 @@ one session per workspace folder, and serves each session under
 /s/<workspace-id>/. Every interface requires login against the config's
 users list. 'uatu hub hash-password' reads a password from stdin and
 prints the hash for a user entry.
+
+'uatu worktree' manages Git worktrees of the workspace it runs in as
+ordinary Uatu workspaces, through the Hub that serves that workspace. It
+needs no configuration and no credential: an Uatu workspace terminal
+already carries the Hub context it uses. Run 'uatu worktree --help' for
+its commands.
 
 Options:
   --config <PATH>         Hub config file (default: \$XDG_CONFIG_HOME/uatu/hub.json, or ~/.config/uatu/hub.json)
@@ -211,6 +222,10 @@ export function parseCommand(
 
   if (argv[0] === "hub") {
     return parseHubCommand(argv.slice(1));
+  }
+
+  if (argv[0] === "worktree") {
+    return { kind: "worktree", command: parseWorktreeCommand(argv.slice(1)) };
   }
 
   // `serve` is no longer a user command. It survives as the session child

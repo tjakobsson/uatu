@@ -4,12 +4,15 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { LocalProcessBackend, type RunningSession } from "./backend";
 import { EMPTY_RESOLVED_CREDENTIAL_CONTEXT } from "./credential-context";
+import { createWorktreeContextIssuer, WorktreeCapabilityStore } from "./worktree-capability";
+import { parseWorktreeHubContext, WORKTREE_CONTEXT_ENV } from "../shared/worktree-context";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.ts");
@@ -231,4 +234,64 @@ describe("LocalProcessBackend stdout parsing", () => {
     },
     30_000,
   );
+});
+
+// Task 6.1's transport, end to end through the backend: the capability is a
+// 0600 FILE in the session's own runtime directory, only its PATH reaches
+// the child's environment, and the grant dies with the session.
+describe("LocalProcessBackend worktree context projection", () => {
+  const workspace = { id: "atlas", path: "/tmp", backend: "local" as const, displayName: "Atlas" };
+
+  async function startWithContext(options: { user?: string | undefined; source?: string | undefined } = {}) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-capability-"));
+    tempDirectories.push(directory);
+    const store = new WorktreeCapabilityStore(path.join(directory, "worktree-capabilities.json"));
+    await store.load();
+    let captured: Record<string, string> = {};
+    const backend = new LocalProcessBackend({
+      uatuArgv: ["ignored"],
+      terminationGraceMs: 10,
+      worktreeContext: createWorktreeContextIssuer({
+        store,
+        hubOrigin: () => "http://127.0.0.1:4700",
+        sourceWorkspaceId: () => ("source" in options ? options.source : "atlas"),
+        user: () => ("user" in options ? options.user : "reviewer"),
+      }),
+      spawn: ((argv: string[], spawnOptions: { env: Record<string, string> }) => {
+        captured = spawnOptions.env;
+        return Bun.spawn(["sh", "-c", "printf 'http://127.0.0.1:43217/s/atlas/\\n'; sleep 30"], {
+          stdin: "pipe", stdout: "pipe", stderr: "pipe",
+        });
+      }) as never,
+    });
+    const session = await backend.start(workspace, "/s/atlas/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+    return { session, store, env: captured };
+  }
+
+  test("writes an owner-only context file and puts only its path in the environment", async () => {
+    const { session, store, env } = await startWithContext();
+    const contextPath = env[WORKTREE_CONTEXT_ENV];
+    expect(typeof contextPath).toBe("string");
+    expect(((await stat(contextPath!)).mode & 0o777)).toBe(0o600);
+    const context = parseWorktreeHubContext(JSON.parse(await readFile(contextPath!, "utf8")));
+    expect(context).toMatchObject({ hubOrigin: "http://127.0.0.1:4700", workspaceId: "atlas" });
+    // The credential is in the file, and in no environment value — so it is
+    // absent from `env`, from argv, and from any process listing.
+    expect(store.resolve(context.token)).toMatchObject({ user: "reviewer", sourceWorkspaceId: "atlas" });
+    expect(Object.values(env)).not.toContain(context.token);
+    for (const value of Object.values(env)) expect(value).not.toContain(context.token);
+
+    await session.stop();
+    // Stopping the session revokes the grant and takes the file with it.
+    expect(store.resolve(context.token)).toBeNull();
+    expect(existsSync(contextPath!)).toBe(false);
+  });
+
+  test("injects nothing when there is no family or no single principal to act for", async () => {
+    for (const options of [{ user: undefined }, { source: undefined }]) {
+      const { session, env } = await startWithContext(options);
+      expect(env[WORKTREE_CONTEXT_ENV]).toBeUndefined();
+      await session.stop();
+    }
+  });
 });

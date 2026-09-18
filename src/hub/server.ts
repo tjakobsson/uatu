@@ -55,6 +55,9 @@ import {
 import { LiveBroker } from "./live-broker";
 import { NotificationRequestError, type HubNotifications } from "./notifications";
 import { createWorktreeRoutes, WORKTREE_PREFIX, type WorktreeStartOutcome } from "./worktree-routes";
+import { createWorktreeApi, isWorktreeApiPath } from "./worktree-api";
+import type { WorktreeCapabilityStore } from "./worktree-capability";
+import { isWorktreeCapabilityToken } from "../shared/worktree-context";
 import type { WorktreeService } from "./worktree-service";
 import { WorktreeReconciler } from "./worktree-reconciler";
 import { checkoutGitLink, readCheckoutHead } from "./worktree-git";
@@ -91,6 +94,10 @@ export type HubDeps = {
   // The worktree operation service. Absent (tests, the e2e harness) leaves
   // the worktree routes unmounted rather than half-answering.
   worktrees?: WorktreeService;
+  // Least-privilege credentials for the agent-invoked CLI. Absent means the
+  // JSON worktree family accepts Hub sessions only; no capability is ever
+  // honored without a store to resolve it against.
+  worktreeCapabilities?: Pick<WorktreeCapabilityStore, "resolve">;
   cloneCredentials?: CloneCredentialResolver;
   credentialApi?: CredentialApiServices;
   gitCommand?: () => string;
@@ -1379,6 +1386,40 @@ export function createHubFetchHandler(deps: HubDeps) {
     },
   });
 
+  // The same operations as data, for the agent-invoked CLI. Built from the
+  // same dependency object as the HTML flow, so neither can drift from the
+  // other's authoritative service, reconciler or invalidation.
+  const worktreeApi = worktreeService === undefined ? undefined : createWorktreeApi({
+    service: worktreeService,
+    registry,
+    async inventory(sourceWorkspaceId, reason) {
+      return (await worktreeReconciler?.request(sourceWorkspaceId, reason)) ?? worktreeService.inventory(sourceWorkspaceId);
+    },
+    changed(sourceWorkspaceId, also = []) {
+      liveBroker.publishWorktrees([...worktreeService.familyOf(sourceWorkspaceId), ...also]);
+      void worktreeReconciler?.rebaseline(sourceWorkspaceId).catch(() => undefined);
+    },
+    async startWorkspace(workspaceId): Promise<WorktreeStartOutcome> {
+      const outcome = await startWorkspaceSession(workspaceId);
+      if (outcome.ok) return { ok: true };
+      const body = await outcome.response.clone().json().catch(() => ({})) as { error?: string };
+      return { ok: false, message: body.error ?? "The workspace could not be started." };
+    },
+  });
+
+  // The capability transport. A presented bearer credential is a worktree
+  // capability ONLY when it carries the capability prefix; a Hub session id
+  // never does. Reading it here, before the session gate, is what lets the
+  // Hub refuse a capability on every other route rather than letting it fall
+  // through to a 401 that reads like a wrong password.
+  const presentedCapability = (request: Request): string | null => {
+    const authorization = request.headers.get("authorization");
+    if (authorization === null) return null;
+    const match = /^Bearer\s+(\S+)$/i.exec(authorization.trim());
+    if (!match || !isWorktreeCapabilityToken(match[1]!)) return null;
+    return match[1]!;
+  };
+
   const mutateFolder = async (
     request: Request,
     operation: "create" | "rename" | "remove",
@@ -1488,6 +1529,25 @@ export function createHubFetchHandler(deps: HubDeps) {
       return new Response(Bun.file(asset), {
         headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" },
       });
+    }
+
+    // The least-privilege worktree capability, resolved BEFORE the session
+    // gate. It is not a Hub session and must never be treated as one: it
+    // authorizes the worktree JSON family for one repository family and
+    // nothing else on this Hub, so a capability presented anywhere else is
+    // refused here rather than reaching that route's handler. Being an
+    // explicitly attached credential it carries no ambient authority and
+    // needs no same-origin check.
+    const capabilityToken = presentedCapability(request);
+    if (capabilityToken !== null) {
+      if (!worktreeApi || !isWorktreeApiPath(pathname)) {
+        return json(403, { error: "this credential authorizes only the worktree API" }, NO_STORE_HEADERS);
+      }
+      const grant = deps.worktreeCapabilities?.resolve(capabilityToken) ?? null;
+      if (!grant || !config.users.some(user => user.name === grant.user)) {
+        return json(401, { error: "the worktree capability is not valid; restart the workspace to get a new one" }, NO_STORE_HEADERS);
+      }
+      return worktreeApi.handle(request, url, { user: grant.user, familyWorkspaceId: grant.sourceWorkspaceId });
     }
 
     // The gate. Everything below requires an authenticated hub session
@@ -1685,6 +1745,16 @@ export function createHubFetchHandler(deps: HubDeps) {
         return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
       }
       return worktrees.act(request, operation, session.user);
+    }
+    // The published JSON worktree family: the same operations the flow above
+    // performs, as data, for the agent-invoked CLI. A Hub session reaches it
+    // too — the CLI is not the only client — and a cookie transport keeps the
+    // same-origin rule on every mutation.
+    if (worktreeApi && isWorktreeApiPath(pathname)) {
+      if (request.method !== "GET" && !csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      return worktreeApi.handle(request, url, { user: session.user });
     }
     if (pathname === "/api/hub/state" && request.method === "GET") {
       return hubState();

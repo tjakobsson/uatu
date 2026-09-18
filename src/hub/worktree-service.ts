@@ -774,7 +774,11 @@ export class WorktreeService {
         await clear();
         return refuse(WorktreeOperationError.of("conflict", "This worktree started running. Choose Stop and delete to stop its Uatu sessions first. Nothing was removed.", { retry: "retry-delete", phase: "fencing" }), "fencing");
       }
-      return { ok: true, operationId, kind: "delete", phase: "complete", checkout: { ...checkout, registered: false, running: false }, registered: false, started: false };
+      // The registration is gone with the files, so the reported checkout
+      // carries no workspace id: `registered` and `workspaceId` are one fact
+      // in the contract, and a removed tree must not still name a live one.
+      const { workspaceId: _unregistered, ...removed } = checkout;
+      return { ok: true, operationId, kind: "delete", phase: "complete", checkout: { ...removed, registered: false, running: false }, registered: false, started: false };
     } catch (error) {
       if (!progress.retained) await clear().catch(() => undefined);
       if (progress.phase === "stopping" && !(error instanceof WorktreeOperationError)) {

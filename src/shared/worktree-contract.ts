@@ -618,11 +618,17 @@ export function parseWorktreeOperationResult(value: unknown): WorktreeOperationR
   const operationId = requiredString(record, "operationId", "worktree operation result");
   const kind = member(record.kind, WORKTREE_OPERATION_KINDS, "worktree operation kind");
   const phased: WorktreePhasedOperation | undefined = kind === "create" || kind === "delete" ? kind : undefined;
+  // An unphased kind (register, start, fetch, refresh, forget) has no
+  // ordered boundaries for recovery to reconcile, so the only phase it can
+  // report is the shared terminal one — which a successful result still
+  // requires, and which is what the service writes for those kinds.
   const phase = record.phase === undefined
     ? undefined
-    : phased !== undefined && isWorktreePhase(phased, record.phase)
-      ? record.phase as WorktreePhase
-      : fail("worktree operation result has an unknown phase");
+    : phased === undefined
+      ? (record.phase === "complete" ? "complete" as WorktreePhase : fail("worktree operation result has an unknown phase"))
+      : isWorktreePhase(phased, record.phase)
+        ? record.phase as WorktreePhase
+        : fail("worktree operation result has an unknown phase");
   if (!ok) {
     return {
       ok: false,

@@ -102,10 +102,27 @@ Section 5 verification (2026-09-17): implemented the reconciler (open/subscribe/
 
 ## 6. Post-approval CLI and provider skills
 
-- [ ] 6.1 Finalize proposed CLI spelling/flags and authenticated Hub-context transport with least-privilege/revocation and secret-redaction review; verify a documented threat model and contract examples cover missing/expired/wrong Hub context without assuming an installed Uatu executable.
-- [ ] 6.2 Implement CLI dispatch as a thin authenticated Hub client with structured progress/results/recovery and explicit destructive confirmation; verify transport tests prove parity with UI safety, no independent Git fallback, and no secrets in arguments/output.
-- [ ] 6.3 Define opt-in Claude/OpenCode skill packaging and add thin guidance for explicit persistent workspace requests; verify fixture-based loading/documentation tests preserve existing user/project configuration and do not replace native hooks or invoke experimental provider removal/reset.
+- [x] 6.1 Finalize proposed CLI spelling/flags and authenticated Hub-context transport with least-privilege/revocation and secret-redaction review; verify a documented threat model and contract examples cover missing/expired/wrong Hub context without assuming an installed Uatu executable.
+- [x] 6.2 Implement CLI dispatch as a thin authenticated Hub client with structured progress/results/recovery and explicit destructive confirmation; verify transport tests prove parity with UI safety, no independent Git fallback, and no secrets in arguments/output.
+- [x] 6.3 Define opt-in Claude/OpenCode skill packaging and add thin guidance for explicit persistent workspace requests; verify fixture-based loading/documentation tests preserve existing user/project configuration and do not replace native hooks or invoke experimental provider removal/reset.
 - [ ] 6.4 Test actual available supported Claude/OpenCode binaries in separate workspaces, requesting permission before any installation; verify new/resumed conversation directory boundaries and native worktree/subagent coexistence, and record unavailable tools as untested rather than claiming compatibility.
+
+Section 6.1-6.3 verification (2026-09-18): the finalized surface is `uatu
+worktree list|create|open|remove` with `--json` as the agent-facing contract,
+served by a published `/api/hub/worktrees` JSON family (GET list plus POST
+create/open/delete) over the same WorktreeService as the unchanged `/worktrees`
+browser flow, authorized by a Hub session or by a new revocable capability the
+Hub writes as a 0600 file into the session child's runtime directory with only
+its path in the environment. Opt-in Claude and OpenCode skills ship under
+`docs/agent-skills/`, installed by one symlink and never written by Uatu.
+Verified by 69 new tests (16 Hub JSON-API integration cases over real temporary
+repositories, 16 capability/context unit cases, 21 CLI parse/client cases, 13
+fixture-based skill cases and 3 new Hub/backend contract cases): full `bun test`
+3642 pass / 10 skip / 5 fail, the 5 being the pre-existing unrelated
+nested-Hub credential-projection (4) and brokered-live-stream (1) failures
+confirmed at the same baseline before this work; `bun run test:api` 182 pass;
+root and both dedicated typechecks clean. Task 6.4 (real agent binaries) is
+untested and remains open.
 
 ## 7. Integrated acceptance and documentation
 

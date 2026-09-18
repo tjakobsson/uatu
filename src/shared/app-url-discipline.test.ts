@@ -25,6 +25,10 @@ const ALLOWED_FILES = new Set([
   // The brokered live stream is a hub route too (design D2): the protocol
   // module names it and the child routes the hub subscribes to.
   "src/shared/live-protocol.ts",
+  // The worktree Hub context is likewise origin-rooted: the Hub API lives
+  // outside any session base path, and this module is what tells the Hub
+  // and the CLI which single route family a capability may reach.
+  "src/shared/worktree-context.ts",
   // The legacy-worker cleanup MATCHES a historical script path rather than
   // building a URL to request, and it has to match it at the origin root as
   // well as under the base path — appUrl() can only produce the latter.
