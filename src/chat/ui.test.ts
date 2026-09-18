@@ -593,10 +593,15 @@ describe("plan usage on demand", () => {
         { id: "message:u", type: "user_message", createdAt: 0, text: "hi" },
         { id: "notice:limit", type: "notice", createdAt: 1, level: "warning", message: "Approaching the 5-hour limit", code: "rate-limit-warning" },
       ],
+      // A report of its own, older than the workspace's last-known one.
+      older: [
+        { id: "message:u", type: "user_message", createdAt: 0, text: "hi" },
+        { id: "context:report:1", type: "context_report", createdAt: Date.now() - 30 * 60_000, total: 10, plan: { subscription: "pro", fiveHour: { utilization: 3 }, sevenDay: { utilization: 25 } } },
+      ],
     };
     const api = {
       status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities } } }]),
-      conversations: async () => [conversation("standing")],
+      conversations: async () => [conversation("standing"), conversation("older")],
       commands: async () => [],
       usage: async () => { usageAsks += 1; return stored; },
       readUsage: async (_agentId: string, _requestId: string, mode: string) => { reads.push(mode); return { report: { plan: { ...stored.plan, fiveHour: { utilization: 14 } }, readAt: Date.now() } }; },
@@ -609,8 +614,27 @@ describe("plan usage on demand", () => {
     initChat(api);
     select.value = "standing";
     select.dispatchEvent(new Event("change", { bubbles: true }));
-    return { document, window, reads, usageAsks: () => usageAsks };
+    return { document, window, select, reads, usageAsks: () => usageAsks };
   };
+
+  test("a conversation's own older report yields to a newer workspace one, so a read answered through another session still lands here", async () => {
+    const { document, window, select, reads } = await boot("older", ["context", "usage"]);
+    try {
+      const summary = document.querySelector<HTMLElement>("#chat-plan-usage-summary")!;
+      select.value = "older";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      // The workspace's 12-minute-old report is newer than this conversation's own 30-minute-old one.
+      await waitUntil(() => summary.textContent === "Session 9% · Week 25%", () => `summary ${summary.textContent}`);
+      document.querySelector<HTMLButtonElement>("#chat-plan-read")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await waitUntil(() => reads.length === 1, () => `reads ${reads.join(",")}`);
+      // The read went through "elsewhere"; the conversation that asked still shows its answer.
+      await waitUntil(() => summary.textContent === "Session 14% · Week 25%", () => `summary ${summary.textContent}`);
+      expect(document.querySelector("#chat-plan-readout-age")?.textContent).toMatch(/· just now$/);
+    } finally {
+      await Bun.sleep(20);
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
 
   test("a conversation with only a standing shows it beside the workspace's last-known plan, refreshes it when opened, and reads on demand", async () => {
     const { document, window, reads } = await boot("with", ["context", "usage"]);

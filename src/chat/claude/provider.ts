@@ -223,6 +223,10 @@ type LiveSession = {
   // Explicit usage reads out on this query: activity, so a turn that ends
   // under one does not retire the session the reader asked through.
   usageReads: number;
+  // A retirement a read held back: the read retires the session when it
+  // settles. Without it a read never retires a session it did not start —
+  // another control operation may be using it.
+  retireAfterRead?: boolean;
   // Live background work, replaced on every background_tasks_changed level
   // signal (ambient ids excluded) and reset when the process starts (D7).
   // A non-empty set keeps the session alive past its turn's result.
@@ -1136,7 +1140,7 @@ export class ClaudeProvider implements ChatProvider {
             // A probe a later turn overtook is not the one to retire on:
             // that turn's own continuation decides, once its read is in.
             if (session.idleTimer !== undefined || session.reportGeneration !== generation) return;
-            if (this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
+            await this.retireIfIdle(session);
           });
         }
       }
@@ -1257,7 +1261,7 @@ export class ClaudeProvider implements ChatProvider {
     } finally {
       // A session started only for this control call holds no turn; an idle
       // conversation keeps no process behind after a rewind, refused or not.
-      if (this.sessionIsIdle(session)) await this.retireSession(session);
+      await this.retireIfIdle(session);
     }
   }
 
@@ -1878,9 +1882,9 @@ export class ClaudeProvider implements ChatProvider {
       this.clearIdleTimer(session);
       session.idleTimer = setTimeout(() => {
         session.idleTimer = undefined;
-        if (this.live.get(session.id) !== session || !this.sessionIsIdle(session)) return;
+        if (this.live.get(session.id) !== session || !this.idleExceptReads(session)) return;
         this.emit(session.id, { updates: [{ kind: "status", status: "idle" }], outcome: "handled", eventType: "turn.background-cleared" });
-        void this.retireSession(session);
+        void this.retireIfIdle(session);
       }, this.backgroundGraceMs);
       (session.idleTimer as unknown as { unref?: () => void }).unref?.();
     } else if (next.size > 0) {
@@ -1925,7 +1929,25 @@ export class ClaudeProvider implements ChatProvider {
 
   /** No accepted turn pending, no follow-up in flight, no live background work, no read out. */
   private sessionIsIdle(session: LiveSession): boolean {
-    return session.pendingTurns === 0 && session.queuedTurns === 0 && !session.unpromptedTurn && session.backgroundTasks.size === 0 && session.usageReads === 0;
+    return this.idleExceptReads(session) && session.usageReads === 0;
+  }
+
+  private idleExceptReads(session: LiveSession): boolean {
+    return session.pendingTurns === 0 && session.queuedTurns === 0 && !session.unpromptedTurn && session.backgroundTasks.size === 0;
+  }
+
+  /**
+   * Retires an idle session, or — with a usage read out on it — leaves
+   * the retirement to that read's completion. Every retirement decision
+   * after a turn or a control operation comes through here.
+   */
+  private async retireIfIdle(session: LiveSession): Promise<void> {
+    if (this.live.get(session.id) !== session || !this.idleExceptReads(session)) return;
+    if (session.usageReads > 0) {
+      session.retireAfterRead = true;
+      return;
+    }
+    await this.retireSession(session);
   }
 
   /** Every live background task, for a reopened conversation's live list. */
@@ -2040,12 +2062,14 @@ export class ClaudeProvider implements ChatProvider {
     const target = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).find(session => !this.pending.has(session.id)) ?? sessions[0];
     if (!target) return this.readUsageThroughProbe();
     let session: LiveSession;
+    let startedForRead = false;
     try {
+      startedForRead = !this.live.has(target.id);
       session = await this.ensureLive(target.id);
     } catch {
       return { report: null, reason: "unavailable" };
     }
-    return this.readUsageThrough(session);
+    return this.readUsageThrough(session, startedForRead);
   }
 
   /** A session with work in flight first, else the most recently started. */
@@ -2061,7 +2085,7 @@ export class ClaudeProvider implements ChatProvider {
    * the turn's bookkeeping: no probe generation, no turn count, no idle
    * timer — a running turn is not interrupted and retires as it would.
    */
-  private async readUsageThrough(session: LiveSession): Promise<UsageReadResult> {
+  private async readUsageThrough(session: LiveSession, startedForRead = false): Promise<UsageReadResult> {
     // The read counts as activity: a turn that ends meanwhile defers its
     // retirement to here rather than closing the query under the read.
     session.usageReads += 1;
@@ -2080,10 +2104,13 @@ export class ClaudeProvider implements ChatProvider {
       return { report: { plan: usage.plan, readAt: this.lastUsage?.readAt ?? this.now(), conversationId: session.id } };
     } finally {
       session.usageReads -= 1;
-      // Whatever the read held back retires now: a session started for the
-      // read, or one whose turn ended under it. A follow-up grace window
-      // (idle timer) keeps its own say, as after any turn.
-      if (session.idleTimer === undefined && this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
+      // Only what this read is answerable for retires here: a session it
+      // started, or a retirement it held back. A session some other
+      // control operation is using is that operation's to retire. A
+      // follow-up grace window (idle timer) keeps its own say.
+      const owed = startedForRead || session.retireAfterRead === true;
+      if (owed && session.usageReads === 0) session.retireAfterRead = false;
+      if (owed && session.idleTimer === undefined && this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
     }
   }
 

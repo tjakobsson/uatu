@@ -1875,10 +1875,13 @@ export function initChat(api = new ChatApiClient()): void {
   const syncPlanUsage = (standing: RateLimitStanding | undefined) => {
     if (!planUsage || !planUsageSummary) return;
     const own = projection && declares("context") ? latestPlanReport(projection.items) : undefined;
-    // No report of its own: the workspace's last-known plan stands in, so a
-    // reopened conversation — or one that only has a standing — still
-    // shows the windows (spec). The totals stay the conversation's own.
-    const report = own ?? (declares("usage") ? lastKnownPlanReport() : undefined);
+    // The newer of the conversation's own report and the workspace's
+    // last-known one: a reopened conversation, or one with only a standing,
+    // still shows the windows (spec), and a read that went through another
+    // session still answers the conversation that asked. The totals stay
+    // the conversation's own.
+    const known = declares("usage") ? lastKnownPlanReport() : undefined;
+    const report = own && (!known || own.createdAt >= known.createdAt) ? own : known ?? own;
     const plan = report?.plan;
     // The conversation's totals: the report's own where the agent tallies
     // them (Claude Code), else folded from the priced usage carriers

@@ -3534,6 +3534,20 @@ describe("plan usage on demand", () => {
     await provider.dispose();
   });
 
+  test("a read on a session another operation started leaves that session to the operation", async () => {
+    const { provider, queries, configDir, workspace } = fixture(answer);
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), "idle-session.jsonl"), userRow("u1", "earlier", workspace));
+    // Another control operation has the session up (a rewind, say) with no turn on it.
+    await (provider as unknown as { ensureLive(id: string): Promise<unknown> }).ensureLive("idle-session");
+    expect(queries).toHaveLength(1);
+    const result = await provider.readUsage("live-only");
+    expect(result.report).toEqual(expect.objectContaining({ conversationId: "idle-session" }));
+    await Bun.sleep(10);
+    expect(queries[0]!.returned).toBe(false);
+    await provider.dispose();
+    expect(queries[0]!.returned).toBe(true);
+  });
+
   test("a workspace without a conversation reads through a hidden probe that never lists", async () => {
     const { provider, queries, configDir, workspace } = fixture(answer);
     expect(await provider.listSessions()).toEqual([]);
