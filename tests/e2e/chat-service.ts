@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { ConversationReplay } from "../../src/chat/replay";
-import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../../src/chat/adapter";
+import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../../src/chat/adapter";
 import { createAttachmentStore } from "../../src/chat/attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "../../src/chat/inventory-broadcaster";
 import { ReversibleHistoryTargetError } from "../../src/chat/provider";
@@ -559,6 +559,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async usage(): Promise<AgentUsageReport | null> {
+    // Gated like the real adapter: an agent that does not declare usage
+    // answers 409, so the client never routes reads to it.
+    if (!this.capabilities.includes("usage")) throw new UsageUnsupportedError();
     return this.usageReport;
   }
 
@@ -568,6 +571,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
    * real provider's read does through the session it went through.
    */
   async readUsage(requestId: string, mode: UsageReadMode): Promise<UsageReadResult> {
+    if (!this.capabilities.includes("usage")) throw new UsageUnsupportedError();
     this.usageReads.push({ requestId, mode });
     const outcome = this.usageReadOutcome;
     if (outcome.delayMs) await new Promise(resolve => setTimeout(resolve, outcome.delayMs));

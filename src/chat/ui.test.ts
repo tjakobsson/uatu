@@ -681,6 +681,7 @@ describe("plan usage on demand", () => {
     let selected = "";
     Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
     const asks: string[] = [];
+    const readAgents: string[] = [];
     let failFirst = true;
     let statusCalls = 0;
     const { ChatTransportError } = await import("./client");
@@ -705,7 +706,7 @@ describe("plan usage on demand", () => {
         if (failFirst) { failFirst = false; throw new ChatTransportError("Chat request failed (502)", 502); }
         return { plan: { subscription: "pro", fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } }, readAt: Date.now() };
       },
-      readUsage: async () => ({ report: null, reason: "no-live-session" }),
+      readUsage: async (agentId: string) => { readAgents.push(agentId); return { report: null, reason: "no-live-session" }; },
       snapshot: async (id: string) => ({ ...snapshot(id), conversation: { id, title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: claude } }),
       stream: () => ({ close() {} }),
       inventoryStream: () => ({ close() {} }),
@@ -727,6 +728,10 @@ describe("plan usage on demand", () => {
       await waitUntil(() => asks.length === 3, () => `asks ${asks.join(",")}`);
       expect(asks.filter(id => id === "opencode")).toHaveLength(1);
       await waitUntil(() => document.querySelector("#usage-pane .usage-pane-head")?.textContent?.startsWith("Pro plan") === true, () => `pane ${document.querySelector("#usage-pane")?.textContent}`);
+      // The reads go to the agent that answered with a report.
+      document.querySelector<HTMLButtonElement>('[data-pane-id="usage"] .pane-action[data-usage-read]')!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await waitUntil(() => readAgents.length === 1, () => `reads ${readAgents.join(",")}`);
+      expect(readAgents).toEqual(["claude"]);
     } finally {
       await Bun.sleep(20);
       window.dispatchEvent(new Event("pagehide"));

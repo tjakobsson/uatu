@@ -3896,7 +3896,10 @@ export function initChat(api = new ChatApiClient()): void {
     // like a failed read instead of throwing through the caller's bootstrap.
     const seed = Promise.resolve().then(() => api.usage(agentId)).then(report => {
       seededUsage.add(agentId);
-      onUsageRead(mode => api.readUsage(agentId, newRequestId(), mode));
+      // The agent that holds a report answers the reads; an agent that
+      // answered with nothing only takes them while no one else has. Which
+      // response lands last must not decide who is asked.
+      if (report || !usageReadable()) onUsageRead(mode => api.readUsage(agentId, newRequestId(), mode));
       if (report) noteUsageReport({ plan: report.plan, reportedAt: report.readAt, ...(report.conversationId ? { conversationId: report.conversationId } : {}) });
     }, error => {
       if (error instanceof ChatTransportError && error.status === 409) usageUnsupported.add(agentId);
