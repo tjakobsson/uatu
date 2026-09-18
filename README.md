@@ -44,6 +44,7 @@ cognitive debt.
 - Whole-repo browsing with `.uatu.json ignore.exclude` and `.gitignore` filtering on top of built-in defaults
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
 - Git-aware workspaces: adding a folder outside a repository offers `git init`
+- [Git worktree workspaces](./docs/WORKTREES.md): create and switch branch checkouts from the workspace picker, with independent terminals and conversations, parent credential policy and guarded cleanup
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
 - Workspace-scoped [Chat](./docs/CHAT.md) with your own OpenCode and Claude Code — resumable history, streamed Markdown and tool activity, permissions, questions, plan approvals, task progress, cancellation, and safe file navigation
 - Installable as a PWA so TUI editor shortcuts (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach the embedded terminal

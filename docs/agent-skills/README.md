@@ -1,5 +1,9 @@
 # Uatu agent skills (opt-in)
 
+See [Git worktree workspaces](../WORKTREES.md) for creation, recovery, CLI
+context requirements and cleanup. A source installation can run
+`bun run /absolute/path/to/uatu/src/cli.ts worktree` when `uatu` is not on PATH.
+
 Two small skill files that teach Claude Code and OpenCode when — and when
 not — to use `uatu worktree`. They are **opt-in**: Uatu never installs them,
 never writes into your agent configuration, and works exactly the same

@@ -140,6 +140,11 @@ export function presentationFor(options: {
       repositoryId: inventory.repositoryId,
     };
   const fetchedAt = inventory.refs.fetchedAt;
+  // Git's occupancy probe knows a path, while rendered actions use the
+  // registration or checkout id. Resolve only against this source's fresh
+  // inventory so both registered and external conflicts get the right action.
+  const conflict = rows.find(row => row.id === options.conflictId
+    || row.checkout === options.conflictId || row.path === options.conflictId);
   return {
     view: options.view,
     source,
@@ -147,7 +152,7 @@ export function presentationFor(options: {
     ...(options.selectedId === undefined ? {} : { selected: rows.find(row => row.id === options.selectedId) }),
     ...(options.message === undefined ? {} : { message: options.message }),
     error: options.error === true,
-    ...(options.conflictId === undefined ? {} : { conflictId: options.conflictId }),
+    ...(conflict === undefined ? {} : { conflictId: conflict.id }),
     draft: options.draft ?? {},
     // "fresh" claims a network fetch in THIS flow; a cached listing never does.
     fresh: false,

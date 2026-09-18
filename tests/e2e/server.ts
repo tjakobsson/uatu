@@ -161,7 +161,7 @@ const chatService = new Proxy({} as MultiAgentChatService, {
   },
 });
 const terminalEnabled = await terminalBackendAvailable();
-let watchSession = await createSession({ resetWorkspace: true });
+let watchSession = await createSession({ resetWorkspace: process.env.UATU_E2E_PRESERVE_WORKSPACE !== "1" });
 
 // The brokered live stream, exactly as a hub would mount it, over this one
 // workspace: the SPA opens only /api/hub/live, so the harness brokers its

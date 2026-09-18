@@ -142,24 +142,26 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HubState' }
-              example:
-                version: 0.5.1 (abcdef0)
-                hubApiRevision: 7
-                workspaceApiRevision: 10
-                workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 10, shells: [{ attached: false, label: zsh }] }]
-                workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
-            examples:
-              worktrees:
-                summary: A main workspace and one linked worktree
-                value:
-                  version: 0.5.1 (abcdef0)
-                  hubApiRevision: 6
-                  workspaceApiRevision: 19
-                  worktreeNavigation: /worktrees
-                  worktreeConfigureNavigation: /settings
-                  workspaces:
-                    - { id: atlas, displayName: Atlas, path: /src/atlas, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [] }, workspaceApiRevision: 19, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: main, createWorktree: /worktrees?view=create&source=atlas }
-                    - { id: feature-login, displayName: feature/login, path: /src/atlas.worktrees/feature-login, backend: local, running: false, credentialRestartRequired: false, credentialAssignments: { authentication: [], signing: [] }, workspaceApiRevision: 19, parentId: atlas, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: feature/login, sourceRef: main, ownership: uatu }
+              examples:
+                ordinary:
+                  summary: An ordinary workspace
+                  value:
+                    version: 0.5.1 (abcdef0)
+                    hubApiRevision: 7
+                    workspaceApiRevision: 19
+                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 19, shells: [{ attached: false, label: zsh }] }]
+                    workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
+                worktrees:
+                  summary: A main workspace and one linked worktree
+                  value:
+                    version: 0.5.1 (abcdef0)
+                    hubApiRevision: 7
+                    workspaceApiRevision: 19
+                    worktreeNavigation: /worktrees
+                    worktreeConfigureNavigation: /settings
+                    workspaces:
+                      - { id: atlas, displayName: Atlas, path: /src/atlas, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [] }, workspaceApiRevision: 19, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: main, createWorktree: /worktrees?view=create&source=atlas }
+                      - { id: feature-login, displayName: feature/login, path: /src/atlas.worktrees/feature-login, backend: local, running: false, credentialRestartRequired: false, credentialAssignments: { authentication: [], signing: [] }, workspaceApiRevision: 19, parentId: atlas, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: feature/login, sourceRef: main, ownership: uatu }
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:

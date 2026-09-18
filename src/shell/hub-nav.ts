@@ -37,6 +37,7 @@ export type HubWorkspaceSummary = {
   repositoryId?: string;
   branch?: string;
   detached?: boolean;
+  availability?: "missing" | "replaced";
   readonly sourceRef?: string;
   createWorktree?: string;
 };
@@ -127,6 +128,8 @@ export function switcherBadgeLabel(badge: SwitcherBadge): string {
 export type WorkspaceMenuState = { text: string; tone: "stopped" | "working" | "awaiting" } | null;
 
 export function workspaceMenuState(workspace: HubWorkspaceSummary, activity: WorkspaceActivityMap): WorkspaceMenuState {
+  if (workspace.availability === "missing") return { text: "Missing checkout", tone: "stopped" };
+  if (workspace.availability === "replaced") return { text: "Identity conflict", tone: "stopped" };
   if (!workspace.running) return { text: "stopped", tone: "stopped" };
   const facts = activity.get(workspace.id);
   if (!facts?.running) return null;
@@ -300,7 +303,7 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
     ...(typeof record?.worktreeNavigation === "string" ? { worktreeNavigation: record.worktreeNavigation } : {}),
     workspaces: workspaces
       .filter(
-        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown; parentId?: unknown; repositoryId?: unknown; branch?: unknown; detached?: unknown; sourceRef?: unknown; createWorktree?: unknown } =>
+        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown; parentId?: unknown; repositoryId?: unknown; branch?: unknown; detached?: unknown; availability?: unknown; sourceRef?: unknown; createWorktree?: unknown } =>
           typeof entry === "object" &&
           entry !== null &&
           typeof (entry as { id?: unknown }).id === "string" &&
@@ -316,6 +319,7 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
         ...(typeof entry.branch === "string" ? { branch: entry.branch } : {}),
         ...(typeof entry.sourceRef === "string" && entry.sourceRef !== "" ? { sourceRef: entry.sourceRef } : {}),
         ...(entry.detached === true ? { detached: true } : {}),
+        ...(entry.availability === "missing" || entry.availability === "replaced" ? { availability: entry.availability } : {}),
         ...(typeof entry.createWorktree === "string" ? { createWorktree: entry.createWorktree } : {}),
       })),
   };
@@ -456,7 +460,13 @@ export function initHubNav(): void {
         state.textContent = menuState.text;
         item.appendChild(state);
       }
-      if (!stopped) {
+      if (workspace.availability) {
+        item.setAttribute("aria-disabled", "true");
+        item.title = workspace.availability === "missing"
+          ? "Checkout missing. Restore it externally, then reopen the picker to refresh."
+          : "A different checkout occupies this path. Resolve the identity conflict before opening.";
+        item.addEventListener("click", event => event.preventDefault());
+      } else if (!stopped) {
         rowStart.delete(workspace.id);
       } else {
         const state = item.querySelector<HTMLSpanElement>(".hub-menu-state.is-stopped")!;

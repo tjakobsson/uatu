@@ -7,13 +7,10 @@
 // it writes no provider configuration, no hooks and no ownership marker into
 // the tree or the repository.
 //
-// What is deliberately NOT claimed here, because proving it costs model
-// quota and the user declined that spend: new/resumed conversation directory
-// boundaries inside a running agent, and how each provider's own worktree and
-// subagent isolation behaves alongside Uatu's. Those remain UNTESTED rather
-// than asserted — see the note recorded on task 6.4. The probes below record
-// which binaries were present when the suite ran; a missing binary is
-// reported, never silently treated as compatibility.
+// Model-backed directory/resume, native worktree and subagent checks live in
+// tests/worktree-agent-smoke.ts and require a separate, user-authorized run.
+// These unit tests establish only checkout compatibility and non-interference.
+// A version probe alone is never evidence of runtime compatibility.
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";

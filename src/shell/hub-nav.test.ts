@@ -234,6 +234,15 @@ describe("chipLabel", () => {
 });
 
 describe("parseHubState", () => {
+  test("unavailable checkouts remain unavailable even while stale activity says running", () => {
+    const state = parseHubState({ workspaces: [
+      { ...summary("missing", true), availability: "missing" },
+      { ...summary("replaced", true), availability: "replaced" },
+    ] })!;
+    const activity = new Map(state.workspaces.map(row => [row.id, { running: true, working: true, awaiting: false }]));
+    expect(state.workspaces.map(row => workspaceMenuState(row, activity)?.text)).toEqual(["Missing checkout", "Identity conflict"]);
+  });
+
   test("preserves only explicit string source snapshots, never infers from upstream", () => {
     const workspaces = [
       { ...summary("new", false), sourceRef: "release" },

@@ -327,6 +327,10 @@ describe("operations", () => {
     const redirect = new URL(body.redirect, origin);
     expect(redirect.searchParams.get("message")).toContain("already checked out");
     expect(redirect.searchParams.get("conflict")).toBeTruthy();
+    const child = registry.list().find(entry => entry.displayName === "feature/routes")!;
+    const view = await (await fetch(`${origin}${body.redirect}&fragment=1`, authenticated())).text();
+    expect(view).toContain(`name="id" value="${child.id}"`);
+    expect(view).toContain('action="/worktrees/start"');
   });
 
   test("Open starts the workspace and navigates to its own session URL", async () => {

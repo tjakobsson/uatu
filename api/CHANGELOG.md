@@ -4,24 +4,13 @@ Entries are ordered newest first. Every entry has Hub and workspace revisions, a
 
 ## Hub 7 / Workspace 20 - Unreleased
 
-Compatibility: breaking (Hub)
-
-### Changes
-
-- `PUT /api/hub/notifications` accepts an optional `allWorkspaces` boolean (default `false`). When true, the device receives its selected event categories from every workspace the login can reach, including workspaces registered after the enrollment was saved; the Hub evaluates the rule at event time rather than expanding it into a list. `workspaceIds` remains required and is stored as the explicit selection the rule overrides, so turning the rule off restores it.
-- The `device` object in `NotificationState` gains a required `allWorkspaces` boolean reporting the stored mode.
-
-### Migration
-
-Strict Hub clients must regenerate against Hub revision 7: the `device` object is closed, so a revision 6 validator rejects the new field on every `GET` and `PUT /api/hub/notifications` response. Clients that never send `allWorkspaces` keep their current behaviour. A Hub downgraded below this revision ignores the stored flag and sends from each device's explicit `workspaceIds` only, until the device is saved again on an upgraded Hub.
-
-## Hub 6 / Workspace 20 - Unreleased
-
-Compatibility: breaking (workspace); additive (Hub)
+Compatibility: breaking (workspace and Hub)
 
 ### Changes
 
 - Added `GET`, `PUT`, and `DELETE /api/hub/notifications` for device push enrollment, preferences, and removal. Device enrollments follow their authenticated login session and selected workspaces. The API never returns push endpoints or private keys.
+- `PUT /api/hub/notifications` accepts an optional `allWorkspaces` boolean (default `false`). When true, the device receives its selected event categories from every workspace the login can reach, including workspaces registered after the enrollment was saved; the Hub evaluates the rule at event time rather than expanding it into a list. `workspaceIds` remains required and is stored as the explicit selection the rule overrides, so turning the rule off restores it.
+- The `device` object in `NotificationState` gains a required `allWorkspaces` boolean reporting the stored mode.
 - A task `tool` item's `usage` changes meaning. It was the subagent's whole child session, with every subagent beneath it added in; it is now what the subagent spent on the task that row represents — the messages it produced answering that task's prompt — and nothing else. A subagent handed a further task (OpenCode's `task_id` continuation) is one `childConversationId` on several rows: those rows used to restate the session's total, so a sum over rows counted the subagent once per task, and they now state one task each and sum to the session.
 - Task `tool` items gain optional `descendants`: the subagents launched beneath the row, at any depth, as a flat ordered list of `SubagentLine` objects (`id`, `parentId`, `description`, optional `subagent`, `conversationId`, optional `model` and `usage`). Each line's `usage` is that task's own spend, and `parentId` names the row or an earlier line.
 - `assistant_message` usage carriers gain optional `agent`: the agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind).
@@ -30,7 +19,19 @@ Compatibility: breaking (workspace); additive (Hub)
 
 Strict workspace Chat consumers must regenerate against workspace revision 20: `tool` and `assistant_message` items are closed objects, so a revision 19 validator rejects `descendants` and `agent` when present. A consumer that totals a conversation's cost must now add each task row's `descendants[].usage` to the row's own `usage` — subagents launched by subagents are no longer folded into their launcher's figure — and must stop treating rows that share a `childConversationId` as separate subagents: they are one subagent's tasks. With both changes, carriers plus rows plus lines count every priced message exactly once. Group carriers by `agent` to itemize the main agent's spend; treat an absent `agent` as unnamed rather than as a distinct agent.
 
-The notification operations require no client migration. Operators enabling Web Push configure `notifications.contact` with a valid `mailto:` address or HTTPS contact URL. Existing devices opt in through notification settings.
+Strict Hub clients must regenerate against Hub revision 7: the notification `device` object is closed, so a revision 6 validator rejects the new `allWorkspaces` field on every `GET` and `PUT /api/hub/notifications` response. Clients that never send `allWorkspaces` keep their current behaviour. A Hub downgraded below this revision ignores the stored flag and sends from each device's explicit `workspaceIds` only, until the device is saved again on an upgraded Hub.
+
+Operators enabling Web Push configure `notifications.contact` with a valid `mailto:` address or HTTPS contact URL. Existing devices opt in through notification settings.
+
+### Worktree changes
+
+- A published worktree operation family, `GET /api/hub/worktrees` and `POST /api/hub/worktrees/{create,open,delete}`, serves the Git worktree inventory, creation, opening and guarded deletion as JSON. It is additive: the Hub's own `/worktrees` browser flow is unchanged, and both run over one service, so a non-browser client cannot reach an operation with weaker safety rules. A refusal is a completed request and answers 200 with `ok: false` and a sanitized error; HTTP statuses report transport problems only. Creation never takes a destination — the Hub computes `<main-folder>.worktrees/<safe-branch-folder>` — deletion requires `confirm: true` and always keeps the branch, and there is no force anywhere in the family.
+- A second bearer credential, `worktreeCapability`, is accepted on that family and nowhere else. The Hub issues one per running workspace into that workspace's private session runtime directory as an owner-only file and puts only the file's path in the child's environment, so a process inside the workspace can present it without the credential appearing in an argument vector or an environment value. It is scoped to one user and one repository family, is revoked when that session stops or the workspace is forgotten or removed, and expires independently. Presented on any other route, or aimed at any other workspace, it answers 403; a capability the Hub does not accept answers 401 and the remedy is to restart the workspace.
+- Hub state adds optional repository, parent, branch, provenance, availability and worktree navigation fields. The live stream adds the cursor-free `worktrees` topic, with an inventory invalidation on subscription, reconnect and committed changes.
+
+### Migration
+
+Strict Hub clients must regenerate against Hub revision 7. The state objects are closed, so older validators reject the new optional fields. Accept the new `worktrees` envelope topic and subscription variant. On invalidation, fetch authoritative inventory without changing the selected workspace or conversation. The workspace payload revision is unchanged by this feature.
 
 ## Hub 6 / Workspace 19 - Unreleased
 
@@ -38,8 +39,6 @@ Compatibility: breaking (Hub)
 
 ### Changes
 
-- A published worktree operation family, `GET /api/hub/worktrees` and `POST /api/hub/worktrees/{create,open,delete}`, serves the Git worktree inventory, creation, opening and guarded deletion as JSON. It is additive: the Hub's own `/worktrees` browser flow is unchanged, and both run over one service, so a non-browser client cannot reach an operation with weaker safety rules. A refusal is a completed request and answers 200 with `ok: false` and a sanitized error; HTTP statuses report transport problems only. Creation never takes a destination — the Hub computes `<main-folder>.worktrees/<safe-branch-folder>` — deletion requires `confirm: true` and always keeps the branch, and there is no force anywhere in the family.
-- A second bearer credential, `worktreeCapability`, is accepted on that family and nowhere else. The Hub issues one per running workspace into that workspace's private session runtime directory as an owner-only file and puts only the file's path in the child's environment, so a process inside the workspace can present it without the credential appearing in an argument vector or an environment value. It is scoped to one user and one repository family, is revoked when that session stops or the workspace is forgotten or removed, and expires independently. Presented on any other route, or aimed at any other workspace, it answers 403; a capability the Hub does not accept answers 401 and the remedy is to restart the workspace.
 - The `hubCookie` session cookie is named for the port of the request's `Host`. It is `uatu_hub` at the scheme's default port and `uatu_hub_<port>` otherwise, so `uatu_hub_4701` for a Hub reached at `127.0.0.1:4701`. Login sets, every request reads, and sign-out clears the cookie under that name. Hubs reached on different ports of one host, as through local port forwards, no longer overwrite each other's session. Bearer authentication and Hubs at a default port are unchanged.
 
 ### Migration

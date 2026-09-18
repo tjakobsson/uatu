@@ -242,6 +242,14 @@ export class WorktreeService {
     const checkouts: WorktreeCheckout[] = [];
     for (const record of view.records) checkouts.push(await this.checkoutFor(view, record));
     checkouts.push(...await this.unlistedRegistrations(view, checkouts));
+    // Reconciliation publishes its invalidation after this read. The state
+    // endpoint must reflect that same inventory, not a still-valid two-second
+    // presentation cache from before the external change.
+    for (const checkout of checkouts) {
+      if (checkout.workspaceId) this.availabilityCache.set(checkout.workspaceId, {
+        at: this.now(), path: checkout.path, value: checkout.availability,
+      });
+    }
     return {
       repositoryId: view.repositoryId,
       sourceWorkspaceId,
@@ -893,6 +901,8 @@ export class WorktreeService {
     const now = this.now();
     if (cached && now - cached.at < AVAILABILITY_CACHE_MS && cached.path === entry.path) return cached.value;
     const inspection = await inspectCheckout(entry.path, { ...this.options.git, run: this.run });
+    const refreshed = this.availabilityCache.get(workspaceId);
+    if (refreshed !== cached && refreshed?.path === entry.path) return refreshed.value;
     const value = !inspection.present
       ? "missing"
       : inspection.identity?.checkoutId === link.checkoutId ? "present" : "replaced";
