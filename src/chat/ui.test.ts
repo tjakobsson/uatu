@@ -669,6 +669,8 @@ describe("plan usage on demand", () => {
         ];
       },
       conversations: async () => [{ id: "claude:c", title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: claude }],
+      models: async () => [],
+      modes: async () => [],
       commands: async () => [],
       usage: async (agentId: string) => {
         asks.push(agentId);
