@@ -3422,9 +3422,10 @@ describe("plan usage on demand", () => {
   const plan = { subscription_type: "pro", rate_limits_available: true, rate_limits: { five_hour: { utilization: 9, resets_at: 1_800_000_000 }, seven_day: { utilization: 25, resets_at: 1_800_400_000 } } };
   const context = { categories: [{ name: "Messages", tokens: 3_000, color: "x" }], totalTokens: 3_000, maxTokens: 200_000 };
   const userRow = (id: string, text: string, cwd: string) => JSON.stringify({ type: "user", uuid: id, parentUuid: null, isSidechain: false, cwd, timestamp: "2026-09-01T12:00:00Z", message: { role: "user", content: text } }) + "\n";
+  const usageOptions: unknown[] = [];
   const answer = (query: FakeQuery) => {
     query.getContextUsage = async () => context;
-    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => plan;
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async (options?: unknown) => { usageOptions.push(options); return plan; };
   };
 
   test("a turn-end read becomes the workspace's last-known report and survives a restart", async () => {
@@ -3437,6 +3438,8 @@ describe("plan usage on demand", () => {
     await waitFor(() => events.some(event => event.eventType === "context.reported"));
     const report = await provider.usageReport();
     expect(report).toEqual(expect.objectContaining({ plan: expect.objectContaining({ subscription: "pro", fiveHour: expect.objectContaining({ utilization: 9 }) }), conversationId: session.id }));
+    // The behaviors scan is never asked for: the block is not carried.
+    expect(usageOptions).toEqual([{ skipBehaviors: true }]);
     stop();
     await provider.dispose();
     // A restarted workspace answers from the durable file before any session starts.
@@ -3497,6 +3500,36 @@ describe("plan usage on demand", () => {
     release!(plan);
     await second;
     expect(queries[1]!.returned).toBe(false);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a turn that ends under an explicit read defers retirement until the read answers", async () => {
+    let release: ((value: unknown) => void) | undefined;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = async () => context;
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(resolve => { release = () => resolve(plan); });
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const query = queries[0]!;
+    const pending = provider.readUsage("live-only");
+    await waitFor(() => release !== undefined);
+    // The turn ends while the read is out: its own probe runs (and hangs on
+    // the same fake read), the status completes, and the session stays.
+    const releaseRead = release!;
+    release = undefined;
+    query.push({ type: "result", subtype: "success", uuid: "r-1", timestamp: "2026-08-30T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "status" && update.status === "completed")));
+    await waitFor(() => release !== undefined);
+    await Bun.sleep(10);
+    expect(query.returned).toBe(false);
+    releaseRead(plan);
+    const result = await pending;
+    expect(result.report).toEqual(expect.objectContaining({ conversationId: session.id }));
+    release!(plan);
+    await waitFor(() => query.returned);
     stop();
     await provider.dispose();
   });
