@@ -3548,6 +3548,41 @@ describe("plan usage on demand", () => {
     expect(queries[0]!.returned).toBe(true);
   });
 
+  test("a usage answer a newer one has overtaken is dropped rather than folded as a reset", async () => {
+    const resolvers: Array<(value: unknown) => void> = [];
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = async () => context;
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(resolve => { resolvers.push(resolve); });
+    });
+    const { events, stop } = collect(provider);
+    const costed = (cost: number) => ({ ...plan, session: { total_cost_usd: cost, model_usage: {} } });
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const explicit = provider.readUsage("live-only");
+    await waitFor(() => resolvers.length === 1);
+    // The turn ends under the explicit read: its probe asks the same query.
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "r-1", timestamp: "2026-08-30T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => resolvers.length === 2);
+    // The newer answer lands first, the older (lower) one after.
+    resolvers[1]!(costed(2));
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    resolvers[0]!(costed(1));
+    const result = await explicit;
+    expect(result.report).not.toBeNull();
+    expect(events.filter(event => event.eventType === "context.reported")).toHaveLength(1);
+    await waitFor(() => queries[0]!.returned);
+    // The next query's tally adds to what was truly spent: 2, not 2 folded twice.
+    const next = provider.readUsage("start");
+    await waitFor(() => resolvers.length === 3);
+    resolvers[2]!(costed(0.5));
+    await next;
+    const reports = events.filter(event => event.eventType === "context.reported");
+    expect(reports).toHaveLength(2);
+    expect((reports[1]!.updates[0] as { item: { session?: { costUsd: number } } }).item.session?.costUsd).toBe(2.5);
+    stop();
+    await provider.dispose();
+  });
+
   test("a workspace without a conversation reads through a hidden probe that never lists", async () => {
     const { provider, queries, configDir, workspace } = fixture(answer);
     expect(await provider.listSessions()).toEqual([]);

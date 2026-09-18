@@ -181,7 +181,7 @@ function paintLiveUsagePane(): void {
 
 type UsageReadHandler = (mode: UsageReadMode) => Promise<UsageReadResult>;
 let readHandler: UsageReadHandler | undefined;
-let inFlight: Promise<boolean> | undefined;
+let inFlight: { mode: UsageReadMode; promise: Promise<boolean> } | undefined;
 const state: UsageReadState = { reading: false };
 
 /**
@@ -205,21 +205,26 @@ export function usageReadState(): UsageReadState {
 }
 
 /**
- * Read plan usage now. One read at a time: a second ask joins the first.
- * A report replaces the held one; a refusal keeps the figures and records
- * why, except that a live-only read finding no session is not a failure —
- * it is the expected answer to an unasked refresh. Resolves true when a
- * report landed.
+ * Read plan usage now. One read at a time: a second ask joins the first
+ * when the first answers at least as much; a click ("start") during an
+ * unasked live-only refresh runs after it, since joining would swallow
+ * the click with "no-live-session". A report replaces the held one; a
+ * refusal keeps the figures and records why, except that a live-only read
+ * finding no session is not a failure — it is the expected answer to an
+ * unasked refresh. Resolves true when a report landed.
  */
 export function readUsageNow(mode: UsageReadMode): Promise<boolean> {
-  if (inFlight) return inFlight;
+  if (inFlight) {
+    if (inFlight.mode === mode || mode === "live-only") return inFlight.promise;
+    return inFlight.promise.then(() => readUsageNow(mode));
+  }
   const handler = readHandler;
   if (!handler) return Promise.resolve(false);
   state.reading = true;
   delete state.failure;
   paintLiveUsagePane();
   notify();
-  inFlight = (async () => {
+  const promise = (async () => {
     try {
       const result = await handler(mode);
       if (result.report) {
@@ -238,7 +243,8 @@ export function readUsageNow(mode: UsageReadMode): Promise<boolean> {
       notify();
     }
   })();
-  return inFlight;
+  inFlight = { mode, promise };
+  return promise;
 }
 
 /**

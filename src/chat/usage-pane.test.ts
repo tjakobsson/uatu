@@ -202,6 +202,32 @@ describe("usage pane: the held report and the read", () => {
     }
   });
 
+  test("a click during an unasked live-only refresh reads after it rather than joining it", async () => {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    Reflect.set(globalThis, "document", document);
+    Reflect.set(globalThis, "window", window);
+    try {
+      const reads: UsageReadMode[] = [];
+      const settle: Array<(result: UsageReadResult) => void> = [];
+      onUsageRead(mode => { reads.push(mode); return new Promise(resolve => { settle.push(resolve); }); });
+      const quiet = readUsageNow("live-only");
+      const click = readUsageNow("start");
+      expect(reads).toEqual(["live-only"]);
+      settle[0]!({ report: null, reason: "no-live-session" });
+      expect(await quiet).toBe(false);
+      await Promise.resolve();
+      expect(reads).toEqual(["live-only", "start"]);
+      settle[1]!({ report: { plan: plan(33), readAt: Date.now() } });
+      expect(await click).toBe(true);
+      expect(currentUsageReport()?.plan.fiveHour?.utilization).toBe(33);
+    } finally {
+      resetUsagePaneForTests();
+      Reflect.deleteProperty(globalThis, "document");
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
   test("the unasked refresh posts one live-only read for a stale report and none for a fresh one", async () => {
     resetUsagePaneForTests();
     const { document, window } = parseHTML(html);

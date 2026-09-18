@@ -1546,19 +1546,26 @@ export class ChatAdapter {
   /**
    * Read plan usage now. Idempotent per client request id, and one read at
    * a time across request ids: a second ask while one is out joins it
-   * rather than starting another (spec).
+   * rather than starting another (spec) — when the one out answers at
+   * least as much. A "start" asked while a live-only read is out runs
+   * after it: joined, it would be told "no-live-session" for the session
+   * it asked to start.
    */
   readUsage(clientRequestId: string, mode: UsageReadMode): Promise<UsageReadResult> {
     return this.receipts.run(`usage-read:${clientRequestId}`, async () => {
-      if (!this.provider.readUsage || !this.provider.describe().capabilities.includes("usage")) throw new UsageUnsupportedError();
-      if (!this.usageRead) {
-        this.usageRead = this.provider.readUsage(mode).finally(() => { this.usageRead = null; });
-      }
-      return this.usageRead;
+      const provider = this.provider;
+      if (!provider.readUsage || !provider.describe().capabilities.includes("usage")) throw new UsageUnsupportedError();
+      const inFlight = this.usageRead;
+      if (inFlight && (inFlight.mode === mode || mode === "live-only")) return inFlight.promise;
+      const run = inFlight ? inFlight.promise.catch(() => undefined).then(() => provider.readUsage!(mode)) : provider.readUsage(mode);
+      const entry = { mode, promise: run };
+      entry.promise = run.finally(() => { if (this.usageRead === entry) this.usageRead = null; });
+      this.usageRead = entry;
+      return entry.promise;
     });
   }
 
-  private usageRead: Promise<UsageReadResult> | null = null;
+  private usageRead: { mode: UsageReadMode; promise: Promise<UsageReadResult> } | null = null;
 
   stopTask(conversationId: string, taskId: string, clientRequestId: string): Promise<{ stopped: true }> {
     return this.receipts.run(`stop-task:${conversationId}:${taskId}:${clientRequestId}`, async () => {

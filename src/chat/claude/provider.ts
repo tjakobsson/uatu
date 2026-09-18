@@ -227,6 +227,11 @@ type LiveSession = {
   // settles. Without it a read never retires a session it did not start —
   // another control operation may be using it.
   retireAfterRead?: boolean;
+  // `/usage` answers are adopted in the order they were asked: an answer
+  // a later one has overtaken is dropped, or its lower counters would read
+  // as the CLI's own reset and be folded into the ledger twice.
+  usageSeq: number;
+  usageAdopted: number;
   // Live background work, replaced on every background_tasks_changed level
   // signal (ambient ids excluded) and reset when the process starts (D7).
   // A non-empty set keeps the session alive past its turn's result.
@@ -358,8 +363,11 @@ export class ClaudeProvider implements ChatProvider {
   // on demand, through any conversation. Per login, not per conversation,
   // and durable, so a restarted workspace answers before a session starts.
   private lastUsage: AgentUsageReport | undefined;
-  // One on-demand read at a time: a second ask joins the first.
-  private usageRead: Promise<UsageReadResult> | null = null;
+  // One on-demand read at a time. A second ask joins the first when the
+  // first answers at least as much (same mode, or the second is live-only);
+  // a "start" asked while a live-only read is out runs after it — joining
+  // would hand it "no-live-session" for a session it asked to start.
+  private usageRead: { mode: UsageReadMode; promise: Promise<UsageReadResult> } | null = null;
   // The conversation-less probe query while its read is out, so disposal
   // ends it rather than leaving a child to run out its own timeout.
   private usageProbe: { query: ClaudeQueryHandle; queue: PushQueue<ClaudeUserEnvelope> } | null = null;
@@ -1030,7 +1038,7 @@ export class ClaudeProvider implements ChatProvider {
         perTaskStopAffordance: true,
       },
     });
-    const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0 };
+    const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0 };
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
     // Observation begins with the conversation's first query in this
@@ -1977,8 +1985,10 @@ export class ClaudeProvider implements ChatProvider {
    */
   private async readPlanUtilization(session: LiveSession, timeoutMs = CONTEXT_REPORT_TIMEOUT_MS): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
     if (this.live.get(session.id) !== session) return undefined;
+    const seq = ++session.usageSeq;
     const answer = await this.readUsageAnswer(session.query, timeoutMs);
-    if ("failure" in answer) return undefined;
+    if ("failure" in answer || seq <= session.usageAdopted) return undefined;
+    session.usageAdopted = seq;
     return this.adoptUsageAnswer(session, answer.raw);
   }
 
@@ -2046,10 +2056,13 @@ export class ClaudeProvider implements ChatProvider {
    */
   async readUsage(mode: UsageReadMode): Promise<UsageReadResult> {
     await this.restoreDurableState();
-    if (this.usageRead) return this.usageRead;
-    const read = this.performUsageRead(mode).finally(() => { this.usageRead = null; });
-    this.usageRead = read;
-    return read;
+    const inFlight = this.usageRead;
+    if (inFlight && (inFlight.mode === mode || mode === "live-only")) return inFlight.promise;
+    const run = inFlight ? inFlight.promise.catch(() => undefined).then(() => this.performUsageRead(mode)) : this.performUsageRead(mode);
+    const entry = { mode, promise: run };
+    entry.promise = run.finally(() => { if (this.usageRead === entry) this.usageRead = null; });
+    this.usageRead = entry;
+    return entry.promise;
   }
 
   private async performUsageRead(mode: UsageReadMode): Promise<UsageReadResult> {
@@ -2090,12 +2103,17 @@ export class ClaudeProvider implements ChatProvider {
     // retirement to here rather than closing the query under the read.
     session.usageReads += 1;
     try {
+      const seq = ++session.usageSeq;
       const [answer, contextRaw] = await Promise.all([
         this.readUsageAnswer(session.query, this.usageReadTimeoutMs),
         this.readContextAnswer(session.query, this.usageReadTimeoutMs),
       ]);
       if ("failure" in answer) return { report: null, reason: answer.failure };
       if (this.live.get(session.id) !== session) return { report: null, reason: "unavailable" };
+      // Overtaken by a newer answer (a turn-end probe on the same query):
+      // that one is the report; this one would only inflate the ledger.
+      if (seq <= session.usageAdopted) return this.lastUsage ? { report: this.lastUsage } : { report: null, reason: "unavailable" };
+      session.usageAdopted = seq;
       const usage = this.adoptUsageAnswer(session, answer.raw);
       const configured = this.configurations.get(session.id)?.model;
       const model = configured && configured.modelId !== "default" ? configured.modelId : undefined;

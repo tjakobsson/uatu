@@ -4501,4 +4501,30 @@ describe("plan usage on demand", () => {
     await third;
     expect(reads).toBe(2);
   });
+
+  test("a start asked during a live-only read runs after it instead of inheriting no-live-session", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "usage"] };
+    const modes: string[] = [];
+    const settle: Array<(value: unknown) => void> = [];
+    (provider as unknown as { readUsage: (mode: string) => Promise<unknown> }).readUsage = mode => {
+      modes.push(mode);
+      return new Promise(resolve => { settle.push(resolve); });
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+    const quiet = adapter.readUsage("req-1", "live-only");
+    const click = adapter.readUsage("req-2", "start");
+    // A live-only asked while the start is queued joins the start: it answers at least as much.
+    const another = adapter.readUsage("req-3", "live-only");
+    await Bun.sleep(1);
+    expect(modes).toEqual(["live-only"]);
+    settle[0]!({ report: null, reason: "no-live-session" });
+    expect(await quiet).toEqual({ report: null, reason: "no-live-session" });
+    await Bun.sleep(1);
+    expect(modes).toEqual(["live-only", "start"]);
+    const report = { plan: {}, readAt: 9 };
+    settle[1]!({ report });
+    expect(await click).toEqual({ report });
+    expect(await another).toEqual({ report });
+  });
 });
