@@ -3542,3 +3542,15 @@ describe("plan usage on demand", () => {
     await provider.dispose();
   });
 });
+
+test("disposing the provider mid-probe ends the probe query instead of leaving it to its timeout", async () => {
+  const { provider, queries } = fixture(query => {
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(() => undefined);
+  }, { usageReadTimeoutMs: 200 });
+  const pending = provider.readUsage("start");
+  await waitFor(() => queries.length === 1);
+  expect(queries[0]!.returned).toBe(false);
+  await provider.dispose();
+  expect(queries[0]!.returned).toBe(true);
+  expect(await pending).toEqual({ report: null, reason: expect.stringMatching(/timeout|unavailable/) });
+});

@@ -133,9 +133,23 @@ export function noteUsageReport(report: UsageReport): void {
   // sync, and a note that notified would sync it again, without end.
   if (current && current.reportedAt >= report.reportedAt) return;
   current = report;
+  // A failure described an older attempt; usage has been read since.
+  delete state.failure;
   paintLiveUsagePane();
   if (tick === undefined) tick = setInterval(paintLiveUsagePane, TICK_MS);
   notify();
+  // A report seeded into a pane or readout that is already open gets the
+  // same unasked refresh opening it would have given.
+  if (usageSurfaceShown()) refreshUsageIfStale();
+}
+
+/** The pane shown and expanded, or the readout open: somewhere the report is being looked at. */
+function usageSurfaceShown(): boolean {
+  if (typeof document === "undefined") return false;
+  const section = document.querySelector<HTMLElement>('[data-pane-id="usage"]');
+  const paneShown = Boolean(section && !section.hidden && !section.classList.contains("is-collapsed"));
+  const readout = document.querySelector<HTMLDetailsElement>("#chat-plan-usage");
+  return paneShown || Boolean(readout && !readout.hidden && readout.open);
 }
 
 export function currentUsageReport(): UsageReport | undefined {
@@ -179,6 +193,7 @@ export function onUsageRead(handler: UsageReadHandler | undefined): void {
   readHandler = handler;
   paintLiveUsagePane();
   notify();
+  if (usageSurfaceShown()) refreshUsageIfStale();
 }
 
 export function usageReadable(): boolean {

@@ -165,6 +165,43 @@ describe("usage pane: the held report and the read", () => {
     }
   });
 
+  test("a stale report seeded into an already-open pane refreshes unasked, and a newer report clears an old failure", async () => {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    Reflect.set(globalThis, "document", document);
+    Reflect.set(globalThis, "window", window);
+    try {
+      // The pane was persisted visible and expanded: shown before Chat seeds it.
+      const section = document.querySelector<HTMLElement>('[data-pane-id="usage"]')!;
+      expect(section.hidden).toBe(false);
+      const reads: UsageReadMode[] = [];
+      let settle!: (result: UsageReadResult) => void;
+      onUsageRead(mode => { reads.push(mode); return new Promise(resolve => { settle = resolve; }); });
+      const now = Date.now();
+      noteUsageReport({ plan: plan(40), reportedAt: now - 11 * 60_000 });
+      expect(reads).toEqual(["live-only"]);
+      settle({ report: null, reason: "timeout" });
+      await Promise.resolve(); await Promise.resolve();
+      expect(usageReadState().failure).toBe("timed out");
+      // A later turn's report supersedes the failed attempt's message.
+      noteUsageReport({ plan: plan(41), reportedAt: now });
+      expect(usageReadState()).toEqual({ reading: false });
+      expect(document.querySelector("#usage-pane .usage-pane-status")).toBeNull();
+      expect(reads).toEqual(["live-only"]);
+      // Hidden pane, closed readout: a stale seed starts nothing.
+      resetUsagePaneForTests();
+      section.hidden = true;
+      const laterReads: UsageReadMode[] = [];
+      onUsageRead(async mode => { laterReads.push(mode); return { report: null, reason: "no-live-session" }; });
+      noteUsageReport({ plan: plan(40), reportedAt: now - 11 * 60_000 });
+      expect(laterReads).toEqual([]);
+    } finally {
+      resetUsagePaneForTests();
+      Reflect.deleteProperty(globalThis, "document");
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
   test("the unasked refresh posts one live-only read for a stale report and none for a fresh one", async () => {
     resetUsagePaneForTests();
     const { document, window } = parseHTML(html);

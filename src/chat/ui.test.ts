@@ -580,6 +580,8 @@ describe("plan usage on demand", () => {
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
     document.documentElement.setAttribute("data-chat-panel", "open");
+    // The sidebar (not booted here) hides the Usage pane by default.
+    document.querySelector<HTMLElement>('[data-pane-id="usage"]')!.hidden = true;
     const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
     let selected = "";
     Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
@@ -650,6 +652,7 @@ describe("plan usage on demand", () => {
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
     document.documentElement.setAttribute("data-chat-panel", "open");
+    document.querySelector<HTMLElement>('[data-pane-id="usage"]')!.hidden = true;
     const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
     let selected = "";
     Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });

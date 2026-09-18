@@ -349,6 +349,9 @@ export class ClaudeProvider implements ChatProvider {
   private lastUsage: AgentUsageReport | undefined;
   // One on-demand read at a time: a second ask joins the first.
   private usageRead: Promise<UsageReadResult> | null = null;
+  // The conversation-less probe query while its read is out, so disposal
+  // ends it rather than leaving a child to run out its own timeout.
+  private usageProbe: { query: ClaudeQueryHandle; queue: PushQueue<ClaudeUserEnvelope> } | null = null;
   private disposed = false;
 
   constructor(options: ClaudeProviderOptions) {
@@ -948,6 +951,12 @@ export class ClaudeProvider implements ChatProvider {
     // Nothing durable may still be in flight when the workspace stops.
     await this.persistChain.catch(() => undefined);
     await this.probeQuery?.return?.().catch(() => undefined);
+    const usageProbe = this.usageProbe;
+    if (usageProbe) {
+      this.usageProbe = null;
+      usageProbe.queue.close();
+      await usageProbe.query.return?.().catch(() => undefined);
+    }
     await this.hydration?.catch(() => undefined);
     const sessions = [...this.live.values()];
     this.live.clear();
@@ -2107,14 +2116,17 @@ export class ClaudeProvider implements ChatProvider {
     }
     // Drained so the SDK's reader never blocks on an unread message.
     void (async () => { for await (const _ of query) { /* nothing to read */ } })().catch(() => undefined);
+    this.usageProbe = { query, queue };
     try {
       const answer = await this.readUsageAnswer(query, this.usageReadTimeoutMs);
+      if (this.disposed) return { report: null, reason: "unavailable" };
       if ("failure" in answer) return { report: null, reason: answer.failure };
       const plan = normalizePlanUtilization(answer.raw) ?? {};
       const report: AgentUsageReport = { plan, readAt: this.now() };
       this.noteUsage(report);
       return { report };
     } finally {
+      if (this.usageProbe?.query === query) this.usageProbe = null;
       queue.close();
       await query.return?.().catch(() => undefined);
     }
