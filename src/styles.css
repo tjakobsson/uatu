@@ -650,6 +650,15 @@ html.uatu-desktop-host
   white-space: nowrap;
 }
 
+.hub-menu-provenance, .hub-menu-branch {
+  display: block;
+  color: var(--text-subtle);
+  font-size: 0.7rem;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .hub-menu-item .hub-menu-state {
   color: var(--text-subtle);
   font-size: 0.7rem;

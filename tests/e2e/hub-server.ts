@@ -37,6 +37,13 @@ import { PersonalWorkspaceStateStore } from "../../src/hub/personal-state";
 import { WorkspaceRegistry, type WorkspaceEntry } from "../../src/hub/registry";
 import { startHubServer } from "../../src/hub/server";
 import { SessionManager } from "../../src/hub/sessions";
+import { CredentialMetadataStore } from "../../src/hub/credential-store";
+import { WorkspaceOnboardingCoordinator } from "../../src/hub/onboarding";
+import { PathReservationCoordinator } from "../../src/hub/path-reservations";
+import { WorktreeJournal, WorktreeProvenanceStore } from "../../src/hub/worktree-journal";
+import { createOnboardingWorktreeRegistrar } from "../../src/hub/worktree-registrar";
+import { WorktreeService } from "../../src/hub/worktree-service";
+import { WorktreeCapabilityStore, worktreeContextFileBody } from "../../src/hub/worktree-capability";
 
 export const HUB_E2E_USER = { name: "e2e", password: "e2e-hub-password" };
 export const HUB_E2E_READY_PREFIX = "uatu-e2e-hub ";
@@ -55,6 +62,8 @@ export type HubE2EInfo = {
   origin: string;
   user: { name: string; password: string };
   workspaces: HubE2EWorkspace[];
+  worktreeContextPath?: string;
+  worktreeContextPaths?: Record<string, string>;
 };
 
 const HUB_PORT = Number.parseInt(process.env.UATU_E2E_HUB_PORT ?? "4300", 10);
@@ -65,8 +74,9 @@ const WORKSPACE_NAMES = (process.env.UATU_E2E_HUB_WORKSPACES ?? "alpha")
   .filter(name => name.length > 0);
 const HARNESS_PATH = path.resolve(import.meta.dir, "server.ts");
 const CHILD_START_TIMEOUT_MS = 30_000;
+const WORKTREES = process.env.UATU_E2E_HUB_WORKTREES === "1";
 
-const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "uatu-hub-e2e-"));
+const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-hub-e2e-")));
 
 // One harness process per workspace. The hub's own LocalProcessBackend
 // contract is kept where it matters — a RunningSession with a loopback
@@ -87,6 +97,7 @@ class HarnessBackend implements SessionBackend {
         UATU_E2E_PORT: String(port),
         UATU_E2E_WORKSPACE: workspace.path,
         UATU_E2E_BASE_PATH: basePath,
+        ...(WORKTREES ? { UATU_E2E_PRESERVE_WORKSPACE: "1" } : {}),
       },
       stdio: ["ignore", "pipe", "inherit"],
     });
@@ -164,7 +175,39 @@ await personalState.load();
 const sessionStore = new HubSessionStore(path.join(tempRoot, "sessions.json"));
 await sessionStore.load();
 const backend = new HarnessBackend();
-const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+let worktreesService: WorktreeService | undefined;
+const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+  workspaceId => worktreesService?.assertStartable(workspaceId) ?? Promise.resolve());
+const credentials = new CredentialMetadataStore(path.join(tempRoot, "credentials.json"));
+await credentials.load();
+const onboarding = new WorkspaceOnboardingCoordinator({
+  journalPath: path.join(tempRoot, "onboarding.json"), registry, credentials, sessions,
+  reservations: new PathReservationCoordinator(),
+});
+const capabilities = new WorktreeCapabilityStore(path.join(tempRoot, "capabilities.json"));
+await capabilities.load();
+if (WORKTREES) {
+  worktreesService = new WorktreeService({
+    registry, sessions,
+    journal: new WorktreeJournal(path.join(tempRoot, "worktree-operation.json")),
+    provenance: new WorktreeProvenanceStore(path.join(tempRoot, "worktree-provenance.json")),
+    registrar: createOnboardingWorktreeRegistrar({ onboarding, registry }),
+    unregister: async id => {
+      await personalState.forgetWorkspace(id, () => registry.remove(id), async () => {
+        await credentials.removeWorkspaceAssignments(id);
+      });
+    },
+  });
+}
+
+async function git(folder: string, args: string[]) {
+  const child = Bun.spawn(["git", "-c", "commit.gpgsign=false", ...args], {
+    cwd: folder, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    stdout: "pipe", stderr: "pipe",
+  });
+  const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+  if (code !== 0) throw new Error(`fixture Git failed: ${stderr}`);
+}
 
 // Workspace ids are the registry's slugs of the folder basenames, so the
 // requested names are the ids — as long as they are slug-shaped.
@@ -172,6 +215,13 @@ const workspaces: HubE2EWorkspace[] = [];
 for (const name of WORKSPACE_NAMES) {
   const folder = path.join(tempRoot, "workspaces", name);
   await fs.mkdir(folder, { recursive: true });
+  if (WORKTREES) {
+    await git(folder, ["init", "--initial-branch=main"]);
+    await fs.writeFile(path.join(folder, "README.md"), `# ${name} main checkout\n`);
+    await fs.writeFile(path.join(folder, "NOTES.md"), `${name} source notes\n`);
+    await git(folder, ["add", "."]);
+    await git(folder, ["-c", "user.name=Uatu Test", "-c", "user.email=uatu@example.test", "commit", "-m", "initial"]);
+  }
   const entry = await registry.register(folder);
   if (entry.id !== name) {
     throw new Error(`workspace '${name}' registered as '${entry.id}'; use slug-shaped names`);
@@ -183,19 +233,36 @@ for (const workspace of workspaces) {
   workspace.childOrigin = `http://${running.endpoint.hostname}:${running.endpoint.port}`;
 }
 
-const server = startHubServer({ config, registry, sessions, sessionStore, personalState });
+const server = startHubServer({ config, registry, sessions, sessionStore, personalState,
+  ...(WORKTREES ? { onboarding, worktrees: worktreesService, worktreeCapabilities: capabilities,
+    worktreeReconcilerOptions: { minIntervalMs: 100, periodMs: 500 } } : {}),
+});
 const origin = `http://127.0.0.1:${server.port}`;
 for (const workspace of workspaces) {
   workspace.sessionUrl = `${origin}/s/${encodeURIComponent(workspace.id)}/`;
 }
 
 const info: HubE2EInfo = { origin, user: HUB_E2E_USER, workspaces };
+if (WORKTREES) {
+  info.worktreeContextPaths = {};
+  for (const workspace of workspaces) {
+    const workspaceId = workspace.id;
+    const issued = await capabilities.issue({ user: HUB_E2E_USER.name, workspaceId, sourceWorkspaceId: workspaceId });
+    const contextPath = path.join(tempRoot, `${workspaceId}-hub-context.json`);
+    info.worktreeContextPaths[workspaceId] = contextPath;
+    info.worktreeContextPath ??= contextPath;
+    await fs.writeFile(contextPath, worktreeContextFileBody({
+      version: 1, hubOrigin: origin, workspaceId, token: issued.token, expiresAt: issued.record.expiresAt,
+    }), { mode: 0o600 });
+  }
+}
 console.log(`${HUB_E2E_READY_PREFIX}${JSON.stringify(info)}`);
 
 let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  server.worktreeReconciler?.dispose();
   server.live.endAll();
   server.liveBroker.dispose();
   await sessions.stopAll().catch(() => undefined);

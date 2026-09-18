@@ -70,6 +70,15 @@
 //                 WorkspaceActivity. Hub-computed, never child content. On
 //                 open the hub sends one `data` envelope per accessible
 //                 workspace, then one whenever a workspace's facts change.
+//   worktrees     no key, no cursor; `ws` is the stream's own workspace, the
+//                 accessible source whose repository inventory changed; data
+//                 = WorktreeInventoryEvent, a bare invalidation. Hub-local:
+//                 no child upstream, so a stopped workspace still carries it.
+//                 A fresh invalidation is written on every subscribe and
+//                 every reconnect, so the client always refetches
+//                 authoritative inventory rather than replaying a cursor. It
+//                 carries no path, branch, identity or credential — the
+//                 authoritative fetch is where those are authorized.
 //
 //   Cursors are opaque, topic-scoped strings. Conversation cursors are the
 //   child's own replay ids; document/inventory/activity cursors are
@@ -123,7 +132,7 @@ export function liveSubscriptionsPath(streamId: string): string {
   return `${LIVE_STREAM_PATH}/${encodeURIComponent(streamId)}/subscriptions`;
 }
 
-export const LIVE_TOPICS = ["document", "inventory", "conversation", "activity"] as const;
+export const LIVE_TOPICS = ["document", "inventory", "conversation", "activity", "worktrees"] as const;
 export type LiveTopic = (typeof LIVE_TOPICS)[number];
 // Topics a client subscribes to per workspace; `activity` is stream-wide and
 // opted into with `activity=1`.
@@ -142,6 +151,16 @@ export type LiveSubscription = LiveSubscriptionKey & { cursor?: string };
 export type LiveSubscriptionChange = { add?: LiveSubscription[]; remove?: LiveSubscriptionKey[] };
 
 export type WorkspaceActivity = { running: boolean; working: boolean; awaiting: boolean };
+
+// The `worktrees` topic's whole payload. Deliberately content-free: it says
+// "this source workspace's worktree inventory may have changed", and the
+// client answers by fetching the inventory over an authorized route.
+export type WorktreeInventoryEvent = { type: "worktree.inventory" };
+export const WORKTREE_INVALIDATION: WorktreeInventoryEvent = { type: "worktree.inventory" };
+
+// The topic takes no replay cursor: every attach sends a fresh invalidation,
+// so there is nothing to resume from and nothing a stale cursor could skip.
+export const WORKTREE_TOPIC_CURSOR = "";
 
 export type LiveEvent =
   | { kind: "data"; data: unknown }
@@ -189,18 +208,19 @@ function byteLength(value: string): number {
 }
 
 function isSubscribableTopic(value: unknown): value is LiveSubscribableTopic {
-  return value === "document" || value === "inventory" || value === "conversation";
+  return value === "document" || value === "inventory" || value === "conversation" || value === "worktrees";
 }
 
 function parseSubscriptionKey(value: unknown): LiveSubscriptionKey | string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "subscription must be an object";
   const record = value as Record<string, unknown>;
-  if (!isSubscribableTopic(record.topic)) return "subscription topic must be document, inventory, or conversation";
+  if (!isSubscribableTopic(record.topic)) return "subscription topic must be document, inventory, conversation, or worktrees";
   const topic = record.topic;
   if (topic === "conversation" && (typeof record.key !== "string" || record.key === "")) {
     return "conversation subscription needs a key";
   }
   if (topic === "inventory" && record.key !== undefined) return "inventory subscription takes no key";
+  if (topic === "worktrees" && record.key !== undefined) return "worktrees subscription takes no key";
   if (record.key !== undefined) {
     if (typeof record.key !== "string") return "subscription key must be a string";
     if (byteLength(record.key) > LIVE_MAX_KEY_BYTES) return "subscription key is too large";
@@ -211,6 +231,10 @@ function parseSubscriptionKey(value: unknown): LiveSubscriptionKey | string {
 function parseSubscription(value: unknown): LiveSubscription | string {
   const key = parseSubscriptionKey(value);
   if (typeof key === "string") return key;
+  // The worktrees topic has no replay cursor. A presented one is dropped
+  // rather than refused, so a client that retained one from an older build
+  // still attaches — and still receives the fresh invalidation.
+  if (key.topic === "worktrees") return key;
   const cursor = (value as Record<string, unknown>).cursor;
   if (cursor === undefined || cursor === null || cursor === "") return key;
   if (typeof cursor !== "string") return "subscription cursor must be a string";

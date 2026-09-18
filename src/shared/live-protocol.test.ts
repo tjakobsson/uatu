@@ -15,6 +15,7 @@ import {
   parseLiveStreamQuery,
   parseLiveSubscriptionChange,
   sanitizeWorkspaceActivity,
+  WORKTREE_INVALIDATION,
   type LiveEnvelope,
   type LiveStreamQuery,
 } from "./live-protocol";
@@ -191,5 +192,19 @@ describe("identities and paths", () => {
 
   test("the control path encodes the stream id", () => {
     expect(liveSubscriptionsPath("a/b")).toBe("/api/hub/live/a%2Fb/subscriptions");
+  });
+});
+
+describe("worktrees topic", () => {
+  test("subscribes without a key, and a presented cursor is dropped", () => {
+    expect(parseLiveSubscriptionChange({ add: [{ topic: "worktrees", cursor: "abc" }] })).toEqual({ add: [{ topic: "worktrees" }] });
+    expect(parseLiveSubscriptionChange({ add: [{ topic: "worktrees", key: "x" }] })).toEqual({ error: "worktrees subscription takes no key" });
+    const query = parseLiveStreamQuery(new URLSearchParams({ ws: "a", subs: JSON.stringify([{ topic: "worktrees", cursor: "c" }]) }));
+    expect(query).toEqual({ ws: "a", activity: false, subs: [{ topic: "worktrees" }], reconnect: false });
+  });
+
+  test("an invalidation envelope parses", () => {
+    expect(parseLiveEnvelope(JSON.stringify({ ws: "a", topic: "worktrees", cursor: "", event: { kind: "data", data: WORKTREE_INVALIDATION } })))
+      .toEqual({ ws: "a", topic: "worktrees", cursor: "", event: { kind: "data", data: { type: "worktree.inventory" } } });
   });
 });

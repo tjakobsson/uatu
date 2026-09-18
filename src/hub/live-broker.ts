@@ -21,6 +21,16 @@
 //   activity      child /api/activity, one upstream per running workspace
 //                 shared by every user's feed (D5). Feeds merge hub session
 //                 state (`running`) with the child's {working, awaiting}.
+//   worktrees     NO child upstream at all. The worktree inventory is the
+//                 hub's own knowledge (src/hub/worktree-service.ts), so this
+//                 topic is a hub-local fan-out: attaching writes one fresh
+//                 invalidation and `ready`, and `publishWorktrees` writes one
+//                 to every attached subscriber after a committed Uatu
+//                 operation or a reconciliation that changed the inventory.
+//                 It takes no cursor, buffers nothing, never fails, and is
+//                 independent of whether the workspace's child is running —
+//                 a stopped parent's picker still learns that its repository
+//                 changed.
 //
 // Lifecycle: the first subscriber opens the upstream; the last leaving
 // starts a linger, after which the upstream is aborted — explicitly, so the
@@ -41,6 +51,8 @@ import {
   CHILD_INVENTORY_EVENTS_PATH,
   childConversationEventsPath,
   sanitizeWorkspaceActivity,
+  WORKTREE_INVALIDATION,
+  WORKTREE_TOPIC_CURSOR,
   type LiveEnvelope,
   type LiveEvent,
   type LiveSubscription,
@@ -97,6 +109,16 @@ export type LiveBrokerOptions = {
   // rejected; a later rejection still signals `unavailable`.
   inventoryOpenGraceMs?: number;
   metrics?: MetricsRegistry;
+};
+
+// What the worktree reconciler learns from the broker: a page attached to a
+// workspace's worktree topic (open), whether any page still holds it (the
+// periodic cadence runs only while one does), and observed agent activity.
+// Observers never influence what the broker writes.
+export type WorktreeTopicObserver = {
+  attached(workspaceId: string): void;
+  interest(workspaceId: string, interested: boolean): void;
+  activity(workspaceId: string, activity: WorkspaceActivity): void;
 };
 
 export type LiveUpstreamDiagnostic = { topic: UpstreamTopic; status: ProxyStatusCategory };
@@ -199,6 +221,13 @@ function upstreamId(workspaceId: string, topic: LiveTopic, key: string | undefin
   return `${workspaceId}\n${topic}\n${key ?? ""}`;
 }
 
+// The upstream metrics describe subscriptions to a CHILD. `worktrees` has
+// none, so it is deliberately absent from the counters rather than reported
+// as an upstream that never opens.
+function childUpstreamTopic(topic: LiveTopic): UpstreamTopic | null {
+  return topic === "worktrees" ? null : topic;
+}
+
 function newEpoch(): string {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -240,6 +269,7 @@ export class LiveBroker {
   private readonly metrics: UpstreamSubscriptionMetrics;
   private readonly unsubscribeSessions: (() => void) | null;
   private disposed = false;
+  private worktreeObserver: WorktreeTopicObserver | null = null;
 
   constructor(private readonly source: LiveUpstreamSource, options: LiveBrokerOptions = {}) {
     this.lingerMs = options.lingerMs ?? LIVE_LINGER_MS;
@@ -305,6 +335,36 @@ export class LiveBroker {
     };
   }
 
+  observeWorktrees(observer: WorktreeTopicObserver | null): void {
+    this.worktreeObserver = observer;
+  }
+
+  private notifyWorktrees(notify: (observer: WorktreeTopicObserver) => void): void {
+    if (!this.worktreeObserver) return;
+    try {
+      notify(this.worktreeObserver);
+    } catch {
+      // An observer never breaks the stream it observes.
+    }
+  }
+
+  // A committed Uatu worktree operation, or a reconciliation that changed
+  // the inventory, invalidates every page subscribed to an affected source
+  // workspace. Authorization is the subscription's: a sink only ever holds
+  // the topic for a workspace its stream was opened for, so naming a
+  // workspace here can never reveal one the user may not access. The
+  // payload is the bare invalidation — no path, no branch, no identity.
+  publishWorktrees(workspaceIds: Iterable<string>): void {
+    if (this.disposed) return;
+    for (const workspaceId of new Set(workspaceIds)) {
+      const upstream = this.upstreams.get(upstreamId(workspaceId, "worktrees", undefined));
+      if (!upstream || upstream.state === "closed") continue;
+      for (const subscriber of [...upstream.subscribers]) {
+        if (subscriber.live) this.emitData(subscriber, WORKTREE_INVALIDATION, WORKTREE_TOPIC_CURSOR);
+      }
+    }
+  }
+
   // Test and diagnostic visibility: the live upstream count per topic.
   upstreamCount(topic?: LiveTopic): number {
     let total = 0;
@@ -332,12 +392,21 @@ export class LiveBroker {
     if (!upstream) {
       upstream = new Upstream(id, subscriber.workspaceId, topic, key);
       this.upstreams.set(id, upstream);
+      if (topic === "worktrees") this.notifyWorktrees(observer => observer.interest(subscriber.workspaceId, true));
     }
     if (upstream.lingerTimer) {
       clearTimeout(upstream.lingerTimer);
       upstream.lingerTimer = null;
     }
     upstream.subscribers.add(subscriber);
+    if (topic === "worktrees") {
+      // Hub-local: there is nothing to open, so the upstream is live from
+      // the moment it exists and can never fail.
+      if (upstream.state === "idle") upstream.state = "live";
+      this.attachLive(upstream, subscriber);
+      this.notifyWorktrees(observer => observer.attached(subscriber.workspaceId));
+      return;
+    }
     switch (upstream.state) {
       case "idle":
         this.open(upstream);
@@ -436,6 +505,16 @@ export class LiveBroker {
         if (subscriber.cursor !== undefined && subscriber.cursor !== upstream.head) {
           this.emitData(subscriber, { type: "conversation.inventory" }, upstream.head);
         }
+        this.emitSignal(subscriber, { kind: "ready" }, upstream);
+        return;
+      }
+      case "worktrees": {
+        // No cursor, no replay, no condition: every attach — a first
+        // subscribe or a reconnect presenting nothing — is told to refetch
+        // authoritative inventory. That is what makes a missed invalidation
+        // during an outage harmless.
+        subscriber.live = true;
+        this.emitData(subscriber, WORKTREE_INVALIDATION, WORKTREE_TOPIC_CURSOR);
         this.emitSignal(subscriber, { kind: "ready" }, upstream);
         return;
       }
@@ -638,10 +717,16 @@ export class LiveBroker {
       }
       case "activity":
         return CHILD_ACTIVITY_PATH;
+      case "worktrees":
+        // Unreachable: open() never runs for a hub-local topic.
+        throw new Error("the worktrees topic has no child upstream");
     }
   }
 
   private open(upstream: Upstream): void {
+    // Hub-local topics have no child to open; attachSubscriber never routes
+    // them here, and neither does a retry, because they never fail.
+    if (upstream.topic === "worktrees") return;
     if (upstream.retryTimer) {
       clearTimeout(upstream.retryTimer);
       upstream.retryTimer = null;
@@ -671,7 +756,7 @@ export class LiveBroker {
     upstream.state = "opening";
     // Every attempt is an open; only the first moves the active gauge — a
     // retry is the same logical upstream.
-    this.metrics.opened(upstream.topic, { reopen: upstream.counted });
+    this.metrics.opened(childUpstreamTopic(upstream.topic)!, { reopen: upstream.counted });
     upstream.counted = true;
     const path = this.childPath(upstream);
     // Presumed live after the grace unless refused first — see
@@ -816,6 +901,9 @@ export class LiveBroker {
         this.recordActivity(upstream, sanitizeWorkspaceActivity({ running: true, ...record }));
         return false;
       }
+      case "worktrees":
+        // Unreachable: no child stream feeds a hub-local topic.
+        return false;
     }
   }
 
@@ -823,6 +911,7 @@ export class LiveBroker {
     const cursor = this.nextHubCursor(upstream);
     upstream.latest = { cursor, data: activity };
     this.fanOut(upstream, activity, cursor);
+    this.notifyWorktrees(observer => observer.activity(upstream.workspaceId, activity));
   }
 
   private nextHubCursor(upstream: Upstream): string {
@@ -857,10 +946,11 @@ export class LiveBroker {
     upstream.abort?.abort();
     upstream.abort = null;
     upstream.state = "failed";
-    if (!upstream.failing) {
+    const metricTopic = childUpstreamTopic(upstream.topic);
+    if (!upstream.failing && metricTopic) {
       upstream.failing = true;
-      this.metrics.failed(upstream.topic);
-      recordUpstreamFailure({ topic: upstream.topic, status });
+      this.metrics.failed(metricTopic);
+      recordUpstreamFailure({ topic: metricTopic, status });
     }
     // A catch-up in flight is left to run: it forwards to its subscriber
     // alone and settles into the pending state (mergeCatchUp,
@@ -910,12 +1000,18 @@ export class LiveBroker {
     }
     upstream.catchUpOwner = null;
     if (this.upstreams.get(upstream.id) === upstream) this.upstreams.delete(upstream.id);
-    if (released && upstream.counted) this.metrics.released(upstream.topic);
+    if (upstream.topic === "worktrees") this.notifyWorktrees(observer => observer.interest(upstream.workspaceId, false));
+    const metricTopic = childUpstreamTopic(upstream.topic);
+    if (released && upstream.counted && metricTopic) this.metrics.released(metricTopic);
   }
 
   private onSessionChange(change: LiveSessionChange): void {
     for (const upstream of [...this.upstreams.values()]) {
       if (upstream.workspaceId !== change.workspaceId) continue;
+      // A hub-local topic does not describe the child, so a start or stop
+      // says nothing about it: the worktree inventory of a stopped parent
+      // is still readable and still worth invalidating.
+      if (upstream.topic === "worktrees") continue;
       if (change.running) {
         if (upstream.state === "failed" || upstream.state === "unsupported") {
           upstream.state = "failed";

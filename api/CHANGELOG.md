@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 7 / Workspace 20 - Unreleased
+
+Compatibility: breaking (Hub)
+
+### Changes
+
+- A published worktree operation family, `GET /api/hub/worktrees` and `POST /api/hub/worktrees/{create,open,delete}`, serves the Git worktree inventory, creation, opening and guarded deletion as JSON. It is additive: the Hub's own `/worktrees` browser flow is unchanged, and both run over one service, so a non-browser client cannot reach an operation with weaker safety rules. A refusal is a completed request and answers 200 with `ok: false` and a sanitized error; HTTP statuses report transport problems only. Creation never takes a destination — the Hub computes `<main-folder>.worktrees/<safe-branch-folder>` — deletion requires `confirm: true` and always keeps the branch, and there is no force anywhere in the family.
+- A second bearer credential, `worktreeCapability`, is accepted on that family and nowhere else. The Hub issues one per running workspace into that workspace's private session runtime directory as an owner-only file and puts only the file's path in the child's environment, so a process inside the workspace can present it without the credential appearing in an argument vector or an environment value. It is scoped to one user and one repository family, is revoked when that session stops or the workspace is forgotten or removed, and expires independently. Presented on any other route, or aimed at any other workspace, it answers 403; a capability the Hub does not accept answers 401 and the remedy is to restart the workspace.
+- Hub state adds optional repository, parent, branch, provenance, availability and worktree navigation fields. The live stream adds the cursor-free `worktrees` topic, with an inventory invalidation on subscription, reconnect and committed changes.
+
+### Migration
+
+Strict Hub clients must regenerate against Hub revision 7. The state objects are closed, so older validators reject the new optional fields. Accept the new `worktrees` envelope topic and subscription variant. On invalidation, fetch authoritative inventory without changing the selected workspace or conversation. The workspace payload revision is unchanged by this feature.
+
 ## Hub 6 / Workspace 20 - Unreleased
 
 Compatibility: breaking (workspace)

@@ -819,3 +819,90 @@ describe("diagnostics (3.3)", () => {
     expect(names).not.toContain(cursorOf("g1", 0));
   });
 });
+
+describe("worktrees topic (worktree 5.2)", () => {
+  test("attaching sends one fresh invalidation and ready, opens no child upstream, and needs no running child", () => {
+    const fake = fakeSource({ running: new Set() });
+    const live = broker(fake.source);
+    const client = sink();
+    live.subscribe(client, "ws", { topic: "worktrees" });
+    expect(client.envelopes).toEqual([
+      { ws: "ws", topic: "worktrees", cursor: "", event: { kind: "data", data: { type: "worktree.inventory" } } },
+      { ws: "ws", topic: "worktrees", cursor: "", event: { kind: "ready" } },
+    ]);
+    expect(fake.opened).toHaveLength(0);
+  });
+
+  test("a reconnect presenting any cursor still receives a fresh invalidation", () => {
+    const live = broker(fakeSource().source);
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "worktrees" }).detach();
+    const second = sink();
+    live.subscribe(second, "ws", { topic: "worktrees", cursor: "stale" });
+    expect(kinds(second.envelopes)).toEqual(["data", "ready"]);
+  });
+
+  test("publish invalidates only subscribers of the named workspaces, immediately, with a content-free payload", () => {
+    const live = broker(fakeSource({ running: new Set(["a", "b"]) }).source);
+    const a = sink();
+    const b = sink();
+    const c = sink();
+    live.subscribe(a, "a", { topic: "worktrees" });
+    live.subscribe(b, "b", { topic: "worktrees" });
+    live.subscribe(c, "c", { topic: "worktrees" });
+    for (const client of [a, b, c]) client.envelopes.length = 0;
+    live.publishWorktrees(["a", "b", "a"]);
+    expect(a.envelopes).toEqual([{ ws: "a", topic: "worktrees", cursor: "", event: { kind: "data", data: { type: "worktree.inventory" } } }]);
+    expect(b.envelopes).toHaveLength(1);
+    expect(c.envelopes).toHaveLength(0);
+    expect(JSON.stringify(a.envelopes)).not.toMatch(/path|branch|checkout/);
+  });
+
+  test("a session stop leaves the topic live; a detached subscriber receives nothing", () => {
+    const fake = fakeSource({ running: new Set(["ws"]) });
+    const live = broker(fake.source);
+    const client = sink();
+    const attachment = live.subscribe(client, "ws", { topic: "worktrees" });
+    client.envelopes.length = 0;
+    fake.setRunning("ws", false);
+    live.publishWorktrees(["ws"]);
+    expect(kinds(client.envelopes)).toEqual(["data"]);
+    attachment.detach();
+    live.publishWorktrees(["ws"]);
+    expect(client.envelopes).toHaveLength(1);
+  });
+
+  test("the activity payload is unchanged by the new topic", async () => {
+    const fake = fakeSource({ running: new Set(["ws"]) });
+    const live = broker(fake.source);
+    const client = sink();
+    live.subscribeActivity(client, "user");
+    live.subscribe(sink(), "ws", { topic: "worktrees" });
+    live.publishWorktrees(["ws"]);
+    expect(client.envelopes.every(envelope => envelope.topic === "activity")).toBe(true);
+    for (const envelope of client.envelopes) {
+      if (envelope.event.kind === "data") expect(Object.keys(envelope.event.data as object).sort()).toEqual(["awaiting", "running", "working"]);
+    }
+  });
+
+  test("the observer hears attach, interest while held, and observed activity", async () => {
+    const fake = fakeSource({ running: new Set(["ws"]) });
+    const live = broker(fake.source, { lingerMs: 20 });
+    const events: string[] = [];
+    live.observeWorktrees({
+      attached: ws => events.push(`attached:${ws}`),
+      interest: (ws, interested) => events.push(`interest:${ws}:${interested}`),
+      activity: (ws, activity) => events.push(`activity:${ws}:${activity.working}`),
+    });
+    const first = live.subscribe(sink(), "ws", { topic: "worktrees" });
+    const second = live.subscribe(sink(), "ws", { topic: "worktrees" });
+    expect(events).toEqual(["interest:ws:true", "attached:ws", "attached:ws"]);
+    first.detach();
+    second.detach();
+    await waitFor(() => events.includes("interest:ws:false"), "interest released after linger");
+    live.subscribeActivity(sink(), "user");
+    await waitFor(() => fake.byPath("/api/activity").length === 1, "activity upstream");
+    fake.byPath("/api/activity")[0]!.push(`event: activity\ndata: {"working":true,"awaiting":false}\n\n`);
+    await waitFor(() => events.includes("activity:ws:true"), "activity observed");
+  });
+});

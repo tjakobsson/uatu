@@ -16,8 +16,9 @@ import type {
 import { normalizeProviderHost } from "./credential-types";
 import { createProviderRuntime } from "./provider-runtime";
 
-export const LOCAL_CREDENTIAL_ASSIGNMENT_WARNING =
-  "Local workspace credential assignments configure normal tools only. All workspaces run as the Hub OS user, so same-UID processes can inspect runtime files, reach shared agents, unset the configuration, and use credentials assigned elsewhere.";
+export { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING } from "./credential-presentation";
+import { SCP_REMOTE_PATTERN } from "./credential-presentation";
+export { SCP_REMOTE_PATTERN } from "./credential-presentation";
 
 export type ResolvedAuthenticationCredential =
   | { host: string; credential: SshCredentialRecord }
@@ -91,7 +92,6 @@ type CloneRemote = { transport: "ssh" | "https" | "other"; host?: string };
 // form must derive the same host from the same spelling: pages.ts inlines
 // this source into its client script rather than keeping a second regex
 // that can drift from what the server accepts.
-export const SCP_REMOTE_PATTERN = /^(?:[^@/:\s]+@)?(\[[^\]]+\]|[^/:\s]+):(.+)$/;
 
 export function parseCloneRemote(remote: string): CloneRemote {
   const scp = SCP_REMOTE_PATTERN.exec(remote);
@@ -255,14 +255,25 @@ export type StoredCredentialContextResolverOptions = {
   openPgpCredentialUsable: (credentialId: string) => Promise<boolean>;
   tools: ResolvedCredentialContext["tools"];
   runExclusive?: <T>(operation: () => Promise<T>) => Promise<T>;
+  // Which workspace's assignments govern this workspace. A registered
+  // linked worktree names its parent: credentials and shared configuration
+  // are managed only on the parent and inherited LIVE, so a parent change
+  // reaches every child with no per-child assignment to update and no
+  // secret copied anywhere (design §3). Defaults to identity.
+  policyWorkspaceId?: (workspaceId: string) => string;
 };
+
+function policyWorkspace(options: StoredCredentialContextResolverOptions, workspaceId: string): string {
+  return options.policyWorkspaceId?.(workspaceId) ?? workspaceId;
+}
 
 function workspaceState(options: StoredCredentialContextResolverOptions, workspaceId: string): {
   assignments: CredentialAssignment[];
   credentials: Array<SshCredentialRecord | OpenPgpCredentialRecord | TokenCredentialRecord>;
 } {
   const state = options.metadata.snapshot();
-  const assignments = state.assignments.filter(item => item.workspaceId === workspaceId);
+  const owner = policyWorkspace(options, workspaceId);
+  const assignments = state.assignments.filter(item => item.workspaceId === owner);
   const ids = new Set(assignments.map(item => item.credentialId));
   return {
     assignments,
@@ -270,6 +281,9 @@ function workspaceState(options: StoredCredentialContextResolverOptions, workspa
   };
 }
 
+// The revision a running session is compared against. Resolved through the
+// policy owner too, so a parent policy change marks its running children
+// restart-required exactly as it does the parent.
 function contextRevision(options: StoredCredentialContextResolverOptions, workspaceId: string): string {
   const state = workspaceState(options, workspaceId);
   const tokens = state.credentials

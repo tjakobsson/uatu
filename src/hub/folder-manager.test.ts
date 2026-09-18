@@ -11,6 +11,7 @@ import { PathReservationCoordinator } from "./path-reservations";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry, type WorkspaceEntry } from "./registry";
 import { SessionManager } from "./sessions";
+import type { WorktreeDependencyProbe } from "./worktree-rename-guard";
 
 const tempDirectories: string[] = [];
 
@@ -25,6 +26,7 @@ async function fixture(options: {
   reservations?: PathReservationCoordinator;
   renameNoReplace?: (from: string, to: string) => number;
   platform?: NodeJS.Platform;
+  worktreeDependencies?: WorktreeDependencyProbe;
 } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-folders-")));
   tempDirectories.push(root);
@@ -59,6 +61,7 @@ async function fixture(options: {
     fs: options.fs,
     ...(options.renameNoReplace === undefined ? {} : { renameNoReplace: options.renameNoReplace }),
     ...(options.platform === undefined ? {} : { platform: options.platform }),
+    ...(options.worktreeDependencies === undefined ? {} : { worktreeDependencies: options.worktreeDependencies }),
   });
   return { root, state, folders, registry, personalState, credentials, sessions, reservations, journalPath, manager, stopped };
 }
@@ -1475,5 +1478,97 @@ describe("FolderManager journal recovery", () => {
     const entry = await f.registry.register(source);
     await writeJournal(f.journalPath, { version: 1, operation: "remove", source, entry }, 0o644);
     await expect(f.manager.recover()).rejects.toThrow("journal is invalid");
+  });
+});
+
+// The Git-dependency guard itself is covered against real repositories in
+// worktree-rename-guard.test.ts; these tests prove the folder manager honours
+// its verdict, and that nothing else in the rename path can bypass it.
+describe("FolderManager Git worktree dependency guard", () => {
+  type Verdict = Awaited<ReturnType<WorktreeDependencyProbe>>;
+  async function guarded(verdict: Verdict | (() => never), stop = false) {
+    const asked: string[] = [];
+    const f = await fixture({
+      worktreeDependencies: async source => {
+        asked.push(source);
+        if (typeof verdict === "function") verdict();
+        return verdict as Verdict;
+      },
+    });
+    const source = path.join(f.folders, "atlas");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    await f.sessions.start(entry.id);
+    return { f, source, entry, asked, stop };
+  }
+
+  // Error messages are non-enumerable, so toMatchObject cannot see them.
+  async function refusal(operation: Promise<unknown>): Promise<FolderManagerError> {
+    const error = await operation.then(() => undefined, (thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(FolderManagerError);
+    return error as FolderManagerError;
+  }
+
+  test("refuses a rename that would break a worktree dependency, before any mutation", async () => {
+    const { f, source, entry, asked } = await guarded({ kind: "blocked", reason: "Moving it would break links between checkouts and their repository." });
+    const error = await refusal(f.manager.rename({ path: source, name: "renamed" }));
+    expect(error.code).toBe("conflict");
+    expect(error.message).toContain("break links");
+    expect(asked).toEqual([source]);
+    expect(await exists(source)).toBe(true);
+    expect(await exists(path.join(f.folders, "renamed"))).toBe(false);
+    expect(f.registry.byId(entry.id)?.path).toBe(source);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("stop authorization does not make an unsafe move safe", async () => {
+    const { f, source } = await guarded({ kind: "blocked", reason: "blocked by Git worktree links" });
+    await expect(f.manager.rename({ path: source, name: "renamed", stop: true }))
+      .rejects.toMatchObject({ code: "conflict" });
+    // The guard runs before session coordination, so nothing was stopped.
+    expect(f.stopped).toEqual([]);
+    expect(await exists(source)).toBe(true);
+  });
+
+  test("an inconclusive verdict fails closed with an actionable explanation", async () => {
+    const { f, source } = await guarded({ kind: "inconclusive", reason: "Uatu could not establish whether moving this folder would break Git worktree links." });
+    const error = await refusal(f.manager.rename({ path: source, name: "renamed" }));
+    expect(error.code).toBe("conflict");
+    expect(error.message).toContain("could not establish");
+    expect(await exists(source)).toBe(true);
+  });
+
+  test("a guard that fails outright also fails closed", async () => {
+    const { f, source } = await guarded(() => { throw new Error("git probe crashed"); });
+    const error = await refusal(f.manager.rename({ path: source, name: "renamed" }));
+    expect(error.code).toBe("conflict");
+    expect(error.message).toContain("could not establish");
+    // The crash detail stays internal: the caller gets the safe explanation.
+    expect(error.message).not.toContain("git probe crashed");
+    expect(await exists(source)).toBe(true);
+  });
+
+  test("a safe unrelated rename still works, and display names stay editable", async () => {
+    const { f, source, entry, asked } = await guarded({ kind: "safe" });
+    const result = completed(await f.manager.rename({ path: source, name: "renamed", stop: true }));
+    expect(result.path).toBe(path.join(f.folders, "renamed"));
+    expect(result.workspaceIds).toEqual([entry.id]);
+    expect(asked).toEqual([source]);
+    // A display-name edit is not a folder move and is never guarded.
+    expect((await f.registry.updateDisplayName(entry.id, "Atlas review"))?.displayName).toBe("Atlas review");
+  });
+
+  test("creating and removing folders do not consult the rename guard", async () => {
+    const asked: string[] = [];
+    const f = await fixture({
+      worktreeDependencies: async source => {
+        asked.push(source);
+        return { kind: "blocked", reason: "blocked" };
+      },
+    });
+    const created = await f.manager.create({ parent: f.folders, name: "fresh" });
+    expect(created.path).toBe(path.join(f.folders, "fresh"));
+    completed(await f.manager.remove({ path: created.path }));
+    expect(asked).toEqual([]);
   });
 });

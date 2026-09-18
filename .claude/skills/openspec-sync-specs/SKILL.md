@@ -7,7 +7,7 @@ compatibility: Requires openspec CLI.
 metadata:
   author: openspec
   version: "1.0"
-  generatedBy: "1.11.0"
+  generatedBy: "1.12.0"
 ---
 
 Sync delta specs from a change to main specs.
@@ -31,7 +31,7 @@ This is an **agent-driven** operation - you will read delta specs and directly e
 
    When prompting, show changes that have delta specs (under `specs/` directory).
 
-   Always announce: "Using change: <name>" and how to override (e.g., `/opsx:sync <other>`).
+   Always announce: "Using change: <name>" and how to override (e.g., `/openspec-sync-specs <other>`).
 
 2. **Resolve change context**
 

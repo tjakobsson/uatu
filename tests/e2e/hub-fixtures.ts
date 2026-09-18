@@ -34,13 +34,15 @@ type TestFixtures = {
 // slug-shaped ([a-z0-9-]): they are the workspace ids.
 type WorkerOptions = {
   hubWorkspaces: string[];
+  hubWorktrees: boolean;
 };
 
 export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
   hubWorkspaces: [["alpha"], { option: true, scope: "worker" }],
+  hubWorktrees: [false, { option: true, scope: "worker" }],
 
   hub: [
-    async ({ hubWorkspaces }, use, workerInfo) => {
+    async ({ hubWorkspaces, hubWorktrees }, use, workerInfo) => {
       const hubPort = HUB_BASE_PORT + workerInfo.workerIndex * PORTS_PER_WORKER;
       if (hubWorkspaces.length >= PORTS_PER_WORKER) {
         throw new Error(`a hub worker serves at most ${PORTS_PER_WORKER - 1} workspaces`);
@@ -51,6 +53,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
           UATU_E2E_HUB_PORT: String(hubPort),
           UATU_E2E_HUB_CHILD_BASE_PORT: String(hubPort + 1),
           UATU_E2E_HUB_WORKSPACES: hubWorkspaces.join(","),
+          UATU_E2E_HUB_WORKTREES: hubWorktrees ? "1" : "0",
         },
         stdio: ["ignore", "pipe", "inherit"],
       });

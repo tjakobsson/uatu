@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 6.20.0-experimental
+  version: 7.20.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 6 and workspace revision 20
+  summary: Hub revision 7 and workspace revision 20
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves one family itself, personal
@@ -20,7 +20,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 6
+    hubApiRevision: 7
     workspaceApiRevision: 20
 servers:
   - url: https://{hubHost}
@@ -32,6 +32,7 @@ tags:
   - { name: Hub credentials, description: "Hub-managed credentials, workspace assignments, and credential-tool readiness." }
   - { name: Clone jobs, description: "Asynchronous clone creation, interaction, cancellation, and events." }
   - { name: Live stream, description: "One SSE connection per client for document state, conversation inventory and events, and cross-workspace activity." }
+  - { name: Worktrees, description: "Git worktrees of a workspace's repository as independent workspaces: authoritative inventory, creation, opening and guarded deletion. The Hub's own interface and an agent-invoked CLI perform the same operations through this family." }
 security:
   - hubBearer: []
   - hubCookie: []
@@ -82,12 +83,26 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HubState' }
-              example:
-                version: 0.5.1 (abcdef0)
-                hubApiRevision: 6
-                workspaceApiRevision: 10
-                workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 10, shells: [{ attached: false, label: zsh }] }]
-                workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
+              examples:
+                ordinary:
+                  summary: An ordinary workspace
+                  value:
+                    version: 0.5.1 (abcdef0)
+                    hubApiRevision: 7
+                    workspaceApiRevision: 20
+                    workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 20, shells: [{ attached: false, label: zsh }] }]
+                    workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
+                worktrees:
+                  summary: A main workspace and one linked worktree
+                  value:
+                    version: 0.5.1 (abcdef0)
+                    hubApiRevision: 7
+                    workspaceApiRevision: 20
+                    worktreeNavigation: /worktrees
+                    worktreeConfigureNavigation: /settings
+                    workspaces:
+                      - { id: atlas, displayName: Atlas, path: /src/atlas, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [] }, workspaceApiRevision: 20, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: main, createWorktree: /worktrees?view=create&source=atlas }
+                      - { id: feature-login, displayName: feature/login, path: /src/atlas.worktrees/feature-login, backend: local, running: false, credentialRestartRequired: false, credentialAssignments: { authentication: [], signing: [] }, workspaceApiRevision: 20, parentId: atlas, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, branch: feature/login, sourceRef: main, ownership: uatu }
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -749,7 +764,8 @@ paths:
       description: |
         One long-lived Server-Sent Events connection per client. It carries
         every pushed update for one workspace, meaning document state, the
-        conversation inventory, and conversation events. On request it also
+        conversation inventory, conversation events, and worktree inventory
+        invalidations. On request it also
         carries an activity summary of every workspace the caller may access.
         streaming.yaml#channels.live defines the frames, envelopes, topics,
         cursors, and signals.
@@ -766,7 +782,7 @@ paths:
           in: query
           required: true
           schema: { $ref: '#/components/schemas/WorkspaceId' }
-          description: "Workspace whose document, inventory, and conversation topics the stream carries. Required. An absent or empty id, or one longer than 256 UTF-8 bytes, answers 400 (absent: `workspace id required`). An id that is unknown, or that the caller may not access, answers 404."
+          description: "Workspace whose document, inventory, conversation, and worktrees topics the stream carries. Required. An absent or empty id, or one longer than 256 UTF-8 bytes, answers 400 (absent: `workspace id required`). An id that is unknown, or that the caller may not access, answers 404."
         - name: activity
           in: query
           schema: { type: string, enum: ['0', '1'], default: '0' }
@@ -866,9 +882,160 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+  /api/hub/worktrees:
+    get:
+      operationId: hubListWorktrees
+      tags: [Worktrees]
+      summary: List a repository's checkouts
+      description: |
+        The authoritative Git worktree inventory of one workspace's
+        repository family, reconciled from Git at the time of the request. A
+        workspace that is a linked worktree resolves to its main workspace,
+        which owns the family and its credential policy.
+      security:
+        - hubBearer: []
+        - hubCookie: []
+        - worktreeCapability: []
+      parameters:
+        - name: source
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/WorkspaceId' }
+          description: "The workspace whose repository family to list. Optional for a worktree capability, which names one family already; required for a Hub session."
+      responses:
+        '200': { $ref: '#/components/responses/WorktreeInventory' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '405': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/worktrees/create:
+    post:
+      operationId: hubCreateWorktree
+      tags: [Worktrees]
+      summary: Create a linked worktree
+      description: |
+        Adds an ordinary linked worktree and registers it as its own
+        workspace, through the same service and the same safety rules the
+        Hub's own interface uses. The destination is predetermined
+        (`<main-folder>.worktrees/<safe-branch-folder>`) and is never an
+        input. Nothing is ever forced: a branch checked out elsewhere, an
+        occupied destination or a ref that is not available is a refusal
+        carrying the existing checkout to open instead.
+
+        A refusal is a completed request: it answers 200 with
+        `ok: false` and a sanitized error, because the Hub processed the
+        request and decided against it. HTTP statuses report transport-level
+        problems only.
+      security:
+        - hubBearer: []
+        - hubCookie: []
+        - worktreeCapability: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWorktreeRequest' }
+            examples:
+              newBranch:
+                summary: A new branch from an unqualified ref the Hub resolves
+                value: { sourceWorkspaceId: atlas, mode: new-branch, branch: feature/login, baseRef: main, start: false }
+              remoteTracking:
+                summary: A tracking branch from a remote-qualified ref
+                value: { sourceWorkspaceId: atlas, mode: remote-tracking, base: { kind: remote, ref: origin/release } }
+      responses:
+        '200': { $ref: '#/components/responses/WorktreeOperation' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '405': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/worktrees/open:
+    post:
+      operationId: hubOpenWorktree
+      tags: [Worktrees]
+      summary: Report, and optionally start, an existing checkout
+      description: |
+        Reports where a registered checkout of this repository family is and
+        whether it runs. With `start: true` it also starts that workspace,
+        through the Hub's ordinary start with all its recovery fences. A
+        failed explicit start does not fail the operation: the workspace
+        stays configured and stopped, and `startError` reports why. This
+        operation never registers an unregistered checkout and never
+        migrates a conversation.
+      security:
+        - hubBearer: []
+        - hubCookie: []
+        - worktreeCapability: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OpenWorktreeRequest' }
+            example: { sourceWorkspaceId: atlas, reference: feature/login, start: true }
+      responses:
+        '200': { $ref: '#/components/responses/WorktreeOperation' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '405': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/worktrees/delete:
+    post:
+      operationId: hubDeleteWorktree
+      tags: [Worktrees]
+      summary: Delete a worktree Uatu created
+      description: |
+        Removes a verified Uatu-created linked checkout after every safety
+        check — ownership, identity, tracked, untracked and ignored data,
+        Git locks, nested worktrees and known activity — and always keeps the
+        branch. `confirm: true` is required and is itself the authorization;
+        there is no force, no override of any blocker, and no branch
+        deletion. `stop: true` additionally authorizes stopping this
+        worktree's own Uatu sessions; activity Uatu does not own remains a
+        blocker. A blocked or failed deletion retains both the checkout and
+        its registration.
+      security:
+        - hubBearer: []
+        - hubCookie: []
+        - worktreeCapability: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeleteWorktreeRequest' }
+            example: { sourceWorkspaceId: atlas, reference: feature/login, confirm: true, stop: true }
+      responses:
+        '200': { $ref: '#/components/responses/WorktreeOperation' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '405': { $ref: '#/components/responses/NoStoreError' }
 components:
   securitySchemes:
     hubBearer: { type: http, scheme: bearer, description: Session ID returned by native JSON login. }
+    worktreeCapability:
+      type: http
+      scheme: bearer
+      description: |
+        A least-privilege worktree capability, not a Hub session. The Hub
+        issues one per running workspace, writes it into that workspace's
+        private session runtime directory as an owner-only file, and puts
+        only that file's path in the workspace child's environment — so a
+        process inside the workspace, including an agent the user runs in its
+        terminal, can present it without it ever appearing in an argument
+        vector or an environment value.
+
+        It carries the `uatu-wt-` prefix, which is how the Hub tells it from
+        a session id. It authorizes ONLY this operation family, and only for
+        the one repository family of the workspace it was issued to: the Hub
+        answers 403 for a capability presented on any other route or aimed at
+        any other workspace. It is revoked when that workspace's session
+        stops and when the workspace, or the main workspace of its family, is
+        forgotten or removed, and it expires independently of that. A
+        capability the Hub does not accept answers 401; the remedy is to
+        restart the workspace, never to present another credential.
     hubCookie:
       type: apiKey
       in: cookie
@@ -957,6 +1124,49 @@ components:
       description: Credential deletion result
       headers: { Cache-Control: { schema: { type: string, const: no-store } } }
       content: { application/json: { schema: { $ref: '#/components/schemas/CredentialDeletedResponse' } } }
+    WorktreeInventory:
+      description: Authoritative Git worktree inventory for one repository family
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/WorktreeInventoryResponse' }
+          example:
+            inventory:
+              repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e
+              sourceWorkspaceId: atlas
+              status: ready
+              checkouts:
+                - { checkoutId: 9a1b, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, workspaceId: atlas, path: /src/atlas, branch: main, detached: false, main: true, ownership: main, availability: present, registered: true, running: true, locked: false }
+                - { checkoutId: 7c2d, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, workspaceId: feature-login, parentWorkspaceId: atlas, path: /src/atlas.worktrees/feature-login, branch: feature/login, detached: false, main: false, ownership: uatu, availability: present, registered: true, running: false, locked: false, sourceRef: main }
+              refs: { local: [main, release], remote: [origin/main], fetchedAt: null }
+    WorktreeOperation:
+      description: |
+        The operation's own outcome. A refusal is a completed request and
+        answers 200 with `ok: false` and a sanitized error; HTTP statuses
+        report transport-level problems only.
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/WorktreeOperationResult' }
+          examples:
+            created:
+              summary: Created and left stopped
+              value:
+                ok: true
+                operationId: 1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9
+                kind: create
+                phase: complete
+                registered: true
+                started: false
+                checkout: { checkoutId: 7c2d, repositoryId: 5f0c2a9d4e1b7a3c6d8e9f0a1b2c3d4e, workspaceId: feature-login, parentWorkspaceId: atlas, path: /src/atlas.worktrees/feature-login, branch: feature/login, detached: false, main: false, ownership: uatu, availability: present, registered: true, running: false, locked: false, sourceRef: main }
+            refused:
+              summary: Refused without force, naming the existing checkout
+              value:
+                ok: false
+                operationId: 2a3b4c5d-6e7f-4801-9234-5f6e7d8c9b0a
+                kind: create
+                phase: validating
+                error: { code: branch-in-use, message: That branch is checked out in another worktree. Open that checkout instead., retry: open-existing, conflictCheckoutId: 7c2d, phase: validating }
   schemas:
     Error:
       type: object
@@ -1013,6 +1223,8 @@ components:
           type: array
           items: { $ref: '#/components/schemas/HubWorkspace' }
         workspaceDefaults: { $ref: '#/components/schemas/WorkspaceDefaults' }
+        worktreeNavigation: { type: string, minLength: 1, description: "Present when this Hub serves worktree operations. The origin-rooted path of the server-rendered worktree presentation the workspace picker and dashboard open. Its operations are a browser form flow, not part of this contract." }
+        worktreeConfigureNavigation: { type: string, minLength: 1, description: "Present with worktreeNavigation. The origin-rooted page where a main workspace's credentials, which its linked worktrees inherit, are managed." }
       additionalProperties: false
     HubWorkspace:
       type: object
@@ -1027,6 +1239,14 @@ components:
         credentialAssignments: { $ref: '#/components/schemas/WorkspaceCredentialAssignmentSummary' }
         workspaceApiRevision: { type: integer, minimum: 1, description: "Workspace API revision spoken by this workspace's child. Matches the top-level workspaceApiRevision for the local backend; backends running children of other builds report the child's own revision." }
         shells: { type: array, items: { type: object, required: [attached, label], properties: { attached: { type: boolean }, label: { type: string } }, additionalProperties: false } }
+        parentId: { $ref: '#/components/schemas/WorkspaceId', description: "Present for a registered linked worktree. The main workspace it belongs to, whose credentials and shared configuration it inherits live. Its own `credentialAssignments` stay its own rows, normally none; read the parent's for the inherited policy." }
+        repositoryId: { type: string, minLength: 1, description: "Opaque canonical repository identity shared by a main workspace and its linked worktrees. Group by this and `parentId`, never by names or paths. Absent when unknown." }
+        branch: { type: string, minLength: 1, description: "The checkout's current local branch, read from its HEAD. For a linked worktree it is also its name. Absent when detached or unknown." }
+        detached: { type: boolean, const: true, description: "Present when the checkout's HEAD is detached." }
+        sourceRef: { type: string, minLength: 1, description: "Linked worktrees only. The recorded ref the branch was created from, when Uatu created it. Never inferred from upstream or history; absent means origin unknown." }
+        ownership: { type: string, enum: [uatu, external, uncertain], description: "Linked worktrees only. `uatu` for a checkout with verified Uatu creation provenance, which alone can be deleted through Uatu." }
+        availability: { type: string, enum: [missing, replaced], description: "Linked worktrees only, present when the registered checkout is not at its path (`missing`) or the path holds a different checkout (`replaced`). Such a workspace cannot start until resolved outside Uatu." }
+        createWorktree: { type: string, minLength: 1, description: "Present for a main checkout that can host linked worktrees. The origin-rooted presentation path the fork action opens." }
       additionalProperties: false
     WorkspaceCredentialAssignmentSummary:
       type: object
@@ -1573,6 +1793,11 @@ components:
             topic: { type: string, const: conversation }
             key: { $ref: '#/components/schemas/LiveConversationKey' }
           additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: worktrees }
+          additionalProperties: false
     LiveSubscription:
       description: A subscription and the cursor to resume it from.
       oneOf:
@@ -1596,6 +1821,12 @@ components:
             key: { $ref: '#/components/schemas/LiveConversationKey' }
             cursor: { $ref: '#/components/schemas/LiveCursor' }
           additionalProperties: false
+        - type: object
+          required: [topic]
+          properties:
+            topic: { type: string, const: worktrees }
+            cursor: { $ref: '#/components/schemas/LiveCursor', description: "Ignored. The worktrees topic has no replay cursor; every attach receives a fresh invalidation." }
+          additionalProperties: false
     LiveSubscriptionList:
       type: array
       maxItems: 16
@@ -1618,3 +1849,134 @@ components:
       properties:
         ok: { type: boolean, const: true }
       additionalProperties: false
+    WorktreeOwnership:
+      type: string
+      enum: [main, uatu, external, uncertain]
+      description: "How this checkout relates to Uatu. `main` is the repository's main checkout. `uatu` means verified Uatu creation provenance, which alone may be deleted through Uatu. `external` is somebody else's tree, whether or not it is registered. `uncertain` means the recorded identity could not be confirmed; its content is retained and destructive actions are refused. Never inferred from a name, a path, or the presence of an agent's configuration directory."
+    WorktreeAvailability:
+      type: string
+      enum: [present, missing, replaced]
+      description: "`present` is the ordinary case. `missing` is a registered path that is not there; `replaced` is a path occupied by a different checkout. Neither is ever silently repaired, and neither can start."
+    WorktreeCheckout:
+      type: object
+      required: [checkoutId, repositoryId, path, branch, detached, main, ownership, availability, registered, running, locked]
+      properties:
+        checkoutId: { type: string, minLength: 1, description: "Canonical identity of this checkout. Ownership and every destructive action are decided on this, never on a path: a path reused by another tree must not inherit an older record's ownership." }
+        repositoryId: { type: string, minLength: 1, description: "Canonical repository identity shared by a main checkout and its linked worktrees. Group by this, never by names or paths." }
+        workspaceId: { $ref: '#/components/schemas/WorkspaceId', description: "The Hub registration, present only once registered. Present exactly when `registered` is true." }
+        parentWorkspaceId: { $ref: '#/components/schemas/WorkspaceId', description: "The registered main workspace this checkout belongs to, when known. It owns the credential policy this checkout inherits live." }
+        path: { type: string, minLength: 1 }
+        branch: { type: [string, 'null'], minLength: 1, description: "The exact local branch, slashes included; for a linked worktree it is also its display name. Null for a detached or unreadable HEAD, which is stated rather than guessed." }
+        detached: { type: boolean }
+        main: { type: boolean, description: "Whether this is the repository's main checkout. A main checkout is never deletable through Uatu." }
+        ownership: { $ref: '#/components/schemas/WorktreeOwnership' }
+        availability: { $ref: '#/components/schemas/WorktreeAvailability' }
+        registered: { type: boolean }
+        running: { type: boolean }
+        locked: { type: boolean, description: "Whether Git reports the checkout locked. A locked checkout is never removed." }
+        sourceRef: { type: string, minLength: 1, description: "Immutable branch-creation snapshot: the ref explicitly selected when Uatu created this branch. Not the upstream and not the starting revision, and never inferred from either. Absent means the origin is unknown." }
+        upstream: { type: string, minLength: 1 }
+        head: { type: string, minLength: 1, description: "Short revision, for diagnostics. Never provenance." }
+      additionalProperties: false
+    WorktreeRefs:
+      type: object
+      required: [local, remote, fetchedAt]
+      properties:
+        local: { type: array, items: { type: string, minLength: 1 } }
+        remote: { type: array, items: { type: string, minLength: 1 }, description: "Remote-qualified, such as origin/release." }
+        fetchedAt: { type: [integer, 'null'], description: "Unix epoch milliseconds of the last successful fetch in this Hub run, or null when the listing comes from repository state alone. A cached listing is never network-fresh." }
+      additionalProperties: false
+    WorktreeErrorCode:
+      type: string
+      enum: [invalid-input, git-unsupported, not-found, branch-exists, branch-in-use, destination-occupied, ref-unavailable, fetch-authentication, fetch-network, registration-failed, start-failed, local-data, git-lock, external-activity, nested-dependency, stop-failed, ownership-required, identity-uncertain, inventory-unavailable, folder-dependency, folder-dependency-unknown, conflict, permission-denied, timeout, cancelled, internal]
+      description: "The closed set of refusals. A client that cannot map a code refuses rather than inventing a recovery."
+    WorktreeRetryAction:
+      type: string
+      enum: [none, retry-registration, retry-start, retry-fetch, retry-delete, refresh, open-existing]
+      description: "The one follow-up the originating flow offers. `none` means there is none; it is never a licence to force."
+    WorktreePhase:
+      type: string
+      enum: [validating, reserving, creating, verifying, registering, assigning, starting, preflight, fencing, stopping, rechecking, removing, unregistering, complete]
+      description: "The last boundary the operation provably passed. Not a progress percentage: it is what restart recovery reconciles against actual Git state. Create phases run validating to complete; delete phases preflight to complete; unphased kinds report only complete."
+    WorktreeError:
+      type: object
+      required: [code, message, retry]
+      properties:
+        code: { $ref: '#/components/schemas/WorktreeErrorCode' }
+        message: { type: string, minLength: 1, maxLength: 300, description: "Already sanitized: no absolute path, no credential, no control character, bounded length. Safe to show a user verbatim." }
+        retry: { $ref: '#/components/schemas/WorktreeRetryAction' }
+        conflictCheckoutId: { type: string, minLength: 1, description: "The existing checkout an occupancy conflict points at, to open instead of forcing." }
+        retainedCheckoutId: { type: string, minLength: 1, description: "A checkout that outlived a failed operation and must not be recreated." }
+        phase: { $ref: '#/components/schemas/WorktreePhase' }
+      additionalProperties: false
+    WorktreeInventoryResponse:
+      type: object
+      required: [inventory]
+      properties:
+        inventory:
+          type: object
+          required: [repositoryId, sourceWorkspaceId, status, checkouts, refs]
+          properties:
+            repositoryId: { type: string, minLength: 1, description: "The reserved word `unknown` when the repository could not be identified at all, which is legal only on an explicitly stale error listing with no checkouts." }
+            sourceWorkspaceId: { $ref: '#/components/schemas/WorkspaceId' }
+            status: { type: string, enum: [ready, loading, error] }
+            checkouts: { type: array, items: { $ref: '#/components/schemas/WorktreeCheckout' } }
+            refs: { $ref: '#/components/schemas/WorktreeRefs' }
+            error: { $ref: '#/components/schemas/WorktreeError', description: "Present when status is error: the listing shown is explicitly stale." }
+          additionalProperties: false
+      additionalProperties: false
+    WorktreeOperationResult:
+      type: object
+      required: [ok, operationId, kind]
+      properties:
+        ok: { type: boolean }
+        operationId: { type: string, minLength: 1 }
+        kind: { type: string, enum: [create, register, start, fetch, refresh, delete, forget] }
+        phase: { $ref: '#/components/schemas/WorktreePhase' }
+        checkout: { $ref: '#/components/schemas/WorktreeCheckout' }
+        registered: { type: boolean }
+        started: { type: boolean }
+        startError: { $ref: '#/components/schemas/WorktreeError', description: "An explicitly requested start that failed. It does not fail the operation: the workspace remains configured and stopped." }
+        error: { $ref: '#/components/schemas/WorktreeError' }
+        retainedCheckout: { $ref: '#/components/schemas/WorktreeCheckout', description: "Present when Git succeeded and a later step did not. Retry acts on this checkout; a second one is never created." }
+      additionalProperties: false
+      description: "A successful result carries phase, registered and started; a refusal carries error, and retainedCheckout when a checkout outlived it."
+    CreateWorktreeRequest:
+      type: object
+      required: [mode]
+      properties:
+        sourceWorkspaceId: { $ref: '#/components/schemas/WorkspaceId', description: "Required for a Hub session. Optional for a worktree capability, which names one repository family already." }
+        mode: { type: string, enum: [new-branch, existing-local, remote-tracking] }
+        branch: { type: string, minLength: 1, description: "The target local branch. Required for new-branch. For the other modes the Hub derives it — the existing local ref, or the remote ref minus its remote prefix — and rejects a mismatching guess. Held to Git's branch grammar before any repository is touched, so an option-like name or a revision expression never reaches a Git argument list." }
+        base:
+          type: object
+          required: [kind, ref]
+          properties:
+            kind: { type: string, enum: [local, remote] }
+            ref: { type: string, minLength: 1 }
+          additionalProperties: false
+          description: "An exactly qualified starting ref. Mutually exclusive with baseRef."
+        baseRef: { type: string, minLength: 1, description: "A starting ref left for the Hub to qualify against the repository's own listing, for callers that have one name rather than a committed selection — feature/login is a valid local branch and origin/main a remote-qualified one, and only the listing tells them apart. A ref that is not in the listing is refused; one that is both is refused as ambiguous. Nothing is substituted for a near match. Ignored when base is present." }
+        start: { type: boolean, description: "Post-commit intent. Creation leaves the workspace stopped by default, and a failed start does not fail the creation." }
+      additionalProperties: false
+    OpenWorktreeRequest:
+      type: object
+      required: [reference]
+      properties:
+        sourceWorkspaceId: { $ref: '#/components/schemas/WorkspaceId' }
+        reference: { $ref: '#/components/schemas/WorktreeReference' }
+        start: { type: boolean }
+      additionalProperties: false
+    DeleteWorktreeRequest:
+      type: object
+      required: [reference, confirm]
+      properties:
+        sourceWorkspaceId: { $ref: '#/components/schemas/WorkspaceId' }
+        reference: { $ref: '#/components/schemas/WorktreeReference' }
+        confirm: { type: boolean, const: true, description: "Required, and itself the authorization — the same role the destructive button plays in the Hub's dialog. It authorizes the stated operation; it does not override any blocker, and there is no force anywhere in this family." }
+        stop: { type: boolean, description: "Additionally authorizes stopping this worktree's own Uatu sessions before removal. Activity Uatu does not own stays a blocker: Uatu never claims it can stop an external application." }
+      additionalProperties: false
+    WorktreeReference:
+      type: string
+      minLength: 1
+      description: "A registered workspace id, a canonical checkout id, or the exact branch of exactly one linked checkout in this repository family. A branch is resolved against the authoritative inventory and yields a canonical identity, which is what every safety check then runs on — so a stale name can never address a path's new occupant. A branch matching more than one checkout is refused as ambiguous."

@@ -30,6 +30,10 @@ import { HubPreferencesStore } from "./preferences";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
+import { WorktreeCapabilityStore } from "./worktree-capability";
+import { WorktreeJournal, WorktreeProvenanceStore } from "./worktree-journal";
+import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
+import { WorktreeService } from "./worktree-service";
 import {
   assertOpenApiResponse,
   assertSchema,
@@ -75,6 +79,7 @@ let bearerId = "";
 let cloneJobs: CloneJobManager;
 let reservations: PathReservationCoordinator;
 let preferences: HubPreferencesStore;
+let worktreeCapability = "";
 const managedCloneStarts: Array<CloneCredentialProcessContext | undefined> = [];
 const managedCloneAssignments: string[] = [];
 let managedAssignmentBarrier: Promise<void> | undefined;
@@ -211,6 +216,22 @@ beforeAll(async () => {
     reservations,
   });
   await onboarding.recover();
+  // The published worktree JSON family, with the least-privilege capability
+  // transport a workspace's own processes use. The workspace is a real Git
+  // repository, so the inventory is real; these tests exercise the family's
+  // authorization and its refusals without mutating anything.
+  const worktrees = new WorktreeService({
+    registry,
+    sessions,
+    journal: new WorktreeJournal(path.join(tempRoot, "pending-worktree-operation.json")),
+    provenance: new WorktreeProvenanceStore(path.join(tempRoot, "worktree-provenance.json")),
+    registrar: createOnboardingWorktreeRegistrar({ onboarding, registry }),
+  });
+  const worktreeCapabilities = new WorktreeCapabilityStore(path.join(tempRoot, "worktree-capabilities.json"));
+  await worktreeCapabilities.load();
+  worktreeCapability = (await worktreeCapabilities.issue({
+    user: "tobias", workspaceId: "myproject", sourceWorkspaceId: "myproject",
+  })).token;
   server = startHubServer({
     config,
     registry,
@@ -222,6 +243,8 @@ beforeAll(async () => {
     cloneJobs,
     folderManager,
     reservations,
+    worktrees,
+    worktreeCapabilities,
   });
   origin = `http://127.0.0.1:${server.port}`;
 }, 30_000);
@@ -3220,6 +3243,50 @@ describe("hub end to end", () => {
     expect(await running!.exited).not.toBeUndefined();
     expect(sessions.runningIds()).toEqual([]);
   }, 60_000);
+
+  test("the worktree JSON family answers both credentials and refuses without force", async () => {
+    // A Hub session lists the family.
+    const listed = await fetch(`${origin}/api/hub/worktrees?source=myproject`, { headers: { cookie } });
+    expect(listed.status).toBe(200);
+    await assertContract("GET", "/api/hub/worktrees", listed);
+    const body = await listed.json() as { inventory: { checkouts: Array<{ main: boolean }> } };
+    expect(body.inventory.checkouts.some(checkout => checkout.main)).toBe(true);
+
+    // The workspace's own least-privilege capability reaches the same family.
+    const viaCapability = await fetch(`${origin}/api/hub/worktrees`, {
+      headers: { authorization: `Bearer ${worktreeCapability}` },
+    });
+    expect(viaCapability.status).toBe(200);
+    // …and nothing else on this Hub, including the dashboard's own state.
+    const elsewhere = await fetch(`${origin}/api/hub/state`, {
+      headers: { authorization: `Bearer ${worktreeCapability}` },
+    });
+    expect(elsewhere.status).toBe(403);
+
+    const post = (action: string, payload: unknown) => fetch(`${origin}/api/hub/worktrees/${action}`, {
+      method: "POST",
+      headers: { cookie, origin, "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    // An option-shaped branch never reaches Git: it is refused as input.
+    const created = await post("create", { sourceWorkspaceId: "myproject", mode: "new-branch", branch: "--force", baseRef: "main" });
+    expect(created.status).toBe(200);
+    await assertContract("POST", "/api/hub/worktrees/create", created);
+    expect(await created.clone().json()).toMatchObject({ ok: false, kind: "create", error: { code: "invalid-input" } });
+
+    const opened = await post("open", { sourceWorkspaceId: "myproject", reference: "no-such-branch" });
+    expect(opened.status).toBe(200);
+    await assertContract("POST", "/api/hub/worktrees/open", opened);
+    expect(await opened.clone().json()).toMatchObject({ ok: false, error: { code: "not-found" } });
+
+    // Deletion without the explicit confirmation removes nothing.
+    const deleted = await post("delete", { sourceWorkspaceId: "myproject", reference: "no-such-branch" });
+    expect(deleted.status).toBe(200);
+    await assertContract("POST", "/api/hub/worktrees/delete", deleted);
+    const refusal = await deleted.clone().json() as { ok: boolean; error: { message: string } };
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error.message).toContain("Nothing was removed");
+  }, 30_000);
 
   test("every documented HTTP operation was black-box validated", () => {
     const documented = new Set<string>();

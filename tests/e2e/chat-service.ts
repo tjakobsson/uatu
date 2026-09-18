@@ -577,6 +577,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.promptVariants = [];
     this.promptConfigurations = [];
     this.reversibleAttempts = [];
+    this.permissionChoices.length = 0;
     this.failNextPrompt = false;
     this.failNextReversible = null;
     this.failNextHistory = false;

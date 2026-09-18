@@ -180,6 +180,7 @@ describe("brokered live stream over a real child", () => {
       expect(tab.ended).toBe(false);
     }
     await waitFor(async () => (await childGauge("stream.document.active")) === 1, "one document subscriber at the child");
+    await waitFor(async () => (await childGauge("stream.chat-inventory.active")) === 1, "one inventory subscriber at the child");
     expect(await childGauge("stream.chat-inventory.active")).toBe(1);
     // One conversation attempt for three tabs, and it is the hub that owns
     // the retry — the child saw one open that ended.

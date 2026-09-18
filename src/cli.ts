@@ -16,6 +16,8 @@ import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { 
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, serveRemovedText, usageText, versionText, type WatchOptions } from "./cli/parse";
+import { runWorktreeCommand, WORKTREE_EXIT_USAGE } from "./cli/worktree-client";
+import { worktreeUsageText } from "./cli/worktree-parse";
 import { LazyChatService } from "./chat/service";
 import { MultiAgentChatService } from "./chat/agents";
 import { ClaudeProvider } from "./chat/claude/provider";
@@ -97,6 +99,13 @@ async function main() {
     parsed = parseCommand(argv);
   } catch (error) {
     console.error(`uatu: ${error instanceof Error ? error.message : String(error)}`);
+    // A worktree usage error gets the worktree usage, not the whole CLI's:
+    // the agent that ran it needs the surface it got wrong, and exit 2 is
+    // this command's documented "invalid usage" code.
+    if (argv[0] === "worktree") {
+      console.error(worktreeUsageText());
+      process.exit(WORKTREE_EXIT_USAGE);
+    }
     console.error(usageText());
     process.exit(1);
   }
@@ -114,6 +123,15 @@ async function main() {
   if (parsed.kind === "version") {
     console.log(versionText());
     return;
+  }
+
+  if (parsed.kind === "worktree") {
+    // A thin Hub client and nothing else: it writes what the Hub answered
+    // and exits with the documented code. No Git runs in this process.
+    const outcome = await runWorktreeCommand(parsed.command);
+    if (outcome.stdout !== "") process.stdout.write(outcome.stdout);
+    if (outcome.stderr !== "") process.stderr.write(outcome.stderr);
+    process.exit(outcome.exitCode);
   }
 
   try {

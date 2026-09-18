@@ -39,8 +39,18 @@ import {
   registryPath,
   resolveHubStateRoot,
   sessionsPath,
+  worktreeCapabilitiesPath,
+  worktreeJournalPath,
+  worktreeProvenancePath,
 } from "./state-dir";
 import { HubPreferencesStore } from "./preferences";
+import { createWorktreeRenameGuard } from "./worktree-rename-guard";
+import { WorktreeJournal, WorktreeProvenanceStore } from "./worktree-journal";
+import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
+import { createParentFetchPolicy } from "./worktree-fetch";
+import { WorktreeService } from "./worktree-service";
+import { WorktreeOperationCoordinator } from "./worktree-coordinator";
+import { createWorktreeContextIssuer, WorktreeCapabilityStore } from "./worktree-capability";
 import { WorkspaceOnboardingCoordinator } from "./onboarding";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -286,6 +296,11 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   });
   const sessionStore = new HubSessionStore(sessionsPath(stateRoot));
   await sessionStore.load();
+  // Least-privilege worktree capabilities, deliberately NOT in the session
+  // store: a Hub session authorizes the whole Hub, and a process inside a
+  // workspace must not hold one.
+  const worktreeCapabilities = new WorktreeCapabilityStore(worktreeCapabilitiesPath(stateRoot));
+  await worktreeCapabilities.load();
 
   const registry = new WorkspaceRegistry(registryPath(stateRoot));
   await registry.load();
@@ -450,16 +465,50 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     },
     tools: contextTools,
     runExclusive: operation => sshRuntime.run(() => operation()),
+    // A registered linked worktree is governed by its parent's policy,
+    // read live through the registry link: credentials and shared
+    // configuration are managed only on the parent, never copied to a child
+    // and never overridden per child.
+    policyWorkspaceId: workspaceId => registry.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId,
   });
+  // Resolved after startHubServer: the listening port is only known then,
+  // and a configured port of 0 is ephemeral. Until it is set the Hub issues
+  // no capability, so a child started during startup simply has no context.
+  let hubOrigin = "";
   const sessions = new SessionManager(
     registry,
-    { local: new LocalProcessBackend() },
+    {
+      local: new LocalProcessBackend({
+        // Projects the capability into the session child: a 0600 file in the
+        // session's own runtime directory, with only its path in the
+        // environment. Revoked when that child exits.
+        worktreeContext: createWorktreeContextIssuer({
+          store: worktreeCapabilities,
+          hubOrigin: () => hubOrigin,
+          // The repository family the workspace belongs to, from the same
+          // registry link the UI's operations resolve through.
+          sourceWorkspaceId: workspaceId => worktrees.sourceFor(workspaceId),
+          // Whose authority the capability carries. A workspace terminal is
+          // shared by every Hub user who can reach it, so on a multi-user
+          // Hub there is no single principal an agent's request can be
+          // attributed to and no capability is issued at all — the CLI then
+          // reports an actionable context error instead of acting as
+          // somebody.
+          user: () => (config.users.length === 1 ? config.users[0]!.name : undefined),
+        }),
+      }),
+    },
     credentialContexts,
     // The pending-mutation fence every start is checked against, evaluated
     // inside the queued lifecycle operation. Reached through the closure
     // because the folder manager below takes `sessions` as a dependency; the
     // first start can only come from the server assembled after it.
-    () => folderManager.assertNoPendingMutation(),
+    async workspaceId => {
+      await folderManager.assertNoPendingMutation();
+      // A registered worktree starts only in the checkout it was registered
+      // with: never in a missing folder, never in a replacement.
+      await worktrees.assertStartable(workspaceId);
+    },
   );
   const cloneCredentials = createStoredCloneCredentialResolver({
     metadata: credentialMetadata,
@@ -483,6 +532,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     personalState,
     credentials: credentialMetadata,
     reservations,
+    // Renames that would break Git worktree links are refused before any
+    // filesystem mutation, including links to checkouts Uatu never
+    // registered. An unestablished verdict fails closed.
+    worktreeDependencies: createWorktreeRenameGuard({
+      gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
+    }),
   });
   await folderManager.recover();
   const onboarding = new WorkspaceOnboardingCoordinator({
@@ -501,6 +556,49 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     workspaceId => registry.byId(workspaceId) !== undefined,
     async workspaceId => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
   );
+  const worktrees = new WorktreeService({
+    registry,
+    sessions,
+    journal: new WorktreeJournal(worktreeJournalPath(stateRoot)),
+    provenance: new WorktreeProvenanceStore(worktreeProvenancePath(stateRoot)),
+    registrar: createOnboardingWorktreeRegistrar({ onboarding, registry }),
+    // Removal and "Remove from Uatu" end in the same Hub cleanup the
+    // dashboard's forget performs: registration, personal state and
+    // credential assignments. Checkout, branch and files are never touched.
+    unregister: async workspaceId => {
+      await personalState.forgetWorkspace(
+        workspaceId,
+        () => registry.remove(workspaceId),
+        async () => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
+      );
+      // A forgotten or removed workspace takes its capabilities with it —
+      // both the ones issued to its own child and, when it was a parent, the
+      // ones scoped to the repository family it owned.
+      await worktreeCapabilities.revokeForWorkspace(workspaceId).catch(() => undefined);
+    },
+    // The same Hub-wide path fence every other folder mutation takes, so a
+    // rename, a clone and a worktree creation cannot race for one hierarchy.
+    coordinator: new WorktreeOperationCoordinator(reservations),
+    assertOperationsAllowed: () => folderManager.assertNoPendingMutation(),
+    git: { gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git") },
+    // Fetch uses the parent's selected credential and nothing else: no
+    // ambient agent, helper, netrc or unselected key can take part.
+    fetchPolicy: createParentFetchPolicy({
+      assignments: () => credentialMetadata.snapshot().assignments,
+      resolve: async (remote, credentialId) => cloneCredentials.resolve(remote, credentialId),
+    }),
+  });
+  // A worktree operation interrupted by a restart is reconciled against
+  // actual Git state before the Hub serves: it never deletes content and
+  // never claims a tree it cannot prove it created.
+  try {
+    const recovered = await worktrees.recover();
+    if (recovered) {
+      console.error(`uatu hub: reconciled an interrupted worktree operation (${recovered.kind})`);
+    }
+  } catch (error) {
+    console.error(`uatu hub: a pending worktree operation needs attention: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const cloneJobs = new CloneJobManager({
     processFactory: new CloneProcessAdapter({ gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git") }),
     registry,
@@ -524,6 +622,8 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
     cloneCredentials,
     cloneJobs,
+    worktrees,
+    worktreeCapabilities,
     folderManager,
     reservations,
     credentialApi: {
@@ -537,6 +637,11 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   });
 
   const scheme = config.tls ? "https" : "http";
+  // The origin a process on this machine reaches the Hub at. A wildcard
+  // listen address is not an address to connect to, so it resolves to
+  // loopback; a configured host is used as configured.
+  const localHost = config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : config.host;
+  hubOrigin = new URL(`${scheme}://${localHost.includes(":") ? `[${localHost}]` : localHost}:${server.port}`).origin;
   console.log(`${scheme}://${config.host}:${server.port}/`);
   console.error(
     `uatu hub: state in ${stateRoot}; ${registry.list().length} registered workspace(s)`,

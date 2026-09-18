@@ -23,6 +23,7 @@ import {
   workspaceSlug,
   type WorkspaceEntry,
   type WorkspaceRegistry,
+  type WorkspaceWorktreeLink,
 } from "./registry";
 import type { SessionManager } from "./sessions";
 
@@ -596,6 +597,64 @@ export class WorkspaceOnboardingCoordinator {
     });
   }
 
+  // Worktree completion path (task 4.3): the checkout already exists and has
+  // been VERIFIED by identity, so this skips folder creation and the git
+  // probe and commits the registration together with its parent/repository
+  // relationship. The child gets NO assignments of its own — credentials and
+  // shared configuration are read live from the parent through the link —
+  // and it is registered stopped unless an explicit start is requested.
+  configureWorktree(options: {
+    path: string;
+    displayName: string;
+    link: WorkspaceWorktreeLink;
+    start?: boolean;
+  }): Promise<OnboardingResult> {
+    return this.enqueue(async () => {
+      await this.assertNoPendingOnboarding();
+      const canonical = await this.canonicalDirectory(options.path);
+      await this.reconcileRegisteredAliases();
+      const parent = this.options.registry.byId(options.link.parentWorkspaceId);
+      if (!parent) throw new OnboardingError("not-found", `unknown parent workspace: ${options.link.parentWorkspaceId}`);
+      // Policy ownership is one level deep by construction: a child never
+      // becomes another child's policy owner, so inheritance cannot chain.
+      if (parent.worktree) throw new OnboardingError("conflict", "a linked worktree cannot own another worktree's configuration");
+      const existing = this.options.registry.byPath(canonical);
+      if (existing) {
+        // An idempotent retry of the SAME verified checkout returns the
+        // registration that is already there rather than minting a second
+        // one; anything else at that path is a conflict.
+        if (existing.worktree?.checkoutId === options.link.checkoutId
+          && existing.worktree.parentWorkspaceId === options.link.parentWorkspaceId) {
+          return {
+            entry: { ...existing },
+            created: false,
+            alreadyRegistered: true,
+            createdFolder: false,
+            started: false,
+            startError: null,
+          };
+        }
+        throw new OnboardingError("conflict", `folder is already registered: ${canonical}`);
+      }
+      const reservation = this.reserve([canonical]);
+      try {
+        const planned = this.planWorkspaceId(canonical);
+        return await this.commitPlanned({
+          operation: "configure-existing",
+          canonical,
+          displayName: displayName(options.displayName),
+          planned,
+          desired: [],
+          createdFolder: false,
+          start: options.start === true,
+          link: options.link,
+        });
+      } finally {
+        reservation.release();
+      }
+    });
+  }
+
   // Startup recovery: a pending journal means the process died between the
   // registry and assignment commits (or before rollback finished). Compare
   // the journaled desired entry with the registry: when the registration
@@ -852,12 +911,14 @@ export class WorkspaceOnboardingCoordinator {
     desired: CredentialAssignment[];
     createdFolder: boolean;
     start: boolean;
+    link?: WorkspaceWorktreeLink;
   }): Promise<OnboardingResult> {
     const entry: WorkspaceEntry = {
       id: options.planned,
       path: options.canonical,
       backend: "local",
       displayName: options.displayName,
+      ...(options.link ? { worktree: { ...options.link } } : {}),
     };
     const previousAssignments = this.options.credentials.snapshot().assignments
       .filter(assignment => assignment.workspaceId === options.planned);
@@ -912,7 +973,7 @@ export class WorkspaceOnboardingCoordinator {
 
       let registered: WorkspaceEntry;
       try {
-        const result = await this.options.registry.registerWithStatus(options.canonical, "local", options.displayName);
+        const result = await this.options.registry.registerWithStatus(options.canonical, "local", options.displayName, options.link);
         registered = result.entry;
         if (!result.created || registered.id !== options.planned) {
           // The planned id was taken between planning and commit — impossible
