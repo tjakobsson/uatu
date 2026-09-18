@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import type { ChatApiClient } from "./client";
+import { resetUsagePaneForTests } from "./usage-pane";
 import type { ChatCommand, ConversationSnapshot, ReversibleHistoryResult } from "./types";
 
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
@@ -572,6 +573,9 @@ describe("chat cost receipt", () => {
 
 describe("plan usage on demand", () => {
   const boot = async (tag: string, capabilities: string[]) => {
+    // One usage-pane module serves every boot in this process: its held
+    // report and read handler must not leak from one test into the next.
+    resetUsagePaneForTests();
     const { document, window } = parseHTML(html);
     installDomGlobals(document, window);
     document.documentElement.setAttribute("data-ui-mode", "desktop");
@@ -634,6 +638,66 @@ describe("plan usage on demand", () => {
       read.dispatchEvent(new window.Event("click", { bubbles: true }));
       await waitUntil(() => reads.length === 2, () => `reads ${reads.join(",")}`);
       expect(reads[1]).toBe("start");
+    } finally {
+      await Bun.sleep(20);
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
+  test("an agent idle at load is asked once the inventory has started it; a failed ask is retried and a 409 is final", async () => {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selected = "";
+    Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
+    const asks: string[] = [];
+    let failFirst = true;
+    let statusCalls = 0;
+    const { ChatTransportError } = await import("./client");
+    const claude = { id: "claude", name: "Claude Code" };
+    const api = {
+      // Idle at first: nothing declared yet, as on a fresh workspace process.
+      // The poll for a selected not-ready agent then finds it ready.
+      status: async () => {
+        statusCalls += 1;
+        return [
+          { agent: claude, availability: statusCalls === 1 ? { state: "idle" } : { state: "ready", version: "test", agent: { ...claude, capabilities: ["context", "usage"] } } },
+          { agent: { id: "opencode", name: "OpenCode" }, availability: { state: "idle" } },
+        ];
+      },
+      conversations: async () => [{ id: "claude:c", title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: claude }],
+      commands: async () => [],
+      usage: async (agentId: string) => {
+        asks.push(agentId);
+        if (agentId === "opencode") throw new ChatTransportError("this agent does not report plan usage", 409);
+        if (failFirst) { failFirst = false; throw new ChatTransportError("Chat request failed (502)", 502); }
+        return { plan: { subscription: "pro", fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } }, readAt: Date.now() };
+      },
+      readUsage: async () => ({ report: null, reason: "no-live-session" }),
+      snapshot: async (id: string) => ({ ...snapshot(id), conversation: { id, title: "c", createdAt: 1, updatedAt: 1, status: "idle", agent: claude } }),
+      stream: () => ({ close() {} }),
+      inventoryStream: () => ({ close() {} }),
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?usage-ui-test-idle=${Date.now()}`);
+    initChat(api);
+    try {
+      // Both idle agents are asked after the inventory read; OpenCode's 409 is final, Claude's 502 is not.
+      await waitUntil(() => asks.length === 2, () => `asks ${asks.join(",")}`);
+      expect([...asks].sort()).toEqual(["claude", "opencode"]);
+      expect(document.querySelector("#usage-pane .pane-empty")?.textContent).toBe("No usage read yet.");
+      // Selecting a conversation under the not-yet-ready agent polls its
+      // status; once it reports ready and declaring usage, Claude is asked
+      // again — OpenCode, having said 409, is not.
+      select.value = "claude:c";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await Bun.sleep(1_700);
+      await waitUntil(() => asks.length === 3, () => `asks ${asks.join(",")}`);
+      expect(asks.filter(id => id === "opencode")).toHaveLength(1);
+      await waitUntil(() => document.querySelector("#usage-pane .usage-pane-head")?.textContent?.startsWith("Pro plan") === true, () => `pane ${document.querySelector("#usage-pane")?.textContent}`);
     } finally {
       await Bun.sleep(20);
       window.dispatchEvent(new Event("pagehide"));

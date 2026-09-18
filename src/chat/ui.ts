@@ -3878,21 +3878,43 @@ export function initChat(api = new ChatApiClient()): void {
 
   // Plan usage is per login: the workspace's last-known report is fetched
   // once per agent that reports it, and that agent answers the reads. One
-  // agent reports it today; the last one to declare it would answer.
+  // agent reports it today; the last one to answer would take the reads.
+  // "Seeded" means answered: a read that failed in transit is asked again
+  // on the next status or context refresh, and an agent that answered 409
+  // does not report usage and is not asked again.
   const seededUsage = new Set<string>();
-  const seedUsage = (agentId: string) => {
-    if (seededUsage.has(agentId)) return;
-    seededUsage.add(agentId);
-    onUsageRead(mode => api.readUsage(agentId, newRequestId(), mode));
-    void api.usage(agentId).then(report => {
+  const usageUnsupported = new Set<string>();
+  const usageSeeds = new Map<string, Promise<void>>();
+  const seedUsage = (agentId: string): Promise<void> => {
+    if (seededUsage.has(agentId) || usageUnsupported.has(agentId)) return Promise.resolve();
+    const pending = usageSeeds.get(agentId);
+    if (pending) return pending;
+    // Inside the chain: a client without the read (an older fake) rejects
+    // like a failed read instead of throwing through the caller's bootstrap.
+    const seed = Promise.resolve().then(() => api.usage(agentId)).then(report => {
+      seededUsage.add(agentId);
+      onUsageRead(mode => api.readUsage(agentId, newRequestId(), mode));
       if (report) noteUsageReport({ plan: report.plan, reportedAt: report.readAt, ...(report.conversationId ? { conversationId: report.conversationId } : {}) });
-    }).catch(() => undefined);
+    }, error => {
+      if (error instanceof ChatTransportError && error.status === 409) usageUnsupported.add(agentId);
+    }).finally(() => { usageSeeds.delete(agentId); });
+    usageSeeds.set(agentId, seed);
+    return seed;
   };
   // An agent already up when the page loads seeds the pane before any
-  // conversation is opened; one that is idle seeds when it reports ready.
+  // conversation is opened; one that reports ready later seeds then.
   const seedUsageFromStatuses = () => {
     for (const status of agentStatuses) {
       if (status.availability.state === "ready" && status.availability.agent?.capabilities.includes("usage")) seedUsage(status.agent.id);
+    }
+  };
+  // An agent idle at page load has not declared anything yet, and a
+  // workspace with no conversations never selects one to make it. The
+  // inventory read has started every agent by the time it answers, so each
+  // usable one is asked then; one that does not report usage says so once.
+  const seedUsageFromInventory = () => {
+    for (const status of agentStatuses) {
+      if (status.availability.state !== "unavailable") void seedUsage(status.agent.id);
     }
   };
 
@@ -4092,6 +4114,7 @@ export function initChat(api = new ChatApiClient()): void {
       // as soon as the inventory answers.
       const contextReady = applyAgentContext(preferred.agent.id);
       const nextConversations = await api.conversations();
+      seedUsageFromInventory();
       conversations = dedupeConversationInventory([...conversations, ...nextConversations]);
       // Bootstrap is the silent page-local baseline. The stream starts only
       // after this point, so its mandatory initial frame reconciles rather
