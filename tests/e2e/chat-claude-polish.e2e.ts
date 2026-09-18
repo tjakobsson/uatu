@@ -481,6 +481,90 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(chip).toHaveAttribute("data-level", "normal");
   });
 
+  test("a standing without a report of its own shows beside the last-known plan; the readout refreshes when opened and reads on demand", async ({ page, request }, testInfo) => {
+    const resetsAt = Date.now() + 3_600_000;
+    // bootClaude's reset would wipe the seeded report, so the boot is inlined
+    // with the workspace's last-known report seeded after the reset.
+    await request.post("/__e2e/reset");
+    await control(request, { action: "agents", count: 2 });
+    await control(request, { action: "models", agent: "claude", models: claudeModels });
+    await control(request, { action: "usageReport", agent: "claude", report: { plan: { subscription: "pro", fiveHour: { utilization: 9, resetsAt }, sevenDay: { utilization: 25, resetsAt } }, readAt: Date.now() - 12 * 60_000 } });
+    // Opening the readout may only refresh through a live session: none is.
+    await control(request, { action: "usageRead", agent: "claude", outcome: { outcome: "no-live-session" } });
+    const seeded = await control(request, { action: "seed", agent: "claude", title: "Standing only", items: [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+      { id: "notice:rate-limit", type: "notice", createdAt: 2, level: "warning", message: "Approaching your 5-hour rate limit (91% used).", code: "rate-limit-warning", resetsAt },
+    ], configuration: { model: { providerId: "anthropic", modelId: "sonnet" } } }) as { conversation: { id: string } };
+    const id = seeded.conversation.id;
+    const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await openChatPanel(page);
+    await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
+    await page.locator("#chat-conversation-select").selectOption(id);
+    await expect(page.locator("#chat-context")).toContainText("Claude Code");
+    const chip = page.locator("#chat-plan-usage");
+    const summary = page.locator("#chat-plan-usage-summary");
+    // The standing and the last-known windows, together — not the standing alone (#389).
+    await expect(summary).toHaveText("Session 9% · Week 25%");
+    await expect(chip).toHaveAttribute("data-level", "warning");
+    await expect(chip).toHaveAttribute("data-stale", "true");
+    await summary.click();
+    await expect(page.locator("#chat-plan-readout-standing")).toHaveText(/^Approaching your 5-hour rate limit \(91% used\)\. Resets /);
+    await expect(page.locator("#chat-plan-readout-head")).toBeVisible();
+    await expect(page.locator("#chat-plan-readout-name")).toHaveText("Pro plan");
+    await expect(page.locator("#chat-plan-readout-age")).toHaveText(/^as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
+    await expect(page.locator("#chat-plan-readout-rows .plan-row-label")).toHaveText(["Session", "Week"]);
+    await capture(page, testInfo, "standing-beside-last-known-plan");
+    // No session was live: the stale figures stand, nothing was started, nothing is called a failure.
+    await expect.poll(async () => ((await control(request, { action: "stats" })) as { usageReads: string[] }).usageReads).toEqual(["live-only"]);
+    await expect(page.locator("#chat-plan-readout-status")).toBeHidden();
+    await expect(chip).toHaveAttribute("data-stale", "true");
+
+    // "Read now" starts a session if it must; the read lands this
+    // conversation's own report, so the readout and the context meter follow it.
+    await control(request, { action: "usageRead", agent: "claude", outcome: { outcome: "ok", delayMs: 600, conversationId: id, contextTotal: 40_000, plan: { subscription: "pro", fiveHour: { utilization: 14, resetsAt }, sevenDay: { utilization: 25, resetsAt } } } });
+    const read = page.locator("#chat-plan-read");
+    await expect(read).toBeVisible();
+    await read.click();
+    await expect(read).toHaveText("Reading…");
+    await expect(page.locator("#chat-plan-readout-status")).toHaveText("Reading…");
+    await expect(summary).toHaveText("Session 14% · Week 25%");
+    await expect(page.locator("#chat-plan-readout-age")).toHaveText(/· just now$/);
+    await expect(chip).not.toHaveAttribute("data-stale", "true");
+    await expect(page.locator("#chat-plan-readout-status")).toBeHidden();
+    await expect(read).toHaveText("Read now");
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("20%");
+    await capture(page, testInfo, "readout-after-read-now");
+    await expect.poll(async () => ((await control(request, { action: "stats" })) as { usageReads: string[] }).usageReads).toEqual(["live-only", "start"]);
+  });
+
+  test("a stale readout opened while a session is live refreshes without a click", async ({ page, request }) => {
+    const resetsAt = Date.now() + 3_600_000;
+    await request.post("/__e2e/reset");
+    await control(request, { action: "agents", count: 2 });
+    await control(request, { action: "models", agent: "claude", models: claudeModels });
+    await control(request, { action: "usageReport", agent: "claude", report: { plan: { subscription: "pro", fiveHour: { utilization: 14, resetsAt }, sevenDay: { utilization: 25, resetsAt } }, readAt: Date.now() - 20 * 60_000 } });
+    // A session is live: a live-only read answers.
+    await control(request, { action: "usageRead", agent: "claude", outcome: { outcome: "ok", plan: { subscription: "pro", fiveHour: { utilization: 16, resetsAt }, sevenDay: { utilization: 25, resetsAt } } } });
+    const seeded = await control(request, { action: "seed", agent: "claude", title: "Reportless", items: [{ id: "message:u1", type: "user_message", createdAt: 1, text: "hello" }] }) as { conversation: { id: string } };
+    const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await openChatPanel(page);
+    await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
+    await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+    const chip = page.locator("#chat-plan-usage");
+    const summary = page.locator("#chat-plan-usage-summary");
+    await expect(summary).toHaveText("Session 14% · Week 25%");
+    await expect(chip).toHaveAttribute("data-stale", "true");
+    await summary.click();
+    await expect(summary).toHaveText("Session 16% · Week 25%");
+    await expect(chip).not.toHaveAttribute("data-stale", "true");
+    await expect(page.locator("#chat-plan-readout-age")).toHaveText(/· just now$/);
+    await expect.poll(async () => ((await control(request, { action: "stats" })) as { usageReads: string[] }).usageReads).toEqual(["live-only"]);
+  });
+
   test("switching conversations does not announce a clear the limited conversation never had", async ({ page, request }) => {
     // The selection change blanks the projection before the incoming
     // snapshot lands. Read as one conversation's history that blank looks

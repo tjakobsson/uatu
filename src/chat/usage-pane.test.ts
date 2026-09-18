@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { buildPlanRowNodes, onRevealUsagePane, renderUsagePaneBody, revealUsagePane } from "./usage-pane";
+import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onRevealUsagePane, onUsageChange, onUsageRead, readUsageNow, refreshUsageIfStale, renderUsagePaneBody, resetUsagePaneForTests, revealUsagePane, usageReadState } from "./usage-pane";
 import { planReadoutRows } from "./composer-status";
+import type { UsageReadMode, UsageReadResult } from "./types";
 
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
 
@@ -12,12 +13,34 @@ function paneBody(): HTMLElement {
 }
 
 describe("usage pane", () => {
-  test("the shipped chrome already carries the empty state, and rendering nothing keeps it", () => {
+  test("the shipped chrome already carries the empty state; rendering nothing keeps it and offers a read where one can be asked", () => {
     const body = paneBody();
-    expect(body.textContent).toContain("Plan usage appears here after a Claude Code turn.");
+    expect(body.textContent).toContain("No usage read yet.");
     renderUsagePaneBody(body, undefined);
-    expect(body.querySelector(".pane-empty")?.textContent).toBe("Plan usage appears here after a Claude Code turn.");
+    expect(body.querySelector(".pane-empty")?.textContent).toBe("No usage read yet.");
     expect(body.querySelectorAll(".plan-row")).toHaveLength(0);
+    expect(body.querySelector("[data-usage-read]")).toBeNull();
+    renderUsagePaneBody(body, undefined, Date.now(), { reading: false }, true);
+    expect(body.querySelector<HTMLButtonElement>("[data-usage-read]")?.textContent).toBe("Read now");
+  });
+
+  test("the head states the read time and age; past ten minutes the body is marked stale", () => {
+    const body = paneBody();
+    const readAt = Date.parse("2026-09-02T10:00:00.000Z");
+    const plan = { subscription: "pro", fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } };
+    renderUsagePaneBody(body, { plan, reportedAt: readAt }, readAt + 3 * 60_000);
+    expect(body.querySelector(".usage-pane-head")?.textContent).toMatch(/^Pro plan · as of \d{1,2}:\d{2}(?: [AP]M)? · 3 min ago$/);
+    expect(body.dataset.stale).toBeUndefined();
+    renderUsagePaneBody(body, { plan, reportedAt: readAt }, readAt + 12 * 60_000);
+    expect(body.querySelector(".usage-pane-head")?.textContent).toMatch(/· 12 min ago$/);
+    expect(body.dataset.stale).toBe("true");
+    expect(body.querySelectorAll(".plan-row")).toHaveLength(2);
+    // The read's state rides under the figures, which stand either way.
+    renderUsagePaneBody(body, { plan, reportedAt: readAt }, readAt, { reading: true });
+    expect(body.querySelector(".usage-pane-status")?.textContent).toBe("Reading…");
+    renderUsagePaneBody(body, { plan, reportedAt: readAt }, readAt, { reading: false, failure: "timed out" });
+    expect(body.querySelector(".usage-pane-status")?.textContent).toBe("Couldn't read usage · timed out");
+    expect(body.querySelectorAll(".plan-row")).toHaveLength(2);
   });
 
   test("an empty plan says the login has no limits rather than waiting for a turn", () => {
@@ -66,5 +89,113 @@ describe("usage pane", () => {
     onRevealUsagePane(() => { revealed += 1; });
     expect(revealUsagePane()).toBe(true);
     expect(revealed).toBe(1);
+  });
+});
+
+describe("usage pane: the held report and the read", () => {
+  const plan = (utilization: number) => ({ fiveHour: { utilization }, sevenDay: { utilization: 25 } });
+
+  test("a seeded report paints before any conversation opens, and an older report never rolls it back", () => {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    Reflect.set(globalThis, "document", document);
+    Reflect.set(globalThis, "window", window);
+    try {
+      noteUsageReport({ plan: plan(40), reportedAt: 2_000 });
+      expect(document.querySelector("#usage-pane .plan-row-figure")?.textContent).toBe("40%");
+      noteUsageReport({ plan: plan(10), reportedAt: 1_000 });
+      expect(currentUsageReport()?.reportedAt).toBe(2_000);
+      expect(document.querySelector("#usage-pane .plan-row-figure")?.textContent).toBe("40%");
+      noteUsageReport({ plan: plan(55), reportedAt: 3_000, conversationId: "c1" });
+      expect(document.querySelector("#usage-pane .plan-row-figure")?.textContent).toBe("55%");
+      // Re-noting the held report is a no-op: nothing repaints, nothing is told.
+      let changes = 0;
+      onUsageChange(() => { changes += 1; });
+      noteUsageReport({ plan: plan(55), reportedAt: 3_000, conversationId: "c1" });
+      expect(changes).toBe(0);
+      noteUsageReport({ plan: plan(56), reportedAt: 3_001 });
+      expect(changes).toBe(1);
+    } finally {
+      resetUsagePaneForTests();
+      Reflect.deleteProperty(globalThis, "document");
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
+  test("a second click joins the read in flight; a failed read keeps the figures and says why", async () => {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    Reflect.set(globalThis, "document", document);
+    Reflect.set(globalThis, "window", window);
+    try {
+      const reads: UsageReadMode[] = [];
+      let settle!: (result: UsageReadResult) => void;
+      onUsageRead(mode => { reads.push(mode); return new Promise(resolve => { settle = resolve; }); });
+      noteUsageReport({ plan: plan(40), reportedAt: Date.now() });
+      const action = document.querySelector<HTMLButtonElement>('[data-pane-id="usage"] .pane-action[data-usage-read]')!;
+      expect(action.hidden).toBe(false);
+      const first = readUsageNow("start");
+      const second = readUsageNow("start");
+      expect(second).toBe(first);
+      expect(usageReadState()).toEqual({ reading: true });
+      expect(action.disabled).toBe(true);
+      expect(document.querySelector("#usage-pane .usage-pane-status")?.textContent).toBe("Reading…");
+      settle({ report: null, reason: "timeout" });
+      expect(await first).toBe(false);
+      expect(reads).toEqual(["start"]);
+      expect(usageReadState()).toEqual({ reading: false, failure: "timed out" });
+      expect(document.querySelector("#usage-pane .plan-row-figure")?.textContent).toBe("40%");
+      expect(document.querySelector("#usage-pane .usage-pane-status")?.textContent).toBe("Couldn't read usage · timed out");
+      // A read that answers replaces the figures and clears the failure.
+      const third = readUsageNow("start");
+      settle({ report: { plan: plan(61), readAt: Date.now() + 1 } });
+      expect(await third).toBe(true);
+      expect(usageReadState()).toEqual({ reading: false });
+      expect(document.querySelector("#usage-pane .plan-row-figure")?.textContent).toBe("61%");
+      expect(document.querySelector("#usage-pane .usage-pane-status")).toBeNull();
+      // A live-only refresh that finds no session is not a failure.
+      const fourth = readUsageNow("live-only");
+      settle({ report: null, reason: "no-live-session" });
+      expect(await fourth).toBe(false);
+      expect(usageReadState()).toEqual({ reading: false });
+    } finally {
+      resetUsagePaneForTests();
+      Reflect.deleteProperty(globalThis, "document");
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
+  test("the unasked refresh posts one live-only read for a stale report and none for a fresh one", async () => {
+    resetUsagePaneForTests();
+    const { document, window } = parseHTML(html);
+    Reflect.set(globalThis, "document", document);
+    Reflect.set(globalThis, "window", window);
+    try {
+      const reads: UsageReadMode[] = [];
+      onUsageRead(async mode => { reads.push(mode); return { report: null, reason: "no-live-session" }; });
+      const now = Date.now();
+      refreshUsageIfStale(now);
+      expect(reads).toEqual([]);
+      noteUsageReport({ plan: plan(40), reportedAt: now - 11 * 60_000 });
+      refreshUsageIfStale(now);
+      refreshUsageIfStale(now);
+      await Promise.resolve();
+      expect(reads).toEqual(["live-only"]);
+      // A fresh report needs no refresh.
+      noteUsageReport({ plan: plan(40), reportedAt: now - 60_000 });
+      refreshUsageIfStale(now);
+      expect(reads).toEqual(["live-only"]);
+      // The pane's controls: the inline empty-state button and the header action read on click,
+      // and showing the pane refreshes a stale report unasked.
+      initUsagePaneControls(document);
+      const section = document.querySelector<HTMLElement>('[data-pane-id="usage"]')!;
+      section.querySelector<HTMLButtonElement>(".pane-action[data-usage-read]")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await Promise.resolve();
+      expect(reads).toEqual(["live-only", "start"]);
+    } finally {
+      resetUsagePaneForTests();
+      Reflect.deleteProperty(globalThis, "document");
+      Reflect.deleteProperty(globalThis, "window");
+    }
   });
 });

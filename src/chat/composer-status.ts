@@ -5,7 +5,7 @@
 
 import { backgroundStatusLabel } from "./background-tasks";
 import { statusLabel } from "./timeline-renderer";
-import { isRateLimitStanding, type BackgroundTaskItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals } from "./types";
+import { isRateLimitStanding, type BackgroundTaskItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals, type UsageReadFailure } from "./types";
 
 export type ComposerRoutineState = {
   stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "failed" | "ready";
@@ -298,6 +298,43 @@ export function resetClock(resetsAt: number, now = Date.now()): string {
   const date = new Date(resetsAt);
   const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return resetsAt - now < 86_400_000 ? time : `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+/**
+ * A usage report older than this is stale: still shown, marked as such.
+ * The 5-hour window moves about 0.3 %/min at full burn, so ten minutes
+ * bounds the error at a few percent.
+ */
+export const USAGE_STALE_MS = 10 * 60_000;
+
+export function usageStale(readAt: number, now = Date.now()): boolean {
+  return now - readAt >= USAGE_STALE_MS;
+}
+
+/** "just now", "12 min ago", "3 h ago", "2 d ago": how long since the read. */
+export function usageAge(readAt: number, now = Date.now()): string {
+  const elapsed = Math.max(0, now - readAt);
+  if (elapsed < 60_000) return "just now";
+  const minutes = Math.round(elapsed / 60_000);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+
+/** "as of 21:33 · 12 min ago" — the read's clock time and its age together. */
+export function usageAsOf(readAt: number, now = Date.now()): string {
+  return `as of ${new Date(readAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${usageAge(readAt, now)}`;
+}
+
+/** Why a read did not answer, as the readout says it. */
+export function usageReadFailureLabel(reason: UsageReadFailure | "network"): string {
+  switch (reason) {
+    case "timeout": return "timed out";
+    case "unavailable": return "Claude Code could not answer";
+    case "no-live-session": return "no session is running";
+    case "network": return "the workspace did not answer";
+  }
 }
 
 /** The plan name as a reader says it: "Max plan", "Pro plan"; "Team", "Enterprise" likewise. */

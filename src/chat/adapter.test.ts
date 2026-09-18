@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "./adapter";
+import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -4464,5 +4464,41 @@ describe("workspace activity summary", () => {
     inventory.cancel();
     await adapter.dispose();
     await pump;
+  });
+});
+
+describe("plan usage on demand", () => {
+  test("a read is gated on the capability, idempotent per request, and joined across concurrent requests", async () => {
+    const provider = new FakeProvider();
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+    await expect(adapter.usage()).rejects.toThrow(UsageUnsupportedError);
+    await expect(adapter.readUsage("req-1", "start")).rejects.toThrow(UsageUnsupportedError);
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "usage"] };
+    let reads = 0;
+    let release!: () => void;
+    const report = { plan: { fiveHour: { utilization: 9 } }, readAt: 5 };
+    (provider as unknown as { usageReport: () => Promise<unknown> }).usageReport = async () => undefined;
+    (provider as unknown as { readUsage: (mode: string) => Promise<unknown> }).readUsage = mode => {
+      reads += 1;
+      expect(mode).toBe("start");
+      return new Promise(resolve => { release = () => resolve({ report }); });
+    };
+    expect(await adapter.usage()).toBeNull();
+    const first = adapter.readUsage("req-1", "start");
+    const second = adapter.readUsage("req-2", "start");
+    await Bun.sleep(1);
+    release();
+    expect(await first).toEqual({ report });
+    expect(await second).toEqual({ report });
+    expect(reads).toBe(1);
+    // The same request id replays its receipt without a new read.
+    expect(await adapter.readUsage("req-1", "start")).toEqual({ report });
+    expect(reads).toBe(1);
+    // A later request reads again.
+    const third = adapter.readUsage("req-3", "start");
+    await Bun.sleep(1);
+    release();
+    await third;
+    expect(reads).toBe(2);
   });
 });

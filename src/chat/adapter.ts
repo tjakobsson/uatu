@@ -35,8 +35,7 @@ import type {
   ReversibleHistoryState,
   SubagentLine,
   TokenUsage,
-  ToolItem,
-} from "./types";
+  ToolItem, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
 import { ConversationNotFoundError, isSessionInWorkspace } from "./workspace";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -63,6 +62,13 @@ export class InvalidPermissionChoiceError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InvalidPermissionChoiceError";
+  }
+}
+
+export class UsageUnsupportedError extends Error {
+  constructor() {
+    super("this agent does not report plan usage");
+    this.name = "UsageUnsupportedError";
   }
 }
 
@@ -1531,6 +1537,29 @@ export class ChatAdapter {
    * reports the stop as that task settling, which is what the timeline
    * records; this only carries the request.
    */
+  /** The login's plan usage as the provider last read it; null when nothing has been read. */
+  async usage(): Promise<AgentUsageReport | null> {
+    if (!this.provider.usageReport || !this.provider.describe().capabilities.includes("usage")) throw new UsageUnsupportedError();
+    return (await this.provider.usageReport()) ?? null;
+  }
+
+  /**
+   * Read plan usage now. Idempotent per client request id, and one read at
+   * a time across request ids: a second ask while one is out joins it
+   * rather than starting another (spec).
+   */
+  readUsage(clientRequestId: string, mode: UsageReadMode): Promise<UsageReadResult> {
+    return this.receipts.run(`usage-read:${clientRequestId}`, async () => {
+      if (!this.provider.readUsage || !this.provider.describe().capabilities.includes("usage")) throw new UsageUnsupportedError();
+      if (!this.usageRead) {
+        this.usageRead = this.provider.readUsage(mode).finally(() => { this.usageRead = null; });
+      }
+      return this.usageRead;
+    });
+  }
+
+  private usageRead: Promise<UsageReadResult> | null = null;
+
   stopTask(conversationId: string, taskId: string, clientRequestId: string): Promise<{ stopped: true }> {
     return this.receipts.run(`stop-task:${conversationId}:${taskId}:${clientRequestId}`, async () => {
       await this.requireSession(conversationId);

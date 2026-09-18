@@ -65,7 +65,7 @@ class FakeQuery implements ClaudeQueryHandle {
   }
 }
 
-function fixture(): { provider: ClaudeProvider; queries: FakeQuery[]; configDir: string; workspace: string } {
+function fixture(prepare?: (query: FakeQuery) => void, options: { usageReadTimeoutMs?: number } = {}): { provider: ClaudeProvider; queries: FakeQuery[]; configDir: string; workspace: string } {
   const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-provider-")));
   const workspace = path.join(root, "workspace");
   mkdirSync(workspace, { recursive: true });
@@ -78,8 +78,10 @@ function fixture(): { provider: ClaudeProvider; queries: FakeQuery[]; configDir:
     executable: "/usr/local/bin/claude",
     configDir,
     catalogProbe: false,
+    ...options,
     queryFactory: input => {
       const query = new FakeQuery(input);
+      prepare?.(query);
       queries.push(query);
       return query;
     },
@@ -3406,5 +3408,137 @@ describe("/usage normalization", () => {
     expect(plan).toEqual({ sevenDay: { resetsAt: 1_788_400_000_000 } });
     expect(normalizeSessionTotals({ session: { total_cost_usd: "free" } })).toBeUndefined();
     expect(normalizeSessionTotals({ session: { total_cost_usd: 0.5, total_duration_ms: "long", model_usage: null } })).toEqual({ costUsd: 0.5, apiDurationMs: 0, durationMs: 0, linesAdded: 0, linesRemoved: 0, models: [] });
+  });
+});
+
+test("the Claude agent declares plan usage as askable", async () => {
+  const { provider } = fixture();
+  try {
+    expect(provider.describe().capabilities).toContain("usage");
+  } finally { await provider.dispose(); }
+});
+
+describe("plan usage on demand", () => {
+  const plan = { subscription_type: "pro", rate_limits_available: true, rate_limits: { five_hour: { utilization: 9, resets_at: 1_800_000_000 }, seven_day: { utilization: 25, resets_at: 1_800_400_000 } } };
+  const context = { categories: [{ name: "Messages", tokens: 3_000, color: "x" }], totalTokens: 3_000, maxTokens: 200_000 };
+  const userRow = (id: string, text: string, cwd: string) => JSON.stringify({ type: "user", uuid: id, parentUuid: null, isSidechain: false, cwd, timestamp: "2026-09-01T12:00:00Z", message: { role: "user", content: text } }) + "\n";
+  const answer = (query: FakeQuery) => {
+    query.getContextUsage = async () => context;
+    query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => plan;
+  };
+
+  test("a turn-end read becomes the workspace's last-known report and survives a restart", async () => {
+    const { provider, queries, configDir, workspace } = fixture(answer);
+    const { events, stop } = collect(provider);
+    expect(await provider.usageReport()).toBeUndefined();
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    queries[0]!.push({ type: "result", subtype: "success", uuid: "r-1", timestamp: "2026-08-30T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.some(event => event.eventType === "context.reported"));
+    const report = await provider.usageReport();
+    expect(report).toEqual(expect.objectContaining({ plan: expect.objectContaining({ subscription: "pro", fiveHour: expect.objectContaining({ utilization: 9 }) }), conversationId: session.id }));
+    stop();
+    await provider.dispose();
+    // A restarted workspace answers from the durable file before any session starts.
+    const restarted = new ClaudeProvider({ workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false, queryFactory: input => new FakeQuery(input) });
+    expect(await restarted.usageReport()).toEqual(report);
+    await restarted.dispose();
+    // A durable file from before the field loads as it did.
+    writeFileSync(path.join(workspace, ".uatu-test-state.json"), JSON.stringify({ configurations: {} }));
+    const older = new ClaudeProvider({ workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false, queryFactory: input => new FakeQuery(input) });
+    expect(await older.usageReport()).toBeUndefined();
+    await older.dispose();
+  });
+
+  test("a live-only read answers from a running turn without touching it", async () => {
+    const { provider, queries } = fixture(answer);
+    const { events, stop } = collect(provider);
+    expect(await provider.readUsage("live-only")).toEqual({ report: null, reason: "no-live-session" });
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    const query = queries[0]!;
+    const result = await provider.readUsage("live-only");
+    expect(result.report).toEqual(expect.objectContaining({ plan: expect.objectContaining({ subscription: "pro" }), conversationId: session.id }));
+    const reported = events.filter(event => event.eventType === "context.reported");
+    expect(reported).toHaveLength(1);
+    expect((reported[0]!.updates[0] as { item: { type: string; plan?: unknown; total: number } }).item).toEqual(expect.objectContaining({ type: "context_report", total: 3_000, plan: expect.objectContaining({ subscription: "pro" }) }));
+    // The turn is still running: not retired, and its own probe still follows its result.
+    expect(query.returned).toBe(false);
+    query.push({ type: "result", subtype: "success", uuid: "r-1", timestamp: "2026-08-30T10:00:02.000Z", session_id: session.id, is_error: false });
+    await waitFor(() => events.filter(event => event.eventType === "context.reported").length === 2);
+    await waitFor(() => query.returned);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a start read resumes the idle conversation, reads, and retires it; a racing prompt keeps it", async () => {
+    let release: ((value: unknown) => void) | undefined;
+    const { provider, queries, configDir, workspace } = fixture(query => {
+      query.getContextUsage = async () => context;
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(resolve => { release = () => resolve(plan); });
+    });
+    const { events, stop } = collect(provider);
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), "idle-session.jsonl"), userRow("u1", "earlier", workspace));
+    const pending = provider.readUsage("start");
+    await waitFor(() => queries.length === 1 && release !== undefined);
+    expect(queries[0]!.input.options.resume).toBe("idle-session");
+    release!(plan);
+    const result = await pending;
+    expect(result.report).toEqual(expect.objectContaining({ conversationId: "idle-session" }));
+    expect(events.filter(event => event.conversationId === "idle-session" && event.eventType === "context.reported")).toHaveLength(1);
+    expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "user_message"))).toBe(false);
+    await waitFor(() => queries[0]!.returned);
+    // A prompt that lands while the read is out joins the live session and keeps it.
+    release = undefined;
+    const second = provider.readUsage("start");
+    await waitFor(() => queries.length === 2 && release !== undefined);
+    await provider.prompt("idle-session", { id: "r2", text: "now", delivery: "queue" });
+    expect(queries).toHaveLength(2);
+    release!(plan);
+    await second;
+    expect(queries[1]!.returned).toBe(false);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a workspace without a conversation reads through a hidden probe that never lists", async () => {
+    const { provider, queries, configDir, workspace } = fixture(answer);
+    expect(await provider.listSessions()).toEqual([]);
+    const result = await provider.readUsage("start");
+    expect(result.report).toEqual(expect.objectContaining({ plan: expect.objectContaining({ subscription: "pro" }) }));
+    expect(result.report?.conversationId).toBeUndefined();
+    expect(queries).toHaveLength(1);
+    const probeId = queries[0]!.input.options.sessionId!;
+    expect(probeId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(queries[0]!.input.options.resume).toBeUndefined();
+    expect(queries[0]!.returned).toBe(true);
+    // Even a transcript the CLI writes for the probe stays out of the inventory, across a restart.
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), `${probeId}.jsonl`), userRow("p1", "probe", workspace));
+    expect(await provider.listSessions()).toEqual([]);
+    await provider.dispose();
+    const stored = JSON.parse(readFileSync(path.join(workspace, ".uatu-test-state.json"), "utf8")) as { hiddenNative: string[] };
+    expect(stored.hiddenNative).toContain(probeId);
+    const restarted = new ClaudeProvider({ workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false, queryFactory: input => new FakeQuery(input) });
+    expect(await restarted.listSessions()).toEqual([]);
+    await restarted.dispose();
+  });
+
+  test("a read that hangs times out and one the query cannot make is unavailable; the last-known report stands", async () => {
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = async () => context;
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = () => new Promise(() => undefined);
+    }, { usageReadTimeoutMs: 20 });
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+    expect(await provider.readUsage("live-only")).toEqual({ report: null, reason: "timeout" });
+    expect(await provider.usageReport()).toBeUndefined();
+    queries[0]!.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = undefined;
+    expect(await provider.readUsage("live-only")).toEqual({ report: null, reason: "unavailable" });
+    // Concurrent asks join one read.
+    queries[0]!.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => plan;
+    const [a, b] = await Promise.all([provider.readUsage("live-only"), provider.readUsage("live-only")]);
+    expect(a).toBe(b);
+    expect(a.report?.plan).toEqual(expect.objectContaining({ subscription: "pro" }));
+    await provider.dispose();
   });
 });

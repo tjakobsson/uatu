@@ -15,8 +15,7 @@ import type {
   ModelSelection,
   PermissionOutcome,
   QuestionOutcome,
-  ReversibleHistoryResult,
-} from "./types";
+  ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
 import {
   parseAgentChatStatuses,
   parseChatMode,
@@ -27,8 +26,7 @@ import {
   parseConversationSnapshot,
   parseConversationConfiguration,
   parseConversationSummary,
-  parseReversibleHistoryResult,
-} from "./validation";
+  parseReversibleHistoryResult, parseUsageReadResult, parseUsageReportResponse } from "./validation";
 
 export class ChatTransportError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -252,6 +250,16 @@ export class ChatApiClient {
 
   question(conversationId: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<unknown> {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/questions/${encodeURIComponent(interactionId)}`), { requestId, outcome }, value => value);
+  }
+
+  /** The agent's last-known plan usage; null when nothing has been read yet. */
+  async usage(agentId: string, signal?: AbortSignal): Promise<AgentUsageReport | null> {
+    const value = await this.get(appUrl(`/api/chat/usage?agent=${encodeURIComponent(agentId)}`), parseUsageReportResponse, signal, this.coldReadBudget());
+    return value.report;
+  }
+
+  readUsage(agentId: string, requestId: string, mode: UsageReadMode): Promise<UsageReadResult> {
+    return this.mutate(appUrl("/api/chat/usage/read"), { agentId, requestId, mode }, parseUsageReadResult);
   }
 
   stopTask(conversationId: string, taskId: string, requestId: string): Promise<unknown> {

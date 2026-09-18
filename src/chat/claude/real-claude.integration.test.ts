@@ -17,6 +17,27 @@ afterEach(async () => {
 });
 
 describe.skipIf(!enabled)("real Claude Code integration", () => {
+  test("a usage read in a workspace without a conversation lists no session afterwards", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-real-claude-usage-"));
+    temporaryRoots.push(root);
+    const workspace = path.join(root, "workspace");
+    await mkdir(workspace);
+    const runtime = new ClaudeRuntime({ workspacePath: workspace });
+    const availability = await runtime.ensure();
+    if (availability.state !== "ready") return;
+    const provider = new ClaudeProvider({ workspacePath: workspace, executable: runtime.executablePath()!, stateFile: path.join(root, "uatu-state.json") });
+    try {
+      expect(await provider.listSessions()).toEqual([]);
+      const result = await provider.readUsage("start");
+      expect(result.report).not.toBeNull();
+      expect(result.report?.conversationId).toBeUndefined();
+      expect(await provider.listSessions()).toEqual([]);
+      expect(await provider.usageReport()).toEqual(result.report!);
+    } finally {
+      await provider.dispose();
+    }
+  }, 60_000);
+
   test("probes the install, runs a session round trip, and reads it back from native storage", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-real-claude-"));
     temporaryRoots.push(root);

@@ -37,6 +37,25 @@ describe("chat API client", () => {
     abort.abort(new Error("Superseded read"));
     await expect(pending).rejects.toThrow("Superseded read");
   });
+  test("plan usage reads and refreshes go through appUrl and parse strictly", async () => {
+    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
+    resetAppBasePathForTests();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const report = { plan: { fiveHour: { utilization: 9 } }, readAt: 5, conversationId: "c1" };
+    const client = new ChatApiClient((async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init });
+      if (init?.method === "POST") return Response.json({ report: null, reason: "no-live-session" });
+      return Response.json({ report });
+    }) as typeof fetch);
+    expect(await client.usage("claude")).toEqual(report);
+    expect(requests[0]!.url).toBe("/s/work/api/chat/usage?agent=claude");
+    expect(await client.readUsage("claude", "req-1", "live-only")).toEqual({ report: null, reason: "no-live-session" });
+    expect(requests[1]!.url).toBe("/s/work/api/chat/usage/read");
+    expect(JSON.parse(String(requests[1]!.init?.body))).toEqual({ agentId: "claude", requestId: "req-1", mode: "live-only" });
+    const malformed = new ChatApiClient((async () => Response.json({ report: { plan: {} } })) as unknown as typeof fetch);
+    await expect(malformed.usage("claude")).rejects.toThrow(/readAt/);
+  });
+
   test("routes status, models, inventory, snapshots, and mutations through appUrl", async () => {
     Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
     resetAppBasePathForTests();

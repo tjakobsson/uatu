@@ -57,7 +57,10 @@ export type ChatCapability =
   // The agent can run work in the background and reports it: live tasks
   // are listed with a stop action, settled tasks land in the timeline, and
   // the conversation presents a background-work state.
-  | "background-tasks";
+  | "background-tasks"
+  // The agent's login has plan usage that can be asked for: the workspace
+  // keeps the newest report and a read can be requested on demand.
+  | "usage";
 
 // Image attachment bounds, shared by the composer (intake refusal), the
 // upload route (authoritative enforcement), and the store. 10 MiB sits
@@ -576,6 +579,27 @@ export type PlanUtilization = {
   modelScoped?: PlanModelWindow[];
   extraUsage?: PlanExtraUsage;
 };
+
+/**
+ * The login's plan usage as the workspace last read it. Per login, not per
+ * conversation: one report serves every conversation of the agent. An empty
+ * plan is an answer ("this login reports no limits"), not an absence.
+ * `conversationId` names the conversation the read went through, when one
+ * did — a read through a probe query has none.
+ */
+export type AgentUsageReport = {
+  plan: PlanUtilization;
+  readAt: number;
+  conversationId?: string;
+};
+
+// "live-only" reads through a session that is already up and answers
+// nothing otherwise; "start" may start one for the read.
+export type UsageReadMode = "live-only" | "start";
+export type UsageReadFailure = "no-live-session" | "timeout" | "unavailable";
+export type UsageReadResult =
+  | { report: AgentUsageReport; reason?: undefined }
+  | { report: null; reason: UsageReadFailure };
 
 export type SessionModelTotals = {
   // The raw model id the agent keyed its tally by; the readout resolves it

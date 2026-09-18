@@ -214,3 +214,18 @@ describe("rate-limit badge and plan utilization", () => {
     expect(relativeReset(now - 60_000, now)).toBe("now");
   });
 });
+
+describe("usage age", () => {
+  test("the age reads in the reader's units and staleness begins at ten minutes", async () => {
+    const { usageAge, usageAsOf, usageStale, USAGE_STALE_MS } = await import("./composer-status");
+    const readAt = Date.parse("2026-09-02T10:00:00.000Z");
+    expect(usageAge(readAt, readAt + 20_000)).toBe("just now");
+    expect(usageAge(readAt, readAt + 3 * 60_000)).toBe("3 min ago");
+    expect(usageAge(readAt, readAt + 5 * 3_600_000)).toBe("5 h ago");
+    expect(usageAge(readAt, readAt + 3 * 86_400_000)).toBe("3 d ago");
+    expect(usageAge(readAt, readAt - 5_000)).toBe("just now");
+    expect(usageStale(readAt, readAt + USAGE_STALE_MS - 1)).toBe(false);
+    expect(usageStale(readAt, readAt + USAGE_STALE_MS)).toBe(true);
+    expect(usageAsOf(readAt, readAt + 12 * 60_000)).toMatch(/^as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
+  });
+});

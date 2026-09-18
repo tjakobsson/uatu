@@ -18,8 +18,7 @@ import type {
   PermissionOutcome,
   ModelSelection,
   QuestionOutcome,
-  ReversibleHistoryResult,
-} from "./types";
+  ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
 
 export interface WorkspaceChatService {
   status(): Promise<ChatAvailability>;
@@ -68,6 +67,10 @@ export interface WorkspaceChatService {
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }>;
+  /** The agent's last-known plan usage; null when nothing has been read. */
+  usage(): Promise<AgentUsageReport | null>;
+  /** Read plan usage now; the agent picks the session (design D3). */
+  readUsage(requestId: string, mode: UsageReadMode): Promise<UsageReadResult>;
   dispose(): Promise<void>;
 }
 
@@ -258,6 +261,8 @@ export class LazyChatService implements WorkspaceChatService {
   async stopTask(id: string, taskId: string, requestId: string) {
     return (await this.requireAdapter()).stopTask(id, taskId, requestId);
   }
+  async usage() { return (await this.requireAdapter()).usage(); }
+  async readUsage(requestId: string, mode: UsageReadMode) { return (await this.requireAdapter()).readUsage(requestId, mode); }
 
   async dispose(): Promise<void> {
     this.disposed = true;

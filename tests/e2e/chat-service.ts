@@ -9,7 +9,7 @@ import { ConversationInventoryBroadcaster, type ConversationInventorySubscriptio
 import { ReversibleHistoryTargetError } from "../../src/chat/provider";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
-import { isLiveConversationStatus } from "../../src/chat/types";
+import { isLiveConversationStatus, type AgentUsageReport, type UsageReadMode, type UsageReadResult } from "../../src/chat/types";
 import type {
   ChatActivity,
   ChatCapability,
@@ -26,8 +26,7 @@ import type {
   QueuedMessage,
   QuestionOutcome,
   ReversibleHistoryResult,
-  ReversibleHistoryState,
-} from "../../src/chat/types";
+  ReversibleHistoryState, PlanUtilization } from "../../src/chat/types";
 
 export type ReversibleFileFixture = {
   relativePath: string;
@@ -47,6 +46,15 @@ type FakeE2EChatServiceOptions = {
   // Capabilities this fake declares beyond the shared default set (a
   // Claude-shaped fixture declares typed model ids; the OpenCode one does not).
   extraCapabilities?: ChatCapability[];
+};
+
+export type UsageReadOutcome = {
+  outcome: "ok" | "fail" | "no-live-session";
+  delayMs?: number;
+  plan?: PlanUtilization;
+  // The conversation a successful read lands its context report in.
+  conversationId?: string;
+  contextTotal?: number;
 };
 
 export class FakeE2EChatService implements WorkspaceChatService {
@@ -534,6 +542,47 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // What each stop request carried, for spec assertions.
   readonly stoppedTasks: string[] = [];
 
+  // The workspace's last-known plan usage and how the next read answers,
+  // both set by control actions (design D9).
+  usageReport: AgentUsageReport | null = null;
+  // No session is live in a fixture workspace unless a spec says so: an
+  // unasked (live-only) refresh answers nothing, an explicit read answers.
+  usageReadOutcome: UsageReadOutcome = { outcome: "no-live-session" };
+  readonly usageReads: Array<{ requestId: string; mode: UsageReadMode }> = [];
+
+  setUsageReport(report: AgentUsageReport | null): void {
+    this.usageReport = report;
+  }
+
+  setUsageReadOutcome(outcome: UsageReadOutcome): void {
+    this.usageReadOutcome = outcome;
+  }
+
+  async usage(): Promise<AgentUsageReport | null> {
+    return this.usageReport;
+  }
+
+  /**
+   * A read answers as the control action said it would. A report that
+   * answers also lands a context report in the named conversation, as the
+   * real provider's read does through the session it went through.
+   */
+  async readUsage(requestId: string, mode: UsageReadMode): Promise<UsageReadResult> {
+    this.usageReads.push({ requestId, mode });
+    const outcome = this.usageReadOutcome;
+    if (outcome.delayMs) await new Promise(resolve => setTimeout(resolve, outcome.delayMs));
+    if (outcome.outcome === "fail") return { report: null, reason: "timeout" };
+    if (outcome.outcome === "no-live-session" && mode === "live-only") return { report: null, reason: "no-live-session" };
+    const plan = outcome.plan ?? this.usageReport?.plan ?? { fiveHour: { utilization: 11 }, sevenDay: { utilization: 27 } };
+    const readAt = Date.now();
+    const report: AgentUsageReport = { plan, readAt, ...(outcome.conversationId ? { conversationId: outcome.conversationId } : {}) };
+    this.usageReport = report;
+    if (outcome.conversationId && this.items.has(outcome.conversationId)) {
+      this.publishItem(outcome.conversationId, { id: `context:report:${readAt}`, type: "context_report", createdAt: readAt, total: outcome.contextTotal ?? 30_000, max: 200_000, plan });
+    }
+    return { report };
+  }
+
   async stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }> {
     this.require(id);
     const key = `stop-task:${id}:${taskId}:${requestId}`;
@@ -560,6 +609,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   reset(): void {
+    this.usageReport = null;
+    this.usageReadOutcome = { outcome: "no-live-session" };
+    this.usageReads.length = 0;
     this.disconnect();
     for (const subscription of [...this.inventorySubscriptions]) subscription.cancel();
     this.inventory.dispose();

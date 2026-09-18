@@ -16,8 +16,8 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, statusLabel, subagentEntries, subagentLabel, workingLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
-import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, type RateLimitStanding } from "./composer-status";
-import { buildPlanRowNodes, noteUsageReport, revealUsagePane } from "./usage-pane";
+import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
+import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
 import { buildReceiptRows, buildReceiptTotal, parseReceiptView, receiptHeading, subagentTrackSummary, subagentTranscriptTitle, type ReceiptView } from "./receipt-view";
@@ -123,6 +123,9 @@ export function initChat(api = new ChatApiClient()): void {
   const planReadout = document.querySelector<HTMLElement>("#chat-plan-readout");
   const planReadoutHead = document.querySelector<HTMLElement>("#chat-plan-readout-head");
   const planReadoutName = document.querySelector<HTMLElement>("#chat-plan-readout-name");
+  const planReadoutAge = document.querySelector<HTMLElement>("#chat-plan-readout-age");
+  const planRead = document.querySelector<HTMLButtonElement>("#chat-plan-read");
+  const planReadoutStatus = document.querySelector<HTMLElement>("#chat-plan-readout-status");
   const planReadoutRowsElement = document.querySelector<HTMLElement>("#chat-plan-readout-rows");
   const planReadoutStanding = document.querySelector<HTMLElement>("#chat-plan-readout-standing");
   const planPin = document.querySelector<HTMLButtonElement>("#chat-plan-pin");
@@ -1768,6 +1771,8 @@ export function initChat(api = new ChatApiClient()): void {
   let planTick: ReturnType<typeof setInterval> | undefined;
   const paintPlanRows = () => {
     if (planReadoutRowsElement && paintedPlanReport?.plan) planReadoutRowsElement.replaceChildren(...buildPlanRowNodes(document, planReadoutRows(paintedPlanReport.plan)));
+    paintPlanAge();
+    paintPlanReadControls();
   };
   // The pin makes sense only where the sidebar sits beside the chat: on the
   // desktop layout with the sidebar expanded, and while the pane is not
@@ -1857,9 +1862,23 @@ export function initChat(api = new ChatApiClient()): void {
   // empty plan and says the login reports none. "Empty" is the readout's
   // own test — no row to draw — not the chip's base summary: a plan of only
   // a model-scoped bucket, or of reset-only base windows, has rows to show.
+  // The workspace's last-known report, shaped as the report a conversation
+  // would carry, so a conversation without one of its own reads the same
+  // path. Cached per held report: the repaint check keys on identity.
+  let knownAsReport: { source: ReturnType<typeof currentUsageReport>; item: ContextReportItem } | undefined;
+  const lastKnownPlanReport = (): ContextReportItem | undefined => {
+    const known = currentUsageReport();
+    if (!known) return undefined;
+    if (knownAsReport?.source !== known) knownAsReport = { source: known, item: { id: "context:last-known", type: "context_report", createdAt: known.reportedAt, total: 0, plan: known.plan } };
+    return knownAsReport.item;
+  };
   const syncPlanUsage = (standing: RateLimitStanding | undefined) => {
     if (!planUsage || !planUsageSummary) return;
-    const report = projection && declares("context") ? latestPlanReport(projection.items) : undefined;
+    const own = projection && declares("context") ? latestPlanReport(projection.items) : undefined;
+    // No report of its own: the workspace's last-known plan stands in, so a
+    // reopened conversation — or one that only has a standing — still
+    // shows the windows (spec). The totals stay the conversation's own.
+    const report = own ?? (declares("usage") ? lastKnownPlanReport() : undefined);
     const plan = report?.plan;
     // The conversation's totals: the report's own where the agent tallies
     // them (Claude Code), else folded from the priced usage carriers
@@ -1910,19 +1929,59 @@ export function initChat(api = new ChatApiClient()): void {
     if (planReadoutRowsElement) planReadoutRowsElement.hidden = !hasWindows;
     planReadout?.setAttribute("aria-label", hasWindows ? "Plan usage" : standing ? "Rate limit" : "This conversation's usage");
     if (planReadoutName) planReadoutName.textContent = name ?? "Plan usage";
-    planUsageSummary.title = hasWindows
+    planSummaryBaseTitle = hasWindows
       ? `${name ?? "Plan usage"} · open for every window and its reset`
       : standing
         ? "Open for what the login reported and when it resets"
         : "This login reports no plan limits · open for this conversation's cost and per-model usage";
+    planUsageSummary.title = planSummaryBaseTitle;
     paintPlanRows();
     paintPlanSession(totals, projection?.items ?? []);
-    if (plan) noteUsageReport({ plan, reportedAt: report!.createdAt });
+    if (own?.plan) noteUsageReport({ plan: own.plan, reportedAt: own.createdAt });
   };
+  // The read time and its age beside the plan name, and the stale mark on
+  // the readout and the chip; repainted with the rows so the age moves.
+  const paintPlanAge = () => {
+    const readAt = paintedPlanReport?.createdAt;
+    const hasPlan = Boolean(paintedPlanReport?.plan && planHasRows(paintedPlanReport.plan));
+    if (planReadoutAge) planReadoutAge.textContent = hasPlan && readAt !== undefined ? usageAsOf(readAt) : "";
+    const stale = hasPlan && readAt !== undefined && usageStale(readAt);
+    if (planUsage) {
+      if (stale) planUsage.dataset.stale = "true"; else delete planUsage.dataset.stale;
+      if (planUsageSummary) planUsageSummary.title = stale && readAt !== undefined ? `${planSummaryBaseTitle} · read ${usageAsOf(readAt).replace(/^as of /, "")}` : planSummaryBaseTitle;
+    }
+  };
+  let planSummaryBaseTitle = "";
+  // "Read now" and the read's state line: shown only for an agent that
+  // reports plan usage, disabled and relabelled while a read is out.
+  const paintPlanReadControls = () => {
+    const state = usageReadState();
+    if (planRead) {
+      planRead.hidden = !declares("usage") || !usageReadable();
+      planRead.disabled = state.reading;
+      planRead.textContent = state.reading ? "Reading…" : "Read now";
+    }
+    if (planReadoutStatus) {
+      const text = declares("usage") ? readStatusText(state) : undefined;
+      planReadoutStatus.hidden = !text;
+      planReadoutStatus.textContent = text ?? "";
+    }
+  };
+  onUsageChange(() => {
+    paintPlanReadControls();
+    // A fresh report from the read (or from any conversation) is a new
+    // last-known plan: a conversation reading through it repaints.
+    syncPlanUsage(paintedStanding);
+  });
+  planRead?.addEventListener("click", () => { void readUsageNow("start"); });
+  initUsagePaneControls();
   planUsage?.addEventListener("toggle", () => {
     if (planUsage.open) {
       syncPlanPin();
       paintPlanRows();
+      // A stale report refreshes through a session that is already up;
+      // nothing is started for an unasked read (spec).
+      if (declares("usage")) refreshUsageIfStale();
       if (planTick === undefined) planTick = setInterval(paintPlanRows, 60_000);
     } else if (planTick !== undefined) {
       clearInterval(planTick);
@@ -3771,6 +3830,7 @@ export function initChat(api = new ChatApiClient()): void {
     catalogLoading = Boolean(status && status.availability.state !== "unavailable");
     configurationTrigger.disabled = catalogLoading || !projection;
     agent = status?.availability.state === "ready" ? status.availability.agent : undefined;
+    if (status && agent?.capabilities.includes("usage")) seedUsage(status.agent.id);
     nameAgent();
     applyCapabilities();
     document.querySelectorAll(".chat-unavailable").forEach(panel => panel.remove());
@@ -3814,6 +3874,26 @@ export function initChat(api = new ChatApiClient()): void {
     form.hidden = false;
     renderConfiguration();
     syncControls();
+  };
+
+  // Plan usage is per login: the workspace's last-known report is fetched
+  // once per agent that reports it, and that agent answers the reads. One
+  // agent reports it today; the last one to declare it would answer.
+  const seededUsage = new Set<string>();
+  const seedUsage = (agentId: string) => {
+    if (seededUsage.has(agentId)) return;
+    seededUsage.add(agentId);
+    onUsageRead(mode => api.readUsage(agentId, newRequestId(), mode));
+    void api.usage(agentId).then(report => {
+      if (report) noteUsageReport({ plan: report.plan, reportedAt: report.readAt, ...(report.conversationId ? { conversationId: report.conversationId } : {}) });
+    }).catch(() => undefined);
+  };
+  // An agent already up when the page loads seeds the pane before any
+  // conversation is opened; one that is idle seeds when it reports ready.
+  const seedUsageFromStatuses = () => {
+    for (const status of agentStatuses) {
+      if (status.availability.state === "ready" && status.availability.agent?.capabilities.includes("usage")) seedUsage(status.agent.id);
+    }
   };
 
   /**
@@ -3985,6 +4065,7 @@ export function initChat(api = new ChatApiClient()): void {
     readError.hidden = true;
     try {
       agentStatuses = await api.status();
+      seedUsageFromStatuses();
       // Every offered agent down at once is the only full takeover: with no
       // agent to converse with, the surface's job is the diagnosis + retry.
       const anyUsable = agentStatuses.some(status => status.availability.state !== "unavailable");

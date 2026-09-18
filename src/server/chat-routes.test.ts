@@ -5,7 +5,7 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
-import { isLiveConversationStatus, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
+import { isLiveConversationStatus, type AgentUsageReport, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
 import { ReversibleHistoryTargetError, InvalidQuestionAnswerError } from "../chat/provider";
@@ -39,6 +39,13 @@ class FakeChatService implements WorkspaceChatService {
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
   async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
   async models() { return [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }]; }
+  usageReport: AgentUsageReport | null = null;
+  usageReads: Array<{ requestId: string; mode: UsageReadMode }> = [];
+  async usage() { return this.usageReport; }
+  async readUsage(requestId: string, mode: UsageReadMode): Promise<UsageReadResult> {
+    this.usageReads.push({ requestId, mode });
+    return this.usageReport ? { report: this.usageReport } : { report: null, reason: "no-live-session" };
+  }
   async modes() { return [{ name: "build", description: "Full read-write mode" }, { name: "plan", description: "Read-only planning mode" }]; }
   async commands() { return [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" as const }]; }
   async listConversations() { return [this.conversation]; }
@@ -259,6 +266,23 @@ describe("workspace chat routes", () => {
     expect(created.status).toBe(201);
     const snapshot = table["/s/project/api/chat/conversations/:conversationId"] as { GET(request: Request & { params: Record<string, string> }): Promise<Response> };
     expect((await (await snapshot.GET(request("/s/project/api/chat/conversations/opencode:local?limit=50", {}, { conversationId: "opencode:local" }) as never)).json() as { conversation: { id: string } }).conversation.id).toBe("opencode:local");
+  });
+
+  test("plan usage is read per agent and refreshed by a validated mutation", async () => {
+    const service = new FakeChatService();
+    const table = routes(service, "/s/project/");
+    const usage = table["/s/project/api/chat/usage"] as { GET(request: Request): Promise<Response> };
+    expect((await usage.GET(request("/s/project/api/chat/usage"))).status).toBe(400);
+    expect(await (await usage.GET(request("/s/project/api/chat/usage?agent=opencode"))).json()).toEqual({ report: null });
+    service.usageReport = { plan: { fiveHour: { utilization: 9 } }, readAt: 5 };
+    expect(await (await usage.GET(request("/s/project/api/chat/usage?agent=opencode"))).json()).toEqual({ report: service.usageReport });
+    const read = table["/s/project/api/chat/usage/read"] as { POST(request: Request): Promise<Response> };
+    const post = (body: unknown) => read.POST(request("/s/project/api/chat/usage/read", { method: "POST", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify(body) }));
+    expect((await post({ agentId: "opencode", requestId: "r1", mode: "now" })).status).toBe(400);
+    expect((await post({ agentId: "opencode", mode: "start" })).status).toBe(400);
+    expect((await post({ agentId: "nobody", requestId: "r1", mode: "start" })).status).toBe(404);
+    expect(await (await post({ agentId: "opencode", requestId: "r1", mode: "live-only" })).json()).toEqual({ report: service.usageReport });
+    expect(service.usageReads).toEqual([{ requestId: "r1", mode: "live-only" }]);
   });
 
   test("streams the normalized initial inventory signal under a relocated base path", async () => {

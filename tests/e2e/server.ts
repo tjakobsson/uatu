@@ -49,8 +49,8 @@ import { createTerminalServer } from "../../src/terminal/server";
 import { LiveBroker, type LiveUpstreamSource } from "../../src/hub/live-broker";
 import { LiveEndpoint } from "../../src/hub/live-endpoint";
 import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
-import { FakeE2EChatService, type ReversibleFileFixture } from "./chat-service";
-import type { ChatCapability, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus } from "../../src/chat/types";
+import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
+import type { ChatCapability, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
 
 // One-shot artificial latency for GET /api/terminal/sessions, armed by tests
 // that need two inventory reads to complete out of order (the switcher's
@@ -124,7 +124,7 @@ const fakeSecondAgent = new FakeE2EChatService({
   // Claude Code's own persistent-approval sentence and its typed-id
   // capability, as the real descriptor declares them (chat/claude/provider).
   permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
-  extraCapabilities: ["custom-model-id", "background-tasks"],
+  extraCapabilities: ["custom-model-id", "background-tasks", "usage"],
 });
 // The fake owns attachment persistence (its prompt path validates ids
 // against its own store), so the routers delegate rather than keeping a
@@ -330,6 +330,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
     reversibleFiles?: ReversibleFileFixture[];
     agent?: "opencode" | "claude";
     count?: number;
+    // Plan usage (design D9): the last-known report and how the next read answers.
+    report?: AgentUsageReport | null;
+    outcome?: UsageReadOutcome;
   };
   // The chat wire is agent-qualified ("opencode:<id>") while the fake works
   // in bare provider ids. The control boundary translates both directions so
@@ -411,7 +414,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       fakeChatAgent.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, ...fakeChatAgent.inventoryStats() });
+      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, usageReads: [...fakeChatAgent.usageReads, ...fakeSecondAgent.usageReads].map(read => read.mode), ...fakeChatAgent.inventoryStats() });
     case "inventoryInvalidate":
       fakeChatAgent.invalidateInventory();
       return Response.json({ ok: true });
@@ -450,6 +453,12 @@ async function handleE2EChat(request: Request): Promise<Response> {
       return Response.json({ ok: true });
     case "declareOnly":
       targetFake.declareOnly(body.capabilities ?? []);
+      return Response.json({ ok: true });
+    case "usageReport":
+      targetFake.setUsageReport(body.report ?? null);
+      return Response.json({ ok: true });
+    case "usageRead":
+      targetFake.setUsageReadOutcome({ ...(body.outcome ?? { outcome: "no-live-session" }), ...(body.outcome?.conversationId ? { conversationId: body.outcome.conversationId.replace(/^(?:opencode|claude):/, "") } : {}) });
       return Response.json({ ok: true });
     case "models":
       targetFake.setModels(body.models ?? []);

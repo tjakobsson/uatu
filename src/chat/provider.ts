@@ -1,4 +1,4 @@
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion, TokenUsage } from "./types";
+import type { AgentUsageReport, ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -248,4 +248,15 @@ export interface ChatProvider {
    * task settling. Optional: only an agent declaring `background-tasks`.
    */
   stopTask?(sessionId: string, taskId: string): Promise<void>;
+  /**
+   * The login's plan usage as last read, from memory: no I/O. Optional:
+   * only an agent declaring `usage`.
+   */
+  usageReport?(): Promise<AgentUsageReport | undefined>;
+  /**
+   * Read plan usage now. The provider chooses the session: a live one
+   * answers without interruption; with "start" an idle conversation is
+   * started for the read and retired again. A failure says why.
+   */
+  readUsage?(mode: UsageReadMode): Promise<UsageReadResult>;
 }

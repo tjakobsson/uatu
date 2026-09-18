@@ -5,7 +5,7 @@ import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ReplaySubscription } from "./replay";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
-import type { ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary } from "./types";
+import type { ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary, UsageReadMode } from "./types";
 
 function summary(id: string, updatedAt = 1): ConversationSummary {
   return { id, title: `Conversation ${id}`, createdAt: updatedAt, updatedAt, status: "idle" };
@@ -73,6 +73,8 @@ class StubAgentService implements WorkspaceChatService {
     return this.record("respondQuestion", [id, interactionId], { outcome: { kind: "rejected" as const } });
   }
   async stopTask(id: string, taskId: string) { return this.record("stopTask", [id, taskId], { stopped: true as const }); }
+  async usage() { return this.record("usage", [], null); }
+  async readUsage(requestId: string, mode: UsageReadMode) { return this.record("readUsage", [requestId, mode], { report: null, reason: "no-live-session" as const }); }
   async dispose() { this.calls.push({ method: "dispose", args: [] }); }
   activityState: ChatActivity = { working: false, awaiting: false };
   activityChanges = new ConversationInventoryBroadcaster();

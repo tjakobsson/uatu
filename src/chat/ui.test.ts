@@ -570,6 +570,92 @@ describe("chat cost receipt", () => {
   });
 });
 
+describe("plan usage on demand", () => {
+  const boot = async (tag: string, capabilities: string[]) => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!;
+    let selected = "";
+    Object.defineProperty(select, "value", { configurable: true, get: () => selected, set: value => { selected = String(value); } });
+    const reads: string[] = [];
+    let usageAsks = 0;
+    const stored = { plan: { subscription: "pro", fiveHour: { utilization: 9 }, sevenDay: { utilization: 25 } }, readAt: Date.now() - 12 * 60_000, conversationId: "elsewhere" };
+    const itemsOf: Record<string, unknown[]> = {
+      standing: [
+        { id: "message:u", type: "user_message", createdAt: 0, text: "hi" },
+        { id: "notice:limit", type: "notice", createdAt: 1, level: "warning", message: "Approaching the 5-hour limit", code: "rate-limit-warning" },
+      ],
+    };
+    const api = {
+      status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities } } }]),
+      conversations: async () => [conversation("standing")],
+      commands: async () => [],
+      usage: async () => { usageAsks += 1; return stored; },
+      readUsage: async (_agentId: string, _requestId: string, mode: string) => { reads.push(mode); return { report: { plan: { ...stored.plan, fiveHour: { utilization: 14 } }, readAt: Date.now() } }; },
+      snapshot: async (id: string) => ({ ...snapshot(id), items: itemsOf[id] ?? [] }),
+      stream: () => ({ close() {} }),
+      inventoryStream: () => ({ close() {} }),
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?usage-ui-test-${tag}=${Date.now()}`);
+    initChat(api);
+    select.value = "standing";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return { document, window, reads, usageAsks: () => usageAsks };
+  };
+
+  test("a conversation with only a standing shows it beside the workspace's last-known plan, refreshes it when opened, and reads on demand", async () => {
+    const { document, window, reads } = await boot("with", ["context", "usage"]);
+    try {
+      const summary = document.querySelector<HTMLElement>("#chat-plan-usage-summary")!;
+      await waitUntil(() => summary.textContent === "Session 9% · Week 25%", () => `summary ${summary.textContent}`);
+      const details = document.querySelector<HTMLElement>("#chat-plan-usage")!;
+      expect(details.dataset.level).toBe("warning");
+      expect(details.dataset.stale).toBe("true");
+      expect(document.querySelector<HTMLElement>("#chat-plan-readout-standing")!.hidden).toBe(false);
+      expect(document.querySelector("#chat-plan-readout-standing")?.textContent).toContain("Approaching the 5-hour limit");
+      expect(document.querySelector<HTMLElement>("#chat-plan-readout-head")!.hidden).toBe(false);
+      expect(document.querySelector("#chat-plan-readout-name")?.textContent).toBe("Pro plan");
+      expect(document.querySelector("#chat-plan-readout-age")?.textContent).toMatch(/· 12 min ago$/);
+      expect([...document.querySelectorAll("#chat-plan-readout-rows .plan-row-label")].map(node => node.textContent)).toEqual(["Session", "Week"]);
+      const read = document.querySelector<HTMLButtonElement>("#chat-plan-read")!;
+      expect(read.hidden).toBe(false);
+      // Opening the stale readout refreshes through a live session, unasked.
+      details.setAttribute("open", "");
+      Object.defineProperty(details, "open", { configurable: true, value: true });
+      details.dispatchEvent(new window.Event("toggle"));
+      await waitUntil(() => reads.length === 1, () => `reads ${reads.join(",")}`);
+      expect(reads).toEqual(["live-only"]);
+      await waitUntil(() => summary.textContent === "Session 14% · Week 25%", () => `summary ${summary.textContent}`);
+      expect(details.dataset.stale).toBeUndefined();
+      // The button reads now, starting a session if it must.
+      read.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await waitUntil(() => reads.length === 2, () => `reads ${reads.join(",")}`);
+      expect(reads[1]).toBe("start");
+    } finally {
+      await Bun.sleep(20);
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+
+  test("an agent that does not report plan usage gets no read control and is never asked", async () => {
+    const { document, window, reads, usageAsks } = await boot("without", ["context"]);
+    try {
+      const summary = document.querySelector<HTMLElement>("#chat-plan-usage-summary")!;
+      await waitUntil(() => summary.textContent === "Near rate limit", () => `summary ${summary.textContent}`);
+      expect(document.querySelector<HTMLElement>("#chat-plan-readout-head")!.hidden).toBe(true);
+      expect(document.querySelector<HTMLButtonElement>("#chat-plan-read")!.hidden).toBe(true);
+      expect(usageAsks()).toBe(0);
+      expect(reads).toEqual([]);
+    } finally {
+      await Bun.sleep(20);
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+});
+
 afterAll(() => {
   for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
 });

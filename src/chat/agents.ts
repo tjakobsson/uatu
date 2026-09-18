@@ -19,8 +19,7 @@ import type {
   ModelSelection,
   PermissionOutcome,
   QuestionOutcome,
-  ReversibleHistoryResult,
-} from "./types";
+  ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
 
 export type { AgentChatStatus, ChatAgentDescriptor } from "./types";
 
@@ -115,6 +114,8 @@ export interface MultiAgentWorkspaceChatService {
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }>;
+  usage(agentId: string): Promise<AgentUsageReport | null>;
+  readUsage(agentId: string, requestId: string, mode: UsageReadMode): Promise<UsageReadResult>;
   dispose(): Promise<void>;
 }
 
@@ -370,6 +371,9 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     const { agent, conversationId } = this.resolve(id);
     return agent.service.stopTask(conversationId, taskId, requestId);
   }
+
+  async usage(agentId: string): Promise<AgentUsageReport | null> { return this.requireAgent(agentId).service.usage(); }
+  async readUsage(agentId: string, requestId: string, mode: UsageReadMode): Promise<UsageReadResult> { return this.requireAgent(agentId).service.readUsage(requestId, mode); }
 
   async dispose(): Promise<void> {
     this.inventoryHub.dispose();

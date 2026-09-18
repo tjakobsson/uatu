@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  parseAgentUsageReport,
   parseChatAvailability,
   parseChatCommand,
   parseChatEvent,
@@ -10,6 +11,8 @@ import {
   parseConversationItem,
   parseConversationConfiguration,
   parseConversationSnapshot,
+  parseUsageReadResult,
+  parseUsageReportResponse,
   parseConversationSummary,
   parseInteractionRequest,
   parseReversibleHistoryResult,
@@ -340,6 +343,25 @@ describe("chat domain validation", () => {
     expect(parseConversationItem({ id: "t", type: "tool", createdAt: 1, name: "Bash", status: "running", elapsedMs: 1200 })).toBeTruthy();
     expect(parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "running" })).toBeTruthy();
     expect(() => parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "paused" })).toThrow(/background task status/);
+  });
+
+  test("a usage report parses with the plan's own rules; a read result is a report or a named failure", () => {
+    const report = { plan: { subscription: "pro", fiveHour: { utilization: 9, resetsAt: 5 }, sevenDay: { utilization: 25 } }, readAt: 1_700_000_000_000, conversationId: "c1" };
+    expect(parseAgentUsageReport(report)).toEqual(report);
+    // An empty plan is an answer: the login reports no limits.
+    expect(parseAgentUsageReport({ plan: {}, readAt: 1 })).toEqual({ plan: {}, readAt: 1 });
+    expect(parseAgentUsageReport(null)).toBeNull();
+    expect(() => parseAgentUsageReport({ plan: {} })).toThrow(/readAt/);
+    expect(() => parseAgentUsageReport({ plan: {}, readAt: Number.NaN })).toThrow(/readAt/);
+    expect(() => parseAgentUsageReport({ plan: { fiveHour: { utilization: -1 } }, readAt: 1 })).toThrow(/utilization/);
+    expect(() => parseAgentUsageReport({ plan: {}, readAt: 1, extra: true })).toThrow(/usage report/);
+    expect(parseUsageReportResponse({ report })).toEqual({ report });
+    expect(parseUsageReportResponse({ report: null })).toEqual({ report: null });
+    expect(() => parseUsageReportResponse({})).toThrow(/report or null/);
+    expect(parseUsageReadResult({ report })).toEqual({ report });
+    expect(parseUsageReadResult({ report: null, reason: "timeout" })).toEqual({ report: null, reason: "timeout" });
+    expect(() => parseUsageReadResult({ report: null, reason: "bored" })).toThrow(/reason/);
+    expect(() => parseUsageReadResult({ report, reason: "timeout" })).toThrow(/no reason/);
   });
 
   test("context reports and compaction markers parse as closed shapes", () => {

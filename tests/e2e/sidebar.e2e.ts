@@ -3,6 +3,7 @@ import type { APIRequestContext } from "@playwright/test";
 import { expect, test } from "./fixtures";
 
 import { openChatPanel } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { treeRow } from "./tree-helpers";
 import { standardBeforeEach, sidebarPanesFitVisibleHeight } from "./fixtures";
 
@@ -175,7 +176,7 @@ test("Usage pane: hidden by default, one toggle away in the panels menu, reveale
   await expect(option).toBeVisible();
   await option.check();
   await expect(usagePane).toBeVisible();
-  await expect(usagePane.locator(".pane-empty")).toHaveText("Plan usage appears here after a Claude Code turn.");
+  await expect(usagePane.locator(".pane-empty")).toHaveText("No usage read yet.");
   await usagePane.getByRole("button", { name: "Collapse Usage" }).click();
   await expect(usagePane).toHaveClass(/is-collapsed/);
   await usagePane.getByRole("button", { name: "Expand Usage" }).click();
@@ -210,6 +211,57 @@ test("Usage pane: hidden by default, one toggle away in the panels menu, reveale
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await expect(usagePane).toBeVisible();
   await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
+});
+
+test("Usage pane: shows the workspace's last-known report on load with its age, marks it stale, reads on demand, and keeps its figures when a read fails", async ({ page, request }, testInfo) => {
+  const usagePane = page.locator('[data-pane-id="usage"]');
+  const body = page.locator("#usage-pane");
+  // The workspace read this plan twelve minutes ago; no conversation is open.
+  await control(request, { action: "agents", count: 2 });
+  await control(request, { action: "usageReport", agent: "claude", report: { plan: { subscription: "pro", fiveHour: { utilization: 9, resetsAt: Date.now() + 3_600_000 }, sevenDay: { utilization: 25 } }, readAt: Date.now() - 12 * 60_000 } });
+  const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await openChatPanel(page);
+  await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
+  await page.locator("#panels-toggle").click();
+  await page.locator('#panels-menu label:has-text("Usage") input').check();
+  await page.locator("#panels-toggle").click();
+  await expect(usagePane).toBeVisible();
+  await expect(body.locator(".usage-pane-head")).toHaveText(/^Pro plan · as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
+  await expect(body.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
+  await expect(body).toHaveAttribute("data-stale", "true");
+  await captureScreenshot(page, testInfo, "usage-pane-stale-on-load");
+
+  // No session is live, so showing the pane started nothing; a reload shows
+  // the stored report again, from the server, with no turn in between.
+  await page.reload();
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await expect(usagePane).toBeVisible();
+  await expect(body.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
+  await expect(body.locator(".usage-pane-head")).toHaveText(/^Pro plan · as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
+  await expect(body).toHaveAttribute("data-stale", "true");
+
+  // A slow read shows itself; when it lands the head is fresh and the figures moved.
+  await control(request, { action: "usageRead", agent: "claude", outcome: { outcome: "ok", delayMs: 800, plan: { subscription: "pro", fiveHour: { utilization: 14 }, sevenDay: { utilization: 25 } } } });
+  const action = usagePane.locator('.pane-action[data-usage-read]');
+  await expect(action).toBeVisible();
+  await action.click();
+  await expect(action).toBeDisabled();
+  await expect(body.locator(".usage-pane-status")).toHaveText("Reading…");
+  await expect(body.locator(".plan-row-figure").first()).toHaveText("14%");
+  await expect(body.locator(".usage-pane-head")).toHaveText(/· just now$/);
+  await expect(body).not.toHaveAttribute("data-stale", "true");
+  await expect(action).toBeEnabled();
+  await captureScreenshot(page, testInfo, "usage-pane-after-read");
+
+  // A failed read keeps the figures and says why.
+  await control(request, { action: "usageRead", agent: "claude", outcome: { outcome: "fail" } });
+  await action.click();
+  await expect(body.locator(".usage-pane-status")).toHaveText("Couldn't read usage · timed out");
+  await expect(body.locator(".plan-row-figure").first()).toHaveText("14%");
+  await expect(body.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
+  await captureScreenshot(page, testInfo, "usage-pane-read-failed");
 });
 
 test("legacy stored pane state with a selection-inspector entry boots cleanly", async ({ page }) => {

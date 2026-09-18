@@ -16,7 +16,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion } from "../types";
+import type { AgentUsageReport, ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion, UsageReadMode, UsageReadResult } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
 import { createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, type ClaudeEventMemory } from "./normalization";
@@ -161,6 +161,8 @@ export type ClaudeProviderOptions = {
    * Tests shorten it.
    */
   backgroundGraceMs?: number;
+  /** Bound on an on-demand usage read, cold start included. Tests shorten it. */
+  usageReadTimeoutMs?: number;
   // Re-read delays for a generated title that lands after the result.
   titleRefreshDelaysMs?: number[];
 };
@@ -181,6 +183,9 @@ const CATALOG_PROBE_COOLDOWN_MS = 60_000;
 // One control round-trip after each turn; a CLI that never answers must not
 // hold the session open past this.
 const CONTEXT_REPORT_TIMEOUT_MS = 3_000;
+// An on-demand usage read may have to start the CLI first; the probe's
+// bound is sized for a query that is already up.
+const USAGE_READ_TIMEOUT_MS = 15_000;
 // The CLI generates its title from an un-awaited side call that can land
 // after the first result; a short turn is re-read a few times for it.
 const TITLE_REFRESH_DELAYS_MS = [1_000, 3_000, 8_000];
@@ -323,6 +328,7 @@ export class ClaudeProvider implements ChatProvider {
   private readonly renameGenerations = new Map<string, number>();
   private readonly events_ = new PushQueue<NormalizedProviderEvent>();
   private readonly backgroundGraceMs: number;
+  private readonly usageReadTimeoutMs: number;
   private readonly titleRefreshDelaysMs: number[];
   // Conversations whose last rate-limit signal was a standing (warning or
   // rejection), with the moment they entered it: carried across this
@@ -337,6 +343,12 @@ export class ClaudeProvider implements ChatProvider {
   // once the first turn has created it.
   private readonly deferredRenames = new Map<string, string>();
   private readonly titleRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // The login's plan usage as last read on this workspace — after a turn or
+  // on demand, through any conversation. Per login, not per conversation,
+  // and durable, so a restarted workspace answers before a session starts.
+  private lastUsage: AgentUsageReport | undefined;
+  // One on-demand read at a time: a second ask joins the first.
+  private usageRead: Promise<UsageReadResult> | null = null;
   private disposed = false;
 
   constructor(options: ClaudeProviderOptions) {
@@ -351,6 +363,7 @@ export class ClaudeProvider implements ChatProvider {
     this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
     this.now = options.now ?? (() => Date.now());
     this.backgroundGraceMs = options.backgroundGraceMs ?? BACKGROUND_FOLLOW_UP_GRACE_MS;
+    this.usageReadTimeoutMs = options.usageReadTimeoutMs ?? USAGE_READ_TIMEOUT_MS;
     this.titleRefreshDelaysMs = options.titleRefreshDelaysMs ?? TITLE_REFRESH_DELAYS_MS;
   }
 
@@ -359,7 +372,7 @@ export class ClaudeProvider implements ChatProvider {
     return {
       id: "claude",
       name: "Claude Code",
-      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "conversation-rename"],
+      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "conversation-rename", "usage"],
       permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
     };
   }
@@ -1411,7 +1424,9 @@ export class ClaudeProvider implements ChatProvider {
           modeBeforePlan?: Record<string, string>;
           deferredRenames?: Record<string, string>;
           pending?: Record<string, { title: string; createdAt: number; updatedAt: number }>;
+          usage?: AgentUsageReport;
         };
+        if (stored.usage && typeof stored.usage.readAt === "number" && (!this.lastUsage || stored.usage.readAt > this.lastUsage.readAt)) this.lastUsage = stored.usage;
         for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
           if (!this.configurations.has(id)) this.configurations.set(id, configuration);
         }
@@ -1501,6 +1516,7 @@ export class ClaudeProvider implements ChatProvider {
       deferredRenames: Object.fromEntries(this.deferredRenames),
       pending: Object.fromEntries([...this.pending.values()].map(session =>
         [session.id, { title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt }])),
+      usage: this.lastUsage,
     });
   }
 
@@ -1921,30 +1937,186 @@ export class ClaudeProvider implements ChatProvider {
    * The `/usage` read: the plan windows when the login has plan limits, and
    * the session's own running totals; bounded like the context read.
    */
-  private async readPlanUtilization(session: LiveSession): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
-    const read = session.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
-    if (!read || this.live.get(session.id) !== session) return undefined;
+  private async readPlanUtilization(session: LiveSession, timeoutMs = CONTEXT_REPORT_TIMEOUT_MS): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
+    if (this.live.get(session.id) !== session) return undefined;
+    const answer = await this.readUsageAnswer(session.query, timeoutMs);
+    if ("failure" in answer) return undefined;
+    return this.adoptUsageAnswer(session, answer.raw);
+  }
+
+  /**
+   * The raw `/usage` answer, or why there is none: the query cannot answer
+   * (no such method, a rejected call) or did not in time.
+   */
+  private async readUsageAnswer(query: ClaudeQueryHandle, timeoutMs: number): Promise<{ raw: unknown } | { raw?: undefined; failure: "timeout" | "unavailable" }> {
+    const read = query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (!read) return { failure: "unavailable" };
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const raw = await Promise.race([
-        read.call(session.query),
-        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTEXT_REPORT_TIMEOUT_MS); }),
+        read.call(query),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); }),
       ]);
-      // Answered with no windows (an API-key login): an explicit empty plan,
-      // so the report states it rather than staying silent like a timeout.
-      // That answer holds for the life of the process, so the plan is not
-      // re-read; the call still goes out, because the same answer carries
-      // the conversation's running totals, which change with every turn and
-      // are the figure such a login budgets by.
-      if (raw === null) return undefined;
-      const plan = session.planUnavailable ? undefined : normalizePlanUtilization(raw);
-      if (!plan) session.planUnavailable = true;
-      const totals = this.accumulateSessionTotals(session, normalizeSessionTotals(raw));
-      return { plan: plan ?? {}, ...(totals ? { session: totals } : {}) };
+      return raw === null ? { failure: "timeout" } : { raw };
+    } catch {
+      return { failure: "unavailable" };
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * What one answer says for the session: the plan and the conversation's
+   * running totals. Answered with no windows (an API-key login): an
+   * explicit empty plan, so the report states it rather than staying silent
+   * like a timeout. That answer holds for the life of the process, so the
+   * plan is not re-read; the call still goes out, because the same answer
+   * carries the conversation's running totals, which change with every turn
+   * and are the figure such a login budgets by. Every answer is also the
+   * workspace's newest usage report.
+   */
+  private adoptUsageAnswer(session: LiveSession, raw: unknown): { plan: PlanUtilization; session?: SessionTotals } {
+    const plan = session.planUnavailable ? undefined : normalizePlanUtilization(raw);
+    if (!plan) session.planUnavailable = true;
+    const totals = this.accumulateSessionTotals(session, normalizeSessionTotals(raw));
+    this.noteUsage({ plan: plan ?? {}, readAt: this.now(), conversationId: session.id });
+    return { plan: plan ?? {}, ...(totals ? { session: totals } : {}) };
+  }
+
+  /** Newest read wins; the report is durable so a restart answers from it. */
+  private noteUsage(report: AgentUsageReport): void {
+    if (this.lastUsage && this.lastUsage.readAt > report.readAt) return;
+    this.lastUsage = report;
+    this.persistDurableState();
+  }
+
+  /** The login's plan usage as last read, from memory. */
+  async usageReport(): Promise<AgentUsageReport | undefined> {
+    await this.restoreDurableState();
+    return this.lastUsage;
+  }
+
+  /**
+   * Read plan usage now. The provider picks the session (design D3): a live
+   * one answers without interruption; otherwise, with "start", the most
+   * recently updated conversation is resumed for the read and retired
+   * again; a workspace without one reads through an unlisted probe query.
+   * One read at a time — a second ask joins the first.
+   */
+  async readUsage(mode: UsageReadMode): Promise<UsageReadResult> {
+    await this.restoreDurableState();
+    if (this.usageRead) return this.usageRead;
+    const read = this.performUsageRead(mode).finally(() => { this.usageRead = null; });
+    this.usageRead = read;
+    return read;
+  }
+
+  private async performUsageRead(mode: UsageReadMode): Promise<UsageReadResult> {
+    const live = this.mostActiveLiveSession();
+    if (live) return this.readUsageThrough(live);
+    if (mode === "live-only") return { report: null, reason: "no-live-session" };
+    const sessions = await this.listSessions();
+    // A conversation with a transcript resumes; a never-prompted one would
+    // start as fresh as the probe does, so it is the last resort before it.
+    const target = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).find(session => !this.pending.has(session.id)) ?? sessions[0];
+    if (!target) return this.readUsageThroughProbe();
+    let session: LiveSession;
+    try {
+      session = await this.ensureLive(target.id);
+    } catch {
+      return { report: null, reason: "unavailable" };
+    }
+    const result = await this.readUsageThrough(session);
+    // Started for the read only: it does not linger for the follow-up grace
+    // window. A prompt that arrived meanwhile keeps it, as its own turn.
+    if (this.sessionIsIdle(session) && this.live.get(session.id) === session) await this.retireSession(session);
+    return result;
+  }
+
+  /** A session with work in flight first, else the most recently started. */
+  private mostActiveLiveSession(): LiveSession | undefined {
+    const sessions = [...this.live.values()];
+    return sessions.findLast(session => !this.sessionIsIdle(session)) ?? sessions.at(-1);
+  }
+
+  /**
+   * The read through a conversation's query: the plan and the context
+   * breakdown together, as after a turn, upserted as one context report so
+   * the conversation's own readout refreshes with it. Deliberately outside
+   * the turn's bookkeeping: no probe generation, no turn count, no idle
+   * timer — a running turn is not interrupted and retires as it would.
+   */
+  private async readUsageThrough(session: LiveSession): Promise<UsageReadResult> {
+    const [answer, contextRaw] = await Promise.all([
+      this.readUsageAnswer(session.query, this.usageReadTimeoutMs),
+      this.readContextAnswer(session.query, this.usageReadTimeoutMs),
+    ]);
+    if ("failure" in answer) return { report: null, reason: answer.failure };
+    if (this.live.get(session.id) !== session) return { report: null, reason: "unavailable" };
+    const usage = this.adoptUsageAnswer(session, answer.raw);
+    const configured = this.configurations.get(session.id)?.model;
+    const model = configured && configured.modelId !== "default" ? configured.modelId : undefined;
+    const item = contextRaw === undefined ? undefined : normalizeContextUsage(contextRaw, this.now(), model);
+    if (item) this.emit(session.id, { updates: [{ kind: "upsert", item: { ...item, ...usage } }], outcome: "handled", eventType: "context.reported" });
+    return { report: { plan: usage.plan, readAt: this.lastUsage?.readAt ?? this.now(), conversationId: session.id } };
+  }
+
+  private async readContextAnswer(query: ClaudeQueryHandle, timeoutMs: number): Promise<unknown | undefined> {
+    if (!query.getContextUsage) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const raw = await Promise.race([
+        query.getContextUsage(),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+      ]);
+      return raw === null ? undefined : raw;
     } catch {
       return undefined;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A workspace with no Claude conversation still answers: a query under a
+   * fresh id that is hidden before it starts, so a transcript the CLI may
+   * write for the unprompted session never lists, and that is never
+   * registered as a conversation. Nothing is emitted: there is no
+   * conversation to report into.
+   */
+  private async readUsageThroughProbe(): Promise<UsageReadResult> {
+    const nativeId = randomUUID();
+    this.hiddenNative.add(nativeId);
+    this.persistDurableState();
+    const queue = new PushQueue<ClaudeUserEnvelope>();
+    let query: ClaudeQueryHandle;
+    try {
+      query = this.queryFactory({
+        prompt: queue,
+        options: {
+          cwd: this.workspacePath,
+          sessionId: nativeId,
+          pathToClaudeCodeExecutable: this.executable,
+          enableFileCheckpointing: false,
+          permissionMode: "plan",
+          canUseTool: async () => ({ behavior: "deny", message: "This session only reads usage." }),
+        },
+      });
+    } catch {
+      return { report: null, reason: "unavailable" };
+    }
+    // Drained so the SDK's reader never blocks on an unread message.
+    void (async () => { for await (const _ of query) { /* nothing to read */ } })().catch(() => undefined);
+    try {
+      const answer = await this.readUsageAnswer(query, this.usageReadTimeoutMs);
+      if ("failure" in answer) return { report: null, reason: answer.failure };
+      const plan = normalizePlanUtilization(answer.raw) ?? {};
+      const report: AgentUsageReport = { plan, readAt: this.now() };
+      this.noteUsage(report);
+      return { report };
+    } finally {
+      queue.close();
+      await query.return?.().catch(() => undefined);
     }
   }
 

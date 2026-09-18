@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
@@ -19,7 +19,7 @@ import { HistoryChangedError } from "../chat/history-reuse";
 import { resolveStartupTimeoutMs } from "../chat/opencode/opencode-service";
 import { ChatUnavailableError } from "../chat/service";
 import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome } from "../chat/types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type UsageReadMode } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { StreamLifecycleMetrics, type StreamOutcome } from "../debug/stream-metrics";
 import { getDocumentDiff } from "../document/diff";
@@ -560,6 +560,26 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       GET: async (request: Request) => authenticated(request) ?? withAgentScope(request, agentId => run(async () => ({
         models: await deps.chatService.models(agentId),
       }))),
+    },
+    // Plan usage is per login, not per conversation: keyed by agent, like
+    // the catalogs. Internal like every child route (contract: workspace-api).
+    [p("/api/chat/usage")]: {
+      GET: async (request: Request) => authenticated(request) ?? withAgentScope(request, agentId => run(async () => ({
+        report: await deps.chatService.usage(agentId),
+      }))),
+    },
+    [p("/api/chat/usage/read")]: {
+      POST: async (request: Request) => {
+        const rejected = mutationGate(request);
+        if (rejected) return rejected;
+        const body = await parseJsonObject(request, ["agentId", "requestId", "mode"]);
+        if (body instanceof Response) return body;
+        if (typeof body.agentId !== "string" || !body.agentId) return chatError(400, "agentId must be a non-empty string");
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        if (body.mode !== "live-only" && body.mode !== "start") return chatError(400, "mode must be live-only or start");
+        return run(() => deps.chatService.readUsage(body.agentId as string, requestId, body.mode as UsageReadMode));
+      },
     },
     [p("/api/chat/modes")]: {
       GET: async (request: Request) => authenticated(request) ?? withAgentScope(request, agentId => run(async () => ({
@@ -1107,6 +1127,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
   if (error instanceof ReversibleHistoryUnsupportedError) return chatError(409, error.message);
+  if (error instanceof UsageUnsupportedError) return chatError(409, error.message);
   if (error instanceof ReversibleHistoryTargetError) return chatError(409, error.message);
   if (error instanceof InvalidQuestionAnswerError) return chatError(400, error.message);
   if (error instanceof BackgroundTaskUnavailableError) return chatError(409, error.message);

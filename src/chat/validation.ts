@@ -24,6 +24,8 @@ import type {
   ReversibleHistoryResult,
   ReversibleHistoryState,
   StructuredQuestion,
+  AgentUsageReport,
+  UsageReadResult,
 } from "./types";
 
 const CONVERSATION_STATUSES = new Set<ConversationStatus>([
@@ -437,31 +439,7 @@ export function parseConversationItem(value: unknown): ConversationItem {
       break;
     case "context_report": {
       expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories", "plan", "session"], type);
-      if (record.plan !== undefined) {
-        // The plan is the one place unknown keys pass: the SDK adds windows
-        // over time and a new one must not make an older client reject the
-        // whole report. Known fields are still held to their types.
-        const plan = expectRecord(record.plan, "context report plan");
-        if (plan.subscription !== undefined) expectNonEmptyString(plan.subscription, "context report plan subscription");
-        for (const key of ["fiveHour", "sevenDay", "sevenDayOpus", "sevenDaySonnet", "sevenDayOauthApps"] as const) {
-          if (plan[key] === undefined) continue;
-          expectPlanWindow(plan[key], `context report plan ${key}`, []);
-        }
-        if (plan.modelScoped !== undefined) {
-          if (!Array.isArray(plan.modelScoped)) throw new Error("context report plan modelScoped must be an array");
-          for (const entry of plan.modelScoped) {
-            const window = expectPlanWindow(entry, "context report plan modelScoped", ["label"]);
-            expectNonEmptyString(window.label, "context report plan modelScoped label");
-          }
-        }
-        if (plan.extraUsage !== undefined) {
-          const extra = expectRecord(plan.extraUsage, "context report plan extraUsage");
-          expectKeys(extra, ["enabled", "usedCredits", "monthlyLimit", "utilization", "currency"], "context report plan extraUsage");
-          if (typeof extra.enabled !== "boolean") throw new Error("context report plan extraUsage enabled must be a boolean");
-          for (const key of ["usedCredits", "monthlyLimit", "utilization"] as const) expectOptionalNonNegative(extra[key], `context report plan extraUsage ${key}`);
-          expectOptionalString(extra.currency, "context report plan extraUsage currency");
-        }
-      }
+      if (record.plan !== undefined) expectPlanUtilization(record.plan, "context report plan");
       if (record.session !== undefined) {
         const session = expectRecord(record.session, "context report session");
         expectKeys(session, ["costUsd", "apiDurationMs", "durationMs", "linesAdded", "linesRemoved", "models", "since"], "context report session");
@@ -685,6 +663,63 @@ function expectTimelineBase(record: Record<string, unknown>, type: string): void
   expectIdentity(record.id, `${type} item id`);
   if (record.type !== type) throw new Error(`expected ${type} item`);
   expectTimestamp(record.createdAt, `${type} createdAt`);
+}
+
+/**
+ * The plan is the one place unknown keys pass: the SDK adds windows over
+ * time and a new one must not make an older client reject the whole report.
+ * Known fields are still held to their types.
+ */
+function expectPlanUtilization(value: unknown, field: string): void {
+  const plan = expectRecord(value, field);
+  if (plan.subscription !== undefined) expectNonEmptyString(plan.subscription, `${field} subscription`);
+  for (const key of ["fiveHour", "sevenDay", "sevenDayOpus", "sevenDaySonnet", "sevenDayOauthApps"] as const) {
+    if (plan[key] === undefined) continue;
+    expectPlanWindow(plan[key], `${field} ${key}`, []);
+  }
+  if (plan.modelScoped !== undefined) {
+    if (!Array.isArray(plan.modelScoped)) throw new Error(`${field} modelScoped must be an array`);
+    for (const entry of plan.modelScoped) {
+      const window = expectPlanWindow(entry, `${field} modelScoped`, ["label"]);
+      expectNonEmptyString(window.label, `${field} modelScoped label`);
+    }
+  }
+  if (plan.extraUsage !== undefined) {
+    const extra = expectRecord(plan.extraUsage, `${field} extraUsage`);
+    expectKeys(extra, ["enabled", "usedCredits", "monthlyLimit", "utilization", "currency"], `${field} extraUsage`);
+    if (typeof extra.enabled !== "boolean") throw new Error(`${field} extraUsage enabled must be a boolean`);
+    for (const key of ["usedCredits", "monthlyLimit", "utilization"] as const) expectOptionalNonNegative(extra[key], `${field} extraUsage ${key}`);
+    expectOptionalString(extra.currency, `${field} extraUsage currency`);
+  }
+}
+
+/** The workspace's last-known plan usage for one agent, or null when none has been read. */
+export function parseAgentUsageReport(value: unknown): AgentUsageReport | null {
+  if (value === null) return null;
+  const record = expectRecord(value, "usage report");
+  expectKeys(record, ["plan", "readAt", "conversationId"], "usage report");
+  expectPlanUtilization(record.plan, "usage report plan");
+  if (typeof record.readAt !== "number" || !Number.isFinite(record.readAt) || record.readAt < 0) throw new Error("usage report readAt must be a timestamp");
+  if (record.conversationId !== undefined) expectIdentity(record.conversationId, "usage report conversationId");
+  return value as AgentUsageReport;
+}
+
+export function parseUsageReportResponse(value: unknown): { report: AgentUsageReport | null } {
+  const record = expectRecord(value, "usage report response");
+  expectKeys(record, ["report"], "usage report response");
+  if (record.report === undefined) throw new Error("usage report response must carry a report or null");
+  return { report: parseAgentUsageReport(record.report) };
+}
+
+export function parseUsageReadResult(value: unknown): UsageReadResult {
+  const record = expectRecord(value, "usage read");
+  expectKeys(record, ["report", "reason"], "usage read");
+  if (record.report === null) {
+    if (record.reason !== "no-live-session" && record.reason !== "timeout" && record.reason !== "unavailable") throw new Error("usage read reason must name a failure");
+    return { report: null, reason: record.reason };
+  }
+  if (record.reason !== undefined) throw new Error("usage read with a report carries no reason");
+  return { report: parseAgentUsageReport(record.report)! };
 }
 
 function expectRecord(value: unknown, field: string): Record<string, unknown> {
