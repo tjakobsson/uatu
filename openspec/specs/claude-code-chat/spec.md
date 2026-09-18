@@ -532,6 +532,34 @@ state that cost instead,
 and activating it SHALL show only this conversation's cost and per-model
 totals, with no plan name, windows, or sidebar control.
 
+Plan utilization belongs to the login, not to a conversation, and it
+SHALL be remembered and readable on demand rather than only after a
+turn. The workspace SHALL keep the newest plan report read through any
+of its Claude Code conversations — the windows and the time they were
+read — across conversation reopening, client reloads, and workspace
+restarts. A conversation that has no plan report of its own SHALL present
+the workspace's last-known report in its summary and readout, stating
+when it was read and how long ago; a report older than ten minutes SHALL
+be marked stale while remaining readable. A rate-limit standing MUST NOT
+displace the last-known windows: the readout SHALL show the standing
+beside them.
+
+The readout SHALL offer a control that reads plan usage now. A read
+SHALL go through a Claude Code session that is already live where one
+exists — a turn in flight or background tasks running — without
+interrupting it; otherwise it SHALL start a session for the conversation
+and let it retire after the read, adding no message to the conversation;
+and a workspace with no Claude Code conversation SHALL still answer,
+without a conversation appearing in the inventory. Every read SHALL
+refresh the conversation it went through with a fresh context report and
+this conversation's totals, exactly as a turn-end read does. While a read
+is in flight the control SHALL say so and further requests SHALL join it
+rather than start another; a read that fails SHALL keep the last-known
+figures and state why it failed. Opening the readout when the last-known
+report is stale and a Claude Code session is already live SHALL refresh
+through that session unasked; a session MUST NOT be started for a read
+the user did not ask for.
+
 #### Scenario: A retry is not a silent stall
 - **WHEN** Claude Code retries a failed API request
 - **THEN** the composer status shows a retrying state
@@ -623,6 +651,54 @@ totals, with no plan name, windows, or sidebar control.
 - **WHEN** the login has no plan limits and the agent reports this conversation's accumulated cost
 - **THEN** the composer summary states the cost, as "$1.23 this conversation"
 - **AND** activating it shows only this conversation's cost and per-model usage, with no plan name or windows
+
+#### Scenario: A reopened conversation shows the last-known plan
+- **WHEN** a Claude Code conversation is opened after a reload, a workspace switch, or a workspace restart, and no turn has ended since
+- **THEN** the composer summary reads the workspace's last-known windows
+- **AND** the readout states when they were read and how long ago
+
+#### Scenario: A stale report says so
+- **WHEN** the last-known report was read more than ten minutes ago
+- **THEN** the summary and readout still show its figures
+- **AND** they are marked stale
+
+#### Scenario: A standing does not empty the readout
+- **WHEN** a rate-limit warning stands for a conversation that has no plan report of its own and the workspace holds a last-known report
+- **THEN** the readout shows the standing and the last-known windows together
+
+#### Scenario: A busy session answers without interruption
+- **WHEN** the reader asks for a read while the conversation runs a long background task
+- **THEN** the windows are refreshed from that session
+- **AND** the task continues, with no message or turn added to the conversation
+
+#### Scenario: An idle conversation is started for the read
+- **WHEN** the reader asks for a read and the conversation's session is retired
+- **THEN** a session is started, the windows are read, and the session retires again
+- **AND** the conversation gains a fresh context report and no message
+
+#### Scenario: A workspace without a conversation still answers
+- **WHEN** the reader asks for a read and the workspace has no Claude Code conversation
+- **THEN** the windows are read
+- **AND** the conversation inventory is unchanged
+
+#### Scenario: One read at a time
+- **WHEN** the reader activates the read control while a read is in flight
+- **THEN** the control shows the read in progress
+- **AND** no second read is started
+
+#### Scenario: A failed read keeps the figures
+- **WHEN** a read times out or the login refuses it
+- **THEN** the last-known windows remain shown
+- **AND** the readout states that the read failed and why
+
+#### Scenario: A live session refreshes a stale report unasked
+- **WHEN** the reader opens the readout while the last-known report is stale and a Claude Code session in this workspace is live
+- **THEN** the windows are refreshed through that session without a click
+
+#### Scenario: No session is started unasked
+- **WHEN** the reader opens the readout while the last-known report is stale and no Claude Code session is live
+- **THEN** the stale figures are shown with their age
+- **AND** no session is started until the reader activates the read control
 
 ### Requirement: Conversation titles follow Claude Code's own
 A Claude Code conversation's title SHALL follow the title Claude Code
