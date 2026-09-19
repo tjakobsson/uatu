@@ -12,7 +12,7 @@ export function mountNotifications(options) {
     <p class="notification-help">Notifications use this browser or installed app's permission. Signing out or expiration of this login stops future notifications.</p>
     <div class="notification-actions"><button type="button" data-enable disabled>Enable notifications</button><button type="button" data-disable hidden>Disable on this device</button><button type="button" data-close>Close</button></div>`;
   const style = document.createElement("style");
-  style.textContent = `#uatu-notifications{box-sizing:border-box;width:min(32rem,calc(100vw - 2rem));max-height:calc(100dvh - 2rem);overflow:auto;padding:1.25rem;border:1px solid var(--border-soft,#888);border-radius:12px;background:var(--surface,Canvas);color:var(--text-strong,CanvasText);font:inherit}#uatu-notifications::backdrop{background:#0006}#uatu-notifications label{display:flex;gap:.5rem;align-items:center;margin:.65rem 0}#uatu-notifications input{width:auto;min-height:0}#uatu-notifications .notification-actions{display:flex;flex-wrap:wrap;gap:.5rem}#uatu-notifications button{min-height:40px;padding:.4rem .65rem}#uatu-notifications .notification-help{font-size:.85em;opacity:.8}.uatu-notifications-trigger{font:inherit;cursor:pointer}`;
+  style.textContent = `#uatu-notifications{box-sizing:border-box;width:min(32rem,calc(100vw - 2rem));max-height:calc(100dvh - 2rem);overflow:auto;padding:1.25rem;border:1px solid var(--border-soft,#888);border-radius:12px;background:var(--surface,Canvas);color:var(--text-strong,CanvasText);font:inherit}#uatu-notifications::backdrop{background:#0006}#uatu-notifications label{display:flex;gap:.5rem;align-items:center;margin:.65rem 0}#uatu-notifications input{width:auto;min-height:0}#uatu-notifications .notification-actions{display:flex;flex-wrap:wrap;gap:.5rem}#uatu-notifications button{min-height:40px;padding:.4rem .65rem}#uatu-notifications .notification-help{font-size:.85em;opacity:.8}.hub-nav .uatu-notifications-trigger{font:inherit;cursor:pointer}`;
   document.head.append(style);
   document.body.append(dialog);
   const status = dialog.querySelector('[role="status"]');
@@ -143,10 +143,18 @@ export function mountNotifications(options) {
   dialog.querySelector("[data-close]").addEventListener("click", () => dialog.close());
   for (const host of document.querySelectorAll(options.hosts)) {
     const button = document.createElement("button");
+    const rail = host.classList.contains("sidebar-rail");
+    const sidebar = host.classList.contains("sidebar-notifications-row");
     button.type = "button"; button.className = "uatu-notifications-trigger";
-    button.textContent = host.classList.contains("sidebar-rail") ? "N" : "Notifications";
+    if (rail || sidebar) {
+      button.classList.add(rail ? "rail-button" : "sidebar-notifications-button");
+      button.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 6a4.5 4.5 0 0 1 9 0v3l1.25 2H2.25L3.5 9V6ZM6 13a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      if (sidebar) button.append(document.createTextNode("Notifications"));
+    } else button.textContent = "Notifications";
     button.setAttribute("aria-label", "Notifications"); button.title = "Notifications";
+    button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", dialog.id);
     button.addEventListener("click", open); host.append(button);
+    host.hidden = false;
   }
   // Reconcile an existing registration on return, without prompting or
   // silently authorizing a different login. Explicit re-enable binds a login.

@@ -129,7 +129,7 @@ injectPwaLinks();
 unregisterLegacyServiceWorkers();
 if (isHubPage()) mountNotifications({
   apiUrl: hubUrl("/api/hub/notifications"), stateUrl: hubUrl("/api/hub/state"), workerUrl: hubUrl("/push-worker.js"),
-  workspaceId: workspaceIdFromBasePath(appBasePath()), hosts: ".sidebar-header, .sidebar-rail", beforeRegister: unregisterLegacyServiceWorkers,
+  workspaceId: workspaceIdFromBasePath(appBasePath()), hosts: ".sidebar-notifications-row, .sidebar-rail", beforeRegister: unregisterLegacyServiceWorkers,
 });
 attachPopstateHandler();
 

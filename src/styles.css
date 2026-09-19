@@ -582,6 +582,7 @@ html.uatu-desktop-host
 .brand-wordmark {
   margin: 0;
   min-width: 0;
+  max-width: 100%;
   font-size: 1.5rem;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -1888,7 +1889,17 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   display: none;
 }
 
-.terminal-toggle-button {
+.sidebar-notifications-row {
+  padding: 0.85rem 0.75rem 0;
+  flex-shrink: 0;
+}
+
+.sidebar-notifications-row[hidden] {
+  display: none;
+}
+
+.terminal-toggle-button,
+.sidebar-notifications-button {
   appearance: none;
   width: 100%;
   display: flex;
@@ -1905,7 +1916,8 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   text-align: left;
 }
 
-.terminal-toggle-button:hover {
+.terminal-toggle-button:hover,
+.sidebar-notifications-button:hover {
   background: var(--surface-muted);
   border-color: var(--border-medium);
 }
