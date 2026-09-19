@@ -3,10 +3,13 @@ import { randomUUID } from "node:crypto";
 import { generateVAPIDKeys, type PushSubscription, type VapidKeys } from "./push-sender";
 import type { AgentNotification } from "../chat/notifications";
 
-export type NotificationPreferences = { workspaceIds: string[]; needsAnswer: boolean; completed: boolean };
+export const NOTIFICATION_CATEGORIES = ["needsAnswer", "completed"] as const;
+export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
+export type NotificationPreferences = { workspaceIds: string[] } & Record<NotificationCategory, boolean>;
 export type NotificationDevice = NotificationPreferences & {
   id: string; user: string; sessionId: string; subscription: PushSubscription;
-  since: Record<string, number>; createdAt: number;
+  /** Per workspace, the moment each enabled category started counting; earlier events are history for this device. */
+  since: Record<string, Partial<Record<NotificationCategory, number>>>; createdAt: number;
 };
 export type NotificationDelivery = {
   key: string; deviceId: string; workspaceId: string; notification?: AgentNotification;
@@ -27,6 +30,10 @@ export class NotificationStore {
       const value = JSON.parse(await fs.readFile(this.filePath, "utf8")) as NotificationData;
       if (value.version !== 1 || typeof value.keys?.publicKey !== "string" || typeof value.keys?.privateKey !== "string"
         || !Array.isArray(value.devices) || !Array.isArray(value.deliveries) || !value.cursors) throw new Error("invalid notification state");
+      for (const device of value.devices) for (const [ws, since] of Object.entries(device.since ?? {})) {
+        // Pre-release enrollments stored one cutoff per workspace.
+        if (typeof since === "number") device.since[ws] = { needsAnswer: since, completed: since };
+      }
       this.data = value;
       await fs.chmod(this.filePath, 0o600);
     } catch (error) {

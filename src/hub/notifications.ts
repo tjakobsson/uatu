@@ -3,7 +3,7 @@ import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notifi
 import { NOTIFICATION_LIFETIME_MS, type AgentNotification } from "../chat/notifications";
 import type { LiveUpstreamSource } from "./live-broker";
 import { SseFrameParser } from "./live-sse";
-import { NotificationStore, type NotificationData, type NotificationDevice, type NotificationPreferences } from "./notification-store";
+import { NOTIFICATION_CATEGORIES, NotificationStore, type NotificationData, type NotificationDevice, type NotificationPreferences } from "./notification-store";
 import { createPushSender, parsePushSubscription, validPushContact, type PushSender } from "./push-sender";
 
 export class NotificationRequestError extends Error {
@@ -11,6 +11,8 @@ export class NotificationRequestError extends Error {
 }
 type Principal = { user: string; sessionId: string };
 type Observer = { abort: AbortController; done: Promise<void> };
+const JOURNAL_CAPACITY = 10_000;
+const SEND_CONCURRENCY = 8;
 
 export class HubNotifications {
   private readonly sender: PushSender | null;
@@ -68,11 +70,12 @@ export class HubNotifications {
       if (data.devices.some(device => device.subscription.endpoint === subscription.endpoint && device.id !== existing?.id)) throw new NotificationRequestError(409, "subscription is already enrolled");
       if (!existing && data.devices.filter(device => device.user === principal.user).length >= 32) throw new NotificationRequestError(409, "device limit reached");
       const sameAuthorization = existing?.sessionId === principal.sessionId;
-      const newCategory = preferences.completed && !existing?.completed || preferences.needsAnswer && !existing?.needsAnswer;
+      // A category keeps its cutoff only while it stays enabled under the same login; anything newly enabled starts now.
       const device: NotificationDevice = {
         ...principal, ...preferences, id: existing?.id ?? randomUUID(), subscription,
         createdAt: existing?.createdAt ?? this.now(),
-        since: Object.fromEntries(preferences.workspaceIds.map(ws => [ws, sameAuthorization && !newCategory ? existing?.since[ws] ?? this.now() : this.now()])),
+        since: Object.fromEntries(preferences.workspaceIds.map(ws => [ws, Object.fromEntries(NOTIFICATION_CATEGORIES.filter(category => preferences[category])
+          .map(category => [category, sameAuthorization && existing?.[category] ? existing.since[ws]?.[category] ?? this.now() : this.now()]))])),
       };
       data.devices = data.devices.filter(candidate => candidate.id !== device.id);
       data.devices.push(device);
@@ -110,7 +113,8 @@ export class HubNotifications {
         const pending = new Set(frame.pending.map(notification => notification.id));
         for (const delivery of data.deliveries) if (delivery.workspaceId === workspaceId && delivery.notification?.kind !== "turn-completed"
           && delivery.notification && !pending.has(delivery.notification.id)) { delivery.status = "discarded"; delete delivery.notification; }
-        if (frame.reason === "gap") for (const notification of frame.pending) this.enqueue(data, workspaceId, notification);
+        // Both handoffs list every still-pending request; each device's cutoff separates history from post-enrollment entries.
+        for (const notification of frame.pending) this.enqueue(data, workspaceId, notification);
       } else if (frame.type === "event" && frame.event.type === "notification") {
         this.enqueue(data, workspaceId, frame.event.notification);
       }
@@ -125,15 +129,20 @@ export class HubNotifications {
       if (!this.eligible(device, workspaceId, notification)) continue;
       const key = JSON.stringify([workspaceId, device.id, notification.id]);
       if (data.deliveries.some(delivery => delivery.key === key)) continue;
-      if (data.deliveries.length >= 10_000) throw new Error("notification journal capacity reached");
+      if (data.deliveries.length >= JOURNAL_CAPACITY) {
+        // Evict the oldest settled record before dropping the new delivery; failing the frame would pin the feed on it.
+        const oldest = data.deliveries.findIndex(delivery => delivery.status !== "pending");
+        if (oldest === -1) continue;
+        data.deliveries.splice(oldest, 1);
+      }
       data.deliveries.push({ key, deviceId: device.id, workspaceId, notification, status: "pending", createdAt: notification.createdAt, attempts: 0, nextAttemptAt: this.now() });
     }
   }
 
   private eligible(device: NotificationDevice, workspaceId: string, notification: AgentNotification): boolean {
-    return device.workspaceIds.includes(workspaceId) && this.options.authorized(device, workspaceId)
-      && notification.createdAt >= (device.since[workspaceId] ?? Infinity)
-      && (notification.kind === "turn-completed" ? device.completed : device.needsAnswer);
+    const category = notification.kind === "turn-completed" ? "completed" : "needsAnswer";
+    return device[category] && device.workspaceIds.includes(workspaceId) && this.options.authorized(device, workspaceId)
+      && notification.createdAt >= (device.since[workspaceId]?.[category] ?? Infinity);
   }
 
   private preferences(principal: Principal, body: Record<string, unknown>): NotificationPreferences {
@@ -208,36 +217,42 @@ export class HubNotifications {
 
   private async deliver(): Promise<void> {
     if (!this.sender || this.closed) return;
-    for (const candidate of this.options.store.snapshot().deliveries) {
-      if (this.closed) return;
-      if (candidate.status !== "pending") continue;
-      const latest = this.options.store.snapshot();
-      const delivery = latest.deliveries.find(entry => entry.key === candidate.key);
-      if (!delivery || delivery.status !== "pending" || !delivery.notification) continue;
-      const device = latest.devices.find(device => device.id === delivery.deviceId);
-      const expires = delivery.createdAt + NOTIFICATION_LIFETIME_MS;
-      if (!device || this.now() >= expires || !this.eligible(device, delivery.workspaceId, delivery.notification)) {
-        await this.finish(delivery.key, "discarded"); continue;
+    const queue = this.options.store.snapshot().deliveries.filter(delivery => delivery.status === "pending" && delivery.nextAttemptAt <= this.now()).map(delivery => delivery.key);
+    // A hung endpoint holds only its own worker; a failed journal write ends this pass and the next drain resumes from durable state.
+    let stopped = false;
+    await Promise.all(Array.from({ length: Math.min(SEND_CONCURRENCY, queue.length) }, async () => {
+      for (let key = queue.shift(); key !== undefined && !stopped && !this.closed; key = queue.shift()) {
+        await this.attempt(key).catch(() => { stopped = true; });
       }
-      if (delivery.nextAttemptAt > this.now()) continue;
-      const notification = delivery.notification;
-      const payload = JSON.stringify({ version: 1, id: createHash("sha256").update(delivery.key).digest("hex"), kind: notification.kind,
-        title: this.options.workspaceName(delivery.workspaceId).slice(0, 120),
-        body: notification.kind === "turn-completed" ? "Agent turn finished" : "An agent needs your answer",
-        url: `/s/${encodeURIComponent(delivery.workspaceId)}/?conversation=${encodeURIComponent(notification.conversationId)}`,
-        createdAt: notification.createdAt,
-      });
-      const result = await this.sender(device.subscription, payload, Math.ceil((expires - this.now()) / 1000));
-      if (result.kind === "accepted") await this.finish(delivery.key, "accepted");
-      else if (result.kind === "gone") await this.remove(device, device.id);
-      else await this.options.store.mutate(data => {
-        const entry = data.deliveries.find(entry => entry.key === delivery.key);
-        if (!entry || entry.status !== "pending") return;
-        entry.attempts += 1;
-        const delay = result.kind === "configuration-error" ? 60_000 : Math.max(result.retryAfterMs ?? 0, Math.min(1000 * 2 ** Math.min(entry.attempts, 5), 30_000));
-        entry.nextAttemptAt = this.now() + delay;
-      });
-    }
+    }));
+  }
+
+  private async attempt(key: string): Promise<void> {
+    if (!this.sender) return;
+    const latest = this.options.store.snapshot();
+    const delivery = latest.deliveries.find(entry => entry.key === key);
+    if (!delivery || delivery.status !== "pending" || !delivery.notification) return;
+    const device = latest.devices.find(device => device.id === delivery.deviceId);
+    const expires = delivery.createdAt + NOTIFICATION_LIFETIME_MS;
+    if (!device || this.now() >= expires || !this.eligible(device, delivery.workspaceId, delivery.notification)) return this.finish(key, "discarded");
+    if (delivery.nextAttemptAt > this.now()) return;
+    const notification = delivery.notification;
+    const payload = JSON.stringify({ version: 1, id: createHash("sha256").update(key).digest("hex"), kind: notification.kind,
+      title: this.options.workspaceName(delivery.workspaceId).slice(0, 120),
+      body: notification.kind === "turn-completed" ? "Agent turn finished" : "An agent needs your answer",
+      url: `/s/${encodeURIComponent(delivery.workspaceId)}/?conversation=${encodeURIComponent(notification.conversationId)}`,
+      createdAt: notification.createdAt,
+    });
+    const result = await this.sender(device.subscription, payload, Math.ceil((expires - this.now()) / 1000));
+    if (result.kind === "accepted") await this.finish(key, "accepted");
+    else if (result.kind === "gone") await this.remove(device, device.id);
+    else await this.options.store.mutate(data => {
+      const entry = data.deliveries.find(entry => entry.key === key);
+      if (!entry || entry.status !== "pending") return;
+      entry.attempts += 1;
+      const delay = result.kind === "configuration-error" ? 60_000 : Math.max(result.retryAfterMs ?? 0, Math.min(1000 * 2 ** Math.min(entry.attempts, 5), 30_000));
+      entry.nextAttemptAt = this.now() + delay;
+    });
   }
 
   private finish(key: string, status: "accepted" | "discarded"): Promise<void> {

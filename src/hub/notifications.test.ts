@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createECDH, randomBytes } from "node:crypto";
@@ -27,7 +27,8 @@ async function fixture() {
   let authorized = true;
   let result: PushSendResult = { kind: "accepted" };
   const sends: Array<{ endpoint: string; payload: string; ttl: number }> = [];
-  const sender: PushSender = async (device, payload, ttl) => { sends.push({ endpoint: device.endpoint, payload, ttl }); return result; };
+  const gates = new Map<string, Promise<void>>();
+  const sender: PushSender = async (device, payload, ttl) => { sends.push({ endpoint: device.endpoint, payload, ttl }); await gates.get(device.endpoint); return result; };
   const feed = new NotificationFeed(() => now);
   let running = false;
   let opens = 0;
@@ -51,6 +52,7 @@ async function fixture() {
   cleanup.push(() => hub.dispose());
   return { store, hub, file, sends, feed, opens: () => opens, run: () => { running = true; }, tick: (ms: number) => { now += ms; }, now: () => now,
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
+    hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },
     enroll: (id = "phone", preferences = {}) => hub.enroll(principal, { subscription: subscription(id), workspaceIds: ["workspace"], needsAnswer: true, completed: true, ...preferences }),
   };
 }
@@ -120,14 +122,79 @@ test("known resolutions and expired events cancel unsent deliveries", async () =
   expect(f.sends).toHaveLength(1);
 });
 
-test("new enrollment skips historical snapshots; gaps recover only still-pending requests", async () => {
+test("snapshots skip requests that predate enrollment and recover those pending since then", async () => {
   const f = await fixture(); await f.enroll();
-  const notification = (occurrence("pending", f.now()) as Extract<NotificationFrame, { type: "event" }>).event;
-  if (notification.type !== "notification") throw new Error("expected notification");
-  await f.hub.receive("workspace", { type: "snapshot", reason: "initial", cursor: "e:1", pending: [notification.notification] });
-  await f.hub.drain(); expect(f.sends).toHaveLength(0);
-  await f.hub.receive("workspace", { type: "snapshot", reason: "gap", cursor: "e:2", pending: [notification.notification] });
+  const pending = (id: string, createdAt: number) => {
+    const event = (occurrence(id, createdAt) as Extract<NotificationFrame, { type: "event" }>).event;
+    if (event.type !== "notification") throw new Error("expected notification");
+    return event.notification;
+  };
+  const history = pending("history", f.now() - 1);
+  await f.hub.receive("workspace", { type: "snapshot", reason: "initial", cursor: "e:1", pending: [history, pending("first", f.now())] });
   await f.hub.drain(); expect(f.sends).toHaveLength(1);
+  f.tick(10);
+  await f.hub.receive("workspace", { type: "snapshot", reason: "gap", cursor: "e:2", pending: [history, pending("first", f.now() - 10), pending("second", f.now())] });
+  await f.hub.drain(); expect(f.sends).toHaveLength(2);
+  expect(f.store.snapshot().deliveries.map(delivery => JSON.parse(delivery.key)[2])).toEqual(["first", "second"]);
+});
+
+test("enabling one category keeps the other category's cutoff and its queued retry", async () => {
+  const f = await fixture();
+  const device = (await f.enroll("phone", { completed: false })).device!;
+  f.result({ kind: "retry", retryAfterMs: 1000 });
+  await f.hub.receive("workspace", occurrence("question", f.now())); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+  f.tick(500);
+  await f.enroll("phone", { id: device.id, completed: true });
+  await f.hub.receive("workspace", occurrence("earlier-turn", f.now() - 1, "turn-completed")); await f.hub.drain();
+  await f.hub.receive("workspace", occurrence("later-turn", f.now(), "turn-completed")); await f.hub.drain();
+  const kinds = () => f.sends.map(send => JSON.parse(send.payload).kind);
+  expect(kinds()).toEqual(["question-pending", "turn-completed"]);
+  f.result({ kind: "accepted" }); f.tick(2500); await f.hub.drain();
+  expect(kinds()).toEqual(["question-pending", "turn-completed", "question-pending", "turn-completed"]);
+  expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["question", "accepted"], ["later-turn", "accepted"]]);
+});
+
+test("a full journal evicts settled records and still advances past frames it cannot record", async () => {
+  const f = await fixture(); await f.enroll();
+  const row = (index: number, status: "accepted" | "pending") => ({
+    key: JSON.stringify(["workspace", "old", `fill-${index}`]), deviceId: "old", workspaceId: "workspace", status, createdAt: f.now(), attempts: 0, nextAttemptAt: f.now() + 60_000,
+    ...(status === "pending" ? { notification: { id: `fill-${index}`, sourceId: `fill-${index}`, conversationId: "opencode:conversation", kind: "question-pending" as const, createdAt: f.now() } } : {}),
+  });
+  await f.store.mutate(data => { data.deliveries = Array.from({ length: 10_000 }, (_, index) => row(index, "accepted")); });
+  await f.hub.receive("workspace", occurrence("fits", f.now())); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+  expect(f.store.snapshot().deliveries).toHaveLength(10_000);
+  expect(f.store.snapshot().deliveries.some(delivery => delivery.key.includes("fill-0"))).toBe(false);
+  await f.store.mutate(data => { data.deliveries = Array.from({ length: 10_000 }, (_, index) => row(index, "pending")); });
+  await f.hub.receive("workspace", occurrence("dropped", f.now())); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+  expect(f.store.snapshot().deliveries).toHaveLength(10_000);
+  expect(f.store.snapshot().cursors.workspace).toBe("epoch:dropped");
+});
+
+test("a hung endpoint does not hold other devices' sends", async () => {
+  const f = await fixture();
+  const slow = (await f.enroll("slow")).device!.id;
+  const fast = (await f.enroll("fast")).device!.id;
+  const release = f.hold("slow");
+  await f.hub.receive("workspace", occurrence("q", f.now()));
+  const status = (id: string) => f.store.snapshot().deliveries.find(delivery => delivery.deviceId === id)?.status;
+  for (let i = 0; i < 200 && status(fast) !== "accepted"; i++) await Bun.sleep(2);
+  expect(status(fast)).toBe("accepted");
+  expect(status(slow)).toBe("pending");
+  release(); await f.hub.drain();
+  expect(status(slow)).toBe("accepted");
+  expect(f.sends).toHaveLength(2);
+});
+
+test("pre-release enrollments with one cutoff per workspace load as both categories", async () => {
+  const f = await fixture(); await f.enroll();
+  const raw = JSON.parse(await readFile(f.file, "utf8"));
+  raw.devices[0].since = { workspace: 1000 };
+  await writeFile(f.file, JSON.stringify(raw));
+  const restored = new NotificationStore(f.file); await restored.load();
+  expect(restored.snapshot().devices[0]?.since).toEqual({ workspace: { needsAnswer: 1000, completed: 1000 } });
 });
 
 test("two enrolled devices share a feed with no browser page and do not start a stopped workspace", async () => {
