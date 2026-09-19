@@ -72,10 +72,19 @@ export class HubNotifications {
     if (body.id !== undefined && (typeof body.id !== "string" || body.id.length > 128)) throw new NotificationRequestError(400, "invalid device id");
     // Know each running workspace's feed position before the cutoff is stamped, so no event after the cutoff can precede the cursor.
     // A feed that does not answer in time gets a refusal, not a cutoff the hub cannot honor; the device's previous record stays.
-    const covered = this.coverage(preferences, principal);
-    const stalled = await this.settle(covered.filter(ws => this.options.source.isRunning(ws)));
-    if (stalled.length) throw new NotificationRequestError(503, `notification feed for ${stalled.map(ws => this.options.workspaceName(ws)).join(", ")} did not answer; try again`);
+    // Under the all-workspaces rule the covered set can grow while the feeds settle; a workspace that appears then is settled
+    // too before the record is written, so the guarantee holds for everything the saved enrollment covers.
+    let covered = this.coverage(preferences, principal);
+    for (let attempt = 0; ; attempt++) {
+      const stalled = await this.settle(covered.filter(ws => this.options.source.isRunning(ws)));
+      if (stalled.length) throw new NotificationRequestError(503, `notification feed for ${stalled.map(ws => this.options.workspaceName(ws)).join(", ")} did not answer; try again`);
+      const latest = this.coverage(preferences, principal);
+      if (latest.every(ws => covered.includes(ws))) break;
+      if (attempt >= 3) throw new NotificationRequestError(503, "workspaces kept changing during enrollment; try again");
+      covered = latest;
+    }
     const id = await this.options.store.mutate(data => {
+      if (this.coverage(preferences, principal).some(ws => !covered.includes(ws))) throw new NotificationRequestError(503, "workspaces changed during enrollment; try again");
       const existing = data.devices.find(device => device.id === body.id || device.subscription.endpoint === subscription.endpoint);
       if (existing && existing.user !== principal.user) throw new NotificationRequestError(409, "subscription belongs to another account; renew it on this device");
       if (data.devices.some(device => device.subscription.endpoint === subscription.endpoint && device.id !== existing?.id)) throw new NotificationRequestError(409, "subscription is already enrolled");

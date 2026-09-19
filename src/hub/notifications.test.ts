@@ -402,6 +402,17 @@ test("an all-workspaces enrollment settles every running workspace and names the
   expect(f.store.snapshot().devices[0]?.since).toEqual({ workspace: { needsAnswer: f.now(), completed: f.now() }, other: { needsAnswer: f.now(), completed: f.now() } });
 });
 
+test("a workspace that appears while an all-workspaces enrollment settles is settled too", async () => {
+  const f = await fixture(); f.run("workspace");
+  let appeared = false;
+  f.onOpen(() => { if (!appeared) { appeared = true; f.register("late"); f.run("late"); } });
+  const enrolled = await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] });
+  expect(enrolled.device?.active).toBe(true);
+  expect(f.opens()).toBe(2);
+  expect(Object.keys(f.store.snapshot().devices[0]!.since).sort()).toEqual(["late", "other", "workspace"]);
+  expect(f.store.snapshot().devices[0]?.since.late).toEqual({ needsAnswer: f.now(), completed: f.now() });
+});
+
 test("turning all workspaces off returns the device to its stored selection", async () => {
   const f = await fixture();
   const on = await f.enroll("phone", { allWorkspaces: true, workspaceIds: ["workspace"] });
