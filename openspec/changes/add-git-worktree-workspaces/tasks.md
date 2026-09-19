@@ -1,3 +1,22 @@
+## 12. Rebased branch review follow-up
+
+User decision (2026-09-19): “Fix all findings” accepts the three safety
+findings, three standards/maintainability findings, and the narrow-screen Hub
+navigation defect reproduced after rebasing onto `origin/main` at `36f3f70`.
+The navigation defect comes from upstream notifications. The branch-rules
+refactor supersedes section 11.2's deliberate shared-to-shell dependency while
+retaining its required minified-dashboard behavior. The suspected Escape focus
+failure was a measurement race, retracted after verification, and needs no fix.
+
+- [x] 12.1 Make interrupted creation retain uncertain ownership when no durable checkout identity ties the result to the operation; cover an external checkout appearing at the pending destination, including a different branch, without stamping or claiming it.
+- [x] 12.2 Make interrupted deletion retain registration and provenance while the original checkout survives, including a crash between the removing phase and marker persistence; preserve verified-removal cleanup and path-reuse recovery.
+- [x] 12.3 Use the canonical ownership resolver for registered Hub state and inventory; cover missing, replaced, unreadable and external checkouts consistently.
+- [x] 12.4 Move canonical branch rules into shared code without a runtime dependency on the dialog, preserving one source of truth and minified dashboard operation.
+- [x] 12.5 Validate inventory, ref-fetch, preflight and operation responses at the client boundary using shared contract parsers; reject malformed responses explicitly without empty-inventory or success fallbacks.
+- [x] 12.6 Fail closed when the rename scan leaves subtrees unexamined at its depth limit; cover a deeply nested unregistered repository with an external linked checkout and safe bounded cases.
+- [x] 12.7 Keep authenticated Hub navigation and worktree dialogs inside 320px and 390px visible viewports with Notifications present; add real-browser regression coverage and inspect fresh screenshots.
+- [x] 12.8 Run combined unit, API, typecheck, minified build/smoke, affected browser and strict OpenSpec verification; record exact results and limitations in verification.md.
+
 ## 1. Mock-backed actual workspace frontend first
 
 This section is the historical record of how UX approval was reached. The

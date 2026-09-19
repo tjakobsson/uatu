@@ -1,6 +1,98 @@
 # Worktree verification
 
-## Final verification (2026-09-19)
+## Rebased review fixes (2026-09-19, tasks 12.1–12.8)
+
+The user accepted all seven findings from the review of `f5f5f0a`, rebased onto
+`origin/main` at `36f3f70`. This section supersedes the earlier verification
+summaries for the current working tree; those sections remain historical.
+
+### Fixes and regression evidence
+
+- **Creation recovery:** real-Git restart tests first reproduced false ownership
+  when an external checkout appeared at a pending destination. Recovery no
+  longer stamps that checkout and requires a durably recorded matching identity.
+  Without it, files and the pending journal remain for reconciliation. Verified
+  retained-checkout recovery and registration retry continue to work.
+- **Deletion recovery:** the removal marker is written and synced before the
+  `removing` phase. Tests cover that ordering and legacy journals with a live
+  matching checkout but no marker. Those cases retain registration/provenance;
+  a subsequent Delete reports uncertainty rather than falsely claiming removal.
+  Verified removal, cleanup retry and replacement-occupant protections remain.
+- **Ownership:** Hub state and inventory use the same canonical resolver.
+  Real-Git cases cover owned/external, missing, replaced, unreadable and
+  repository-identity mismatches, including cache invalidation.
+- **Shared rules and wire validation:** branch rules no longer import the
+  dialog. Shared parser factories are injected into the minification-safe
+  dashboard script. Red-before-fix tests cover malformed inventory, refs,
+  preflight, operation results and JSON, including structurally valid results
+  for the wrong endpoint or missing required checkout identity. Both Open
+  paths validate before navigation. Drafts survive, no false success is
+  emitted, and aborted reads stay silent. Explicit Fetch uses the published
+  POST. Repeated retained-registration failure now omits its invalid top-level
+  phase, preserving the valid sanitized error through client parsing.
+- **Rename safety:** real-Git tests first reproduced the unsafe depth-limited
+  verdict, including a deeply named submodule with an external linked tree.
+  Ordinary and submodule scans now propagate depth, entry-budget and read
+  uncertainty. Fully inspected leaves and ordinary boundary repositories stay
+  safe; no recursive unbounded scan was added.
+- **Narrow navigation:** browser tests first measured 374px/409px documents in
+  320px/390px viewports with Notifications present. Hub navigation now wraps,
+  retains every action and provides 44px phone targets. New real-Hub tests
+  assert navigation, create/delete dialogs and their controls fit the visible
+  viewport at 320, 390 and 1440px. The 320px run uses a 568px-tall viewport.
+  Fresh screenshots were inspected. Escape focus restoration was separately
+  confirmed; the review's initial focus suspicion was retracted, not patched.
+
+### Combined verification
+
+Unit tests, browser tests and compiled smoke used the clean tool environment:
+
+```sh
+env -i HOME="$HOME" TMPDIR="$TMPDIR" SHELL=/bin/zsh \
+  PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin bun test
+```
+
+The same environment prefix was used for the browser and smoke commands below.
+No project dependencies were added by these fixes.
+
+| Command | Result |
+| --- | --- |
+| `bun test` (final full run) | **3,860 pass, 11 skip, 0 fail**; 28,186 assertions across 238 files; 194.81 seconds |
+| `bun run typecheck` | Passed |
+| `bunx --no-install tsc --noEmit -p tests/tsconfig.worktree.json` | Passed |
+| `bun run test:api` | 183 pass, 0 fail; 1,488 assertions |
+| `bun run api:validate` | Passed; existing single-member `WorkspaceConflict allOf` warning |
+| `bun run test:e2e tests/e2e/worktree-ui.e2e.ts tests/e2e/worktree-integration.e2e.ts tests/e2e/worktree-webkit.e2e.ts tests/e2e/hub-switcher.e2e.ts tests/e2e/hub-live-stream.e2e.ts tests/e2e/hub-nav-bounds.e2e.ts --workers=1 --retries=0 --output=test-results/review-fixes` | **19 passed**, no retries; 1.8 minutes |
+| `bun run check:licenses` | Passed; 585 installed packages |
+| `bun run build` then `bun run smoke` | Passed; 16 compiled smoke checks, including real first-attempt worktree creation and minified dashboard dialog |
+| `bunx --no-install openspec validate --all --strict` | 54 passed, 0 failed |
+| `git diff --check` | Passed |
+
+The first full unit run had 3,857 passes, 11 skips and three failures: a detached
+terminal exit timeout; a temporary credential-runtime directory cleanup `EPERM`
+on Hub Stop; and its consequential missing-operation-coverage assertion. A
+rerun of `src/terminal/server.test.ts` and `src/hub/hub.integration.test.ts`
+passed (107 pass, 4 skip), followed by the clean full run above. No product or
+test-timeout changes were made to conceal these transient failures.
+
+Evidence is in Playwright output under `test-results/review-fixes/`, including
+`hub-nav-{320,390,1440}`, `hub-create-{320,390,1440}` and
+`hub-delete-{320,390,1440}` screenshots and per-viewport `bounds.json` files.
+Earlier red/green navigation captures remain under `test-results/nav-bounds-*`.
+Tests do not write to this change's screenshot folder.
+
+The full repository browser suite, native macOS WebView smoke and physical
+phone/software-keyboard behavior were not rerun. The 11 unit skips are optional
+installed-TUI, Linux-only and real-provider tests. Build warnings about CSS
+`::highlight` remain non-fatal. At verification time, all fixes were uncommitted
+and no push had been made.
+
+Release-note classification: worktree corrections stabilize this branch's
+unreleased feature, and navigation corrects the unreleased notification
+addition inherited from main. A separate future `fix` PR needs the documented
+Release Please `chore(...)` override, not a stable-regression release note.
+
+## Earlier final verification (2026-09-19)
 
 The change was verified after the scope change and the migrated UI, including the fresh UX review (tasks 11.1–11.2) and three production bugs found by the user on the compiled binary in a disposable live Hub:
 - Dashboard dialog script broken by minification

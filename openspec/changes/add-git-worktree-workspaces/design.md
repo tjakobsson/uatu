@@ -105,6 +105,15 @@ Deliberate simplification: there is no separate worktree `folder` dialog whose o
 
 ### 7. One published JSON family, rendered by one client module
 
+Review follow-up (2026-09-19): shared modules own branch rules and response
+parsers; neither depends on the dialog. The SPA imports them normally and the
+dashboard injects self-contained factory scopes through stable property keys,
+preserving minification safety without a shared-to-presentation dependency.
+Every client response is parsed, including the inventory wrapper, refs,
+preflight and operation results. Operation-specific checks reject a result for
+the wrong action or a success missing its required registered checkout before
+the UI announces success or navigates.
+
 Worktrees use the same shape as every other Hub surface: a session-authenticated JSON family under `/api/hub/worktrees`, published through the existing public-contract machinery (`api/openapi.yaml`, `api/operations.yaml`, examples and `route-coverage`), with no `api/exclusions.yaml` entry. `GET /api/hub/worktrees?source=<workspaceId>` returns the inventory; `POST /api/hub/worktrees/{fetch,create,open,preflight-delete,delete,register,forget}` perform the bounded operations. Routes enforce authentication, cookie same-origin checks, current authorization and workspace/source context; results are scoped to the initiating user and redact secrets. Refusals are ordinary answers: HTTP 200 with `{ok: false, error}` carrying the short actionable reason the dialog shows, so a blocker is never an unexplained transport failure. Creation never takes a destination; delete requires `confirm: true`, always keeps the branch, and no operation accepts a force option. There is no separate operation-progress poll: each operation answers with its own bounded outcome. The UI cannot bypass safety, because safety lives in the service the family exposes.
 
 `/api/hub/state` carries the capability, not URLs to server-rendered pages: `worktreeApi` (present when the Hub serves worktrees, valued `/api/hub/worktrees`) replaces `worktreeNavigation`, per-row `createWorktree` becomes a boolean `true` marking a main checkout that can fork, `worktreeConfigureNavigation` is gone with the Configure button that read it (F9), and so is the prototype-only `dashboardWorktreeNavigation`. Hub revision 7 is unreleased, so this is a reshape of that revision rather than a new one.

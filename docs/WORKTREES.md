@@ -163,6 +163,12 @@ name remains available.
 - If start fails, the configured child remains stopped. Retry Open or Start.
 - After a Hub interruption, recovery reconciles the operation journal with Git.
   An uncertain path stays intact. Resolve the reported conflict before retrying.
+  If creation stopped before Uatu durably recorded the checkout's identity,
+  matching its intended path or branch is not enough to claim ownership. The
+  checkout remains unclaimed rather than becoming eligible for Uatu deletion.
+- An interrupted deletion with a surviving checkout but missing removal proof
+  keeps its registration and provenance and requires reconciliation. Uatu does
+  not report the files as removed or silently clean up that registration.
 - If Git removal completes but metadata cleanup fails, retry cleanup. Recovery
   records completed removal and must not delete a new occupant at the old path.
 
