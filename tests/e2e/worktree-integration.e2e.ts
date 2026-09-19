@@ -167,14 +167,31 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     const external = (await worktreeInventory(page, parentId)).checkouts.find((row: { branch: string }) => row.branch === "agent/external");
     expect(external.registered).toBe(false);
     expect(external.ownership).toBe("external");
+    // F7: Existing branch does not offer a branch another checkout already
+    // holds, so the dialog can no longer reach the occupancy refusal at all.
+    await picker(page);
     await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
     await page.getByRole("menuitem", { name: "Existing branch", exact: true }).click();
     await page.getByRole("dialog").getByRole("combobox").fill("agent/external");
-    await page.getByRole("option", { name: "agent/external Local", exact: true }).click();
-    await page.getByRole("button", { name: "Create", exact: true }).click();
-    await expect(page.getByRole("alert")).toContainText("already checked out");
-    // The refusal names the occupying checkout and offers its own action.
-    await page.getByRole("alert").getByRole("button", { name: "Register workspace", exact: true }).click();
+    await expect(page.locator('[role="option"][data-value="local:agent/external"]')).toHaveCount(0);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // The Hub's own refusal is untouched behind it: a completed request
+    // carrying the actionable reason, having changed nothing.
+    const refused = await worktreeAction(page, "create", {
+      sourceWorkspaceId: parentId, mode: "existing-local", base: { kind: "local", ref: "agent/external" },
+    });
+    expect(refused.ok).toBe(false);
+    expect(String(refused.error?.message ?? "")).toContain("already checked out");
+    expect((await worktreeInventory(page, parentId)).checkouts
+      .find((row: { path: string }) => row.path === externalPath).registered).toBe(false);
+    // Registration is reached from the fork menu's register list, the one
+    // place an unregistered checkout is acted on.
+    await picker(page);
+    await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
+    await page.getByRole("menuitem", { name: "Register worktree…", exact: true }).click();
+    await page.getByRole("dialog").locator(".wt-card").filter({ hasText: "agent/external" })
+      .getByRole("button", { name: "Register workspace", exact: true }).click();
     await expect(page.getByText("Registration does not move files", { exact: false })).toBeVisible();
     await page.getByRole("button", { name: "Register workspace", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);

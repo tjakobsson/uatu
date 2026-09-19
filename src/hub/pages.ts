@@ -794,7 +794,7 @@ function row({ title, href, titleClick, path, detail, live, chip, chipWarn, butt
   const actions = el("div", "row-actions");
   for (const spec of specs) {
     const action = el("button", spec.className || null, spec.label);
-    if (spec.icon === "fork") action.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6"/></svg>';
+    if (spec.icon === "fork") action.innerHTML = worktreeForkIcon;
     if (spec.ariaLabel) action.setAttribute("aria-label", spec.ariaLabel);
     action.onclick = () => spec.onClick(action);
     actions.appendChild(action);
@@ -1777,7 +1777,7 @@ async function refresh(force) {
           if (w.ownership === "uatu" && !w.availability) action("Delete worktree", "delete");
         } else if (w.createWorktree === true) {
           const fork = el("button"); fork.setAttribute("aria-label", "Add worktree to " + workspaceLabel(w)); fork.setAttribute("aria-haspopup", "menu");
-          fork.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6"/></svg>';
+          fork.innerHTML = worktreeForkIcon;
           fork.onclick = () => openWorktreeFork(target, fork); actions.append(fork);
         }
       });

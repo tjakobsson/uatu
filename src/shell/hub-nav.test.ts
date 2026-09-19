@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import { resetAppBasePathForTests } from "../shared/app-url";
+import { worktreeForkIcon } from "./worktree-dialog";
 import { createLiveChannel, type LiveChannel, type LiveChannelStatus } from "./live-channel";
 import { disposeLiveChannel, installLiveChannelForTests, watchPageLifecycle } from "./live";
 import { currentSessionRunningFact, onCurrentSessionRunning, resetCurrentSessionRunningForTests } from "./session-running";
@@ -1392,6 +1393,11 @@ describe("initHubNav renders the repository title and the grouped menu", () => {
       expect(header.firstElementChild!.className).toBe("hub-menu-label");
       expect(header.lastElementChild!.tagName).toBe("BUTTON");
       expect(header.lastElementChild!.className).toBe("hub-menu-fork");
+      // F11: the one shared glyph, straight from the dialog module's public
+      // surface — the dashboard's inlined copy draws the very same string.
+      // linkedom re-serializes self-closing tags with a space before "/>".
+      expect(header.lastElementChild!.innerHTML.replace(/ \/>/g, "/>")).toBe(worktreeForkIcon);
+      expect(worktreeForkIcon).toContain('viewBox="0 0 32 20"');
     }
 
     // F3: a separator of its own divides consecutive repository groups. The

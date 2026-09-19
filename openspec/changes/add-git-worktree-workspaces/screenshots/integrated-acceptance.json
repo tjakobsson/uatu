@@ -1,0 +1,15 @@
+{
+  "realGit": true,
+  "realHub": true,
+  "realWatchers": true,
+  "realPty": true,
+  "chat": "deterministic fixture",
+  "browserTouchEmulation": true,
+  "sourceTerminal": "498360fc-4a8d-47b9-8f5b-55117c268fb9",
+  "childTerminal": "59e5edb1-6e21-4983-9ab2-4e9019fa2780",
+  "sourceConversation": "opencode:conversation-1",
+  "childConversation": "opencode:conversation-1",
+  "apiLiveRefreshes": 13,
+  "externalMissing": true,
+  "independentRoundTrips": true
+}

@@ -23,7 +23,7 @@ import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import type { WorkspaceActivity } from "../shared/live-protocol";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
-import { openWorktreeFork, worktreeProvenanceLabel } from "./worktree-dialog";
+import { openWorktreeFork, worktreeForkIcon, worktreeProvenanceLabel } from "./worktree-dialog";
 import { watchWorktreeInventory, WORKTREES_CHANGED_EVENT } from "./worktree-live";
 
 export type HubWorkspaceSummary = {
@@ -532,7 +532,8 @@ export function initHubNav(): void {
     const forkButton = (workspace: HubWorkspaceSummary): HTMLButtonElement => {
       const fork = document.createElement("button");
       fork.className = "hub-menu-fork";
-      fork.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6"/></svg>';
+      // The one shared glyph (F11), never a second spelling of it here.
+      fork.innerHTML = worktreeForkIcon;
       fork.setAttribute("aria-label", `Add worktree to ${workspaceMenuLabel(workspace)}`);
       fork.title = `Add worktree to ${workspaceMenuLabel(workspace)}`;
       fork.setAttribute("aria-haspopup", "menu");

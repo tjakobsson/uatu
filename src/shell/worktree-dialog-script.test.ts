@@ -62,6 +62,12 @@ describe("worktreeDialogScript is minification-safe", () => {
       // window-exposed rule pages.ts's inline script would call.
       expect((globals.validWorktreeBranch as (branch: string) => boolean)("x".repeat(65))).toBe(false);
       expect((globals.validWorktreeBranch as (branch: string) => boolean)("x".repeat(64))).toBe(true);
+      // F11: the one fork glyph both surfaces draw. The dashboard's inline
+      // script reads it by this plain name too, so it has to survive
+      // minification exactly as the functions around it do.
+      expect(typeof globals.worktreeForkIcon).toBe("string");
+      expect(globals.worktreeForkIcon as string).toContain('viewBox="0 0 32 20"');
+      expect(globals.worktreeForkIcon as string).toContain("M6.4 6h19.2M6.4 6.8c7 1.5 8 8.2 15 8.2h4.2");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

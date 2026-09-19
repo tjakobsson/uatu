@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Worktree-capable dashboard uses selected Active groups layout
-Active groups SHALL be the sole worktree-capable dashboard layout, using reusable actual dashboard presentation. The discarded alternative and layout toggle SHALL be absent. Default load, reload and create/delete/start/stop operations SHALL preserve the selected presentation. Original row styling/actions, exact branches, provenance and safety SHALL remain; no-capability product behavior SHALL remain unchanged. The repository heading SHALL own parent Rename and fork, while a separate main checkout row SHALL expose its actual branch and independent lifecycle.
+Active groups SHALL be the sole worktree-capable dashboard layout, using reusable actual dashboard presentation. The discarded alternative and layout toggle SHALL be absent. Default load, reload and create/delete/start/stop operations SHALL preserve the selected presentation. Original row styling/actions, exact branches, provenance and safety SHALL remain; no-capability product behavior SHALL remain unchanged. The repository heading SHALL own parent Rename and fork, with those actions grouped at the row's trailing edge — the same edge the rows beneath end their own Open/Stop actions on, wrapping under the repository name on a narrow viewport without horizontal overflow — and the fork control last among them. Every fork control, on the dashboard heading and in the picker's group header alike, SHALL draw one shared glyph defined in a single place. A separate main checkout row SHALL expose its actual branch and independent lifecycle.
 
 #### Scenario: Main stops while a child runs
 - **WHEN** main Stop is activated

@@ -448,7 +448,19 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     // own Settings page, which the site navigation already reaches; the
     // heading keeps Rename workspace and the fork control.
     await expect(page.getByRole("button", { name: /^Configure / })).toHaveCount(0);
-    await expect(page.locator(`.dashboard-group-heading [aria-label="Add worktree to ${parentId}"]`)).toBeVisible();
+    const heading = page.locator(`.dashboard-group-heading[data-repository="${parentId}"], section[data-repository="${parentId}"] .dashboard-group-heading`).first();
+    const headingFork = heading.locator(`[aria-label="Add worktree to ${parentId}"]`);
+    await expect(headingFork).toBeVisible();
+    // F10: the heading's actions end where the rows' own actions end — the
+    // fork is last, on the row's trailing edge, like Open/Stop beneath it.
+    await expect(heading.locator("button").last()).toHaveAttribute("aria-label", `Add worktree to ${parentId}`);
+    const forkBox = (await headingFork.boundingBox())!;
+    const rowActionBox = (await row(parentId).locator(".row-actions button").last().boundingBox())!;
+    expect(Math.abs((forkBox.x + forkBox.width) - (rowActionBox.x + rowActionBox.width))).toBeLessThan(2);
+    // F11: both surfaces draw the one sideways fork glyph.
+    expect(await headingFork.locator("svg").getAttribute("viewBox")).toBe("0 0 32 20");
+    // Nothing about the heading overflows a narrow viewport.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await captureScreenshot(page, info, `worktree-ui-${label}-dashboard-groups`);
 
     await row(forgotten.workspaceId!).getByRole("button", { name: "Delete worktree", exact: true }).click();

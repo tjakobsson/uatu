@@ -170,6 +170,13 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
     };
   }
 
+  /** F11 (2026-09-19 live test): the one fork glyph every surface draws —
+   *  a long sideways trunk with a branch curving off it — defined here so
+   *  the SPA's picker (shell/hub-nav.ts) and the dashboard's inlined copy
+   *  of this module (hub/pages.ts, which reads it by this plain name off
+   *  `window`) cannot drift apart. */
+  const worktreeForkIcon = '<svg viewBox="0 0 32 20" width="30" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4" cy="6" r="2.4"/><circle cx="28" cy="6" r="2.4"/><circle cx="28" cy="15" r="2.4"/><path d="M6.4 6h19.2M6.4 6.8c7 1.5 8 8.2 15 8.2h4.2"/></svg>';
+
   function worktreeEscape(value: unknown): string {
     return String(value === undefined || value === null ? "" : value)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -1117,6 +1124,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
     initialWorktreeBase,
     localTrackingBranch,
     worktreeExistingRefs,
+    worktreeForkIcon,
     worktreeEscape,
     worktreeDialogStyle,
     worktreeRowState,
@@ -1144,6 +1152,7 @@ export const WORKTREE_BRANCH_NAME_MAX_LENGTH = runtime.WORKTREE_BRANCH_NAME_MAX_
 export const validWorktreeBranch = runtime.validWorktreeBranch;
 export const initialWorktreeBase = runtime.initialWorktreeBase;
 export const localTrackingBranch = runtime.localTrackingBranch;
+export const worktreeForkIcon = runtime.worktreeForkIcon;
 export const worktreeEscape = runtime.worktreeEscape;
 export const worktreeDialogStyle = runtime.worktreeDialogStyle;
 export const worktreeRowState = runtime.worktreeRowState;

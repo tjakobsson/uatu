@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, parseCloneRemote } from "./credential-context";
+import { createDashboardGroups, dashboardGroupsStyle } from "./dashboard-groups";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
 
 const htmlFor = {
@@ -219,9 +220,12 @@ describe("worktree dashboard integration (Section 11 UX review)", () => {
     expect(html).toContain("node.dataset.parent = w.parentId;");
     expect(html).not.toContain("marginInlineStart");
     expect(html).not.toContain("paddingInlineStart");
-    expect(html).not.toContain("margin-inline-start");
     expect(html).not.toContain("padding-inline-start");
     expect(html).not.toContain("border-inline-start");
+    // The dashboard's styles carry exactly one inline-start rule, and it is
+    // F10's heading-actions alignment — nothing insets a workspace row.
+    expect(html.match(/inline-start/g) ?? []).toHaveLength(1);
+    expect(dashboardGroupsStyle).toContain(".dashboard-group-heading .row-actions{margin-inline-start:auto}");
   });
 
   // Decision F9 (2026-09-19, second round): the per-repository Configure
@@ -237,6 +241,34 @@ describe("worktree dashboard integration (Section 11 UX review)", () => {
     // The heading still collects what remains.
     expect(html).toContain('button.getAttribute("aria-label")?.startsWith("Rename workspace")');
     expect(html).toContain('button.getAttribute("aria-label")?.startsWith("Add worktree")');
+  });
+
+  // Decision F10 (2026-09-19): the repository heading's actions sit at the
+  // row's right edge, where Open/Stop end on the rows beneath — the same
+  // treatment F2 gave the picker's group header.
+  test("the repository heading pushes its actions to the row's trailing edge", () => {
+    expect(dashboardGroupsStyle).toContain(".dashboard-group-heading .row-actions{margin-inline-start:auto}");
+    expect(dashboardGroupsStyle).toContain(".dashboard-group-heading .row-title{flex:1 1 auto;min-width:0}");
+    // Narrow viewports wrap the actions under the name, still right-aligned.
+    expect(dashboardGroupsStyle).toContain(".dashboard-group-heading .row-actions{flex:1 0 100%}");
+    // The heading collects the name first, then its actions, fork last.
+    const source = createDashboardGroups.toString();
+    expect(source.indexOf('heading.append(make("h3"')).toBeLessThan(source.indexOf("heading.append(actions)"));
+    expect(source.indexOf('startsWith("Rename workspace")')).toBeLessThan(source.indexOf('startsWith("Add worktree")'));
+  });
+
+  // Decision F11 (2026-09-19): one sideways fork glyph, defined once on the
+  // dialog module's public surface so the SPA's picker and the dashboard's
+  // inlined script cannot drift apart.
+  test("both dashboard fork controls draw the one shared fork icon", () => {
+    const html = htmlFor.dashboard();
+    expect(html).toContain("fork.innerHTML = worktreeForkIcon;");
+    expect(html).toContain("action.innerHTML = worktreeForkIcon;");
+    // Exactly one definition of the glyph, inside the inlined module.
+    expect(html.split('viewBox="0 0 32 20"').length - 1).toBe(1);
+    expect(html).toContain("M6.4 6h19.2M6.4 6.8c7 1.5 8 8.2 15 8.2h4.2");
+    // The old three-node glyph is gone from every surface.
+    expect(html).not.toContain("M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6");
   });
 
   test("the worktree dialog module is inlined once and the dashboard groups renderer is wired to it", () => {
