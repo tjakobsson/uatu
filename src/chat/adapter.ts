@@ -237,12 +237,17 @@ export class ChatAdapter {
   private readonly questionRefreshes = new Set<string>();
   private readonly questionCreatedAt = new Map<string, number>();
   private readonly permissionCreatedAt = new Map<string, number>();
-  // The conversation that owns each published question/permission, by item
-  // id. A removal has no item to read the owner from, and the conversation
-  // reporting it may be the parent — a subagent's request is answered from
-  // the parent's transcript, or retired by the parent's reconciliation — so
-  // this is what keeps the resolution on the identity the pending event used.
-  private readonly interactionOwner = new Map<string, string>();
+  // What each pending question/permission was announced as, by item id: the
+  // owning conversation and the launching conversation it appeared under. A
+  // removal has no item to read these from, and the conversation reporting it
+  // may be the parent — a subagent's request is answered from the parent's
+  // transcript, or retired by a reconciliation — so the resolution is built
+  // from this record, with no provider lookup that could fail and drop it.
+  // The tick orders an announcement against an authoritative pending read: a
+  // request announced after the read began is pending now whatever the older
+  // snapshot lists.
+  private interactionClock = 0;
+  private readonly announced = new Map<string, { owner: string; destination: string; tick: number }>();
   private readonly sessionParents = new Map<string, string | null>();
   private readonly inventorySessions = new Map<string, InventorySessionMetadata>();
   private readonly inventory = new ConversationInventoryBroadcaster();
@@ -536,6 +541,7 @@ export class ChatAdapter {
     // rewrite the published set — that would erase live questions.
     let questionsReconciled = false;
     try {
+      const questionTick = this.interactionClock;
       const pendingNow = await this.pendingQuestions(id);
       for (const pending of pendingNow) {
         if (items.some(item => item.id === pending.id)) continue;
@@ -548,14 +554,15 @@ export class ChatAdapter {
         // answered elsewhere while its only live signal was missed.
         const live = new Set(pendingNow.map(item => item.id));
         const projection = this.projection(id);
-        const retired: NormalizedProviderUpdate[] = [];
         for (const existing of projection.items()) {
           if (existing.type !== "question" || existing.status !== "pending" || live.has(existing.id)) continue;
+          // Announced after the read began: the snapshot predates it, so it
+          // stays on the timeline and its notification stays pending.
+          if ((this.announced.get(existing.id)?.tick ?? 0) > questionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
           projection.apply({ kind: "remove", itemId: existing.id });
           this.questionCreatedAt.delete(existing.id);
-          retired.push({ kind: "remove", itemId: existing.id });
+          this.resolveAnnounced(existing.id);
         }
-        await this.resolveRetired(id, retired, "questions.refreshed");
       }
       if (pendingNow.length > 0) {
         this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
@@ -585,6 +592,7 @@ export class ChatAdapter {
     // answerable. Ids match the event path's, so a request that also arrives
     // live converges on one entry instead of rendering twice.
     try {
+      const permissionTick = this.interactionClock;
       const pendingNow = await this.pendingPermissions(id);
       for (const pending of pendingNow) {
         if (items.some(item => item.id === pending.id)) continue;
@@ -600,14 +608,13 @@ export class ChatAdapter {
       if (this.provider.listPermissions) {
         const live = new Set(pendingNow.map(item => item.id));
         const projection = this.projection(id);
-        const retired: NormalizedProviderUpdate[] = [];
         for (const existing of projection.items()) {
           if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id)) continue;
+          if ((this.announced.get(existing.id)?.tick ?? 0) > permissionTick) { if (!items.some(item => item.id === existing.id)) items.push(existing); continue; }
           projection.apply({ kind: "remove", itemId: existing.id });
           this.permissionCreatedAt.delete(existing.id);
-          retired.push({ kind: "remove", itemId: existing.id });
+          this.resolveAnnounced(existing.id);
         }
-        await this.resolveRetired(id, retired, "permissions.refreshed");
       }
     } catch {
       // Unknown, not empty. `seed` replaces the timeline from history, and
@@ -715,7 +722,7 @@ export class ChatAdapter {
 
   private forgetInteractions(conversationId: string): void {
     this.pendingInteractions.delete(conversationId);
-    for (const [itemId, owner] of this.interactionOwner) if (owner === conversationId) this.interactionOwner.delete(itemId);
+    for (const [itemId, record] of this.announced) if (record.owner === conversationId) this.announced.delete(itemId);
     this.activityMayHaveChanged();
   }
 
@@ -2257,7 +2264,6 @@ export class ChatAdapter {
       // Date.now() on every reconciliation would keep moving the card.
       const createdAt = this.permissionCreatedAt.get(itemId) ?? Date.now();
       this.permissionCreatedAt.set(itemId, createdAt);
-      this.interactionOwner.set(itemId, request.conversationId);
       items.push({
         id: itemId,
         type: "permission" as const,
@@ -2369,7 +2375,6 @@ export class ChatAdapter {
       // down the timeline as its tool part ticks over.
       const createdAt = this.questionCreatedAt.get(itemId) ?? Date.now();
       this.questionCreatedAt.set(itemId, createdAt);
-      this.interactionOwner.set(itemId, request.conversationId);
       items.push({
         id: itemId,
         type: "question" as const,
@@ -2440,15 +2445,24 @@ export class ChatAdapter {
   }
 
   /**
-   * A request an authoritative read retired from the timeline is resolved for
-   * notifications too — otherwise the card disappears while the tracker
-   * keeps announcing it as pending. Best effort: the tracker's lifetime is
-   * the backstop, and a failed lookup must not turn a successful read into a
-   * failed one.
+   * Resolves a request exactly as it was announced — same owner, same
+   * launching conversation — from the record kept at announcement, so a
+   * removal reported by the parent, or by a reconciliation that retires the
+   * card, needs no provider lookup. False when nothing was announced under
+   * this id: there is then nothing pending to resolve.
    */
-  private async resolveRetired(conversationId: string, updates: NormalizedProviderUpdate[], eventType: string): Promise<void> {
-    if (updates.length === 0) return;
-    await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType }).catch(() => {});
+  private resolveAnnounced(itemId: string): boolean {
+    const match = /^(question|permission):(.+)$/.exec(itemId);
+    const known = match ? this.announced.get(itemId) : undefined;
+    if (!match || !known) return false;
+    this.announced.delete(itemId);
+    this.notifications.observe({
+      type: "interaction", origin: "live", conversationId: known.destination,
+      sourceId: JSON.stringify([known.owner, match[2]]),
+      kind: match[1] === "question" ? "question-pending" : "permission-pending",
+      pending: false, createdAt: Date.now(),
+    });
+    return true;
   }
 
   private async observeNotifications(event: NormalizedProviderEvent): Promise<void> {
@@ -2472,8 +2486,8 @@ export class ChatAdapter {
       if (update.kind === "upsert" && (update.item.type === "question" || update.item.type === "permission")) {
         const item = update.item;
         const owner = item.conversationId ?? session.id;
-        if (item.status === "pending") this.interactionOwner.set(item.id, owner);
-        else this.interactionOwner.delete(item.id);
+        if (item.status !== "pending" && this.resolveAnnounced(item.id)) continue;
+        if (item.status === "pending") this.announced.set(item.id, { owner, destination: destination.id, tick: ++this.interactionClock });
         this.notifications.observe({
           type: "interaction", origin: "live", conversationId: destination.id,
           sourceId: JSON.stringify([owner, item.requestId]),
@@ -2482,14 +2496,12 @@ export class ChatAdapter {
         });
       } else if (update.kind === "remove") {
         const match = /^(question|permission):(.+)$/.exec(update.itemId);
-        if (!match) continue;
-        // The removal resolves what the upsert announced: the owner recorded
-        // then, not whichever conversation happens to report the removal.
-        const owner = this.interactionOwner.get(update.itemId) ?? session.id;
-        this.interactionOwner.delete(update.itemId);
+        if (!match || this.resolveAnnounced(update.itemId)) continue;
+        // Never announced here — nothing is pending under it, but a resolution
+        // after a lost pending frame must still reach the hub.
         this.notifications.observe({
           type: "interaction", origin: "live", conversationId: destination.id,
-          sourceId: JSON.stringify([owner, match[2]]),
+          sourceId: JSON.stringify([session.id, match[2]]),
           kind: match[1] === "question" ? "question-pending" : "permission-pending",
           pending: false, createdAt: Date.now(),
         });

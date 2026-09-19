@@ -2747,6 +2747,37 @@ describe("pending permission recovery", () => {
     await adapter.dispose();
   });
 
+  test("a request announced while the authoritative read is in flight is neither retired nor resolved", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    let releaseQuestions = () => {}; let releasePermissions = () => {};
+    let questionsRead = false; let permissionsRead = false;
+    // Each read takes its snapshot (empty) and then stalls; the request that
+    // arrives meanwhile is newer than what the read will report.
+    provider.listQuestions = async () => { questionsRead = true; await new Promise<void>(resolve => { releaseQuestions = resolve; }); return []; };
+    provider.listPermissions = async () => { permissionsRead = true; await new Promise<void>(resolve => { releasePermissions = resolve; }); return []; };
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    const load = adapter.history("local");
+    await waitUntil(() => questionsRead);
+    provider.eventQueue.push({ type: "question.asked", data: { sessionID: "local", id: "que_live", timestamp: Date.now(), questions: [{ question: "Pick", options: [{ label: "A" }] }] } });
+    await waitUntil(() => events.filter(event => event.type === "notification").length === 1);
+    releaseQuestions();
+    await waitUntil(() => permissionsRead);
+    provider.eventQueue.push({ type: "permission.v2.asked", data: { id: "perm_live", sessionID: "local", action: "shell", resources: ["ls"], timestamp: Date.now() } } as never);
+    await waitUntil(() => events.filter(event => event.type === "notification").length === 2);
+    releasePermissions();
+    const snapshot = await load;
+    await adapter.stopEventPump();
+    await pump;
+    expect(events.filter(event => event.type === "resolved")).toEqual([]);
+    expect(snapshot.items.map(item => item.id).sort()).toEqual(["permission:perm_live", "question:que_live"]);
+    expect(adapter.projectionForTests("local").has("question:que_live")).toBe(true);
+    expect(adapter.projectionForTests("local").has("permission:perm_live")).toBe(true);
+    await adapter.dispose();
+  });
+
   test("answering a child's question or permission from the parent resolves the child's identity", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
