@@ -36,6 +36,65 @@ security:
   - hubBearer: []
   - hubCookie: []
 paths:
+  /api/hub/notifications:
+    get:
+      operationId: hubGetNotifications
+      tags: [Hub]
+      summary: Read push configuration and this user's device enrollment
+      parameters:
+        - { name: device, in: query, schema: { type: string, maxLength: 128 } }
+      responses:
+        '200':
+          description: Push support and the selected device, without endpoint or private keys
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationState' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '500': { $ref: '#/components/responses/NoStoreError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+    put:
+      operationId: hubEnrollNotifications
+      tags: [Hub]
+      summary: Enroll or reconcile a browser push subscription and device preferences
+      description: Requires an explicit user enrollment action. Cookie requests require same-origin CSRF validation. Enrollment is authorized by the current login session; expiry or revocation stops future sends until reconciliation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationEnrollment' }
+      responses:
+        '200':
+          description: Device enrollment saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationState' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/NoStoreError' }
+        '413': { $ref: '#/components/responses/NoStoreError' }
+        '500': { $ref: '#/components/responses/NoStoreError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+    delete:
+      operationId: hubRemoveNotifications
+      tags: [Hub]
+      summary: Disable notifications for an owned device
+      parameters:
+        - { name: device, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
+      responses:
+        '200':
+          description: Device removed and unsent notifications cancelled
+          content:
+            application/json:
+              schema: { type: object, required: [removed], additionalProperties: false, properties: { removed: { const: true } } }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '500': { $ref: '#/components/responses/NoStoreError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
   /login:
     post:
       operationId: hubLogin
@@ -958,6 +1017,45 @@ components:
       headers: { Cache-Control: { schema: { type: string, const: no-store } } }
       content: { application/json: { schema: { $ref: '#/components/schemas/CredentialDeletedResponse' } } }
   schemas:
+    NotificationEnrollment:
+      type: object
+      required: [subscription, workspaceIds, needsAnswer, completed]
+      properties:
+        id: { type: string, maxLength: 128 }
+        subscription:
+          type: object
+          required: [endpoint, keys]
+          properties:
+            endpoint: { type: string, format: uri, maxLength: 4096 }
+            expirationTime: { type: [number, 'null'] }
+            keys:
+              type: object
+              required: [p256dh, auth]
+              properties:
+                p256dh: { type: string }
+                auth: { type: string }
+        workspaceIds: { type: array, maxItems: 256, items: { type: string } }
+        needsAnswer: { type: boolean }
+        completed: { type: boolean }
+    NotificationState:
+      type: object
+      required: [configured, publicKey, device]
+      additionalProperties: false
+      properties:
+        configured: { type: boolean }
+        publicKey: { type: [string, 'null'] }
+        device:
+          oneOf:
+            - { type: 'null' }
+            - type: object
+              required: [id, workspaceIds, needsAnswer, completed, active]
+              additionalProperties: false
+              properties:
+                id: { type: string }
+                workspaceIds: { type: array, items: { type: string } }
+                needsAnswer: { type: boolean }
+                completed: { type: boolean }
+                active: { type: boolean }
     Error:
       type: object
       required: [error]

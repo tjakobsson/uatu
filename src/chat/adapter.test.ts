@@ -16,6 +16,9 @@ import type { ChatEvent, ChatModel, ConversationItem, ToolItem, ModelSelection, 
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
 import type { ConversationInventorySubscription } from "./inventory-broadcaster";
+import { OpenCodeNotificationLifecycle } from "./opencode/notification-lifecycle";
+import type { AgentNotificationEvent } from "./notifications";
+import { notificationPipeline } from "../../tests/notification-pipeline";
 
 class EventQueue implements AsyncIterable<ProviderEvent> {
   private values: ProviderEvent[] = [];
@@ -58,6 +61,7 @@ class FakeProvider implements ChatProvider {
   sessions: ProviderSession[] = [];
   pages = new Map<string, RawPage>();
   eventQueue = new EventQueue();
+  notificationLifecycle = new OpenCodeNotificationLifecycle();
   prompts: Array<{ sessionId: string; id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }> = [];
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
@@ -104,7 +108,10 @@ class FakeProvider implements ChatProvider {
     const memory = createProviderEventMemory();
     for await (const event of this.eventQueue) {
       try {
-        yield normalizeProviderEvent(event, memory);
+        const normalized = normalizeProviderEvent(event, memory);
+        const turns = this.notificationLifecycle.observe(event, normalized);
+        if (turns.length) normalized.notificationTurns = turns;
+        yield normalized;
       } catch {
         yield { updates: [], outcome: "unparseable", eventType: "" };
       }
@@ -175,6 +182,48 @@ async function expectInventorySignal(subscription: ConversationInventorySubscrip
   expect(result).not.toBe("timeout");
   expect((result as IteratorResult<void>).done).toBe(false);
 }
+
+describe("live notification confinement", () => {
+  test("OpenCode events reach both enrolled devices without an open page", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, id: "opencode" };
+    provider.sessions = [fixtureSession("one")];
+    const pipeline = await notificationPipeline(provider, process.cwd());
+    try {
+      const timestamp = Date.now();
+      provider.eventQueue.push({ type: "session.next.step.started", data: { sessionID: "one", assistantMessageID: "a", timestamp } });
+      provider.eventQueue.push({ type: "question.asked", data: { sessionID: "one", id: "q", timestamp, questions: [{ question: "Choose?", options: [{ label: "A" }] }] } });
+      await pipeline.waitForSends(2);
+      await pipeline.restartHub();
+      provider.eventQueue.push({ type: "session.next.step.ended", data: { sessionID: "one", assistantMessageID: "a", finish: "stop", timestamp: Date.now() } });
+      await pipeline.waitForSends(4);
+      expect(pipeline.opens()).toBe(2);
+      expect(pipeline.sent.map(send => send.payload.kind).sort()).toEqual(["question-pending", "question-pending", "turn-completed", "turn-completed"]);
+      expect(pipeline.sent.every(send => send.payload.url.includes("opencode%3Aone"))).toBe(true);
+    } finally { await pipeline.dispose(); }
+  });
+  test("unselected conversations notify, while child completions and outside workspaces do not", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("one"), fixtureSession("two"), { ...fixtureSession("child"), parentId: "one" }, fixtureSession("outside", "/tmp/uatu-outside")];
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    const now = Date.now();
+    for (const sessionID of ["one", "two", "child", "outside"]) {
+      provider.eventQueue.push({ type: "session.next.step.started", data: { sessionID, assistantMessageID: "a", timestamp: now } });
+    }
+    for (const sessionID of ["one", "child", "outside"]) {
+      provider.eventQueue.push({ type: "session.next.step.ended", data: { sessionID, assistantMessageID: "a", finish: "stop", timestamp: now + 1 } });
+    }
+    provider.eventQueue.push({ type: "question.asked", data: { sessionID: "child", id: "q", questions: [{ question: "Choose?", options: [{ label: "A" }] }] } });
+    provider.eventQueue.close();
+    await pump;
+    expect(events.filter(event => event.type === "notification").map(event => event.type === "notification" ? [event.notification.conversationId, event.notification.kind] : [])).toEqual([
+      ["one", "turn-completed"], ["one", "question-pending"],
+    ]);
+    await adapter.dispose();
+  });
+});
 
 describe("OpenCode conversation inventory and history", () => {
   test("repairs a persisted default title from its first user message", async () => {

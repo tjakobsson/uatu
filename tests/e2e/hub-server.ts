@@ -37,6 +37,8 @@ import { PersonalWorkspaceStateStore } from "../../src/hub/personal-state";
 import { WorkspaceRegistry, type WorkspaceEntry } from "../../src/hub/registry";
 import { startHubServer } from "../../src/hub/server";
 import { SessionManager } from "../../src/hub/sessions";
+import { NotificationStore } from "../../src/hub/notification-store";
+import { HubNotifications } from "../../src/hub/notifications";
 
 export const HUB_E2E_USER = { name: "e2e", password: "e2e-hub-password" };
 export const HUB_E2E_READY_PREFIX = "uatu-e2e-hub ";
@@ -183,7 +185,14 @@ for (const workspace of workspaces) {
   workspace.childOrigin = `http://${running.endpoint.hostname}:${running.endpoint.port}`;
 }
 
-const server = startHubServer({ config, registry, sessions, sessionStore, personalState });
+const notificationStore = new NotificationStore(path.join(tempRoot, "notifications.json"));
+await notificationStore.load();
+const notifications = new HubNotifications({ store: notificationStore, sender: async () => ({ kind: "accepted" }),
+  source: { isRunning: () => false, workspaceIds: () => [], open: async () => { throw new Error("browser suite does not open push upstreams"); } },
+  authorized: (principal, id) => sessionStore.resolve(principal.sessionId)?.user === principal.user && Boolean(registry.byId(id)),
+  workspaceName: id => registry.byId(id)?.displayName ?? id,
+});
+const server = startHubServer({ config, registry, sessions, sessionStore, personalState, notifications });
 const origin = `http://127.0.0.1:${server.port}`;
 for (const workspace of workspaces) {
   workspace.sessionUrl = `${origin}/s/${encodeURIComponent(workspace.id)}/`;
@@ -196,6 +205,7 @@ let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  await notifications.dispose();
   server.live.endAll();
   server.liveBroker.dispose();
   await sessions.stopAll().catch(() => undefined);

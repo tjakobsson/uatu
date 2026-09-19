@@ -82,6 +82,13 @@ export type NormalizedProviderEvent = {
   // The event's own type, so a caller can count drops per type. Never a
   // payload — a payload can carry file contents.
   eventType: string;
+  // Correlated live execution signals, separate from the UI's unqualified
+  // status transitions. History readers never populate these.
+  notificationTurns?: Array<{
+    sourceId: string;
+    phase: "started" | "completed" | "failed" | "interrupted" | "background";
+    createdAt: number;
+  }>;
   // The model the assistant message ran, when the event states it. Reported on
   // the envelope rather than on an item: it belongs to the message, and the
   // one thing that needs it — attributing a subagent on its parent's row —

@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { readYaml } from "../scripts/validate-api";
 import {
   CHILD_ACTIVITY_PATH,
+  CHILD_NOTIFICATIONS_PATH,
   CHILD_DOCUMENT_EVENTS_PATH,
   CHILD_INVENTORY_EVENTS_PATH,
   childConversationEventsPath,
@@ -49,7 +50,7 @@ test("every workspace child route is an explicit internal exclusion", async () =
   // Routes registered through a shared constant escape the literal sweep.
   // Each one must be known here and classified below.
   const constantRoutes = [...source.matchAll(/p\(([A-Z][A-Z0-9_]*)\)/g)].map(match => match[1]!);
-  expect(constantRoutes.filter(name => name !== "CHILD_ACTIVITY_PATH")).toEqual([]);
+  expect(constantRoutes.filter(name => name !== "CHILD_ACTIVITY_PATH" && name !== "CHILD_NOTIFICATIONS_PATH")).toEqual([]);
   // The fetch fallback dispatches on requestUrl.pathname comparisons rather
   // than p("...") literals. Sweep those too, so a new fallback branch cannot
   // escape both the contract and the exclusion list unnoticed.
@@ -69,7 +70,7 @@ test("every workspace child route is an explicit internal exclusion", async () =
     expect(source).toContain(marker);
   }
   expect(source.includes(`p(${JSON.stringify(CHILD_ACTIVITY_PATH)})`) || source.includes("p(CHILD_ACTIVITY_PATH)")).toBe(true);
-  for (const path of [CHILD_DOCUMENT_EVENTS_PATH, CHILD_INVENTORY_EVENTS_PATH, childConversationEventsPath("sample"), CHILD_ACTIVITY_PATH]) {
+  for (const path of [CHILD_DOCUMENT_EVENTS_PATH, CHILD_INVENTORY_EVENTS_PATH, childConversationEventsPath("sample"), CHILD_ACTIVITY_PATH, CHILD_NOTIFICATIONS_PATH]) {
     expect(classified(path)).toBe(true);
   }
 });
@@ -82,6 +83,9 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
   ]);
   const hub = inventory.operations.filter(item => item.domain === "hub");
   const expected = [
+    ["hubGetNotifications", 'pathname === "/api/hub/notifications"'],
+    ["hubEnrollNotifications", 'pathname === "/api/hub/notifications"'],
+    ["hubRemoveNotifications", 'pathname === "/api/hub/notifications"'],
     ["hubLogin", 'pathname === "/login"'],
     ["hubLogout", 'pathname === "/logout"'],
     ["hubGetState", 'pathname === "/api/hub/state"'],

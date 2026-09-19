@@ -143,6 +143,13 @@ export async function proxyHttp(request: Request, session: RunningSession): Prom
   }
 
   statusCategory = statusCategoryOf(upstream.status);
+  if (upstream.status === 200 && upstream.headers.get("content-type")?.includes("text/html")) {
+    upstream = new HTMLRewriter().on("head", { element(head) {
+      head.prepend('<meta name="uatu-hub" content="true">', { html: true });
+    } }).transform(upstream);
+    upstream.headers.delete("content-length");
+    upstream.headers.delete("etag");
+  }
 
   // Stream the body through untouched — SSE depends on this staying
   // unbuffered. Strip hop-by-hop response headers; everything else

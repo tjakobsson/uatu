@@ -42,6 +42,84 @@ The boundaries to keep in mind:
 - **WebSocket between SPA and terminal subsystem.** Authenticated by a cookie set on `POST /api/auth`; multiplexed across multiple PTY panes by `terminal/server.ts`.
 - **A single Bun binary.** No node, no separate frontend bundler. The same binary runs the hub and every session child, and each child's `Bun.serve` serves the SPA and its API.
 
+## Web Push delivery
+
+The notification path runs independently of the page's brokered live stream:
+
+```text
+agent lifecycle --> ChatAdapter --> NotificationFeed
+                                         |
+                      /api/chat/notifications/events
+                                         |
+                         HubNotifications coordinator
+                                         |
+                        encrypted Web Push --> push worker
+```
+
+`chat/notifications.ts` tracks identified live occurrences and resolutions.
+OpenCode's `notification-lifecycle.ts` correlates native step and compatibility
+message records by assistant-message identity; unqualified idle/status frames
+do not create completion alerts. Claude's provider attaches execution identity
+and resolves cancellation/background state before emitting its notification
+outcome. The adapter checks workspace membership, excludes child completion,
+and routes child questions to their launching conversation.
+
+`chat/notification-feed.ts` provides bounded replay and an atomic pending-request
+snapshot/live handoff. Each lazy agent service owns a feed without starting its
+runtime. `MultiAgentChatService` qualifies and merges occurrences. The internal
+child route is declared by `server/routes.ts` and is refused through the browser
+proxy.
+
+`hub/notifications.ts` holds one notification upstream per interested running
+workspace, independent of visible pages. `notification-store.ts` atomically
+persists the VAPID keys, device enrollments, cursors, and event/device delivery
+journal. Authorization is checked against the enrollment's current hub session
+and workspace access before sending. Expiry, bounded retry, known interaction
+resolution, and subscription removal are delivery concerns. `push-sender.ts`
+uses the MIT-licensed Web Crypto implementation for encryption and VAPID signing.
+
+The hub serves `pwa/push-worker.js` at origin scope. It handles push and clicks,
+with no fetch handler or offline content cache. `notification-client.js` is a
+shared browser module, bundled into the SPA and served directly to hub pages;
+its declaration file supplies the TypeScript interface. Hosts inject URLs, and
+workspace boot requires the proxy's explicit `uatu-hub` marker before using
+`hubUrl()`. Legacy cleanup preserves active, waiting, and installing push workers.
+
+Notification URLs carry an agent-qualified `conversation` parameter through
+login and document history changes. Chat opens that exact target or shows its
+read error. A matching window is focused without navigating another workspace's
+draft. A desktop window too narrow for the split uses a temporary Chat view
+that the existing collapse control dismisses; it does not change the stored UI
+mode.
+
+## Desktop viewport on tablets
+
+`shell/desktop-viewport.ts` owns the desktop work area's visible rectangle and
+safe-area overlap. It measures at boot and on mode changes, then coalesces
+visual-viewport resize/scroll and window resize events into animation frames.
+The scalar viewport observer is shared with the touch terminal through
+`shared/visual-viewport.ts`.
+
+Wide desktop browser layouts fit one fixed shell to that rectangle. Sidebar,
+preview, chat, and docked/fullscreen terminal therefore share the available
+height, including small hardware-keyboard accessory bars. Safe-area padding
+lives on that outer shell, so the desktop composer does not reserve the bottom
+inset again. A bottom-docked terminal is temporarily capped while the viewport
+is occluded, without changing its persisted size. Xterm refits through its
+existing host ResizeObserver.
+
+The narrow desktop layout remains a scrolling stack with a safe-area-aware
+sticky preview header. Native macOS hosting retains its existing titlebar and
+frost stacking contract. During pinch zoom, the desktop controller retains the
+last normal-scale layout and lets the browser pan it. Switching to touch clears
+the desktop measurements and hands sizing back to the touch chat/terminal
+controllers; Chat clears its own obsolete overrides immediately on mode change.
+
+Browser regressions inject safe areas and visual-viewport changes and assert
+header/composer bounds in Chromium and WebKit. They do not reproduce iPadOS's
+native glass or Magic Keyboard accessory UI. The reported physical-device bug
+still needs manual acceptance on the 11-inch iPad Pro.
+
 ## Folder tour
 
 `src/` is organized by feature. Three entrypoint files live at the root; everything else is in a folder named after its concern. Files are listed in each folder's `ls` — open the folder when you need a specific name.
@@ -120,7 +198,8 @@ src/
 │                         subprocess + forensic dump bundle
 ├── debug/                Observability — XDG-cache path resolution +
 │                         event-counter metrics
-├── pwa/                  PWA install affordance (manifest + SW asset refs)
+├── pwa/                  PWA assets, shared notification enrollment UI,
+│                         and the hub's push-only service worker
 └── shared/               Cross-cutting helpers: html escape, types,
                           license check, build version
 ```

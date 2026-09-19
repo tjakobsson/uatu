@@ -211,6 +211,60 @@ body {
   grid-template-areas: "sidebar resize preview";
 }
 
+/* Physical safe areas apply in desktop mode too, even with a trackpad.
+   The probe resolves env() to pixels for visual-viewport overlap accounting. */
+:root {
+  --device-safe-top: env(safe-area-inset-top, 0px);
+  --device-safe-right: env(safe-area-inset-right, 0px);
+  --device-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --device-safe-left: env(safe-area-inset-left, 0px);
+}
+
+.desktop-safe-area-probe {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  padding: var(--device-safe-top) var(--device-safe-right) var(--device-safe-bottom) var(--device-safe-left);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+html[data-ui-mode="desktop"]:not(.uatu-desktop-host) .app-shell {
+  padding: var(--device-safe-top) var(--device-safe-right) var(--device-safe-bottom) var(--device-safe-left);
+  background: var(--surface);
+}
+
+@media (min-width: 901px) {
+  html[data-ui-mode="desktop"]:not(.uatu-desktop-host) {
+    overflow: hidden;
+  }
+
+  /* One visible rectangle for every desktop pane. Fixed positioning prevents
+     focus-induced document scrolling from carrying the headers out of view.
+     The native macOS wrapper keeps its existing titlebar stacking contract. */
+  html[data-ui-mode="desktop"]:not(.uatu-desktop-host) .app-shell {
+    position: fixed;
+    top: var(--desktop-visual-top, 0px);
+    left: var(--desktop-visual-left, 0px);
+    width: var(--desktop-visual-width, 100%);
+    height: var(--desktop-visual-height, 100dvh);
+    padding: var(--desktop-visual-safe-top, var(--device-safe-top))
+      var(--desktop-visual-safe-right, var(--device-safe-right))
+      var(--desktop-visual-safe-bottom, var(--device-safe-bottom))
+      var(--desktop-visual-safe-left, var(--device-safe-left));
+  }
+
+  /* Retain the stored dock height, but temporarily leave room for the work
+     row when a keyboard reduces the visible height. Xterm's ResizeObserver
+     refits its host; no second keyboard offset belongs on the terminal. */
+  html[data-ui-mode="desktop"][data-desktop-occluded]:not(.uatu-desktop-host) .terminal-panel[data-dock="bottom"][data-display="normal"] {
+    max-height: 40%;
+    min-height: min(120px, 40%);
+  }
+}
+
 .app-shell.is-sidebar-collapsed {
   grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr);
   grid-template-areas: "rail preview";
@@ -3858,6 +3912,17 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
     margin: 0 -1rem;
   }
 
+  /* The stacked desktop still scrolls the document, rather than fixing a
+     tall stack into the keyboard-sized rectangle. Its sticky header must
+     clear the device status area while scrolling. */
+  html[data-ui-mode="desktop"]:not(.uatu-desktop-host) {
+    scroll-padding-top: calc(var(--preview-scroll-inset) + var(--device-safe-top));
+  }
+
+  html[data-ui-mode="desktop"]:not(.uatu-desktop-host) .preview-header {
+    top: var(--device-safe-top);
+  }
+
   .preview {
     padding: 15px;
   }
@@ -4791,7 +4856,7 @@ html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-surface {
   max-width: none;
 }
 
-html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-surface > :not(.chat-expand-strip),
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"]:not([data-notification-chat]) .chat-surface > :not(.chat-expand-strip),
 html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-resizer,
 html[data-ui-mode="touch"] .chat-resizer {
   display: none;
@@ -4872,7 +4937,7 @@ body.is-resizing-chat .chat-resizer {
     max-width: none;
   }
 
-  html[data-ui-mode="desktop"] .chat-surface > :not(.chat-expand-strip) {
+  html[data-ui-mode="desktop"]:not([data-notification-chat]) .chat-surface > :not(.chat-expand-strip) {
     display: none;
   }
 
@@ -4942,6 +5007,28 @@ body.is-resizing-chat .chat-resizer {
 .chat-surface:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+html[data-ui-mode="desktop"][data-notification-chat] .chat-surface {
+  position: fixed;
+  inset: 0;
+  top: var(--desktop-visual-top, 0px);
+  left: var(--desktop-visual-left, 0px);
+  width: var(--desktop-visual-width, 100%);
+  height: var(--desktop-visual-height, 100dvh);
+  z-index: 100;
+  padding: var(--desktop-visual-safe-top, var(--device-safe-top))
+    var(--desktop-visual-safe-right, var(--device-safe-right))
+    var(--desktop-visual-safe-bottom, var(--device-safe-bottom))
+    var(--desktop-visual-safe-left, var(--device-safe-left));
+}
+
+html.uatu-desktop-host[data-notification-chat] .chat-surface {
+  padding-top: var(--titlebar-inset, 0px);
+}
+
+html[data-ui-mode="desktop"][data-notification-chat] .chat-expand-strip {
+  display: none;
 }
 
 .chat-header {
@@ -6364,6 +6451,12 @@ body.is-resizing-chat .chat-resizer {
   padding: 0.75rem max(1rem, calc((100% - 52rem) / 2)) calc(0.75rem + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border-soft);
   background: var(--surface-raised);
+}
+
+/* The desktop shell (or notification overlay) reserves the bottom safe area.
+   Keeping the touch composer's inset here would reserve it a second time. */
+html[data-ui-mode="desktop"]:not(.uatu-desktop-host) .chat-composer {
+  padding-bottom: 0.75rem;
 }
 
 /* Context usage. The collapsed form has to answer "how full is this" on its

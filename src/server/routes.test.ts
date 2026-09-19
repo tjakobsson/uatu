@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import path from "node:path";
 
 import { buildFetchFallback, buildRoutes } from "./routes";
+import { NotificationFeed, CHILD_NOTIFICATIONS_PATH } from "../chat/notification-feed";
 
 // Minimal stub: the asset routes never touch the session, so a thrown
 // getter is fine — it makes accidental coupling fail loudly.
@@ -13,6 +14,7 @@ function buildFontTestRoutes(
   basePath?: string,
   getSession: () => never = stubSession,
   manifestScope?: "base-path" | "origin",
+  notificationFeed?: NotificationFeed,
 ) {
   const repoRoot = path.resolve(import.meta.dir, "..", "..");
   return buildRoutes({
@@ -33,7 +35,7 @@ function buildFontTestRoutes(
       },
     },
     getSession,
-    chatService: {} as never,
+    chatService: { notificationFeed } as never,
     getWorkspaceCredential: () => "test-credential",
     debug: false,
     getMetricsSnapshot: () => ({}),
@@ -41,6 +43,21 @@ function buildFontTestRoutes(
 }
 
 describe("buildRoutes — bundled font asset routes", () => {
+  test("the internal notification stream authenticates, prefixes, and opens before an event", async () => {
+    const feed = new NotificationFeed();
+    const routes = buildFontTestRoutes("/s/test/", stubSession, "origin", feed);
+    const handler = (routes[`/s/test${CHILD_NOTIFICATIONS_PATH}`] as { GET: (request: Request) => Response }).GET;
+    expect(handler(new Request(`http://localhost/s/test${CHILD_NOTIFICATIONS_PATH}`)).status).toBe(401);
+    const response = handler(new Request(`http://localhost/s/test${CHILD_NOTIFICATIONS_PATH}?t=test-credential`));
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain(": open");
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('"reason":"initial"');
+    feed.publish({ type: "notification", notification: { id: "q", sourceId: "q", conversationId: "opencode:one", kind: "question-pending", createdAt: Date.now() } });
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('"id":"q"');
+    await reader.cancel();
+    feed.dispose();
+  });
   test("serves the Hack WOFF2 with the right content-type and an immutable cache", async () => {
     const routes = buildFontTestRoutes();
     const response = routes["/assets/fonts/HackNerdFontMono-Regular.woff2"] as Response;

@@ -11,6 +11,9 @@ import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
 import { CoordinatedScrollOwner } from "./coordinated-scroll";
 import { ChatViewportController } from "./viewport";
+import { notificationConversation } from "./notification-navigation";
+import { setActiveTab } from "../shell/tab-bar";
+import { expandChatPanel, isChatPanelOpen } from "./surface";
 import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
@@ -78,6 +81,7 @@ type Announcer = ((message: string, error?: boolean) => void) & {
 const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, dismissedSubagents: {} };
 
 export function initChat(api = new ChatApiClient()): void {
+  let notificationTarget = notificationConversation(window.location?.search ?? "");
   const surface = document.querySelector<HTMLElement>("#chat-surface");
   const timeline = document.querySelector<HTMLElement>("#chat-timeline");
   const items = document.querySelector<HTMLElement>("#chat-items");
@@ -2338,6 +2342,11 @@ export function initChat(api = new ChatApiClient()): void {
       if (currentAnchor) presentation.anchors[projection.conversationId] = currentAnchor;
     }
     presentation.selectedId = id;
+    if (window.location && new URLSearchParams(window.location.search).has("conversation")) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("conversation", id);
+      window.history.replaceState(window.history.state, "", url);
+    }
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : chatHeading();
     form.hidden = false;
@@ -2417,6 +2426,13 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const installInitialChooser = () => {
+    if (notificationTarget) {
+      const target = notificationTarget;
+      notificationTarget = null;
+      patchChooser(target);
+      void selectConversation(target);
+      return;
+    }
     const selected = conversations.some(item => item.id === presentation.selectedId)
       ? presentation.selectedId!
       : conversations[0]?.id ?? null;
@@ -4172,6 +4188,7 @@ export function initChat(api = new ChatApiClient()): void {
   function chatSurfaceActive() {
     if (document.visibilityState === "hidden") return false;
     const root = document.documentElement;
+    if (root.hasAttribute("data-notification-chat")) return true;
     return root.getAttribute("data-ui-mode") === "touch"
       ? root.getAttribute("data-active-tab") === "chat"
       : root.getAttribute("data-chat-panel") === "open";
@@ -4193,6 +4210,9 @@ export function initChat(api = new ChatApiClient()): void {
   };
   document.addEventListener("uatu:before-surface-change", captureSurfaceAnchors);
   const handleChatSurfaceState = () => {
+    if (document.documentElement.hasAttribute("data-notification-chat") && (document.documentElement.getAttribute("data-ui-mode") === "touch" || isChatPanelOpen())) {
+      document.documentElement.removeAttribute("data-notification-chat");
+    }
     const active = chatSurfaceActive();
     const becameActive = active && !chatWasActive;
     chatWasActive = active;
@@ -4227,7 +4247,7 @@ export function initChat(api = new ChatApiClient()): void {
     }
   };
   const surfaceObserver = new MutationObserver(handleChatSurfaceState);
-  surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-chat-panel", "data-active-tab", "data-ui-mode"] });
+  surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-chat-panel", "data-active-tab", "data-ui-mode", "data-notification-chat"] });
   document.addEventListener("visibilitychange", handleChatSurfaceState);
   onWorkspaceCredentialRefresh(() => {
     if (bootstrapped) {
@@ -4250,6 +4270,26 @@ export function initChat(api = new ChatApiClient()): void {
     if (!bootstrapped) return;
     await inventoryReconciler.request();
   });
+  const revealNotificationChat = () => {
+    if (document.documentElement.getAttribute("data-ui-mode") === "touch") setActiveTab("chat");
+    else {
+      expandChatPanel();
+      // A notification still needs to be answerable in a desktop window too
+      // narrow for the split. This temporary view does not change UI mode.
+      if (!isChatPanelOpen()) document.documentElement.setAttribute("data-notification-chat", "");
+    }
+  };
+  document.getElementById("chat-collapse")?.addEventListener("click", () => document.documentElement.removeAttribute("data-notification-chat"));
+  navigator.serviceWorker?.addEventListener("message", event => {
+    if (event.data?.type !== "uatu:open-conversation" || typeof event.data.conversationId !== "string") return;
+    const id = notificationConversation(`conversation=${encodeURIComponent(event.data.conversationId)}`);
+    if (!id) return;
+    revealNotificationChat();
+    closeChildConversation();
+    if (bootstrapped) void selectConversation(id);
+    else notificationTarget = id;
+  });
+  if (notificationTarget) revealNotificationChat();
   handleChatSurfaceState();
 }
 

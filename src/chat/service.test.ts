@@ -91,9 +91,16 @@ describe("LazyChatService", () => {
     expect(await service.status()).toEqual({ state: "idle" });
     expect(spawns).toBe(0);
 
+    const notifications = service.notificationFeed.subscribe();
+    expect((await notifications.next()).value).toMatchObject({ type: "snapshot", pending: [] });
+    expect(spawns).toBe(0);
+
     // Conversation-scoped need is what starts it.
     await service.listConversations();
     expect(spawns).toBe(1);
+    service.notificationFeed.publish({ type: "notification", notification: { id: "q", sourceId: "q", conversationId: "one", kind: "question-pending", createdAt: Date.now() } });
+    expect((await notifications.next()).value).toMatchObject({ type: "event", event: { notification: { id: "q" } } });
+    notifications.cancel();
     expect(await service.status()).toEqual(expect.objectContaining({ state: "ready" }));
 
     await service.dispose();

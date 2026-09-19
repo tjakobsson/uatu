@@ -188,6 +188,41 @@ along with the `watch` alias and the bare `uatu <path>` form. Each of them
 prints the steps above and exits with an error. Add the folder to a hub
 instead.
 
+## Web notifications
+
+The hub can send Web Push notifications when an agent asks a question, requests
+permission, or successfully finishes a turn. Open **Notifications** in the hub
+navigation or workspace sidebar to select workspaces and event categories for
+that browser or installed app. Permission is requested only when you enable it.
+
+Configure the hub's `hub.json` with a contact for its Web Push sender, then
+restart the hub:
+
+```json
+"notifications": { "contact": "mailto:you@example.com" }
+```
+
+On iPhone and iPad, use HTTPS, add Uatu to the Home Screen, and enable
+notifications from the installed app. Supported desktop browsers can enroll
+without installation. Plain HTTP to a remote LAN address does not support push.
+The hub needs outbound access to the browser's push service; no Apple developer
+account or Uatu-hosted relay is needed.
+
+The hub and agent must stay running, but the page can be closed or the phone
+locked. Tapping an alert opens its conversation. Notifications contain generic
+event text and the workspace name, not question text or tool output. Delivery
+timing follows browser and OS settings, including Focus. Sends expire after five
+minutes, and failures, cancellations, and background-work transitions do not
+produce a successful-turn alert.
+
+Preferences are per device. Signing out, login expiration, or session revocation
+stops future sends under that login. Return to Notifications and enable it again
+after signing in. Disable on this device stops future sends without affecting
+other devices. Already submitted platform notifications cannot be recalled.
+
+See [self-hosting](docs/SELF-HOSTING.md#web-push-notifications) for state backups,
+troubleshooting, and rollback.
+
 ## Configuration: `.uatu.json`
 
 Optional repo-root file carrying content-scoping facts about the

@@ -11,6 +11,8 @@ import type { ServerWebSocket } from "bun";
 import hubMonoFontAsset from "../assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
 import hubIcon192Asset from "../assets/icon-192.png" with { type: "file" };
 import hubIcon512Asset from "../assets/icon-512.png" with { type: "file" };
+import pushWorkerAsset from "../pwa/push-worker.js" with { type: "file" };
+import notificationClientAsset from "../pwa/notification-client.js" with { type: "file" };
 
 import {
   clientKeyForRateLimit,
@@ -50,6 +52,7 @@ import {
   type UpgradableServer,
 } from "./proxy";
 import { LiveBroker } from "./live-broker";
+import { NotificationRequestError, type HubNotifications } from "./notifications";
 import { LiveEndpoint } from "./live-endpoint";
 import { createHubUpstreamSource } from "./live-source";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
@@ -87,6 +90,7 @@ export type HubDeps = {
   live?: LiveEndpoint;
   liveBroker?: LiveBroker;
   metrics?: MetricsRegistry;
+  notifications?: HubNotifications;
 };
 
 type HubServer = UpgradableServer & {
@@ -98,7 +102,7 @@ const LIVE_SUBSCRIPTIONS_PATH = /^\/api\/hub\/live\/([^/]+)\/subscriptions$/;
 // The child's per-stream SSE routes are the internal hub↔child protocol the
 // broker subscribes to; through the hub they are refused, never proxied.
 // `/api/activity` is internal too (the activity summary the broker reads).
-const REFUSED_CHILD_STREAM_SUFFIXES = /^\/api\/(events|activity|chat\/conversations\/(events|[^/]+\/events))$/;
+const REFUSED_CHILD_STREAM_SUFFIXES = /^\/api\/(events|activity|chat\/notifications\/events|chat\/conversations\/(events|[^/]+\/events))$/;
 const CREDENTIAL_PATH = "/api/hub/credentials";
 const CREDENTIAL_TOOL_PATH = "/api/hub/credential-tools";
 
@@ -1232,6 +1236,11 @@ export function createHubFetchHandler(deps: HubDeps) {
     const pathname = url.pathname;
 
     // Un-gated: the login flow and the dashboard's static assets.
+    if (pathname === "/push-worker.js" || pathname === "/hub-assets/notifications.js") {
+      return new Response(Bun.file(pathname === "/push-worker.js" ? pushWorkerAsset : notificationClientAsset), {
+        headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-cache", "service-worker-allowed": "/" },
+      });
+    }
     if (pathname === "/login") {
       return handleLogin(request, server);
     }
@@ -1319,6 +1328,34 @@ export function createHubFetchHandler(deps: HubDeps) {
         return Response.redirect(next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`, 303);
       }
       return json(401, { error: "authentication required" }, NO_STORE_HEADERS);
+    }
+
+    if (pathname === "/api/hub/notifications") {
+      const notifications = deps.notifications;
+      if (!notifications) return json(503, { error: "notifications are unavailable" }, NO_STORE_HEADERS);
+      if (!csrfOk(request, session.transport)) return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      try {
+        const id = url.searchParams.get("device") ?? undefined;
+        if (id && id.length > 128) return json(400, { error: "invalid device id" }, NO_STORE_HEADERS);
+        if (request.method === "GET") return json(200, notifications.state(session, id), NO_STORE_HEADERS);
+        if (request.method === "PUT") {
+          const text = await request.text();
+          if (Buffer.byteLength(text) > 16 * 1024) return json(413, { error: "notification enrollment is too large" }, NO_STORE_HEADERS);
+          let body: unknown;
+          try { body = JSON.parse(text); } catch { return json(400, { error: "invalid JSON body" }, NO_STORE_HEADERS); }
+          return json(200, await notifications.enroll(session, body), NO_STORE_HEADERS);
+        }
+        if (request.method === "DELETE") {
+          if (!id) return json(400, { error: "device id required" }, NO_STORE_HEADERS);
+          await notifications.remove(session, id);
+          return json(200, { removed: true }, NO_STORE_HEADERS);
+        }
+        return new Response(null, { status: 405, headers: { allow: "GET, PUT, DELETE" } });
+      } catch (error) {
+        return error instanceof NotificationRequestError
+          ? json(error.status, { error: error.message }, NO_STORE_HEADERS)
+          : json(500, { error: "failed to persist notification state" }, NO_STORE_HEADERS);
+      }
     }
 
     // The brokered live stream (design D2/D3): one SSE connection per page,

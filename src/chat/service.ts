@@ -1,4 +1,5 @@
 import { ChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
+import { NotificationFeed } from "./notification-feed";
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
 import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode/opencode-service";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
@@ -21,6 +22,7 @@ import type {
   ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
 
 export interface WorkspaceChatService {
+  readonly notificationFeed?: NotificationFeed;
   status(): Promise<ChatAvailability>;
   retry(): Promise<ChatAvailability>;
   models(): Promise<ChatModel[]>;
@@ -121,6 +123,7 @@ export type LazyChatServiceOptions = OpenCodeServiceOptions & {
 };
 
 export class LazyChatService implements WorkspaceChatService {
+  readonly notificationFeed = new NotificationFeed();
   private readonly runtime: AgentRuntime;
   private readonly workspacePath: string;
   private readonly createAdapter: NonNullable<LazyChatServiceOptions["createAdapter"]>;
@@ -266,6 +269,7 @@ export class LazyChatService implements WorkspaceChatService {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.notificationFeed.dispose();
     this.activityChanges.dispose();
     const runtimeDisposal = this.runtime.dispose();
     // Shutdown can race the first ensureAdapter: the promise may own a
@@ -308,6 +312,7 @@ export class LazyChatService implements WorkspaceChatService {
         // A retired adapter's late tick is harmless: it only prompts a re-read
         // of the current adapter.
         onActivityChange: () => this.activityChanges.invalidate(),
+        onNotification: event => { if (this.adapter === adapter) this.notificationFeed.publish(event); },
       });
       // Shutdown or a retry may have superseded this build while the probe
       // ran; a stale build retires itself instead of publishing.

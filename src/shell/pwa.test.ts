@@ -6,7 +6,7 @@
 // and those are exactly the ones a fresh browser profile can never exercise.
 
 import { describe, expect, it } from "bun:test";
-import { isLegacyUatuWorker } from "./pwa";
+import { isLegacyUatuWorker, unregisterLegacyServiceWorkers } from "./pwa";
 
 const ORIGIN = "https://uatu.example";
 
@@ -18,6 +18,22 @@ function facts(scopePath: string, scriptPath: string | null) {
 }
 
 describe("isLegacyUatuWorker", () => {
+  it("preserves active, installing, and waiting push registrations during legacy cleanup", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const removed: string[] = [];
+    const worker = (name: string) => ({ scriptURL: `${ORIGIN}/${name}` });
+    const registrations = [
+      { scope: `${ORIGIN}/`, active: worker("sw.js"), unregister: async () => { removed.push("legacy"); return true; } },
+      ...["active", "waiting", "installing"].map(slot => ({ scope: `${ORIGIN}/`, active: worker("sw.js"), [slot]: worker("push-worker.js"), unregister: async () => { removed.push(slot); return true; } })),
+      { scope: `${ORIGIN}/`, active: worker("other.js"), unregister: async () => { removed.push("other"); return true; } },
+    ];
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { serviceWorker: { getRegistrations: async () => registrations } } });
+    try { await unregisterLegacyServiceWorkers(); expect(removed).toEqual(["legacy"]); }
+    finally {
+      if (descriptor) Object.defineProperty(globalThis, "navigator", descriptor);
+      else delete (globalThis as { navigator?: unknown }).navigator;
+    }
+  });
   it("matches the origin-root registration a direct load left behind", () => {
     expect(isLegacyUatuWorker(facts("/", "/sw.js"), "/")).toBe(true);
   });

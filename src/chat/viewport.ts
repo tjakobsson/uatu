@@ -1,8 +1,10 @@
 import { tabBarBottomInset } from "../shell/tab-bar";
+import { onUiModeChange } from "../shell/ui-mode";
 
 export class ChatViewportController {
   private readonly resize = () => this.apply();
   private observer: ResizeObserver | null = null;
+  private unsubscribeMode: (() => void) | null = null;
 
   constructor(
     private readonly surface: HTMLElement,
@@ -11,17 +13,21 @@ export class ChatViewportController {
   ) {}
 
   start(): void {
+    this.unsubscribeMode ??= onUiModeChange(this.resize);
     window.visualViewport?.addEventListener("resize", this.resize);
     window.visualViewport?.addEventListener("scroll", this.resize);
     window.addEventListener("resize", this.resize);
     if (typeof ResizeObserver === "function") {
       this.observer = new ResizeObserver(this.resize);
       this.observer.observe(this.composer);
+      this.observer.observe(this.surface);
     }
     this.apply();
   }
 
   stop(): void {
+    this.unsubscribeMode?.();
+    this.unsubscribeMode = null;
     window.visualViewport?.removeEventListener("resize", this.resize);
     window.visualViewport?.removeEventListener("scroll", this.resize);
     window.removeEventListener("resize", this.resize);
@@ -34,11 +40,18 @@ export class ChatViewportController {
     const top = viewport?.offsetTop ?? 0;
     const metrics = chatViewportMetrics(height, top, window.innerHeight, tabBarBottomInset());
     document.documentElement.toggleAttribute("data-chat-keyboard", metrics.keyboardVisible);
-    this.surface.style.setProperty("--chat-visual-top", `${top}px`);
-    this.surface.style.setProperty("--chat-visual-height", `${metrics.height}px`);
     const root = document.documentElement;
-    const visible = document.visibilityState !== "hidden" && (root.getAttribute("data-ui-mode") === "touch"
-      ? root.getAttribute("data-active-tab") === "chat" : root.getAttribute("data-chat-panel") === "open");
+    const touch = root.getAttribute("data-ui-mode") === "touch";
+    if (touch) {
+      this.surface.style.setProperty("--chat-visual-top", `${top}px`);
+      this.surface.style.setProperty("--chat-visual-height", `${metrics.height}px`);
+    } else {
+      // The desktop shell owns this rectangle, including its safe areas.
+      this.surface.style.removeProperty("--chat-visual-top");
+      this.surface.style.removeProperty("--chat-visual-height");
+    }
+    const visible = document.visibilityState !== "hidden" && (touch
+      ? root.getAttribute("data-active-tab") === "chat" : root.getAttribute("data-chat-panel") === "open" || root.hasAttribute("data-notification-chat"));
     if (visible) this.requestCorrection();
   }
 }

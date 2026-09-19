@@ -112,6 +112,7 @@ export function childConversationEventsPath(conversationId: string): string {
 // `event: activity` with data {working, awaiting} on every change (the first
 // one immediately), 15 s keepalives.
 export const CHILD_ACTIVITY_PATH = "/api/activity";
+export const CHILD_NOTIFICATIONS_PATH = "/api/chat/notifications/events";
 export const CHILD_ACTIVITY_EVENT = "activity";
 // The child's conversation stream opens with this event, whose data names
 // the cursor its live events follow: `{ "cursor": "<replay cursor>" }`. A

@@ -1,9 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { AgentNotificationTracker, type AgentNotificationEvent } from "./notifications";
 
 import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
-import type { NormalizedProviderUpdate, NormalizedSessionLifecycle } from "./provider";
+import type { NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "./provider";
 import { describeToolDetail } from "./tool-detail";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
 import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError, type ChatProvider, type ProviderAttachment, type ProviderPermissionReply, type ProviderSession } from "./provider";
@@ -217,9 +218,11 @@ export type ChatAdapterOptions = {
   // deduplicated here). The service forwards it to whoever watches the
   // workspace's activity summary.
   onActivityChange?: () => void;
+  onNotification?: (event: AgentNotificationEvent) => void;
 };
 
 export class ChatAdapter {
+  private readonly notifications: AgentNotificationTracker;
   readonly generation: string;
   private readonly provider: ChatProvider;
   private readonly workspacePath: string;
@@ -327,6 +330,7 @@ export class ChatAdapter {
   private disposed = false;
 
   constructor(options: ChatAdapterOptions) {
+    this.notifications = new AgentNotificationTracker({ emit: options.onNotification ?? (() => {}), now: options.now });
     this.provider = options.provider;
     this.workspacePath = options.workspacePath;
     this.resolveAttachment = options.resolveAttachment;
@@ -674,6 +678,8 @@ export class ChatAdapter {
     return { working: this.liveTurns.size > 0, awaiting: this.pendingInteractions.size > 0 };
   }
 
+  pendingNotifications() { return this.notifications.pendingSnapshot(); }
+
   // Deduplicated at the source: a second conversation starting while one
   // already runs does not change the summary.
   private activityMayHaveChanged(): void {
@@ -705,6 +711,14 @@ export class ChatAdapter {
   // nothing else would ever settle its adapter-level records. If it returns,
   // its activity is re-derived from new events.
   private forgetActivity(conversationId: string): void {
+    for (const notification of this.notifications.pendingSnapshot()) {
+      try {
+        if (JSON.parse(notification.sourceId)[0] !== conversationId || notification.kind === "turn-completed") continue;
+        this.notifications.observe({ type: "interaction", origin: "live", conversationId: notification.conversationId, sourceId: notification.sourceId,
+          kind: notification.kind, pending: false, createdAt: Date.now() });
+      } catch { /* only interaction source ids are owner/request tuples */ }
+    }
+    this.notifications.forgetConversation(conversationId);
     this.liveTurns.delete(conversationId);
     this.forgetInteractions(conversationId);
   }
@@ -1527,6 +1541,7 @@ export class ChatAdapter {
       const reply: ProviderPermissionReply = outcome === "approved-once" ? "once" : outcome === "approved-session" ? "always" : "reject";
       await this.provider.replyPermission(conversationId, requestId, reply, choiceId);
       projection.resolvePermission(requestId, outcome, choiceId);
+      await this.observeNotifications({ conversationId, updates: [{ kind: "remove", itemId: `permission:${requestId}` }], outcome: "handled", eventType: "permission.answered" });
       this.resolveMirroredCopy(session.parentId, `permission:${requestId}`, parent => parent.resolvePermission(requestId, outcome, choiceId));
       return { outcome };
     });
@@ -1591,6 +1606,7 @@ export class ChatAdapter {
       if (outcome.kind === "rejected") await this.provider.rejectQuestion(conversationId, requestId);
       else await this.provider.replyQuestion(conversationId, requestId, outcome.answers);
       projection.resolveQuestion(requestId, outcome);
+      await this.observeNotifications({ conversationId, updates: [{ kind: "remove", itemId: `question:${requestId}` }], outcome: "handled", eventType: "question.answered" });
       this.resolveMirroredCopy(session.parentId, `question:${requestId}`, parent => parent.resolveQuestion(requestId, outcome));
       return { outcome };
     });
@@ -2146,7 +2162,7 @@ export class ChatAdapter {
         // reasoning parts emits. Attribution must see those; only an event
         // carrying nothing at all is skipped.
         if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined
-          && normalized.removedMessageId === undefined && normalized.configuration === undefined && normalized.revertLifecycle === undefined) continue;
+          && normalized.removedMessageId === undefined && normalized.configuration === undefined && normalized.revertLifecycle === undefined && !normalized.notificationTurns?.length) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.
@@ -2162,6 +2178,7 @@ export class ChatAdapter {
           this.scheduleRevertReconciliation(normalized.conversationId, normalized.revertLifecycle);
           continue;
         }
+        await this.observeNotifications(normalized);
         if (normalized.configuration) {
           const current = await this.configuration(normalized.conversationId);
           const configuration = { ...current, ...normalized.configuration };
@@ -2390,6 +2407,7 @@ export class ChatAdapter {
         if (live.size > 0) this.publishedQuestions.set(conversationId, live);
         else this.publishedQuestions.delete(conversationId);
         if (updates.length > 0) {
+          await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType: "questions.refreshed" });
           coalescer.push(conversationId, updates);
           // This fallback is the only path that discovers a subagent's
           // question at all (no asked event exists), and the pump's mirror
@@ -2404,6 +2422,44 @@ export class ChatAdapter {
       catch { /* a failed refresh leaves the next tool update to retry */ }
       finally { this.questionRefreshes.delete(conversationId); }
     })();
+  }
+
+  private async observeNotifications(event: NormalizedProviderEvent): Promise<void> {
+    if (!event.conversationId) return;
+    if (!event.notificationTurns?.length && !event.updates.some(update =>
+      update.kind === "upsert" && (update.item.type === "question" || update.item.type === "permission")
+      || update.kind === "remove" && /^(question|permission):/.test(update.itemId))) return;
+    const session = await this.requireSession(event.conversationId);
+    for (const turn of event.notificationTurns ?? []) {
+      this.notifications.observe({ ...turn, origin: "live", type: "turn", conversationId: session.id, child: Boolean(session.parentId) });
+    }
+    // Child requests appear in their launching conversation. Use the owning
+    // session in the source key so mirroring never creates a second alert.
+    let destination = session;
+    const visited = new Set([session.id]);
+    while (destination.parentId && !visited.has(destination.parentId)) {
+      visited.add(destination.parentId);
+      destination = await this.requireSession(destination.parentId);
+    }
+    for (const update of event.updates) {
+      if (update.kind === "upsert" && (update.item.type === "question" || update.item.type === "permission")) {
+        const item = update.item;
+        this.notifications.observe({
+          type: "interaction", origin: "live", conversationId: destination.id,
+          sourceId: JSON.stringify([item.conversationId ?? session.id, item.requestId]),
+          kind: item.type === "question" ? "question-pending" : "permission-pending",
+          pending: item.status === "pending", createdAt: item.createdAt,
+        });
+      } else if (update.kind === "remove") {
+        const match = /^(question|permission):(.+)$/.exec(update.itemId);
+        if (match) this.notifications.observe({
+          type: "interaction", origin: "live", conversationId: destination.id,
+          sourceId: JSON.stringify([session.id, match[2]]),
+          kind: match[1] === "question" ? "question-pending" : "permission-pending",
+          pending: false, createdAt: Date.now(),
+        });
+      }
+    }
   }
 
   private async requireSession(id: string): Promise<ProviderSession> {

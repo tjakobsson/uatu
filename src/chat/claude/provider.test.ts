@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { notificationPipeline } from "../../../tests/notification-pipeline";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1046,6 +1047,25 @@ describe("ClaudeProvider sessions", () => {
     await provider.dispose();
   });
 
+  test("Claude SDK permissions and successful results reach two devices with no page", async () => {
+    const { provider, queries, workspace } = fixture();
+    const session = await provider.createSession("notification-pipeline");
+    const pipeline = await notificationPipeline(provider, workspace);
+    try {
+      await provider.prompt(session.id, { id: "turn", text: "work", delivery: "queue" });
+      const decision = queries[0]!.input.options.canUseTool!("Write", { file_path: path.join(workspace, "a.txt"), content: "x" }, { signal: new AbortController().signal, toolUseID: "permission" });
+      await pipeline.waitForSends(2);
+      await pipeline.restartHub();
+      await provider.replyPermission(session.id, "permission", "once");
+      await decision;
+      queries[0]!.push({ type: "result", subtype: "success", uuid: "result", session_id: session.id, is_error: false });
+      await pipeline.waitForSends(4);
+      expect(pipeline.opens()).toBe(2);
+      expect(pipeline.sent.map(send => send.payload.kind).sort()).toEqual(["permission-pending", "permission-pending", "turn-completed", "turn-completed"]);
+      expect(pipeline.sent.every(send => send.payload.url.includes(encodeURIComponent(`claude:${session.id}`)))).toBe(true);
+    } finally { await pipeline.dispose(); }
+  });
+
   test("background work keeps the session alive past its result and reports the background state", async () => {
     const { provider, queries } = fixture();
     const { events, stop } = collect(provider);
@@ -1062,6 +1082,7 @@ describe("ClaudeProvider sessions", () => {
     expect(query.returned).toBe(false);
     const statuses = events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
     expect(statuses).toEqual(["running", "completed", "background"]);
+    expect(events.flatMap(event => event.notificationTurns ?? []).map(turn => [turn.sourceId, turn.phase])).toEqual([["r1", "started"], ["r1", "background"]]);
     // Ambient ids stay out of the live list; the real task is listed.
     expect(await provider.listBackgroundTasks()).toEqual([expect.objectContaining({ conversationId: session.id, taskId: "b1", description: "Sleep then echo", taskType: "local_bash", toolUseId: "toolu_1" })]);
     // Prompting is still possible on the live session.
@@ -1070,6 +1091,25 @@ describe("ClaudeProvider sessions", () => {
     query.push({ type: "result", subtype: "success", uuid: "res2", timestamp: "2026-09-02T10:00:07.000Z", session_id: session.id, is_error: false });
     await waitFor(() => events.filter(event => event.eventType === "turn.background").length === 2);
     expect(provider.liveSessionCount()).toBe(1);
+    stop();
+    await provider.dispose();
+  });
+
+  test("duplicate result frames leave the next accepted notification turn running", async () => {
+    const { provider, queries } = fixture();
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("notification-queue");
+    await provider.prompt(session.id, { id: "a", text: "one", delivery: "queue" });
+    await provider.prompt(session.id, { id: "b", text: "two", delivery: "queue" });
+    const result = { type: "result", subtype: "success", uuid: "result-a", session_id: session.id, is_error: false };
+    queries[0]!.push(result);
+    await waitFor(() => events.some(event => event.notificationTurns?.some(turn => turn.sourceId === "a" && turn.phase === "completed")));
+    queries[0]!.push(result);
+    queries[0]!.push({ ...result, uuid: "result-b" });
+    await waitFor(() => events.some(event => event.notificationTurns?.some(turn => turn.sourceId === "b" && turn.phase === "completed")));
+    expect(events.flatMap(event => event.notificationTurns ?? []).map(turn => [turn.sourceId, turn.phase])).toEqual([
+      ["a", "started"], ["a", "completed"], ["b", "started"], ["b", "completed"],
+    ]);
     stop();
     await provider.dispose();
   });

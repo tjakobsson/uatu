@@ -6,6 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../../shared/bounded-map";
+import { OpenCodeNotificationLifecycle } from "./notification-lifecycle";
 import { measureChatWork } from "../performance";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../history-reuse";
 import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
@@ -61,6 +62,7 @@ export const OPENCODE_PERMISSION_SCOPE_NOTE = "“Allow always” also covers la
 export class SdkV2Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
   private readonly historyReuse = new HistoryReuse<ProviderMessage[]>();
+  private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
 
   constructor(
     private readonly client: OpencodeClient,
@@ -508,6 +510,8 @@ export class SdkV2Provider implements ChatProvider {
       // still escapes must cost one event rather than ending the stream.
       try {
         const normalized = normalizeProviderEvent(event, memory);
+        const notificationTurns = this.notificationLifecycle.observe(event, normalized);
+        if (notificationTurns.length > 0) { normalized.notificationTurns = notificationTurns; normalized.outcome = "handled"; }
         this.historyReuse.invalidate(normalized.conversationId);
         yield normalized;
       } catch {

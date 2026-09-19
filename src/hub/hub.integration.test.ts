@@ -6,6 +6,9 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createECDH, randomBytes } from "node:crypto";
+import { NotificationStore } from "./notification-store";
+import { HubNotifications } from "./notifications";
 import { promises as nodeFs } from "node:fs";
 import { chmod, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -75,6 +78,7 @@ let bearerId = "";
 let cloneJobs: CloneJobManager;
 let reservations: PathReservationCoordinator;
 let preferences: HubPreferencesStore;
+let notifications: HubNotifications;
 const managedCloneStarts: Array<CloneCredentialProcessContext | undefined> = [];
 const managedCloneAssignments: string[] = [];
 let managedAssignmentBarrier: Promise<void> | undefined;
@@ -211,12 +215,21 @@ beforeAll(async () => {
     reservations,
   });
   await onboarding.recover();
+  const notificationStore = new NotificationStore(path.join(tempRoot, "notifications.json"));
+  await notificationStore.load();
+  notifications = new HubNotifications({
+    store: notificationStore, sender: async () => ({ kind: "accepted" }),
+    source: { isRunning: () => false, workspaceIds: () => [], open: async () => { throw new Error("unused"); } },
+    authorized: (principal, ws) => sessionStore.resolve(principal.sessionId)?.user === principal.user && Boolean(registry.byId(ws)),
+    workspaceName: id => id,
+  });
   server = startHubServer({
     config,
     registry,
     sessions,
     sessionStore,
     personalState,
+    notifications,
     preferences,
     onboarding,
     cloneJobs,
@@ -227,6 +240,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
+  await notifications?.dispose();
   await cloneJobs?.close();
   await sessions?.stopAll();
   server?.stop(true);
@@ -236,6 +250,31 @@ afterAll(async () => {
 });
 
 describe("hub end to end", () => {
+  test("push enrollment follows the authenticated user and rejects cookie CSRF", async () => {
+    const login = await sessionStore.issue("tobias", "notification test");
+    const other = await sessionStore.issue("alice", "other notification test");
+    const headers = { authorization: `Bearer ${login.id}`, "content-type": "application/json" };
+    const target = `${origin}/api/hub/notifications`;
+    expect((await fetch(target)).status).toBe(401);
+    const initial = await fetch(target, { headers });
+    await assertContract("GET", "/api/hub/notifications", initial.clone());
+    expect(await initial.json()).toMatchObject({ configured: true, device: null });
+    const key = createECDH("prime256v1"); key.generateKeys();
+    const input = { subscription: { endpoint: "https://web.push.apple.com/api-test", keys: { p256dh: key.getPublicKey().toString("base64url"), auth: randomBytes(16).toString("base64url") } }, workspaceIds: [], needsAnswer: true, completed: true };
+    const csrf = await fetch(target, { method: "PUT", headers: { cookie: `${hubCookieName(new URL(origin))}=${login.id}`, origin: "https://elsewhere.invalid", "content-type": "application/json" }, body: JSON.stringify(input) });
+    expect(csrf.status).toBe(403);
+    const enrolled = await fetch(target, { method: "PUT", headers, body: JSON.stringify(input) });
+    await assertContract("PUT", "/api/hub/notifications", enrolled.clone());
+    const body = await enrolled.json() as { device: { id: string } };
+    expect(JSON.stringify(body)).not.toContain("api-test");
+    expect((await fetch(`${target}?device=${body.device.id}`, { method: "DELETE", headers: { authorization: `Bearer ${other.id}` } })).status).toBe(404);
+    const removed = await fetch(`${target}?device=${body.device.id}`, { method: "DELETE", headers });
+    await assertContract("DELETE", "/api/hub/notifications", removed.clone());
+    expect(await removed.json()).toEqual({ removed: true });
+    await sessionStore.revoke(login.id);
+    await sessionStore.revoke(other.id);
+    expect((await fetch(target, { headers })).status).toBe(401);
+  });
   test("unauthenticated requests are blocked before any child contact", async () => {
     const api = await fetch(`${origin}/api/hub/state`);
     expect(api.status).toBe(401);

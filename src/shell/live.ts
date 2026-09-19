@@ -43,8 +43,8 @@ function releaseLiveChannel(): void {
 // wake-up — reconnects and resumes each topic. There is no grace period:
 // that recovery reconnects on every return anyway, so holding the stream
 // through a short absence would keep a socket without saving a reconnect.
-// Nothing visible depends on live events while hidden: the title and favicon
-// come from the project, and there are no notifications or app badges.
+// Notifications come from the hub's independent Web Push observer, so they do
+// not require a hidden page to hold this connection. Title/favicon are static.
 //
 // The lifecycle recovery performs this release on every hide it observes
 // (it has to know, so a recovery hidden mid-flight is followed up); this is

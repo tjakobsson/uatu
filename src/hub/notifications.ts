@@ -1,0 +1,279 @@
+import { createHash, randomUUID } from "node:crypto";
+import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
+import { NOTIFICATION_LIFETIME_MS, type AgentNotification } from "../chat/notifications";
+import type { LiveUpstreamSource } from "./live-broker";
+import { SseFrameParser } from "./live-sse";
+import { NotificationStore, type NotificationData, type NotificationDevice, type NotificationPreferences } from "./notification-store";
+import { createPushSender, parsePushSubscription, validPushContact, type PushSender } from "./push-sender";
+
+export class NotificationRequestError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+type Principal = { user: string; sessionId: string };
+type Observer = { abort: AbortController; done: Promise<void> };
+
+export class HubNotifications {
+  private readonly sender: PushSender | null;
+  private readonly observers = new Map<string, Observer>();
+  private readonly now: () => number;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private unsubscribe: (() => void) | undefined;
+  private draining: Promise<void> | null = null;
+  private drainAgain = false;
+  private closed = false;
+
+  constructor(private readonly options: {
+    store: NotificationStore;
+    contact?: string;
+    source: LiveUpstreamSource;
+    authorized: (principal: Principal, workspaceId: string) => boolean;
+    workspaceName: (id: string) => string;
+    sender?: PushSender;
+    now?: () => number;
+  }) {
+    this.now = options.now ?? Date.now;
+    this.sender = options.sender ?? (options.contact && validPushContact(options.contact)
+      ? createPushSender({ keys: options.store.snapshot().keys, contact: options.contact }) : null);
+  }
+
+  start(): void {
+    if (this.timer || this.closed) return;
+    this.unsubscribe = this.options.source.onSessionChange?.(() => this.refresh());
+    this.timer = setInterval(() => this.refresh(), 1000);
+    this.timer.unref();
+    this.refresh();
+  }
+
+  state(principal: Principal, id?: string) {
+    const data = this.options.store.snapshot();
+    const device = data.devices.find(device => device.id === id && device.user === principal.user);
+    return {
+      configured: this.sender !== null, publicKey: this.sender ? data.keys.publicKey : null,
+      device: device ? { id: device.id, workspaceIds: device.workspaceIds, needsAnswer: device.needsAnswer, completed: device.completed,
+        active: device.sessionId === principal.sessionId && device.workspaceIds.some(ws => this.options.authorized(device, ws)),
+      } : null,
+    };
+  }
+
+  async enroll(principal: Principal, raw: unknown) {
+    if (!this.sender) throw new NotificationRequestError(503, "configure notifications.contact in the hub configuration first");
+    const body = object(raw);
+    const subscription = parsePushSubscription(body.subscription);
+    if (!subscription) throw new NotificationRequestError(400, "invalid browser push subscription");
+    const preferences = this.preferences(principal, body);
+    if (body.id !== undefined && (typeof body.id !== "string" || body.id.length > 128)) throw new NotificationRequestError(400, "invalid device id");
+    const id = await this.options.store.mutate(data => {
+      const existing = data.devices.find(device => device.id === body.id || device.subscription.endpoint === subscription.endpoint);
+      if (existing && existing.user !== principal.user) throw new NotificationRequestError(409, "subscription belongs to another account; renew it on this device");
+      if (data.devices.some(device => device.subscription.endpoint === subscription.endpoint && device.id !== existing?.id)) throw new NotificationRequestError(409, "subscription is already enrolled");
+      if (!existing && data.devices.filter(device => device.user === principal.user).length >= 32) throw new NotificationRequestError(409, "device limit reached");
+      const sameAuthorization = existing?.sessionId === principal.sessionId;
+      const newCategory = preferences.completed && !existing?.completed || preferences.needsAnswer && !existing?.needsAnswer;
+      const device: NotificationDevice = {
+        ...principal, ...preferences, id: existing?.id ?? randomUUID(), subscription,
+        createdAt: existing?.createdAt ?? this.now(),
+        since: Object.fromEntries(preferences.workspaceIds.map(ws => [ws, sameAuthorization && !newCategory ? existing?.since[ws] ?? this.now() : this.now()])),
+      };
+      data.devices = data.devices.filter(candidate => candidate.id !== device.id);
+      data.devices.push(device);
+      for (const delivery of data.deliveries) {
+        if (delivery.deviceId === device.id && delivery.status === "pending" && (!sameAuthorization || !this.eligible(device, delivery.workspaceId, delivery.notification!))) {
+          delivery.status = "discarded"; delete delivery.notification;
+        }
+      }
+      return device.id;
+    });
+    this.refresh();
+    return this.state(principal, id);
+  }
+
+  async remove(principal: Principal, id: string): Promise<void> {
+    await this.options.store.mutate(data => {
+      const device = data.devices.find(device => device.id === id);
+      if (device && device.user !== principal.user) throw new NotificationRequestError(404, "notification device not found");
+      data.devices = data.devices.filter(device => device.id !== id);
+      for (const delivery of data.deliveries) if (delivery.deviceId === id && delivery.status === "pending") {
+        delivery.status = "discarded"; delete delivery.notification;
+      }
+    });
+    this.refresh();
+  }
+
+  async receive(workspaceId: string, frame: NotificationFrame): Promise<void> {
+    await this.options.store.mutate(data => {
+      this.prune(data);
+      if (frame.type === "event" && frame.event.type === "resolved") {
+        for (const delivery of data.deliveries) if (delivery.workspaceId === workspaceId && delivery.notification?.id === frame.event.id) {
+          delivery.status = "discarded"; delete delivery.notification;
+        }
+      } else if (frame.type === "snapshot") {
+        const pending = new Set(frame.pending.map(notification => notification.id));
+        for (const delivery of data.deliveries) if (delivery.workspaceId === workspaceId && delivery.notification?.kind !== "turn-completed"
+          && delivery.notification && !pending.has(delivery.notification.id)) { delivery.status = "discarded"; delete delivery.notification; }
+        if (frame.reason === "gap") for (const notification of frame.pending) this.enqueue(data, workspaceId, notification);
+      } else if (frame.type === "event" && frame.event.type === "notification") {
+        this.enqueue(data, workspaceId, frame.event.notification);
+      }
+      data.cursors[workspaceId] = frame.cursor;
+    });
+    void this.drain();
+  }
+
+  private enqueue(data: NotificationData, workspaceId: string, notification: AgentNotification): void {
+    if (!validNotification(notification) || this.now() - notification.createdAt >= NOTIFICATION_LIFETIME_MS) return;
+    for (const device of data.devices) {
+      if (!this.eligible(device, workspaceId, notification)) continue;
+      const key = JSON.stringify([workspaceId, device.id, notification.id]);
+      if (data.deliveries.some(delivery => delivery.key === key)) continue;
+      if (data.deliveries.length >= 10_000) throw new Error("notification journal capacity reached");
+      data.deliveries.push({ key, deviceId: device.id, workspaceId, notification, status: "pending", createdAt: notification.createdAt, attempts: 0, nextAttemptAt: this.now() });
+    }
+  }
+
+  private eligible(device: NotificationDevice, workspaceId: string, notification: AgentNotification): boolean {
+    return device.workspaceIds.includes(workspaceId) && this.options.authorized(device, workspaceId)
+      && notification.createdAt >= (device.since[workspaceId] ?? Infinity)
+      && (notification.kind === "turn-completed" ? device.completed : device.needsAnswer);
+  }
+
+  private preferences(principal: Principal, body: Record<string, unknown>): NotificationPreferences {
+    if (!Array.isArray(body.workspaceIds) || body.workspaceIds.length > 256 || body.workspaceIds.some(id => typeof id !== "string" || !this.options.authorized(principal, id))
+      || typeof body.needsAnswer !== "boolean" || typeof body.completed !== "boolean") throw new NotificationRequestError(400, "invalid notification preferences or workspace access");
+    return { workspaceIds: [...new Set(body.workspaceIds as string[])], needsAnswer: body.needsAnswer, completed: body.completed };
+  }
+
+  refresh(): void {
+    if (this.closed || !this.sender) return;
+    const wanted = new Set(this.options.store.snapshot().devices.flatMap(device => device.workspaceIds.filter(ws =>
+      (device.needsAnswer || device.completed) && this.options.authorized(device, ws) && this.options.source.isRunning(ws))));
+    for (const [id, observer] of this.observers) if (!wanted.has(id)) observer.abort.abort();
+    for (const id of wanted) if (!this.observers.has(id)) {
+      const abort = new AbortController();
+      const observer: Observer = { abort, done: Promise.resolve() };
+      this.observers.set(id, observer);
+      observer.done = this.observe(id, abort.signal).finally(() => { if (this.observers.get(id) === observer) this.observers.delete(id); });
+    }
+    void this.drain();
+  }
+
+  private async observe(workspaceId: string, signal: AbortSignal): Promise<void> {
+    let failures = 0;
+    while (!signal.aborted) {
+      try {
+        const cursor = this.options.store.snapshot().cursors[workspaceId];
+        const response = await this.options.source.open({ workspaceId, path: `${CHILD_NOTIFICATIONS_PATH}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, signal });
+        if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error("notification feed unavailable"); }
+        const reader = response.body.getReader();
+        const parser = new SseFrameParser();
+        let buffered = 0;
+        try {
+          while (!signal.aborted) {
+            const next = await reader.read();
+            if (next.done) break;
+            buffered += next.value.byteLength;
+            if (buffered > 2 * 1024 * 1024) throw new Error("notification feed frame too large");
+            const frames = parser.push(next.value);
+            if (frames.length) buffered = 0;
+            for (const frame of frames) {
+              if ("comment" in frame || frame.event !== "notification") continue;
+              const value = JSON.parse(frame.data) as NotificationFrame;
+              if (!validFrame(value)) throw new Error("invalid notification feed frame");
+              await this.receive(workspaceId, value);
+              failures = 0;
+            }
+          }
+        } finally { await reader.cancel().catch(() => {}); }
+      } catch { /* Retry from the last durably recorded cursor. Never log payloads. */ }
+      if (!signal.aborted) await new Promise<void>(resolve => {
+        const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); };
+        const timer = setTimeout(finish, Math.min(1000 * 2 ** Math.min(failures++, 4), 15_000));
+        signal.addEventListener("abort", finish, { once: true });
+      });
+    }
+  }
+
+  drain(): Promise<void> {
+    if (this.draining) { this.drainAgain = true; return this.draining; }
+    this.draining = (async () => {
+      do {
+        this.drainAgain = false;
+        await this.deliver();
+      } while (this.drainAgain && !this.closed);
+    })().catch(() => {}).finally(() => {
+      this.draining = null;
+      if (this.drainAgain && !this.closed) return this.drain();
+    });
+    return this.draining;
+  }
+
+  private async deliver(): Promise<void> {
+    if (!this.sender || this.closed) return;
+    for (const candidate of this.options.store.snapshot().deliveries) {
+      if (this.closed) return;
+      if (candidate.status !== "pending") continue;
+      const latest = this.options.store.snapshot();
+      const delivery = latest.deliveries.find(entry => entry.key === candidate.key);
+      if (!delivery || delivery.status !== "pending" || !delivery.notification) continue;
+      const device = latest.devices.find(device => device.id === delivery.deviceId);
+      const expires = delivery.createdAt + NOTIFICATION_LIFETIME_MS;
+      if (!device || this.now() >= expires || !this.eligible(device, delivery.workspaceId, delivery.notification)) {
+        await this.finish(delivery.key, "discarded"); continue;
+      }
+      if (delivery.nextAttemptAt > this.now()) continue;
+      const notification = delivery.notification;
+      const payload = JSON.stringify({ version: 1, id: createHash("sha256").update(delivery.key).digest("hex"), kind: notification.kind,
+        title: this.options.workspaceName(delivery.workspaceId).slice(0, 120),
+        body: notification.kind === "turn-completed" ? "Agent turn finished" : "An agent needs your answer",
+        url: `/s/${encodeURIComponent(delivery.workspaceId)}/?conversation=${encodeURIComponent(notification.conversationId)}`,
+        createdAt: notification.createdAt,
+      });
+      const result = await this.sender(device.subscription, payload, Math.ceil((expires - this.now()) / 1000));
+      if (result.kind === "accepted") await this.finish(delivery.key, "accepted");
+      else if (result.kind === "gone") await this.remove(device, device.id);
+      else await this.options.store.mutate(data => {
+        const entry = data.deliveries.find(entry => entry.key === delivery.key);
+        if (!entry || entry.status !== "pending") return;
+        entry.attempts += 1;
+        const delay = result.kind === "configuration-error" ? 60_000 : Math.max(result.retryAfterMs ?? 0, Math.min(1000 * 2 ** Math.min(entry.attempts, 5), 30_000));
+        entry.nextAttemptAt = this.now() + delay;
+      });
+    }
+  }
+
+  private finish(key: string, status: "accepted" | "discarded"): Promise<void> {
+    return this.options.store.mutate(data => {
+      const delivery = data.deliveries.find(entry => entry.key === key);
+      if (delivery?.status === "pending") { delivery.status = status; delete delivery.notification; }
+    });
+  }
+
+  private prune(data: NotificationData): void {
+    data.deliveries = data.deliveries.filter(delivery => this.now() - delivery.createdAt < 24 * 60 * 60_000);
+    for (const delivery of data.deliveries) if (delivery.status === "pending" && this.now() - delivery.createdAt >= NOTIFICATION_LIFETIME_MS) {
+      delivery.status = "discarded"; delete delivery.notification;
+    }
+  }
+
+  async dispose(): Promise<void> {
+    this.closed = true;
+    if (this.timer) clearInterval(this.timer);
+    this.unsubscribe?.();
+    for (const observer of this.observers.values()) observer.abort.abort();
+    await Promise.all([...this.observers.values()].map(observer => observer.done));
+    await this.draining;
+    await this.options.store.settled();
+  }
+}
+
+function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function validNotification(value: AgentNotification): boolean {
+  return Boolean(value && typeof value.id === "string" && value.id.length < 4096 && typeof value.conversationId === "string" && value.conversationId.includes(":")
+    && typeof value.sourceId === "string" && ["question-pending", "permission-pending", "turn-completed"].includes(value.kind) && Number.isFinite(value.createdAt));
+}
+function validFrame(value: NotificationFrame): boolean {
+  if (!value || typeof value.cursor !== "string" || value.cursor.length > 1024) return false;
+  if (value.type === "ready") return true;
+  if (value.type === "snapshot") return (value.reason === "initial" || value.reason === "gap") && Array.isArray(value.pending) && value.pending.every(validNotification);
+  return value.type === "event" && Boolean(value.event) && (value.event.type === "notification" ? validNotification(value.event.notification)
+    : value.event.type === "resolved" && typeof value.event.id === "string" && typeof value.event.conversationId === "string");
+}

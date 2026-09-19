@@ -1,5 +1,7 @@
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "./inventory-broadcaster";
+import { NotificationFeed } from "./notification-feed";
+import { qualifyNotificationEvent } from "./notifications";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
 import type {
@@ -77,6 +79,7 @@ export type MultiAgentChatServiceOptions = {
  * status is per-agent. Implemented by the router below and by test fakes.
  */
 export interface MultiAgentWorkspaceChatService {
+  readonly notificationFeed?: NotificationFeed;
   agents(): ChatAgentDescriptor[];
   defaultAgentId(): string;
   status(): Promise<AgentChatStatus[]>;
@@ -127,6 +130,8 @@ export interface MultiAgentWorkspaceChatService {
  * affects only its own entries.
  */
 export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
+  readonly notificationFeed = new NotificationFeed();
+  private readonly notificationUnsubscribes: Array<() => void> = [];
   private readonly agentsById = new Map<string, RegisteredChatAgent>();
   private readonly order: RegisteredChatAgent[];
   private readonly attachmentStore: AttachmentStore;
@@ -165,6 +170,13 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
       this.agentsById.set(agent.descriptor.id, agent);
     }
     this.order = [...options.agents];
+    for (const agent of this.order) {
+      const feed = agent.service.notificationFeed;
+      if (!feed) continue;
+      const publish = (event: import("./notifications").AgentNotificationEvent) => this.notificationFeed.publish(qualifyNotificationEvent(agent.descriptor.id, event));
+      for (const notification of feed.snapshot()) publish({ type: "notification", notification });
+      this.notificationUnsubscribes.push(feed.listen(publish));
+    }
     // The store is workspace state shared across agents — same backing
     // directory the per-agent stacks resolve, one authority for routes.
     this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
@@ -376,6 +388,8 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async readUsage(agentId: string, requestId: string, mode: UsageReadMode): Promise<UsageReadResult> { return this.requireAgent(agentId).service.readUsage(requestId, mode); }
 
   async dispose(): Promise<void> {
+    for (const unsubscribe of this.notificationUnsubscribes) unsubscribe();
+    this.notificationFeed.dispose();
     this.inventoryHub.dispose();
     for (const subscription of [...this.activitySubscriptions]) subscription.cancel();
     await Promise.all(this.order.map(agent => agent.service.dispose().catch(() => undefined)));

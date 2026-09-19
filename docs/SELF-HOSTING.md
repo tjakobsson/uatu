@@ -151,6 +151,50 @@ Browser layout, dock, split, and dimensions remain client-local. Forgetting a
 stopped workspace removes every user's personal record and its credential
 assignments as part of the same coordinated operation.
 
+## Web Push notifications
+
+Add `"notifications": { "contact": "mailto:operator@example.com" }` to the hub
+configuration. An HTTPS contact URL is also accepted. Restart the hub after a
+configuration change. Without this setting, normal use continues and the
+Notifications form explains that sender configuration is required.
+
+Each browser profile or Home Screen installation enrolls independently through
+**Notifications**. Users select workspaces and choose needs-answer and successful
+turn-completion alerts. Newly registered workspaces are not subscribed
+automatically. On iOS/iPadOS 16.4 and later, enrollment requires opening the Home
+Screen installation and responding to the permission prompt from the Enable
+notifications action. Use a trusted HTTPS URL on remote devices.
+
+The hub sends encrypted Web Push requests to browser-issued Apple, Google,
+Mozilla, or Windows push endpoints over HTTPS. Allow outbound access to these
+services when using an egress firewall. The phone does not need an open Uatu
+connection to receive a push; it does need access to the hub when opening the
+conversation. Keep the hub and relevant agent running.
+
+`notifications.json` in the private hub state directory contains the persistent
+VAPID identity, enrollment endpoints/keys, login ownership, preferences, delivery
+journal, and source cursors. Back it up with the rest of that state directory and
+preserve its owner-only permissions. Do not publish it. Restart reuses the keys;
+deleting the file loses the sender identity and requires device re-enrollment.
+Unsent events expire after five minutes. Deduplication records have a bounded
+24-hour retention window. Browser acceptance is not proof that the OS displayed
+an alert immediately, and delivery is not exactly once.
+
+If alerts stop, check the browser/OS permission and Focus settings, hub sender
+configuration, the enrolled workspaces/categories, and whether the enrollment's
+login expired or was revoked. The form reports a missing subscription when the
+device returns. Sign in and explicitly enable again to renew its authorization.
+Another application's root service worker is an enrollment conflict; Uatu does
+not replace it. Close older Uatu pages during an upgrade if they still run legacy
+worker cleanup, then reopen the current version to reconcile registration.
+
+To stop sending during rollback, remove the notification contact configuration
+and restart the hub, or disable enrollment on each device. Retain
+`notifications.json` if returning to this version later. Older binaries can
+remove the root registration through their legacy cleanup, so verify device
+enrollment when upgrading again. The push worker does not intercept requests or
+cache application content offline.
+
 ## Credential setup and migration
 
 The Hub no longer inherits `SSH_AUTH_SOCK`, system GnuPG homes, provider CLI

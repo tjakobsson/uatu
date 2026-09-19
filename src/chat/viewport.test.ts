@@ -25,7 +25,7 @@ describe("chat visual viewport geometry", () => {
         document.querySelector("form")! as unknown as HTMLElement, () => requests++);
       controller.apply();
       expect(requests).toBe(1);
-      expect(document.querySelector("section")!.style.getPropertyValue("--chat-visual-height")).toBe("800px");
+      expect(document.querySelector("section")!.style.getPropertyValue("--chat-visual-height")).toBe("");
       document.documentElement.setAttribute("data-chat-panel", "collapsed");
       controller.apply();
       expect(requests).toBe(1);
@@ -33,6 +33,11 @@ describe("chat visual viewport geometry", () => {
       document.documentElement.setAttribute("data-active-tab", "chat");
       controller.apply();
       expect(requests).toBe(2);
+      expect(document.querySelector("section")!.style.getPropertyValue("--chat-visual-height")).toBe("800px");
+      document.documentElement.setAttribute("data-ui-mode", "desktop");
+      controller.apply();
+      expect(document.querySelector("section")!.style.getPropertyValue("--chat-visual-height")).toBe("");
+      expect(document.querySelector("section")!.style.getPropertyValue("--chat-visual-top")).toBe("");
     } finally {
       if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow); else Reflect.deleteProperty(globalThis, "window");
       if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument); else Reflect.deleteProperty(globalThis, "document");

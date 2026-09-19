@@ -1,0 +1,234 @@
+{
+  "before": {
+    "viewport": {
+      "top": 0,
+      "height": 834,
+      "bottom": 834
+    },
+    "shell": {
+      "top": 0,
+      "bottom": 834,
+      "left": 0,
+      "right": 1194,
+      "height": 834,
+      "width": 1194
+    },
+    "sidebar": {
+      "top": 48,
+      "bottom": 104,
+      "left": 20,
+      "right": 300,
+      "height": 56,
+      "width": 280
+    },
+    "preview": {
+      "top": 24,
+      "bottom": 195.078125,
+      "left": 326,
+      "right": 842.8125,
+      "height": 171.078125,
+      "width": 516.8125
+    },
+    "chat": {
+      "top": 24,
+      "bottom": 120.375,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 96.375,
+      "width": 347.1875
+    },
+    "composer": {
+      "top": 697.828125,
+      "bottom": 814,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 116.171875,
+      "width": 347.1875
+    },
+    "send": {
+      "top": 761.203125,
+      "bottom": 802,
+      "left": 1137.203125,
+      "right": 1178,
+      "height": 40.796875,
+      "width": 40.796875
+    },
+    "scrollY": 0,
+    "shellPosition": "fixed",
+    "composerBottomPadding": "12px"
+  },
+  "accessory": {
+    "viewport": {
+      "top": 0,
+      "height": 790,
+      "bottom": 790
+    },
+    "shell": {
+      "top": 0,
+      "bottom": 790,
+      "left": 0,
+      "right": 1194,
+      "height": 790,
+      "width": 1194
+    },
+    "sidebar": {
+      "top": 48,
+      "bottom": 104,
+      "left": 20,
+      "right": 300,
+      "height": 56,
+      "width": 280
+    },
+    "preview": {
+      "top": 24,
+      "bottom": 195.078125,
+      "left": 326,
+      "right": 842.8125,
+      "height": 171.078125,
+      "width": 516.8125
+    },
+    "chat": {
+      "top": 24,
+      "bottom": 120.375,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 96.375,
+      "width": 347.1875
+    },
+    "composer": {
+      "top": 673.828125,
+      "bottom": 790,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 116.171875,
+      "width": 347.1875
+    },
+    "send": {
+      "top": 737.203125,
+      "bottom": 778,
+      "left": 1137.203125,
+      "right": 1178,
+      "height": 40.796875,
+      "width": 40.796875
+    },
+    "scrollY": 0,
+    "shellPosition": "fixed",
+    "composerBottomPadding": "12px"
+  },
+  "software": {
+    "viewport": {
+      "top": 54,
+      "height": 460,
+      "bottom": 514
+    },
+    "shell": {
+      "top": 54,
+      "bottom": 514,
+      "left": 0,
+      "right": 1194,
+      "height": 460,
+      "width": 1194
+    },
+    "sidebar": {
+      "top": 78,
+      "bottom": 134,
+      "left": 20,
+      "right": 300,
+      "height": 56,
+      "width": 280
+    },
+    "preview": {
+      "top": 54,
+      "bottom": 225.078125,
+      "left": 326,
+      "right": 842.8125,
+      "height": 171.078125,
+      "width": 516.8125
+    },
+    "chat": {
+      "top": 54,
+      "bottom": 150.375,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 96.375,
+      "width": 347.1875
+    },
+    "composer": {
+      "top": 397.828125,
+      "bottom": 514,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 116.171875,
+      "width": 347.1875
+    },
+    "send": {
+      "top": 461.203125,
+      "bottom": 502,
+      "left": 1137.203125,
+      "right": 1178,
+      "height": 40.796875,
+      "width": 40.796875
+    },
+    "scrollY": 0,
+    "shellPosition": "fixed",
+    "composerBottomPadding": "12px"
+  },
+  "restored": {
+    "viewport": {
+      "top": 0,
+      "height": 834,
+      "bottom": 834
+    },
+    "shell": {
+      "top": 0,
+      "bottom": 834,
+      "left": 0,
+      "right": 1194,
+      "height": 834,
+      "width": 1194
+    },
+    "sidebar": {
+      "top": 48,
+      "bottom": 104,
+      "left": 20,
+      "right": 300,
+      "height": 56,
+      "width": 280
+    },
+    "preview": {
+      "top": 24,
+      "bottom": 195.078125,
+      "left": 326,
+      "right": 842.8125,
+      "height": 171.078125,
+      "width": 516.8125
+    },
+    "chat": {
+      "top": 24,
+      "bottom": 120.375,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 96.375,
+      "width": 347.1875
+    },
+    "composer": {
+      "top": 697.828125,
+      "bottom": 814,
+      "left": 846.8125,
+      "right": 1194,
+      "height": 116.171875,
+      "width": 347.1875
+    },
+    "send": {
+      "top": 761.203125,
+      "bottom": 802,
+      "left": 1137.203125,
+      "right": 1178,
+      "height": 40.796875,
+      "width": 40.796875
+    },
+    "scrollY": 0,
+    "shellPosition": "fixed",
+    "composerBottomPadding": "12px"
+  }
+}

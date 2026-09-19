@@ -7,6 +7,7 @@
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.252",
         "@asciidoctor/core": "^4.0.7",
+        "@block65/webcrypto-web-push": "2.0.0",
         "@opencode-ai/sdk": "1.18.30",
         "@pierre/diffs": "1.4.3",
         "@pierre/trees": "1.0.0-beta.6",
@@ -122,6 +123,8 @@
     "@babel/runtime": ["@babel/runtime@7.29.7", "", {}, "sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw=="],
 
     "@babel/types": ["@babel/types@7.29.8", "", { "dependencies": { "@babel/helper-string-parser": "^7.29.7", "@babel/helper-validator-identifier": "^7.29.7" } }, "sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg=="],
+
+    "@block65/webcrypto-web-push": ["@block65/webcrypto-web-push@2.0.0", "", { "dependencies": { "uint8array-extras": "^1.5.0" } }, "sha512-BMrw8hABq5krABWPy3zFJvBC73HeRkyT/GTZ2AD7wqzo9hd9vO56MstBqjGMIxIw3e4lbRUbYxgihCcfhoTI2g=="],
 
     "@braintree/sanitize-url": ["@braintree/sanitize-url@7.1.2", "", {}, "sha512-jigsZK+sMF/cuiB7sERuo9V7N9jx+dhmHHnQyDSVdpZwVutaBu7WvNYqMDLSgFgfB30n452TP3vjDAvFC973mA=="],
 
@@ -1322,6 +1325,8 @@
     "ufo": ["ufo@1.6.4", "", {}, "sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA=="],
 
     "uhyphen": ["uhyphen@0.2.0", "", {}, "sha512-qz3o9CHXmJJPGBdqzab7qAYuW8kQGKNEuoHFYrBwV6hWIMcpAmxDLXojcHfFr9US1Pe6zUswEIJIbLI610fuqA=="],
+
+    "uint8array-extras": ["uint8array-extras@1.5.0", "", {}, "sha512-rvKSBiC5zqCCiDZ9kAOszZcDvdAHwwIKJG33Ykj43OKcWsnmcBRL09YTU4nOeHZ8Y2a7l1MgTd08SBe9A8Qj6A=="],
 
     "ultrahtml": ["ultrahtml@1.7.0", "", {}, "sha512-2xRd0VHoAQE4M+vF/DvFFB7pUV0ZxTW1TLi7lHQWnF/Sb5TPeEUV/l+hxcNnGO00ZXGnR0voCMmYRKQf+rvJ2g=="],
 

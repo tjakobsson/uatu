@@ -47,7 +47,8 @@ src/
 │                   history, url, connection, pwa, follow,
 │                   follow-rules, state, storage, freshness (client/server
 │                   build-identity handshake), ui-mode (per-device
-│                   touch/desktop mode on <html>), tab-bar (touch mode's
+│                   touch/desktop mode on <html>), desktop-viewport (desktop
+│                   visible rectangle and device safe areas), tab-bar (touch mode's
 │                   bottom Files/Preview/Terminal tabs) — the app-wide
 │                   chrome and the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
@@ -86,7 +87,8 @@ src/
 │                   transports + rate limit + CSRF), pages, server, main
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
-├── pwa/            PWA install affordance (asset references only)
+├── pwa/            PWA assets, shared browser notification enrollment UI,
+│                   and the hub's push-only service worker
 └── shared/         html, types, license-check, version
 ```
 

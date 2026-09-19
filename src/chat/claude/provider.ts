@@ -20,6 +20,7 @@ import type { AgentUsageReport, ChatAgent, ChatCommand, ChatMode, ChatModel, Con
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
 import { createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, type ClaudeEventMemory } from "./normalization";
+import { ClaudeNotificationLifecycle } from "./notification-lifecycle";
 import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
 /**
@@ -201,6 +202,7 @@ const TITLE_LIMIT = 80;
 
 type LiveSession = {
   id: string;
+  notificationLifecycle: ClaudeNotificationLifecycle;
   queue: PushQueue<ClaudeUserEnvelope>;
   query: ClaudeQueryHandle;
   reader: Promise<void>;
@@ -803,6 +805,7 @@ export class ClaudeProvider implements ChatProvider {
     // The provider mints the user's timeline item at accept time; the SDK's
     // own echo is skipped by the live normalizer.
     this.emit(sessionId, {
+      notificationTurns: session.notificationLifecycle.accept(input.id, acceptedAt),
       updates: [
         { kind: "upsert", item: {
           id: `message:${input.id}`,
@@ -1038,7 +1041,7 @@ export class ClaudeProvider implements ChatProvider {
         perTaskStopAffordance: true,
       },
     });
-    const session: LiveSession = { id: sessionId, queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0 };
+    const session: LiveSession = { id: sessionId, notificationLifecycle: new ClaudeNotificationLifecycle(), queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0 };
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
     // Observation begins with the conversation's first query in this
@@ -1064,6 +1067,9 @@ export class ClaudeProvider implements ChatProvider {
     memory.rateLimit = this.rateLimitedSessions.get(session.id);
     try {
       for await (const message of session.query) {
+        const resultId = !(message as { parent_tool_use_id?: unknown }).parent_tool_use_id && (message as { type?: unknown; uuid?: unknown }).type === "result" && typeof (message as { uuid?: unknown }).uuid === "string"
+          ? (message as { uuid: string }).uuid : undefined;
+        if (resultId && session.notificationLifecycle.hasResult(resultId)) continue;
         this.captureCommands(message);
         this.trackSessionLevel(session, message, memory);
         const normalized = normalizeClaudeMessage(message, memory, "live", session.id);
@@ -1096,14 +1102,22 @@ export class ClaudeProvider implements ChatProvider {
           && (normalized.eventType === "assistant" || normalized.eventType === "stream_event" || (normalized.eventType === "system" && (message as { subtype?: unknown }).subtype === "init"))) {
           session.unpromptedTurn = true;
           this.clearIdleTimer(session);
-          this.emit(session.id, { updates: [{ kind: "status", status: "running" }], outcome: "handled", eventType: "turn.unprompted" });
+          this.emit(session.id, { updates: [{ kind: "status", status: "running" }], outcome: "handled", eventType: "turn.unprompted",
+            notificationTurns: session.notificationLifecycle.beginFollowup(`followup:${randomUUID()}`, this.now()),
+          });
         }
         // A result that lands after the user cancelled is the cancellation's
         // own echo: report interrupted, not a turn failure.
+        const wasInterrupted = session.interrupted;
         if (session.interrupted && normalized.eventType === "result") {
           session.interrupted = false;
           normalized.updates = normalized.updates.map(update =>
             update.kind === "status" ? { kind: "status", status: "interrupted" } : update);
+        }
+        if (resultId && normalized.outcome === "handled") {
+          const failed = normalized.updates.some(update => update.kind === "status" && update.status === "failed");
+          normalized.notificationTurns = session.notificationLifecycle.finish(resultId,
+            wasInterrupted ? "interrupted" : failed ? "failed" : session.backgroundTasks.size > 0 ? "background" : "completed", this.now());
         }
         this.emit(session.id, normalized);
         // A terminal result ends the turn; an idle conversation holds no

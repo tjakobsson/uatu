@@ -14,6 +14,7 @@
 
 import os from "node:os";
 import path from "node:path";
+import { validPushContact } from "./push-sender";
 
 export const DEFAULT_HUB_PORT = 4700;
 
@@ -34,6 +35,7 @@ export type HubConfig = {
   users: HubUser[];
   // Optional override for the XDG state dir (registry + session store).
   stateDir?: string;
+  notifications?: { contact: string };
 };
 
 export function defaultHubConfigPath(env: Record<string, string | undefined> = process.env): string {
@@ -139,7 +141,15 @@ export function parseHubConfig(raw: unknown): HubConfig {
     stateDir = expandHomePath(record.stateDir);
   }
 
-  return { port, host, tls, users, stateDir };
+  let notifications: HubConfig["notifications"];
+  if (record.notifications !== undefined) {
+    const value = record.notifications as { contact?: unknown } | null;
+    if (!value || typeof value.contact !== "string" || !validPushContact(value.contact)) {
+      throw new Error("hub config: notifications.contact must be a mailto: address or HTTPS contact URL");
+    }
+    notifications = { contact: value.contact };
+  }
+  return { port, host, tls, users, stateDir, ...(notifications ? { notifications } : {}) };
 }
 
 // The no-users startup error doubles as the bootstrap instructions: a

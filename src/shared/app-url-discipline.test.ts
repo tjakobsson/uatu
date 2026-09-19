@@ -39,7 +39,7 @@ const ALLOWED_DIRS = ["src/server/", "src/cli/", "src/watchdog/", "src/debug/", 
 
 // A root-relative URL literal is only an offense when it is not the direct
 // argument of the appUrl() chokepoint.
-const URL_LITERAL = /(?<!appUrl\()["'`]\/(api\/|api["'`]|assets\/|sw\.js|manifest\.webmanifest)/;
+const URL_LITERAL = /(?<!appUrl\()(?<!hubUrl\()["'`]\/(api\/|api["'`]|assets\/|sw\.js|push-worker\.js|manifest\.webmanifest)/;
 
 function* walkTsFiles(dir: string): Generator<string> {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {

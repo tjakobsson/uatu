@@ -123,6 +123,7 @@ await fs.writeFile(
     host: "127.0.0.1",
     users: [{ name: USER.name, passwordHash: hashed.stdout.trim() }],
     stateDir: path.join(tempRoot, "state"),
+    notifications: { contact: "mailto:smoke@example.com" },
   }),
 );
 
@@ -223,6 +224,13 @@ try {
     );
   }
   pass(`compiled hub listens at ${BASE}/`);
+  for (const asset of ["/push-worker.js", "/hub-assets/notifications.js"]) {
+    const response = await fetch(BASE + asset);
+    if (!response.ok || !response.headers.get("content-type")?.includes("javascript") || (await response.text()).length < 100) {
+      throw new BootFailure(`compiled notification asset ${asset} is unavailable`);
+    }
+  }
+  pass("compiled push worker and notification client assets are served without login");
 
   // === Layer 1: HTTP-level checks ===
 
@@ -239,6 +247,9 @@ try {
   const [cookieName, cookieValue] = [cookiePair.slice(0, cookiePair.indexOf("=")), cookiePair.slice(cookiePair.indexOf("=") + 1)];
   const cookie = { cookie: cookiePair };
   pass("hub login returns a session and cookie");
+  const notificationState = await fetch(`${BASE}/api/hub/notifications`, { headers: { authorization: `Bearer ${sessionId}` } }).then(response => response.json()) as { configured: boolean; publicKey: string };
+  if (!notificationState.configured || notificationState.publicKey.length !== 87) throw new BootFailure("compiled notification sender did not initialize");
+  pass("compiled notification sender exposes its persisted VAPID public key");
 
   // Registering starts the session: the hub spawns this same binary as the
   // workspace's child and answers 200 once it serves. Only an explicit

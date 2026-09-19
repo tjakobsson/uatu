@@ -38,6 +38,16 @@ export function appUrl(rootRelativePath: string): string {
   return joinBasePath(appBasePath(), rootRelativePath);
 }
 
+export function isHubPage(): boolean {
+  return typeof document !== "undefined" && document.querySelector('meta[name="uatu-hub"]')?.getAttribute("content") === "true";
+}
+
+export function hubUrl(rootRelativePath: string): string {
+  if (!isHubPage()) throw new Error("hub URL requested outside a hub-served page");
+  if (!rootRelativePath.startsWith("/") || rootRelativePath.startsWith("//")) throw new Error("invalid hub path");
+  return rootRelativePath;
+}
+
 // Extracts the workspace id from a hub-shaped base path ("/s/uatu/" →
 // "uatu"). Null for the default "/" and for prefixes that are not
 // hub-session-shaped. Shared by the workspace switcher and the live channel

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { appBasePath, appDocumentRelativePath, appPathname, appUrl, resetAppBasePathForTests } from "./app-url";
+import { appBasePath, appDocumentRelativePath, appPathname, appUrl, resetAppBasePathForTests, hubUrl, isHubPage } from "./app-url";
 
 // app-url reads the injected meta tag through the global `document`, which
 // bun test does not provide — install a linkedom document per scenario and
@@ -35,6 +35,17 @@ describe("appBasePath", () => {
 });
 
 describe("appUrl", () => {
+  test("a hub-shaped path is not enough to claim origin-wide routes", () => {
+    installDocument("/s/alpha/");
+    expect(isHubPage()).toBe(false);
+    expect(() => hubUrl("/push-worker.js")).toThrow();
+    const meta = document.createElement("meta");
+    meta.name = "uatu-hub"; meta.content = "true"; document.head.append(meta);
+    expect(isHubPage()).toBe(true);
+    expect(hubUrl("/push-worker.js")).toBe("/push-worker.js");
+    expect(appUrl("/api/state")).toBe("/s/alpha/api/state");
+    expect(() => hubUrl("//other.example/worker.js")).toThrow();
+  });
   test("is the identity at the default base path", () => {
     installDocument();
     expect(appUrl("/api/state")).toBe("/api/state");

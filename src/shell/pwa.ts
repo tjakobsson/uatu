@@ -1,10 +1,6 @@
-// Progressive-web-app glue: manifest / icon `<link>` injection. A tiny,
-// runtime-side concern that doesn't really belong in `app.ts` — moved here
-// so the shell keeps the PWA surface together and the caller controls when
-// it runs. There is deliberately no service worker: uatu has nothing useful
-// to do offline (the server must be running), and modern Chromium surfaces
-// its install affordance from a valid manifest alone — which is why the other
-// half of this file exists, to clear the workers older versions installed.
+// Manifest/icon injection and migration of the old pass-through workers.
+// Installation uses the manifest alone. Hub notification enrollment installs
+// a separate push-only worker, which this cleanup must preserve.
 
 import { appBasePath, appUrl } from "../shared/app-url";
 import { joinBasePath } from "../shared/base-path";
@@ -39,16 +35,10 @@ export function injectPwaLinks() {
 
 // --- Legacy service worker cleanup ------------------------------------------
 //
-// TEMPORARY, and deliberately so. Deleting the registration call (and the
-// route it registered) stops NEW installs; it does nothing about the ones
-// already out there. A browser profile that loaded uatu before 0.5.0 still
-// has the pass-through worker installed and controlling its scope, which both
-// fails the pwa-install contract ("getRegistrations() resolves to an empty
-// list") and leaves a stale interceptor sitting in front of every request.
-// Only an explicit unregister() removes it.
-//
-// Remove this section once 0.7.0 ships — by then no reachable profile can
-// predate the removal, and what is left is a call that never matches anything.
+// Removing the old registration call did not remove installed workers from
+// upgraded browser profiles. Clean up those exact pass-through registrations
+// before push enrollment, preserving the current push worker in every stage
+// of activation and leaving unrelated registrations alone.
 
 // The script every uatu worker was registered from, relative to its scope.
 const LEGACY_WORKER_SCRIPT_PATH = "/sw.js";
@@ -88,7 +78,7 @@ export type LegacyWorkerFacts = {
 //
 // The origin root counts even for a session under a base path: a worker scoped
 // to "/" controls the session's pages too, so leaving it installed would leave
-// the contract broken at exactly the URL being loaded.
+// a legacy interceptor at exactly the URL being loaded.
 export function isLegacyUatuWorker(facts: LegacyWorkerFacts, basePath: string): boolean {
   if (!facts.scriptURL) {
     return false;
@@ -108,21 +98,24 @@ export function isLegacyUatuWorker(facts: LegacyWorkerFacts, basePath: string): 
 // outside a secure context — uatu is routinely served over plain HTTP to a LAN
 // address, which is not one — so an unguarded access here would be a new way
 // for boot to fail, on behalf of a cleanup most profiles do not need.
-export function unregisterLegacyServiceWorkers(): void {
-  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+export function unregisterLegacyServiceWorkers(): Promise<void> {
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return Promise.resolve();
   const container = navigator.serviceWorker;
-  if (typeof container?.getRegistrations !== "function") return;
+  if (typeof container?.getRegistrations !== "function") return Promise.resolve();
   const basePath = appBasePath();
-  void container
+  return container
     .getRegistrations()
-    .then(registrations => {
+    .then(async registrations => {
       for (const registration of registrations) {
+        // A new push worker waiting behind the old worker owns this same
+        // registration already. Unregistering would remove its subscription.
+        if ([registration.active, registration.waiting, registration.installing].some(worker => worker && pathnameOf(worker.scriptURL) === "/push-worker.js")) continue;
         // `active` is the usual case; the other two cover a worker caught
         // mid-install, which would otherwise activate right after this ran.
         const worker = registration.active ?? registration.waiting ?? registration.installing;
         const facts = { scope: registration.scope, scriptURL: worker?.scriptURL ?? null };
         if (!isLegacyUatuWorker(facts, basePath)) continue;
-        void registration.unregister().catch(() => {});
+        await registration.unregister().catch(() => {});
       }
     })
     .catch(() => {});
@@ -141,4 +134,3 @@ function pathnameOf(value: string): string | null {
 function withTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
-

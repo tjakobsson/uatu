@@ -1,6 +1,8 @@
 import { captureTerminalToken, waitForWorkspaceCredential } from "./terminal/client";
 import { initHubNav } from "./shell/hub-nav";
 import { injectPwaLinks, unregisterLegacyServiceWorkers } from "./shell/pwa";
+import { mountNotifications } from "./pwa/notification-client.js";
+import { hubUrl, isHubPage, workspaceIdFromBasePath, appBasePath } from "./shared/app-url";
 import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
@@ -20,6 +22,7 @@ import { initFindBar } from "./find/find-bar";
 import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initUiMode } from "./shell/ui-mode";
+import { initDesktopViewport } from "./shell/desktop-viewport";
 import { initTabBar } from "./shell/tab-bar";
 import { initChatPanel } from "./chat/surface";
 import { initChat } from "./chat/ui";
@@ -91,6 +94,7 @@ if (
 // Mode + tab chrome first: everything layout-related keys on the
 // data-ui-mode / data-active-tab attributes these two stamp on <html>.
 initUiMode();
+initDesktopViewport();
 initTabBar();
 initChatPanel();
 
@@ -120,9 +124,13 @@ attachAutoStackObserver();
 captureTerminalToken();
 
 injectPwaLinks();
-// Nothing waits on this: it is housekeeping for profiles that predate 0.5.0,
-// and it is removed once 0.7.0 ships.
+// Boot does not wait for cleanup. Notification enrollment awaits cleanup
+// before registering the current push worker.
 unregisterLegacyServiceWorkers();
+if (isHubPage()) mountNotifications({
+  apiUrl: hubUrl("/api/hub/notifications"), stateUrl: hubUrl("/api/hub/state"), workerUrl: hubUrl("/push-worker.js"),
+  workspaceId: workspaceIdFromBasePath(appBasePath()), hosts: ".sidebar-header, .sidebar-rail", beforeRegister: unregisterLegacyServiceWorkers,
+});
 attachPopstateHandler();
 
 void loadInitialState(() => {

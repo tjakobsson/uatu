@@ -15,6 +15,7 @@ import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsuppor
 import { AttachmentStoreError } from "../chat/attachment-store";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
+import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
 import { HistoryChangedError } from "../chat/history-reuse";
 import { resolveStartupTimeoutMs } from "../chat/opencode/opencode-service";
 import { ChatUnavailableError } from "../chat/service";
@@ -535,6 +536,33 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
           request.signal.removeEventListener("abort", onAbort);
           return normalizedChatError(error);
         }
+      },
+    },
+    [p(CHILD_NOTIFICATIONS_PATH)]: {
+      GET: (request: Request) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const feed = deps.chatService.notificationFeed;
+        if (!feed) return chatError(503, "notification feed unavailable");
+        const cursor = optionalBounded(new URL(request.url).searchParams.get("cursor"), "cursor", CHAT_CURSOR_LIMIT);
+        if (cursor instanceof Response) return cursor;
+        const subscription = feed.subscribe(cursor, request.signal);
+        const encoder = new TextEncoder();
+        let pending: Promise<IteratorResult<NotificationFrame>> | null = null;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(encoder.encode(": open\n\n")); },
+          async pull(controller) {
+            try {
+              pending ??= subscription.next();
+              const result = await nextChatEvent(pending, keepaliveMs);
+              if (result === "keepalive") { controller.enqueue(encoder.encode(": keepalive\n\n")); return; }
+              pending = null;
+              if (result.done) { controller.close(); return; }
+              controller.enqueue(encoder.encode(`event: notification\nid: ${result.value.cursor}\ndata: ${JSON.stringify(result.value)}\n\n`));
+            } catch { subscription.cancel(); try { controller.close(); } catch {} }
+          },
+          cancel() { subscription.cancel(); },
+        }, { highWaterMark: 0 }), { headers: { "content-type": "text/event-stream", "cache-control": "no-store, no-transform", "x-accel-buffering": "no" } });
       },
     },
     [p("/api/chat/status")]: {

@@ -48,7 +48,7 @@ import {
   type TerminalPaneRecord,
 } from "./pane-state";
 import { composeStickyCtrl, createStickyCtrl } from "./sticky-ctrl";
-import { createVisualViewportSizer } from "./visual-viewport";
+import { createVisualViewportSizer } from "../shared/visual-viewport";
 import { presentationLocalStorage, presentationSessionStorage } from "../shell/presentation-storage";
 import { persistPersonalWorkspaceState } from "../shell/personal-state";
 import { onUiModeChange, uiMode } from "../shell/ui-mode";

@@ -1,5 +1,7 @@
 schemaVersion: 1
 exclusions:
+  - { id: hub-push-worker, scope: hub, methods: [GET], path: /push-worker.js, reason: push-only service worker asset }
+  - { id: workspace-notification-stream-refused, scope: workspace, methods: [GET], path: "/s/{workspaceId}/api/chat/notifications/events", reason: "internal child-to-hub notification feed; not proxied to browser clients" }
   - { id: hub-login-page, scope: hub, methods: [GET], path: /login, reason: browser HTML flow }
   - { id: hub-form-login, scope: hub, methods: [POST], path: /login, condition: content-type is not application/json, reason: browser HTML form variant }
   - { id: hub-cookie-logout, scope: hub, methods: [POST], path: /logout, condition: cookie or absent credential transport, reason: browser redirect variant (303 + cookie clear, also for credential-less requests); bearer JSON operation is public }
@@ -23,4 +25,4 @@ exclusions:
   - { id: e2e-chat, scope: test, methods: [POST], path: /__e2e/chat, reason: test-only chat fixture control }
   - { id: e2e-personal-state, scope: test, methods: [GET, PATCH], path: /api/personal-state, reason: direct-child test substitute for the Hub's public personal-state operations }
   - { id: direct-child-api, scope: workspace, methods: [GET, POST, PATCH, DELETE], pathPattern: /api/*, reason: "internal Hub-to-child protocol on the child's loopback listener, reached only through the Hub. It includes the SSE routes the Hub's live broker subscribes to (/api/events, /api/chat/conversations/events, /api/chat/conversations/{conversationId}/events) and the workspace activity stream (/api/activity)" }
-  - { id: unsupported-methods, scope: all, methods: [OPTIONS, PUT, TRACE], pathPattern: "*", reason: no supported public operations; undocumented methods on documented paths likewise reject (405 or 404) without a documented contract }
+  - { id: unsupported-methods, scope: all, methods: [OPTIONS, TRACE], pathPattern: "*", reason: no supported public operations; undocumented methods on documented paths likewise reject (405 or 404) without a documented contract }
