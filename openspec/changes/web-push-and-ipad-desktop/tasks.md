@@ -59,7 +59,7 @@
 
 - [x] 9.1 Regenerate the existing PWA icons with opaque backgrounds, preserved aspect ratio, and maskable-safe padding; verify the generated pixels with the icon generator's check mode and inspect the rendered artwork.
 - [x] 9.2 Update hub/workspace manifest and Apple touch-icon metadata to use the revised icon URLs; verify HTTP serving, browser pixel checks, and consistency of the shared revision.
-- [ ] 9.3 Run focused checks and the compiled smoke test, then update PR #400 with the icon correction and the user's successful phone push report.
+- [x] 9.3 Run focused checks and the compiled smoke test, then update PR #400 with the icon correction and the user's successful phone push report.
 
 ## Execution notes
 
@@ -67,6 +67,7 @@
 - Task 7.1 remains pending. Browser enrollment tests simulate permission and PushManager responses; sender tests use fake transports. Neither establishes real OS push delivery to a locked iPhone/iPad.
 - The user subsequently confirmed that phone notifications work after the sender-configuration/enrollment troubleshooting. This records that reported phone result; the broader platform/provider acceptance matrix in task 7.1 remains pending. The same device-testing exchange reported the transparent, edge-to-edge Home Screen icon, addressed by section 9.
 - Icon verification: the old 192px image failed the opacity/safe-area check with 19,159 non-opaque pixels. Both regenerated sizes pass `bun run generate:pwa-icons --check`; 110 focused unit/integration tests, six PWA browser tests, TypeScript, build, compiled smoke, and strict OpenSpec validation passed. The old 512px icon blob is identical in `v0.7.0` and the pre-correction PR head, confirming this icon defect exists in the latest stable release.
+- The icon fix is pushed as `210f9d3`; PR #400's title and follow-up comment include the icon correction, rendered preview, verification results, cache-refresh guidance, and the user's phone push success report.
 - PR preparation is now requested. The latest stable tag is `v0.7.0`; its desktop shell still uses `100vh`, and only touch chat consumes the visual-viewport dimensions. The iPad correction therefore addresses stable-release behavior and should remain visible in release notes. Physical acceptance is assigned to the user as part of PR testing.
 - PR [#400](https://github.com/tjakobsson/uatu/pull/400) contains the implementation summary, automated verification, stable-release classification, screenshot evidence, configuration instructions, and an unchecked manual-device checklist. Tasks 1.1, 7.1, and 7.2 remain open for the user's PR testing.
 - Unit verification: `bun run typecheck` passed. The full `bun test` run with a clean tool PATH passed 3,431 tests, skipped 10, and failed none. The initial inherited environment exposed the documented projected Git/SSH wrappers; product credential behavior was not changed for that environment.
@@ -78,4 +79,4 @@
 - The iPad safe-area/viewport correction is implemented. Tasks 1.1 and 7.2 remain manual physical-device checks, not remaining implementation work. Verify the top headers before and after focusing the composer with Magic Keyboard, keyboard dismissal, rotation, and switching modes.
 - During PR testing, the user supplied physical-iPad screenshots with runtime build badge `d8392fc`, before and after focusing the composer. The preview/chat headers stay in place and clear of the earlier top blur while the Magic Keyboard accessory bar appears; the composer remains above it. The pair also exposed the new Notifications button crowding the brand row. That control now has its own sidebar row, a bell in the collapsed rail, and Chromium/WebKit coverage at 280px, 320px, and 360px sidebar widths and in the touch Files tab. The remaining physical rotation, dismissal, software-keyboard, and real push-delivery checks are still pending.
 - PR-time evidence was assembled with `UATU_E2E_SCREENSHOTS_DIR=openspec/changes/web-push-and-ipad-desktop/screenshots bun run test:e2e tests/e2e/ipad-desktop-viewport.e2e.ts --workers=1`: all eight cases passed. Four screenshots and two geometry reports are included with the change. They are controlled browser evidence, not physical-device confirmation.
-- Strict OpenSpec validation and `git diff --check` passed. The change remains open for physical-device acceptance and PR preparation.
+- Strict OpenSpec validation and `git diff --check` passed. The change remains open for the remaining physical-device acceptance checks.
