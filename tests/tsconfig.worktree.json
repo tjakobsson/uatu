@@ -7,6 +7,7 @@
     "e2e/evidence.ts",
     "e2e/hub-fixtures.ts",
     "e2e/hub-server.ts",
+    "e2e/hub-nav-bounds.e2e.ts",
     "e2e/worktree-integration.e2e.ts",
     "e2e/worktree-ui.e2e.ts"
   ]

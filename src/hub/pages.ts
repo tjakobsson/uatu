@@ -74,10 +74,15 @@ const SHARED_STYLE = `
      --titlebar-inset on <html>; pad below it so nothing renders under the
      native chrome. Plain browsers see the 0px default. */
   main { position: relative; max-width: 680px; margin: 0 auto; padding: calc(2.5rem + var(--titlebar-inset, 0px)) 1.25rem 4rem; }
-  .hub-nav { display: flex; align-items: center; justify-content: center; gap: 0.35rem; margin: -1.25rem 0 1.5rem; }
+  .hub-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.35rem; margin: -1.25rem 0 1.5rem; }
   .hub-nav a { padding: 0.3rem 0.65rem; border-radius: 0.375rem; color: var(--text-subtle); font-size: 0.78rem; font-weight: 600; }
   .hub-nav a:hover { background: var(--surface-muted); color: var(--text-strong); text-decoration: none; }
   .hub-nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+  /* Notification enrollment mounts another action at runtime. Wrap rather
+     than widening the page (and shifting fixed dialogs off phone screens). */
+  @media (max-width: 600px) {
+    .hub-nav a, .hub-nav button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; }
+  }
   .sign-out { margin: 0; }
   .sign-out button {
     background: transparent;

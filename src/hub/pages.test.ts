@@ -11,6 +11,17 @@ const htmlFor = {
   settings: () => settingsPage("alice"),
 };
 
+test("authenticated navigation wraps dynamic notifications without losing labelled actions", () => {
+  for (const render of Object.values(htmlFor)) {
+    const html = render();
+    expect(html).toMatch(/\.hub-nav \{[^}]*flex-wrap: wrap/);
+    expect(html).toContain('.hub-nav a, .hub-nav button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; }');
+    expect(html).toContain('hosts: ".hub-nav"');
+    const nav = parseHTML(html).document.querySelector(".hub-nav")!;
+    expect([...nav.querySelectorAll("a, button")].map(node => node.textContent)).toEqual(["Dashboard", "Add workspace", "Settings", "Sign out"]);
+  }
+});
+
 function documentFor(page: keyof typeof htmlFor) {
   return parseHTML(htmlFor[page]()).document;
 }
