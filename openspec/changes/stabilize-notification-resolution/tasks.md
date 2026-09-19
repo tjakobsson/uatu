@@ -15,4 +15,4 @@
 
 - [x] 3.1 Sync the two delta scenarios into `openspec/specs/web-push-notifications/spec.md` at archive time; until then verify `openspec validate stabilize-notification-resolution` reports the change valid.
 - [x] 3.2 Run `bun test` and the notification-related e2e file(s) (`tests/e2e/*notification*`); verify a green run and that the enrollment dialog's existing error-path e2e still shows a server message without an "enabled" state.
-- [ ] 3.3 Close #404 with the reasoning from the proposal (option 3) and link this change's PR from #402 and #403. Verify the three issues reference the PR.
+- [x] 3.3 Close #404 with the reasoning from the proposal (option 3) and link this change's PR from #402 and #403. Verify the three issues reference the PR.
