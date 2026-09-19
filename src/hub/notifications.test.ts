@@ -280,6 +280,23 @@ test("only the stalled running workspace is named and stopped workspaces never w
   expect(f.opens()).toBe(1);
 });
 
+test("an enrollment during the feed's reconnect backoff is refused, not settled on the lost stream", async () => {
+  const f = await fixture(); f.run();
+  // The first device connects to a stream that delivers one frame and ends; the observer is now in its backoff.
+  f.batch([occurrence("seen", f.now())]);
+  await f.enroll("phone");
+  expect(f.opens()).toBe(1);
+  f.stall();
+  await expect(f.enroll("desktop")).rejects.toMatchObject({ status: 503, message: expect.stringContaining("Project") });
+  expect(f.store.snapshot().devices.map(device => device.subscription.endpoint)).toEqual(["https://web.push.apple.com/phone"]);
+  f.release();
+  // The observer reconnects when its backoff ends; a retry then joins that stream's position.
+  for (let i = 0; i < 600 && f.opens() < 2; i++) await Bun.sleep(5);
+  const enrolled = await f.enroll("desktop");
+  expect(enrolled.device?.active).toBe(true);
+  expect(f.opens()).toBe(2);
+});
+
 test("a refused update leaves the existing device record untouched", async () => {
   const f = await fixture();
   await f.enroll("phone", { completed: false });

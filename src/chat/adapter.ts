@@ -548,11 +548,14 @@ export class ChatAdapter {
         // answered elsewhere while its only live signal was missed.
         const live = new Set(pendingNow.map(item => item.id));
         const projection = this.projection(id);
+        const retired: NormalizedProviderUpdate[] = [];
         for (const existing of projection.items()) {
           if (existing.type !== "question" || existing.status !== "pending" || live.has(existing.id)) continue;
           projection.apply({ kind: "remove", itemId: existing.id });
           this.questionCreatedAt.delete(existing.id);
+          retired.push({ kind: "remove", itemId: existing.id });
         }
+        await this.resolveRetired(id, retired, "questions.refreshed");
       }
       if (pendingNow.length > 0) {
         this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
@@ -597,11 +600,14 @@ export class ChatAdapter {
       if (this.provider.listPermissions) {
         const live = new Set(pendingNow.map(item => item.id));
         const projection = this.projection(id);
+        const retired: NormalizedProviderUpdate[] = [];
         for (const existing of projection.items()) {
           if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id)) continue;
           projection.apply({ kind: "remove", itemId: existing.id });
           this.permissionCreatedAt.delete(existing.id);
+          retired.push({ kind: "remove", itemId: existing.id });
         }
+        await this.resolveRetired(id, retired, "permissions.refreshed");
       }
     } catch {
       // Unknown, not empty. `seed` replaces the timeline from history, and
@@ -2431,6 +2437,18 @@ export class ChatAdapter {
       catch { /* a failed refresh leaves the next tool update to retry */ }
       finally { this.questionRefreshes.delete(conversationId); }
     })();
+  }
+
+  /**
+   * A request an authoritative read retired from the timeline is resolved for
+   * notifications too — otherwise the card disappears while the tracker
+   * keeps announcing it as pending. Best effort: the tracker's lifetime is
+   * the backstop, and a failed lookup must not turn a successful read into a
+   * failed one.
+   */
+  private async resolveRetired(conversationId: string, updates: NormalizedProviderUpdate[], eventType: string): Promise<void> {
+    if (updates.length === 0) return;
+    await this.observeNotifications({ conversationId, updates, outcome: "handled", eventType }).catch(() => {});
   }
 
   private async observeNotifications(event: NormalizedProviderEvent): Promise<void> {

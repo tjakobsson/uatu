@@ -213,9 +213,13 @@ export class HubNotifications {
 
   private async observe(workspaceId: string, signal: AbortSignal, observer: Observer): Promise<void> {
     let failures = 0;
+    let connect = () => {};
+    // The feed position is known only while a stream is delivering frames. The promise is replaced the moment a stream
+    // ends — before the backoff, not at the next attempt — so an enrollment during the outage waits for the reconnect
+    // instead of reading the previous connection as settled.
+    const disconnect = () => { observer.connected = new Promise<void>(resolve => { connect = resolve; }); };
+    disconnect();
     while (!signal.aborted) {
-      let connect = () => {};
-      observer.connected = new Promise<void>(resolve => { connect = resolve; });
       try {
         const cursor = this.options.store.snapshot().cursors[workspaceId];
         const response = await this.options.source.open({ workspaceId, path: `${CHILD_NOTIFICATIONS_PATH}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, signal });
@@ -244,6 +248,7 @@ export class HubNotifications {
           }
         } finally { await reader.cancel().catch(() => {}); }
       } catch { /* Retry from the last durably recorded cursor. Never log payloads. */ }
+      disconnect();
       if (!signal.aborted) await new Promise<void>(resolve => {
         const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); };
         const timer = setTimeout(finish, Math.min(1000 * 2 ** Math.min(failures++, 4), 15_000));

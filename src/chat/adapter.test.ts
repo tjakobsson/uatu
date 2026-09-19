@@ -2716,6 +2716,37 @@ describe("pending permission recovery", () => {
     await adapter.dispose();
   });
 
+  test("a history read that retires a child's request resolves the child's identity", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let questions = [{
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    let permissions = [{ requestId: "perm_child", conversationId: "child", action: "shell", resources: ["ls"] }];
+    provider.listQuestions = async () => questions;
+    provider.listPermissions = async () => permissions;
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    // Announced live: the question through the parent's sweep, the permission on the child's own stream.
+    provider.eventQueue.push({ id: "t0", type: "session.next.tool.success", data: { sessionID: "parent", callID: "c0", tool: "question" } } as never);
+    provider.eventQueue.push({ type: "permission.v2.asked", data: { id: "perm_child", sessionID: "child", action: "shell", resources: ["ls"], timestamp: Date.now() } } as never);
+    await waitUntil(() => events.filter(event => event.type === "notification").length === 2);
+    await adapter.stopEventPump();
+    await pump;
+    const announced = events.flatMap(event => event.type === "notification" ? [event.notification] : []);
+    expect(announced.map(notification => notification.sourceId).sort()).toEqual([JSON.stringify(["child", "perm_child"]), JSON.stringify(["child", "que_child"])]);
+    // Both answered elsewhere with the reply events lost; opening the
+    // transcripts is the next authoritative read.
+    questions = []; permissions = [];
+    await adapter.history("parent");
+    await adapter.history("child");
+    expect(events.flatMap(event => event.type === "resolved" ? [event.id] : []).sort()).toEqual(announced.map(notification => notification.id).sort());
+    await adapter.dispose();
+  });
+
   test("answering a child's question or permission from the parent resolves the child's identity", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
