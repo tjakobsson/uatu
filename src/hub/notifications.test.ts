@@ -253,6 +253,8 @@ test("enrolling on a running workspace stamps the cutoff after the feed position
   expect(f.store.snapshot().devices[0]?.since.workspace).toEqual({ needsAnswer: f.now(), completed: f.now() });
   f.feed.publish(turn("after-cursor"));
   for (let i = 0; i < 200 && f.sends.length < 1; i++) await Bun.sleep(2);
+  // The send is observed before its outcome is journaled; join the pass that records it.
+  await f.hub.drain();
   expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["after-cursor", "accepted"]]);
 });
 
@@ -270,6 +272,8 @@ test("a running workspace whose feed does not answer refuses enrollment without 
   expect(f.store.snapshot().devices[0]?.since.workspace).toEqual({ needsAnswer: f.now(), completed: f.now() });
   f.feed.publish(turn("after-cursor"));
   for (let i = 0; i < 200 && f.sends.length < 1; i++) await Bun.sleep(2);
+  // The send is observed before its outcome is journaled; join the pass that records it.
+  await f.hub.drain();
   expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["after-cursor", "accepted"]]);
 });
 
