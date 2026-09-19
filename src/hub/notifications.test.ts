@@ -25,15 +25,19 @@ async function fixture() {
   const store = new NotificationStore(file); await store.load();
   let now = 1000;
   let authorized = true;
+  const sessions = new Set(["session-one"]);
   let result: PushSendResult = { kind: "accepted" };
+  const results = new Map<string, PushSendResult>();
   const sends: Array<{ endpoint: string; payload: string; ttl: number }> = [];
   const gates = new Map<string, Promise<void>>();
-  const sender: PushSender = async (device, payload, ttl) => { sends.push({ endpoint: device.endpoint, payload, ttl }); await gates.get(device.endpoint); return result; };
+  const sender: PushSender = async (device, payload, ttl) => {
+    sends.push({ endpoint: device.endpoint, payload, ttl }); await gates.get(device.endpoint); return results.get(device.endpoint) ?? result;
+  };
   const feed = new NotificationFeed(() => now);
   let running = false;
   let opens = 0;
   const hub = new HubNotifications({ store, sender, now: () => now, workspaceName: () => "Project",
-    authorized: (user, ws) => authorized && user.user === "one" && user.sessionId === "session-one" && ws === "workspace",
+    authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && ws === "workspace",
     source: {
       isRunning: () => running, workspaceIds: () => ["workspace"],
       open: async request => {
@@ -52,8 +56,9 @@ async function fixture() {
   cleanup.push(() => hub.dispose());
   return { store, hub, file, sends, feed, opens: () => opens, run: () => { running = true; }, tick: (ms: number) => { now += ms; }, now: () => now,
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
+    sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
     hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },
-    enroll: (id = "phone", preferences = {}) => hub.enroll(principal, { subscription: subscription(id), workspaceIds: ["workspace"], needsAnswer: true, completed: true, ...preferences }),
+    enroll: (id = "phone", preferences = {}, as = principal) => hub.enroll(as, { subscription: subscription(id), workspaceIds: ["workspace"], needsAnswer: true, completed: true, ...preferences }),
   };
 }
 
@@ -186,6 +191,35 @@ test("a hung endpoint does not hold other devices' sends", async () => {
   release(); await f.hub.drain();
   expect(status(slow)).toBe("accepted");
   expect(f.sends).toHaveLength(2);
+});
+
+test("a gone answer from a replaced endpoint does not retire the re-enrolled device", async () => {
+  const f = await fixture();
+  const id = (await f.enroll("old")).device!.id;
+  const release = f.hold("old");
+  await f.hub.receive("workspace", occurrence("q", f.now()));
+  for (let i = 0; i < 200 && f.sends.length < 1; i++) await Bun.sleep(2);
+  await f.enroll("new", { id });
+  f.resultFor("old", { kind: "gone" });
+  release(); await f.hub.drain();
+  expect(f.store.snapshot().devices.map(device => device.subscription.endpoint)).toEqual(["https://web.push.apple.com/new"]);
+  expect(f.sends.map(send => send.endpoint)).toEqual(["https://web.push.apple.com/old", "https://web.push.apple.com/new"]);
+  expect(f.store.snapshot().deliveries).toMatchObject([{ status: "accepted" }]);
+  f.resultFor("new", { kind: "gone" });
+  await f.hub.receive("workspace", occurrence("q2", f.now())); await f.hub.drain();
+  expect(f.store.snapshot().devices).toEqual([]);
+});
+
+test("retired enrollments whose login lapsed give way before the device limit refuses a live one", async () => {
+  const f = await fixture();
+  f.sessions.add("session-old");
+  const old = { user: "one", sessionId: "session-old" };
+  for (let i = 0; i < 32; i++) await f.enroll(`retired-${i}`, {}, old);
+  await expect(f.enroll("live")).rejects.toMatchObject({ status: 409 });
+  f.sessions.delete("session-old");
+  const live = await f.enroll("live");
+  expect(live.device?.active).toBe(true);
+  expect(f.store.snapshot().devices.map(device => device.subscription.endpoint)).toEqual(["https://web.push.apple.com/live"]);
 });
 
 test("pre-release enrollments with one cutoff per workspace load as both categories", async () => {

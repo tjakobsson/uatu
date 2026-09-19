@@ -13,6 +13,7 @@ type Principal = { user: string; sessionId: string };
 type Observer = { abort: AbortController; done: Promise<void> };
 const JOURNAL_CAPACITY = 10_000;
 const SEND_CONCURRENCY = 8;
+const DEVICE_LIMIT = 32;
 
 export class HubNotifications {
   private readonly sender: PushSender | null;
@@ -52,7 +53,7 @@ export class HubNotifications {
     return {
       configured: this.sender !== null, publicKey: this.sender ? data.keys.publicKey : null,
       device: device ? { id: device.id, workspaceIds: device.workspaceIds, needsAnswer: device.needsAnswer, completed: device.completed,
-        active: device.sessionId === principal.sessionId && device.workspaceIds.some(ws => this.options.authorized(device, ws)),
+        active: device.sessionId === principal.sessionId && this.active(device),
       } : null,
     };
   }
@@ -68,7 +69,11 @@ export class HubNotifications {
       const existing = data.devices.find(device => device.id === body.id || device.subscription.endpoint === subscription.endpoint);
       if (existing && existing.user !== principal.user) throw new NotificationRequestError(409, "subscription belongs to another account; renew it on this device");
       if (data.devices.some(device => device.subscription.endpoint === subscription.endpoint && device.id !== existing?.id)) throw new NotificationRequestError(409, "subscription is already enrolled");
-      if (!existing && data.devices.filter(device => device.user === principal.user).length >= 32) throw new NotificationRequestError(409, "device limit reached");
+      if (!existing && data.devices.filter(device => device.user === principal.user).length >= DEVICE_LIMIT) {
+        // Retired browsers leave records nobody can remove once their login lapses; those give way before the limit refuses a live device.
+        for (const device of data.devices.filter(device => device.user === principal.user && !this.active(device))) this.forget(data, device.id);
+        if (data.devices.filter(device => device.user === principal.user).length >= DEVICE_LIMIT) throw new NotificationRequestError(409, "device limit reached");
+      }
       const sameAuthorization = existing?.sessionId === principal.sessionId;
       // A category keeps its cutoff only while it stays enabled under the same login; anything newly enabled starts now.
       const device: NotificationDevice = {
@@ -94,12 +99,20 @@ export class HubNotifications {
     await this.options.store.mutate(data => {
       const device = data.devices.find(device => device.id === id);
       if (device && device.user !== principal.user) throw new NotificationRequestError(404, "notification device not found");
-      data.devices = data.devices.filter(device => device.id !== id);
-      for (const delivery of data.deliveries) if (delivery.deviceId === id && delivery.status === "pending") {
-        delivery.status = "discarded"; delete delivery.notification;
-      }
+      this.forget(data, id);
     });
     this.refresh();
+  }
+
+  private forget(data: NotificationData, id: string): void {
+    data.devices = data.devices.filter(device => device.id !== id);
+    for (const delivery of data.deliveries) if (delivery.deviceId === id && delivery.status === "pending") {
+      delivery.status = "discarded"; delete delivery.notification;
+    }
+  }
+
+  private active(device: NotificationDevice): boolean {
+    return device.workspaceIds.some(ws => this.options.authorized(device, ws));
   }
 
   async receive(workspaceId: string, frame: NotificationFrame): Promise<void> {
@@ -245,7 +258,13 @@ export class HubNotifications {
     });
     const result = await this.sender(device.subscription, payload, Math.ceil((expires - this.now()) / 1000));
     if (result.kind === "accepted") await this.finish(key, "accepted");
-    else if (result.kind === "gone") await this.remove(device, device.id);
+    else if (result.kind === "gone") {
+      // A re-enrollment may have replaced the subscription while this send was in flight; only the endpoint that answered is gone.
+      await this.options.store.mutate(data => {
+        if (data.devices.find(entry => entry.id === device.id)?.subscription.endpoint === device.subscription.endpoint) this.forget(data, device.id);
+      });
+      this.refresh();
+    }
     else await this.options.store.mutate(data => {
       const entry = data.deliveries.find(entry => entry.key === key);
       if (!entry || entry.status !== "pending") return;
