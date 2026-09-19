@@ -214,10 +214,16 @@ export class HubNotifications {
   private async observe(workspaceId: string, signal: AbortSignal, observer: Observer): Promise<void> {
     let failures = 0;
     let connect = () => {};
-    // The feed position is known only while a stream is delivering frames. The promise is replaced the moment a stream
-    // ends — before the backoff, not at the next attempt — so an enrollment during the outage waits for the reconnect
-    // instead of reading the previous connection as settled.
-    const disconnect = () => { observer.connected = new Promise<void>(resolve => { connect = resolve; }); };
+    // The feed position is known only while a stream is delivering frames. A resolved promise is replaced the moment
+    // its stream ends — before the backoff, not at the next attempt — so an enrollment during the outage waits for the
+    // reconnect instead of reading the previous connection as settled. A promise still pending is kept: an attempt that
+    // failed before any frame changes nothing, and waiters already attached must see the retry that answers.
+    let pending = false;
+    const disconnect = () => {
+      if (pending) return;
+      pending = true;
+      observer.connected = new Promise<void>(resolve => { connect = () => { pending = false; resolve(); }; });
+    };
     disconnect();
     while (!signal.aborted) {
       try {

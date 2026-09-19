@@ -18,7 +18,7 @@ function subscription(id: string) {
 const occurrence = (id: string, createdAt: number, kind: "question-pending" | "turn-completed" = "question-pending"): NotificationFrame => ({
   type: "event", cursor: `epoch:${id}`, event: { type: "notification", notification: { id, sourceId: id, conversationId: "opencode:conversation", kind, createdAt } },
 });
-async function fixture() {
+async function fixture(options: { settleTimeoutMs?: number } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "uatu-notifications-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const file = path.join(root, "notifications.json");
@@ -40,12 +40,14 @@ async function fixture() {
   let onOpen = () => {};
   // A hung feed answers only when released, or rejects when the hub gives up on it.
   let stalled: Array<{ resolve: () => void; signal?: AbortSignal }> | null = null;
-  const hub = new HubNotifications({ store, sender, now: () => now, settleTimeoutMs: 50, workspaceName: ws => ws === "workspace" ? "Project" : "Other",
+  let failOpens = 0;
+  const hub = new HubNotifications({ store, sender, now: () => now, settleTimeoutMs: options.settleTimeoutMs ?? 50, workspaceName: ws => ws === "workspace" ? "Project" : "Other",
     authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && (ws === "workspace" || ws === "other"),
     source: {
       isRunning: ws => running.has(ws), workspaceIds: () => ["workspace", "other"],
       open: async request => {
         opens += 1; onOpen();
+        if (failOpens > 0) { failOpens -= 1; return new Response(null, { status: 503 }); }
         if (stalled) await new Promise<void>((resolve, reject) => {
           stalled!.push({ resolve, signal: request.signal });
           request.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
@@ -64,7 +66,7 @@ async function fixture() {
   });
   cleanup.push(() => hub.dispose());
   return { store, hub, file, sends, feed, opens: () => opens, run: (ws = "workspace") => { running.add(ws); }, tick: (ms: number) => { now += ms; }, now: () => now,
-    stall: () => { stalled = []; }, release: () => { const waiting = stalled ?? []; stalled = null; for (const entry of waiting) entry.resolve(); },
+    failNextOpen: () => { failOpens += 1; }, stall: () => { stalled = []; }, release: () => { const waiting = stalled ?? []; stalled = null; for (const entry of waiting) entry.resolve(); },
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
     batch: (frames: NotificationFrame[]) => { batch = frames; }, onOpen: (hook: () => void) => { onOpen = hook; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
     hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },
@@ -295,6 +297,14 @@ test("an enrollment during the feed's reconnect backoff is refused, not settled 
   const enrolled = await f.enroll("desktop");
   expect(enrolled.device?.active).toBe(true);
   expect(f.opens()).toBe(2);
+});
+
+test("a settle that spans a failed first attempt is answered by the retry within the bound", async () => {
+  const f = await fixture({ settleTimeoutMs: 3000 }); f.run(); f.failNextOpen();
+  const enrolled = await f.enroll();
+  expect(enrolled.device?.active).toBe(true);
+  expect(f.opens()).toBe(2);
+  expect(f.store.snapshot().cursors.workspace).toBeDefined();
 });
 
 test("a refused update leaves the existing device record untouched", async () => {
