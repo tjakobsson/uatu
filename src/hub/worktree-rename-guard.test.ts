@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { promises as nodeFs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -77,6 +78,22 @@ describe("folders with no Git dependency stay renameable", () => {
     expect(await (await guard())(main)).toEqual({ kind: "safe" });
   });
 
+  test("a leaf containing only files at the depth limit is fully examined", async () => {
+    const directory = await temporaryDirectory("depth-leaf");
+    const leaf = path.join(directory, "a", "b", "c", "d", "e", "f");
+    await mkdir(leaf, { recursive: true });
+    await writeFile(path.join(leaf, "notes.md"), "hello\n");
+    expect(await (await guard())(directory)).toEqual({ kind: "safe" });
+    expect(await (await guard({ maxDepth: 0 }))(leaf)).toEqual({ kind: "safe" });
+  });
+
+  test("an ordinary repository at the depth limit establishes safety without scanning its contents", async () => {
+    const { workspace, main } = await repository("depth-solo", path.join("a", "b", "c", "d", "e", "repo"));
+    await mkdir(path.join(main, "docs", "nested"), { recursive: true });
+    expect(await (await guard())(workspace)).toEqual({ kind: "safe" });
+    expect(await (await guard({ maxDepth: 0 }))(main)).toEqual({ kind: "safe" });
+  });
+
   test("a subfolder inside a checkout that owns worktrees is still safe", async () => {
     const { workspace, main } = await repository("subfolder");
     await git(main, ["worktree", "add", "-b", "feature/login", "--", path.join(workspace, "linked")]);
@@ -146,6 +163,16 @@ describe("moves that would break Git worktree links are refused", () => {
 });
 
 describe("uncertainty fails closed", () => {
+  test("an unregistered repository beyond the default scan depth makes its ancestor inconclusive", async () => {
+    const { workspace, main } = await repository("deep-main", path.join("source", "a", "b", "c", "d", "e", "f", "repo"));
+    await git(main, ["worktree", "add", "-b", "feature/deep", "--", path.join(workspace, "linked")]);
+    const source = path.join(workspace, "source");
+    expect((await (await guard())(source)).kind).toBe("inconclusive");
+    // With enough scan depth, Git confirms the dependency rather than merely
+    // refusing because some of the subtree could not be examined.
+    expect((await (await guard({ maxDepth: 7 }))(source)).kind).toBe("blocked");
+  });
+
   test("an unusable Git makes a Git-adjacent rename inconclusive, not safe", async () => {
     const { main } = await repository("no-git");
     const verdict = await (await guard({ gitCommand: () => path.join(main, "absent-git") }))(main);
@@ -174,6 +201,42 @@ describe("uncertainty fails closed", () => {
 });
 
 describe("submodules", () => {
+  test("unreadable submodule directories fail closed, including nested name groups", async () => {
+    const { main: dependency } = await repository("unreadable-submodule-dependency");
+    const { main } = await repository("unreadable-submodule-super");
+    await git(main, ["submodule", "add", "--", dependency, "vendor/dependency"]);
+    for (const suffix of [path.join(".git", "modules"), path.join(".git", "modules", "vendor")]) {
+      const probe = await guard({
+        fs: {
+          ...nodeFs,
+          readdir: (async (directory: string, options: unknown) => {
+            if (String(directory).endsWith(suffix)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+            return nodeFs.readdir(directory, options as { withFileTypes: true });
+          }) as typeof nodeFs.readdir,
+        },
+      });
+      expect((await probe(main)).kind).toBe("inconclusive");
+    }
+  });
+
+  test("submodule scanning respects the entry budget and accepts a fully inspected boundary repository", async () => {
+    const { main: dependency } = await repository("bounded-submodule-dependency");
+    const { main } = await repository("bounded-submodule-super");
+    await git(main, ["submodule", "add", "--", dependency, "vendor/dependency"]);
+    expect((await (await guard({ maxEntries: 1 }))(main)).kind).toBe("inconclusive");
+    expect(await (await guard({ maxDepth: 1, maxEntries: 2 }))(main)).toEqual({ kind: "safe" });
+  });
+
+  test("a deeply named submodule with an external linked worktree makes inspection inconclusive", async () => {
+    const { main: dependency } = await repository("deep-submodule-dependency");
+    const { workspace, main } = await repository("deep-submodule-super");
+    const name = "a/b/c/d/e/f/g/h/dependency";
+    await git(main, ["submodule", "add", "--", dependency, name]);
+    await git(path.join(main, name), ["worktree", "add", "-b", "feature/deep", "--", path.join(workspace, "linked")]);
+    expect((await (await guard())(main)).kind).toBe("inconclusive");
+    expect((await (await guard({ maxDepth: 9 }))(main)).kind).toBe("blocked");
+  });
+
   test("a superproject with a submodule and no linked worktrees is renameable", async () => {
     const { main: dependency } = await repository("submodule-dependency");
     const { workspace, main } = await repository("submodule-super");

@@ -116,7 +116,6 @@ async function findGitLocations(
       // working tree is not.
       return;
     }
-    if (depth >= options.maxDepth) return;
     let entries: Dirent[];
     try {
       entries = await fs.readdir(directory, { withFileTypes: true }) as Dirent[];
@@ -126,6 +125,12 @@ async function findGitLocations(
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      // A leaf at the depth limit is fully examined. A child directory is
+      // not: it may hide a checkout, so do not report a partial scan as safe.
+      if (depth >= options.maxDepth) {
+        truncated = true;
+        return;
+      }
       visited += 1;
       if (visited > options.maxEntries) {
         truncated = true;
@@ -146,29 +151,40 @@ async function findSubmoduleGitDirectories(
   commonDirectory: string,
   fs: NonNullable<RenameGuardOptions["fs"]>,
   maxDepth: number,
-): Promise<string[]> {
+  maxEntries: number,
+): Promise<{ locations: string[]; truncated: boolean }> {
   const found: string[] = [];
-  const walk = async (directory: string, depth: number): Promise<void> => {
-    if (depth > maxDepth) return;
+  let truncated = false;
+  let visited = 0;
+  const walk = async (directory: string, depth: number, optional = false): Promise<void> => {
+    if (truncated) return;
     let entries: Dirent[];
     try {
       entries = await fs.readdir(directory, { withFileTypes: true }) as Dirent[];
-    } catch {
+    } catch (error) {
+      // Repositories need not have a modules directory. Other failures (or
+      // a discovered directory disappearing) leave inspection incomplete.
+      if (!optional || (error as NodeJS.ErrnoException).code !== "ENOENT") truncated = true;
       return;
     }
     for (const entry of entries) {
+      if (truncated) return;
       if (!entry.isDirectory()) continue;
+      if (depth > maxDepth || ++visited > maxEntries) {
+        truncated = true;
+        return;
+      }
       const candidate = path.join(directory, entry.name);
       if (await looksLikeGitDirectory(fs, candidate)) {
         found.push(candidate);
-        await walk(path.join(candidate, "modules"), depth + 1);
+        await walk(path.join(candidate, "modules"), depth + 1, true);
       } else {
         await walk(candidate, depth + 1);
       }
     }
   };
-  await walk(path.join(commonDirectory, "modules"), 0);
-  return found;
+  await walk(path.join(commonDirectory, "modules"), 0, true);
+  return { locations: found, truncated };
 }
 
 // Refuses the moves that would invalidate a worktree dependency, and only
@@ -198,7 +214,9 @@ export function createWorktreeRenameGuard(options: RenameGuardOptions = {}): Wor
       if (context.kind === "not-a-repository") continue;
       if (inspected.has(context.identity.repositoryId)) continue;
       inspected.add(context.identity.repositoryId);
-      queue.push(...await findSubmoduleGitDirectories(context.commonDirectory, fs, maxDepth));
+      const submodules = await findSubmoduleGitDirectories(context.commonDirectory, fs, maxDepth, maxEntries);
+      if (submodules.truncated) return { kind: "inconclusive", reason: INCONCLUSIVE_REASON };
+      queue.push(...submodules.locations);
 
       const inventory = await listWorktrees(location, options);
       if (inventory.kind === "indeterminate") return { kind: "inconclusive", reason: INCONCLUSIVE_REASON };
