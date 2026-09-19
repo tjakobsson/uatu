@@ -1,26 +1,32 @@
 // Presentation/input rules only. Ref inventory and operations belong to callers.
 
-// The branch-naming rules (WORKTREE_BRANCH_NAME_MAX_LENGTH,
-// validWorktreeBranch, initialWorktreeBase, localTrackingBranch) are defined
-// exactly once, inside src/shell/worktree-dialog.ts's installWorktreeDialog()
-// — the same function whose toString() the Hub dashboard inlines verbatim as
-// a plain <script> (worktreeDialogScript; see that file's header for why the
-// rules live there and not here). Re-exporting them from this call, rather
-// than redefining them, keeps one source of truth for both the server (which
-// imports this module directly, e.g. src/hub/worktree-api.ts) and every
-// client surface. installWorktreeDialog never touches the DOM merely by
-// being called, so calling it here with an inert `{}` target is safe with no
-// `document`/`window` in scope, exactly as it is on the server.
-//
 // A branch IS the child's display name (src/hub/worktree-registrar.ts), so it
 // must satisfy the registry's own display-name ceiling
 // (src/hub/registry.ts WORKSPACE_DISPLAY_NAME_MAX_LENGTH) or registration
 // throws after Git has already created the checkout and branch — an
 // unrecoverable "Retry registration" loop. worktree-branches.test.ts asserts
 // the two ceilings stay in sync.
-import { installWorktreeDialog } from "../shell/worktree-dialog";
-
-const branchRules = installWorktreeDialog({} as Record<string, unknown>);
+// Self-contained scope: serialized clients receive dependencies by stable
+// property keys, never by concatenating independently minified identifiers.
+export function createWorktreeBranchRules() {
+  const WORKTREE_BRANCH_NAME_MAX_LENGTH = 64;
+  function validWorktreeBranch(branch: string): boolean {
+    return Boolean(branch) && branch !== "@" && [...branch].length <= WORKTREE_BRANCH_NAME_MAX_LENGTH
+      && !/^[-/]|[\s\x00-\x1f\x7f~^:?*\\\[]|\.\.|@\{|\/\//.test(branch)
+      && !/[/.]$/.test(branch) && branch.split("/").every(part => !part.startsWith(".") && !part.endsWith(".lock"));
+  }
+  function initialWorktreeBase(local: readonly string[], remote: readonly string[]): string {
+    if (local.includes("main")) return "local:main";
+    const mains = remote.filter(ref => ref.slice(ref.indexOf("/") + 1) === "main");
+    return mains.length === 1 ? `remote:${mains[0]}` : "";
+  }
+  function localTrackingBranch(remoteRef: string): string {
+    const separator = remoteRef.indexOf("/");
+    return separator < 0 ? remoteRef : remoteRef.slice(separator + 1);
+  }
+  return { WORKTREE_BRANCH_NAME_MAX_LENGTH, validWorktreeBranch, initialWorktreeBase, localTrackingBranch };
+}
+const branchRules = createWorktreeBranchRules();
 
 export const WORKTREE_BRANCH_NAME_MAX_LENGTH = branchRules.WORKTREE_BRANCH_NAME_MAX_LENGTH;
 export const validWorktreeBranch = branchRules.validWorktreeBranch;

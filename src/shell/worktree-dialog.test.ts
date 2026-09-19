@@ -153,6 +153,122 @@ async function open(h: Harness, options: Partial<WorktreeDialogOptions> = {}): P
   await settle();
 }
 
+describe("response contract boundary", () => {
+  for (const confirmation of [false, true]) {
+    test(`Open refuses wrong-kind success (${confirmation ? "confirmation" : "dialog"})`, async () => {
+      const success = { ok: true, operationId: "op", kind: "create", phase: "complete", checkout: checkout(), registered: true, started: false };
+      const h = harness({
+        "/": () => inventory([mainCheckout(), checkout()]),
+        "/create": () => success,
+        "/open": () => ({ ...success, started: true, checkout: checkout({ running: true }) }),
+      });
+      if (confirmation) {
+        await open(h, { view: "create", mode: "new" });
+        h.main().querySelector<HTMLInputElement>('[name="branch"]')!.value = "draft";
+        h.submit();
+        await settle();
+        h.changed.length = 0;
+        h.click(h.document.querySelector("[data-worktree-confirmation] button"));
+      } else {
+        await open(h, { view: "result", id: "atlas-child", error: true, message: "Retry Open." });
+        h.submit();
+      }
+      await settle();
+      const text = confirmation ? h.document.querySelector("[data-worktree-confirmation]")!.textContent : h.text();
+      expect(text).toContain("Invalid worktree response.");
+      expect(h.navigations).toEqual([]);
+      expect(h.changed).toEqual([]);
+    });
+  }
+  for (const operation of ["create", "register"] as const) {
+    for (const invalid of [
+      { kind: "delete", registered: false, started: false },
+      { registered: true, started: false },
+      { registered: false, started: false, checkout: checkout() },
+      { registered: true, started: true, checkout: checkout({ running: false }) },
+    ]) {
+      test(`${operation} refuses endpoint-mismatched success ${JSON.stringify(invalid)}`, async () => {
+        const h = harness({
+          "/": () => inventory([mainCheckout(), checkout({ registered: false, workspaceId: undefined })]),
+          [`/${operation}`]: () => ({ ok: true, operationId: "op", kind: operation, phase: "complete", ...invalid }),
+        });
+        await open(h, { view: operation, mode: "new", id: "checkout-child" });
+        const input = h.main().querySelector<HTMLInputElement>('[name="branch"]');
+        if (input) input.value = "kept-draft";
+        h.submit();
+        await settle();
+        expect(h.dialog()).toBeTruthy();
+        expect(h.text()).toContain("Invalid worktree response.");
+        if (input) expect(input.value).toBe("kept-draft");
+        expect(h.changed).toEqual([]);
+        expect(h.navigations).toEqual([]);
+      });
+    }
+  }
+  test("domain rules do not import the dialog", async () => {
+    expect(await Bun.file(new URL("../shared/worktree-branches.ts", import.meta.url)).text()).not.toContain('../shell/worktree-dialog');
+  });
+  test("malformed inventory is an error, not an empty repository", async () => {
+    const h = harness({ "/": () => ({ inventory: {} }) });
+    await open(h);
+    expect(h.text()).toContain("Invalid worktree response.");
+    expect(h.text()).not.toContain("Every worktree Git lists is registered.");
+  });
+  test("malformed operation result never commits", async () => {
+    const h = harness({ "/": () => inventory([mainCheckout(), checkout()]), "/create": () => ({ ok: true }) });
+    await open(h, { view: "create", mode: "new" });
+    const input = h.main().querySelector<HTMLInputElement>('[name="branch"]')!;
+    input.value = "draft";
+    h.submit();
+    await settle();
+    expect(h.dialog()).toBeTruthy();
+    expect(h.text()).toContain("Invalid worktree response.");
+    expect(input.value).toBe("draft");
+    expect(h.changed).toEqual([]);
+  });
+  test("malformed refs preserve the draft", async () => {
+    const h = harness({ "/": () => inventory([mainCheckout()]), "/fetch": () => ({ ok: true, refs: { local: [], remote: [] } }) });
+    await open(h, { view: "create", mode: "new" });
+    const input = h.main().querySelector<HTMLInputElement>('[name="branch"]')!;
+    input.value = "kept-draft";
+    const selection = h.main().querySelector<HTMLInputElement>('[name="selection"]')!.value;
+    h.click(h.main().querySelector('[data-fetch]'));
+    await settle();
+    expect(h.text()).toContain("Invalid worktree response.");
+    expect(input.value).toBe("kept-draft");
+    expect(h.main().querySelector<HTMLInputElement>('[name="selection"]')!.value).toBe(selection);
+    expect(h.requests.filter(request => request.path === "/fetch")).toEqual([
+      { path: "/fetch", method: "POST", body: { sourceWorkspaceId: "atlas" } },
+    ]);
+  });
+  test("malformed preflight cannot authorize deletion", async () => {
+    const h = harness({ "/": () => inventory([mainCheckout(), checkout()]), "/preflight-delete": () => ({ ok: true, requiresStop: false }) });
+    await open(h, { view: "delete", id: "atlas-child" });
+    expect(h.text()).toContain("Invalid worktree response.");
+    expect(h.button("Delete")).toBeUndefined();
+  });
+  test("malformed JSON has a clean error and no automatic retry", async () => {
+    const h = harness({ "/": () => new Response("{ not-json") });
+    await open(h);
+    expect(h.text()).toContain("Invalid worktree response. Close and retry. Nothing was retried automatically.");
+    expect(h.text()).not.toContain("not-json");
+    expect(h.requests).toHaveLength(1);
+  });
+  test("closing during a response read discards the later parse failure", async () => {
+    let reject!: (error: Error) => void;
+    const response = new Response();
+    response.json = () => new Promise((_resolve, fail) => { reject = fail; });
+    const h = harness({ "/": () => response });
+    await open(h);
+    h.click(h.button("Cancel"));
+    reject(new Error("raw parser error"));
+    await settle();
+    expect(h.dialog()).toBeNull();
+    expect(h.changed).toEqual([]);
+    expect(h.requests).toHaveLength(1);
+  });
+});
+
 // The fork menu's third item. It lists ONLY what the picker and the
 // dashboard cannot show — the checkouts Git lists for this repository that
 // Uatu has not registered — so there is no general inventory view, no
@@ -656,7 +772,7 @@ describe("registration and forgetting", () => {
     const external = checkout({ checkoutId: "c-ext", workspaceId: undefined, registered: false, ownership: "external", branch: "agent/ext", sourceRef: undefined });
     const h = harness({
       "/": () => inventory([mainCheckout(), external]),
-      "/register": () => ({ ok: true, operationId: "op", kind: "register", phase: "complete", checkout: checkout({ checkoutId: "c-ext", workspaceId: "w-ext", ownership: "external", branch: "agent/ext" }), registered: true, started: true }),
+      "/register": () => ({ ok: true, operationId: "op", kind: "register", phase: "complete", checkout: checkout({ checkoutId: "c-ext", workspaceId: "w-ext", ownership: "external", branch: "agent/ext", running: true }), registered: true, started: true }),
     });
     openWorktreeDialog({
       api: API, source: { id: "atlas", name: "Atlas", authentication: "deploy key", signing: "release key" },

@@ -24,7 +24,7 @@
 // forgetting a workspace keeps it, re-registering the same verified tree
 // recovers it, and a path reused by another tree never acquires it.
 
-import { validWorktreeBranch } from "./worktree-branches";
+import { createWorktreeBranchRules } from "./worktree-branches";
 
 export const WORKTREE_OWNERSHIPS = ["main", "uatu", "external", "uncertain"] as const;
 export type WorktreeOwnership = (typeof WORKTREE_OWNERSHIPS)[number];
@@ -89,7 +89,7 @@ export type WorktreeRefs = {
 export const WORKTREE_UNKNOWN_REPOSITORY = "unknown";
 
 export function isWorktreeIdentityUnknown(repositoryId: string): boolean {
-  return repositoryId === WORKTREE_UNKNOWN_REPOSITORY;
+  return worktreeParsers.isWorktreeIdentityUnknown(repositoryId);
 }
 
 export type WorktreeInventory = {
@@ -230,7 +230,7 @@ export function worktreePhases(operation: WorktreePhasedOperation): readonly Wor
 }
 
 export function isWorktreePhase(operation: WorktreePhasedOperation, value: unknown): value is WorktreePhase {
-  return typeof value === "string" && (PHASES[operation] as readonly string[]).includes(value);
+  return worktreeParsers.isWorktreePhase(operation, value);
 }
 
 // Phases only ever move forward, one recorded boundary at a time or further.
@@ -323,36 +323,40 @@ export type WorktreeError = {
   readonly phase?: WorktreePhase;
 };
 
-export const WORKTREE_MESSAGE_LIMIT = 300;
+export function createWorktreeMessageRules() {
+  const WORKTREE_MESSAGE_LIMIT = 300;
 
-const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu;
-// scheme://user:secret@host → scheme://host
-const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi;
-// Known secret shapes and key=value secrets, whatever produced them.
-const TOKEN_SHAPES = /\b(?:gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9]{16,})\b/g;
-const KEYED_SECRETS = /\b(?:password|passphrase|secret|token|authorization|api[_-]?key)\b\s*[:=]\s*\S+/gi;
-// Absolute POSIX and Windows paths, including the quoted forms Git emits.
-// The lookbehind keeps relative refs whole: the slash in "origin/release",
-// "refs/heads/main" or "https://host/repo" follows a word character, a
-// colon or another slash, so none of them starts a path match.
-const ABSOLUTE_PATHS = /(?<![\w:@./\\-])(?:[A-Za-z]:)?(?:[/\\][\w.~@+%$#()\[\]-]+)+[/\\]?/g;
+  const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu;
+  // scheme://user:secret@host → scheme://host
+  const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi;
+  // Known secret shapes and key=value secrets, whatever produced them.
+  const TOKEN_SHAPES = /\b(?:gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9]{16,})\b/g;
+  const KEYED_SECRETS = /\b(?:password|passphrase|secret|token|authorization|api[_-]?key)\b\s*[:=]\s*\S+/gi;
+  // Absolute POSIX and Windows paths, including the quoted forms Git emits.
+  // The lookbehind keeps relative refs whole: the slash in "origin/release",
+  // "refs/heads/main" or "https://host/repo" follows a word character, a
+  // colon or another slash, so none of them starts a path match.
+  const ABSOLUTE_PATHS = /(?<![\w:@./\\-])(?:[A-Za-z]:)?(?:[/\\][\w.~@+%$#()\[\]-]+)+[/\\]?/g;
 
-// Git, SSH and filesystem output reaches users through this and nothing
-// else. It is not a formatter: it removes what must never be published
-// (secrets) and what the compact flows must not dump (absolute paths), then
-// bounds the result so no upstream can flood a dialog.
-export function sanitizeWorktreeMessage(value: string): string {
-  const redacted = value
-    .replace(CONTROL_CHARACTERS, " ")
-    .replace(URL_CREDENTIALS, "$1")
-    .replace(TOKEN_SHAPES, "[redacted]")
-    .replace(KEYED_SECRETS, match => `${match.slice(0, match.search(/[:=]/) + 1)} [redacted]`)
-    .replace(ABSOLUTE_PATHS, "[path]")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (redacted.length <= WORKTREE_MESSAGE_LIMIT) return redacted;
-  return `${redacted.slice(0, WORKTREE_MESSAGE_LIMIT - 1).trimEnd()}…`;
+  // Git, SSH and filesystem output reaches users through this and nothing
+  // else. It is not a formatter: it removes what must never be published
+  // (secrets) and what the compact flows must not dump (absolute paths), then
+  // bounds the result so no upstream can flood a dialog.
+  function sanitizeWorktreeMessage(value: string): string {
+    const redacted = value
+      .replace(CONTROL_CHARACTERS, " ")
+      .replace(URL_CREDENTIALS, "$1")
+      .replace(TOKEN_SHAPES, "[redacted]")
+      .replace(KEYED_SECRETS, match => `${match.slice(0, match.search(/[:=]/) + 1)} [redacted]`)
+      .replace(ABSOLUTE_PATHS, "[path]")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (redacted.length <= WORKTREE_MESSAGE_LIMIT) return redacted;
+    return `${redacted.slice(0, WORKTREE_MESSAGE_LIMIT - 1).trimEnd()}…`;
+  }
+  return { WORKTREE_MESSAGE_LIMIT, sanitizeWorktreeMessage };
 }
+export const { WORKTREE_MESSAGE_LIMIT, sanitizeWorktreeMessage } = createWorktreeMessageRules();
 
 export function worktreeError(
   code: WorktreeErrorCode,
@@ -493,8 +497,29 @@ export function canDeleteWorktree(checkout: Pick<WorktreeCheckout, "ownership" |
 // not have sent. Objects are closed — an unknown field is a contract
 // mismatch, not something to ignore.
 
-function fail(message: string): never {
-  throw WorktreeOperationError.of("invalid-input", message);
+// The same parsers run in the server, SPA and inline dashboard. Each factory
+// is a closed lexical scope; injected dependencies cross only stable keys.
+const parserVocabulary = {
+  WORKTREE_OWNERSHIPS, WORKTREE_AVAILABILITIES, WORKTREE_INVENTORY_STATUSES,
+  WORKTREE_UNKNOWN_REPOSITORY, WORKTREE_OPERATION_KINDS, WORKTREE_CREATE_MODES,
+  WORKTREE_ERROR_CODES, WORKTREE_RETRY_ACTIONS, PHASES,
+};
+export function createWorktreeParsers(
+  vocabulary: typeof parserVocabulary,
+  branches: ReturnType<typeof createWorktreeBranchRules>,
+  messages: ReturnType<typeof createWorktreeMessageRules>,
+  fail: (message: string) => never = message => { throw new Error(message); },
+) {
+const { WORKTREE_OWNERSHIPS, WORKTREE_AVAILABILITIES, WORKTREE_INVENTORY_STATUSES,
+  WORKTREE_UNKNOWN_REPOSITORY, WORKTREE_OPERATION_KINDS, WORKTREE_CREATE_MODES,
+  WORKTREE_ERROR_CODES, WORKTREE_RETRY_ACTIONS, PHASES } = vocabulary;
+const { validWorktreeBranch } = branches;
+const { sanitizeWorktreeMessage } = messages;
+function isWorktreePhase(operation: WorktreePhasedOperation, value: unknown): value is WorktreePhase {
+  return typeof value === "string" && (PHASES[operation] as readonly string[]).includes(value);
+}
+function isWorktreeIdentityUnknown(repositoryId: string): boolean {
+  return repositoryId === WORKTREE_UNKNOWN_REPOSITORY;
 }
 
 function closed(value: unknown, fields: readonly string[], label: string): Record<string, unknown> {
@@ -531,7 +556,7 @@ function member<T extends string>(value: unknown, values: readonly T[], label: s
   return value as T;
 }
 
-export function parseWorktreeError(value: unknown): WorktreeError {
+function parseWorktreeError(value: unknown): WorktreeError {
   const record = closed(value, ["code", "message", "retry", "conflictCheckoutId", "retainedCheckoutId", "phase"], "worktree error");
   const phase = record.phase === undefined
     ? undefined
@@ -548,7 +573,7 @@ export function parseWorktreeError(value: unknown): WorktreeError {
   };
 }
 
-export function parseWorktreeCheckout(value: unknown): WorktreeCheckout {
+function parseWorktreeCheckout(value: unknown): WorktreeCheckout {
   const record = closed(
     value,
     [
@@ -599,7 +624,7 @@ function parseRefs(value: unknown): WorktreeRefs {
   return { local: refs("local"), remote: refs("remote"), fetchedAt: fetchedAt as number | null };
 }
 
-export function parseWorktreeInventory(value: unknown): WorktreeInventory {
+function parseWorktreeInventory(value: unknown): WorktreeInventory {
   const record = closed(value, ["repositoryId", "sourceWorkspaceId", "status", "checkouts", "refs", "error"], "worktree inventory");
   if (!Array.isArray(record.checkouts)) fail("worktree inventory requires checkouts");
   const status = member(record.status, WORKTREE_INVENTORY_STATUSES, "worktree inventory status");
@@ -627,7 +652,7 @@ export function parseWorktreeInventory(value: unknown): WorktreeInventory {
 // The one spelling for "the repository could not be identified": an
 // explicitly stale, empty listing that names no repository and carries the
 // sanitized reason. Round-trips through parseWorktreeInventory.
-export function unknownWorktreeInventory(sourceWorkspaceId: string, error: WorktreeError): WorktreeInventory {
+function unknownWorktreeInventory(sourceWorkspaceId: string, error: WorktreeError): WorktreeInventory {
   return {
     repositoryId: WORKTREE_UNKNOWN_REPOSITORY,
     sourceWorkspaceId,
@@ -638,7 +663,7 @@ export function unknownWorktreeInventory(sourceWorkspaceId: string, error: Workt
   };
 }
 
-export function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
+function parseWorktreeOperationResult(value: unknown): WorktreeOperationResult {
   const record = closed(
     value,
     ["ok", "operationId", "kind", "phase", "checkout", "registered", "started", "startError", "error", "retainedCheckout"],
@@ -684,7 +709,7 @@ export function parseWorktreeOperationResult(value: unknown): WorktreeOperationR
   };
 }
 
-export function parseWorktreeDeleteRequest(value: unknown): WorktreeDeleteRequest {
+function parseWorktreeDeleteRequest(value: unknown): WorktreeDeleteRequest {
   const record = closed(value, ["sourceWorkspaceId", "reference", "stop"], "worktree delete request");
   return {
     sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree delete request"),
@@ -693,7 +718,7 @@ export function parseWorktreeDeleteRequest(value: unknown): WorktreeDeleteReques
   };
 }
 
-export function parseWorktreeForgetRequest(value: unknown): WorktreeForgetRequest {
+function parseWorktreeForgetRequest(value: unknown): WorktreeForgetRequest {
   const record = closed(value, ["sourceWorkspaceId", "reference", "stop"], "worktree forget request");
   return {
     sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree forget request"),
@@ -702,12 +727,12 @@ export function parseWorktreeForgetRequest(value: unknown): WorktreeForgetReques
   };
 }
 
-export function parseWorktreeFetchRequest(value: unknown): WorktreeFetchRequest {
+function parseWorktreeFetchRequest(value: unknown): WorktreeFetchRequest {
   const record = closed(value, ["sourceWorkspaceId"], "worktree fetch request");
   return { sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree fetch request") };
 }
 
-export function parseWorktreePreflightDeleteRequest(value: unknown): WorktreePreflightDeleteRequest {
+function parseWorktreePreflightDeleteRequest(value: unknown): WorktreePreflightDeleteRequest {
   const record = closed(value, ["sourceWorkspaceId", "reference"], "worktree preflight delete request");
   return {
     sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree preflight delete request"),
@@ -715,7 +740,7 @@ export function parseWorktreePreflightDeleteRequest(value: unknown): WorktreePre
   };
 }
 
-export function parseWorktreeRegisterRequest(value: unknown): WorktreeRegisterRequest {
+function parseWorktreeRegisterRequest(value: unknown): WorktreeRegisterRequest {
   const record = closed(value, ["sourceWorkspaceId", "reference", "start"], "worktree register request");
   return {
     sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree register request"),
@@ -724,7 +749,7 @@ export function parseWorktreeRegisterRequest(value: unknown): WorktreeRegisterRe
   };
 }
 
-export function parseWorktreeDeletionPreflight(value: unknown): WorktreeDeletionPreflight {
+function parseWorktreeDeletionPreflight(value: unknown): WorktreeDeletionPreflight {
   const record = closed(value, ["ok", "checkout", "requiresStop", "error"], "worktree deletion preflight");
   const ok = flag(record, "ok", "worktree deletion preflight");
   const checkout = record.checkout === undefined ? undefined : parseWorktreeCheckout(record.checkout);
@@ -737,7 +762,7 @@ export function parseWorktreeDeletionPreflight(value: unknown): WorktreeDeletion
   return { ok: false, ...(checkout === undefined ? {} : { checkout }), error: parseWorktreeError(record.error) };
 }
 
-export function parseWorktreeRefsResponse(value: unknown): WorktreeRefsResponse {
+function parseWorktreeRefsResponse(value: unknown): WorktreeRefsResponse {
   const record = closed(value, ["ok", "refs", "error"], "worktree refs response");
   const ok = flag(record, "ok", "worktree refs response");
   const refs = record.refs === undefined ? undefined : parseRefs(record.refs);
@@ -749,7 +774,7 @@ export function parseWorktreeRefsResponse(value: unknown): WorktreeRefsResponse 
   return { ok: false, ...(refs === undefined ? {} : { refs }), error: parseWorktreeError(record.error) };
 }
 
-export function parseWorktreeCreateRequest(value: unknown): WorktreeCreateRequest {
+function parseWorktreeCreateRequest(value: unknown): WorktreeCreateRequest {
   const record = closed(value, ["sourceWorkspaceId", "mode", "branch", "base", "start"], "worktree create request");
   const base = closed(record.base, ["kind", "ref"], "worktree create base");
   const mode = member(record.mode, WORKTREE_CREATE_MODES, "worktree create mode");
@@ -770,3 +795,45 @@ export function parseWorktreeCreateRequest(value: unknown): WorktreeCreateReques
     ...(record.start === undefined ? {} : { start: flag(record, "start", "worktree create request") }),
   };
 }
+
+function parseWorktreeInventoryResponse(value: unknown): { inventory: WorktreeInventory } {
+  const record = closed(value, ["inventory"], "worktree inventory response");
+  return { inventory: parseWorktreeInventory(record.inventory) };
+}
+// Endpoint semantics layer over the published union; the general-purpose
+// parser remains useful for journal/service results of every operation kind.
+function parseWorktreeEndpointResult(
+  value: unknown,
+  expected: "create" | "register" | "start" | "delete" | "forget",
+): WorktreeOperationResult {
+  const result = parseWorktreeOperationResult(value);
+  if (result.kind !== expected) fail("worktree response belongs to another operation");
+  if (!result.ok) return result;
+  if (result.phase !== "complete") fail("worktree endpoint success must be complete");
+  if (expected === "create" || expected === "register" || expected === "start") {
+    const checkout = result.checkout;
+    if (!result.registered || !checkout?.registered || !checkout.workspaceId
+      || checkout.availability !== "present" || result.started !== checkout.running) {
+      fail("worktree endpoint success requires a registered checkout with matching activity");
+    }
+  } else if (result.registered || result.started || result.startError !== undefined) {
+    fail("worktree removal success cannot report registration or activity");
+  }
+  return result;
+}
+return { isWorktreeIdentityUnknown, isWorktreePhase, parseWorktreeError, parseWorktreeCheckout, parseWorktreeInventory,
+  unknownWorktreeInventory, parseWorktreeOperationResult, parseWorktreeDeleteRequest,
+  parseWorktreeForgetRequest, parseWorktreeFetchRequest, parseWorktreePreflightDeleteRequest,
+  parseWorktreeRegisterRequest, parseWorktreeDeletionPreflight, parseWorktreeRefsResponse,
+  parseWorktreeCreateRequest, parseWorktreeInventoryResponse, parseWorktreeEndpointResult };
+}
+
+export const worktreeParsers = createWorktreeParsers(parserVocabulary, createWorktreeBranchRules(), createWorktreeMessageRules(),
+  message => { throw WorktreeOperationError.of("invalid-input", message); });
+export const { parseWorktreeError, parseWorktreeCheckout, parseWorktreeInventory,
+  unknownWorktreeInventory, parseWorktreeOperationResult, parseWorktreeDeleteRequest,
+  parseWorktreeForgetRequest, parseWorktreeFetchRequest, parseWorktreePreflightDeleteRequest,
+  parseWorktreeRegisterRequest, parseWorktreeDeletionPreflight, parseWorktreeRefsResponse,
+  parseWorktreeCreateRequest, parseWorktreeInventoryResponse, parseWorktreeEndpointResult } = worktreeParsers;
+
+export const worktreeParsersScript = `(${createWorktreeParsers.toString()})(${JSON.stringify(parserVocabulary)},(${createWorktreeBranchRules.toString()})(),(${createWorktreeMessageRules.toString()})())`;

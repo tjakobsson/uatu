@@ -12,44 +12,21 @@
 //     exports as ordinary ESM bindings;
 //   * the Hub dashboard (src/hub/pages.ts) inlines `worktreeDialogScript`
 //     as a plain, unbundled `<script>` tag.
-// The second mechanism is why every runtime helper below is declared INSIDE
-// `installWorktreeDialog`, one single function, rather than as separate
-// top-level declarations: `worktreeDialogScript` is `installWorktreeDialog`
-// re-derived from its own source via `toString()`, and the whole app.ts
-// bundle this module also ships in gets minified for the compiled binary
-// (`bun build --compile --minify`, scripts/build.ts). A minifier is free to
-// rename every identifier it can prove is safe to rename — including a top-
-// level function declaration's own name — and it renames call sites
-// consistently only WITHIN the scope it is rewriting. Concatenating several
-// SEPARATELY minified top-level functions' `.toString()` output (the
-// former approach here) let one function's renamed call to a sibling drift
-// out of sync with that sibling's own renamed declaration, which is exactly
-// what threw `ReferenceError: openWorktreeFork is not defined` in
-// production (bun build --compile is minified; the dev/e2e Hub, which runs
-// from source, could never see it). A single `installWorktreeDialog(...)
-// .toString()` has no such seam: whatever names the minifier picks inside
-// it, they are consistent throughout that one contiguous blob of source
-// text, because they were all renamed together. The only names that must
-// survive minification unrenamed are the property keys in the final
-// `Object.assign(target, { openWorktreeFork, openWorktreeDialog, ... })` —
-// and minifiers do not rename object property keys unless property
-// mangling is explicitly requested, which scripts/build.ts does not do.
-//
-// The branch-naming rules (`WORKTREE_BRANCH_NAME_MAX_LENGTH`,
-// `validWorktreeBranch`, `initialWorktreeBase`, `localTrackingBranch`) live
-// here too, for the same reason, and are re-exported from
-// `../shared/worktree-branches` (itself imported by the Hub's own
-// server-side validation) so there is exactly one source of truth for both
-// the server and every client surface. `installWorktreeDialog` must
-// therefore never touch the DOM merely by being called — the Hub's server
-// process calls it too (with an inert `{}` target) purely to read those
-// four values back off the result, and it has no `document`/`window`.
+// Runtime helpers stay in closed factory scopes. Canonical domain rules and
+// contract parsers live in shared modules and are injected by stable property
+// keys. Never concatenate independently minified functions expecting their
+// lexical identifiers to match: each serialized factory must contain all its
+// bindings or receive them as arguments. Production minifies identifiers, not
+// property keys; the minified inline-script smoke test guards this seam.
 //
 // The API base is always supplied by the caller from `/api/hub/state`'s
 // `worktreeApi` field. No root-relative Hub URL literal is built here, so
 // shared/app-url-discipline.test.ts needs no allowlist entry for this file:
 // the Hub API lives outside a session's base path and is therefore never
 // passed through appUrl() (the same rule hub-nav.ts documents).
+
+import { createWorktreeBranchRules } from "../shared/worktree-branches";
+import { worktreeParsers, worktreeParsersScript, type WorktreeCheckout } from "../shared/worktree-contract";
 
 /** One checkout as the inventory describes it, reduced to what the dialog
  *  renders. `id` is the registered workspace id when there is one and the
@@ -118,31 +95,18 @@ export type WorktreeDialogModel = {
 /** Defines every runtime helper the dialog needs, nested inside this one
  *  function, then assigns the public entry points onto `target` by property
  *  name. See the file header for why this shape is what makes
- *  `worktreeDialogScript` safe under minification. Must not touch the DOM —
- *  callers that only want the branch-naming rules (worktree-branches.ts,
- *  including from the server) pass an inert `{}` target. */
-export function installWorktreeDialog<T extends Record<string, unknown>>(target: T) {
-  const WORKTREE_BRANCH_NAME_MAX_LENGTH = 64;
-
-  function validWorktreeBranch(branch: string): boolean {
-    return Boolean(branch) && branch !== "@" && [...branch].length <= WORKTREE_BRANCH_NAME_MAX_LENGTH
-      && !/^[-/]|[\s\x00-\x1f\x7f~^:?*\\\[]|\.\.|@\{|\/\//.test(branch)
-      && !/[/.]$/.test(branch) && branch.split("/").every(part => !part.startsWith(".") && !part.endsWith(".lock"));
-  }
-
-  function initialWorktreeBase(local: string[], remote: string[]): string {
-    if (local.includes("main")) return "local:main";
-    const mains = remote.filter(ref => ref.slice(ref.indexOf("/") + 1) === "main");
-    return mains.length === 1 ? `remote:${mains[0]}` : "";
-  }
-
-  // A remote-qualified ref's local tracking name is the ref minus its remote
-  // prefix ("origin/feature/login" → "feature/login"). No other derivation is
-  // applied: an existing local name of that spelling is a conflict, never a
-  // reset (spec: "Remote ref becomes a tracking branch").
-  function localTrackingBranch(remoteRef: string): string {
-    const separator = remoteRef.indexOf("/");
-    return separator < 0 ? remoteRef : remoteRef.slice(separator + 1);
+ *  `worktreeDialogScript` safe under minification. Installation does not touch
+ *  the DOM; only invoking its UI entry points does. */
+export function installWorktreeDialog<T extends Record<string, unknown>>(
+  target: T,
+  branches: ReturnType<typeof createWorktreeBranchRules>,
+  parsers: typeof worktreeParsers,
+) {
+  const { WORKTREE_BRANCH_NAME_MAX_LENGTH, validWorktreeBranch, initialWorktreeBase, localTrackingBranch } = branches;
+  async function readResponse<T>(response: Response, parse: (value: unknown) => T): Promise<T> {
+    if (!response.ok) throw new Error("Request failed. Nothing was retried automatically.");
+    try { return parse(await response.json()); }
+    catch { throw new Error("Invalid worktree response. Close and retry. Nothing was retried automatically."); }
   }
 
   /** F7 (2026-09-19 live test): the refs "Existing branch" may offer. A
@@ -306,7 +270,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       body += m.loading
         ? pendingWith("Loading worktree inventory…")
         : unregistered.length === 0
-          ? `<p role="status">Every worktree Git lists is registered.</p><div class="wt-actions" style="justify-content:flex-end">${cancel}</div>`
+          ? `${m.error ? "" : '<p role="status">Every worktree Git lists is registered.</p>'}<div class="wt-actions" style="justify-content:flex-end">${cancel}</div>`
           : unregistered.map(r => `<article class="wt-card" data-workspace="${h(r.id)}"><div class="wt-card-top"><h3>${h(r.branch || r.name)}</h3></div><p class="wt-muted">${h(worktreeProvenanceLabel(r))}</p><p class="wt-card-path" title="${h(r.path)}">${h(r.path)}</p><div class="wt-actions">${worktreeRowPrimary(r)}</div></article>`).join("")
             + `<div class="wt-actions" style="justify-content:flex-end">${cancel}</div>`;
       body += `</section>`;
@@ -638,7 +602,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
 
     let busy = false;
     let revision = 0;
-    let checkouts: Record<string, unknown>[] = [];
+    let checkouts: WorktreeCheckout[] = [];
     let refs: { local: string[]; remote: string[] } = { local: [], remote: [] };
     let view = options.view;
     let mode = options.mode;
@@ -696,7 +660,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
         ?? (view === "discover" ? title : main.querySelector<HTMLElement>('input:not([type=hidden]), [data-cancel]')))?.focus();
     }
 
-    async function request(path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
+    async function request<T>(path: string, parse: (value: unknown) => T, body?: Record<string, unknown>): Promise<T> {
       let response: Response;
       try {
         response = body === undefined
@@ -716,8 +680,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
         if (controller.signal.aborted) throw failure;
         throw new Error("Request failed. Nothing was retried automatically.");
       }
-      if (!response.ok) throw new Error("Request failed. Nothing was retried automatically.");
-      return await response.json() as Record<string, unknown>;
+      return readResponse(response, parse);
     }
 
     // The authoritative inventory read. A transport failure is reported as an
@@ -727,17 +690,17 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       loading = checkouts.length === 0;
       main.setAttribute("aria-busy", "true");
       try {
-        const payload = await request(`${api}?source=${encodeURIComponent(source.id)}`);
+        const payload = await request(`${api}?source=${encodeURIComponent(source.id)}`, parsers.parseWorktreeInventoryResponse);
         if (current !== revision) return false;
-        const inventory = (payload.inventory ?? {}) as Record<string, unknown>;
-        checkouts = Array.isArray(inventory.checkouts) ? inventory.checkouts as Record<string, unknown>[] : [];
-        const listed = (inventory.refs ?? {}) as Record<string, unknown>;
+        const inventory = payload.inventory;
+        checkouts = [...inventory.checkouts];
+        const listed = inventory.refs;
         refs = {
-          local: Array.isArray(listed.local) ? listed.local as string[] : [],
-          remote: Array.isArray(listed.remote) ? listed.remote as string[] : [],
+          local: [...listed.local],
+          remote: [...listed.remote],
         };
         if (inventory.status === "error") {
-          message = (inventory.error as { message?: string } | undefined)?.message ?? "Worktree inventory unavailable. Close and retry.";
+          message = inventory.error?.message ?? "Worktree inventory unavailable. Close and retry.";
           error = true;
         }
         return true;
@@ -760,9 +723,9 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       blocked = false;
       if (!row) { blocked = true; message = "No worktree of this repository matches that name."; error = true; return; }
       try {
-        const outcome = await request(`${api}/preflight-delete`, { reference: row.id });
+        const outcome = await request(`${api}/preflight-delete`, parsers.parseWorktreeDeletionPreflight, { reference: row.id });
         if (outcome.ok === true) requiresStop = outcome.requiresStop === true;
-        else { message = (outcome.error as { message?: string })?.message ?? "Deletion could not be completed. Files and registration retained."; error = true; }
+        else { message = outcome.error.message; error = true; }
       } catch (failure) {
         if (controller.signal.aborted) return;
         message = failure instanceof Error ? failure.message : String(failure);
@@ -833,12 +796,12 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
             body: JSON.stringify({ sourceWorkspaceId: source.id, reference: openId, start: true }),
           });
           if (!response.ok) throw new Error("Could not open workspace. Retry Open.");
-          const outcome = await response.json() as Record<string, unknown>;
+          const outcome = await readResponse(response, value => parsers.parseWorktreeEndpointResult(value, "start"));
           if (outcome.ok === true && outcome.started === true) {
             location.assign(`/s/${encodeURIComponent(openId)}/`);
             return;
           }
-          const reason = ((outcome.startError ?? outcome.error) as { message?: string } | undefined)?.message
+          const reason = (outcome.ok ? outcome.startError : outcome.error)?.message
             ?? "Could not open workspace. Retry Open.";
           button.closest("[data-worktree-confirmation]")?.remove();
           openWorktreeDialog({ api, source, view: "result", id: openId, message: reason, error: true }, returnFocus);
@@ -852,12 +815,12 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
     async function startWorkspace(id: string): Promise<void> {
       const status = startBusy("Starting workspace… Opening when ready.");
       try {
-        const outcome = await request(`${api}/open`, { reference: id, start: true });
+        const outcome = await request(`${api}/open`, value => parsers.parseWorktreeEndpointResult(value, "start"), { reference: id, start: true });
         if (outcome.ok === true && outcome.started === true) {
           location.assign(`/s/${encodeURIComponent(id)}/`);
           return;
         }
-        const reason = ((outcome.startError ?? outcome.error) as { message?: string } | undefined)?.message
+        const reason = (outcome.ok ? outcome.startError : outcome.error)?.message
           ?? "The workspace could not be started.";
         endBusy();
         view = "result"; selectedId = id; mode = undefined; draft = undefined;
@@ -902,30 +865,30 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       }
       const status = startBusy(form.dataset.pending ?? "Working…");
       try {
-        const outcome = await request(`${api}/create`, mode === "existing"
+        const outcome = await request(`${api}/create`, value => parsers.parseWorktreeEndpointResult(value, "create"), mode === "existing"
           ? { mode: kind === "remote" ? "remote-tracking" : "existing-local", base: { kind, ref } }
           : { mode: "new-branch", branch, base: { kind, ref } });
         if (outcome.ok === true) {
-          const checkout = (outcome.checkout ?? {}) as Record<string, unknown>;
-          committed(`Created ${checkout.branch}`, typeof checkout.workspaceId === "string" ? checkout.workspaceId : undefined);
+          const checkout = outcome.checkout;
+          committed(checkout?.branch ? `Created ${checkout.branch}` : "Worktree created.", checkout?.workspaceId);
           return;
         }
-        const detail = (outcome.error ?? {}) as { message?: string; conflictCheckoutId?: string };
-        const retained = outcome.retainedCheckout as Record<string, unknown> | undefined;
+        const detail = outcome.error;
+        const retained = outcome.retainedCheckout;
         endBusy();
         // Git created the tree and a later step did not: the retry acts on
         // THAT checkout, never on a second creation.
         if (retained) {
           view = "register";
-          selectedId = typeof retained.workspaceId === "string" ? retained.workspaceId : String(retained.checkoutId ?? "");
+          selectedId = retained.workspaceId ?? retained.checkoutId;
           mode = undefined; draft = undefined; conflictId = undefined;
-          message = detail.message ?? "Registration did not complete. The checkout and branch were kept.";
+          message = detail.message;
           error = true;
           await loadInventory();
           if (!controller.signal.aborted) render();
           return;
         }
-        message = detail.message ?? "The worktree could not be created.";
+        message = detail.message;
         error = true;
         conflictId = detail.conflictCheckoutId;
         // The occupying checkout must be offered by its CURRENT state, so the
@@ -945,14 +908,14 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       const kept = creationDraft();
       const status = startBusy("Fetching remote branches…");
       try {
-        const outcome = await request(`${api}/fetch`);
-        const listed = (outcome.refs ?? undefined) as { local?: string[]; remote?: string[] } | undefined;
-        if (listed) refs = { local: listed.local ?? [], remote: listed.remote ?? [] };
+        const outcome = await request(`${api}/fetch`, parsers.parseWorktreeRefsResponse, {});
+        const listed = outcome.refs;
+        if (listed) refs = { local: [...listed.local], remote: [...listed.remote] };
         endBusy();
         draft = kept;
         conflictId = undefined;
         if (outcome.ok !== true) {
-          message = ((outcome.error ?? {}) as { message?: string }).message ?? "The remote could not be fetched.";
+          message = outcome.error.message;
           error = true;
           render();
           return;
@@ -985,13 +948,13 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       if (!row) return;
       const status = startBusy(form.dataset.pending ?? "Working…");
       try {
-        const outcome = await request(`${api}/delete`, { reference: row.id, confirm: true, stop: requiresStop });
+        const outcome = await request(`${api}/delete`, value => parsers.parseWorktreeEndpointResult(value, "delete"), { reference: row.id, confirm: true, stop: requiresStop });
         if (outcome.ok === true) {
           committed("Worktree deleted. Branch kept.", undefined, row.id);
           return;
         }
         endBusy();
-        message = ((outcome.error ?? {}) as { message?: string }).message ?? "Deletion could not be completed. Files and registration retained.";
+        message = outcome.error.message;
         error = true;
         blocked = true;
         render();
@@ -1008,15 +971,14 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       const start = form.querySelector<HTMLInputElement>('[name="start"]')?.checked === true;
       const status = startBusy(form.dataset.pending ?? "Working…");
       try {
-        const outcome = await request(`${api}/register`, { reference: row.id, start });
+        const outcome = await request(`${api}/register`, value => parsers.parseWorktreeEndpointResult(value, "register"), { reference: row.id, start });
         if (outcome.ok === true) {
-          const checkout = (outcome.checkout ?? {}) as Record<string, unknown>;
-          committed(`${checkout.ownership === "uatu" ? "Created" : "Registered"} ${checkout.branch}`,
-            typeof checkout.workspaceId === "string" ? checkout.workspaceId : undefined);
+          const checkout = outcome.checkout;
+          committed(checkout?.branch ? `${checkout.ownership === "uatu" ? "Created" : "Registered"} ${checkout.branch}` : "Worktree registered.", checkout?.workspaceId);
           return;
         }
         endBusy();
-        message = ((outcome.error ?? {}) as { message?: string }).message ?? "Registration could not be completed.";
+        message = outcome.error.message;
         error = true;
         render();
         return;
@@ -1037,13 +999,13 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
       }
       const status = startBusy(form.dataset.pending ?? "Working…");
       try {
-        const outcome = await request(`${api}/forget`, { reference: row.id });
+        const outcome = await request(`${api}/forget`, value => parsers.parseWorktreeEndpointResult(value, "forget"), { reference: row.id });
         if (outcome.ok === true) {
           committed("Removed from Uatu. Checkout, branch and files were kept.", undefined, row.id);
           return;
         }
         endBusy();
-        message = ((outcome.error ?? {}) as { message?: string }).message ?? "The registration could not be removed.";
+        message = outcome.error.message;
         error = true;
         render();
         return;
@@ -1141,12 +1103,12 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(target:
 }
 
 // Populated once at module load, purely to give every ordinary ESM importer
-// (hub-nav.ts, worktree-branches.ts, this file's own test) a normal named
+// (hub-nav.ts and this file's own test) a normal named
 // binding. No DOM is touched by this call — only function/const definitions
 // and property assignment — so it is just as safe to run inside the Hub's
 // server process (which never invokes the DOM-touching members) as in a
 // browser.
-const runtime = installWorktreeDialog({} as Record<string, unknown>);
+const runtime = installWorktreeDialog({} as Record<string, unknown>, createWorktreeBranchRules(), worktreeParsers);
 
 export const WORKTREE_BRANCH_NAME_MAX_LENGTH = runtime.WORKTREE_BRANCH_NAME_MAX_LENGTH;
 export const validWorktreeBranch = runtime.validWorktreeBranch;
@@ -1174,4 +1136,4 @@ export const openWorktreeFork = runtime.openWorktreeFork;
 // comment for why this particular shape (one function, self-invoked,
 // assigning its public surface onto `window` by property name) survives
 // minification where the former per-function `.toString()` array did not.
-export const worktreeDialogScript = `(${installWorktreeDialog.toString()})(window);`;
+export const worktreeDialogScript = `(${installWorktreeDialog.toString()})(window,(${createWorktreeBranchRules.toString()})(),${worktreeParsersScript});`;
