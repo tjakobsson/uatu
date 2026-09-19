@@ -21,6 +21,7 @@
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
     "build": "bun run scripts/build.ts",
+    "generate:pwa-icons": "bun run scripts/generate-pwa-icons.ts",
     "smoke": "bun run scripts/smoke-binary.ts",
     "api:lint": "redocly lint api/openapi.yaml",
     "api:bundle": "redocly bundle api/openapi.yaml --output /tmp/uatu-openapi.yaml",

@@ -309,7 +309,9 @@ describe("hub end to end", () => {
 
   test("login and dashboard pages link the hub manifest", async () => {
     const login = await fetch(`${origin}/login`, { headers: { accept: "text/html" } });
-    expect(await login.text()).toContain('<link rel="manifest" href="/manifest.webmanifest" />');
+    const html = await login.text();
+    expect(html).toContain('<link rel="manifest" href="/manifest.webmanifest" />');
+    expect(html).toContain('<link rel="apple-touch-icon" sizes="192x192" href="/hub-assets/icon-192.png?v=padded-1" />');
   });
 
   test("hub HTML pages are never cached", async () => {

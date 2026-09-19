@@ -4,6 +4,7 @@
 
 import { appBasePath, appUrl } from "../shared/app-url";
 import { joinBasePath } from "../shared/base-path";
+import { PWA_ICON_VERSION } from "../pwa/icons";
 
 // Inject PWA links at runtime rather than declaring them in index.html. Bun's
 // HTML bundler tries to resolve every <link href="..."> as a build-time
@@ -28,9 +29,14 @@ export function injectPwaLinks() {
     icon.rel = "icon";
     icon.type = "image/png";
     icon.setAttribute("sizes", `${size}x${size}`);
-    icon.href = appUrl(`/assets/icon-${size}.png`);
+    icon.href = appUrl(`/assets/icon-${size}.png?v=${PWA_ICON_VERSION}`);
     head.appendChild(icon);
   }
+  const touchIcon = document.createElement("link");
+  touchIcon.rel = "apple-touch-icon";
+  touchIcon.setAttribute("sizes", "192x192");
+  touchIcon.href = appUrl(`/assets/icon-192.png?v=${PWA_ICON_VERSION}`);
+  head.appendChild(touchIcon);
 }
 
 // --- Legacy service worker cleanup ------------------------------------------

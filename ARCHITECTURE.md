@@ -85,6 +85,12 @@ its declaration file supplies the TypeScript interface. Hosts inject URLs, and
 workspace boot requires the proxy's explicit `uatu-hub` marker before using
 `hubUrl()`. Legacy cleanup preserves active, waiting, and installing push workers.
 
+The 192px and 512px Home Screen icons have opaque white backgrounds and keep
+the complete mark inside the maskable safe circle. Regenerate them from the
+canonical SVG with `bun run generate:pwa-icons`; use `--check` to validate the
+checked-in pixels. `pwa/icons.ts` versions manifest and Apple touch-icon URLs,
+and the static session manifest carries the same revision.
+
 Notification URLs carry an agent-qualified `conversation` parameter through
 login and document history changes. Chat opens that exact target or shows its
 read error. A matching window is focused without navigating another workspace's

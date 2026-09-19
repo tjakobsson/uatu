@@ -2,12 +2,13 @@
 // off disk (the same files cli.ts mounts via Bun.file imports) rather than
 // spinning up a server — the routing wrapper just emits raw Bun.file bodies
 // with fixed headers, so the bytes that reach the browser ARE the file
-// contents. There is deliberately no service worker: installability no
-// longer requires one, and uatu has nothing useful to do offline.
+// contents. Installation uses the manifest and icons; notification enrollment
+// separately installs the hub's push-only service worker.
 
 import { describe, expect, it } from "bun:test";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { PWA_ICON_VERSION } from "./icons";
 
 const ASSETS_DIR = path.join(__dirname, "..", "assets");
 
@@ -25,13 +26,14 @@ describe("manifest.webmanifest", () => {
 
   it("declares both 192x192 and 512x512 PNG icons", async () => {
     const source = await fs.readFile(path.join(ASSETS_DIR, "manifest.webmanifest"), "utf8");
-    const parsed = JSON.parse(source) as { icons: Array<{ sizes?: string; type?: string }> };
+    const parsed = JSON.parse(source) as { icons: Array<{ src: string; sizes?: string; type?: string }> };
     expect(Array.isArray(parsed.icons)).toBe(true);
     const sizes = parsed.icons.map(icon => icon.sizes);
     expect(sizes).toContain("192x192");
     expect(sizes).toContain("512x512");
     for (const icon of parsed.icons) {
       expect(icon.type).toBe("image/png");
+      expect(new URL(icon.src, "https://uatu.example").searchParams.get("v")).toBe(PWA_ICON_VERSION);
     }
   });
 });

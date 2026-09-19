@@ -42,3 +42,28 @@ The UI SHALL meet Chromium's installability criteria so that Edge, Chrome, and B
 - **WHEN** the UI loads on an origin that is not a secure context or in a browser without service worker support
 - **THEN** boot completes normally with no cleanup attempted
 - **AND** notification settings explain the unavailable capability without a boot error
+
+### Requirement: Server serves PWA icons
+The server SHALL serve raster icons at `/assets/icon-192.png` and `/assets/icon-512.png` derived from the existing `uatu-logo.svg`, with appropriate `Content-Type: image/png` headers and a long `Cache-Control` lifetime. Home Screen icon images SHALL have an opaque white background and preserve the logo's aspect ratio with visible padding. Icons advertised as maskable SHALL keep the complete mark inside the centered safe circle of radius 40% of the image width. Hub and workspace pages SHALL provide an explicit Apple touch-icon link to the same padded artwork. Icon URLs in manifests and HTML metadata SHALL carry a revision query when the artwork changes so a fresh icon request does not reuse the previous HTTP cache entry.
+
+#### Scenario: 192px icon is reachable
+- **WHEN** a client requests `/assets/icon-192.png`
+- **THEN** the response status is 200
+- **AND** the `Content-Type` header is `image/png`
+- **AND** the response body is a valid PNG image with width and height of 192 pixels
+
+#### Scenario: 512px icon is reachable
+- **WHEN** a client requests `/assets/icon-512.png`
+- **THEN** the response status is 200
+- **AND** the `Content-Type` header is `image/png`
+- **AND** the response body is a valid PNG image with width and height of 512 pixels
+
+#### Scenario: Home Screen compositing does not introduce a black background
+- **WHEN** the platform displays a Uatu Home Screen icon
+- **THEN** its source image has no transparent pixels and the space around and within the mark is opaque white
+- **AND** applying a mask within the standard maskable safe-area guarantee does not clip the mark
+
+#### Scenario: Apple installation metadata points to revised artwork
+- **WHEN** a user opens a hub or workspace page to add it to the Home Screen
+- **THEN** its Apple touch-icon link points to the versioned padded icon
+- **AND** the applicable manifest advertises the same artwork revision

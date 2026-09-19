@@ -61,6 +61,38 @@ test.describe("PWA install surface", () => {
     }
   });
 
+  test("Home Screen icons are opaque and their artwork fits the maskable safe circle", async ({ page }) => {
+    await expect(page.locator('link[rel="apple-touch-icon"]')).toHaveAttribute("href", "/assets/icon-192.png?v=padded-1");
+    const reports = await page.evaluate(async () => {
+      const manifest = await fetch(document.querySelector<HTMLLinkElement>('link[rel="manifest"]')!.href).then(response => response.json());
+      return Promise.all(manifest.icons.map(async (icon: { src: string }) => {
+        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const img = new Image(); img.onload = () => resolve(img); img.onerror = reject; img.src = icon.src;
+        });
+        const canvas = document.createElement("canvas"); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d")!; context.drawImage(image, 0, 0);
+        const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let transparent = 0; let outsideSafeCircle = 0; let navy = 0; let teal = 0;
+        for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+          const at = (y * canvas.width + x) * 4;
+          if (data[at + 3] !== 255) transparent++;
+          if (data[at] === 10 && data[at + 1] === 28 && data[at + 2] === 56) navy++;
+          if (data[at] === 28 && data[at + 1] === 168 && data[at + 2] === 167) teal++;
+          if (Math.hypot(x + 0.5 - canvas.width / 2, y + 0.5 - canvas.height / 2) > canvas.width * 0.4
+            && (data[at] !== 255 || data[at + 1] !== 255 || data[at + 2] !== 255)) outsideSafeCircle++;
+        }
+        return { transparent, outsideSafeCircle, navy, teal };
+      }));
+    });
+    expect(reports).toHaveLength(2);
+    for (const report of reports) {
+      expect(report.transparent).toBe(0);
+      expect(report.outsideSafeCircle).toBe(0);
+      expect(report.navy).toBeGreaterThan(100);
+      expect(report.teal).toBeGreaterThan(100);
+    }
+  });
+
   test("theme-color meta is set to the brand navy", async ({ page }) => {
     const themeColor = await page.locator('meta[name="theme-color"]').getAttribute("content");
     expect(themeColor).toBe("#0a1c38");

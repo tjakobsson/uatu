@@ -55,10 +55,18 @@
 - [x] 8.4 Run `openspec validate web-push-and-ipad-desktop --strict` and review implemented behavior against all four deltas. Verify every completed task has evidence and any blocked physical-device checks remain unchecked and reported.
 - [x] 8.5 Before preparing a fix PR, determine whether the iPad bug exists in the latest stable tag and record the result. Verify the PR uses the required Release Please override for an unreleased-only correction and assembles relevant screenshots using the repository's documented PR-time evidence workflow.
 
+## 9. Home Screen icon correction from device testing
+
+- [x] 9.1 Regenerate the existing PWA icons with opaque backgrounds, preserved aspect ratio, and maskable-safe padding; verify the generated pixels with the icon generator's check mode and inspect the rendered artwork.
+- [x] 9.2 Update hub/workspace manifest and Apple touch-icon metadata to use the revised icon URLs; verify HTTP serving, browser pixel checks, and consistency of the shared revision.
+- [ ] 9.3 Run focused checks and the compiled smoke test, then update PR #400 with the icon correction and the user's successful phone push report.
+
 ## Execution notes
 
 - After the notification implementation, the user authorized implementing the iPad fix from the supplied screenshots and browser regression tests, with final physical-device verification left to them. Simulator testing did not reproduce the original behavior; tasks 1.1 and 7.2 therefore remain unchecked.
 - Task 7.1 remains pending. Browser enrollment tests simulate permission and PushManager responses; sender tests use fake transports. Neither establishes real OS push delivery to a locked iPhone/iPad.
+- The user subsequently confirmed that phone notifications work after the sender-configuration/enrollment troubleshooting. This records that reported phone result; the broader platform/provider acceptance matrix in task 7.1 remains pending. The same device-testing exchange reported the transparent, edge-to-edge Home Screen icon, addressed by section 9.
+- Icon verification: the old 192px image failed the opacity/safe-area check with 19,159 non-opaque pixels. Both regenerated sizes pass `bun run generate:pwa-icons --check`; 110 focused unit/integration tests, six PWA browser tests, TypeScript, build, compiled smoke, and strict OpenSpec validation passed. The old 512px icon blob is identical in `v0.7.0` and the pre-correction PR head, confirming this icon defect exists in the latest stable release.
 - PR preparation is now requested. The latest stable tag is `v0.7.0`; its desktop shell still uses `100vh`, and only touch chat consumes the visual-viewport dimensions. The iPad correction therefore addresses stable-release behavior and should remain visible in release notes. Physical acceptance is assigned to the user as part of PR testing.
 - PR [#400](https://github.com/tjakobsson/uatu/pull/400) contains the implementation summary, automated verification, stable-release classification, screenshot evidence, configuration instructions, and an unchecked manual-device checklist. Tasks 1.1, 7.1, and 7.2 remain open for the user's PR testing.
 - Unit verification: `bun run typecheck` passed. The full `bun test` run with a clean tool PATH passed 3,431 tests, skipped 10, and failed none. The initial inherited environment exposed the documented projected Git/SSH wrappers; product credential behavior was not changed for that environment.

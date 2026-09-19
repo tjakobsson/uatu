@@ -13,6 +13,7 @@ import hubIcon192Asset from "../assets/icon-192.png" with { type: "file" };
 import hubIcon512Asset from "../assets/icon-512.png" with { type: "file" };
 import pushWorkerAsset from "../pwa/push-worker.js" with { type: "file" };
 import notificationClientAsset from "../pwa/notification-client.js" with { type: "file" };
+import { PWA_ICON_VERSION } from "../pwa/icons";
 
 import {
   clientKeyForRateLimit,
@@ -1293,8 +1294,8 @@ export function createHubFetchHandler(deps: HubDeps) {
           background_color: "#ffffff",
           theme_color: "#0a1c38",
           icons: [
-            { src: "/hub-assets/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-            { src: "/hub-assets/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+            { src: `/hub-assets/icon-192.png?v=${PWA_ICON_VERSION}`, sizes: "192x192", type: "image/png", purpose: "any maskable" },
+            { src: `/hub-assets/icon-512.png?v=${PWA_ICON_VERSION}`, sizes: "512x512", type: "image/png", purpose: "any maskable" },
           ],
         },
         {

@@ -195,6 +195,11 @@ remove the root registration through their legacy cleanup, so verify device
 enrollment when upgrading again. The push worker does not intercept requests or
 cache application content offline.
 
+Home Screen icons use opaque, padded artwork and versioned image URLs. iOS can
+retain an installed app's old icon after a hub update. If reopening the app
+does not refresh it, re-add it to the Home Screen, then check its login and
+notification enrollment again.
+
 ## Credential setup and migration
 
 The Hub no longer inherits `SSH_AUTH_SOCK`, system GnuPG homes, provider CLI

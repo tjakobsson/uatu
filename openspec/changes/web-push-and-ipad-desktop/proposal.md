@@ -10,6 +10,7 @@ Users need to know when an agent asks a question, requests permission, or finish
 - Deliver notifications through a push-only service worker; tapping a notification opens the corresponding workspace and agent-qualified conversation.
 - Replace the blanket prohibition on service workers with a push-only registration contract, preserving manifest-based installation and carefully migrating legacy registrations.
 - Make the iPad desktop layout respect safe areas and the visual viewport, including hardware-keyboard accessory bars, software keyboards, rotation, and live mode switching.
+- Correct the Home Screen icons reported during device testing: use opaque white backgrounds, safe padding, versioned icon URLs, and explicit Apple touch-icon metadata.
 
 ## Capabilities
 
@@ -19,7 +20,7 @@ Users need to know when an agent asks a question, requests permission, or finish
 
 ### Modified Capabilities
 
-- `pwa-install`: Permit a push-only service worker while keeping installation independent of notification permission and offline support; preserve the new worker during legacy cleanup.
+- `pwa-install`: Permit a push-only service worker while keeping installation independent of notification permission and offline support; preserve the new worker during legacy cleanup and serve opaque, padded Home Screen icons.
 - `base-path-serving`: Distinguish hub-owned push worker scope and notification control URLs from session-prefixed URLs and generic mounts.
 - `touch-navigation`: Require safe-area and keyboard-aware geometry on tablets using desktop mode, including the reported 11-inch iPad Pro with Magic Keyboard.
 

@@ -106,6 +106,10 @@ The user authorized implementing this correction using the supplied screenshots 
 
 Alternative considered: replacing `100vh` with `100dvh` alone. Dynamic viewport units do not reliably account for software-keyboard overlay/panning. Raising header z-index also cannot defeat native iPadOS blur or recover a header outside the visible viewport.
 
+### D8. Home Screen icons have an opaque, padded canvas
+
+The user's physical-device testing also exposed a Home Screen icon defect. The existing PNGs had transparent areas that iOS composited as black, and the mark reached the image edges despite being advertised as maskable. Regenerate both existing sizes from the canonical SVG with an opaque white canvas and aspect-preserving placement inside a 39%-radius circle, leaving antialiasing room within the standard 40% safe circle. `scripts/generate-pwa-icons.ts` uses the existing Playwright browser dependency for repeatable rasterization; its check mode verifies the output pixels. Version the icon references through `pwa/icons.ts`, keep the static manifest in sync, and provide Apple touch-icon metadata on both hub and workspace pages. Already-installed iOS Home Screen icons can remain cached; if re-adding the app is needed, the user must check notification enrollment again.
+
 ## Risks / Trade-offs
 
 - OS presentation can be delayed by Focus, power settings, or browser policy. Mitigation: describe platform acceptance separately from device display and verify real-device behavior.
