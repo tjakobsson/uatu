@@ -720,9 +720,12 @@ export class ChatAdapter {
     this.activityMayHaveChanged();
   }
 
+  // Also reached when a timeline is rewritten (undo, redo, revert, restore).
+  // Announcement records outlive that: the request is still pending for the
+  // agent and the hub, and only an explicit resolution — or the
+  // conversation's loss below — settles what was announced.
   private forgetInteractions(conversationId: string): void {
     this.pendingInteractions.delete(conversationId);
-    for (const [itemId, record] of this.announced) if (record.owner === conversationId) this.announced.delete(itemId);
     this.activityMayHaveChanged();
   }
 
@@ -731,6 +734,7 @@ export class ChatAdapter {
   // nothing else would ever settle its adapter-level records. If it returns,
   // its activity is re-derived from new events.
   private forgetActivity(conversationId: string): void {
+    for (const [itemId, record] of this.announced) if (record.owner === conversationId) this.resolveAnnounced(itemId);
     for (const notification of this.notifications.pendingSnapshot()) {
       try {
         if (JSON.parse(notification.sourceId)[0] !== conversationId || notification.kind === "turn-completed") continue;

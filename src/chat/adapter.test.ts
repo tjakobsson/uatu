@@ -2778,6 +2778,31 @@ describe("pending permission recovery", () => {
     await adapter.dispose();
   });
 
+  test("a rewrite of the child's timeline keeps the announcement, so a later answer from the parent still resolves it", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listQuestions = async () => [{
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ id: "t0", type: "session.next.tool.success", data: { sessionID: "parent", callID: "c0", tool: "question" } } as never);
+    await waitUntil(() => events.some(event => event.type === "notification"));
+    await adapter.stopEventPump();
+    await pump;
+    const announced = events.find(event => event.type === "notification");
+    // An undo/redo/revert/restore replaces the child's timeline wholesale.
+    adapter.projectionForTests("child").replace([]);
+    await adapter.respondQuestion("parent", "que_child", "c1", { kind: "answered", answers: [["A"]] });
+    expect(events.filter(event => event.type === "resolved")).toEqual([
+      { type: "resolved", id: (announced as Extract<AgentNotificationEvent, { type: "notification" }>).notification.id, conversationId: "parent" },
+    ]);
+    await adapter.dispose();
+  });
+
   test("answering a child's question or permission from the parent resolves the child's identity", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
