@@ -116,7 +116,12 @@ export class HubNotifications {
   }
 
   async receive(workspaceId: string, frame: NotificationFrame): Promise<void> {
-    await this.options.store.mutate(data => {
+    await this.ingest(workspaceId, frame);
+    void this.drain();
+  }
+
+  private ingest(workspaceId: string, frame: NotificationFrame): Promise<void> {
+    return this.options.store.mutate(data => {
       this.prune(data);
       if (frame.type === "event" && frame.event.type === "resolved") {
         for (const delivery of data.deliveries) if (delivery.workspaceId === workspaceId && delivery.notification?.id === frame.event.id) {
@@ -133,7 +138,6 @@ export class HubNotifications {
       }
       data.cursors[workspaceId] = frame.cursor;
     });
-    void this.drain();
   }
 
   private enqueue(data: NotificationData, workspaceId: string, notification: AgentNotification): void {
@@ -196,13 +200,15 @@ export class HubNotifications {
             if (buffered > 2 * 1024 * 1024) throw new Error("notification feed frame too large");
             const frames = parser.push(next.value);
             if (frames.length) buffered = 0;
+            // A request and its resolution can share one chunk; record the whole batch before anything is sent.
             for (const frame of frames) {
               if ("comment" in frame || frame.event !== "notification") continue;
               const value = JSON.parse(frame.data) as NotificationFrame;
               if (!validFrame(value)) throw new Error("invalid notification feed frame");
-              await this.receive(workspaceId, value);
+              await this.ingest(workspaceId, value);
               failures = 0;
             }
+            if (frames.length) void this.drain();
           }
         } finally { await reader.cancel().catch(() => {}); }
       } catch { /* Retry from the last durably recorded cursor. Never log payloads. */ }

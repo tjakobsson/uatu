@@ -36,12 +36,14 @@ async function fixture() {
   const feed = new NotificationFeed(() => now);
   let running = false;
   let opens = 0;
+  let batch: NotificationFrame[] | null = null;
   const hub = new HubNotifications({ store, sender, now: () => now, workspaceName: () => "Project",
     authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && ws === "workspace",
     source: {
       isRunning: () => running, workspaceIds: () => ["workspace"],
       open: async request => {
         opens += 1;
+        if (batch) { const chunk = batch.map(frame => `event: notification\ndata: ${JSON.stringify(frame)}\n\n`).join(""); batch = null; return new Response(chunk); }
         const sub = feed.subscribe(new URL(request.path, "http://child.invalid").searchParams.get("cursor") ?? undefined, request.signal);
         return new Response(new ReadableStream({
           async pull(controller) {
@@ -56,7 +58,7 @@ async function fixture() {
   cleanup.push(() => hub.dispose());
   return { store, hub, file, sends, feed, opens: () => opens, run: () => { running = true; }, tick: (ms: number) => { now += ms; }, now: () => now,
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
-    sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
+    batch: (frames: NotificationFrame[]) => { batch = frames; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
     hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },
     enroll: (id = "phone", preferences = {}, as = principal) => hub.enroll(as, { subscription: subscription(id), workspaceIds: ["workspace"], needsAnswer: true, completed: true, ...preferences }),
   };
@@ -220,6 +222,16 @@ test("retired enrollments whose login lapsed give way before the device limit re
   const live = await f.enroll("live");
   expect(live.device?.active).toBe(true);
   expect(f.store.snapshot().devices.map(device => device.subscription.endpoint)).toEqual(["https://web.push.apple.com/live"]);
+});
+
+test("a request resolved within the same feed chunk is never sent", async () => {
+  const f = await fixture(); await f.enroll();
+  f.batch([occurrence("q", f.now()), { type: "event", cursor: "epoch:r", event: { type: "resolved", id: "q", conversationId: "opencode:conversation" } }]);
+  f.run(); f.hub.refresh();
+  for (let i = 0; i < 200 && f.store.snapshot().cursors.workspace !== "epoch:r"; i++) await Bun.sleep(2);
+  await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(f.store.snapshot().deliveries).toMatchObject([{ status: "discarded" }]);
 });
 
 test("pre-release enrollments with one cutoff per workspace load as both categories", async () => {
