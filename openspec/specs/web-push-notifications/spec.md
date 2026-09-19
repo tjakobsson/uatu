@@ -7,7 +7,7 @@ Notify users when an agent needs an answer or finishes a turn, even when their U
 ## Requirements
 
 ### Requirement: Notifications require explicit device opt-in
-Hub-served Uatu SHALL offer an Enable notifications action in supported secure browser contexts. Permission SHALL be requested only following that action, never on installation, page load, or receipt of an agent event. The UI SHALL report the actual permission and subscription state and SHALL explain denied permission, unsupported environments, and HTTPS requirements without blocking ordinary use. On iPhone and iPad environments requiring a Home Screen installation, the UI SHALL explain that prerequisite before attempting enrollment. Enrollment SHALL use feature detection and SHALL work from the hub dashboard and a hub-served workspace.
+Hub-served Uatu SHALL offer an Enable notifications action in supported secure browser contexts. Permission SHALL be requested only following that action, never on installation, page load, or receipt of an agent event. The UI SHALL report the actual permission and subscription state and SHALL explain denied permission, unsupported environments, and HTTPS requirements without blocking ordinary use. On iPhone and iPad environments requiring a Home Screen installation, the UI SHALL explain that prerequisite before attempting enrollment. Enrollment SHALL use feature detection and SHALL work from the hub dashboard and a hub-served workspace. Enrollment SHALL succeed only when the hub knows the current notification-feed position of every selected running workspace; otherwise the hub SHALL refuse with a retryable error naming the workspace(s) it could not reach, SHALL leave the device's existing enrollment unchanged, and the UI SHALL present that refusal rather than reporting the device enabled.
 
 #### Scenario: Installed iPhone app enrolls
 - **WHEN** a user opens Uatu as a Home Screen app over HTTPS on a supported iPhone and taps Enable notifications
@@ -30,6 +30,17 @@ Hub-served Uatu SHALL offer an Enable notifications action in supported secure b
 #### Scenario: Denied permission is not repeatedly requested
 - **WHEN** notification permission is denied
 - **THEN** the UI explains how to change the browser or OS permission and does not repeatedly invoke the permission prompt
+
+#### Scenario: A running workspace's feed does not answer in time
+- **WHEN** a user enrolls or updates a device selecting a running workspace whose notification feed has not answered within the hub's settle bound
+- **THEN** the hub refuses with a retryable service-unavailable error that names that workspace
+- **AND** no device record is created or changed and no cutoff is stamped
+- **AND** the UI shows the refusal and leaves the device's previous state intact
+- **AND** a retry after the feed answers succeeds with a cutoff no earlier than the feed position
+
+#### Scenario: Stopped workspaces do not delay enrollment
+- **WHEN** a user enrolls selecting only stopped workspaces, or a mix in which every running workspace's feed answers in time
+- **THEN** enrollment succeeds without waiting on the stopped workspaces
 
 ### Requirement: Device preferences select workspaces and event categories
 Each enrolled browser profile or installed app SHALL have notification preferences associated with its authenticated hub user. The user SHALL explicitly select accessible workspaces and SHALL be able to toggle needs-answer notifications and successful-turn-completion notifications independently for that device. Both categories SHALL initially be selected in the enrollment form, with the current workspace preselected when enrollment starts there and no workspace preselected on the dashboard. Submitting the form SHALL confirm the selection. New workspaces SHALL NOT be subscribed automatically. Disabling notifications SHALL stop future sends to that device without affecting the user's other devices.
@@ -64,7 +75,7 @@ Subscription creation, preference changes, and removal SHALL require hub authent
 - **THEN** the hub stops sending that workspace's notifications to that user, including queued unsent events
 
 ### Requirement: Notifications describe live agent events
-Uatu SHALL produce needs-answer notifications for newly pending questions and permission requests and completion notifications for successful completion of a top-level agent turn in a selected workspace. Events SHALL identify the workspace, agent-qualified conversation, event kind, and stable source occurrence. OpenCode and Claude SHALL follow the same behavior. A new pending interaction SHALL remain distinguishable from an earlier pending interaction in the same workspace. Transcript replay, initial state hydration, unchanged status snapshots, individual tool completion, child-agent completion, failure, cancellation, and a transition into background work SHALL NOT produce a successful-turn-completion notification. An already resolved interaction SHALL be discarded before its unsent notification is dispatched when its resolution is known.
+Uatu SHALL produce needs-answer notifications for newly pending questions and permission requests and completion notifications for successful completion of a top-level agent turn in a selected workspace. Events SHALL identify the workspace, agent-qualified conversation, event kind, and stable source occurrence. OpenCode and Claude SHALL follow the same behavior. A new pending interaction SHALL remain distinguishable from an earlier pending interaction in the same workspace. Transcript replay, initial state hydration, unchanged status snapshots, individual tool completion, child-agent completion, failure, cancellation, and a transition into background work SHALL NOT produce a successful-turn-completion notification. An already resolved interaction SHALL be discarded before its unsent notification is dispatched when its resolution is known. A resolution SHALL carry the same identity as the pending event it resolves, regardless of which conversation reported the resolution.
 
 #### Scenario: Another question appears while one is pending
 - **WHEN** a second distinct question becomes pending while the workspace already has an unanswered question
@@ -81,6 +92,12 @@ Uatu SHALL produce needs-answer notifications for newly pending questions and pe
 #### Scenario: A turn fails or leaves work in the background
 - **WHEN** a turn fails, is cancelled, or moves into a background-work state
 - **THEN** Uatu does not describe that transition as successful completion
+
+#### Scenario: A subagent's request is resolved through its parent
+- **WHEN** a subagent's question or permission request was announced as pending and its answer is later known only through the parent conversation — an answer given from the parent's transcript, or a parent reconciliation that no longer lists the request
+- **THEN** the resolution identifies the subagent conversation and request that were announced, not the parent
+- **AND** the request is no longer pending in the workspace feed
+- **AND** an unsent delivery for that request is discarded
 
 ### Requirement: Delivery continues without an open page
 For selected running workspaces, the hub SHALL observe eligible events and submit Web Push notifications without requiring a browser live stream, an open conversation, or any visible page. Observation SHALL be shared across enrolled devices and SHALL NOT start an unused agent runtime or stopped workspace merely to watch it. Device enrollments, server push identity, and pending delivery state SHALL survive hub restart. A reconnect SHALL resume retained events where possible; a replay gap SHALL reconcile still-pending interactions without announcing historical completions. Uatu SHALL document that the hub and agent must be running and that platform delivery timing is controlled by the browser/OS.
