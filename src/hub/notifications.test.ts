@@ -37,12 +37,13 @@ async function fixture() {
   let running = false;
   let opens = 0;
   let batch: NotificationFrame[] | null = null;
+  let onOpen = () => {};
   const hub = new HubNotifications({ store, sender, now: () => now, workspaceName: () => "Project",
     authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && ws === "workspace",
     source: {
       isRunning: () => running, workspaceIds: () => ["workspace"],
       open: async request => {
-        opens += 1;
+        opens += 1; onOpen();
         if (batch) { const chunk = batch.map(frame => `event: notification\ndata: ${JSON.stringify(frame)}\n\n`).join(""); batch = null; return new Response(chunk); }
         const sub = feed.subscribe(new URL(request.path, "http://child.invalid").searchParams.get("cursor") ?? undefined, request.signal);
         return new Response(new ReadableStream({
@@ -58,7 +59,7 @@ async function fixture() {
   cleanup.push(() => hub.dispose());
   return { store, hub, file, sends, feed, opens: () => opens, run: () => { running = true; }, tick: (ms: number) => { now += ms; }, now: () => now,
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
-    batch: (frames: NotificationFrame[]) => { batch = frames; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
+    batch: (frames: NotificationFrame[]) => { batch = frames; }, onOpen: (hook: () => void) => { onOpen = hook; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
     hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },
     enroll: (id = "phone", preferences = {}, as = principal) => hub.enroll(as, { subscription: subscription(id), workspaceIds: ["workspace"], needsAnswer: true, completed: true, ...preferences }),
   };
@@ -232,6 +233,18 @@ test("a request resolved within the same feed chunk is never sent", async () => 
   await f.hub.drain();
   expect(f.sends).toHaveLength(0);
   expect(f.store.snapshot().deliveries).toMatchObject([{ status: "discarded" }]);
+});
+
+test("enrolling on a running workspace stamps the cutoff after the feed position is known", async () => {
+  const f = await fixture(); f.run();
+  const turn = (id: string) => (occurrence(id, f.now(), "turn-completed") as Extract<NotificationFrame, { type: "event" }>).event;
+  f.onOpen(() => { f.feed.publish(turn("before-cursor")); f.tick(100); });
+  await f.enroll();
+  expect(f.opens()).toBe(1);
+  expect(f.store.snapshot().devices[0]?.since.workspace).toEqual({ needsAnswer: f.now(), completed: f.now() });
+  f.feed.publish(turn("after-cursor"));
+  for (let i = 0; i < 200 && f.sends.length < 1; i++) await Bun.sleep(2);
+  expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["after-cursor", "accepted"]]);
 });
 
 test("pre-release enrollments with one cutoff per workspace load as both categories", async () => {

@@ -10,7 +10,7 @@ export class NotificationRequestError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 type Principal = { user: string; sessionId: string };
-type Observer = { abort: AbortController; done: Promise<void> };
+type Observer = { abort: AbortController; done: Promise<void>; connected: Promise<void> };
 const JOURNAL_CAPACITY = 10_000;
 const SEND_CONCURRENCY = 8;
 const DEVICE_LIMIT = 32;
@@ -18,6 +18,7 @@ const DEVICE_LIMIT = 32;
 export class HubNotifications {
   private readonly sender: PushSender | null;
   private readonly observers = new Map<string, Observer>();
+  private readonly enrolling = new Map<string, number>();
   private readonly now: () => number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubscribe: (() => void) | undefined;
@@ -65,6 +66,8 @@ export class HubNotifications {
     if (!subscription) throw new NotificationRequestError(400, "invalid browser push subscription");
     const preferences = this.preferences(principal, body);
     if (body.id !== undefined && (typeof body.id !== "string" || body.id.length > 128)) throw new NotificationRequestError(400, "invalid device id");
+    // Know each running workspace's feed position before the cutoff is stamped, so no event after the cutoff can precede the cursor.
+    await this.settle(preferences.workspaceIds.filter(ws => this.options.source.isRunning(ws)));
     const id = await this.options.store.mutate(data => {
       const existing = data.devices.find(device => device.id === body.id || device.subscription.endpoint === subscription.endpoint);
       if (existing && existing.user !== principal.user) throw new NotificationRequestError(409, "subscription belongs to another account; renew it on this device");
@@ -170,21 +173,42 @@ export class HubNotifications {
 
   refresh(): void {
     if (this.closed || !this.sender) return;
-    const wanted = new Set(this.options.store.snapshot().devices.flatMap(device => device.workspaceIds.filter(ws =>
-      (device.needsAnswer || device.completed) && this.options.authorized(device, ws) && this.options.source.isRunning(ws))));
+    const wanted = new Set([...this.enrolling.keys(), ...this.options.store.snapshot().devices.flatMap(device => device.workspaceIds.filter(ws =>
+      (device.needsAnswer || device.completed) && this.options.authorized(device, ws)))].filter(ws => this.options.source.isRunning(ws)));
     for (const [id, observer] of this.observers) if (!wanted.has(id)) observer.abort.abort();
-    for (const id of wanted) if (!this.observers.has(id)) {
-      const abort = new AbortController();
-      const observer: Observer = { abort, done: Promise.resolve() };
-      this.observers.set(id, observer);
-      observer.done = this.observe(id, abort.signal).finally(() => { if (this.observers.get(id) === observer) this.observers.delete(id); });
-    }
+    for (const id of wanted) this.ensureObserver(id);
     void this.drain();
   }
 
-  private async observe(workspaceId: string, signal: AbortSignal): Promise<void> {
+  private ensureObserver(id: string): Observer {
+    const existing = this.observers.get(id);
+    if (existing) return existing;
+    const abort = new AbortController();
+    const observer: Observer = { abort, done: Promise.resolve(), connected: Promise.resolve() };
+    this.observers.set(id, observer);
+    observer.done = this.observe(id, abort.signal, observer).finally(() => { if (this.observers.get(id) === observer) this.observers.delete(id); });
+    return observer;
+  }
+
+  private async settle(workspaceIds: string[]): Promise<void> {
+    if (!workspaceIds.length || this.closed) return;
+    for (const ws of workspaceIds) this.enrolling.set(ws, (this.enrolling.get(ws) ?? 0) + 1);
+    try {
+      const connected = Promise.all(workspaceIds.map(ws => this.ensureObserver(ws).connected));
+      await Promise.race([connected, new Promise<void>(resolve => setTimeout(resolve, 3000).unref())]);
+    } finally {
+      for (const ws of workspaceIds) {
+        const remaining = (this.enrolling.get(ws) ?? 1) - 1;
+        if (remaining > 0) this.enrolling.set(ws, remaining); else this.enrolling.delete(ws);
+      }
+    }
+  }
+
+  private async observe(workspaceId: string, signal: AbortSignal, observer: Observer): Promise<void> {
     let failures = 0;
     while (!signal.aborted) {
+      let connect = () => {};
+      observer.connected = new Promise<void>(resolve => { connect = resolve; });
       try {
         const cursor = this.options.store.snapshot().cursors[workspaceId];
         const response = await this.options.source.open({ workspaceId, path: `${CHILD_NOTIFICATIONS_PATH}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, signal });
@@ -207,6 +231,7 @@ export class HubNotifications {
               if (!validFrame(value)) throw new Error("invalid notification feed frame");
               await this.ingest(workspaceId, value);
               failures = 0;
+              connect();
             }
             if (frames.length) void this.drain();
           }
