@@ -734,7 +734,10 @@ export class ChatAdapter {
   // nothing else would ever settle its adapter-level records. If it returns,
   // its activity is re-derived from new events.
   private forgetActivity(conversationId: string): void {
-    for (const [itemId, record] of this.announced) if (record.owner === conversationId) this.resolveAnnounced(itemId);
+    // Owned by it, or announced under it: a child's request appears in its
+    // launching conversation, and that conversation's loss settles it too —
+    // no child event is guaranteed to follow.
+    for (const [itemId, record] of this.announced) if (record.owner === conversationId || record.destination === conversationId) this.resolveAnnounced(itemId);
     for (const notification of this.notifications.pendingSnapshot()) {
       try {
         if (JSON.parse(notification.sourceId)[0] !== conversationId || notification.kind === "turn-completed") continue;

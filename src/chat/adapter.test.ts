@@ -2803,6 +2803,30 @@ describe("pending permission recovery", () => {
     await adapter.dispose();
   });
 
+  test("deleting the parent settles a child's request announced under it", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listQuestions = async () => [{
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ id: "t0", type: "session.next.tool.success", data: { sessionID: "parent", callID: "c0", tool: "question" } } as never);
+    await waitUntil(() => events.some(event => event.type === "notification"));
+    const announced = events.find(event => event.type === "notification") as Extract<AgentNotificationEvent, { type: "notification" }>;
+    expect(announced.notification).toEqual(expect.objectContaining({ conversationId: "parent", sourceId: JSON.stringify(["child", "que_child"]) }));
+    // The parent goes away; no event for the child is guaranteed to follow.
+    provider.eventQueue.push({ type: "session.deleted", data: { info: fixtureSession("parent") } });
+    await waitUntil(() => events.some(event => event.type === "resolved"));
+    await adapter.stopEventPump();
+    await pump;
+    expect(events.filter(event => event.type === "resolved")).toEqual([{ type: "resolved", id: announced.notification.id, conversationId: "parent" }]);
+    await adapter.dispose();
+  });
+
   test("answering a child's question or permission from the parent resolves the child's identity", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
