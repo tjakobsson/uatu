@@ -14,6 +14,7 @@ type Observer = { abort: AbortController; done: Promise<void>; connected: Promis
 const JOURNAL_CAPACITY = 10_000;
 const SEND_CONCURRENCY = 8;
 const DEVICE_LIMIT = 32;
+const SETTLE_TIMEOUT_MS = 3000;
 
 export class HubNotifications {
   private readonly sender: PushSender | null;
@@ -34,6 +35,7 @@ export class HubNotifications {
     workspaceName: (id: string) => string;
     sender?: PushSender;
     now?: () => number;
+    settleTimeoutMs?: number;
   }) {
     this.now = options.now ?? Date.now;
     this.sender = options.sender ?? (options.contact && validPushContact(options.contact)
@@ -67,7 +69,9 @@ export class HubNotifications {
     const preferences = this.preferences(principal, body);
     if (body.id !== undefined && (typeof body.id !== "string" || body.id.length > 128)) throw new NotificationRequestError(400, "invalid device id");
     // Know each running workspace's feed position before the cutoff is stamped, so no event after the cutoff can precede the cursor.
-    await this.settle(preferences.workspaceIds.filter(ws => this.options.source.isRunning(ws)));
+    // A feed that does not answer in time gets a refusal, not a cutoff the hub cannot honor; the device's previous record stays.
+    const stalled = await this.settle(preferences.workspaceIds.filter(ws => this.options.source.isRunning(ws)));
+    if (stalled.length) throw new NotificationRequestError(503, `notification feed for ${stalled.map(ws => this.options.workspaceName(ws)).join(", ")} did not answer; try again`);
     const id = await this.options.store.mutate(data => {
       const existing = data.devices.find(device => device.id === body.id || device.subscription.endpoint === subscription.endpoint);
       if (existing && existing.user !== principal.user) throw new NotificationRequestError(409, "subscription belongs to another account; renew it on this device");
@@ -190,12 +194,15 @@ export class HubNotifications {
     return observer;
   }
 
-  private async settle(workspaceIds: string[]): Promise<void> {
-    if (!workspaceIds.length || this.closed) return;
+  /** Resolves to the workspaces whose feed had not answered when the bound elapsed. */
+  private async settle(workspaceIds: string[]): Promise<string[]> {
+    if (!workspaceIds.length || this.closed) return [];
     for (const ws of workspaceIds) this.enrolling.set(ws, (this.enrolling.get(ws) ?? 0) + 1);
     try {
-      const connected = Promise.all(workspaceIds.map(ws => this.ensureObserver(ws).connected));
-      await Promise.race([connected, new Promise<void>(resolve => setTimeout(resolve, 3000).unref())]);
+      const pending = new Set(workspaceIds);
+      const connected = Promise.all(workspaceIds.map(ws => this.ensureObserver(ws).connected.then(() => { pending.delete(ws); })));
+      await Promise.race([connected, new Promise<void>(resolve => setTimeout(resolve, this.options.settleTimeoutMs ?? SETTLE_TIMEOUT_MS).unref())]);
+      return [...pending];
     } finally {
       for (const ws of workspaceIds) {
         const remaining = (this.enrolling.get(ws) ?? 1) - 1;

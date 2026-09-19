@@ -237,6 +237,12 @@ export class ChatAdapter {
   private readonly questionRefreshes = new Set<string>();
   private readonly questionCreatedAt = new Map<string, number>();
   private readonly permissionCreatedAt = new Map<string, number>();
+  // The conversation that owns each published question/permission, by item
+  // id. A removal has no item to read the owner from, and the conversation
+  // reporting it may be the parent — a subagent's request is answered from
+  // the parent's transcript, or retired by the parent's reconciliation — so
+  // this is what keeps the resolution on the identity the pending event used.
+  private readonly interactionOwner = new Map<string, string>();
   private readonly sessionParents = new Map<string, string | null>();
   private readonly inventorySessions = new Map<string, InventorySessionMetadata>();
   private readonly inventory = new ConversationInventoryBroadcaster();
@@ -703,6 +709,7 @@ export class ChatAdapter {
 
   private forgetInteractions(conversationId: string): void {
     this.pendingInteractions.delete(conversationId);
+    for (const [itemId, owner] of this.interactionOwner) if (owner === conversationId) this.interactionOwner.delete(itemId);
     this.activityMayHaveChanged();
   }
 
@@ -2244,6 +2251,7 @@ export class ChatAdapter {
       // Date.now() on every reconciliation would keep moving the card.
       const createdAt = this.permissionCreatedAt.get(itemId) ?? Date.now();
       this.permissionCreatedAt.set(itemId, createdAt);
+      this.interactionOwner.set(itemId, request.conversationId);
       items.push({
         id: itemId,
         type: "permission" as const,
@@ -2355,6 +2363,7 @@ export class ChatAdapter {
       // down the timeline as its tool part ticks over.
       const createdAt = this.questionCreatedAt.get(itemId) ?? Date.now();
       this.questionCreatedAt.set(itemId, createdAt);
+      this.interactionOwner.set(itemId, request.conversationId);
       items.push({
         id: itemId,
         type: "question" as const,
@@ -2444,17 +2453,25 @@ export class ChatAdapter {
     for (const update of event.updates) {
       if (update.kind === "upsert" && (update.item.type === "question" || update.item.type === "permission")) {
         const item = update.item;
+        const owner = item.conversationId ?? session.id;
+        if (item.status === "pending") this.interactionOwner.set(item.id, owner);
+        else this.interactionOwner.delete(item.id);
         this.notifications.observe({
           type: "interaction", origin: "live", conversationId: destination.id,
-          sourceId: JSON.stringify([item.conversationId ?? session.id, item.requestId]),
+          sourceId: JSON.stringify([owner, item.requestId]),
           kind: item.type === "question" ? "question-pending" : "permission-pending",
           pending: item.status === "pending", createdAt: item.createdAt,
         });
       } else if (update.kind === "remove") {
         const match = /^(question|permission):(.+)$/.exec(update.itemId);
-        if (match) this.notifications.observe({
+        if (!match) continue;
+        // The removal resolves what the upsert announced: the owner recorded
+        // then, not whichever conversation happens to report the removal.
+        const owner = this.interactionOwner.get(update.itemId) ?? session.id;
+        this.interactionOwner.delete(update.itemId);
+        this.notifications.observe({
           type: "interaction", origin: "live", conversationId: destination.id,
-          sourceId: JSON.stringify([session.id, match[2]]),
+          sourceId: JSON.stringify([owner, match[2]]),
           kind: match[1] === "question" ? "question-pending" : "permission-pending",
           pending: false, createdAt: Date.now(),
         });

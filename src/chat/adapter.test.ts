@@ -2678,6 +2678,74 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  // A subagent's request is announced under its own conversation. Its
+  // resolution can reach the adapter only through the parent — an answer given
+  // from the parent's transcript, or a parent reconciliation that no longer
+  // lists it — and must still resolve the identity that was announced, or the
+  // hub keeps a delivery alive for a request nobody is waiting on.
+  test("a parent reconciliation that retires a child's question resolves the child's identity", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let pending = [{
+      requestId: "que_gone",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    provider.listQuestions = async () => pending;
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    // Discovered by the parent's sweep: the only signal for a question asked
+    // while the pump was down, and it names the child.
+    provider.eventQueue.push({ id: "t0", type: "session.next.tool.success", data: { sessionID: "parent", callID: "c0", tool: "question" } } as never);
+    await waitUntil(() => events.some(event => event.type === "notification"));
+    const announced = events.find(event => event.type === "notification");
+    expect(announced).toEqual({ type: "notification", notification: expect.objectContaining({
+      conversationId: "parent", kind: "question-pending", sourceId: JSON.stringify(["child", "que_gone"]),
+    }) });
+    // Answered elsewhere with the reply event lost; the parent's next
+    // reconciliation carries only the removal.
+    pending = [];
+    provider.eventQueue.push({ id: "t1", type: "session.next.tool.success", data: { sessionID: "parent", callID: "c1", tool: "question" } } as never);
+    await waitUntil(() => events.some(event => event.type === "resolved"));
+    await adapter.stopEventPump();
+    await pump;
+    expect(events.filter(event => event.type === "resolved")).toEqual([
+      { type: "resolved", id: (announced as Extract<AgentNotificationEvent, { type: "notification" }>).notification.id, conversationId: "parent" },
+    ]);
+    await adapter.dispose();
+  });
+
+  test("answering a child's question or permission from the parent resolves the child's identity", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    // The parent's projection is seeded from these when the answer arrives;
+    // the child transcript is never opened.
+    provider.listQuestions = async () => [{
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    provider.listPermissions = async () => [{ requestId: "perm_child", conversationId: "child", action: "shell", resources: ["ls"] }];
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, onNotification: event => events.push(event) });
+    const pump = adapter.startEventPump();
+    const timestamp = Date.now();
+    provider.eventQueue.push({ type: "question.asked", data: { sessionID: "child", id: "que_child", timestamp, questions: [{ question: "Pick", options: [{ label: "A" }] }] } });
+    provider.eventQueue.push({ type: "permission.v2.asked", data: { id: "perm_child", sessionID: "child", action: "shell", resources: ["ls"], timestamp } } as never);
+    await waitUntil(() => events.filter(event => event.type === "notification").length === 2);
+    const announced = events.flatMap(event => event.type === "notification" ? [event.notification] : []);
+    expect(announced.map(notification => [notification.conversationId, notification.sourceId]).sort()).toEqual([
+      ["parent", JSON.stringify(["child", "perm_child"])], ["parent", JSON.stringify(["child", "que_child"])],
+    ]);
+    await adapter.respondQuestion("parent", "que_child", "c1", { kind: "answered", answers: [["A"]] });
+    await adapter.respondPermission("parent", "perm_child", "c2", "approved-once");
+    await adapter.stopEventPump();
+    await pump;
+    expect(events.flatMap(event => event.type === "resolved" ? [event.id] : []).sort()).toEqual(announced.map(notification => notification.id).sort());
+    await adapter.dispose();
+  });
+
   // A subagent's model and cost live in its own session, which the parent's
   // client never sees. The adapter is the only place both are in scope, so it
   // sums the child's messages and materializes the total onto the row that

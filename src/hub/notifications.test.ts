@@ -34,16 +34,22 @@ async function fixture() {
     sends.push({ endpoint: device.endpoint, payload, ttl }); await gates.get(device.endpoint); return results.get(device.endpoint) ?? result;
   };
   const feed = new NotificationFeed(() => now);
-  let running = false;
+  const running = new Set<string>();
   let opens = 0;
   let batch: NotificationFrame[] | null = null;
   let onOpen = () => {};
-  const hub = new HubNotifications({ store, sender, now: () => now, workspaceName: () => "Project",
-    authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && ws === "workspace",
+  // A hung feed answers only when released, or rejects when the hub gives up on it.
+  let stalled: Array<{ resolve: () => void; signal?: AbortSignal }> | null = null;
+  const hub = new HubNotifications({ store, sender, now: () => now, settleTimeoutMs: 50, workspaceName: ws => ws === "workspace" ? "Project" : "Other",
+    authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && (ws === "workspace" || ws === "other"),
     source: {
-      isRunning: () => running, workspaceIds: () => ["workspace"],
+      isRunning: ws => running.has(ws), workspaceIds: () => ["workspace", "other"],
       open: async request => {
         opens += 1; onOpen();
+        if (stalled) await new Promise<void>((resolve, reject) => {
+          stalled!.push({ resolve, signal: request.signal });
+          request.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
         if (batch) { const chunk = batch.map(frame => `event: notification\ndata: ${JSON.stringify(frame)}\n\n`).join(""); batch = null; return new Response(chunk); }
         const sub = feed.subscribe(new URL(request.path, "http://child.invalid").searchParams.get("cursor") ?? undefined, request.signal);
         return new Response(new ReadableStream({
@@ -57,7 +63,8 @@ async function fixture() {
     },
   });
   cleanup.push(() => hub.dispose());
-  return { store, hub, file, sends, feed, opens: () => opens, run: () => { running = true; }, tick: (ms: number) => { now += ms; }, now: () => now,
+  return { store, hub, file, sends, feed, opens: () => opens, run: (ws = "workspace") => { running.add(ws); }, tick: (ms: number) => { now += ms; }, now: () => now,
+    stall: () => { stalled = []; }, release: () => { const waiting = stalled ?? []; stalled = null; for (const entry of waiting) entry.resolve(); },
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
     batch: (frames: NotificationFrame[]) => { batch = frames; }, onOpen: (hook: () => void) => { onOpen = hook; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
     hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },
@@ -245,6 +252,42 @@ test("enrolling on a running workspace stamps the cutoff after the feed position
   f.feed.publish(turn("after-cursor"));
   for (let i = 0; i < 200 && f.sends.length < 1; i++) await Bun.sleep(2);
   expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["after-cursor", "accepted"]]);
+});
+
+test("a running workspace whose feed does not answer refuses enrollment without writing a device", async () => {
+  const f = await fixture(); f.run(); f.stall();
+  await expect(f.enroll()).rejects.toMatchObject({ status: 503, message: expect.stringContaining("Project") });
+  expect(f.store.snapshot().devices).toEqual([]);
+  expect(f.hub.state(principal).device).toBeNull();
+  // Once the feed answers, a retry enrolls with a cutoff at the feed position: nothing published before it is delivered.
+  const turn = (id: string) => (occurrence(id, f.now(), "turn-completed") as Extract<NotificationFrame, { type: "event" }>).event;
+  f.feed.publish(turn("before-cursor")); f.tick(100);
+  f.release();
+  const enrolled = await f.enroll();
+  expect(enrolled.device?.active).toBe(true);
+  expect(f.store.snapshot().devices[0]?.since.workspace).toEqual({ needsAnswer: f.now(), completed: f.now() });
+  f.feed.publish(turn("after-cursor"));
+  for (let i = 0; i < 200 && f.sends.length < 1; i++) await Bun.sleep(2);
+  expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["after-cursor", "accepted"]]);
+});
+
+test("only the stalled running workspace is named and stopped workspaces never wait", async () => {
+  const f = await fixture(); f.run("workspace"); f.stall();
+  await expect(f.enroll("phone", { workspaceIds: ["workspace", "other"] })).rejects.toMatchObject({ status: 503, message: "notification feed for Project did not answer; try again" });
+  expect(f.store.snapshot().devices).toEqual([]);
+  const enrolled = await f.enroll("phone", { workspaceIds: ["other"] });
+  expect(enrolled.device?.workspaceIds).toEqual(["other"]);
+  expect(f.opens()).toBe(1);
+});
+
+test("a refused update leaves the existing device record untouched", async () => {
+  const f = await fixture();
+  await f.enroll("phone", { completed: false });
+  const before = structuredClone(f.store.snapshot().devices);
+  f.run(); f.stall(); f.tick(500);
+  await expect(f.enroll("phone", { completed: true })).rejects.toMatchObject({ status: 503 });
+  expect(f.store.snapshot().devices).toEqual(before);
+  expect(f.hub.state(principal, before[0]!.id).device).toMatchObject({ completed: false, active: true });
 });
 
 test("pre-release enrollments with one cutoff per workspace load as both categories", async () => {
