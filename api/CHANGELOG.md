@@ -2,15 +2,39 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 8 / Workspace 20 - Unreleased
+
+Compatibility: breaking (Hub)
+
+### Changes
+
+- A published worktree operation family serves the complete Git worktree lifecycle as JSON: `GET /api/hub/worktrees` (inventory) and `POST /api/hub/worktrees/{fetch,create,open,preflight-delete,delete,register,forget}`. It is the Hub's only worktree transport — the in-workspace picker and the Hub dashboard both drive it through one client dialog — so every caller, browser or not, runs over the same service and the same safety rules and no client can reach a weaker check. A refusal is a completed request and answers 200 with `ok: false` and a sanitized error; HTTP statuses report transport problems only. Creation never takes a destination — the Hub computes `<main-folder>.worktrees/<safe-branch-folder>` — deletion requires `confirm: true`, forgetting a workspace is itself the authorization to stop its own Uatu sessions first (there is no `stop: false` variant), the branch is always kept, there is no force anywhere in the family, and there is no operation-progress poll in this contract. `fetch` is one explicit, credential-aware remote fetch that reports refs whether or not it succeeded, carrying no server-side draft. `preflight-delete` is a read-only check of the one blocker that would refuse a deletion, or whether proceeding needs the caller's explicit stop authorization. `register` covers both retrying a Uatu-created checkout that outlived a failed registration and registering an external tree for the first time, told apart by the service's own pending state rather than anything the caller says.
+- Hub state adds optional repository, parent, branch, provenance and availability fields, plus `worktreeApi` — the origin-rooted path of the published JSON family, present only when the Hub serves worktree operations — and a boolean `createWorktree` on a main checkout that can host linked worktrees. Neither publishes a server-rendered worktree URL; the picker and dashboard derive their behavior from the field's presence and the JSON family alone. The live stream adds the cursor-free `worktrees` topic, with an inventory invalidation on subscription, reconnect and committed changes.
+
+### Migration
+
+Strict Hub clients must regenerate against Hub revision 8. The state objects are closed, so revision 7 validators reject the new optional fields. Accept the new `worktrees` envelope topic and subscription variant. On invalidation, fetch authoritative inventory without changing the selected workspace or conversation. The workspace payload revision remains 20.
+
 ## Hub 7 / Workspace 20 - Unreleased
 
-Compatibility: breaking (workspace and Hub)
+Compatibility: breaking (Hub)
+
+### Changes
+
+- `PUT /api/hub/notifications` accepts an optional `allWorkspaces` boolean (default `false`). When true, the device receives its selected event categories from every workspace the login can reach, including workspaces registered after the enrollment was saved; the Hub evaluates the rule at event time rather than expanding it into a list. `workspaceIds` remains required and is stored as the explicit selection the rule overrides, so turning the rule off restores it.
+- The `device` object in `NotificationState` gains a required `allWorkspaces` boolean reporting the stored mode.
+
+### Migration
+
+Strict Hub clients must regenerate against Hub revision 7: the `device` object is closed, so a revision 6 validator rejects the new field on every `GET` and `PUT /api/hub/notifications` response. Clients that never send `allWorkspaces` keep their current behaviour. A Hub downgraded below this revision ignores the stored flag and sends from each device's explicit `workspaceIds` only, until the device is saved again on an upgraded Hub.
+
+## Hub 6 / Workspace 20 - Unreleased
+
+Compatibility: breaking (workspace); additive (Hub)
 
 ### Changes
 
 - Added `GET`, `PUT`, and `DELETE /api/hub/notifications` for device push enrollment, preferences, and removal. Device enrollments follow their authenticated login session and selected workspaces. The API never returns push endpoints or private keys.
-- `PUT /api/hub/notifications` accepts an optional `allWorkspaces` boolean (default `false`). When true, the device receives its selected event categories from every workspace the login can reach, including workspaces registered after the enrollment was saved; the Hub evaluates the rule at event time rather than expanding it into a list. `workspaceIds` remains required and is stored as the explicit selection the rule overrides, so turning the rule off restores it.
-- The `device` object in `NotificationState` gains a required `allWorkspaces` boolean reporting the stored mode.
 - A task `tool` item's `usage` changes meaning. It was the subagent's whole child session, with every subagent beneath it added in; it is now what the subagent spent on the task that row represents — the messages it produced answering that task's prompt — and nothing else. A subagent handed a further task (OpenCode's `task_id` continuation) is one `childConversationId` on several rows: those rows used to restate the session's total, so a sum over rows counted the subagent once per task, and they now state one task each and sum to the session.
 - Task `tool` items gain optional `descendants`: the subagents launched beneath the row, at any depth, as a flat ordered list of `SubagentLine` objects (`id`, `parentId`, `description`, optional `subagent`, `conversationId`, optional `model` and `usage`). Each line's `usage` is that task's own spend, and `parentId` names the row or an earlier line.
 - `assistant_message` usage carriers gain optional `agent`: the agent that produced the message, as the provider names it (OpenCode: `build`, `plan`, `compaction`, or a subagent's kind).
@@ -19,18 +43,7 @@ Compatibility: breaking (workspace and Hub)
 
 Strict workspace Chat consumers must regenerate against workspace revision 20: `tool` and `assistant_message` items are closed objects, so a revision 19 validator rejects `descendants` and `agent` when present. A consumer that totals a conversation's cost must now add each task row's `descendants[].usage` to the row's own `usage` — subagents launched by subagents are no longer folded into their launcher's figure — and must stop treating rows that share a `childConversationId` as separate subagents: they are one subagent's tasks. With both changes, carriers plus rows plus lines count every priced message exactly once. Group carriers by `agent` to itemize the main agent's spend; treat an absent `agent` as unnamed rather than as a distinct agent.
 
-Strict Hub clients must regenerate against Hub revision 7: the notification `device` object is closed, so a revision 6 validator rejects the new `allWorkspaces` field on every `GET` and `PUT /api/hub/notifications` response. Clients that never send `allWorkspaces` keep their current behaviour. A Hub downgraded below this revision ignores the stored flag and sends from each device's explicit `workspaceIds` only, until the device is saved again on an upgraded Hub.
-
-Operators enabling Web Push configure `notifications.contact` with a valid `mailto:` address or HTTPS contact URL. Existing devices opt in through notification settings.
-
-### Worktree changes
-
-- A published worktree operation family serves the complete Git worktree lifecycle as JSON: `GET /api/hub/worktrees` (inventory) and `POST /api/hub/worktrees/{fetch,create,open,preflight-delete,delete,register,forget}`. It is the Hub's only worktree transport — the in-workspace picker and the Hub dashboard both drive it through one client dialog — so every caller, browser or not, runs over the same service and the same safety rules and no client can reach a weaker check. A refusal is a completed request and answers 200 with `ok: false` and a sanitized error; HTTP statuses report transport problems only. Creation never takes a destination — the Hub computes `<main-folder>.worktrees/<safe-branch-folder>` — deletion requires `confirm: true`, forgetting a workspace is itself the authorization to stop its own Uatu sessions first (there is no `stop: false` variant), the branch is always kept, there is no force anywhere in the family, and there is no operation-progress poll in this contract. `fetch` is one explicit, credential-aware remote fetch that reports refs whether or not it succeeded, carrying no server-side draft. `preflight-delete` is a read-only check of the one blocker that would refuse a deletion, or whether proceeding needs the caller's explicit stop authorization. `register` covers both retrying a Uatu-created checkout that outlived a failed registration and registering an external tree for the first time, told apart by the service's own pending state rather than anything the caller says.
-- Hub state adds optional repository, parent, branch, provenance and availability fields, plus `worktreeApi` — the origin-rooted path of the published JSON family, present only when the Hub serves worktree operations — and a boolean `createWorktree` on a main checkout that can host linked worktrees. Neither publishes a server-rendered worktree URL; the picker and dashboard derive their behavior from the field's presence and the JSON family alone. The live stream adds the cursor-free `worktrees` topic, with an inventory invalidation on subscription, reconnect and committed changes.
-
-### Migration
-
-Strict Hub clients must regenerate against Hub revision 7. The state objects are closed, so older validators reject the new optional fields. Accept the new `worktrees` envelope topic and subscription variant. On invalidation, fetch authoritative inventory without changing the selected workspace or conversation. The workspace payload revision is unchanged by this feature.
+The notification operations require no client migration. Operators enabling Web Push configure `notifications.contact` with a valid `mailto:` address or HTTPS contact URL. Existing devices opt in through notification settings.
 
 ## Hub 6 / Workspace 19 - Unreleased
 

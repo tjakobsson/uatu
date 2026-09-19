@@ -2,7 +2,7 @@
   "$schema": "./contract.schema.json",
   "schemaVersion": 1,
   "stability": "experimental",
-  "hubApiRevision": 7,
+  "hubApiRevision": 8,
   "workspaceApiRevision": 20,
   "productVersion": null,
   "sourceCommit": null,

@@ -1,5 +1,7 @@
 # Worktree verification
 
+Latest integration: [rebase onto `a1ac6d3` and Hub API revision 8](#latest-rebase-and-api-revision-correction-2026-09-19).
+
 ## Rebased review fixes (2026-09-19, tasks 12.1–12.8)
 
 The user accepted all seven findings from the review of `f5f5f0a`, rebased onto
@@ -271,3 +273,58 @@ Post-integration checks on 2026-09-18:
 
 The earlier full-browser results remain identified above; CI will run the full
 suite on the pushed combined branch.
+
+### Latest rebase and API revision correction (2026-09-19)
+
+Rebased onto `origin/main` at `a1ac6d3`; the resulting HEAD before this correction
+is `937bff3`. The user explicitly approved Hub revision 8 / workspace revision 20,
+superseding the earlier claim that both unreleased changes could share Hub 7.
+Main already uses Hub 7 for notification `allWorkspaces`. The compatibility policy
+requires a newer Hub revision for the worktree additions to closed state objects
+and the live topic, regardless of release status.
+
+Runtime, contract metadata, OpenAPI revision metadata and both state examples now
+declare 8/20 (`8.20.0-experimental`). The changelog adds a separate Hub 8 worktree
+entry with migration guidance; its entire Hub 7/20 notification and Hub 6/20
+receipt/notification history matches current main unchanged. Current design and
+proposal state the corrected decision; earlier verification and task records
+remain historical rather than being retroactively rewritten.
+
+Revision-focused verification:
+
+- `bun run typecheck`: passed (`tsc --noEmit`).
+- `bun run api:validate`: passed metadata, schemas, examples and OpenAPI lint;
+  one existing `no-illogical-composition-keywords` warning remains for the
+  single-member `WorkspaceConflict.allOf` at `api/openapi.yaml:1551`.
+- `bun test src/shared/api-revisions.test.ts api/contract.test.ts`: 25 pass,
+  0 fail, 375 assertions across 2 files (4.50 seconds). Existing tests cover
+  revision consistency and examples, so no redundant regression test was added.
+- The existing compatibility checker, invoked with `origin/main` contract and
+  streaming snapshots versus the working tree: `API compatibility against
+  origin/main passed`. The temporary invocation script was removed afterward.
+- `git diff --check`: passed. Compared the changelog against `origin/main`:
+  only the new Hub 8/20 entry is added; all upstream entries remain intact.
+
+Post-rebase integration verification (clean tool environment, as above):
+
+- `bun run test:api`: 183 pass, 0 fail, 1,491 assertions (27.80 seconds).
+- `bun test src/hub/notifications.test.ts src/hub/worktree-lifecycle.integration.test.ts src/hub/worktree-onboarding.test.ts src/hub/worktree-api.integration.test.ts src/hub/worktree-journal.test.ts src/hub/worktree-rename-guard.test.ts src/shared/worktree-contract.test.ts src/shell/worktree-dialog.test.ts src/shell/worktree-dialog-script.test.ts`:
+  276 pass, 0 fail, 1,372 assertions (43.15 seconds).
+- `bun run test:e2e tests/e2e/worktree-ui.e2e.ts tests/e2e/worktree-integration.e2e.ts tests/e2e/worktree-webkit.e2e.ts tests/e2e/hub-switcher.e2e.ts tests/e2e/hub-live-stream.e2e.ts tests/e2e/hub-nav-bounds.e2e.ts tests/e2e/notifications.e2e.ts --workers=1 --retries=0 --output=test-results/rebase-hub8-repeat`:
+  all 28 passed in 2.4 minutes, including notifications' all-workspaces rule,
+  WebKit, checkout round trips and 320/390px dialog bounds. The initial run
+  (`test-results/rebase-hub8`) passed 27 and failed the touch creation journey
+  because a picker `boundingBox()` measurement returned null. The complete
+  repeat passed without source/test changes; the initial failure is retained
+  as a transient layout-measurement failure, not counted as a first-run pass.
+- Root and worktree-dedicated typechecks passed.
+- `bun run build` and `bun run smoke`: all 16 compiled checks passed, including
+  notification assets, first-attempt creation and the minified dashboard dialog.
+- `bunx --no-install openspec validate add-git-worktree-workspaces --strict`
+  and `git diff --check`: passed.
+
+The full unit suite, full browser suite, native WebView and physical-phone checks
+were not rerun after this rebase; their earlier results above remain historical.
+No dependencies were installed. At verification time, the rebase had replayed
+existing commits, the Hub 8 correction and this verification update were
+uncommitted, and nothing had been pushed.

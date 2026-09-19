@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 7.20.0-experimental
+  version: 8.20.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 7 and workspace revision 20
+  summary: Hub revision 8 and workspace revision 20
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves one family itself, personal
@@ -20,7 +20,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 7
+    hubApiRevision: 8
     workspaceApiRevision: 20
 servers:
   - url: https://{hubHost}
@@ -147,7 +147,7 @@ paths:
                   summary: An ordinary workspace
                   value:
                     version: 0.5.1 (abcdef0)
-                    hubApiRevision: 7
+                    hubApiRevision: 8
                     workspaceApiRevision: 20
                     workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 20, shells: [{ attached: false, label: zsh }] }]
                     workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
@@ -155,7 +155,7 @@ paths:
                   summary: A main workspace and one linked worktree
                   value:
                     version: 0.5.1 (abcdef0)
-                    hubApiRevision: 7
+                    hubApiRevision: 8
                     workspaceApiRevision: 20
                     worktreeApi: /api/hub/worktrees
                     workspaces:
