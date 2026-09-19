@@ -24,6 +24,7 @@ export class HubNotifications {
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubscribe: (() => void) | undefined;
   private draining: Promise<void> | null = null;
+  private reconciling: Promise<void> | null = null;
   private drainAgain = false;
   private closed = false;
 
@@ -31,7 +32,8 @@ export class HubNotifications {
     store: NotificationStore;
     contact?: string;
     source: LiveUpstreamSource;
-    authorized: (principal: Principal, workspaceId: string) => boolean;
+    /** Without a workspace: is the principal still a valid login? With one: does that login reach a registered workspace? */
+    authorized: (principal: Principal, workspaceId?: string) => boolean;
     workspaceName: (id: string) => string;
     sender?: PushSender;
     now?: () => number;
@@ -55,7 +57,7 @@ export class HubNotifications {
     const device = data.devices.find(device => device.id === id && device.user === principal.user);
     return {
       configured: this.sender !== null, publicKey: this.sender ? data.keys.publicKey : null,
-      device: device ? { id: device.id, workspaceIds: device.workspaceIds, needsAnswer: device.needsAnswer, completed: device.completed,
+      device: device ? { id: device.id, allWorkspaces: device.allWorkspaces, workspaceIds: device.workspaceIds, needsAnswer: device.needsAnswer, completed: device.completed,
         active: device.sessionId === principal.sessionId && this.active(device),
       } : null,
     };
@@ -70,7 +72,8 @@ export class HubNotifications {
     if (body.id !== undefined && (typeof body.id !== "string" || body.id.length > 128)) throw new NotificationRequestError(400, "invalid device id");
     // Know each running workspace's feed position before the cutoff is stamped, so no event after the cutoff can precede the cursor.
     // A feed that does not answer in time gets a refusal, not a cutoff the hub cannot honor; the device's previous record stays.
-    const stalled = await this.settle(preferences.workspaceIds.filter(ws => this.options.source.isRunning(ws)));
+    const covered = this.coverage(preferences, principal);
+    const stalled = await this.settle(covered.filter(ws => this.options.source.isRunning(ws)));
     if (stalled.length) throw new NotificationRequestError(503, `notification feed for ${stalled.map(ws => this.options.workspaceName(ws)).join(", ")} did not answer; try again`);
     const id = await this.options.store.mutate(data => {
       const existing = data.devices.find(device => device.id === body.id || device.subscription.endpoint === subscription.endpoint);
@@ -86,7 +89,7 @@ export class HubNotifications {
       const device: NotificationDevice = {
         ...principal, ...preferences, id: existing?.id ?? randomUUID(), subscription,
         createdAt: existing?.createdAt ?? this.now(),
-        since: Object.fromEntries(preferences.workspaceIds.map(ws => [ws, Object.fromEntries(NOTIFICATION_CATEGORIES.filter(category => preferences[category])
+        since: Object.fromEntries(covered.map(ws => [ws, Object.fromEntries(NOTIFICATION_CATEGORIES.filter(category => preferences[category])
           .map(category => [category, sameAuthorization && existing?.[category] ? existing.since[ws]?.[category] ?? this.now() : this.now()]))])),
       };
       data.devices = data.devices.filter(candidate => candidate.id !== device.id);
@@ -119,7 +122,16 @@ export class HubNotifications {
   }
 
   private active(device: NotificationDevice): boolean {
-    return device.workspaceIds.some(ws => this.options.authorized(device, ws));
+    return device.allWorkspaces ? this.options.authorized(device) : device.workspaceIds.some(ws => this.options.authorized(device, ws));
+  }
+
+  /** The registered workspaces a device's rule reaches right now. */
+  private coverage(preferences: NotificationPreferences, principal: Principal): string[] {
+    return preferences.allWorkspaces ? this.options.source.workspaceIds().filter(ws => this.options.authorized(principal, ws)) : preferences.workspaceIds;
+  }
+
+  private covers(device: NotificationDevice, workspaceId: string): boolean {
+    return (device.allWorkspaces || device.workspaceIds.includes(workspaceId)) && this.options.authorized(device, workspaceId);
   }
 
   async receive(workspaceId: string, frame: NotificationFrame): Promise<void> {
@@ -165,23 +177,56 @@ export class HubNotifications {
 
   private eligible(device: NotificationDevice, workspaceId: string, notification: AgentNotification): boolean {
     const category = notification.kind === "turn-completed" ? "completed" : "needsAnswer";
-    return device[category] && device.workspaceIds.includes(workspaceId) && this.options.authorized(device, workspaceId)
+    return device[category] && this.covers(device, workspaceId)
       && notification.createdAt >= (device.since[workspaceId]?.[category] ?? Infinity);
   }
 
   private preferences(principal: Principal, body: Record<string, unknown>): NotificationPreferences {
     if (!Array.isArray(body.workspaceIds) || body.workspaceIds.length > 256 || body.workspaceIds.some(id => typeof id !== "string" || !this.options.authorized(principal, id))
-      || typeof body.needsAnswer !== "boolean" || typeof body.completed !== "boolean") throw new NotificationRequestError(400, "invalid notification preferences or workspace access");
-    return { workspaceIds: [...new Set(body.workspaceIds as string[])], needsAnswer: body.needsAnswer, completed: body.completed };
+      || typeof body.needsAnswer !== "boolean" || typeof body.completed !== "boolean" || (body.allWorkspaces !== undefined && typeof body.allWorkspaces !== "boolean")) {
+      throw new NotificationRequestError(400, "invalid notification preferences or workspace access");
+    }
+    return { allWorkspaces: body.allWorkspaces === true, workspaceIds: [...new Set(body.workspaceIds as string[])], needsAnswer: body.needsAnswer, completed: body.completed };
   }
 
   refresh(): void {
     if (this.closed || !this.sender) return;
-    const wanted = new Set([...this.enrolling.keys(), ...this.options.store.snapshot().devices.flatMap(device => device.workspaceIds.filter(ws =>
-      (device.needsAnswer || device.completed) && this.options.authorized(device, ws)))].filter(ws => this.options.source.isRunning(ws)));
+    const data = this.options.store.snapshot();
+    const registered = this.options.source.workspaceIds();
+    // A workspace an all-workspaces device has no cutoff for is stamped before its feed is observed for that device,
+    // so what happened before the hub first saw it registered stays history; a workspace gone from the registry loses its cutoff.
+    const unstamped = new Set(registered.filter(ws => data.devices.some(device => device.allWorkspaces && this.unstamped(device, ws))));
+    const stale = data.devices.some(device => device.allWorkspaces && Object.keys(device.since).some(ws => !registered.includes(ws)));
+    if ((unstamped.size || stale) && !this.reconciling) {
+      this.reconciling = this.reconcile().catch(() => {}).finally(() => { this.reconciling = null; this.refresh(); });
+    }
+    const wanted = new Set([...this.enrolling.keys(), ...data.devices.flatMap(device => (device.needsAnswer || device.completed)
+      ? this.coverage(device, device).filter(ws => this.options.authorized(device, ws)) : [])].filter(ws => this.options.source.isRunning(ws)));
     for (const [id, observer] of this.observers) if (!wanted.has(id)) observer.abort.abort();
-    for (const id of wanted) this.ensureObserver(id);
+    for (const id of wanted) if (!unstamped.has(id) || this.observers.has(id)) this.ensureObserver(id);
     void this.drain();
+  }
+
+  private unstamped(device: NotificationDevice, workspaceId: string): boolean {
+    return NOTIFICATION_CATEGORIES.some(category => device[category] && device.since[workspaceId]?.[category] === undefined);
+  }
+
+  private reconcile(): Promise<void> {
+    return this.options.store.mutate(data => {
+      const registered = this.options.source.workspaceIds();
+      for (const device of data.devices) {
+        if (!device.allWorkspaces) continue;
+        for (const ws of Object.keys(device.since)) if (!registered.includes(ws)) {
+          delete device.since[ws];
+          for (const delivery of data.deliveries) if (delivery.deviceId === device.id && delivery.workspaceId === ws && delivery.status === "pending") {
+            delivery.status = "discarded"; delete delivery.notification;
+          }
+        }
+        for (const ws of registered) for (const category of NOTIFICATION_CATEGORIES) {
+          if (device[category] && device.since[ws]?.[category] === undefined) (device.since[ws] ??= {})[category] = this.now();
+        }
+      }
+    });
   }
 
   private ensureObserver(id: string): Observer {
@@ -344,6 +389,7 @@ export class HubNotifications {
     for (const observer of this.observers.values()) observer.abort.abort();
     await Promise.all([...this.observers.values()].map(observer => observer.done));
     await this.draining;
+    await this.reconciling;
     await this.options.store.settled();
   }
 }

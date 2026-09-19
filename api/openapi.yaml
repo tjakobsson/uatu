@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 6.20.0-experimental
+  version: 7.20.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 6 and workspace revision 20
+  summary: Hub revision 7 and workspace revision 20
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves one family itself, personal
@@ -20,7 +20,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 6
+    hubApiRevision: 7
     workspaceApiRevision: 20
 servers:
   - url: https://{hubHost}
@@ -58,7 +58,7 @@ paths:
       operationId: hubEnrollNotifications
       tags: [Hub]
       summary: Enroll or reconcile a browser push subscription and device preferences
-      description: Requires an explicit user enrollment action. Cookie requests require same-origin CSRF validation. Enrollment is authorized by the current login session; expiry or revocation stops future sends until reconciliation.
+      description: Requires an explicit user enrollment action. Cookie requests require same-origin CSRF validation. Enrollment is authorized by the current login session; expiry or revocation stops future sends until reconciliation. With `allWorkspaces` true the device covers every workspace the login can reach, including workspaces registered later; `workspaceIds` is still validated and stored so the explicit selection is restored when the rule is turned off. Enrollment waits for the feed position of every running covered workspace before saving.
       requestBody:
         required: true
         content:
@@ -143,7 +143,7 @@ paths:
               schema: { $ref: '#/components/schemas/HubState' }
               example:
                 version: 0.5.1 (abcdef0)
-                hubApiRevision: 6
+                hubApiRevision: 7
                 workspaceApiRevision: 10
                 workspaces: [{ id: uatu, displayName: Uatu Docs, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 10, shells: [{ attached: false, label: zsh }] }]
                 workspaceDefaults: { configured: /srv/workspaces, configuredAvailable: true, effective: /srv/workspaces }
@@ -1035,6 +1035,10 @@ components:
                 p256dh: { type: string }
                 auth: { type: string }
         workspaceIds: { type: array, maxItems: 256, items: { type: string } }
+        allWorkspaces:
+          type: boolean
+          default: false
+          description: Cover every accessible workspace, including ones registered later, instead of `workspaceIds`.
         needsAnswer: { type: boolean }
         completed: { type: boolean }
     NotificationState:
@@ -1048,10 +1052,11 @@ components:
           oneOf:
             - { type: 'null' }
             - type: object
-              required: [id, workspaceIds, needsAnswer, completed, active]
+              required: [id, allWorkspaces, workspaceIds, needsAnswer, completed, active]
               additionalProperties: false
               properties:
                 id: { type: string }
+                allWorkspaces: { type: boolean, description: True when the device covers every accessible workspace as a standing rule; `workspaceIds` then holds the explicit selection it overrides. }
                 workspaceIds: { type: array, items: { type: string } }
                 needsAnswer: { type: boolean }
                 completed: { type: boolean }

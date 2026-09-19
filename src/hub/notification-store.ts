@@ -5,7 +5,8 @@ import type { AgentNotification } from "../chat/notifications";
 
 export const NOTIFICATION_CATEGORIES = ["needsAnswer", "completed"] as const;
 export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
-export type NotificationPreferences = { workspaceIds: string[] } & Record<NotificationCategory, boolean>;
+/** `allWorkspaces` is a standing rule evaluated against the registry at event time; `workspaceIds` is the explicit selection it overrides. */
+export type NotificationPreferences = { allWorkspaces: boolean; workspaceIds: string[] } & Record<NotificationCategory, boolean>;
 export type NotificationDevice = NotificationPreferences & {
   id: string; user: string; sessionId: string; subscription: PushSubscription;
   /** Per workspace, the moment each enabled category started counting; earlier events are history for this device. */
@@ -30,9 +31,13 @@ export class NotificationStore {
       const value = JSON.parse(await fs.readFile(this.filePath, "utf8")) as NotificationData;
       if (value.version !== 1 || typeof value.keys?.publicKey !== "string" || typeof value.keys?.privateKey !== "string"
         || !Array.isArray(value.devices) || !Array.isArray(value.deliveries) || !value.cursors) throw new Error("invalid notification state");
-      for (const device of value.devices) for (const [ws, since] of Object.entries(device.since ?? {})) {
-        // Pre-release enrollments stored one cutoff per workspace.
-        if (typeof since === "number") device.since[ws] = { needsAnswer: since, completed: since };
+      for (const device of value.devices) {
+        // Records written before the all-workspaces mode existed are explicit selections.
+        if (typeof device.allWorkspaces !== "boolean") device.allWorkspaces = false;
+        for (const [ws, since] of Object.entries(device.since ?? {})) {
+          // Pre-release enrollments stored one cutoff per workspace.
+          if (typeof since === "number") device.since[ws] = { needsAnswer: since, completed: since };
+        }
       }
       this.data = value;
       await fs.chmod(this.filePath, 0o600);

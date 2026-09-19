@@ -1,4 +1,8 @@
 import { createECDH, randomBytes } from "node:crypto";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { captureScreenshot } from "./evidence";
 import { childChatControl, expect, test } from "./hub-fixtures";
 
 test.use({ hubWorkspaces: ["alpha", "beta"] });
@@ -143,4 +147,86 @@ test("notification destination survives login and an unavailable target never fa
     await expect(page.locator("#chat-surface > .chat-read-error")).toBeVisible();
     await expect(page.locator("#chat-items")).not.toContainText("This is the notification target");
   } finally { await context.close(); }
+});
+
+// Last in the file: the workspace it registers stays in the worker's hub.
+test("all workspaces is a standing rule that outlives reload and a later-registered workspace", async ({ hub, hubContext }, testInfo) => {
+  const key = createECDH("prime256v1"); key.generateKeys();
+  const subscription = { endpoint: "https://web.push.apple.com/all-workspaces-fixture", keys: { p256dh: key.getPublicKey().toString("base64url"), auth: randomBytes(16).toString("base64url") } };
+  test.info().annotations.push({ type: "simulation", description: "PushManager and permission response are simulated; no OS delivery claimed." });
+  await hubContext.addInitScript(value => {
+    Object.defineProperty(Notification, "permission", { configurable: true, get: () => localStorage.getItem("test:permission") || "default" });
+    Notification.requestPermission = async () => { localStorage.setItem("test:permission", "granted"); return "granted"; };
+    const existing = () => localStorage.getItem("test:subscription") ? {
+      toJSON: () => value,
+      unsubscribe: async () => { localStorage.removeItem("test:subscription"); return true; },
+    } as PushSubscription : null;
+    PushManager.prototype.getSubscription = async () => existing();
+    PushManager.prototype.subscribe = async () => { localStorage.setItem("test:subscription", "yes"); return existing()!; };
+  }, subscription);
+  const page = await hubContext.newPage();
+  await page.goto(hub.workspaces[0]!.sessionUrl);
+  const openDialog = async () => {
+    await page.getByRole("button", { name: "Notifications", exact: true }).first().click();
+    await expect(dialog.getByRole("button", { name: /Enable notifications|Save preferences/ })).toBeEnabled();
+  };
+  const dialog = page.getByRole("dialog", { name: "Notifications", exact: true });
+  const all = dialog.getByRole("checkbox", { name: "All workspaces, including ones added later" });
+  const alpha = dialog.getByRole("checkbox", { name: "alpha", exact: true });
+  const beta = dialog.getByRole("checkbox", { name: "beta", exact: true });
+  await openDialog();
+  // Off by default; the current workspace is still the preselection.
+  await expect(all).not.toBeChecked();
+  await expect(alpha).toBeChecked();
+  await expect(beta).not.toBeChecked();
+  await captureScreenshot(page, testInfo, "notifications-selected-mode");
+  // The rule stands in for the list without discarding the ticks.
+  await all.check();
+  await expect(alpha).toBeDisabled(); await expect(alpha).toBeChecked();
+  await expect(beta).toBeDisabled(); await expect(beta).not.toBeChecked();
+  await captureScreenshot(page, testInfo, "notifications-all-workspaces");
+  await all.uncheck();
+  await expect(alpha).toBeEnabled(); await expect(alpha).toBeChecked();
+  await all.check();
+  await dialog.getByRole("button", { name: "Enable notifications", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("all workspaces");
+  await page.reload();
+  await openDialog();
+  await expect(dialog.getByRole("status")).toContainText("enabled for all workspaces");
+  await expect(all).toBeChecked();
+  await expect(alpha).toBeDisabled(); await expect(alpha).toBeChecked();
+  // A workspace registered afterwards is covered by the rule, not appended to the selection.
+  const folder = path.join(await mkdtemp(path.join(tmpdir(), "uatu-e2e-notify-")), "gamma");
+  await mkdir(folder);
+  const created = await page.evaluate(async target => {
+    const response = await fetch("/api/hub/workspaces", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: target, init: true, start: false }) });
+    return { status: response.status, body: await response.json() as { id?: string } };
+  }, folder);
+  expect(created).toMatchObject({ status: 200, body: { id: "gamma" } });
+  const state = await page.evaluate(async () => {
+    const response = await fetch(`/api/hub/notifications?device=${encodeURIComponent(localStorage.getItem("uatu:push-device")!)}`);
+    return await response.json() as { device: { allWorkspaces: boolean; workspaceIds: string[]; active: boolean } };
+  });
+  expect(state.device).toMatchObject({ allWorkspaces: true, workspaceIds: ["alpha"], active: true });
+  await page.reload();
+  await openDialog();
+  const gamma = dialog.getByRole("checkbox", { name: "gamma", exact: true });
+  await expect(all).toBeChecked();
+  await expect(gamma).toBeDisabled(); await expect(gamma).not.toBeChecked();
+  // Turning the rule off returns to the stored selection, without the newcomer.
+  await all.uncheck();
+  await expect(alpha).toBeChecked(); await expect(beta).not.toBeChecked(); await expect(gamma).not.toBeChecked();
+  await dialog.getByRole("button", { name: "Save preferences" }).click();
+  await expect(dialog.getByRole("status")).toHaveText("Notification preferences saved for this device.");
+  await page.reload();
+  await openDialog();
+  await expect(all).not.toBeChecked();
+  await expect(alpha).toBeEnabled(); await expect(alpha).toBeChecked();
+  await expect(gamma).not.toBeChecked();
+  // The dashboard shares the dialog.
+  await page.goto(hub.origin);
+  await page.getByRole("button", { name: "Notifications", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Save preferences" })).toBeEnabled();
+  await expect(all).not.toBeChecked();
+  await captureScreenshot(page, testInfo, "notifications-dashboard");
 });

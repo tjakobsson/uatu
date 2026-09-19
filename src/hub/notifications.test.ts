@@ -35,6 +35,7 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
   };
   const feed = new NotificationFeed(() => now);
   const running = new Set<string>();
+  const registered = new Set(["workspace", "other"]);
   let opens = 0;
   let batch: NotificationFrame[] | null = null;
   let onOpen = () => {};
@@ -42,9 +43,9 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
   let stalled: Array<{ resolve: () => void; signal?: AbortSignal }> | null = null;
   let failOpens = 0;
   const hub = new HubNotifications({ store, sender, now: () => now, settleTimeoutMs: options.settleTimeoutMs ?? 50, workspaceName: ws => ws === "workspace" ? "Project" : "Other",
-    authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && (ws === "workspace" || ws === "other"),
+    authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && (ws === undefined || registered.has(ws)),
     source: {
-      isRunning: ws => running.has(ws), workspaceIds: () => ["workspace", "other"],
+      isRunning: ws => running.has(ws), workspaceIds: () => [...registered],
       open: async request => {
         opens += 1; onOpen();
         if (failOpens > 0) { failOpens -= 1; return new Response(null, { status: 503 }); }
@@ -66,6 +67,7 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
   });
   cleanup.push(() => hub.dispose());
   return { store, hub, file, sends, feed, opens: () => opens, run: (ws = "workspace") => { running.add(ws); }, tick: (ms: number) => { now += ms; }, now: () => now,
+    register: (ws: string) => { registered.add(ws); }, unregister: (ws: string) => { registered.delete(ws); running.delete(ws); },
     failNextOpen: () => { failOpens += 1; }, stall: () => { stalled = []; }, release: () => { const waiting = stalled ?? []; stalled = null; for (const entry of waiting) entry.resolve(); },
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
     batch: (frames: NotificationFrame[]) => { batch = frames; }, onOpen: (hook: () => void) => { onOpen = hook; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
@@ -353,4 +355,98 @@ test("other users cannot modify, remove, or adopt a device subscription", async 
   await expect(f.hub.remove(other, state.device!.id)).rejects.toMatchObject({ status: 404 });
   await expect(f.hub.enroll(other, { ...input, workspaceIds: [] })).rejects.toMatchObject({ status: 409 });
   expect(f.store.snapshot().devices).toHaveLength(1);
+});
+
+test("records written before the all-workspaces mode load as explicit selections", async () => {
+  const f = await fixture(); await f.enroll();
+  const raw = JSON.parse(await readFile(f.file, "utf8"));
+  delete raw.devices[0].allWorkspaces;
+  await writeFile(f.file, JSON.stringify(raw));
+  const restored = new NotificationStore(f.file); await restored.load();
+  expect(restored.snapshot().devices[0]?.allWorkspaces).toBe(false);
+  await restored.mutate(() => {});
+  expect(JSON.parse(await readFile(f.file, "utf8")).devices[0].allWorkspaces).toBe(false);
+});
+
+test("an all-workspaces device hears every workspace while a selective device hears only its own", async () => {
+  const f = await fixture();
+  const phone = await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] });
+  await f.enroll("desktop", { workspaceIds: ["workspace"] });
+  expect(phone.device).toMatchObject({ allWorkspaces: true, workspaceIds: [], active: true });
+  expect(f.store.snapshot().devices[0]?.since).toEqual({ workspace: { needsAnswer: 1000, completed: 1000 }, other: { needsAnswer: 1000, completed: 1000 } });
+  await f.hub.receive("other", occurrence("q", f.now())); await f.hub.drain();
+  expect(f.sends.map(send => send.endpoint)).toEqual(["https://web.push.apple.com/phone"]);
+  await f.hub.receive("workspace", occurrence("q2", f.now())); await f.hub.drain();
+  expect(f.sends.map(send => send.endpoint.split("/").pop()).sort()).toEqual(["desktop", "phone", "phone"]);
+});
+
+test("an all-workspaces device on an empty registry is still active and covers nothing yet", async () => {
+  const f = await fixture(); f.unregister("workspace"); f.unregister("other");
+  const enrolled = await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] });
+  expect(enrolled.device).toMatchObject({ allWorkspaces: true, active: true });
+  expect(f.store.snapshot().devices[0]?.since).toEqual({});
+  const selective = await f.enroll("desktop", { workspaceIds: [] });
+  expect(selective.device?.active).toBe(false);
+});
+
+test("an all-workspaces enrollment settles every running workspace and names the ones that stall", async () => {
+  const f = await fixture(); f.run("workspace"); f.run("other"); f.stall();
+  await expect(f.enroll("phone", { allWorkspaces: true, workspaceIds: [] })).rejects.toMatchObject({ status: 503, message: "notification feed for Project, Other did not answer; try again" });
+  expect(f.store.snapshot().devices).toEqual([]);
+  const turn = (id: string) => (occurrence(id, f.now(), "turn-completed") as Extract<NotificationFrame, { type: "event" }>).event;
+  f.feed.publish(turn("before-cursor")); f.tick(100);
+  f.release();
+  const enrolled = await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] });
+  expect(enrolled.device?.active).toBe(true);
+  expect(f.opens()).toBe(2);
+  expect(f.store.snapshot().devices[0]?.since).toEqual({ workspace: { needsAnswer: f.now(), completed: f.now() }, other: { needsAnswer: f.now(), completed: f.now() } });
+});
+
+test("turning all workspaces off returns the device to its stored selection", async () => {
+  const f = await fixture();
+  const on = await f.enroll("phone", { allWorkspaces: true, workspaceIds: ["workspace"] });
+  expect(on.device).toMatchObject({ allWorkspaces: true, workspaceIds: ["workspace"] });
+  const off = await f.enroll("phone", { id: on.device!.id, allWorkspaces: false, workspaceIds: ["workspace"] });
+  expect(off.device).toMatchObject({ id: on.device!.id, allWorkspaces: false, workspaceIds: ["workspace"] });
+  expect(Object.keys(f.store.snapshot().devices[0]!.since)).toEqual(["workspace"]);
+  await f.hub.receive("other", occurrence("ignored", f.now())); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  await f.hub.receive("workspace", occurrence("heard", f.now())); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+});
+
+test("a workspace registered after an all-workspaces enrollment is stamped before it is observed", async () => {
+  const f = await fixture();
+  await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] });
+  f.register("late");
+  // Pending before the hub saw the workspace: history for this device, even when a later snapshot lists it again.
+  await f.hub.receive("late", occurrence("old", f.now())); await f.hub.drain();
+  f.tick(1); f.hub.refresh();
+  for (let i = 0; i < 200 && !f.store.snapshot().devices[0]?.since.late; i++) await Bun.sleep(2);
+  expect(f.store.snapshot().devices[0]?.since.late).toEqual({ needsAnswer: f.now(), completed: f.now() });
+  const old = { id: "old", sourceId: "old", conversationId: "opencode:conversation", kind: "question-pending" as const, createdAt: f.now() - 1 };
+  await f.hub.receive("late", { type: "snapshot", reason: "gap", cursor: "epoch:snap", pending: [old] });
+  await f.hub.receive("late", occurrence("new", f.now())); await f.hub.drain();
+  expect(f.sends.map(send => JSON.parse(send.payload).kind)).toEqual(["question-pending"]);
+  expect(f.store.snapshot().deliveries.map(delivery => JSON.parse(delivery.key)[2])).toEqual(["new"]);
+  // Once it runs, the hub observes it with no client action.
+  expect(f.opens()).toBe(0);
+  f.run("late"); f.hub.refresh();
+  for (let i = 0; i < 200 && !f.store.snapshot().cursors.late; i++) await Bun.sleep(2);
+  expect(f.opens()).toBe(1);
+});
+
+test("unregistering a covered workspace discards its unsent deliveries and leaves the rest alone", async () => {
+  const f = await fixture(); f.result({ kind: "retry" });
+  await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] });
+  await f.hub.receive("other", occurrence("gone", f.now())); await f.hub.drain();
+  expect(f.store.snapshot().deliveries.map(delivery => delivery.status)).toEqual(["pending"]);
+  f.unregister("other"); f.hub.refresh();
+  for (let i = 0; i < 200 && f.store.snapshot().devices[0]?.since.other; i++) await Bun.sleep(2);
+  expect(f.store.snapshot().devices[0]?.since).toEqual({ workspace: { needsAnswer: 1000, completed: 1000 } });
+  expect(f.store.snapshot().deliveries.map(delivery => delivery.status)).toEqual(["discarded"]);
+  f.result({ kind: "accepted" }); f.tick(60_000);
+  await f.hub.receive("workspace", occurrence("kept", f.now())); await f.hub.drain();
+  expect(f.sends.filter(send => JSON.parse(send.payload).title === "Project")).toHaveLength(1);
+  expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["gone", "discarded"], ["kept", "accepted"]]);
 });

@@ -192,8 +192,11 @@ instead.
 
 The hub can send Web Push notifications when an agent asks a question, requests
 permission, or successfully finishes a turn. Open **Notifications** in the hub
-navigation or workspace sidebar to select workspaces and event categories for
-that browser or installed app. Permission is requested only when you enable it.
+navigation or workspace sidebar to choose workspaces and event categories for
+that browser or installed app. Tick **All workspaces** to cover every workspace
+on the hub, including ones registered later, or pick workspaces one by one;
+turning All workspaces off brings back the workspaces you had picked.
+Permission is requested only when you enable it.
 
 Configure the hub's `hub.json` with a contact for its Web Push sender, then
 restart the hub:

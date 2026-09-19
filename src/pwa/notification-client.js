@@ -6,19 +6,25 @@ export function mountNotifications(options) {
   dialog.id = "uatu-notifications";
   dialog.setAttribute("aria-labelledby", "uatu-notifications-title");
   dialog.innerHTML = `<h2 id="uatu-notifications-title">Notifications</h2>
-    <p role="status" aria-live="polite"></p><fieldset class="notification-workspaces"><legend>Workspaces on this device</legend></fieldset>
+    <p role="status" aria-live="polite"></p><fieldset class="notification-workspaces"><legend>Workspaces on this device</legend>
+    <label class="notification-all"><input type="checkbox" name="allWorkspaces"> All workspaces, including ones added later</label></fieldset>
     <label><input type="checkbox" name="needsAnswer" checked> Questions and permission requests</label>
     <label><input type="checkbox" name="completed" checked> Successful turn completion</label>
     <p class="notification-help">Notifications use this browser or installed app's permission. Signing out or expiration of this login stops future notifications.</p>
     <div class="notification-actions"><button type="button" data-enable disabled>Enable notifications</button><button type="button" data-disable hidden>Disable on this device</button><button type="button" data-close>Close</button></div>`;
   const style = document.createElement("style");
-  style.textContent = `#uatu-notifications{box-sizing:border-box;width:min(32rem,calc(100vw - 2rem));max-height:calc(100dvh - 2rem);overflow:auto;padding:1.25rem;border:1px solid var(--border-soft,#888);border-radius:12px;background:var(--surface,Canvas);color:var(--text-strong,CanvasText);font:inherit}#uatu-notifications::backdrop{background:#0006}#uatu-notifications label{display:flex;gap:.5rem;align-items:center;margin:.65rem 0}#uatu-notifications input{width:auto;min-height:0}#uatu-notifications .notification-actions{display:flex;flex-wrap:wrap;gap:.5rem}#uatu-notifications button{min-height:40px;padding:.4rem .65rem}#uatu-notifications .notification-help{font-size:.85em;opacity:.8}.hub-nav .uatu-notifications-trigger{font:inherit;cursor:pointer}`;
+  style.textContent = `#uatu-notifications{box-sizing:border-box;width:min(32rem,calc(100vw - 2rem));max-height:calc(100dvh - 2rem);overflow:auto;padding:1.25rem;border:1px solid var(--border-soft,#888);border-radius:12px;background:var(--surface,Canvas);color:var(--text-strong,CanvasText);font:inherit}#uatu-notifications::backdrop{background:#0006}#uatu-notifications label{display:flex;gap:.5rem;align-items:center;margin:.65rem 0}#uatu-notifications input{width:auto;min-height:0}#uatu-notifications .notification-actions{display:flex;flex-wrap:wrap;gap:.5rem}#uatu-notifications button{min-height:40px;padding:.4rem .65rem}#uatu-notifications .notification-help{font-size:.85em;opacity:.8}#uatu-notifications .notification-all{padding-bottom:.4rem;border-bottom:1px solid var(--border-soft,#888)}#uatu-notifications .notification-workspaces label:not(.notification-all):has(input:disabled){opacity:.5}.hub-nav .uatu-notifications-trigger{font:inherit;cursor:pointer}`;
   document.head.append(style);
   document.body.append(dialog);
   const status = dialog.querySelector('[role="status"]');
   const enable = dialog.querySelector("[data-enable]");
   const disable = dialog.querySelector("[data-disable]");
   const workspaces = dialog.querySelector("fieldset");
+  const all = dialog.querySelector('[name="allWorkspaces"]');
+  // The rule stands in for the list; the ticks stay so turning it off restores them.
+  const applyMode = () => { for (const input of workspaces.querySelectorAll('input:not([name="allWorkspaces"])')) input.disabled = all.checked; };
+  all.addEventListener("change", applyMode);
+  const enabledText = () => all.checked ? "Notifications are enabled for all workspaces on this device." : "Notifications are enabled for this device.";
   let registration;
   let remote;
   let deviceId;
@@ -74,7 +80,8 @@ export function mountNotifications(options) {
       const [state, hub] = await Promise.all([request(apiUrl()), request(options.stateUrl)]);
       remote = state.device;
       disable.hidden = !remote;
-      workspaces.querySelectorAll("label").forEach(label => label.remove());
+      workspaces.querySelectorAll("label:not(.notification-all)").forEach(label => label.remove());
+      all.checked = remote?.allWorkspaces ?? false;
       for (const workspace of hub.workspaces) {
         const label = document.createElement("label");
         const input = document.createElement("input");
@@ -83,6 +90,7 @@ export function mountNotifications(options) {
         label.append(input, document.createTextNode(workspace.displayName || workspace.id));
         workspaces.append(label);
       }
+      applyMode();
       dialog.querySelector('[name="needsAnswer"]').checked = remote?.needsAnswer ?? true;
       dialog.querySelector('[name="completed"]').checked = remote?.completed ?? true;
       const reason = unsupported();
@@ -98,7 +106,7 @@ export function mountNotifications(options) {
       const publicKey = Uint8Array.from(atob(state.publicKey.replace(/-/g, "+").replace(/_/g, "/")), char => char.charCodeAt(0));
       enable._applicationServerKey = publicKey;
       enable.textContent = remote && subscribed && remote.active ? "Save preferences" : "Enable notifications";
-      status.textContent = remote && subscribed && remote.active ? "Notifications are enabled for this device." : "Choose workspaces and enable notifications for this device.";
+      status.textContent = remote && subscribed && remote.active ? enabledText() : "Choose workspaces and enable notifications for this device.";
       enable.disabled = false;
     } catch (error) { status.textContent = error.message; }
   };
@@ -116,13 +124,14 @@ export function mountNotifications(options) {
       subscription ||= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: enable._applicationServerKey });
       const state = await request(options.apiUrl, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({
         ...(deviceId ? { id: deviceId } : {}), subscription: subscription.toJSON(),
-        workspaceIds: [...workspaces.querySelectorAll("input:checked")].map(input => input.value),
+        allWorkspaces: all.checked,
+        workspaceIds: [...workspaces.querySelectorAll('input:checked:not([name="allWorkspaces"])')].map(input => input.value),
         needsAnswer: dialog.querySelector('[name="needsAnswer"]').checked,
         completed: dialog.querySelector('[name="completed"]').checked,
       }) });
       remote = state.device; deviceId = remote.id;
       try { localStorage.setItem("uatu:push-device", deviceId); } catch {}
-      status.textContent = "Notification preferences saved for this device.";
+      status.textContent = all.checked ? "Notification preferences saved: all workspaces on this device." : "Notification preferences saved for this device.";
       disable.hidden = false; enable.textContent = "Save preferences";
     }).catch(error => { status.textContent = error.message; }).finally(() => { busy = false; enable.disabled = Boolean(unsupported()); });
   });

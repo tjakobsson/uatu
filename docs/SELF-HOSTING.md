@@ -159,9 +159,12 @@ configuration change. Without this setting, normal use continues and the
 Notifications form explains that sender configuration is required.
 
 Each browser profile or Home Screen installation enrolls independently through
-**Notifications**. Users select workspaces and choose needs-answer and successful
-turn-completion alerts. Newly registered workspaces are not subscribed
-automatically. On iOS/iPadOS 16.4 and later, enrollment requires opening the Home
+**Notifications**. Users choose needs-answer and successful turn-completion
+alerts, and either **All workspaces** or a list of workspaces. All workspaces is
+a standing rule: a workspace registered later is covered from the moment the
+hub sees it, with no further configuration. A device with a workspace list does
+not gain newly registered workspaces until they are ticked. On iOS/iPadOS 16.4
+and later, enrollment requires opening the Home
 Screen installation and responding to the permission prompt from the Enable
 notifications action. Use a trusted HTTPS URL on remote devices.
 
@@ -192,7 +195,9 @@ To stop sending during rollback, remove the notification contact configuration
 and restart the hub, or disable enrollment on each device. Retain
 `notifications.json` if returning to this version later. Older binaries can
 remove the root registration through their legacy cleanup, so verify device
-enrollment when upgrading again. The push worker does not intercept requests or
+enrollment when upgrading again. A binary from before the All workspaces option
+ignores that rule and sends from each device's stored workspace list only, until
+the device is saved again on a current build. The push worker does not intercept requests or
 cache application content offline.
 
 Home Screen icons use opaque, padded artwork and versioned image URLs. iOS can

@@ -2,6 +2,19 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 7 / Workspace 20 - Unreleased
+
+Compatibility: breaking (Hub)
+
+### Changes
+
+- `PUT /api/hub/notifications` accepts an optional `allWorkspaces` boolean (default `false`). When true, the device receives its selected event categories from every workspace the login can reach, including workspaces registered after the enrollment was saved; the Hub evaluates the rule at event time rather than expanding it into a list. `workspaceIds` remains required and is stored as the explicit selection the rule overrides, so turning the rule off restores it.
+- The `device` object in `NotificationState` gains a required `allWorkspaces` boolean reporting the stored mode.
+
+### Migration
+
+Strict Hub clients must regenerate against Hub revision 7: the `device` object is closed, so a revision 6 validator rejects the new field on every `GET` and `PUT /api/hub/notifications` response. Clients that never send `allWorkspaces` keep their current behaviour. A Hub downgraded below this revision ignores the stored flag and sends from each device's explicit `workspaceIds` only, until the device is saved again on an upgraded Hub.
+
 ## Hub 6 / Workspace 20 - Unreleased
 
 Compatibility: breaking (workspace); additive (Hub)

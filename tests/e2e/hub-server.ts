@@ -188,8 +188,8 @@ for (const workspace of workspaces) {
 const notificationStore = new NotificationStore(path.join(tempRoot, "notifications.json"));
 await notificationStore.load();
 const notifications = new HubNotifications({ store: notificationStore, sender: async () => ({ kind: "accepted" }),
-  source: { isRunning: () => false, workspaceIds: () => [], open: async () => { throw new Error("browser suite does not open push upstreams"); } },
-  authorized: (principal, id) => sessionStore.resolve(principal.sessionId)?.user === principal.user && Boolean(registry.byId(id)),
+  source: { isRunning: () => false, workspaceIds: () => registry.list().map(entry => entry.id), open: async () => { throw new Error("browser suite does not open push upstreams"); } },
+  authorized: (principal, id) => sessionStore.resolve(principal.sessionId)?.user === principal.user && (id === undefined || Boolean(registry.byId(id))),
   workspaceName: id => registry.byId(id)?.displayName ?? id,
 });
 const server = startHubServer({ config, registry, sessions, sessionStore, personalState, notifications });

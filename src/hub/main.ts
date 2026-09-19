@@ -526,7 +526,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     source: createHubUpstreamSource({ sessions, registry }),
     authorized: (principal, workspaceId) => {
       const session = sessionStore.resolve(principal.sessionId);
-      return session?.user === principal.user && config.users.some(user => user.name === principal.user) && Boolean(registry.byId(workspaceId));
+      return session?.user === principal.user && config.users.some(user => user.name === principal.user) && (workspaceId === undefined || Boolean(registry.byId(workspaceId)));
     },
     workspaceName: id => registry.byId(id)?.displayName ?? id,
   });

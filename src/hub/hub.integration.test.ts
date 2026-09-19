@@ -220,7 +220,7 @@ beforeAll(async () => {
   notifications = new HubNotifications({
     store: notificationStore, sender: async () => ({ kind: "accepted" }),
     source: { isRunning: () => false, workspaceIds: () => [], open: async () => { throw new Error("unused"); } },
-    authorized: (principal, ws) => sessionStore.resolve(principal.sessionId)?.user === principal.user && Boolean(registry.byId(ws)),
+    authorized: (principal, ws) => sessionStore.resolve(principal.sessionId)?.user === principal.user && (ws === undefined || Boolean(registry.byId(ws))),
     workspaceName: id => id,
   });
   server = startHubServer({
@@ -267,6 +267,13 @@ describe("hub end to end", () => {
     await assertContract("PUT", "/api/hub/notifications", enrolled.clone());
     const body = await enrolled.json() as { device: { id: string } };
     expect(JSON.stringify(body)).not.toContain("api-test");
+    expect(body.device).toMatchObject({ allWorkspaces: false, workspaceIds: [] });
+    const everywhere = await fetch(target, { method: "PUT", headers, body: JSON.stringify({ ...input, id: body.device.id, allWorkspaces: true }) });
+    await assertContract("PUT", "/api/hub/notifications", everywhere.clone());
+    expect((await everywhere.json() as { device: unknown }).device).toMatchObject({ id: body.device.id, allWorkspaces: true, workspaceIds: [], active: true });
+    const state = await fetch(`${target}?device=${body.device.id}`, { headers });
+    await assertContract("GET", "/api/hub/notifications", state.clone());
+    expect((await state.json() as { device: unknown }).device).toMatchObject({ allWorkspaces: true });
     expect((await fetch(`${target}?device=${body.device.id}`, { method: "DELETE", headers: { authorization: `Bearer ${other.id}` } })).status).toBe(404);
     const removed = await fetch(`${target}?device=${body.device.id}`, { method: "DELETE", headers });
     await assertContract("DELETE", "/api/hub/notifications", removed.clone());
