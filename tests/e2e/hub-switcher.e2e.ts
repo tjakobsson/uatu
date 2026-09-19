@@ -95,6 +95,17 @@ async function openMenuAndExpectStates(page: Page): Promise<void> {
   await page.locator("#hub-toggle").click();
   const menu = page.locator("#hub-menu");
   await expect(menu).toBeVisible();
+  // These workspaces are plain folders: no `.git` directory, no parent, so no
+  // repository family. They stay flat rows with no group header, and there is
+  // no repository title line anywhere — the chip is the only place a
+  // repository is ever named.
+  await expect(menu.locator(".hub-menu-group")).toHaveCount(0);
+  await expect(menu.locator(".hub-menu-divider.is-group")).toHaveCount(0);
+  await expect(page.locator("#hub-repository")).toHaveCount(0);
+  // F1's boundary: with no repository family there is no repository and no
+  // branch to name, so the chip carries the display name alone.
+  await expect(page.locator("#hub-current")).toHaveText("alpha");
+  await expect(page.locator("#hub-current .hub-toggle-branch")).toHaveCount(0);
   const item = (id: string) => menu.locator(`.hub-menu-item[href="/s/${id}/"]`);
   await expect(item("alpha")).toHaveAttribute("aria-current", "true");
   await expect(item("beta").locator(".hub-menu-state")).toHaveText("awaiting you");

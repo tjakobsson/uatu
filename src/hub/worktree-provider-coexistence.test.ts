@@ -7,10 +7,11 @@
 // it writes no provider configuration, no hooks and no ownership marker into
 // the tree or the repository.
 //
-// Model-backed directory/resume, native worktree and subagent checks live in
-// tests/worktree-agent-smoke.ts and require a separate, user-authorized run.
-// These unit tests establish only checkout compatibility and non-interference.
-// A version probe alone is never evidence of runtime compatibility.
+// Model-backed directory/resume, native worktree and subagent checks are not
+// automated here — verify those manually with the installed agents before
+// relying on this compatibility claim. These unit tests establish only
+// checkout compatibility and non-interference. A version probe alone is
+// never evidence of runtime compatibility.
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";

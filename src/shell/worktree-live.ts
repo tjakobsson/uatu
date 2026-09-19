@@ -7,7 +7,7 @@
 //   uatu:worktrees-changed      hub-nav re-reads /api/hub/state, so the
 //                               workspace picker's rows are authoritative
 //   uatu:worktrees-invalidated  an open worktree dialog reloads its
-//                               inventory view (worktree-picker)
+//                               register list (worktree-dialog)
 //
 // Nothing else happens: the active workspace, its document/preview, its
 // terminal and its selected conversation are not touched, and the payload

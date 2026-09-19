@@ -1,0 +1,11 @@
+{
+  "realHub": true,
+  "realGit": true,
+  "viewport": "390x844 touch",
+  "dialogEntryPoints": [
+    "in-workspace picker",
+    "Hub dashboard"
+  ],
+  "liveInvalidationRefreshedOpenRegisterList": true,
+  "contextPreserved": true
+}

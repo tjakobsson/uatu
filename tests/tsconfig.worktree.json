@@ -1,0 +1,13 @@
+{
+  "// ": "The worktree feature's own typecheck project. The root tsconfig covers src/**/*.ts only, and the rest of tests/ has never been typechecked, so this narrow project keeps the worktree test surfaces — including the manual macOS native smoke runner — honest.",
+  "extends": "../tsconfig.json",
+  "include": [
+    "../src/**/*.ts",
+    "worktree-native-smoke.ts",
+    "e2e/evidence.ts",
+    "e2e/hub-fixtures.ts",
+    "e2e/hub-server.ts",
+    "e2e/worktree-integration.e2e.ts",
+    "e2e/worktree-ui.e2e.ts"
+  ]
+}

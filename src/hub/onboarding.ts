@@ -608,6 +608,20 @@ export class WorkspaceOnboardingCoordinator {
     displayName: string;
     link: WorkspaceWorktreeLink;
     start?: boolean;
+    // Set only by the worktree registrar (src/hub/worktree-registrar.ts),
+    // which registerCreatedWorktree() (src/hub/worktree-journal.ts) calls
+    // exclusively from inside WorktreeService's create()/retryRegistration()
+    // — both of which already hold a WorktreeOperationCoordinator path
+    // reservation covering this exact `path` on the SAME PathReservationCoordinator
+    // main.ts hands `onboarding` (see worktree-coordinator.ts's own header
+    // comment on the two fences). Reserving it a SECOND time here would
+    // conflict with the caller's own reservation — not with anything else —
+    // and always refuse with "folder path is reserved by another operation"
+    // (Bug 3: first-attempt worktree registration always failing in
+    // production). A direct, unfenced caller (registerExisting's own
+    // external-discovery path, which holds no outer path reservation) must
+    // still self-reserve, so this defaults to false.
+    fenced?: boolean;
   }): Promise<OnboardingResult> {
     return this.enqueue(async () => {
       await this.assertNoPendingOnboarding();
@@ -636,7 +650,13 @@ export class WorkspaceOnboardingCoordinator {
         }
         throw new OnboardingError("conflict", `folder is already registered: ${canonical}`);
       }
-      const reservation = this.reserve([canonical]);
+      // Bug 3: a fenced caller already holds this exact path (or a hierarchy
+      // covering it) on the SAME PathReservationCoordinator; reserving it
+      // again here would only ever conflict with that caller's own
+      // reservation, never with anything else, so it is skipped. An
+      // unfenced caller self-reserves as before — it is its own only guard
+      // against a concurrent rename/clone/onboarding of this path.
+      const reservation = options.fenced === true ? undefined : this.reserve([canonical]);
       try {
         const planned = this.planWorkspaceId(canonical);
         return await this.commitPlanned({
@@ -650,7 +670,7 @@ export class WorkspaceOnboardingCoordinator {
           link: options.link,
         });
       } finally {
-        reservation.release();
+        reservation?.release();
       }
     });
   }

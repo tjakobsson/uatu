@@ -9,15 +9,32 @@ They are not security isolation.
 
 1. Open the workspace picker above the file tree, or in the touch Files tab.
 2. Select the fork icon beside the main workspace that owns the repository.
-3. Choose **New branch / worktree** or **Existing branch**.
+3. Choose **New branch / worktree**, **Existing branch**, or **Register
+   worktree…**.
 4. Create the checkout. It starts stopped, and your current workspace stays open.
-5. Select **Open** in the creation confirmation to start and visit it.
+5. Select **Open** in the creation confirmation — it appears at the top of the
+   window — to start and visit it.
 
 The Hub dashboard has the same parent fork actions. Its Active groups section
 keeps repositories with a running checkout together. Stopped children are under
 an expandable row; completely stopped repositories are under Inactive groups.
 Stopping the main checkout stops only that checkout. A child can run while main
 is stopped.
+
+### Registering a worktree Uatu did not create
+
+**Register worktree…**, the fork menu's third item, lists only the checkouts
+Git knows about that Uatu has not registered: one an agent or a plain
+`git worktree add` created, and any Uatu-created checkout whose registration
+did not complete. Each row shows its branch, whether it is an external
+worktree or of uncertain ownership, and its path, with **Register workspace**
+or **Retry registration**. When Git lists nothing unregistered it says so.
+It is the same view from the picker and the dashboard.
+
+Checkouts Uatu has already registered are managed where you already see
+them — the workspace picker's rows and the Hub dashboard's rows — including
+Open, Start, Delete worktree, Remove from Uatu and the inline retry a missing
+or replaced path offers.
 
 ### Branch choices
 
@@ -42,7 +59,10 @@ leaves cached refs available, without claiming they are fresh.
 
 ### Names, destinations and history
 
-The child name is its exact local branch, including slashes. Uatu chooses its
+The child name is its exact local branch, including slashes, up to 64
+characters — the same ceiling the Hub's workspace registry applies to every
+display name. A longer name is refused before Git runs anything: **Create**
+stays disabled with the reason shown under the Name field. Uatu chooses its
 destination beside the main checkout:
 
 ```text
@@ -55,15 +75,25 @@ a deterministic branch-derived suffix; an occupied destination is never
 overwritten. There is no destination field or separate child name. Uatu does
 not rename branches.
 
-Rows show `from main` or another recorded creation source. This is historical
-information, not the current upstream or parent's current branch. Existing-local
-and external branches with no recorded history show `origin unknown`. The main
-row separately shows its current branch, Detached HEAD, or Branch unknown.
+Rows Uatu created show `from main` or another recorded creation source. This is
+historical information, not the current upstream or parent's current branch. A
+Uatu-created branch with no recorded history shows `origin unknown`. A checkout
+Uatu did not create is labelled `External worktree`, or `Ownership uncertain`
+when its identity cannot be established — ownership is stated rather than an
+origin guessed. The main checkout row separately shows its current branch,
+Detached HEAD, or Branch unknown.
+
+The workspace picker's selector reads `<repository> <branch>` for every
+checkout — a worktree shows **atlas** probe/first-attempt exactly as its main
+checkout shows **atlas** main.
+The menu groups under a header per repository: the repository's name with its
+fork control at the right edge, then its main checkout, then its worktrees, all
+on the same left edge, with a divider between repositories.
 
 ## Parent policy and checkout context
 
-Use the parent's **Configure** action to manage shared policy and credential
-assignments. Children inherit that policy live, without child credential copies
+Manage shared policy and credential assignments for a repository on the Hub's
+**Settings** page. Children inherit that policy live, without child credential copies
 or overrides. A credential change may require restarting a running checkout to
 replace its process environment; the Hub reports this through its normal restart
 indicator. Explicitly registering an external child uses the same parent policy.
@@ -87,15 +117,19 @@ refresh and a bounded periodic schedule. Its own committed operations notify ope
 pages immediately through the existing live stream. External changes may take a
 refresh to appear.
 
-A worktree created by Git, Claude Code or OpenCode is external. Explicitly register
-it under its parent before opening it as a Uatu workspace. Registration preserves
+A worktree created by Git, Claude Code or OpenCode is external. Open its
+parent's **Register worktree…** list (see above) and explicitly register it
+before opening it as a Uatu workspace. Registration preserves
 its path and does not grant Uatu deletion ownership. In an Existing branch flow,
-an already-checked-out branch offers that checkout's Open or registration action.
+an already-checked-out branch offers that checkout's Open or registration action,
+and selecting a remote ref there shows which local branch it will create before
+you commit to it.
 
-A removed or replaced registered path remains in the inventory as unavailable.
-Uatu refuses to start it rather than recreate the directory, silently forget it,
-or move your conversation to another checkout. Resolve the path or remove the
-stopped registration when you no longer need it.
+A removed or replaced registered path stays visible as unavailable in the picker
+and the dashboard, with an inline retry that re-reads Git. Uatu refuses to start
+it rather than recreate the directory, silently forget it, or move your
+conversation to another checkout. Resolve the path, or use **Remove from Uatu**
+on the stopped registration, when you no longer need it.
 
 ## Delete versus remove from Uatu
 
@@ -111,10 +145,10 @@ valuable local data before trying again. There is no force option, and Uatu
 cannot stop unknown external applications for you. A failed stop or removal
 keeps the checkout and its registration.
 
-**Remove from Uatu** or **Remove from Hub** forgets a stopped workspace's
-registration and associated Hub personal state. It keeps the checkout, files,
-branch and creation provenance. This is also how to forget an external checkout.
-Stopping the workspace is a separate prerequisite.
+**Remove from Uatu** forgets a workspace's registration and associated Hub
+personal state, stopping its Uatu sessions first if it is running as part of
+the same confirmed action. It keeps the checkout, files, branch and creation
+provenance. This is also how to forget an external checkout.
 
 Folder rename is refused if it would break a linked checkout, main checkout,
 shared Git directory or an ancestor dependency, including unregistered trees.
@@ -132,64 +166,15 @@ name remains available.
 - If Git removal completes but metadata cleanup fails, retry cleanup. Recovery
   records completed removal and must not delete a new occupant at the old path.
 
-## CLI and agent skills
-
-Run these commands from an embedded terminal in a Hub workspace, with `uatu`
-available on PATH:
-
-```sh
-uatu worktree list --json
-uatu worktree create --new-branch feature/login --from main --json
-uatu worktree create --branch release --json
-uatu worktree create --remote-branch origin/feature/search --json
-uatu worktree open feature/login --start --json
-uatu worktree remove feature/login --confirm-delete --stop --json
-```
-
-The last command explicitly authorizes deletion and stopping Uatu activity.
-Every deletion blocker still applies. Omit `--stop` for a stopped checkout.
-`open` without `--start` reports the existing registration; it does not launch a
-browser or register an external checkout. Register external trees in the browser
-first. Creation accepts `--start` but otherwise defaults to stopped.
-
-For a source installation, replace `uatu` with
-`bun run /absolute/path/to/uatu/src/cli.ts`. No globally installed executable is
-assumed by the skill packaging. Use `uatu worktree --help` for the full syntax.
-
-JSON list output has `{ "ok": true, "command": "list", "inventory": ... }`.
-Mutations return `{ "ok": ..., "command": ..., "result": ... }`. Inspect
-`result.phase`, `result.error`, `result.retainedCheckout` and `result.startError`
-when present. A successful registration with `startError` remains stopped.
-Exit codes are 0 for success, 1 for refusal, 2 for invalid usage and 3 for unusable
-Hub context. Transport and context failures may write only stderr, even with
-`--json`.
-
-The Hub writes an owner-readable capability file in the session runtime
-directory. `UATU_HUB_CONTEXT` contains its path, not a token. The capability
-authorizes only worktree operations in that repository family and is revoked
-when the issuing session stops. Missing or expired context requires restarting
-the workspace from the Hub. There is no offline Git fallback. Automatic
-capabilities currently require a single-user Hub; a multi-user Hub cannot
-attribute a shared terminal to one user and issues none. Its browser operations
-remain available through authenticated Hub sessions.
-
-Install the optional [Claude Code or OpenCode skill](agent-skills/README.md) by
-copying or linking its directory into your chosen project or user configuration.
-Uatu never installs it automatically. The skills apply to explicit persistent
-workspace requests. Native worktree hooks and subagent lifecycles stay under the
-agent's control; native removal/reset APIs must not clean up Uatu-owned trees.
-Native transcript import depends on the provider's directory and storage format
-and is not guaranteed across versions.
-
 ## Requirements and rollback
 
 Git 2.36 or newer is required. Bare repositories, main checkouts created with
 `--separate-git-dir`, and submodule creation sources are unsupported. Inventory
 uses known repositories, not a scan of arbitrary host directories.
 
-To stop using the feature, stop affected sessions and remove any optional skill
-links. Keep the ordinary Git checkouts and branches. Before downgrading the Hub,
-finish or recover pending operations and back up its state directory. Preserve
-the worktree journal and provenance records; do not discard a pending journal
-to make an older version start. Use a compatible version to resolve it first.
+To stop using the feature, stop affected sessions. Keep the ordinary Git
+checkouts and branches. Before downgrading the Hub, finish or recover pending
+operations and back up its state directory. Preserve the worktree journal and
+provenance records; do not discard a pending journal to make an older version
+start. Use a compatible version to resolve it first.
 Rollback never requires deleting checkouts or branches.

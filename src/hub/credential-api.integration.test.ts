@@ -276,12 +276,19 @@ describe("credential API integration", () => {
     const response = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
     expect(response.status).toBe(200);
     await assertContract("GET", "/api/hub/state", response);
-    expect(await response.json()).toMatchObject({
+    const state = await response.json() as Record<string, unknown> & { workspaces: Record<string, unknown>[] };
+    expect(state).toMatchObject({
       workspaces: [{
         id: f.workspace.id,
         credentialAssignments: { authentication: ["Shared SSH"], signing: ["Shared SSH"] },
       }],
     });
+    // This Hub was started with no worktree service: no worktreeApi
+    // capability, no worktreeConfigureNavigation, and no per-row
+    // createWorktree fork affordance are published.
+    expect(state.worktreeApi).toBeUndefined();
+    expect(state.worktreeConfigureNavigation).toBeUndefined();
+    expect(state.workspaces[0]!.createWorktree).toBeUndefined();
   });
 
   test("reports missing tools and permits an authenticated readiness test", async () => {

@@ -3,18 +3,24 @@ import { promisify } from "node:util";
 import { writeFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "@playwright/test";
-import { test, expect, openEventSources, type HubE2EInfo } from "./hub-fixtures";
+import { test, expect, openEventSources } from "./hub-fixtures";
 import { captureScreenshot, saveEvidence } from "./evidence";
 
 const exec = promisify(execFile);
 test.use({ hubWorktrees: true, hubWorkspaces: ["atlas-desktop", "atlas-touch"] });
 
-async function cli(hub: HubE2EInfo, args: string[]) {
-  const result = await exec("bun", ["run", "src/cli.ts", "worktree", ...args, "--json"], {
-    env: { ...process.env, UATU_HUB_CONTEXT: hub.worktreeContextPath }, timeout: 30_000,
-  });
-  const output = JSON.parse(result.stdout);
-  return output.inventory ?? output.result;
+// The published JSON family, over the signed-in Hub session `hubContext`
+// carries — the same credential the browser itself uses, and the only one
+// the Hub honors on these routes.
+async function worktreeInventory(page: Page, sourceWorkspaceId: string) {
+  const response = await page.request.get(`/api/hub/worktrees?source=${encodeURIComponent(sourceWorkspaceId)}`);
+  expect(response.ok()).toBe(true);
+  return (await response.json()).inventory;
+}
+async function worktreeAction(page: Page, action: "create" | "open" | "delete", body: Record<string, unknown>) {
+  const response = await page.request.post(`/api/hub/worktrees/${action}`, { data: body });
+  expect(response.ok()).toBe(true);
+  return response.json();
 }
 async function git(cwd: string, args: string[]) {
   return (await exec("git", ["-c", "commit.gpgsign=false", ...args], {
@@ -71,10 +77,9 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
   const parentId = touch ? "atlas-touch" : "atlas-desktop";
   // Separate repositories also isolate journeys scheduled on the same worker.
   test.use({ viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 }, hasTouch: touch, isMobile: touch });
-  test("picker creation, CLI live updates and independent checkout round trips", async ({ hub, hubContext }, info) => {
+  test("picker creation, JSON API live updates and independent checkout round trips", async ({ hub, hubContext }, info) => {
     test.setTimeout(60_000);
-    hub = { ...hub, worktreeContextPath: hub.worktreeContextPaths![parentId],
-      workspaces: hub.workspaces.filter(workspace => workspace.id === parentId) };
+    hub = { ...hub, workspaces: hub.workspaces.filter(workspace => workspace.id === parentId) };
     const page = await hubContext.newPage();
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -92,7 +97,7 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.locator("[data-worktree-confirmation]")).toContainText("Created feature/browser");
     expect(new URL(page.url()).pathname).toContain(`/s/${parentId}/`);
-    const inventory = await cli(hub, ["list"]);
+    const inventory = await worktreeInventory(page, parentId);
     const child = inventory.checkouts.find((row: { branch: string }) => row.branch === "feature/browser");
     expect(child.running).toBe(false);
     expect(child.sourceRef).toBe("main");
@@ -148,8 +153,8 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     await picker(page);
     const liveEvents: unknown[] = [];
     page.on("response", response => { if (response.url().includes("/api/hub/state")) liveEvents.push(response.status()); });
-    const fromCli = await cli(hub, ["create", "--new-branch", "feature/cli", "--from", "main"]);
-    expect(fromCli.ok).toBe(true);
+    const fromApi = await worktreeAction(page, "create", { sourceWorkspaceId: parentId, mode: "new-branch", branch: "feature/cli", baseRef: "main" });
+    expect(fromApi.ok).toBe(true);
     await expect(page.locator("#hub-menu")).toContainText("feature/cli");
     expect(new URL(page.url()).pathname).toContain(`/s/${parentId}/`);
     await captureScreenshot(page, info, `integrated-${touch ? "touch" : "desktop"}-picker`);
@@ -158,8 +163,8 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     // An agent-owned checkout appears without registration or navigation.
     const externalPath = path.join(path.dirname(hub.workspaces[0]!.path), `${parentId}-external-agent`);
     await git(hub.workspaces[0]!.path, ["worktree", "add", "-b", "agent/external", externalPath, "main"]);
-    await expect.poll(async () => (await cli(hub, ["list"])).checkouts.some((row: { branch: string }) => row.branch === "agent/external")).toBe(true);
-    const external = (await cli(hub, ["list"])).checkouts.find((row: { branch: string }) => row.branch === "agent/external");
+    await expect.poll(async () => (await worktreeInventory(page, parentId)).checkouts.some((row: { branch: string }) => row.branch === "agent/external")).toBe(true);
+    const external = (await worktreeInventory(page, parentId)).checkouts.find((row: { branch: string }) => row.branch === "agent/external");
     expect(external.registered).toBe(false);
     expect(external.ownership).toBe("external");
     await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
@@ -168,14 +173,25 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     await page.getByRole("option", { name: "agent/external Local", exact: true }).click();
     await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(page.getByRole("alert")).toContainText("already checked out");
-    await page.getByRole("link", { name: "Register workspace", exact: true }).click();
+    // The refusal names the occupying checkout and offers its own action.
+    await page.getByRole("alert").getByRole("button", { name: "Register workspace", exact: true }).click();
     await expect(page.getByText("Registration does not move files", { exact: false })).toBeVisible();
     await page.getByRole("button", { name: "Register workspace", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
-    await git(hub.workspaces[0]!.path, ["worktree", "remove", externalPath]);
-    await expect.poll(async () => (await cli(hub, ["list"])).checkouts.find((row: { branch: string }) => row.branch === "agent/external")?.availability).toBe("missing");
+    // A registered tree Uatu did not create says so in the picker, instead of
+    // claiming an unknown origin for a branch it never created (decision A).
+    // Scoped to THIS test's own checkout: the desktop and touch runs share one
+    // hub and both register an `agent/external` of the same repository.
+    const registeredExternal = (await worktreeInventory(page, parentId)).checkouts
+      .find((row: { path: string }) => row.path === externalPath);
     await picker(page);
-    const missing = (await cli(hub, ["list"])).checkouts.find((row: { branch: string }) => row.branch === "agent/external");
+    await expect(page.locator(`#hub-menu a[data-workspace-id="${registeredExternal.workspaceId}"] .hub-menu-provenance`))
+      .toHaveText("External worktree");
+    await page.locator("#hub-toggle").click();
+    await git(hub.workspaces[0]!.path, ["worktree", "remove", externalPath]);
+    await expect.poll(async () => (await worktreeInventory(page, parentId)).checkouts.find((row: { branch: string }) => row.branch === "agent/external")?.availability).toBe("missing");
+    await picker(page);
+    const missing = (await worktreeInventory(page, parentId)).checkouts.find((row: { branch: string }) => row.branch === "agent/external");
     const missingRow = page.locator(`#hub-menu a[data-workspace-id="${missing.workspaceId}"]`);
     await expect(missingRow).toContainText("Missing checkout");
     await expect(missingRow).toHaveAttribute("aria-disabled", "true");
@@ -204,7 +220,7 @@ for (const touch of [false, true]) test.describe(touch ? "real worktrees touch" 
     await saveEvidence(info, "integrated-acceptance.json", JSON.stringify({
       realGit: true, realHub: true, realWatchers: true, realPty: true, chat: "deterministic fixture",
       browserTouchEmulation: touch, sourceTerminal, childTerminal, sourceConversation, childConversation,
-      cliLiveRefreshes: liveEvents.length, externalMissing: true, independentRoundTrips: true,
+      apiLiveRefreshes: liveEvents.length, externalMissing: true, independentRoundTrips: true,
     }, null, 2));
     await page.close();
   });

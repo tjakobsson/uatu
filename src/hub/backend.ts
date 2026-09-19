@@ -15,12 +15,9 @@
 
 import type { Subprocess } from "bun";
 import { promises as fs } from "node:fs";
-import path from "node:path";
 
 import { buildLocalCredentialEnvironment, type ResolvedCredentialContext } from "./credential-context";
 import type { WorkspaceEntry } from "./registry";
-import { worktreeContextFileBody, type WorktreeContextIssuer } from "./worktree-capability";
-import { WORKTREE_CONTEXT_ENV, WORKTREE_CONTEXT_FILENAME } from "../shared/worktree-context";
 
 export type SessionEndpoint = {
   hostname: string;
@@ -66,11 +63,6 @@ export type LocalBackendOptions = {
   env?: NodeJS.ProcessEnv;
   terminationGraceMs?: number;
   startupInactivityMs?: number;
-  // Projects a least-privilege worktree capability into the child. Absent
-  // (a Hub without worktree operations, an alternate backend, the tests)
-  // means the child's environment simply carries no Hub context, and the
-  // CLI inside it reports an actionable context error rather than guessing.
-  worktreeContext?: WorktreeContextIssuer;
 };
 
 export function resolveUatuArgv(): string[] {
@@ -87,7 +79,6 @@ export class LocalProcessBackend implements SessionBackend {
   private readonly env: NodeJS.ProcessEnv;
   private readonly terminationGraceMs: number;
   private readonly startupInactivityMs: number;
-  private readonly worktreeContext: WorktreeContextIssuer | undefined;
 
   constructor(options: LocalBackendOptions = {}) {
     this.uatuArgv = options.uatuArgv ?? resolveUatuArgv();
@@ -95,7 +86,6 @@ export class LocalProcessBackend implements SessionBackend {
     this.env = options.env ?? process.env;
     this.terminationGraceMs = options.terminationGraceMs ?? SIGTERM_GRACE_MS;
     this.startupInactivityMs = options.startupInactivityMs ?? STARTUP_INACTIVITY_TIMEOUT_MS;
-    this.worktreeContext = options.worktreeContext;
   }
 
   async start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession> {
@@ -122,35 +112,6 @@ export class LocalProcessBackend implements SessionBackend {
       uatuArgv: this.uatuArgv,
       sourceEnv: this.env,
     });
-    // The worktree capability rides the SAME per-session runtime directory
-    // the credential projection already owns (0700, removed with the
-    // session): the file is 0600 and only its PATH reaches the environment,
-    // so the token is absent from argv, from `env`, and from any process
-    // listing. Issuance failure is never fatal — the session starts without
-    // a Hub context and the CLI inside it says so.
-    let revokeWorktreeContext: (() => Promise<void>) | undefined;
-    try {
-      const issued = await this.worktreeContext?.issue(workspace.id);
-      if (issued) {
-        const contextPath = path.join(projected.runtimeDirectory, WORKTREE_CONTEXT_FILENAME);
-        await fs.writeFile(contextPath, worktreeContextFileBody(issued.context), { mode: 0o600 });
-        await fs.chmod(contextPath, 0o600);
-        projected.env[WORKTREE_CONTEXT_ENV] = contextPath;
-        revokeWorktreeContext = issued.revoke;
-      }
-    } catch {
-      // A capability that could not be written must not be left live.
-      await revokeWorktreeContext?.().catch(() => undefined);
-      revokeWorktreeContext = undefined;
-      delete projected.env[WORKTREE_CONTEXT_ENV];
-    }
-    // Revocation is immediate and server-side, exactly like a Hub session:
-    // the record dies with the child, whatever the file's lifetime.
-    const releaseWorktreeContext = async () => {
-      const revoke = revokeWorktreeContext;
-      revokeWorktreeContext = undefined;
-      await revoke?.().catch(() => undefined);
-    };
     let child: Subprocess<"pipe", "pipe", "pipe">;
     try {
       child = this.spawn(argv, {
@@ -166,7 +127,6 @@ export class LocalProcessBackend implements SessionBackend {
         env: projected.env,
       });
     } catch (error) {
-      await releaseWorktreeContext();
       await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       throw error;
     }
@@ -179,7 +139,6 @@ export class LocalProcessBackend implements SessionBackend {
       url = new URL(line);
     } catch (error) {
       await terminate(child, this.terminationGraceMs);
-      await releaseWorktreeContext();
       await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       const tail = stderrTail.snapshot();
       const detail = tail ? `\n${tail}` : "";
@@ -196,13 +155,11 @@ export class LocalProcessBackend implements SessionBackend {
       exited: child.exited.then(code => code ?? null).catch(() => null),
       stop: async () => {
         await terminate(child, this.terminationGraceMs);
-        await releaseWorktreeContext();
         await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       },
     };
     void session.exited
       .then(async () => {
-        await releaseWorktreeContext();
         await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       })
       .catch(() => undefined);

@@ -42,10 +42,10 @@ import { HubNotifications } from "../../src/hub/notifications";
 import { CredentialMetadataStore } from "../../src/hub/credential-store";
 import { WorkspaceOnboardingCoordinator } from "../../src/hub/onboarding";
 import { PathReservationCoordinator } from "../../src/hub/path-reservations";
+import { WorktreeOperationCoordinator } from "../../src/hub/worktree-coordinator";
 import { WorktreeJournal, WorktreeProvenanceStore } from "../../src/hub/worktree-journal";
 import { createOnboardingWorktreeRegistrar } from "../../src/hub/worktree-registrar";
 import { WorktreeService } from "../../src/hub/worktree-service";
-import { WorktreeCapabilityStore, worktreeContextFileBody } from "../../src/hub/worktree-capability";
 
 export const HUB_E2E_USER = { name: "e2e", password: "e2e-hub-password" };
 export const HUB_E2E_READY_PREFIX = "uatu-e2e-hub ";
@@ -64,8 +64,6 @@ export type HubE2EInfo = {
   origin: string;
   user: { name: string; password: string };
   workspaces: HubE2EWorkspace[];
-  worktreeContextPath?: string;
-  worktreeContextPaths?: Record<string, string>;
 };
 
 const HUB_PORT = Number.parseInt(process.env.UATU_E2E_HUB_PORT ?? "4300", 10);
@@ -182,18 +180,25 @@ const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTI
   workspaceId => worktreesService?.assertStartable(workspaceId) ?? Promise.resolve());
 const credentials = new CredentialMetadataStore(path.join(tempRoot, "credentials.json"));
 await credentials.load();
+// One PathReservationCoordinator shared by onboarding and the worktree
+// coordinator, exactly like src/hub/main.ts composes them — a rename, a
+// clone and a worktree creation must not be able to race for one hierarchy.
+// Handing each its own (the bug this harness used to hide, uatu-2 Bug 3)
+// lets a worktree create's own path fence and its own registration step
+// both "win" a path that was never actually contested, which the real Hub
+// can never do.
+const reservations = new PathReservationCoordinator();
 const onboarding = new WorkspaceOnboardingCoordinator({
   journalPath: path.join(tempRoot, "onboarding.json"), registry, credentials, sessions,
-  reservations: new PathReservationCoordinator(),
+  reservations,
 });
-const capabilities = new WorktreeCapabilityStore(path.join(tempRoot, "capabilities.json"));
-await capabilities.load();
 if (WORKTREES) {
   worktreesService = new WorktreeService({
     registry, sessions,
     journal: new WorktreeJournal(path.join(tempRoot, "worktree-operation.json")),
     provenance: new WorktreeProvenanceStore(path.join(tempRoot, "worktree-provenance.json")),
     registrar: createOnboardingWorktreeRegistrar({ onboarding, registry }),
+    coordinator: new WorktreeOperationCoordinator(reservations),
     unregister: async id => {
       await personalState.forgetWorkspace(id, () => registry.remove(id), async () => {
         await credentials.removeWorkspaceAssignments(id);
@@ -243,7 +248,7 @@ const notifications = new HubNotifications({ store: notificationStore, sender: a
   workspaceName: id => registry.byId(id)?.displayName ?? id,
 });
 const server = startHubServer({ config, registry, sessions, sessionStore, personalState, notifications,
-  ...(WORKTREES ? { onboarding, worktrees: worktreesService, worktreeCapabilities: capabilities,
+  ...(WORKTREES ? { onboarding, worktrees: worktreesService,
     worktreeReconcilerOptions: { minIntervalMs: 100, periodMs: 500 } } : {}),
 });
 const origin = `http://127.0.0.1:${server.port}`;
@@ -252,19 +257,6 @@ for (const workspace of workspaces) {
 }
 
 const info: HubE2EInfo = { origin, user: HUB_E2E_USER, workspaces };
-if (WORKTREES) {
-  info.worktreeContextPaths = {};
-  for (const workspace of workspaces) {
-    const workspaceId = workspace.id;
-    const issued = await capabilities.issue({ user: HUB_E2E_USER.name, workspaceId, sourceWorkspaceId: workspaceId });
-    const contextPath = path.join(tempRoot, `${workspaceId}-hub-context.json`);
-    info.worktreeContextPaths[workspaceId] = contextPath;
-    info.worktreeContextPath ??= contextPath;
-    await fs.writeFile(contextPath, worktreeContextFileBody({
-      version: 1, hubOrigin: origin, workspaceId, token: issued.token, expiresAt: issued.record.expiresAt,
-    }), { mode: 0o600 });
-  }
-}
 console.log(`${HUB_E2E_READY_PREFIX}${JSON.stringify(info)}`);
 
 let shuttingDown = false;

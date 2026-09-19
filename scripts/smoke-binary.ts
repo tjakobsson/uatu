@@ -266,6 +266,61 @@ try {
   const SESSION = `${BASE}/s/${encodeURIComponent(workspace.id)}/`;
   pass(`hub registered and started testdata/watch-docs as '${workspace.id}'`);
 
+  // Bug 3 (uatu-2): a first-attempt worktree registration always failed in
+  // production ("folder path is reserved by another operation") because two
+  // path-reservation fences — WorktreeService's own and the one
+  // onboarding.configureWorktree() takes for the registry commit — shared a
+  // single PathReservationCoordinator in main.ts and self-conflicted. A
+  // real repository, registered and forked here through the same
+  // POST /api/hub/worktrees/create route the dashboard's dialog calls, is
+  // what the user actually hit: it must succeed on the FIRST attempt.
+  const worktreeRepo = path.join(tempRoot, "worktree-repo");
+  await fs.mkdir(worktreeRepo, { recursive: true });
+  const gitEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Uatu Smoke",
+    GIT_AUTHOR_EMAIL: "uatu-smoke@example.test",
+    GIT_COMMITTER_NAME: "Uatu Smoke",
+    GIT_COMMITTER_EMAIL: "uatu-smoke@example.test",
+  };
+  async function git(args: string[]): Promise<void> {
+    const child = spawn("git", ["-c", "commit.gpgsign=false", ...args], { cwd: worktreeRepo, env: gitEnv, stdio: "ignore" });
+    const code = await new Promise<number | null>(resolve => child.once("close", resolve));
+    if (code !== 0) throw new BootFailure(`git ${args.join(" ")} exited ${code} setting up the worktree smoke fixture`);
+  }
+  await git(["init", "--initial-branch=main"]);
+  await fs.writeFile(path.join(worktreeRepo, "README.md"), "# worktree-repo\n");
+  await git(["add", "."]);
+  await git(["commit", "-m", "initial"]);
+  const registeredRepo = await fetch(`${BASE}/api/hub/workspaces`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${sessionId}` },
+    body: JSON.stringify({ path: worktreeRepo }),
+  });
+  const repoWorkspace = (await registeredRepo.json().catch(() => ({}))) as { id?: string; error?: string };
+  if (!registeredRepo.ok || !repoWorkspace.id) {
+    fail(`registering the worktree smoke fixture repo returned ${registeredRepo.status}: ${JSON.stringify(repoWorkspace).slice(0, 200)}`);
+  } else {
+    const created = await fetch(`${BASE}/api/hub/worktrees/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${sessionId}` },
+      body: JSON.stringify({
+        sourceWorkspaceId: repoWorkspace.id,
+        mode: "new-branch",
+        branch: "feature/smoke",
+        base: { kind: "local", ref: "main" },
+      }),
+    });
+    const outcome = (await created.json().catch(() => ({}))) as { ok?: boolean; registered?: boolean; error?: { message?: string } };
+    if (!created.ok || outcome.ok !== true || outcome.registered !== true) {
+      fail(`POST /api/hub/worktrees/create did not report ok/registered on the first attempt (${created.status}): ${JSON.stringify(outcome).slice(0, 300)}`);
+    } else {
+      pass("POST /api/hub/worktrees/create registers on the first attempt (Bug 3)");
+    }
+  }
+
   // Chunk URL — Bun generates `chunk-XXXX.js` references in the compiled
   // HTML, relocated under the session's base path. If `routes:
   // buildRoutes(...)` hides the HTMLBundle from Bun's bundler, this URL falls
@@ -368,6 +423,44 @@ try {
       fail(`SPA connection-label: "${connectionLabel}" (expected "Connected")`);
     } else {
       pass("SPA connection-label: Connected");
+    }
+
+    // Bug 1 (uatu-2): the dashboard's worktree controls inline
+    // worktreeDialogScript — installWorktreeDialog stringified — straight
+    // into a plain <script> tag (src/hub/pages.ts). The e2e suite runs the
+    // Hub from source, so it never minifies that string; only a real
+    // `bun build --compile --minify` bundle (this binary) can reproduce the
+    // production ReferenceError. Reuse the same page/cookie; keep this
+    // short.
+    const dashboardErrors: string[] = [];
+    page.on("pageerror", error => dashboardErrors.push(error.message));
+    await page.goto(`${BASE}/`, { waitUntil: "load", timeout: 10_000 });
+    const fork = page.locator('button[aria-label^="Add worktree to "]').first();
+    await expect(fork).toBeVisible({ timeout: 10_000 });
+    await fork.click();
+    const menu = page.getByRole("menu", { name: "Create worktree" });
+    await expect(menu).toBeVisible({ timeout: 5_000 });
+    const menuItems = menu.getByRole("menuitem");
+    await expect(menuItems).toHaveCount(3);
+    const menuItemNames = await menuItems.allTextContents();
+    const expectedMenuItems = ["New branch / worktree", "Existing branch", "Register worktree…"];
+    if (expectedMenuItems.some((label, index) => menuItemNames[index] !== label)) {
+      fail(`dashboard fork menu items: ${JSON.stringify(menuItemNames)} (expected ${JSON.stringify(expectedMenuItems)})`);
+    } else {
+      pass("dashboard fork menu opens with the three New branch/Existing branch/Register worktree… items");
+    }
+    await menu.getByRole("menuitem", { name: "Register worktree…" }).click();
+    const dialogHeading = page.getByRole("heading", { name: "Register worktree" });
+    await expect(dialogHeading).toBeVisible({ timeout: 10_000 });
+    // The smoke's own repository has one checkout Uatu created and registered
+    // above, so Git lists nothing unregistered: the empty state is the
+    // truthful answer, and it is what proves the list rendered from the
+    // published JSON rather than throwing.
+    await expect(page.getByText("Every worktree Git lists is registered.")).toBeVisible({ timeout: 10_000 });
+    if (dashboardErrors.length > 0) {
+      fail(`dashboard pageerror(s) opening the worktree dialog: ${dashboardErrors.join(" | ")}`);
+    } else {
+      pass("dashboard opens the Register worktree list with no page errors");
     }
   } finally {
     await browser.close();

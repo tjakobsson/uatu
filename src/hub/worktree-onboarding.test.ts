@@ -8,6 +8,7 @@ import { createStoredCredentialContextResolver } from "./credential-context";
 import { WorkspaceOnboardingCoordinator, type OnboardingGit } from "./onboarding";
 import { PathReservationCoordinator } from "./path-reservations";
 import { WorkspaceRegistry } from "./registry";
+import { WorktreeOperationCoordinator } from "./worktree-coordinator";
 import { WorktreeService } from "./worktree-service";
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
 import { WorktreeJournal, WorktreeProvenanceStore, type WorktreeRegistrar } from "./worktree-journal";
@@ -100,12 +101,18 @@ async function fixture(label: string, options: { registrar?: (real: WorktreeRegi
     isRunning: (id: string) => running.has(id),
   };
 
+  // One PathReservationCoordinator shared by onboarding and the worktree
+  // coordinator, exactly like main.ts composes them. Bug 3: a separate
+  // coordinator for each hid onboarding.configureWorktree()'s self-conflict
+  // — its own path reservation nesting inside a create's already-held one
+  // on the SAME coordinator, which is what production actually does.
+  const reservations = new PathReservationCoordinator();
   const onboarding = new WorkspaceOnboardingCoordinator({
     journalPath: path.join(state, "pending-onboarding.json"),
     registry,
     credentials,
     sessions,
-    reservations: new PathReservationCoordinator(),
+    reservations,
     git: onboardingGit,
   });
   const parent = await onboarding.configureExisting({
@@ -124,6 +131,7 @@ async function fixture(label: string, options: { registrar?: (real: WorktreeRegi
     journal: new WorktreeJournal(path.join(state, "pending-worktree-operation.json")),
     provenance: new WorktreeProvenanceStore(path.join(state, "worktree-provenance.json")),
     registrar: options.registrar ? options.registrar(realRegistrar) : realRegistrar,
+    coordinator: new WorktreeOperationCoordinator(reservations),
     git: { env: await cleanEnvironment() },
     newOperationId: (() => {
       let counter = 0;

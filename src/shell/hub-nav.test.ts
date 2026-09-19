@@ -7,13 +7,18 @@ import { disposeLiveChannel, installLiveChannelForTests, watchPageLifecycle } fr
 import { currentSessionRunningFact, onCurrentSessionRunning, resetCurrentSessionRunningForTests } from "./session-running";
 import {
   applyWorkspaceActivity,
+  checkoutBranchLabel,
+  childProvenanceLabel,
+  chipBranchLabel,
   chipLabel,
   chipDotClass,
   currentSessionRunning,
   initHubNav,
   installHubNavigationForTests,
   installStopReconcileForTests,
+  groupHubWorkspaces,
   parseHubState,
+  repositoryTitle,
   sortHubWorkspaces,
   startFailureNeedsHubUnlock,
   startWorkspaceSession,
@@ -230,6 +235,35 @@ describe("chipLabel", () => {
   test("uses the latest display name and falls back to the stable id", () => {
     expect(chipLabel([summary("uatu", true, "Uatu Docs")], "uatu")).toBe("Uatu Docs");
     expect(chipLabel([summary("other", true)], "uatu")).toBe("uatu");
+  });
+
+  // Decision F1 (2026-09-19, second round): the chip reads
+  // `<repository> <branch>` for EVERY checkout, so a child names its
+  // repository first — `atlas probe/first-attempt` — exactly the way its
+  // main checkout already reads `atlas main`.
+  test("names the repository and then the branch for every checkout in a repository family", () => {
+    const main = {
+      id: "atlas", displayName: "atlas", path: "/src/atlas", running: true,
+      repositoryId: "repo-1", branch: "main", createWorktree: true as const,
+    };
+    const child = {
+      id: "atlas-probe", displayName: "Probe", path: "/src/atlas.worktrees/probe", running: true,
+      repositoryId: "repo-1", parentId: "atlas", branch: "probe/first-attempt", ownership: "uatu" as const,
+    };
+    const loose = summary("notes", true, "Notes");
+    const family = [main, child, loose];
+    expect(chipLabel(family, "atlas-probe")).toBe("atlas");
+    expect(chipBranchLabel(family, "atlas-probe")).toBe("probe/first-attempt");
+    expect(chipLabel(family, "atlas")).toBe("atlas");
+    expect(chipBranchLabel(family, "atlas")).toBe("main");
+    // Detached and unknown heads stay explicit on the chip too.
+    expect(chipBranchLabel([{ ...main, detached: true }], "atlas")).toBe("Detached HEAD");
+    expect(chipBranchLabel([{ ...main, branch: undefined }], "atlas")).toBe("Branch unknown");
+    // A workspace outside any repository family keeps its display name and
+    // carries no branch at all.
+    expect(chipLabel(family, "notes")).toBe("Notes");
+    expect(chipBranchLabel(family, "notes")).toBeNull();
+    expect(chipBranchLabel(family, "missing")).toBeNull();
   });
 });
 
@@ -1175,5 +1209,212 @@ describe("initHubNav with the live activity topic", () => {
     expect(badge.className).toBe("hub-activity-badge is-awaiting");
     expect(badge.textContent).toBe("1");
     channel.dispose();
+  });
+});
+
+// Items A and E of the 2026-09-19 live-test decisions: the selector says
+// which repository the current checkout belongs to, groups the menu by
+// repository, and labels a checkout Uatu did not create for what it is.
+describe("repository identity around the workspace selector", () => {
+  const atlas = {
+    id: "atlas", displayName: "atlas", path: "/src/atlas", running: true,
+    repositoryId: "repo-1", branch: "main", createWorktree: true as const,
+  };
+  const trst = {
+    id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true,
+    repositoryId: "repo-1", parentId: "atlas", branch: "Trst", ownership: "uatu" as const, sourceRef: "main",
+  };
+  const external = {
+    id: "atlas-ext", displayName: "agent/outside", path: "/src/atlas-agent", running: false,
+    repositoryId: "repo-1", parentId: "atlas", branch: "agent/outside", ownership: "external" as const,
+  };
+  const loose = { id: "notes", displayName: "Notes", path: "/src/notes", running: true };
+  const family = [atlas, trst, external, loose];
+
+  test("the repository is the parent for a child and its own name for a main checkout", () => {
+    expect(repositoryTitle(family, "atlas-trst")).toBe("atlas");
+    expect(repositoryTitle(family, "atlas")).toBe("atlas");
+    // A workspace outside any repository family has no repository at all.
+    expect(repositoryTitle(family, "notes")).toBeNull();
+    expect(repositoryTitle(family, "missing")).toBeNull();
+  });
+
+  test("grouping follows explicit parent/repository identity, never a display name", () => {
+    const entries = groupHubWorkspaces(family, "atlas-trst");
+    expect(entries.map(entry => entry.kind === "repository" ? `repo:${entry.main.id}` : `plain:${entry.workspace.id}`))
+      .toEqual(["repo:atlas", "plain:notes"]);
+    const repository = entries[0]!;
+    if (repository.kind !== "repository") throw new Error("expected a repository group");
+    expect(repository.children.map(child => child.id)).toEqual(["atlas-trst", "atlas-ext"]);
+    // A same-named workspace in another repository is never absorbed.
+    const twin = { ...atlas, id: "atlas-two", repositoryId: "repo-2" };
+    const separated = groupHubWorkspaces([...family, twin], "atlas");
+    expect(separated.filter(entry => entry.kind === "repository").length).toBe(2);
+  });
+
+  test("a child's label names its ownership; a main checkout's branch is explicit", () => {
+    expect(childProvenanceLabel(trst)).toBe("from main");
+    expect(childProvenanceLabel(external)).toBe("External worktree");
+    expect(childProvenanceLabel({ ...external, ownership: "uncertain" })).toBe("Ownership uncertain");
+    expect(childProvenanceLabel({ ...trst, sourceRef: undefined })).toBe("origin unknown");
+    expect(checkoutBranchLabel(atlas)).toBe("main");
+    expect(checkoutBranchLabel({ ...atlas, detached: true })).toBe("Detached HEAD");
+    expect(checkoutBranchLabel({ ...atlas, branch: undefined })).toBe("Branch unknown");
+  });
+
+  test("parseHubState carries the Hub's verified ownership through to the picker", () => {
+    const parsed = parseHubState({
+      workspaces: [
+        { id: "atlas-ext", running: false, parentId: "atlas", repositoryId: "repo-1", branch: "agent/outside", ownership: "external" },
+        { id: "atlas-bogus", running: false, parentId: "atlas", repositoryId: "repo-1", ownership: "invented" },
+      ],
+    });
+    expect(parsed!.workspaces[0]!.ownership).toBe("external");
+    expect(parsed!.workspaces[1]!.ownership).toBeUndefined();
+  });
+});
+
+describe("initHubNav renders the repository title and the grouped menu", () => {
+  const savedGlobals = new Map<string, unknown>();
+  const setGlobal = (key: string, value: unknown) => {
+    if (!savedGlobals.has(key)) savedGlobals.set(key, Reflect.get(globalThis, key));
+    Reflect.set(globalThis, key, value);
+  };
+
+  afterEach(() => {
+    disposeLiveChannel();
+    installLiveChannelForTests(null);
+    for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
+    savedGlobals.clear();
+    resetAppBasePathForTests();
+  });
+
+  // Boots hub-nav against a parsed index.html and a stubbed hub state, and
+  // resolves once the probe has unhidden the control.
+  async function mount(basePath: string, workspaces: unknown[]) {
+    const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
+    const { document, window } = parseHTML(html);
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", basePath);
+    document.head.appendChild(meta);
+    setGlobal("document", document);
+    setGlobal("window", window);
+    setGlobal("Node", (window as unknown as Record<string, unknown>).Node);
+    resetAppBasePathForTests();
+    setGlobal("fetch", async (url: string) => {
+      if (url !== "/api/hub/state") return Response.json({ error: "unexpected" }, { status: 404 });
+      return Response.json({ worktreeApi: "/api/hub/worktrees", workspaces });
+    });
+    installLiveChannelForTests({
+      onActivity() { return () => {}; },
+      onStreamOpened() { return () => {}; },
+      subscribe() { return { close() {} }; },
+      dispose() {},
+    } as unknown as LiveChannel);
+
+    initHubNav();
+    const control = document.querySelector<HTMLElement>("#hub-control")!;
+    for (let attempt = 0; attempt < 200 && control.hidden; attempt += 1) await Bun.sleep(1);
+    expect(control.hidden).toBe(false);
+    return { document, window };
+  }
+
+  test("the chip names the repository, the menu groups by it, and no title line duplicates it", async () => {
+    const { document, window } = await mount("/s/atlas-trst/", [
+      { id: "atlas", displayName: "atlas", path: "/src/atlas", running: true, repositoryId: "repo-1", branch: "main", createWorktree: true },
+      { id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true, repositoryId: "repo-1", parentId: "atlas", branch: "Trst", ownership: "uatu", sourceRef: "main" },
+      { id: "atlas-ext", displayName: "agent/outside", path: "/src/atlas-agent", running: false, repositoryId: "repo-1", parentId: "atlas", branch: "agent/outside", ownership: "external" },
+      { id: "notes", displayName: "Notes", path: "/src/notes", running: true },
+    ]);
+
+    // F1: the chip names this child's repository first, then its branch —
+    // the same two-part reading a main checkout's chip has. It is the ONLY
+    // place the repository is named: the separate title line above the
+    // selector was removed once the chip carried the repository for every
+    // checkout, so nothing repeats it (2026-09-19, second round).
+    expect(document.querySelector("#hub-repository")).toBeNull();
+    const chip = document.querySelector<HTMLElement>("#hub-current")!;
+    expect(chip.firstChild!.textContent).toBe("atlas");
+    expect(chip.querySelector(".hub-toggle-branch")!.textContent).toBe("Trst");
+
+    document.querySelector<HTMLElement>("#hub-toggle")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const menu = document.querySelector<HTMLElement>("#hub-menu")!;
+    const header = menu.querySelector<HTMLElement>(".hub-menu-group")!;
+    expect(header.textContent).toContain("atlas");
+    // The group header is not a link and owns the repository's one fork.
+    expect(header.tagName).toBe("DIV");
+    expect(header.getAttribute("href")).toBeNull();
+    expect(header.querySelector("button")!.getAttribute("aria-label")).toBe("Add worktree to atlas");
+
+    const rows = [...menu.querySelectorAll<HTMLElement>(".hub-menu-item[data-workspace-id]")];
+    // The repository's main checkout leads its own group, its children
+    // follow in order, and the workspace outside any family comes after.
+    expect(rows.map(row => row.dataset.workspaceId)).toEqual(["atlas", "atlas-trst", "atlas-ext", "notes"]);
+    const row = (id: string) => menu.querySelector<HTMLElement>(`.hub-menu-item[data-workspace-id="${id}"]`)!;
+    // The repository's own main checkout row, under the header that already
+    // names the repository.
+    expect(row("atlas").querySelector(".hub-menu-label")!.textContent).toContain("main checkout");
+    expect(row("atlas").querySelector(".hub-menu-branch")!.textContent).toBe("main");
+    expect(row("atlas").style.paddingInlineStart).toBe("");
+    // F4: the header already groups them, so children share the main
+    // checkout's left edge; they carry the ownership labels beneath.
+    expect(row("atlas-trst").style.paddingInlineStart).toBe("");
+    expect(row("atlas-trst").querySelector(".hub-menu-provenance")!.textContent).toBe("from main");
+    expect(row("atlas-ext").querySelector(".hub-menu-provenance")!.textContent).toBe("External worktree");
+    // A workspace with no repository family stays a plain, unindented row
+    // with no group header of its own.
+    expect(row("notes").style.paddingInlineStart).toBe("");
+    expect(menu.querySelectorAll(".hub-menu-group")).toHaveLength(1);
+    // Only a main checkout has a fork control, and only one.
+    expect(menu.querySelectorAll('[aria-label^="Add worktree to"]')).toHaveLength(1);
+  });
+
+  // Decisions F2–F4 (2026-09-19, second round): the fork control trails its
+  // group header, consecutive repositories are visibly divided, and no row is
+  // indented.
+  test("the fork trails each group header, consecutive groups are divided, and no child is indented", async () => {
+    const { document, window } = await mount("/s/atlas/", [
+      { id: "atlas", displayName: "atlas", path: "/src/atlas", running: true, repositoryId: "repo-1", branch: "main", createWorktree: true },
+      { id: "atlas-trst", displayName: "Trst", path: "/src/atlas.worktrees/trst", running: true, repositoryId: "repo-1", parentId: "atlas", branch: "Trst", ownership: "uatu", sourceRef: "main" },
+      { id: "beacon", displayName: "beacon", path: "/src/beacon", running: false, repositoryId: "repo-2", branch: "main", createWorktree: true },
+      { id: "beacon-probe", displayName: "probe", path: "/src/beacon.worktrees/probe", running: false, repositoryId: "repo-2", parentId: "beacon", branch: "probe/first-attempt", ownership: "external" },
+    ]);
+
+    document.querySelector<HTMLElement>("#hub-toggle")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const menu = document.querySelector<HTMLElement>("#hub-menu")!;
+    const headers = [...menu.querySelectorAll<HTMLElement>(".hub-menu-group")];
+    expect(headers.map(header => header.dataset.repository)).toEqual(["atlas", "beacon"]);
+
+    // F2: the repository's name leads the header and its fork control is the
+    // header's last element, so the layout can push it to the trailing edge.
+    for (const header of headers) {
+      expect(header.firstElementChild!.className).toBe("hub-menu-label");
+      expect(header.lastElementChild!.tagName).toBe("BUTTON");
+      expect(header.lastElementChild!.className).toBe("hub-menu-fork");
+    }
+
+    // F3: a separator of its own divides consecutive repository groups. The
+    // first group needs none — the menu's dashboard divider already precedes
+    // it — and the dividers around Hub dashboard and Sign out are untouched.
+    expect(headers[0]!.previousElementSibling!.className).toBe("hub-menu-divider");
+    expect(headers[1]!.previousElementSibling!.className).toBe("hub-menu-divider is-group");
+    expect(menu.querySelectorAll(".hub-menu-divider.is-group")).toHaveLength(1);
+    expect(menu.querySelectorAll(".hub-menu-divider")).toHaveLength(3);
+
+    // F6: the open menu is bounded to what is visible and scrolls, so a
+    // repository or two can never push Sign out past the bottom of a phone
+    // with no way back to it. The pixel bound is measured from the menu's
+    // own top; the stylesheet owns the scrolling itself.
+    expect(menu.style.getPropertyValue("--hub-menu-max-height")).toMatch(/^\d+px$/);
+
+    // F4: every row — main checkout and child alike — shares one left edge.
+    const rows = [...menu.querySelectorAll<HTMLElement>(".hub-menu-item[data-workspace-id]")];
+    expect(rows.map(row => row.dataset.workspaceId)).toEqual(["atlas", "atlas-trst", "beacon", "beacon-probe"]);
+    for (const row of rows) {
+      expect(row.style.paddingInlineStart).toBe("");
+      expect(row.style.marginInlineStart).toBe("");
+      expect(row.className).toBe("hub-menu-item");
+    }
   });
 });

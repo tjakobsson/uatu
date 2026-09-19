@@ -293,6 +293,32 @@ localhost security model unchanged and are never network-reachable. Live
 updates do not go through the proxy; [Live delivery](#live-delivery) covers
 them.
 
+The hub also owns Git worktrees: a linked checkout is a child workspace of
+the main one it forks from, sharing its Git objects and repository
+configuration. `src/hub/worktree-service.ts` composes the service — Git
+probes and the coordinator (`worktree-git.ts`), non-force creation
+(`worktree-create.ts`), credential-aware fetch (`worktree-fetch.ts`),
+deletion preflight and the confirm-stop-fence-recheck-remove sequence
+(`worktree-delete.ts`), the rename guard (`worktree-rename-guard.ts`), the
+durable intent/provenance journal with restart recovery
+(`worktree-journal.ts`), Git-backed reconciliation on open/activity/manual/
+periodic cadence (`worktree-reconciler.ts`), and onboarding
+(`worktree-registrar.ts`) — and answers every operation through one
+session-authenticated JSON family, `worktree-api.ts` at
+`/api/hub/worktrees` (`GET ?source=` inventory, `POST
+/{fetch,create,open,preflight-delete,delete,register,forget}`), published
+like any other hub route with no separate progress poll: each call answers
+its own bounded outcome, and a safety refusal is an ordinary `{ok: false,
+error}` response rather than a transport failure. `src/shell/worktree-dialog.ts`
+is the one client for that family — a shadow-DOM dialog embedded both in
+the in-workspace picker (`shell/hub-nav.ts`) and the hub dashboard
+(`hub/pages.ts`) — and `shell/worktree-live.ts` refreshes an open
+register list (the fork menu's `Register worktree…`, the checkouts Git lists
+that Uatu has not registered) from the live stream's cursor-free `worktrees`
+topic without touching the page's own document or conversation selection. Design rationale (safety
+model, provenance, parent credential inheritance) is in
+`openspec/changes/add-git-worktree-workspaces/design.md`.
+
 The session child is `uatu serve`, and it is no longer a user command. A
 user-shaped invocation (`uatu serve`, the removed `watch` alias, a bare
 `uatu <path>`) prints the hub bootstrap steps and exits non-zero

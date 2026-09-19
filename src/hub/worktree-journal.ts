@@ -678,6 +678,12 @@ export type WorktreeRegistrar = {
     // another tree never inherits the relationship.
     identity: WorktreeIdentity;
     start: boolean;
+    // True exactly when the caller (registerCreatedWorktree, below) already
+    // holds a WorktreeOperationCoordinator path reservation covering
+    // `path` — so the onboarding commit this triggers must not reserve it a
+    // second time (Bug 3: that self-conflict is what made a first-attempt
+    // worktree registration always fail in production).
+    fenced?: boolean;
   }): Promise<{ workspaceId: string; started: boolean; startError?: string }>;
 };
 
@@ -744,10 +750,18 @@ export async function registerCreatedWorktree(options: RegisterCreatedWorktreeOp
       parentWorkspaceId: pending.sourceWorkspaceId,
       identity: inspection.identity,
       start: options.start === true,
+      // Both of registerCreatedWorktree's callers (WorktreeService's
+      // create() and retryRegistration()) run this exclusively inside a
+      // WorktreeOperationCoordinator.run() whose `paths` already cover
+      // `pending.destination` — see the Bug 3 comment on
+      // WorktreeRegistrar.register's `fenced` field above.
+      fenced: true,
     });
   } catch (error) {
     // The checkout and its branch are retained, and the journal stays at
     // `registering` so a retry resumes here instead of creating another tree.
+    // The client gets the sanitized message; the operator gets the cause.
+    console.error(`uatu hub: worktree registration failed for ${pending.destination}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
     throw WorktreeOperationError.of(
       "registration-failed",
       "Registration failed. The checkout and branch are retained. Retry registration; do not create another checkout.",

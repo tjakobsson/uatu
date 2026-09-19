@@ -12,7 +12,7 @@ import { Buffer } from "node:buffer";
 
 import { escapeHtml } from "../shared/html";
 import { PWA_ICON_VERSION } from "../pwa/icons";
-import { worktreePickerScript } from "../shell/worktree-picker";
+import { worktreeDialogScript } from "../shell/worktree-dialog";
 import { createDashboardGroups, dashboardGroupsStyle } from "./dashboard-groups";
 import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, SCP_REMOTE_PATTERN } from "./credential-presentation";
 
@@ -50,6 +50,10 @@ const SHARED_STYLE = `
     --surface-subtle: light-dark(#f6f8fa, #161b22);
     --surface-muted: light-dark(#f3f5f7, #161b22);
     --success: light-dark(#2da44e, #3fb950);
+    /* Matches src/styles.css: the worktree confirmation is rendered by the
+       same inlined module on both surfaces, so both define its tint. */
+    --success-soft: light-dark(#dafbe1, #12261e);
+    --success-strong: light-dark(#1a7f37, #3fb950);
     --danger: light-dark(#cf222e, #f85149);
     --attention: light-dark(#bf8700, #d29922);
     --pane-header-bg: light-dark(#fbfcfd, #161b22);
@@ -700,7 +704,7 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
 ${content}
 </div>
 <script>
-${worktreePickerScript}
+${worktreeDialogScript}
 const renderDashboardGroups = (${createDashboardGroups.toString()})();
 const dashboardGroupsStyle = document.createElement("style");
 dashboardGroupsStyle.textContent = ${JSON.stringify(dashboardGroupsStyle)};
@@ -1681,56 +1685,100 @@ async function refresh(force) {
     rows,
     "No stopped workspaces — use Add workspace to configure one.",
   );
-  if (state.worktreeNavigation) {
+  if (state.worktreeApi) {
     const nodes = new Map();
     for (const [container, entries] of [["sessions", running], ["workspaces", stopped]]) {
       const rendered = document.getElementById(container).querySelectorAll(".row");
       entries.forEach((w, index) => {
         const node = rendered[index]; if (!node) return;
         nodes.set(w.id, node); node.dataset.workspace = w.id;
-        const target = new URL(state.dashboardWorktreeNavigation || state.worktreeNavigation, location.href);
-        if (target.origin !== location.origin) return;
-        target.searchParams.set("source", w.parentId || w.id); target.searchParams.set("id", w.id);
+        // The JSON family's presence AND value: state.worktreeApi is both
+        // the capability signal and the family's base path. Every worktree
+        // view is rendered here by the same client module the in-workspace
+        // picker embeds; nothing navigates to a server-rendered page.
+        const parent = dashboardWorkspaces.find(entry => entry.id === (w.parentId || w.id)) || w;
+        const target = {
+          api: state.worktreeApi,
+          source: {
+            id: parent.id,
+            name: workspaceLabel(parent),
+            authentication: ((parent.credentialAssignments || {}).authentication || []).join(", ") || undefined,
+            signing: ((parent.credentialAssignments || {}).signing || []).join(", ") || undefined,
+          },
+        };
         const actions = node.querySelector(".row-actions");
+        // Bug 2: a running workspace (main checkout or worktree child) must
+        // offer Open — the same openSession() path the folder browser's
+        // running rows use (around L1558) — not just an implicit
+        // title-link click. dashboard-groups.ts also stopped destroying the
+        // main row's own title link (which carried this same navigation),
+        // but the explicit button is what the spec (hub-dashboard spec:
+        // 'a running workspace SHALL offer Open') and the folder browser's
+        // own precedent both call for, and it is unambiguous for touch and
+        // keyboard users.
+        if (w.running) {
+          const open = el("button", null, "Open");
+          open.setAttribute("aria-label", "Open " + workspaceLabel(w));
+          open.onclick = () => openSession(w.id);
+          actions.prepend(open);
+        }
         if (!w.parentId && w.branch) node.querySelector(".row-title").append(el("span", "chip", w.branch));
         const action = (label, view) => {
           const button = el("button", null, label);
-          button.onclick = () => { const url = new URL(target); url.searchParams.set("view", view); openWorktreePicker(url.href, button); };
+          button.onclick = () => openWorktreeDialog({ ...target, view, id: w.id }, button);
           actions.append(button); return button;
         };
-        // Parent policy is managed where the Hub manages credentials when the
-        // Hub names that place; otherwise (the isolated review host) in the
-        // worktree presentation's own settings view. Children never get one.
-        if (!w.parentId && state.worktreeConfigureNavigation) {
-          const configure = el("button", null, "Configure");
-          configure.setAttribute("aria-label", "Configure " + workspaceLabel(w) + " credentials and shared settings");
-          configure.onclick = () => { const next = new URL(state.worktreeConfigureNavigation, location.href); if (next.origin === location.origin) location.assign(next.href); };
-          actions.append(configure);
-        } else if (!w.parentId) action("Configure", "settings");
+        // F9: no per-repository Configure button. It only ever navigated to
+        // the Hub's own Settings page, which the site navigation already
+        // reaches; parent credentials and shared policy are managed there,
+        // for every repository, as they always were.
         const forget = actions.querySelector('[aria-label^="Remove "]');
         if (forget) {
           forget.textContent = "Remove from Uatu";
           forget.setAttribute("aria-label", "Remove " + workspaceLabel(w) + " from Uatu");
-          forget.onclick = () => { const url = new URL(target); url.searchParams.set("view", "forget"); openWorktreePicker(url.href, forget); };
+          forget.onclick = () => openWorktreeDialog({ ...target, view: "forget", id: w.id }, forget);
         }
         if (w.availability) {
           const warning = el("p", "action-error", (w.availability === "missing" ? "Missing checkout" : "Identity conflict — path replaced") + ". Restore the original checkout externally, then retry. Nothing will be recreated.");
-          warning.setAttribute("role", "alert"); node.append(warning);
+          warning.setAttribute("role", "alert");
+          // W3: appended to .row directly, the warning took width as a flex
+          // item in .row's row-direction flexbox and squeezed .row-main
+          // (min-width:0) to min-content, breaking the title/path down to
+          // one character per line. .row-main is itself a column flexbox,
+          // so a paragraph appended there takes the full width for free and
+          // the title/path column keeps its size.
+          node.querySelector(".row-main").append(warning);
           const start = actions.querySelector('[aria-label^="Start "]'); if (start) start.remove();
-          const title = node.querySelector("a.row-title"); if (title) title.removeAttribute("href");
+          const openAction = actions.querySelector('[aria-label^="Open "]'); if (openAction) openAction.remove();
+          // Drive-by: the selector below used to be "a.row-title" (an <a>
+          // carrying its own "row-title" class), which never matches —
+          // row()'s <a> is unclassed, nested inside a *div* with that
+          // class (see this file's own SHARED_STYLE selectors, e.g.
+          // '.row-title a, .row-title strong'). A missing/replaced
+          // checkout's title link was therefore never actually defused;
+          // fix the selector so it is.
+          const title = node.querySelector(".row-title a"); if (title) title.removeAttribute("href");
           const retry = el("button", null, "Retry refresh"); retry.onclick = () => refresh(true); actions.append(retry);
         }
         if (w.parentId) {
-          const provenance = el("span", "worktree-provenance", w.sourceRef ? "from " + w.sourceRef : "origin unknown");
+          // The same muted provenance rule the picker and the register list
+          // use (worktreeProvenanceLabel, from the inlined dialog module):
+          // a tree Uatu did not create reads "External worktree", never
+          // "origin unknown".
+          const provenance = el("span", "worktree-provenance", worktreeProvenanceLabel(w));
           provenance.style.cssText = "font-size:11px;font-weight:400;color:var(--text-subtle);overflow-wrap:anywhere";
           node.querySelector(".row-title").append(provenance);
-          node.dataset.parent = w.parentId; node.style.marginInlineStart = "24px";
+          // F8: no inset. The Active-groups repository heading and the
+          // main checkout's own row already place a child, exactly as
+          // the picker's group header does since F4, so every row in a
+          // group shares one left edge and nothing is drawn as a tree.
+          node.dataset.parent = w.parentId;
           const rename = actions.querySelector('[aria-label^="Rename workspace"]'); if (rename) rename.remove();
           if (w.ownership === "uatu" && !w.availability) action("Delete worktree", "delete");
-        } else if (w.createWorktree) {
+        } else if (w.createWorktree === true) {
           const fork = el("button"); fork.setAttribute("aria-label", "Add worktree to " + workspaceLabel(w)); fork.setAttribute("aria-haspopup", "menu");
           fork.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5v1a4 4 0 0 1-4 4H6"/></svg>';
-          fork.onclick = () => { const url = new URL(w.createWorktree, location.href); url.pathname = target.pathname; openWorktreeFork(url.href, fork); }; actions.append(fork);
+          fork.onclick = () => openWorktreeFork(target, fork); actions.append(fork);
         }
       });
     }

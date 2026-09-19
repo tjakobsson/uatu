@@ -171,6 +171,109 @@ describe("authenticated Hub pages", () => {
   });
 });
 
+describe("worktree dashboard integration (Section 11 UX review)", () => {
+  test("W3 the missing/replaced-checkout warning goes into .row-main, keeping the title/path column width", () => {
+    const html = htmlFor.dashboard();
+    // .row is a row-direction flexbox; .row-main is itself a column
+    // flexbox with min-width:0. Appending the warning to .row directly (the
+    // bug) makes it a flex item that squeezes .row-main to min-content,
+    // breaking the title down to one character per line. Appending it
+    // inside .row-main keeps the row's existing columns their size.
+    expect(html).toContain('node.querySelector(".row-main").append(warning);');
+    expect(html).not.toContain("node.append(warning);");
+  });
+
+  test("W9 the parent fork button opens the shared three-item menu (New branch, Existing branch, Register worktree…)", () => {
+    const html = htmlFor.dashboard();
+    // The dashboard's own fork button calls the exact same openWorktreeFork
+    // the picker calls — inlined once as worktreeDialogScript, not
+    // reimplemented — so the menu shape (including W1's third item) is
+    // identical on both surfaces by construction.
+    expect(html).toContain('fork.onclick = () => openWorktreeFork(target, fork); actions.append(fork);');
+    // The trailing ellipsis survives bundling as either the literal
+    // character or its \u escape, so match just the stable label prefix.
+    expect(html).toMatch(/label: "Register worktree/);
+    expect(html).not.toMatch(/label: "Repository worktrees/);
+  });
+
+  // Item A (2026-09-19 live-test decision): a dashboard child row labels a
+  // tree Uatu did not create "External worktree" — the same rule the picker
+  // and the register list apply, from the one inlined helper rather than a
+  // second spelling of it here.
+  test("child rows take their muted provenance label from the shared ownership rule", () => {
+    const html = htmlFor.dashboard();
+    expect(html).toContain('el("span", "worktree-provenance", worktreeProvenanceLabel(w))');
+    expect(html).not.toContain('w.sourceRef ? "from " + w.sourceRef : "origin unknown"');
+    // The helper it calls is part of the inlined module's public surface.
+    expect(html).toContain("function worktreeProvenanceLabel(");
+    expect(html).toContain("worktreeProvenanceLabel,");
+  });
+
+  // Decision F8 (2026-09-19, second round): the Active-groups heading and the
+  // main checkout's own row already say which rows belong to which
+  // repository, so a child shares the main row's left edge — exactly as the
+  // picker's menu does since F4. No inset, no tree line.
+  test("child rows are not indented under the repository heading", () => {
+    const html = htmlFor.dashboard();
+    // The parent link itself is what grouping reads; only the inset is gone.
+    expect(html).toContain("node.dataset.parent = w.parentId;");
+    expect(html).not.toContain("marginInlineStart");
+    expect(html).not.toContain("paddingInlineStart");
+    expect(html).not.toContain("margin-inline-start");
+    expect(html).not.toContain("padding-inline-start");
+    expect(html).not.toContain("border-inline-start");
+  });
+
+  // Decision F9 (2026-09-19, second round): the per-repository Configure
+  // button only navigated to the global Settings page, which the Hub's own
+  // navigation already reaches, so it is gone. Parent credentials and shared
+  // policy are still managed there; the heading keeps Rename workspace and
+  // the fork control.
+  test("a repository heading carries no Configure button, and no state field points one at Settings", () => {
+    const html = htmlFor.dashboard();
+    expect(html).not.toContain("worktreeConfigureNavigation");
+    expect(html).not.toContain('" credentials and shared settings"');
+    expect(html).not.toContain('el("button", null, "Configure")');
+    // The heading still collects what remains.
+    expect(html).toContain('button.getAttribute("aria-label")?.startsWith("Rename workspace")');
+    expect(html).toContain('button.getAttribute("aria-label")?.startsWith("Add worktree")');
+  });
+
+  test("the worktree dialog module is inlined once and the dashboard groups renderer is wired to it", () => {
+    const html = htmlFor.dashboard();
+    expect(html).toContain("function openWorktreeDialog(");
+    expect(html).toContain("function openWorktreeFork(");
+    expect(html).toContain("const renderDashboardGroups = (");
+    expect(html).toContain("renderDashboardGroups(dashboardWorkspaces, nodes);");
+  });
+
+  // Bug 2: a running workspace (main checkout or worktree child) must offer
+  // Open, not just Stop; a stopped one keeps Start. hub-dashboard/spec.md:
+  // "A stopped registered directory SHALL offer Start rather than Open; a
+  // running workspace SHALL offer Open."
+  test("Bug 2 a running row gets an explicit Open action alongside the openSession() the folder browser already uses", () => {
+    const html = htmlFor.dashboard();
+    expect(html).toContain('if (w.running) {');
+    expect(html).toContain('open.setAttribute("aria-label", "Open " + workspaceLabel(w));');
+    expect(html).toContain("open.onclick = () => openSession(w.id);");
+    expect(html).toContain("actions.prepend(open);");
+    // The availability branch (missing/replaced checkout) removes both
+    // Start and this same Open action — an unreachable checkout offers
+    // neither.
+    expect(html).toContain('const openAction = actions.querySelector(\'[aria-label^="Open "]\'); if (openAction) openAction.remove();');
+  });
+
+  // Drive-by fix alongside Bug 2: `a.row-title` never matched row()'s
+  // actual markup (an unclassed <a> nested inside a *div* with that class),
+  // so a missing/replaced checkout's title link was never actually
+  // defused.
+  test("the missing/replaced-checkout branch defuses the real title link selector, not the always-empty a.row-title", () => {
+    const html = htmlFor.dashboard();
+    expect(html).toContain('node.querySelector(".row-title a")');
+    expect(html).not.toContain('node.querySelector("a.row-title")');
+  });
+});
+
 describe("clone page", () => {
   test("renders folder registration and prompt-capable clone controls", () => {
     const html = htmlFor.clone();
@@ -620,5 +723,18 @@ describe("stopped session page", () => {
   test("escapes display names and ids", () => {
     const html = stoppedSessionPage("x", true, "<script>alert(1)</script>");
     expect(html).not.toContain("<script>alert(1)</script>");
+  });
+});
+
+// Item D: the worktree confirmation is rendered by the inlined dialog module
+// on the dashboard exactly as in the SPA, so the Hub's own pages must define
+// the success tint it uses — otherwise the dashboard falls back to a literal
+// light green in dark mode.
+describe("the Hub's shared style carries the success palette the confirmation uses", () => {
+  test("--success-soft and --success-strong are defined for both colour schemes", () => {
+    const html = htmlFor.dashboard();
+    expect(html).toContain("--success-soft: light-dark(#dafbe1, #12261e);");
+    expect(html).toContain("--success-strong: light-dark(#1a7f37, #3fb950);");
+    expect(html).toContain("background:var(--success-soft,#dafbe1)");
   });
 });

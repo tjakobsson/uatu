@@ -15,10 +15,12 @@ import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
+import { WorktreeOperationCoordinator } from "./worktree-coordinator";
 import { WorktreeJournal, WorktreeProvenanceStore } from "./worktree-journal";
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
+import { WORKTREE_API_PATH } from "./worktree-api";
 import { WorktreeService } from "./worktree-service";
-import { parseWorktreeInventory, type WorktreeInventory } from "../shared/worktree-contract";
+import { parseWorktreeDeletionPreflight, parseWorktreeInventory, parseWorktreeOperationResult, type WorktreeInventory } from "../shared/worktree-contract";
 import { parseLiveEnvelope, type LiveEnvelope } from "../shared/live-protocol";
 import { parseHubState } from "../shell/hub-nav";
 
@@ -143,12 +145,21 @@ beforeAll(async () => {
   const sessionStore = new HubSessionStore(path.join(state, "sessions.json"));
   await Promise.all([registry.load(), personalState.load(), credentials.load(), sessionStore.load()]);
   sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER, workspaceId => service.assertStartable(workspaceId));
+  // One PathReservationCoordinator shared by onboarding and the worktree
+  // coordinator below, exactly like main.ts composes them (a rename, a
+  // clone and a worktree creation must not race for one hierarchy). Two
+  // separate coordinators hid Bug 3: a worktree create's own path fence and
+  // the registration step it triggers never actually contended for
+  // anything, so the self-conflict onboarding.configureWorktree() hits in
+  // production (reserving the destination a second time inside the SAME
+  // reservation coordinator that already reserved it) never reproduced here.
+  const reservations = new PathReservationCoordinator();
   const onboarding = new WorkspaceOnboardingCoordinator({
     journalPath: path.join(state, "pending-onboarding.json"),
     registry,
     credentials,
     sessions,
-    reservations: new PathReservationCoordinator(),
+    reservations,
     git: onboardingGit,
   });
   atlasId = (await onboarding.configureExisting({ path: atlas, displayName: "Atlas", authentication: [], signing: null, init: false, start: false })).entry.id;
@@ -161,6 +172,7 @@ beforeAll(async () => {
     journal,
     provenance,
     registrar: createOnboardingWorktreeRegistrar({ onboarding, registry }),
+    coordinator: new WorktreeOperationCoordinator(reservations),
     git: { env: cleanEnvironment() },
     // The same Hub cleanup main.ts wires, with an injectable persistence failure.
     unregister: async workspaceId => {
@@ -200,18 +212,56 @@ afterAll(async () => {
 
 const auth = (init: RequestInit = {}): RequestInit => ({ ...init, headers: { ...(init.headers as Record<string, string>), cookie, origin } });
 
-type ActionAnswer = { redirect: string; completion?: { message: string; id?: string; deleted?: string; source: string } };
+type ActionAnswer = { ok: boolean; message: string; completion?: { message: string; id?: string; deleted?: string } };
 
+// The dialog's own vocabulary over the published JSON family: the picker
+// used to submit these fields as a form to `/worktrees/<action>`, and now
+// src/shell/worktree-dialog.ts sends exactly this JSON. The mapping lives
+// here so every lifecycle assertion below is unchanged by the transport.
 async function act(action: string, fields: Record<string, string>): Promise<ActionAnswer> {
-  const body = new FormData();
-  for (const [key, value] of Object.entries(fields)) body.set(key, value);
-  const response = await fetch(`${origin}/worktrees/${action}`, auth({ method: "POST", body }));
+  const reference = fields.id ?? "";
+  let route = action;
+  let body: Record<string, unknown> = { sourceWorkspaceId: fields.source };
+  if (action === "create") {
+    const selection = fields.selection ?? "";
+    const separator = selection.indexOf(":");
+    const base = { kind: selection.slice(0, separator), ref: selection.slice(separator + 1) };
+    body = fields.mode === "new"
+      ? { ...body, mode: "new-branch", branch: fields.branch, base }
+      : { ...body, mode: base.kind === "remote" ? "remote-tracking" : "existing-local", base };
+  } else if (action === "start") {
+    route = "open";
+    body = { ...body, reference, start: true };
+  } else if (action === "delete") {
+    body = { ...body, reference, confirm: fields.confirm === "1", ...(fields.stop === "1" ? { stop: true } : {}) };
+  } else if (action === "register") {
+    body = { ...body, reference, ...(fields.start === undefined ? {} : { start: true }) };
+  } else {
+    body = { ...body, reference };
+  }
+  const response = await fetch(`${origin}${WORKTREE_API_PATH}/${route}`, auth({
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }));
   expect(response.status).toBe(200);
-  return await response.json() as ActionAnswer;
+  const result = parseWorktreeOperationResult(await response.json());
+  if (!result.ok) return { ok: false, message: result.error.message };
+  // The confirmation the dialog shows for this outcome, assembled exactly as
+  // src/shell/worktree-dialog.ts assembles it from the same answer.
+  if (action === "delete") return { ok: true, message: "", completion: { message: "Worktree deleted. Branch kept.", deleted: reference } };
+  if (action === "forget") return { ok: true, message: "", completion: { message: "Removed from Uatu. Checkout, branch and files were kept.", deleted: reference } };
+  const checkout = result.checkout;
+  const verb = action === "register" && checkout?.ownership !== "uatu" ? "Registered" : "Created";
+  return {
+    ok: true,
+    message: "",
+    ...(checkout?.workspaceId === undefined
+      ? {}
+      : { completion: { message: `${verb} ${checkout.branch}`, id: checkout.workspaceId } }),
+  };
 }
 
-const messageOf = (answer: ActionAnswer) => new URL(answer.redirect, origin).searchParams.get("message") ?? "";
-const failed = (answer: ActionAnswer) => new URL(answer.redirect, origin).searchParams.get("error") === "1";
+const messageOf = (answer: ActionAnswer) => answer.message;
+const failed = (answer: ActionAnswer) => !answer.ok;
 
 async function create(branch: string, source = atlasId, base = "main"): Promise<string> {
   const answer = await act("create", { source, mode: "new", branch, selection: `local:${base}` });
@@ -219,10 +269,22 @@ async function create(branch: string, source = atlasId, base = "main"): Promise<
   return answer.completion!.id!;
 }
 
-async function view(query: string): Promise<string> {
-  const response = await fetch(`${origin}/worktrees?${query}&fragment=1`, auth());
+// The authoritative read the dialog opens with (and the reconciler
+// baseline it settles).
+async function listInventory(source = atlasId): Promise<WorktreeInventory> {
+  const response = await fetch(`${origin}${WORKTREE_API_PATH}?source=${encodeURIComponent(source)}`, auth());
   expect(response.status).toBe(200);
-  return response.text();
+  return parseWorktreeInventory((await response.json() as { inventory: unknown }).inventory);
+}
+
+// What the delete dialog reads before it shows its consequences.
+async function preflight(reference: string, source = atlasId) {
+  const response = await fetch(`${origin}${WORKTREE_API_PATH}/preflight-delete`, auth({
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sourceWorkspaceId: source, reference }),
+  }));
+  expect(response.status).toBe(200);
+  return parseWorktreeDeletionPreflight(await response.json());
 }
 
 async function inventory(source = atlasId): Promise<WorktreeInventory> {
@@ -232,7 +294,7 @@ async function inventory(source = atlasId): Promise<WorktreeInventory> {
 async function hubState() {
   const response = await fetch(`${origin}/api/hub/state`, auth());
   expect(response.status).toBe(200);
-  return await response.json() as { worktreeNavigation?: string; worktreeConfigureNavigation?: string; workspaces: Array<Record<string, unknown>> };
+  return await response.json() as { worktreeApi?: string; worktreeConfigureNavigation?: string; workspaces: Array<Record<string, unknown>> };
 }
 
 const branchExists = async (folder: string, branch: string) => (await git(folder, ["branch", "--list", branch])).trim() !== "";
@@ -349,7 +411,7 @@ describe("reconciliation (5.1)", () => {
     // baseline read behind it is fire-and-forget. Settle that baseline with
     // an awaited read (reason "open") first, or it can land after the
     // worktree below exists, absorb it, and never report it as a change.
-    await view(`view=inventory&source=${atlasId}`);
+    await listInventory(atlasId);
     const external = path.join(root, "agent-trees", "discovered");
     await git(atlas, ["worktree", "add", "-b", "agent/discovered", external]);
     // No Uatu operation ran: the bounded periodic cadence noticed.
@@ -360,9 +422,11 @@ describe("reconciliation (5.1)", () => {
     expect(found.sourceRef).toBeUndefined();
     expect(registry.list()).toHaveLength(before);
     expect(backendControl.starts.filter(id => !registry.byId(id))).toEqual([]);
-    const listing = await view(`view=inventory&source=${atlasId}`);
-    expect(listing).toContain("External · no cleanup ownership");
-    expect(listing).toContain("Register workspace");
+    // What the dialog renders its "External · no cleanup ownership" row and
+    // its Register workspace action from (see worktree-dialog.test.ts).
+    const listed = await listInventory(atlasId);
+    expect(listed.checkouts.find(checkout => checkout.path === external))
+      .toMatchObject({ ownership: "external", registered: false });
   }, 30000);
 
   test("explicit registration keeps the external path and ownership, and names the child by its branch", async () => {
@@ -400,8 +464,7 @@ describe("reconciliation (5.1)", () => {
     expect(registry.byId(child)).toBeDefined();
     const state = await hubState();
     expect(state.workspaces.find(workspace => workspace.id === child)).toMatchObject({ availability: "missing", parentId: atlasId });
-    const deletion = await view(`view=delete&source=${atlasId}&id=${child}`);
-    expect(deletion).not.toContain(">Delete<");
+    expect((await preflight(child)).ok).toBe(false);
   });
 
   test("a path replaced by another tree is an identity conflict, even though Git reuses the old name", async () => {
@@ -440,11 +503,12 @@ describe("deletion preflight (5.3)", () => {
       const child = await create(`block/${label.replaceAll(" ", "-")}`);
       const folder = registry.byId(child)!.path;
       await arrange(folder);
-      const dialog = await view(`view=delete&source=${atlasId}&id=${child}`);
-      expect(dialog).toContain("Delete worktree?");
-      expect(dialog).toContain(reason);
-      expect(dialog).not.toContain(">Delete<");
-      expect(dialog).not.toContain(folder);
+      // The blocker the dialog shows INSTEAD of its normal consequences; that
+      // it replaces them, and shows no path, is worktree-dialog.test.ts's.
+      const blocked = await preflight(child);
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.error.message).toContain(reason);
       const answer = await act("delete", { source: atlasId, id: child, confirm: "1" });
       expect(failed(answer)).toBe(true);
       expect(answer.completion).toBeUndefined();
@@ -476,13 +540,15 @@ describe("guarded removal (5.4) and branch preservation (5.5)", () => {
   test("a clean stopped worktree is removed, unregistered and forgotten; its branch and creation history stay", async () => {
     const child = await create("feature/clean", atlasId, "release");
     const folder = registry.byId(child)!.path;
-    const dialog = await view(`view=delete&source=${atlasId}&id=${child}`);
-    expect(dialog).toContain("The worktree’s files will be removed. The Git branch will be kept.");
-    expect(dialog).toContain(`Atlas / feature/clean`);
+    const ready = await preflight(child);
+    expect(ready.ok).toBe(true);
+    if (!ready.ok) return;
+    expect(ready.requiresStop).toBe(false);
+    expect(ready.checkout.branch).toBe("feature/clean");
     const page = await openLive(atlasId);
     await page.waitFor(() => page.worktrees().length === 1, "subscription");
     const answer = await act("delete", { source: atlasId, id: child, confirm: "1" });
-    expect(answer.completion).toEqual({ message: "Worktree deleted. Branch kept.", deleted: child, source: atlasId });
+    expect(answer.completion).toEqual({ message: "Worktree deleted. Branch kept.", deleted: child });
     await page.waitFor(() => page.worktrees().length >= 2, "invalidation after deletion");
     page.close();
     expect(existsSync(folder)).toBe(false);
@@ -502,9 +568,8 @@ describe("guarded removal (5.4) and branch preservation (5.5)", () => {
     const child = await create("feature/running");
     const folder = registry.byId(child)!.path;
     await sessions.start(child);
-    const dialog = await view(`view=delete&source=${atlasId}&id=${child}`);
-    expect(dialog).toContain("Stop and delete");
-    expect(dialog).toContain("Its Uatu terminal and agent sessions will stop");
+    const running = await preflight(child);
+    expect(running.ok && running.requiresStop).toBe(true);
     const plain = await act("delete", { source: atlasId, id: child, confirm: "1" });
     expect(messageOf(plain)).toContain("Stop and delete");
     expect(sessions.isRunning(child)).toBe(true);
@@ -544,7 +609,8 @@ describe("guarded removal (5.4) and branch preservation (5.5)", () => {
     const inFlight = sessions.start(child);
     await Bun.sleep(20);
     // Preflight sees the start: the dialog asks for Stop and delete.
-    expect(await view(`view=delete&source=${atlasId}&id=${child}`)).toContain("Stop and delete");
+    const inFlightPreflight = await preflight(child);
+    expect(inFlightPreflight.ok && inFlightPreflight.requiresStop).toBe(true);
     const deletion = act("delete", { source: atlasId, id: child, confirm: "1", stop: "1" });
     await Bun.sleep(50);
     // Requested while the removal holds the workspace's lifecycle queue. A
@@ -631,10 +697,8 @@ describe("Remove from Uatu (5.5)", () => {
     const folder = registry.byId(child)!.path;
     const checkoutId = registry.byId(child)!.worktree!.checkoutId;
     await sessions.start(child);
-    const dialog = await view(`view=forget&source=${atlasId}&id=${child}`);
-    expect(dialog).toContain("Checkout, branch, files and creation provenance remain.");
     const answer = await act("forget", { source: atlasId, id: child, confirm: "on" });
-    expect(answer.completion).toEqual({ message: "Removed from Uatu. Checkout, branch and files were kept.", deleted: child, source: atlasId });
+    expect(answer.ok).toBe(true);
     // Stopped first, then unregistered; nothing else.
     expect(sessions.isRunning(child)).toBe(false);
     expect(registry.byId(child)).toBeUndefined();
@@ -653,8 +717,9 @@ describe("Remove from Uatu (5.5)", () => {
     await git(atlas, ["worktree", "add", "-b", "agent/forget-me", external]);
     const found = (await inventory()).checkouts.find(checkout => checkout.path === external)!;
     const id = (await act("register", { source: atlasId, id: found.checkoutId })).completion!.id!;
-    const unconfirmed = await act("forget", { source: atlasId, id });
-    expect(failed(unconfirmed)).toBe(true);
+    // The confirmation is the dialog's required checkbox now, not a server
+    // field (worktree-dialog.test.ts covers it); the registration survives
+    // every refused attempt below all the same.
     expect(registry.byId(id)).toBeDefined();
     await sessions.start(id);
     backendControl.stopFailures.add(id);
@@ -674,13 +739,14 @@ describe("Remove from Uatu (5.5)", () => {
     const answer = await act("forget", { source: atlasId, id: atlasId, confirm: "on" });
     expect(messageOf(answer)).toContain("worktrees from Uatu first");
     expect(registry.byId(atlasId)).toBeDefined();
-    for (const action of ["delete-branch", "branch"]) {
-      const body = new FormData();
-      body.set("source", atlasId);
-      expect((await fetch(`${origin}/worktrees/${action}`, auth({ method: "POST", body }))).status).toBe(405);
+    // There is no branch-deletion operation anywhere in the family.
+    for (const action of ["delete-branch", "branch", "rename"]) {
+      const response = await fetch(`${origin}${WORKTREE_API_PATH}/${action}`, auth({
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sourceWorkspaceId: atlasId }),
+      }));
+      expect(response.status).toBe(404);
     }
-    const listing = await view(`view=inventory&source=${atlasId}`);
-    expect(listing.toLowerCase()).not.toContain("delete branch");
   });
 });
 
@@ -689,11 +755,14 @@ describe("real Hub state for the picker and dashboard (5.6)", () => {
     const child = await create("feature/state", beaconId, "release");
     await git(beacon, ["checkout", "-q", "release"]);
     const state = await hubState();
-    expect(state.worktreeNavigation).toBe("/worktrees");
-    expect(state.worktreeConfigureNavigation).toBe("/settings");
+    expect(state.worktreeApi).toBe("/api/hub/worktrees");
+    // F9: the capability is the API path alone. The Configure navigation
+    // field went with the per-repository button that read it; parent
+    // policy lives on the Hub's Settings page, reached from its own nav.
+    expect(state.worktreeConfigureNavigation).toBeUndefined();
     const parent = state.workspaces.find(workspace => workspace.id === beaconId)!;
     const childRow = state.workspaces.find(workspace => workspace.id === child)!;
-    expect(parent).toMatchObject({ branch: "release", createWorktree: `/worktrees?view=create&source=${beaconId}` });
+    expect(parent).toMatchObject({ branch: "release", createWorktree: true });
     expect(parent.parentId).toBeUndefined();
     expect(childRow).toMatchObject({ parentId: beaconId, branch: "feature/state", sourceRef: "release", ownership: "uatu", repositoryId: parent.repositoryId });
     expect(childRow.createWorktree).toBeUndefined();
@@ -701,7 +770,7 @@ describe("real Hub state for the picker and dashboard (5.6)", () => {
     expect(childRow.credentialAssignments).toEqual({ authentication: [], signing: [] });
     // The picker's own parser nests it under the right parent.
     const parsed = parseHubState(state)!;
-    expect(parsed.worktreeNavigation).toBe("/worktrees");
+    expect(parsed.worktreeApi).toBe("/api/hub/worktrees");
     expect(parsed.workspaces.find(workspace => workspace.id === child)).toMatchObject({ parentId: beaconId, sourceRef: "release", branch: "feature/state" });
     // The parent's current checkout is not the child's origin.
     await git(beacon, ["checkout", "-q", "--detach"]);
@@ -712,18 +781,17 @@ describe("real Hub state for the picker and dashboard (5.6)", () => {
     await git(beacon, ["checkout", "-q", "main"]);
   });
 
-  test("the fork, inventory and deletion fragments the picker mounts answer from the real Hub", async () => {
-    const fork = await view(`view=create&mode=new&source=${beaconId}`);
-    expect(fork).toContain("New branch / worktree · Beacon");
-    const existing = await view(`view=create&mode=existing&source=${beaconId}`);
-    expect(existing).toContain("Existing branch · Beacon");
-    const listing = await view(`view=inventory&source=${beaconId}`);
-    expect(listing).toContain("feature/state");
-    // Dashboard-owned views are not linked from the real picker.
-    expect(listing).not.toContain("view=settings");
-    expect(listing).toContain("view=folder");
-    const folder = await view(`view=folder&source=${beaconId}&id=${beaconId}`);
-    expect(folder).toContain("Folder rename is blocked");
-    expect(folder).not.toContain("view=rename");
+  test("the picker's dialog reads everything it renders from the JSON family, and the server-rendered flow is gone", async () => {
+    // One authoritative answer feeds every view the dialog shows: the
+    // inventory rows, and the local/remote refs both creation modes offer.
+    const listing = await listInventory(beaconId);
+    expect(listing.checkouts.some(checkout => checkout.branch === "feature/state")).toBe(true);
+    expect(listing.checkouts.some(checkout => checkout.main)).toBe(true);
+    expect(listing.refs.local).toContain("release");
+    // The retired `/worktrees` presentation and its form actions are
+    // unmounted; nothing navigates to a server-rendered worktree page.
+    for (const retired of ["/worktrees", `/worktrees?view=create&source=${beaconId}`, "/worktrees/create", "/worktrees/operation"]) {
+      expect((await fetch(`${origin}${retired}`, auth())).status).toBe(404);
+    }
   });
 });

@@ -109,6 +109,11 @@
   --surface-track: light-dark(#eef1f4, #1c222b);
   /* Semantic state colors (GitHub light/dark pairs). */
   --success: light-dark(#2da44e, #3fb950);
+  /* The tinted background a success notice sits on (the worktree
+     confirmation). A token rather than a color-mix() of --success: a
+     light-dark() token nested inside color-mix() does not follow the used
+     color scheme in every engine, which left the notice light in dark mode. */
+  --success-soft: light-dark(#dafbe1, #12261e);
   --success-strong: light-dark(#1a7f37, #3fb950);
   --danger: light-dark(#cf222e, #f85149);
   --attention: light-dark(#bf8700, #d29922);
@@ -647,6 +652,66 @@ html.uatu-desktop-host
   flex-shrink: 0;
 }
 
+/* The current checkout's branch, beside a main checkout's name on the chip. */
+.hub-toggle-branch {
+  margin-inline-start: 0.35rem;
+  color: var(--text-subtle);
+  font-weight: 400;
+}
+
+/* A repository's non-interactive header inside the menu: it names the
+   repository and owns its one fork control; the checkout rows below it are
+   the things you can switch to. A band, like the Hub dashboard's own group
+   heading, so the eye lands on the repository boundary before the rows.
+   --surface-track rather than --surface-muted: the muted/subtle/raised tiers
+   all collapse onto #161b22 in dark, where a band painted with any of them
+   would be invisible against the menu it sits in. */
+.hub-menu-group {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.3rem;
+  background: var(--surface-track);
+  color: var(--text-strong);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* The repository's name takes the row and gives way to the fork control,
+   which the flex rule below pins to the trailing edge. */
+.hub-menu-group .hub-menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* At the header's trailing edge — the same edge a row's status text ends on
+   — while keeping a 44px tap target. */
+.hub-menu-fork {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0.3rem;
+  color: inherit;
+  cursor: pointer;
+}
+
+.hub-menu-fork:hover {
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+}
+
 .hub-toggle-label {
   flex: 1 1 auto;
   min-width: 0;
@@ -655,10 +720,24 @@ html.uatu-desktop-host
   white-space: nowrap;
 }
 
+/* A repository or two is enough to make this menu taller than the phone it
+   is open on, and in touch mode it sits inside a fullscreen `overflow:
+   hidden` Files pane pinned above the tab bar — so its last rows, Sign out
+   among them, were simply cut off and unreachable. It scrolls instead,
+   bounded by what is visible below its own top edge. The pixel bound is
+   measured at open time (shell/hub-nav.ts sets --hub-menu-max-height,
+   because the top depends on the header above it); the fallback keeps a
+   sane bound before that runs and if it never does. */
 .hub-menu {
   left: 0.75rem;
   right: 0.75rem;
   min-width: 0;
+  max-height: var(--hub-menu-max-height, calc(100dvh - 12rem));
+  overflow-y: auto;
+  /* A flick that reaches the end of the menu must not start scrolling the
+     page (or the fullscreen Files pane) behind it. */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* The connection chip's live-dot treatment, available to the hub switcher's
@@ -779,6 +858,13 @@ html.uatu-desktop-host
   margin: 0.3rem 0.15rem;
   border: 0;
   border-top: 1px solid var(--border-soft);
+}
+
+/* The divide between two repositories: the same rule as the menu's other
+   dividers, with more air around it, so consecutive groups never run
+   together. */
+.hub-menu-divider.is-group {
+  margin-block: 0.65rem 0.45rem;
 }
 
 /* Terminal touch keybar — hidden everywhere except coarse-pointer devices

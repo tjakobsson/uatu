@@ -37,6 +37,11 @@ export function createOnboardingWorktreeRegistrar(options: OnboardingWorktreeReg
         // Stopped by default: a start is requested explicitly and its
         // failure leaves the configured workspace stopped.
         start: input.start,
+        // Bug 3: forwarded straight through. Whether onboarding's own path
+        // reservation would double-reserve a path this call's own caller
+        // already holds is a fact only that caller (registerCreatedWorktree)
+        // knows — see WorktreeRegistrar.register's `fenced` doc comment.
+        fenced: input.fenced,
       });
       return {
         workspaceId: result.entry.id,

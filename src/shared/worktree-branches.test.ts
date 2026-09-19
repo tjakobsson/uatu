@@ -6,7 +6,9 @@ import {
   validWorktreeBranch,
   worktreeDestinationCandidates,
   worktreeFolderName,
+  WORKTREE_BRANCH_NAME_MAX_LENGTH,
 } from "./worktree-branches";
+import { WORKSPACE_DISPLAY_NAME_MAX_LENGTH } from "../hub/registry";
 
 describe("branch names", () => {
   test("accepts ordinary branch spellings, slashes included", () => {
@@ -19,6 +21,24 @@ describe("branch names", () => {
     for (const branch of ["", "-f", "--force", "-", "@", "/leading", "a//b", "a..b", "a@{0}", "a b", "a~1", "a^", "a:b", "a?", "a*", "a\\b", "a[", "trailing/", "trailing.", ".hidden", "x/.hidden", "x.lock", "a\u0000b"]) {
       expect(`${JSON.stringify(branch)}:${validWorktreeBranch(branch)}`).toBe(`${JSON.stringify(branch)}:false`);
     }
+  });
+
+  // W2: a 65-character branch is exactly what Git will create and the
+  // registry will then refuse to register as a display name, stranding the
+  // checkout on a "Retry registration" loop that can never succeed
+  // (src/hub/registry.ts WORKSPACE_DISPLAY_NAME_MAX_LENGTH). Refuse it before
+  // Git ever runs, at the shared rule both the client and the Hub call.
+  test("W2 refuses a branch name over 64 characters, and accepts exactly 64", () => {
+    expect(WORKTREE_BRANCH_NAME_MAX_LENGTH).toBe(64);
+    // The two ceilings must be the exact same number, or a name could pass
+    // this rule and still blow up registration (or vice versa).
+    expect(WORKTREE_BRANCH_NAME_MAX_LENGTH).toBe(WORKSPACE_DISPLAY_NAME_MAX_LENGTH);
+    expect(validWorktreeBranch("a".repeat(64))).toBe(true);
+    expect(validWorktreeBranch("a".repeat(65))).toBe(false);
+    // Counted in code points, like the registry counts its own ceiling —
+    // not UTF-16 code units.
+    expect(validWorktreeBranch("功".repeat(64))).toBe(true);
+    expect(validWorktreeBranch("功".repeat(65))).toBe(false);
   });
 });
 

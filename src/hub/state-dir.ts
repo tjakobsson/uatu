@@ -62,14 +62,6 @@ export function worktreeProvenancePath(stateRoot: string): string {
   return path.join(stateRoot, "worktree-provenance.json");
 }
 
-// Worktree capability tokens: the least-privilege credential a session
-// child's environment points at, scoped to one repository family. Separate
-// from the session store on purpose — a Hub session is not least privilege.
-// Deleting the file revokes every capability; sessions reissue on restart.
-export function worktreeCapabilitiesPath(stateRoot: string): string {
-  return path.join(stateRoot, "worktree-capabilities.json");
-}
-
 // The server-side session store: opaque session ids mapped to user, issue
 // time, and revocation state. Deleting the file invalidates every session.
 export function sessionsPath(stateRoot: string): string {

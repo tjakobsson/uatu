@@ -39,7 +39,6 @@ import {
   registryPath,
   resolveHubStateRoot,
   sessionsPath,
-  worktreeCapabilitiesPath,
   worktreeJournalPath,
   worktreeProvenancePath,
 } from "./state-dir";
@@ -50,7 +49,6 @@ import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
 import { createParentFetchPolicy } from "./worktree-fetch";
 import { WorktreeService } from "./worktree-service";
 import { WorktreeOperationCoordinator } from "./worktree-coordinator";
-import { createWorktreeContextIssuer, WorktreeCapabilityStore } from "./worktree-capability";
 import { WorkspaceOnboardingCoordinator } from "./onboarding";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -301,11 +299,6 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   });
   const sessionStore = new HubSessionStore(sessionsPath(stateRoot));
   await sessionStore.load();
-  // Least-privilege worktree capabilities, deliberately NOT in the session
-  // store: a Hub session authorizes the whole Hub, and a process inside a
-  // workspace must not hold one.
-  const worktreeCapabilities = new WorktreeCapabilityStore(worktreeCapabilitiesPath(stateRoot));
-  await worktreeCapabilities.load();
 
   const registry = new WorkspaceRegistry(registryPath(stateRoot));
   await registry.load();
@@ -476,32 +469,10 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     // and never overridden per child.
     policyWorkspaceId: workspaceId => registry.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId,
   });
-  // Resolved after startHubServer: the listening port is only known then,
-  // and a configured port of 0 is ephemeral. Until it is set the Hub issues
-  // no capability, so a child started during startup simply has no context.
-  let hubOrigin = "";
   const sessions = new SessionManager(
     registry,
     {
-      local: new LocalProcessBackend({
-        // Projects the capability into the session child: a 0600 file in the
-        // session's own runtime directory, with only its path in the
-        // environment. Revoked when that child exits.
-        worktreeContext: createWorktreeContextIssuer({
-          store: worktreeCapabilities,
-          hubOrigin: () => hubOrigin,
-          // The repository family the workspace belongs to, from the same
-          // registry link the UI's operations resolve through.
-          sourceWorkspaceId: workspaceId => worktrees.sourceFor(workspaceId),
-          // Whose authority the capability carries. A workspace terminal is
-          // shared by every Hub user who can reach it, so on a multi-user
-          // Hub there is no single principal an agent's request can be
-          // attributed to and no capability is issued at all — the CLI then
-          // reports an actionable context error instead of acting as
-          // somebody.
-          user: () => (config.users.length === 1 ? config.users[0]!.name : undefined),
-        }),
-      }),
+      local: new LocalProcessBackend(),
     },
     credentialContexts,
     // The pending-mutation fence every start is checked against, evaluated
@@ -576,10 +547,6 @@ export async function runHub(options: RunHubOptions): Promise<void> {
         () => registry.remove(workspaceId),
         async () => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
       );
-      // A forgotten or removed workspace takes its capabilities with it —
-      // both the ones issued to its own child and, when it was a parent, the
-      // ones scoped to the repository family it owned.
-      await worktreeCapabilities.revokeForWorkspace(workspaceId).catch(() => undefined);
     },
     // The same Hub-wide path fence every other folder mutation takes, so a
     // rename, a clone and a worktree creation cannot race for one hierarchy.
@@ -641,7 +608,6 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     cloneCredentials,
     cloneJobs,
     worktrees,
-    worktreeCapabilities,
     folderManager,
     reservations,
     credentialApi: {
@@ -656,11 +622,6 @@ export async function runHub(options: RunHubOptions): Promise<void> {
 
   notifications.start();
   const scheme = config.tls ? "https" : "http";
-  // The origin a process on this machine reaches the Hub at. A wildcard
-  // listen address is not an address to connect to, so it resolves to
-  // loopback; a configured host is used as configured.
-  const localHost = config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : config.host;
-  hubOrigin = new URL(`${scheme}://${localHost.includes(":") ? `[${localHost}]` : localHost}:${server.port}`).origin;
   console.log(`${scheme}://${config.host}:${server.port}/`);
   console.error(
     `uatu hub: state in ${stateRoot}; ${registry.list().length} registered workspace(s)`,

@@ -1,21 +1,16 @@
-// The published worktree JSON family (task 6.2's server half).
+// The published worktree JSON family: the Hub's whole worktree surface.
 //
-// `/worktrees` (worktree-routes.ts) is the browser's server-rendered flow:
-// HTML in, `{ redirect, completion }` out. An agent-invoked CLI needs neither
-// — it needs the operations themselves, as data. So the same operations are
-// published here as JSON, over the SAME WorktreeService, with the SAME
-// safety and recovery rules. There is no second implementation of any check:
-// this module is authorization, request validation, reference resolution and
-// DTO mapping, and nothing else.
+// This is the ONLY worktree transport: the server-rendered `/worktrees`
+// fragment flow it once mirrored was retired with section 9, and its client
+// (src/shell/worktree-dialog.ts) now renders every view from these answers.
+// Safety and recovery live in the WorktreeService below; there is no second
+// implementation of any check here — this module is authorization, request
+// validation, reference resolution and DTO mapping, and nothing else.
 //
-// Two credentials reach it, and only it:
-//
-//   * an ordinary Hub session (cookie or bearer). Cookie transports keep the
-//     Hub's same-origin rule on every mutation; a bearer credential carries
-//     no ambient authority and is exempt, exactly as elsewhere.
-//   * a worktree capability (see worktree-capability.ts), which is pinned to
-//     ONE repository family and is refused on every other Hub route before
-//     that route's handler runs.
+// The only credential that reaches it is an ordinary Hub session (cookie or
+// bearer). Cookie transports keep the Hub's same-origin rule on every
+// mutation; a bearer credential carries no ambient authority and is exempt,
+// exactly as elsewhere.
 //
 // A request that the Hub could process answers 200 and carries the
 // operation's own structured outcome — including a refusal, which is a
@@ -26,37 +21,54 @@
 import {
   parseWorktreeCreateRequest,
   parseWorktreeDeleteRequest,
+  parseWorktreeFetchRequest,
+  parseWorktreeForgetRequest,
+  parseWorktreePreflightDeleteRequest,
+  parseWorktreeRegisterRequest,
   WorktreeOperationError,
   worktreeError,
   type WorktreeCheckout,
   type WorktreeError,
   type WorktreeInventory,
+  type WorktreeOperationKind,
   type WorktreeOperationResult,
   type WorktreeRefs,
   type WorktreeRefSelection,
+  type WorktreeRefsResponse,
 } from "../shared/worktree-contract";
-import { validWorktreeBranch } from "../shared/worktree-branches";
-import { WORKTREE_API_PATH } from "../shared/worktree-context";
-import type { WorktreeRouteDeps } from "./worktree-routes";
+import { validWorktreeBranch, WORKTREE_BRANCH_NAME_MAX_LENGTH } from "../shared/worktree-branches";
+import type { WorkspaceRegistry } from "./registry";
+import type { WorktreeService } from "./worktree-service";
 
-export { WORKTREE_API_PATH };
+// The published JSON family the Hub session authorizes, and nothing else.
+export const WORKTREE_API_PATH = "/api/hub/worktrees";
 
 // The operations the JSON family serves. `list` is the GET on the family
 // root; the rest are POSTs one path segment below it.
-const ACTIONS = new Set(["create", "open", "delete"]);
+const ACTIONS = new Set(["fetch", "create", "open", "preflight-delete", "delete", "register", "forget"]);
 
 export type WorktreeApiPrincipal = {
   readonly user: string;
-  // Present for a capability token: the one main workspace whose repository
-  // family this credential may operate on. A Hub session has none, and may
-  // reach any workspace it can already see in the dashboard.
-  readonly familyWorkspaceId?: string;
 };
 
-export type WorktreeApiDeps = Pick<
-  WorktreeRouteDeps,
-  "service" | "registry" | "startWorkspace" | "inventory" | "changed"
->;
+export type WorktreeStartOutcome = { readonly ok: true } | { readonly ok: false; readonly message: string };
+
+export type WorktreeApiDeps = {
+  service: WorktreeService;
+  registry: Pick<WorkspaceRegistry, "byId" | "byPath" | "list">;
+  // The Hub's own session start, with its recovery fences. This module never
+  // spawns a child itself.
+  startWorkspace: (workspaceId: string) => Promise<WorktreeStartOutcome>;
+  // The authoritative inventory read, through the reconciler when the Hub
+  // has one (so a read also updates the change baseline). Defaults to the
+  // service directly.
+  inventory?: (sourceWorkspaceId: string, reason: "open" | "manual") => Promise<WorktreeInventory>;
+  // A Uatu operation committed: invalidate every page that shows this
+  // repository, immediately.
+  // `also` names workspaces an operation just unregistered, whose own open
+  // pages the family lookup can no longer find.
+  changed?: (sourceWorkspaceId: string, also?: string[]) => void;
+};
 
 export function isWorktreeApiPath(pathname: string): boolean {
   return pathname === WORKTREE_API_PATH || pathname.startsWith(`${WORKTREE_API_PATH}/`);
@@ -72,8 +84,8 @@ function operationId(): string {
   return crypto.randomUUID();
 }
 
-function refusal(kind: "create" | "open" | "delete", error: WorktreeError): Response {
-  const resultKind = kind === "open" ? "start" : kind;
+function refusal(kind: "create" | "open" | "delete" | "register" | "forget", error: WorktreeError): Response {
+  const resultKind: WorktreeOperationKind = kind === "open" ? "start" : kind;
   return json(200, { ok: false, operationId: operationId(), kind: resultKind, error } satisfies WorktreeOperationResult);
 }
 
@@ -153,7 +165,6 @@ export function createWorktreeApi(deps: WorktreeApiDeps) {
   // Resolves and authorizes the repository family one request names.
   const resolveSource = (
     requested: string,
-    principal: WorktreeApiPrincipal,
   ): { ok: true; source: string } | { ok: false; response: Response } => {
     if (requested === "") {
       return { ok: false, response: json(400, { error: "source workspace id required" }) };
@@ -162,19 +173,104 @@ export function createWorktreeApi(deps: WorktreeApiDeps) {
     if (!deps.registry.byId(source)) {
       return { ok: false, response: json(404, { error: "unknown workspace" }) };
     }
-    // A capability is pinned to one family. Another family is refused
-    // without describing it — the credential does not get to learn that a
-    // workspace it may not touch exists.
-    if (principal.familyWorkspaceId !== undefined && principal.familyWorkspaceId !== source) {
-      return { ok: false, response: json(403, { error: "this credential authorizes another workspace" }) };
-    }
     return { ok: true, source };
   };
 
-  const list = async (url: URL, principal: WorktreeApiPrincipal): Promise<Response> => {
-    const resolved = resolveSource(url.searchParams.get("source") ?? principal.familyWorkspaceId ?? "", principal);
+  const list = async (url: URL): Promise<Response> => {
+    const resolved = resolveSource(url.searchParams.get("source") ?? "");
     if (!resolved.ok) return resolved.response;
     return json(200, { inventory: await inventoryFor(resolved.source, "manual") });
+  };
+
+  // One explicit "Fetch remote branches". The server keeps no draft: a
+  // selection that vanished from the refreshed listing is the caller's own
+  // to reconcile, exactly as the HTML flow's redirect does with its query
+  // string. Never invalidates: a fetch changes remote-tracking refs, not
+  // anything another open page shows.
+  const fetchRefs = async (body: unknown, source: string): Promise<Response> => {
+    const record = (body ?? {}) as Record<string, unknown>;
+    try {
+      parseWorktreeFetchRequest({ ...record, sourceWorkspaceId: source });
+    } catch (error) {
+      return json(200, {
+        ok: false,
+        error: worktreeError("invalid-input", error instanceof Error ? error.message : "The request is not valid."),
+      } satisfies WorktreeRefsResponse);
+    }
+    const outcome = await deps.service.fetch(source);
+    if (outcome.error) return json(200, { ok: false, error: outcome.error, refs: outcome.refs } satisfies WorktreeRefsResponse);
+    return json(200, { ok: true, refs: outcome.refs } satisfies WorktreeRefsResponse);
+  };
+
+  // Read-only: "may this be deleted, and does proceeding need the caller's
+  // explicit stop authorization." Nothing here mutates.
+  const preflightDelete = async (body: unknown, source: string): Promise<Response> => {
+    const record = (body ?? {}) as Record<string, unknown>;
+    let request;
+    try {
+      request = parseWorktreePreflightDeleteRequest({ ...record, sourceWorkspaceId: source });
+    } catch (error) {
+      return json(200, { ok: false, error: worktreeError("invalid-input", error instanceof Error ? error.message : "The request is not valid.") });
+    }
+    const inventory = await inventoryFor(source, "open");
+    if (inventory.status === "error") {
+      return json(200, { ok: false, error: inventory.error ?? worktreeError("inventory-unavailable", "The worktree inventory is unavailable.", { retry: "refresh" }) });
+    }
+    const resolved = resolveWorktreeReference(inventory, request.reference);
+    if (!resolved.ok) return json(200, { ok: false, error: resolved.error });
+    return json(200, await deps.service.preflightDelete({ sourceWorkspaceId: source, reference: resolved.reference }));
+  };
+
+  // Registers a checkout Git already lists but the Hub does not: a retry of
+  // a Uatu-created checkout that outlived a failed registration (detected by
+  // the service itself against its own pending journal), or a first-time
+  // registration of an external tree. Nothing is moved, copied or created.
+  const register = async (body: unknown, source: string, principal: WorktreeApiPrincipal): Promise<Response> => {
+    const record = (body ?? {}) as Record<string, unknown>;
+    let request;
+    try {
+      request = parseWorktreeRegisterRequest({ ...record, sourceWorkspaceId: source });
+    } catch (error) {
+      return refusal("register", worktreeError("invalid-input", error instanceof Error ? error.message : "The request is not valid."));
+    }
+    const inventory = await inventoryFor(source, "open");
+    if (inventory.status === "error") {
+      return refusal("register", inventory.error ?? worktreeError("inventory-unavailable", "The worktree inventory is unavailable.", { retry: "refresh" }));
+    }
+    const resolved = resolveWorktreeReference(inventory, request.reference);
+    if (!resolved.ok) return refusal("register", resolved.error);
+    // registerExisting's own vocabulary is the canonical checkout id, always
+    // — it is how the service tells "already registered" (a match whose
+    // `registered` is true) from "retained, awaiting retry" (a match against
+    // its own pending journal). `resolved.reference` names a workspace id
+    // once registered, which is not what that scan compares against.
+    const result = await deps.service.registerExisting(principal.user, source, resolved.checkout.checkoutId, request.start === true);
+    if (result.ok) committed(source);
+    return json(200, result);
+  };
+
+  // Unregisters a STOPPED workspace and nothing else: checkout, branch,
+  // files and creation provenance all stay. The confirmation of calling this
+  // endpoint at all is what authorizes stopping the workspace's own Uatu
+  // sessions first — there is no `stop: false` variant, exactly as the HTML
+  // flow's single confirmation wording reads.
+  const forget = async (body: unknown, source: string, principal: WorktreeApiPrincipal): Promise<Response> => {
+    const record = (body ?? {}) as Record<string, unknown>;
+    let request;
+    try {
+      request = parseWorktreeForgetRequest({ ...record, sourceWorkspaceId: source });
+    } catch (error) {
+      return refusal("forget", worktreeError("invalid-input", error instanceof Error ? error.message : "The request is not valid."));
+    }
+    const inventory = await inventoryFor(source, "open");
+    if (inventory.status === "error") {
+      return refusal("forget", inventory.error ?? worktreeError("inventory-unavailable", "The worktree inventory is unavailable.", { retry: "refresh" }));
+    }
+    const resolved = resolveWorktreeReference(inventory, request.reference);
+    if (!resolved.ok) return refusal("forget", resolved.error);
+    const result = await deps.service.forget(principal.user, { sourceWorkspaceId: source, reference: resolved.reference, stop: true });
+    if (result.ok) committed(source, [resolved.reference]);
+    return json(200, result);
   };
 
   const create = async (body: unknown, source: string, principal: WorktreeApiPrincipal): Promise<Response> => {
@@ -183,6 +279,13 @@ export function createWorktreeApi(deps: WorktreeApiDeps) {
     // option-like name, a revision expression or a traversal is refused as
     // input rather than reported as a missing ref — and never gets near a
     // Git argument list.
+    // W2: a name over the registry's own display-name ceiling would let Git
+    // create the checkout and branch, then fail registration with no way to
+    // ever retry successfully — checked first, with its own actionable
+    // message, before the generic grammar refusal below.
+    if (typeof record.branch === "string" && [...record.branch].length > WORKTREE_BRANCH_NAME_MAX_LENGTH) {
+      return refusal("create", worktreeError("invalid-input", "Branch names are limited to 64 characters in Uatu."));
+    }
     if (record.branch !== undefined && (typeof record.branch !== "string" || !validWorktreeBranch(record.branch))) {
       return refusal("create", worktreeError("invalid-input", "That is not a valid branch name."));
     }
@@ -314,12 +417,12 @@ export function createWorktreeApi(deps: WorktreeApiDeps) {
 
   return {
     // GET  /api/hub/worktrees?source=<workspaceId>
-    // POST /api/hub/worktrees/{create,open,delete}
+    // POST /api/hub/worktrees/{fetch,create,open,preflight-delete,delete,register,forget}
     async handle(request: Request, url: URL, principal: WorktreeApiPrincipal): Promise<Response> {
       const pathname = url.pathname;
       if (pathname === WORKTREE_API_PATH) {
         if (request.method !== "GET") return json(405, { error: "method not allowed" });
-        return list(url, principal);
+        return list(url);
       }
       const action = pathname.slice(`${WORKTREE_API_PATH}/`.length);
       if (!ACTIONS.has(action)) return json(404, { error: "unknown worktree operation" });
@@ -334,14 +437,25 @@ export function createWorktreeApi(deps: WorktreeApiDeps) {
         return json(400, { error: "invalid JSON body" });
       }
       const requested = (body as Record<string, unknown>).sourceWorkspaceId;
-      const resolved = resolveSource(
-        typeof requested === "string" && requested !== "" ? requested : principal.familyWorkspaceId ?? "",
-        principal,
-      );
+      const resolved = resolveSource(typeof requested === "string" ? requested : "");
       if (!resolved.ok) return resolved.response;
+      // Read-only checks (fetch, preflight-delete) carry no operationId/kind,
+      // so an internal failure past their own try/catch answers in their own
+      // shape rather than through the operation-result refusal() helper.
+      try {
+        if (action === "fetch") return await fetchRefs(body, resolved.source);
+        if (action === "preflight-delete") return await preflightDelete(body, resolved.source);
+      } catch (error) {
+        const detail = error instanceof WorktreeOperationError
+          ? error.detail
+          : worktreeError("internal", "The worktree operation could not be completed.");
+        return json(200, { ok: false, error: detail });
+      }
       try {
         if (action === "create") return await create(body, resolved.source, principal);
         if (action === "open") return await open(body, resolved.source);
+        if (action === "register") return await register(body, resolved.source, principal);
+        if (action === "forget") return await forget(body, resolved.source, principal);
         return await remove(body, resolved.source, principal);
       } catch (error) {
         // Every refusal the service raises is already sanitized; anything
@@ -350,7 +464,7 @@ export function createWorktreeApi(deps: WorktreeApiDeps) {
         const detail = error instanceof WorktreeOperationError
           ? error.detail
           : worktreeError("internal", "The worktree operation could not be completed.");
-        return refusal(action as "create" | "open" | "delete", detail);
+        return refusal(action as "create" | "open" | "delete" | "register" | "forget", detail);
       }
     },
   };

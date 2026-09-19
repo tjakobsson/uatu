@@ -1,7 +1,7 @@
 // The worktree operation contract — one wire shape shared by the Hub
-// worktree service (src/hub/worktree-*.ts), the workspace picker
-// (src/shell/worktree-picker.ts + hub-nav.ts), the Hub's own pages
-// (src/hub/worktree-pages.ts), and the later agent-invoked CLI. Presentation
+// worktree service (src/hub/worktree-*.ts) and the client dialog
+// (src/shell/worktree-dialog.ts + hub-nav.ts), which renders every worktree
+// view in the browser from these shapes alone. Presentation
 // lives in those callers; this module is the transport shape, its bounded
 // phase vocabulary, the ownership/identity rules, and the sanitized error
 // contract. See openspec/changes/add-git-worktree-workspaces/design.md §2–§6.
@@ -149,6 +149,29 @@ export type WorktreeForgetRequest = {
   readonly stop?: boolean;
 };
 
+// A read-only "may this be deleted" check, addressed the same way deletion
+// itself is: no destination, no force, nothing mutated.
+export type WorktreePreflightDeleteRequest = {
+  readonly sourceWorkspaceId: string;
+  readonly reference: string;
+};
+
+// One explicit "Fetch remote branches". The server carries no draft: a
+// vanished selection is the caller's to reconcile against the refreshed refs.
+export type WorktreeFetchRequest = {
+  readonly sourceWorkspaceId: string;
+};
+
+// Registers a checkout Git already lists but the Hub does not — a Uatu tree
+// that outlived a failed registration, retried by naming it again, or an
+// external tree named for the first time. Nothing is moved, copied or
+// recreated either way.
+export type WorktreeRegisterRequest = {
+  readonly sourceWorkspaceId: string;
+  readonly reference: string;
+  readonly start?: boolean;
+};
+
 // What preflight found. `ok: false` carries the ONE blocker that replaces
 // the dialog's normal consequences; there is no force path past it.
 export type WorktreeDeletionPreflight =
@@ -159,6 +182,13 @@ export type WorktreeDeletionPreflight =
     readonly requiresStop: boolean;
   }
   | { readonly ok: false; readonly checkout?: WorktreeCheckout; readonly error: WorktreeError };
+
+// The wire shape of a fetch's own outcome: refs are reported whether or not
+// the fetch itself succeeded, since a partial fetch may still have updated
+// some of them and a failure must never look like an empty repository.
+export type WorktreeRefsResponse =
+  | { readonly ok: true; readonly refs: WorktreeRefs }
+  | { readonly ok: false; readonly refs?: WorktreeRefs; readonly error: WorktreeError };
 
 // Bounded, ordered, and never re-entered. A phase names the last boundary an
 // operation provably passed, which is what restart recovery reconciles
@@ -670,6 +700,53 @@ export function parseWorktreeForgetRequest(value: unknown): WorktreeForgetReques
     reference: requiredString(record, "reference", "worktree forget request"),
     ...(record.stop === undefined ? {} : { stop: flag(record, "stop", "worktree forget request") }),
   };
+}
+
+export function parseWorktreeFetchRequest(value: unknown): WorktreeFetchRequest {
+  const record = closed(value, ["sourceWorkspaceId"], "worktree fetch request");
+  return { sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree fetch request") };
+}
+
+export function parseWorktreePreflightDeleteRequest(value: unknown): WorktreePreflightDeleteRequest {
+  const record = closed(value, ["sourceWorkspaceId", "reference"], "worktree preflight delete request");
+  return {
+    sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree preflight delete request"),
+    reference: requiredString(record, "reference", "worktree preflight delete request"),
+  };
+}
+
+export function parseWorktreeRegisterRequest(value: unknown): WorktreeRegisterRequest {
+  const record = closed(value, ["sourceWorkspaceId", "reference", "start"], "worktree register request");
+  return {
+    sourceWorkspaceId: requiredString(record, "sourceWorkspaceId", "worktree register request"),
+    reference: requiredString(record, "reference", "worktree register request"),
+    ...(record.start === undefined ? {} : { start: flag(record, "start", "worktree register request") }),
+  };
+}
+
+export function parseWorktreeDeletionPreflight(value: unknown): WorktreeDeletionPreflight {
+  const record = closed(value, ["ok", "checkout", "requiresStop", "error"], "worktree deletion preflight");
+  const ok = flag(record, "ok", "worktree deletion preflight");
+  const checkout = record.checkout === undefined ? undefined : parseWorktreeCheckout(record.checkout);
+  if (ok) {
+    if (record.error !== undefined) fail("a successful worktree deletion preflight cannot carry an error");
+    if (checkout === undefined) fail("a successful worktree deletion preflight requires a checkout");
+    return { ok: true, checkout, requiresStop: flag(record, "requiresStop", "worktree deletion preflight") };
+  }
+  if (record.requiresStop !== undefined) fail("a refused worktree deletion preflight cannot carry requiresStop");
+  return { ok: false, ...(checkout === undefined ? {} : { checkout }), error: parseWorktreeError(record.error) };
+}
+
+export function parseWorktreeRefsResponse(value: unknown): WorktreeRefsResponse {
+  const record = closed(value, ["ok", "refs", "error"], "worktree refs response");
+  const ok = flag(record, "ok", "worktree refs response");
+  const refs = record.refs === undefined ? undefined : parseRefs(record.refs);
+  if (ok) {
+    if (record.error !== undefined) fail("a successful worktree refs response cannot carry an error");
+    if (refs === undefined) fail("a successful worktree refs response requires refs");
+    return { ok: true, refs };
+  }
+  return { ok: false, ...(refs === undefined ? {} : { refs }), error: parseWorktreeError(record.error) };
 }
 
 export function parseWorktreeCreateRequest(value: unknown): WorktreeCreateRequest {

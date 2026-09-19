@@ -25,65 +25,14 @@ import {
   type WorktreeInventory,
   type WorktreeOperationResult,
 } from "./worktree-contract";
-import type { WorktreeRow } from "../hub/worktree-pages";
-import { scenarios, WorktreeDemoState, type Scenario } from "../../tests/e2e/worktree-demo-state";
 
-// The contract has to serve exactly the states the approved mock host
-// already shows, so task 5.6 can swap the mock for the real Hub without
-// touching the UI. These two projections are that claim, written once: a
-// prototype row becomes a checkout DTO and comes back unchanged.
+// The contract has to serve every state the approved UX shows, so the client
+// dialog (src/shell/worktree-dialog.ts) can render each of them from one
+// published JSON family. The fixture table below is that claim, written
+// once: one artifact per reviewed state, all of them wire-legal.
 
-function checkoutFromRow(row: WorktreeRow): unknown {
-  const detached = row.detached === true;
-  return {
-    checkoutId: row.checkout,
-    repositoryId: row.repositoryId ?? "repository-unknown",
-    ...(row.registered ? { workspaceId: row.id } : {}),
-    ...(row.parentId === undefined ? {} : { parentWorkspaceId: row.parentId }),
-    path: row.path,
-    branch: detached || row.branch === "" ? null : row.branch,
-    detached,
-    main: row.ownership === "main",
-    ownership: row.ownership,
-    availability: row.availability ?? "present",
-    registered: row.registered,
-    running: row.running,
-    locked: false,
-    ...(row.sourceRef === undefined ? {} : { sourceRef: row.sourceRef }),
-    ...(row.upstream === undefined ? {} : { upstream: row.upstream }),
-  };
-}
-
-function rowFromCheckout(checkout: WorktreeCheckout, source: WorktreeRow): WorktreeRow {
-  const parent = checkout.parentWorkspaceId !== undefined;
-  return {
-    id: checkout.workspaceId ?? checkout.checkoutId,
-    // A child's display name is its exact local branch; the main checkout
-    // keeps the repository's display name.
-    name: parent ? checkout.branch ?? "" : source.name,
-    path: checkout.path,
-    branch: checkout.branch ?? "",
-    ...(checkout.detached ? { detached: true } : {}),
-    ownership: checkout.ownership,
-    registered: checkout.registered,
-    running: checkout.running,
-    ...(checkout.availability === "present" ? {} : { availability: checkout.availability }),
-    checkout: checkout.checkoutId,
-    ...(checkout.sourceRef === undefined ? {} : { sourceRef: checkout.sourceRef }),
-    ...(checkout.upstream === undefined ? {} : { upstream: checkout.upstream }),
-    ...(checkout.parentWorkspaceId === undefined ? {} : { parentId: checkout.parentWorkspaceId }),
-    ...(checkout.repositoryId === "repository-unknown" ? {} : { repositoryId: checkout.repositoryId }),
-  };
-}
-
-const PRESENTED = ["name", "path", "branch", "detached", "ownership", "registered", "running", "availability", "checkout", "sourceRef", "upstream", "parentId", "repositoryId"] as const;
-
-function presented(row: WorktreeRow): Record<string, unknown> {
-  return Object.fromEntries(PRESENTED.filter(field => row[field] !== undefined).map(field => [field, row[field]]));
-}
-
-// One contract artifact per prototype scenario. The table is exhaustive by
-// construction below: a new mock scenario without a fixture fails the suite.
+// One contract artifact per reviewed state. Every entry is parsed below, so
+// a fixture that drifts out of the contract fails the suite.
 
 const checkout = (overrides: Record<string, unknown> = {}): unknown => ({
   checkoutId: "checkout-sidebar",
@@ -121,7 +70,7 @@ const failure = (overrides: Record<string, unknown>): unknown => ({
 
 type Fixture = { inventory?: unknown; result?: unknown };
 
-const FIXTURES: Record<Scenario, Fixture> = {
+const FIXTURES: Record<string, Fixture> = {
   // --- inventory shape -----------------------------------------------------
   populated: { inventory: inventory() },
   empty: { inventory: inventory({ checkouts: [] }) },
@@ -186,8 +135,7 @@ const FIXTURES: Record<Scenario, Fixture> = {
 };
 
 describe("worktree contract fixtures", () => {
-  test("cover every prototype state the mock host exposes", () => {
-    expect(Object.keys(FIXTURES).sort()).toEqual(Object.keys(scenarios).sort());
+  test("every reviewed state has one wire-legal artifact", () => {
     for (const [scenario, fixture] of Object.entries(FIXTURES)) {
       expect(`${scenario}:${Boolean(fixture.inventory ?? fixture.result)}`).toBe(`${scenario}:true`);
       if (fixture.inventory) expect(parseWorktreeInventory(fixture.inventory).repositoryId).toBe("repository-atlas");
@@ -235,31 +183,17 @@ describe("worktree contract fixtures", () => {
   });
 });
 
-describe("prototype rows round-trip through the contract", () => {
-  test("every scenario's rows survive the DTO in both directions", () => {
-    const state = new WorktreeDemoState();
-    for (const scenario of Object.keys(scenarios) as Scenario[]) {
-      state.reset(scenario);
-      for (const row of state.rows.map(entry => state.effective(entry))) {
-        const source = state.rows.find(candidate => candidate.id === (row.parentId ?? row.id))!;
-        const dto = parseWorktreeCheckout(checkoutFromRow(row));
-        expect(`${scenario}:${JSON.stringify(presented(rowFromCheckout(dto, source)))}`)
-          .toBe(`${scenario}:${JSON.stringify(presented(row))}`);
-        if (row.registered) expect(dto.workspaceId).toBe(row.id);
-      }
-    }
-  });
-
+describe("deletion is gated on verified ownership alone", () => {
   test("only verified Uatu-created present checkouts may be deleted", () => {
-    const state = new WorktreeDemoState();
-    for (const scenario of ["populated", "discovery", "missing", "replaced"] as Scenario[]) {
-      state.reset(scenario);
-      if (scenario === "discovery") state.discover();
-      for (const row of state.rows) {
-        const dto = parseWorktreeCheckout(checkoutFromRow(row));
-        expect(`${scenario}:${row.id}:${canDeleteWorktree(dto)}`)
-          .toBe(`${scenario}:${row.id}:${row.ownership === "uatu" && row.availability === undefined}`);
-      }
+    const cases: [string, unknown, boolean][] = [
+      ["owned and present", checkout(), true],
+      ["the main checkout", checkout({ checkoutId: "checkout-main", workspaceId: "atlas", parentWorkspaceId: undefined, path: "/atlas", main: true, ownership: "main", sourceRef: undefined }), false],
+      ["an external discovery", checkout({ checkoutId: "checkout-agent", workspaceId: undefined, registered: false, ownership: "external", sourceRef: undefined }), false],
+      ["an owned but missing checkout", checkout({ availability: "missing" }), false],
+      ["an uncertain identity at a replaced path", checkout({ ownership: "uncertain", availability: "replaced" }), false],
+    ];
+    for (const [what, value, deletable] of cases) {
+      expect(`${what}:${canDeleteWorktree(parseWorktreeCheckout(value))}`).toBe(`${what}:${deletable}`);
     }
   });
 });

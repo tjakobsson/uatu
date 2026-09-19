@@ -1,6 +1,6 @@
 /** Capability-scoped presentation; rows retain their existing action handlers. */
 export function createDashboardGroups() {
-  type Workspace = { id: string; displayName?: string; branch?: string; detached?: boolean; parentId?: string; repositoryId?: string; running: boolean };
+  type Workspace = { id: string; displayName?: string; branch?: string; detached?: boolean; parentId?: string; repositoryId?: string; running: boolean; createWorktree?: boolean };
   const expanded = new Map<string, boolean>();
   const make = (tag: string, text = "", className = "") => {
     const node = document.createElement(tag); node.textContent = text; node.className = className; return node;
@@ -27,10 +27,29 @@ export function createDashboardGroups() {
       heading.append(make("h3", parent.displayName || parent.id, "row-title"));
       const actions = make("div", "", "row-actions");
       for (const button of main.querySelectorAll<HTMLButtonElement>(".row-actions button")) {
-        if (button.textContent === "Configure" || button.getAttribute("aria-label")?.startsWith("Rename workspace") || button.getAttribute("aria-label")?.startsWith("Add worktree")) actions.append(button);
+        if (button.getAttribute("aria-label")?.startsWith("Rename workspace") || button.getAttribute("aria-label")?.startsWith("Add worktree")) actions.append(button);
       }
       heading.append(actions); group.append(heading);
-      main.querySelector<HTMLElement>(".row-title")!.replaceChildren(document.createTextNode(parent.detached ? "Detached HEAD" : parent.branch || "Branch unknown"), make("span", "Main checkout", "chip"));
+      // W10: "Main checkout" is a truthful claim about repository ownership
+      // — the Hub only sets createWorktree when this row's .git is a real
+      // repository directory, i.e. when a fork control exists at all. A
+      // linked worktree registered on its own through Add workspace (a .git
+      // FILE) has no fork control and is not this repository's main
+      // checkout; label it for what it is instead of promising a fork it
+      // does not have.
+      const isMain = parent.createWorktree === true;
+      // Bug 2: this used to `replaceChildren(textNode, chip)` directly on
+      // `.row-title` (the wrapping div), which discarded the `<a>` the row
+      // itself renders for a RUNNING checkout (row(), pages.ts) — silently
+      // turning a running main checkout's only navigation affordance into
+      // plain unlinked text. Re-label the existing title element in place
+      // (an `<a>` keeps its href; a `<strong>` stays a `<strong>`) instead
+      // of replacing it, so a running repository's title is still the link
+      // it is everywhere else in the dashboard.
+      const titleRow = main.querySelector<HTMLElement>(".row-title")!;
+      const titleEl = titleRow.querySelector<HTMLElement>("a, strong") ?? titleRow;
+      titleEl.textContent = parent.detached ? "Detached HEAD" : parent.branch || "Branch unknown";
+      titleRow.replaceChildren(titleEl, make("span", isMain ? "Main checkout" : "Linked checkout", "chip"));
       group.append(main);
       const count = children.filter(w => !w.running).length;
       const hidden = count ? details(`${parent.id}-stopped`, `${count} stopped worktree${count === 1 ? "" : "s"}`) : null;
@@ -39,7 +58,10 @@ export function createDashboardGroups() {
       }
       if (hidden) group.append(hidden);
       if (!active) {
-        const folded = details(`${parent.id}-inactive`, `${parent.displayName || parent.id} · all stopped · expand to Start or fork`);
+        const summary = isMain
+          ? `${parent.displayName || parent.id} · all stopped · expand to Start or fork`
+          : `${parent.displayName || parent.id} · all stopped · expand to Start`;
+        const folded = details(`${parent.id}-inactive`, summary);
         folded.append(group); stopped.append(folded);
       } else sessions.append(group);
     }
@@ -48,4 +70,9 @@ export function createDashboardGroups() {
   };
 }
 
-export const dashboardGroupsStyle = `.dashboard-repository{border:1px solid var(--border-soft);border-radius:8px;margin:12px 0;overflow:hidden}.dashboard-group-heading{background:var(--surface-hover)}.dashboard-group-heading h3{margin:0}.dashboard-repository summary,#workspaces>details>summary{padding:12px;cursor:pointer;min-height:44px;box-sizing:border-box}.dashboard-repository summary:focus-visible,#workspaces>details>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}`;
+// W8: --surface-hover was never defined for the Hub's own pages (only the
+// client SPA's stylesheet has it), so the heading band had no background at
+// all, in either color scheme. --surface-muted is defined in pages.ts's
+// SHARED_STYLE for both schemes and reads distinctly from .row:hover's
+// --surface-subtle.
+export const dashboardGroupsStyle = `.dashboard-repository{border:1px solid var(--border-soft);border-radius:8px;margin:12px 0;overflow:hidden}.dashboard-group-heading{background:var(--surface-muted)}.dashboard-group-heading h3{margin:0}.dashboard-repository summary,#workspaces>details>summary{padding:12px;cursor:pointer;min-height:44px;box-sizing:border-box}.dashboard-repository summary:focus-visible,#workspaces>details>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}`;
