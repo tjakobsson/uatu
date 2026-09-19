@@ -211,8 +211,8 @@ describe("restart recovery at every creation boundary", () => {
     expect(await provenance.load()).toEqual([]);
   });
 
-  test("interrupted after Git created the tree: retained and registrable", async () => {
-    const { outcome, journal, provenance } = await recoverAt("creating", present());
+  test("interrupted after checkout identity was persisted: retained and registrable", async () => {
+    const { outcome, journal, provenance } = await recoverAt("creating", present(), { checkoutId: IDENTITY.checkoutId });
     expect(outcome).toEqual({
       kind: "retained-unregistered",
       operationId: "operation-1",
@@ -223,6 +223,13 @@ describe("restart recovery at every creation boundary", () => {
     // the provenance write still leaves a provably owned checkout.
     expect((await provenance.byCheckoutId(IDENTITY.checkoutId))?.sourceRef).toBe("main");
     expect(await journal.read()).toBeUndefined();
+  });
+
+  test("creating without durable identity proof stays uncertain even on the intended branch", async () => {
+    const { outcome, journal, provenance } = await recoverAt("creating", present());
+    expect(outcome?.kind).toBe("uncertain");
+    expect(await provenance.load()).toEqual([]);
+    expect(await journal.read()).toBeDefined();
   });
 
   test("interrupted after registration committed: completed", async () => {
@@ -439,16 +446,22 @@ describe("removal intent and restart recovery (5.4)", () => {
     expect(await journal.read()).toBeUndefined();
   });
 
-  test("a new tree reusing the path and identity is recognized as a new occupant and left alone", async () => {
-    // Git reuses the administrative name, so the identity matches; the
-    // missing marker is what proves our tree was removed.
+  test("a surviving identity without a marker cannot prove removal in an older journal", async () => {
     const { journal, provenance, completeRemoval, cleaned } = await setup("removing");
     const outcome = await recoverWorktreeOperation({ journal, provenance, inspect: async () => present(), completeRemoval });
+    expect(outcome?.kind).toBe("uncertain");
+    expect(cleaned).toEqual([]);
+    expect(await provenance.byCheckoutId(IDENTITY.checkoutId)).toBeDefined();
+    expect(await journal.read()).toBeDefined();
+  });
+
+  test("a replacement with a different durable identity is left alone while old metadata is cleaned", async () => {
+    const { journal, provenance, completeRemoval, cleaned } = await setup("removing");
+    const occupant = { ...IDENTITY, checkoutId: "replacement" };
+    const outcome = await recoverWorktreeOperation({ journal, provenance, inspect: async () => present(occupant), completeRemoval });
     expect(outcome?.kind).toBe("removed");
     expect(cleaned).toEqual(["delete-1"]);
-    // The occupant cannot inherit ownership from the removed tree.
-    const ownership = await ownershipForCheckout({ provenance, inspection: present(), checkoutPath: INTENT.destination });
-    expect(ownership.ownership).toBe("external");
+    expect((await ownershipForCheckout({ provenance, inspection: present(occupant), checkoutPath: INTENT.destination })).ownership).toBe("external");
   });
 
   test("a cleanup persistence failure keeps the record at unregistering for a later retry", async () => {

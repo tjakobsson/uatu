@@ -109,7 +109,17 @@ export async function removalMarkerPresent(administrativeDirectory: string, oper
 }
 
 export async function writeRemovalMarker(administrativeDirectory: string, operationId: string): Promise<void> {
-  await nodeFs.writeFile(removalMarkerPath(administrativeDirectory), `${operationId}\n`, { mode: 0o600 });
+  const handle = await nodeFs.open(removalMarkerPath(administrativeDirectory), "w", 0o600);
+  try {
+    await handle.writeFile(`${operationId}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  if (process.platform !== "win32") {
+    const directory = await nodeFs.open(administrativeDirectory, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
 }
 
 export async function clearRemovalMarker(administrativeDirectory: string): Promise<void> {
@@ -504,7 +514,8 @@ export async function ownershipForCheckout(options: {
   registeredIdentity?: WorktreeIdentity;
 }): Promise<{ ownership: WorktreeOwnership; availability: "present" | "missing" | "replaced"; record?: WorktreeProvenanceRecord }> {
   const { inspection } = options;
-  const record = inspection.identity ? await options.provenance.byCheckoutId(inspection.identity.checkoutId) : undefined;
+  const identity = inspection.identity ?? (!inspection.present ? options.registeredIdentity : undefined);
+  const record = identity ? await options.provenance.byCheckoutId(identity.checkoutId) : undefined;
   const resolved = resolveWorktreeOwnership({
     main: options.main === true,
     present: inspection.present,
@@ -563,12 +574,18 @@ async function recoverRemoval(options: WorktreeRecoveryOptions, pending: Worktre
     // the record stays, so no later operation acts on a guess.
     return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: inspection.detail ?? "the checkout's identity could not be read" };
   }
-  const sameIdentity = inspection.present && inspection.identity?.checkoutId === pending.checkoutId;
+  const sameIdentity = inspection.present && inspection.identity?.checkoutId === pending.checkoutId && inspection.identity.repositoryId === pending.repositoryId;
   // Same identity is not proof of the same tree: Git reuses a removed tree's
   // administrative name. The marker written before the removal is.
   const marker = sameIdentity ? await removalMarkerPresent(pending.administrativeDirectory, pending.operationId) : false;
   if (marker === null) {
     return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: "the removal marker could not be read" };
+  }
+  if (sameIdentity && !marker && removalMayHaveRun) {
+    // Older journals could persist `removing` before writing the marker.
+    // Its absence cannot distinguish that crash from administrative-name
+    // reuse. Neither case authorizes forgetting a surviving identity.
+    return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: "the recorded checkout is still present without removal proof; reconcile it outside Uatu, then refresh" };
   }
   const stillOurs = sameIdentity && (marker || !removalMayHaveRun);
   if (stillOurs) {
@@ -633,7 +650,10 @@ export async function recoverWorktreeOperation(options: WorktreeRecoveryOptions)
   if (pending.phase === "validating" || pending.phase === "reserving") {
     return uncertain("the destination was already occupied before creation began");
   }
-  if (pending.checkoutId !== undefined && pending.checkoutId !== inspection.identity.checkoutId) {
+  if (pending.checkoutId === undefined) {
+    return uncertain("creation has no durably verified checkout identity; retain the files and reconcile the destination outside Uatu before retrying");
+  }
+  if (pending.checkoutId !== inspection.identity.checkoutId) {
     return uncertain("the destination holds a different checkout than the one recorded");
   }
 

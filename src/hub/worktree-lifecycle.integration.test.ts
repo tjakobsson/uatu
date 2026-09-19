@@ -16,7 +16,7 @@ import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
 import { WorktreeOperationCoordinator } from "./worktree-coordinator";
-import { WorktreeJournal, WorktreeProvenanceStore } from "./worktree-journal";
+import { WorktreeJournal, WorktreeProvenanceStore, removalMarkerPresent } from "./worktree-journal";
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
 import { WORKTREE_API_PATH } from "./worktree-api";
 import { WorktreeService } from "./worktree-service";
@@ -211,6 +211,28 @@ afterAll(async () => {
 });
 
 const auth = (init: RequestInit = {}): RequestInit => ({ ...init, headers: { ...(init.headers as Record<string, string>), cookie, origin } });
+
+test("removal marker is durable before the removing phase can be persisted", async () => {
+  const created = await service.create("reviewer", { sourceWorkspaceId: atlasId, mode: "new-branch", branch: "marker-order", base: { kind: "local", ref: "main" } });
+  if (!created.ok || !created.checkout?.workspaceId) throw new Error("expected created workspace");
+  const originalAdvance = journal.advance.bind(journal);
+  let markerAtTransition: boolean | null | undefined;
+  journal.advance = async (...args) => {
+    if (args[1] === "removing") {
+      const pending = await journal.read();
+      if (pending?.kind !== "delete") throw new Error("expected deletion intent");
+      markerAtTransition = await removalMarkerPresent(pending.administrativeDirectory, pending.operationId);
+    }
+    return originalAdvance(...args);
+  };
+  try {
+    const deleted = await service.delete("reviewer", { sourceWorkspaceId: atlasId, reference: created.checkout.workspaceId });
+    expect(deleted.ok).toBe(true);
+    expect(markerAtTransition).toBe(true);
+  } finally {
+    journal.advance = originalAdvance;
+  }
+});
 
 type ActionAnswer = { ok: boolean; message: string; completion?: { message: string; id?: string; deleted?: string } };
 

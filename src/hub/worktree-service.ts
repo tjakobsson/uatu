@@ -123,7 +123,7 @@ export class WorktreeService {
   // truthfully "cached" again rather than claiming a fetch nobody made.
   private readonly fetchedAt = new Map<string, number>();
   // The state list is polled; a child's identity probe is cached briefly.
-  private readonly availabilityCache = new Map<string, { at: number; path: string; value: "present" | "missing" | "replaced" }>();
+  private readonly availabilityCache = new Map<string, { at: number; path: string; repositoryId: string; checkoutId: string; value: "present" | "missing" | "replaced"; ownership: "uatu" | "external" | "uncertain" }>();
 
   constructor(private readonly options: WorktreeServiceOptions) {
     this.coordinator = options.coordinator ?? new WorktreeOperationCoordinator();
@@ -246,8 +246,9 @@ export class WorktreeService {
     // endpoint must reflect that same inventory, not a still-valid two-second
     // presentation cache from before the external change.
     for (const checkout of checkouts) {
-      if (checkout.workspaceId) this.availabilityCache.set(checkout.workspaceId, {
+      if (checkout.workspaceId && checkout.ownership !== "main") this.availabilityCache.set(checkout.workspaceId, {
         at: this.now(), path: checkout.path, value: checkout.availability,
+        repositoryId: checkout.repositoryId, checkoutId: checkout.checkoutId, ownership: checkout.ownership,
       });
     }
     return {
@@ -276,10 +277,9 @@ export class WorktreeService {
         checkoutPath: entry.path,
         registeredIdentity: { repositoryId: link.repositoryId, checkoutId: link.checkoutId },
       });
-      // A path that holds a readable checkout Git does not list for this
-      // repository is somebody else's tree: an identity conflict, whatever
-      // ownership arithmetic says.
-      const availability = resolved.availability === "present" ? "replaced" : resolved.availability;
+      // The canonical identity resolver also distinguishes unreadable
+      // (present/uncertain) from readable replacement and missing paths.
+      const availability = resolved.availability;
       const origin = await this.options.provenance.branchOrigin(view.repositoryId, entry.displayName);
       rows.push({
         checkoutId: link.checkoutId,
@@ -292,7 +292,7 @@ export class WorktreeService {
         branch: entry.displayName,
         detached: false,
         main: false,
-        ownership: availability === "replaced" ? "uncertain" : resolved.ownership,
+        ownership: resolved.ownership,
         availability,
         registered: true,
         running: false,
@@ -509,7 +509,7 @@ export class WorktreeService {
         };
       });
     } catch (error) {
-      return { ok: false, operationId, kind: "register", phase: "registering", error: toWorktreeError(error, "The retained checkout could not be registered.") };
+      return { ok: false, operationId, kind: "register", error: toWorktreeError(error, "The retained checkout could not be registered.") };
     }
   }
 
@@ -662,7 +662,13 @@ export class WorktreeService {
         if (pending.user !== user) throw WorktreeOperationError.of("permission-denied", "That operation belongs to another user.");
         const outcome = await this.recover();
         if (outcome?.kind === "removed") return { ok: true, operationId: pending.operationId, kind: "delete", phase: "complete", registered: false, started: false };
-        throw WorktreeOperationError.of("internal", "The worktree's files were removed and its branch kept, but Hub cleanup has not finished. Retry shortly.", { retry: "retry-delete", phase: "unregistering" });
+        if (outcome?.kind === "removal-cleanup-pending") {
+          throw WorktreeOperationError.of("internal", "The worktree's files were removed and its branch kept, but Hub cleanup has not finished. Retry shortly.", { retry: "retry-delete", phase: "unregistering" });
+        }
+        if (outcome?.kind === "removal-not-performed") {
+          throw WorktreeOperationError.of("conflict", "The previous deletion did not remove the worktree. Refresh and review it before deleting again.", { retry: "refresh" });
+        }
+        throw WorktreeOperationError.of("identity-uncertain", "Uatu cannot verify the previous deletion. Files and registration have been left unchanged by recovery. Reconcile the checkout outside Uatu, then refresh before attempting another deletion.", { retry: "none" });
       }
       await this.options.assertOperationsAllowed?.();
       const view = await this.repositoryView(request.sourceWorkspaceId);
@@ -734,12 +740,12 @@ export class WorktreeService {
         if (recheck.checkout.checkoutId !== checkout.checkoutId || recheck.checkout.path !== checkout.path) {
           throw WorktreeOperationError.of("identity-uncertain", "The worktree changed while deletion was prepared. Nothing was removed.", { retry: "refresh", phase: "rechecking" });
         }
-        progress.phase = "removing";
-        await this.options.journal.advance(operationId, "removing");
         // Written into Git's administrative directory for this tree, which
         // `git worktree remove` deletes with it: its survival is what proves
         // "not removed" even when a new tree reuses the same name.
         await writeRemovalMarker(administrativeDirectory, operationId);
+        progress.phase = "removing";
+        await this.options.journal.advance(operationId, "removing");
         const removed = await runWorktreeRemove(this.run, current.mainPath, checkout.path);
         const after = await inspectCheckout(checkout.path, { ...this.options.git, run: this.run });
         if (after.present && !after.identityReadable) {
@@ -751,7 +757,7 @@ export class WorktreeService {
           progress.retained = true;
           throw WorktreeOperationError.of("identity-uncertain", "The removal could not be verified. Nothing more was changed; refresh the inventory.", { retry: "refresh", phase: "removing" });
         }
-        const stillOurs = marker && after.present && after.identity?.checkoutId === checkout.checkoutId;
+        const stillOurs = after.present && after.identity?.checkoutId === checkout.checkoutId && after.identity.repositoryId === checkout.repositoryId;
         if (!removed.ok || stillOurs) {
           if (!removed.ok && !stillOurs && after.present) {
             // Git failed AND the path now holds something else: uncertain;
@@ -876,7 +882,7 @@ export class WorktreeService {
     if (!inspection.present) {
       throw WorktreeOperationError.of("identity-uncertain", "This worktree's folder is missing. Restore it outside Uatu, then refresh; nothing will be recreated.", { retry: "refresh" });
     }
-    if (!inspection.identityReadable || inspection.identity?.checkoutId !== entry.worktree.checkoutId) {
+    if (!inspection.identityReadable || inspection.identity?.checkoutId !== entry.worktree.checkoutId || inspection.identity.repositoryId !== entry.worktree.repositoryId) {
       throw WorktreeOperationError.of("identity-uncertain", "This worktree's folder now holds a different checkout. Resolve it outside Uatu before starting.", { retry: "refresh" });
     }
   }
@@ -885,28 +891,28 @@ export class WorktreeService {
   // recorded identity plus a filesystem/identity probe of its path. The
   // probe runs Git only for a present path, once per registered child.
   async registeredOwnership(workspaceId: string): Promise<"uatu" | "external" | "uncertain"> {
-    const entry = this.options.registry.byId(workspaceId);
-    const link = entry?.worktree;
-    if (!link) return "external";
-    const record = await this.options.provenance.byCheckoutId(link.checkoutId);
-    if (!record || record.repositoryId !== link.repositoryId) return "external";
-    return (await this.registeredAvailability(workspaceId)) === "present" ? "uatu" : "uncertain";
+    return (await this.registeredClassification(workspaceId)).ownership;
   }
 
   async registeredAvailability(workspaceId: string): Promise<"present" | "missing" | "replaced"> {
+    return (await this.registeredClassification(workspaceId)).value;
+  }
+
+  private async registeredClassification(workspaceId: string): Promise<{ ownership: "uatu" | "external" | "uncertain"; value: "present" | "missing" | "replaced" }> {
     const entry = this.options.registry.byId(workspaceId);
     const link = entry?.worktree;
-    if (!entry || !link) return "present";
+    if (!entry || !link) return { ownership: "external", value: "present" };
     const cached = this.availabilityCache.get(workspaceId);
     const now = this.now();
-    if (cached && now - cached.at < AVAILABILITY_CACHE_MS && cached.path === entry.path) return cached.value;
+    const matches = (item: typeof cached) => item?.path === entry.path && item.repositoryId === link.repositoryId && item.checkoutId === link.checkoutId;
+    if (cached && now - cached.at < AVAILABILITY_CACHE_MS && matches(cached)) return cached;
     const inspection = await inspectCheckout(entry.path, { ...this.options.git, run: this.run });
+    const resolved = await ownershipForCheckout({ provenance: this.options.provenance, inspection, checkoutPath: entry.path, registeredIdentity: link });
     const refreshed = this.availabilityCache.get(workspaceId);
-    if (refreshed !== cached && refreshed?.path === entry.path) return refreshed.value;
-    const value = !inspection.present
-      ? "missing"
-      : inspection.identity?.checkoutId === link.checkoutId ? "present" : "replaced";
-    this.availabilityCache.set(workspaceId, { at: now, path: entry.path, value });
+    if (refreshed && refreshed !== cached && matches(refreshed)) return refreshed;
+    const value = { at: now, path: entry.path, repositoryId: link.repositoryId, checkoutId: link.checkoutId,
+      value: resolved.availability, ownership: resolved.ownership as "uatu" | "external" | "uncertain" };
+    this.availabilityCache.set(workspaceId, value);
     return value;
   }
 
@@ -943,16 +949,6 @@ export class WorktreeService {
 
   // Startup reconciliation. Never deletes, never claims an uncertain tree.
   async recover(): Promise<WorktreeRecoveryOutcome | undefined> {
-    const pending = await this.options.journal.read();
-    // A crash between `git worktree add` and the identity stamp: the tree
-    // recovery is about to claim gets its stamp first, so its recorded
-    // identity is the durable one.
-    if (pending?.kind === "create" && pending.phase === "creating" && pending.checkoutId === undefined) {
-      const context = await repositoryContext(pending.destination, { ...this.options.git, run: this.run });
-      if (context.kind === "checkout" && !context.main && context.identity.repositoryId === pending.repositoryId && context.topLevel === pending.destination) {
-        await stampCheckoutIdentity(pending.destination, { ...this.options.git, run: this.run }).catch(() => undefined);
-      }
-    }
     return recoverWorktreeOperation({
       journal: this.options.journal,
       provenance: this.options.provenance,

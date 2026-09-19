@@ -11,8 +11,9 @@ import { WorkspaceRegistry } from "./registry";
 import { WorktreeOperationCoordinator } from "./worktree-coordinator";
 import { WorktreeService } from "./worktree-service";
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
-import { WorktreeJournal, WorktreeProvenanceStore, type WorktreeRegistrar } from "./worktree-journal";
-import { listWorktrees } from "./worktree-git";
+import { WorktreeJournal, WorktreeProvenanceStore, ownershipForCheckout, type WorktreeRegistrar } from "./worktree-journal";
+import { resolveWorktreeOwnership, parseWorktreeOperationResult } from "../shared/worktree-contract";
+import { listWorktrees, inspectCheckout, repositoryContext } from "./worktree-git";
 
 // Real Git, real registry/onboarding/credential stores, temporary
 // directories only. The Git environment is explicit: developing Uatu inside
@@ -177,6 +178,137 @@ async function addSshCredential(store: CredentialMetadataStore, id: string) {
     createdAt: "2026-09-17T00:00:00.000Z",
   }));
 }
+
+describe("restart proof boundaries", () => {
+  async function reopen(f: Awaited<ReturnType<typeof fixture>>) {
+    const journal = new WorktreeJournal(path.join(f.state, "pending-worktree-operation.json"));
+    const provenance = new WorktreeProvenanceStore(path.join(f.state, "worktree-provenance.json"));
+    const service = new WorktreeService({
+      registry: f.registry, sessions: { ...f.sessions, isStarting: () => false,
+        runWithSessionsStopped: async () => { throw new Error("recovery must not attempt a new removal"); } }, journal, provenance,
+      registrar: createOnboardingWorktreeRegistrar({ onboarding: f.onboarding, registry: f.registry }),
+      coordinator: new WorktreeOperationCoordinator(new PathReservationCoordinator()),
+      git: { env: await cleanEnvironment() },
+      unregister: async id => { await f.registry.remove(id); },
+    });
+    return { journal, provenance, service };
+  }
+
+  test("restart never stamps or claims an external occupant after creating intent", async () => {
+    const f = await fixture("unproved-create");
+    const first = await reopen(f);
+    const context = await repositoryContext(f.repository, { env: await cleanEnvironment() });
+    if (context.kind !== "checkout") throw new Error("expected repository");
+    const destination = path.join(f.root, "pending");
+    await first.journal.begin({ operationId: "interrupted", kind: "create", phase: "creating", user: "dev",
+      repositoryId: context.identity.repositoryId, sourceWorkspaceId: f.parentId, sourcePath: f.repository,
+      destination, mode: "new-branch", branch: "intended", base: { kind: "local", ref: "main" } });
+    await git(f.repository, ["worktree", "add", "-b", "external", destination]);
+    const before = await inspectCheckout(destination, { env: await cleanEnvironment() });
+    const restarted = await reopen(f);
+    expect((await restarted.service.recover())?.kind).toBe("uncertain");
+    expect(await inspectCheckout(destination, { env: await cleanEnvironment() })).toEqual(before);
+    expect(await restarted.provenance.byCheckoutId(before.identity!.checkoutId)).toBeUndefined();
+    expect(await restarted.journal.read()).toBeDefined();
+    expect(await Bun.file(path.join(destination, "README.md")).exists()).toBe(true);
+  });
+
+  test("restart preserves the original checkout when removing was persisted without a marker", async () => {
+    const f = await fixture("unproved-delete");
+    const created = await f.service.create("dev", { sourceWorkspaceId: f.parentId, mode: "new-branch", branch: "owned", base: { kind: "local", ref: "main" } });
+    if (!created.ok || !created.checkout?.workspaceId) throw new Error("expected created workspace");
+    const checkout = created.checkout;
+    const context = await repositoryContext(checkout.path, { env: await cleanEnvironment() });
+    if (context.kind !== "checkout") throw new Error("expected checkout");
+    const first = await reopen(f);
+    await first.journal.begin({ operationId: "interrupted-delete", kind: "delete", phase: "removing", user: "dev",
+      repositoryId: checkout.repositoryId, checkoutId: checkout.checkoutId, sourceWorkspaceId: f.parentId,
+      sourcePath: f.repository, destination: checkout.path, branch: "owned", workspaceId: checkout.workspaceId,
+      administrativeDirectory: context.gitDirectory });
+    const restarted = await reopen(f);
+    expect((await restarted.service.recover())?.kind).toBe("uncertain");
+    const retry = parseWorktreeOperationResult(JSON.parse(JSON.stringify(await restarted.service.delete("dev", {
+      sourceWorkspaceId: f.parentId, reference: checkout.workspaceId!,
+    }))));
+    expect(retry.ok).toBe(false);
+    if (retry.ok) throw new Error("expected identity refusal");
+    expect(retry.error.code).toBe("identity-uncertain");
+    expect(retry.error.retry).toBe("none");
+    expect(retry.error.message).toContain("outside Uatu");
+    expect(retry.error.message).not.toContain("files were removed");
+    expect(f.registry.byId(checkout.workspaceId!)).toBeDefined();
+    expect(await restarted.provenance.byCheckoutId(checkout.checkoutId)).toBeDefined();
+    expect(await restarted.journal.read()).toBeDefined();
+    expect(await Bun.file(path.join(checkout.path, "README.md")).exists()).toBe(true);
+  });
+
+  test("retained registration retry failure crosses the strict client result parser", async () => {
+    let attempts = 0;
+    const f = await fixture("retry-contract", { registrar: real => ({ async register(input) {
+      if (++attempts <= 2) throw new Error("registry persistence failed");
+      return real.register(input);
+    } }) });
+    const created = await f.service.create("dev", { sourceWorkspaceId: f.parentId, mode: "new-branch", branch: "retained", base: { kind: "local", ref: "main" } });
+    if (created.ok) throw new Error("expected retained creation");
+    const pending = await new WorktreeJournal(path.join(f.state, "pending-worktree-operation.json")).read();
+    if (!pending?.checkoutId) throw new Error("expected durable checkout identity");
+    const retry = parseWorktreeOperationResult(JSON.parse(JSON.stringify(await f.service.registerExisting("dev", f.parentId, pending.checkoutId))));
+    expect(retry.ok).toBe(false);
+    if (retry.ok) throw new Error("expected registration failure");
+    expect(retry.phase).toBeUndefined();
+    expect(retry.error.phase).toBe("registering");
+    expect(retry.error.retry).toBe("retry-registration");
+    expect(await Bun.file(path.join(pending.destination, "README.md")).exists()).toBe(true);
+    const succeeded = parseWorktreeOperationResult(JSON.parse(JSON.stringify(await f.service.registerExisting("dev", f.parentId, pending.checkoutId))));
+    expect(succeeded.ok).toBe(true);
+    expect(attempts).toBe(3);
+  });
+
+  for (const state of ["owned", "external", "missing", "missing-external", "replaced", "unreadable", "repository-mismatch", "different-repository"] as const) {
+    test(`registered classification matches canonical ownership: ${state}`, async () => {
+      const f = await fixture(`classification-${state}`);
+      const created = await f.service.create("dev", { sourceWorkspaceId: f.parentId, mode: "new-branch", branch: "owned", base: { kind: "local", ref: "main" } });
+      if (!created.ok || !created.checkout?.workspaceId) throw new Error("expected created workspace");
+      const checkout = created.checkout;
+      const restarted = await reopen(f);
+      if (state === "external" || state === "missing-external") await restarted.provenance.forgetCheckout(checkout.checkoutId);
+      if (state === "repository-mismatch") {
+        const record = (await restarted.provenance.byCheckoutId(checkout.checkoutId))!;
+        await restarted.provenance.record({ ...record, repositoryId: "another-repository" });
+      }
+      if (state === "missing" || state === "missing-external" || state === "replaced") await git(f.repository, ["worktree", "remove", checkout.path]);
+      if (state === "replaced") await git(f.repository, ["worktree", "add", "-b", "replacement", checkout.path]);
+      if (state === "unreadable") {
+        const context = await repositoryContext(checkout.path, { env: await cleanEnvironment() });
+        if (context.kind !== "checkout") throw new Error("expected checkout");
+        await writeFile(path.join(context.gitDirectory, "uatu-checkout"), "invalid identity\n");
+      }
+      if (state === "different-repository") {
+        await git(f.repository, ["worktree", "remove", checkout.path]);
+        const other = path.join(f.root, "other");
+        await mkdir(other);
+        await git(other, ["init", "--initial-branch=main"]);
+        await git(other, ["commit", "--allow-empty", "-m", "initial"]);
+        await git(other, ["worktree", "add", "-b", "replacement", checkout.path]);
+      }
+      const inspection = await inspectCheckout(checkout.path, { env: await cleanEnvironment() });
+      if (state === "different-repository") {
+        expect(inspection.identity?.repositoryId).not.toBe(checkout.repositoryId);
+        await expect(restarted.service.assertStartable(checkout.workspaceId!)).rejects.toThrow();
+      }
+      if (state === "unreadable") expect(inspection.identityReadable).toBe(false);
+      const registered = { repositoryId: checkout.repositoryId, checkoutId: checkout.checkoutId };
+      const record = await restarted.provenance.byCheckoutId(checkout.checkoutId);
+      const expected = resolveWorktreeOwnership({ main: false, ...inspection, observed: inspection.identity, registered,
+        ...(record ? { provenance: { identity: { repositoryId: record.repositoryId, checkoutId: record.checkoutId }, path: record.path } } : {}) });
+      expect(await ownershipForCheckout({ provenance: restarted.provenance, inspection, checkoutPath: checkout.path, registeredIdentity: registered })).toMatchObject(expected);
+      expect(expected).toEqual({ ownership: await restarted.service.registeredOwnership(checkout.workspaceId!),
+        availability: await restarted.service.registeredAvailability(checkout.workspaceId!) });
+      const inventory = await restarted.service.inventory(f.parentId);
+      expect(inventory.checkouts.find(row => row.workspaceId === checkout.workspaceId)).toMatchObject(expected);
+    });
+  }
+});
 
 afterAll(async () => {
   await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
