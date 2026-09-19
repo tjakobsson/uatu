@@ -107,7 +107,7 @@ export async function stopHubRuntime(parts: {
 }
 
 export async function shutdownHub(parts: {
-  stopServer(): void;
+  stopServer(): void | Promise<void>;
   stateLease: { release(): Promise<void> };
   cloneJobs: { close(): Promise<void> };
   credentialTools?: { shutdown(): Promise<void> } | null;
@@ -119,7 +119,9 @@ export async function shutdownHub(parts: {
   const report = parts.reportError ?? (message => console.error(message));
   let serverStopped = true;
   try {
-    parts.stopServer();
+    // Awaited: the lease must not be released while the server's own
+    // teardown (in-flight pushes, notification state writes) is still running.
+    await parts.stopServer();
   } catch {
     serverStopped = false;
     report("uatu hub: server shutdown failed");

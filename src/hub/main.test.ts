@@ -309,6 +309,20 @@ describe("Hub runtime shutdown", () => {
     expect(errors).toContain("uatu hub: retaining state-root lease after incomplete shutdown");
   });
 
+  test("an asynchronous server stop finishes before the runtime stops and the lease is released", async () => {
+    const calls: string[] = [];
+    const result = await shutdownHub({
+      async stopServer() { await Bun.sleep(20); calls.push("server"); },
+      stateLease: { async release() { calls.push("lease"); } },
+      cloneJobs: { async close() { calls.push("clones"); } },
+      sessions: { async stopAll() { calls.push("sessions"); } },
+      reportError() {},
+    });
+    expect(result).toEqual({ exitCode: 0, stateLeaseHeld: false });
+    expect(calls[0]).toBe("server");
+    expect(calls.at(-1)).toBe("lease");
+  });
+
   test("clean signal shutdown releases the lease and exits zero", async () => {
     let releases = 0;
     const result = await shutdownHub({
