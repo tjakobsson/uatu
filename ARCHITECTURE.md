@@ -123,8 +123,8 @@ controllers; Chat clears its own obsolete overrides immediately on mode change.
 
 Browser regressions inject safe areas and visual-viewport changes and assert
 header/composer bounds in Chromium and WebKit. They do not reproduce iPadOS's
-native glass or Magic Keyboard accessory UI. The reported physical-device bug
-still needs manual acceptance on the 11-inch iPad Pro.
+native glass or Magic Keyboard accessory UI. Those platform behaviors require
+physical-device acceptance in addition to the browser checks.
 
 ## Folder tour
 
