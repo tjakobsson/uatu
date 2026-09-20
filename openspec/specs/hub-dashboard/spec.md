@@ -166,7 +166,7 @@ When the SPA is served through a hub (a hub-session-shaped base path AND the hub
 - **THEN** the workspace switcher is not shown
 
 ### Requirement: The workspace switcher chip reflects real session state
-The in-session workspace switcher's collapsed chip SHALL show the current workspace's live indicator from hub-reported state, never from an assumption that the viewed session is running: a session page can outlive its server (a stop from the dashboard, a back/forward-cache restore). The chip and the open menu SHALL update from the brokered live stream's activity topic as workspace state changes, and additionally from fresh hub state on page-cache restores and whenever the menu's state refresh completes, so chip and menu can never disagree.
+The in-session workspace switcher's collapsed chip SHALL show the current workspace's live indicator from hub-reported state, never from an assumption that the viewed session is running: a session page can outlive its server (a stop from the dashboard, a back/forward-cache restore). The chip and the open menu SHALL update from the brokered live stream's activity topic as workspace state changes, and additionally from fresh hub state on page-cache restores and whenever the menu's state refresh completes, so chip and menu can never disagree. When the current workspace's session is stopped, its entry in the open menu SHALL offer to start it, as entries for other stopped workspaces do, and a successful start SHALL leave the page in place to recover from the stream rather than navigating. The switcher and the shell's connection indicator SHALL agree on whether the current session is stopped: both derive it from the same hub-reported state.
 
 #### Scenario: A cached page of a stopped session shows a truthful chip
 - **WHEN** the user stops a session from the dashboard and returns to its page via browser history
@@ -176,6 +176,16 @@ The in-session workspace switcher's collapsed chip SHALL show the current worksp
 #### Scenario: A stop elsewhere updates the chip without a refresh
 - **WHEN** the viewed workspace's session is stopped from another device while its page is open
 - **THEN** the chip's indicator turns not-running from the stream update, without the menu being opened or the page reloaded
+
+#### Scenario: The current workspace's row starts its stopped session
+- **WHEN** the user opens the switcher menu on a page whose session is stopped and activates the current workspace's entry
+- **THEN** the hub is asked to start that session and the entry shows it starting
+- **AND** the page is not navigated away; the chip's indicator and the connection indicator turn live once the started session's state arrives
+
+#### Scenario: Chip and indicator agree
+- **WHEN** the hub reports the current workspace's session not running
+- **THEN** the switcher chip shows not-running and the connection indicator reads `Stopped`
+- **AND** neither claims the session is running while the other says it is stopped
 
 ### Requirement: Dashboard and login follow uatu's visual language
 The hub's pages (login, dashboard, session-unavailable) SHALL use uatu's design system, not an ad-hoc theme: the same brand header (inline logo with its dark-scheme retint, wordmark typography), `color-scheme: light dark` with the app's `light-dark()` token palette so both schemes render correctly, the app's sans-serif body font with monospace reserved for paths and code, pane-style section headers, and the app's indicator-dot idiom for live/running state. Fixed single-scheme palettes MUST NOT be used.
