@@ -351,6 +351,28 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       expect(errorLine.hidden).toBe(true);
     });
 
+    test("a tap while the start is in flight never launches a recovery, even once the session reads running", async () => {
+      const h = stoppedHarness({ status: 200, body: { id: "uatu", running: true } });
+      const before = h.sources.length;
+      click();
+      await settled();
+      expect(h.starts).toHaveLength(1);
+      // The hub reports the session running before its state is applied:
+      // the label is `Reconnecting`, the start is still under way.
+      setCurrentSessionRunning(true);
+      expect(readIndicator().label).toBe("Reconnecting");
+      click();
+      await settled();
+      expect(h.sources.length).toBe(before);
+      expect(h.starts).toHaveLength(1);
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+
+      h.channel.confirm(h.channel.currentGeneration());
+      await settled();
+      expect(indicator.classList.contains("is-attempting")).toBe(false);
+      expect(h.reloads()).toBe(0);
+    });
+
     test("a start the channel confirms before the hub answers settles at once", async () => {
       // The hub's answer is held; the started child's state lands first.
       let answer!: () => void;

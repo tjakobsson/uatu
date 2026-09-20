@@ -331,6 +331,12 @@ export function initHubNav(): void {
     toggle.title = spoken ? `${baseToggleLabel} — ${spoken}` : baseToggleLabel;
   };
 
+  // What a stopped row's start is up to, by workspace id: the menu is
+  // re-rendered whenever the list or the stream changes, so a row's own
+  // node cannot carry it. Cleared once the workspace runs.
+  const rowStart = new Map<string, "starting" | "unlock" | "failed">();
+  const rowStartWords = { starting: "starting…", unlock: "unlock in Hub…", failed: "start failed" } as const;
+
   const renderMenu = () => {
     menu.replaceChildren();
 
@@ -376,8 +382,12 @@ export function initHubNav(): void {
         state.textContent = menuState.text;
         item.appendChild(state);
       }
-      if (!workspace.running) {
+      if (workspace.running) {
+        rowStart.delete(workspace.id);
+      } else {
         const state = item.querySelector<HTMLSpanElement>(".hub-menu-state.is-stopped")!;
+        const pending = rowStart.get(workspace.id);
+        if (pending) state.textContent = rowStartWords[pending];
         // A stopped target's session URL answers 503; Start it instead of
         // navigating into an unavailable page. Only a successful start of
         // ANOTHER workspace navigates: the current one is already on
@@ -385,13 +395,19 @@ export function initHubNav(): void {
         // is back (the connection indicator offers the same start).
         item.addEventListener("click", event => {
           event.preventDefault();
-          state.textContent = "starting…";
+          if (rowStart.get(workspace.id) === "starting") return;
+          rowStart.set(workspace.id, "starting");
+          state.textContent = rowStartWords.starting;
           void startWorkspaceSession(workspace.id).then(outcome => {
             if (outcome.ok) {
+              rowStart.delete(workspace.id);
               if (workspace.id !== currentId) hubNavigation(item.href);
               return;
             }
-            state.textContent = outcome.unlock ? "unlock in Hub…" : "start failed";
+            rowStart.set(workspace.id, outcome.unlock ? "unlock" : "failed");
+            // The row may have been re-rendered meanwhile; say it on
+            // whichever node the menu shows now.
+            if (!menu.hidden) renderMenu();
           });
         });
       }
@@ -464,8 +480,14 @@ export function initHubNav(): void {
     const reportsBefore = reports;
     outstanding += 1;
     const fresh = await fetchHubState().finally(() => { outstanding -= 1; });
-    if (fresh === null) return false;
-    if (request < applied) return true;
+    if (fresh === null) {
+      resumeReconcile();
+      return false;
+    }
+    if (request < applied) {
+      resumeReconcile();
+      return true;
+    }
     applied = request;
     latest = foldCurrent(fresh.workspaces, reportsBefore);
     for (const ws of [...activity.keys()]) {
@@ -479,6 +501,7 @@ export function initHubNav(): void {
     if (!menu.hidden) {
       renderMenu();
     }
+    resumeReconcile();
     return true;
   };
 
@@ -508,9 +531,12 @@ export function initHubNav(): void {
   // and the next reconnect, menu open, or page-cache restore reads again).
   // An answer already on its way counts as a read.
   let reconcileAttempt = 0;
+  // Set while the reconcile is waiting for a read it did not issue; that
+  // read's settling resumes it, whatever it answered.
+  let reconcileWaiting = false;
   const disagree = () => activity.get(currentId)?.running === false && listedRunning === true;
   const reconcileStop = () => {
-    if (reconcileTimer !== null) return;
+    if (reconcileTimer !== null || reconcileWaiting) return;
     if (!disagree()) {
       reconcileAttempt = 0;
       return;
@@ -528,11 +554,19 @@ export function initHubNav(): void {
         return;
       }
       if (outstanding > 0) {
-        reconcileStop();
+        // A read is on its way: its answer counts as this attempt's. The
+        // slot is given back so a slow answer does not use up the schedule.
+        reconcileAttempt -= 1;
+        reconcileWaiting = true;
         return;
       }
       void refreshHubState().then(reconcileStop);
     }, delay);
+  };
+  const resumeReconcile = () => {
+    if (!reconcileWaiting) return;
+    reconcileWaiting = false;
+    reconcileStop();
   };
 
   // One probe decides hub-ness; only a hub origin answers this at the root.

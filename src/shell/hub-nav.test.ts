@@ -465,14 +465,20 @@ describe("initHubNav with the live activity topic", () => {
 
     // The hub answers with its list as it is when asked. While answers are
     // held, each waits for its own release, in request order.
-    const hub = { workspaces: initial, stateFetches: 0, starts: [] as string[] };
+    const hub = {
+      workspaces: initial,
+      stateFetches: 0,
+      starts: [] as string[],
+      // How the hub answers a start; null is an immediate 200.
+      startAnswer: null as (() => Promise<Response>) | null,
+    };
     const held: (() => void)[] = [];
     let holding = false;
     setGlobal("fetch", async (url: string, init?: RequestInit) => {
       const start = /^\/api\/hub\/sessions\/([^/]+)\/start$/.exec(url);
       if (start && init?.method === "POST") {
         hub.starts.push(decodeURIComponent(start[1]!));
-        return Response.json({ id: start[1], running: true });
+        return hub.startAnswer ? hub.startAnswer() : Response.json({ id: start[1], running: true });
       }
       if (url !== "/api/hub/state") return Response.json({ error: "unexpected" }, { status: 404 });
       hub.stateFetches += 1;
@@ -817,6 +823,75 @@ describe("initHubNav with the live activity topic", () => {
     expect(page.toggle.querySelector(".indicator-dot")!.className).toBe("indicator-dot is-live");
     const current = page.menu.querySelector<HTMLElement>('.hub-menu-item[href="/s/uatu/"]')!;
     expect(current.querySelector(".hub-menu-state.is-stopped")).toBeNull();
+  });
+
+  test("a read already on its way that answers stale does not use up the schedule: the reconcile resumes with its own read", async () => {
+    installStopReconcileForTests([0]);
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
+    await page.boot([["uatu", idle], ["two", idle]]);
+    await settle();
+    const fetchesBefore = page.hub.stateFetches;
+
+    // The menu opens and asks for the list; that answer is slow. The stop
+    // happens meanwhile: the child goes, and the list catches up later.
+    page.hold();
+    page.openMenu();
+    expect(page.heldAnswers()).toBe(1);
+    page.latest().activity("uatu", stopped);
+    page.latest().documentUnavailable();
+    await settle();
+    expect(page.heldAnswers()).toBe(1);
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 1);
+
+    // The slow answer is from before the stop: still running. The reconcile
+    // reads for itself now, and that read sees the stop.
+    page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments")];
+    page.release(0);
+    await waitFor(() => page.heldAnswers() === 2);
+    expect(currentSessionRunningFact()).toBe(true);
+    page.release(1);
+    await waitFor(() => currentSessionRunningFact() === false);
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 2);
+  });
+
+  test("a start refused after the menu re-rendered still says so on the current row", async () => {
+    installStopReconcileForTests([0]);
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
+    await page.boot([["uatu", idle], ["two", idle]]);
+    page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments")];
+    page.latest().activity("uatu", stopped);
+    await waitFor(() => currentSessionRunningFact() === false);
+
+    let refuse!: () => void;
+    page.hub.startAnswer = () => new Promise<Response>(resolve => {
+      refuse = () => resolve(Response.json({ error: "a folder mutation is pending" }, { status: 409 }));
+    });
+    const row = () => page.menu.querySelector<HTMLElement>('.hub-menu-item[href="/s/uatu/"]')!;
+    const rowState = () => row().querySelector<HTMLElement>(".hub-menu-state.is-stopped")?.textContent ?? null;
+    page.openMenu();
+    await settle();
+    const before = row();
+    before.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    expect(rowState()).toBe("starting…");
+    // A second click while starting does not start again.
+    before.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    await waitFor(() => page.hub.starts.length === 1);
+    await settle();
+    expect(page.hub.starts).toEqual(["uatu"]);
+
+    // Payments reports activity: the open menu re-renders, replacing rows.
+    page.latest().activity("two", working);
+    expect(row()).not.toBe(before);
+    expect(rowState()).toBe("starting…");
+
+    refuse();
+    await waitFor(() => rowState() === "start failed");
+    expect(rowState()).toBe("start failed");
+
+    // Started elsewhere: the row's state clears with the running list.
+    page.hub.workspaces = [workspace("uatu", "Uatu"), workspace("two", "Payments")];
+    page.latest().activity("uatu", idle);
+    expect(row().querySelector(".hub-menu-state.is-stopped")).toBeNull();
   });
 
   test("the current workspace's menu row starts its stopped session and stays on the page", async () => {

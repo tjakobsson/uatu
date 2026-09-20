@@ -109,20 +109,22 @@ function syncConnectionDisplay() {
 // which joins an attempt already in flight rather than starting a second.
 // While the session is stopped the same control starts it instead: a
 // reconnect cannot bring back a child nobody has started.
+// Both the manual recovery and a start show as one attempt under way; the
+// control refuses to pile up either, or to mix them: a start whose session
+// is already reported running but not yet confirmed reads `Reconnecting`,
+// and a tap then must not launch a recovery whose fallback is a reload.
+let manualInFlight = false;
+let startInFlight = false;
+
 connectionStateElement.addEventListener("click", () => {
   const state = connectionDisplayState(connectionRawState, sessionStopped);
-  if (state === "live") return;
+  if (state === "live" || startInFlight || manualInFlight) return;
   if (state === "stopped") {
     void startStoppedSession();
     return;
   }
   void requestManualRecovery();
 });
-
-// Both the manual recovery and a start show as one attempt under way; the
-// control refuses to pile up either.
-let manualInFlight = false;
-let startInFlight = false;
 
 function syncAttempting() {
   const inFlight = manualInFlight || startInFlight;
