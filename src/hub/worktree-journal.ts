@@ -737,6 +737,9 @@ export type WorktreeRegistrar = {
     path: string;
     displayName: string;
     parentWorkspaceId: string;
+    // Durable source identity, checked under the parent's lifecycle fence.
+    expectedParentPath?: string;
+    verifyParentIdentity?: () => Promise<void>;
     // The VERIFIED Git identity of the tree being registered. The
     // registration records it, so a later retry recognizes the same
     // checkout instead of registering a second one, and a path reused by
@@ -759,6 +762,7 @@ export type RegisterCreatedWorktreeOptions = {
   inspect(checkoutPath: string): Promise<CheckoutInspection>;
   operationId: string;
   start?: boolean;
+  parentWorkspaceId?: string;
 };
 
 export type RegisterCreatedWorktreeResult = {
@@ -784,7 +788,7 @@ export async function registerCreatedWorktree(options: RegisterCreatedWorktreeOp
       { retry: "none", phase: pending.phase },
     );
   }
-  if (inspection.identity.checkoutId !== pending.checkoutId) {
+  if (inspection.identity.checkoutId !== pending.checkoutId || inspection.identity.repositoryId !== pending.repositoryId) {
     throw WorktreeOperationError.of(
       "identity-uncertain",
       "The retained path no longer holds the checkout that was created. Nothing was changed or removed.",
@@ -812,7 +816,20 @@ export async function registerCreatedWorktree(options: RegisterCreatedWorktreeOp
     registration = await options.registrar.register({
       path: pending.destination,
       displayName: pending.branch,
-      parentWorkspaceId: pending.sourceWorkspaceId,
+      parentWorkspaceId: options.parentWorkspaceId ?? pending.sourceWorkspaceId,
+      expectedParentPath: pending.sourcePath,
+      verifyParentIdentity: async () => {
+        const source = await options.inspect(pending.sourcePath);
+        // Repository ids are canonical-common-directory based. Recheck the
+        // stamped child too: replacing that directory at the same path must
+        // not make a different repository inherit this pending operation.
+        const retained = await options.inspect(pending.destination);
+        if (!source.present || !source.identityReadable || source.identity?.repositoryId !== pending.repositoryId
+          || !retained.present || !retained.identityReadable
+          || retained.identity?.repositoryId !== pending.repositoryId || retained.identity?.checkoutId !== pending.checkoutId) {
+          throw WorktreeOperationError.of("identity-uncertain", "The original parent repository could not be verified. The checkout is retained.", { retry: "refresh" });
+        }
+      },
       identity: inspection.identity,
       start: options.start === true,
       // Both of registerCreatedWorktree's callers (WorktreeService's

@@ -482,7 +482,7 @@ describe("registration and assignment", () => {
     // inside create()/retryRegistration()'s own path reservation, so
     // onboarding.configureWorktree() must not reserve `path` a second time
     // on the same PathReservationCoordinator (which always self-conflicted).
-    expect(calls).toEqual([{ path: INTENT.destination, displayName: "feature/login", parentWorkspaceId: "atlas", identity: IDENTITY, start: false, fenced: true }]);
+    expect(calls).toEqual([{ path: INTENT.destination, displayName: "feature/login", parentWorkspaceId: "atlas", expectedParentPath: INTENT.sourcePath, verifyParentIdentity: expect.any(Function), identity: IDENTITY, start: false, fenced: true }]);
     expect(await context.journal.read()).toBeUndefined();
     expect((await context.provenance.byCheckoutId(IDENTITY.checkoutId))?.branch).toBe("feature/login");
   });

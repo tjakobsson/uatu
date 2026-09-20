@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -10,6 +10,7 @@ import { PathReservationCoordinator } from "./path-reservations";
 import { WorkspaceRegistry } from "./registry";
 import { WorktreeOperationCoordinator } from "./worktree-coordinator";
 import { WorktreeService } from "./worktree-service";
+import { createWorktreeApi } from "./worktree-api";
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
 import { WorktreeJournal, WorktreeProvenanceStore, ownershipForCheckout, type WorktreeRegistrar } from "./worktree-journal";
 import { resolveWorktreeOwnership, parseWorktreeOperationResult } from "../shared/worktree-contract";
@@ -100,6 +101,12 @@ async function fixture(label: string, options: { registrar?: (real: WorktreeRegi
       return {} as never;
     },
     isRunning: (id: string) => running.has(id),
+    isStarting: () => false,
+    runWithSessionsStopped: <T,>(ids: readonly string[], _stop: boolean, operation: () => Promise<T>) =>
+      runExclusive(ids[0]!, async () => {
+        if (ids.some(id => running.has(id))) return { status: "needs-stop" as const, workspaceIds: [...ids] };
+        return { status: "completed" as const, value: await operation() };
+      }),
   };
 
   // One PathReservationCoordinator shared by onboarding and the worktree
@@ -132,6 +139,7 @@ async function fixture(label: string, options: { registrar?: (real: WorktreeRegi
     journal: new WorktreeJournal(path.join(state, "pending-worktree-operation.json")),
     provenance: new WorktreeProvenanceStore(path.join(state, "worktree-provenance.json")),
     registrar: options.registrar ? options.registrar(realRegistrar) : realRegistrar,
+    unregister: async id => { await registry.remove(id); },
     coordinator: new WorktreeOperationCoordinator(reservations),
     git: { env: await cleanEnvironment() },
     newOperationId: (() => {
@@ -180,6 +188,73 @@ async function addSshCredential(store: CredentialMetadataStore, id: string) {
 }
 
 describe("restart proof boundaries", () => {
+  test("retained retry revalidates the original repository after waiting for its lifecycle fence", async () => {
+    let fail = true;
+    let entered!: () => void;
+    const registering = new Promise<void>(resolve => { entered = resolve; });
+    const f = await fixture("retry-parent-fence", { registrar: real => ({ register: input => {
+      if (fail) throw new Error("registration persistence unavailable");
+      entered();
+      return real.register(input);
+    } }) });
+    const created = await f.service.create("dev", { sourceWorkspaceId: f.parentId, mode: "new-branch", branch: "retained", base: { kind: "local", ref: "main" } });
+    if (created.ok || !created.retainedCheckout) throw new Error("expected retained checkout");
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const mutation = f.sessions.runExclusive(f.parentId, async () => {
+      await registering;
+      await rename(f.repository, `${f.repository}-original`);
+      await mkdir(f.repository);
+      await git(f.repository, ["init", "--initial-branch=main"]);
+      await git(f.repository, ["commit", "--allow-empty", "-m", "replacement"]);
+      await held;
+    });
+    fail = false;
+    const retry = f.service.retryRegistration("dev", created.operationId);
+    await registering;
+    release();
+    await mutation;
+    expect((await retry).ok).toBe(false);
+    expect(f.registry.byPath(created.retainedCheckout.path)).toBeUndefined();
+    expect(await new WorktreeJournal(path.join(f.state, "pending-worktree-operation.json")).read()).toBeDefined();
+    expect(await Bun.file(path.join(created.retainedCheckout.path, "README.md")).exists()).toBe(true);
+  });
+  test("retained registration binds the original repository after its old slug is reused", async () => {
+    const f = await fixture("reused-parent");
+    const failure = spyOn(f.registry, "registerWithStatus").mockImplementationOnce(async () => { throw new Error("registration persistence unavailable"); });
+    const created = await f.service.create("dev", { sourceWorkspaceId: f.parentId, mode: "new-branch", branch: "retained", base: { kind: "local", ref: "main" } }).finally(() => failure.mockRestore());
+    if (created.ok || !created.retainedCheckout) throw new Error("expected retained checkout");
+    const journal = new WorktreeJournal(path.join(f.state, "pending-worktree-operation.json"));
+    const api = createWorktreeApi({ service: f.service, registry: f.registry, startWorkspace: async () => ({ ok: true }) });
+    const forgetUrl = new URL("http://localhost/api/hub/worktrees/forget");
+    const forgotten = await api.handle(new Request(forgetUrl, { method: "POST", body: JSON.stringify({ sourceWorkspaceId: f.parentId, reference: f.parentId }) }), forgetUrl, { user: "dev" });
+    expect(parseWorktreeOperationResult(await forgotten.json()).ok).toBe(true);
+    const unrelated = path.join(f.root, "unrelated", "atlas");
+    await mkdir(unrelated, { recursive: true });
+    await git(unrelated, ["init", "--initial-branch=main"]);
+    await git(unrelated, ["commit", "--allow-empty", "-m", "unrelated"]);
+    const configure = (folder: string) => f.onboarding.configureExisting({ path: folder, displayName: "Atlas", authentication: [], signing: null, init: false });
+    const replacement = await configure(unrelated);
+    expect(replacement.entry.id).toBe(f.parentId);
+    const original = await configure(f.repository);
+    expect(original.entry.id).toBe("atlas-2");
+    for (const [workspaceId, credentialId] of [[replacement.entry.id, "wrong"], [original.entry.id, "right"]]) {
+      await addSshCredential(f.credentials, credentialId!);
+      await f.credentials.assign({ workspaceId: workspaceId!, credentialId: credentialId!, role: "authentication", host: "example.test" });
+    }
+    const stale = await f.service.retryRegistration("dev", created.operationId);
+    expect(stale.ok).toBe(false);
+    expect(await journal.read()).toBeDefined();
+    expect(f.registry.byPath(created.retainedCheckout.path)).toBeUndefined();
+    const url = new URL("http://localhost/api/hub/worktrees/register");
+    const response = await api.handle(new Request(url, { method: "POST", body: JSON.stringify({ sourceWorkspaceId: original.entry.id, reference: "retained" }) }), url, { user: "dev" });
+    const result = parseWorktreeOperationResult(await response.json());
+    expect(result.ok).toBe(true);
+    const child = f.registry.byPath(created.retainedCheckout.path)!;
+    expect(child.worktree?.parentWorkspaceId).toBe(original.entry.id);
+    expect((await f.contexts.resolve(child)).authentication.map(item => item.credential.id)).toEqual(["right"]);
+    expect(await journal.read()).toBeUndefined();
+  });
   async function reopen(f: Awaited<ReturnType<typeof fixture>>) {
     const journal = new WorktreeJournal(path.join(f.state, "pending-worktree-operation.json"));
     const provenance = new WorktreeProvenanceStore(path.join(f.state, "worktree-provenance.json"));

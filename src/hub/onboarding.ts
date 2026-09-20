@@ -608,6 +608,8 @@ export class WorkspaceOnboardingCoordinator {
     displayName: string;
     link: WorkspaceWorktreeLink;
     start?: boolean;
+    expectedParentPath?: string;
+    verifyParentIdentity?: () => Promise<void>;
     // Set only by the worktree registrar (src/hub/worktree-registrar.ts),
     // which registerCreatedWorktree() (src/hub/worktree-journal.ts) calls
     // exclusively from inside WorktreeService's create()/retryRegistration()
@@ -648,6 +650,12 @@ export class WorkspaceOnboardingCoordinator {
         if (currentParent.path !== parent.path || currentParent.backend !== parent.backend || currentParent.worktree) {
           throw new OnboardingError("conflict", "parent workspace changed during worktree registration; refresh and try again");
         }
+        // A retry's slug may now name an unrelated registration. Compare to
+        // the pre-failure source, not merely the parent observed on entry.
+        if (options.expectedParentPath !== undefined && currentParent.path !== options.expectedParentPath) {
+          throw new OnboardingError("conflict", "the original parent workspace changed; register the retained checkout from its original repository");
+        }
+        await options.verifyParentIdentity?.();
         const existing = this.options.registry.byPath(canonical);
         if (existing) {
           // An idempotent retry of the SAME verified checkout returns the

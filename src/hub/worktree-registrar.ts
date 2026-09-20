@@ -42,6 +42,8 @@ export function createOnboardingWorktreeRegistrar(options: OnboardingWorktreeReg
         // already holds is a fact only that caller (registerCreatedWorktree)
         // knows — see WorktreeRegistrar.register's `fenced` doc comment.
         fenced: input.fenced,
+        expectedParentPath: input.expectedParentPath,
+        verifyParentIdentity: input.verifyParentIdentity,
       });
       return {
         workspaceId: result.entry.id,

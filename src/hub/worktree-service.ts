@@ -493,7 +493,7 @@ export class WorktreeService {
   // `reference` is either that operation's id or the retained checkout's
   // identity — the compact recovery view knows the checkout, the CLI knows
   // the operation, and both mean this one pending operation.
-  async retryRegistration(user: string, reference: string, start = false): Promise<WorktreeOperationResult> {
+  async retryRegistration(user: string, reference: string, start = false, sourceWorkspaceId?: string): Promise<WorktreeOperationResult> {
     const pending = await this.options.journal.read();
     if (!pending || (pending.operationId !== reference && pending.checkoutId !== reference)) {
       return { ok: false, operationId: reference, kind: "register", error: notFound("That operation is no longer pending. Refresh the inventory.").detail };
@@ -504,8 +504,11 @@ export class WorktreeService {
       return { ok: false, operationId: reference, kind: "register", error: WorktreeOperationError.of("permission-denied", "That operation belongs to another user.").detail };
     }
     try {
-      const view = await this.repositoryView(pending.sourceWorkspaceId);
-      return await this.coordinator.run({ repositoryId: view.repositoryId, paths: [pending.destination] }, async () => {
+      return await this.coordinator.run({ repositoryId: pending.repositoryId, paths: [pending.sourcePath, pending.destination] }, async () => {
+        const view = await this.repositoryView(sourceWorkspaceId ?? pending.sourceWorkspaceId);
+        if (view.repositoryId !== pending.repositoryId || view.source.path !== pending.sourcePath || view.source.worktree) {
+          throw WorktreeOperationError.of("identity-uncertain", "The source no longer identifies the original parent repository. Register the retained checkout from its original repository.", { retry: "refresh" });
+        }
         const registration = await registerCreatedWorktree({
           journal: this.options.journal,
           provenance: this.options.provenance,
@@ -513,6 +516,7 @@ export class WorktreeService {
           inspect: checkoutPath => inspectCheckout(checkoutPath, { ...this.options.git, run: this.run }),
           operationId,
           start,
+          parentWorkspaceId: view.source.id,
         });
         const inspection = await inspectCheckout(pending.destination, { ...this.options.git, run: this.run });
         const record = view.records.find(candidate => candidate.path === pending.destination)
@@ -546,7 +550,7 @@ export class WorktreeService {
   async registerExisting(user: string, sourceWorkspaceId: string, reference: string, start = false): Promise<WorktreeOperationResult> {
     const pending = await this.options.journal.read().catch(() => undefined);
     if (pending?.kind === "create" && (pending.operationId === reference || pending.checkoutId === reference)) {
-      return this.retryRegistration(user, reference, start);
+      return this.retryRegistration(user, reference, start, sourceWorkspaceId);
     }
     const operationId = this.newOperationId();
     try {
