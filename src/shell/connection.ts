@@ -12,7 +12,7 @@ import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import type { BuildSummary } from "../shared/types";
 import type { LiveChannelStatus } from "./live-channel";
 import { startWorkspaceSession } from "./hub-nav";
-import { awaitConfirmedLive, onManualRecovery, requestManualRecovery } from "./live";
+import { awaitConfirmedLive, holdManualReload, onManualRecovery, requestManualRecovery } from "./live";
 import { onCurrentSessionRunning } from "./session-running";
 
 const connectionStateElementMaybe = document.querySelector<HTMLElement>("#connection-state");
@@ -156,6 +156,9 @@ async function startStoppedSession(): Promise<void> {
   clearConnectionError();
   syncAttempting();
   const confirmed = awaitConfirmedLive();
+  // A recovery asked for elsewhere while the start is under way (Chat's
+  // Reconnect) must not reload on its timeout.
+  const releaseReload = holdManualReload();
   try {
     const outcome = await startWorkspaceSession(workspaceId);
     if (outcome.ok) {
@@ -165,6 +168,7 @@ async function startStoppedSession(): Promise<void> {
       if (!outcome.unlock) showConnectionError(outcome.message);
     }
   } finally {
+    releaseReload();
     confirmed.cancel();
     startInFlight = false;
     syncAttempting();

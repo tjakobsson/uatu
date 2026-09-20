@@ -161,6 +161,23 @@ const defaultManualDeps: ManualRecoveryDeps = {
 };
 
 let manualDeps: ManualRecoveryDeps = defaultManualDeps;
+// Holds on the reload fallback. The indicator's in-place start of a stopped
+// session takes one for its duration: the session may already read running
+// (so `sessionStopped` no longer protects the page) while its state is
+// still on the way, and any recovery requested meanwhile — the Chat
+// surface's Reconnect calls `requestManualRecovery` on its own — must not
+// answer its timeout with the reload the start exists to avoid.
+let reloadHolds = 0;
+
+export function holdManualReload(): () => void {
+  reloadHolds += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    reloadHolds -= 1;
+  };
+}
 // The attempt in flight, or null. A second request while one is running
 // joins it rather than starting another.
 let manualAttempt: { promise: Promise<void>; cancel: () => void } | null = null;
@@ -205,7 +222,7 @@ export function requestManualRecovery(): Promise<void> {
       deps.timers.clearTimeout(timer);
       manualAttempt = null;
       notifyManual(false);
-      if (result === "timeout" && !deps.sessionStopped()) deps.reload();
+      if (result === "timeout" && !deps.sessionStopped() && reloadHolds === 0) deps.reload();
     }),
     cancel: () => settle("cancelled"),
   };

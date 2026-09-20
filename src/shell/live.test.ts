@@ -7,6 +7,7 @@ import {
   disposeLiveChannel,
   installLiveChannelForTests,
   awaitConfirmedLive,
+  holdManualReload,
   installManualRecoveryForTests,
   isManualRecoveryInFlight,
   liveChannel,
@@ -404,6 +405,30 @@ describe("manual recovery", () => {
 
     // Started again meanwhile: the next timeout reloads as before.
     stopped = false;
+    const next = requestManualRecovery();
+    clock.elapse();
+    await next;
+    expect(reloads).toBe(1);
+  });
+
+  test("a held reload keeps a timed-out attempt from reloading, whatever the session reads", async () => {
+    const clock = fakeClock();
+    let reloads = 0;
+    installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: clock.timers, sessionStopped: () => false });
+    const channel = statusChannel();
+
+    // The indicator's start is under way; Chat's Reconnect asks for a
+    // recovery that does not confirm in time.
+    const release = holdManualReload();
+    const attempt = requestManualRecovery();
+    channel.emit("reconnecting");
+    clock.elapse();
+    await attempt;
+    expect(reloads).toBe(0);
+
+    // Released (and releasing twice is harmless): the next timeout reloads.
+    release();
+    release();
     const next = requestManualRecovery();
     clock.elapse();
     await next;

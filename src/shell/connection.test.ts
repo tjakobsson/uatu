@@ -38,7 +38,7 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
 
   const { applyChannelStatus, connectionDisplayState } = await import("./connection");
   const { createLiveChannel } = await import("./live-channel");
-  const { installLiveChannelForTests, installManualRecoveryForTests } = await import("./live");
+  const { installLiveChannelForTests, installManualRecoveryForTests, requestManualRecovery } = await import("./live");
   const { installHubNavigationForTests } = await import("./hub-nav");
   const { setCurrentSessionRunning } = await import("./session-running");
 
@@ -101,6 +101,13 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       fireReconnect() {
         const entry = scheduled.shift();
         if (!entry) throw new Error("no reconnect scheduled");
+        entry.run();
+      },
+      // The most recently armed timer, for when a later window must
+      // elapse before an earlier one.
+      fireLatest() {
+        const entry = scheduled.pop();
+        if (!entry) throw new Error("no timer scheduled");
         entry.run();
       },
     };
@@ -371,6 +378,33 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       await settled();
       expect(indicator.classList.contains("is-attempting")).toBe(false);
       expect(h.reloads()).toBe(0);
+    });
+
+    test("a recovery asked for elsewhere during the start does not reload on its timeout", async () => {
+      const h = stoppedHarness({ status: 200, body: { id: "uatu", running: true } });
+      click();
+      await settled();
+      setCurrentSessionRunning(true);
+      // Chat's Reconnect, independently of the indicator. Its window
+      // elapses while the start is still waiting on its own: no reload.
+      const recovery = requestManualRecovery();
+      h.fireLatest();
+      await recovery;
+      await settled();
+      expect(h.reloads()).toBe(0);
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+
+      // The start's own window elapses: the attempt ends, the hold goes.
+      h.fireReconnect();
+      await settled();
+      expect(indicator.classList.contains("is-attempting")).toBe(false);
+      expect(h.reloads()).toBe(0);
+
+      // With the start over, a recovery that times out reloads as before.
+      const later = requestManualRecovery();
+      h.fireReconnect();
+      await later;
+      expect(h.reloads()).toBe(1);
     });
 
     test("a start the channel confirms before the hub answers settles at once", async () => {
