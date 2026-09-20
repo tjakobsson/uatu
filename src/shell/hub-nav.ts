@@ -21,7 +21,7 @@
 
 import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import type { WorkspaceActivity } from "../shared/live-protocol";
-import { liveChannel } from "./live";
+import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
 
 export type HubWorkspaceSummary = {
@@ -187,8 +187,16 @@ export function startFailureNeedsHubUnlock(message: string): boolean {
 // happens after. A locked-credential refusal is handed to the dashboard's
 // credential-aware start flow, which has the passphrase surface this page
 // lacks — the navigation happens here so both callers behave alike.
+//
+// A start of the CURRENT workspace also owns the page's way back to
+// `Connected`: the wait for the channel to confirm live is armed before the
+// hub is asked (a quick start confirms before the answer lands), and the
+// manual recovery's reload fallback is held until that wait settles, so a
+// recovery requested meanwhile — from the indicator, from Chat's Reconnect —
+// cannot reload the page whose state the in-place start preserves. Both
+// live here so every caller gets them. `confirmed` is that wait.
 export type WorkspaceStartOutcome =
-  | { ok: true }
+  | { ok: true; confirmed: Promise<"live" | "timeout" | "cancelled"> }
   | { ok: false; unlock: true }
   | { ok: false; unlock: false; message: string };
 
@@ -220,20 +228,32 @@ export function installStopReconcileForTests(delays: readonly number[] | null): 
 }
 
 export async function startWorkspaceSession(workspaceId: string): Promise<WorkspaceStartOutcome> {
+  const current = workspaceId === workspaceIdFromBasePath(appBasePath());
+  const wait = current ? awaitConfirmedLive() : null;
+  const releaseReload = current ? holdManualReload() : () => {};
+  const refuse = (outcome: Exclude<WorkspaceStartOutcome, { ok: true }>): WorkspaceStartOutcome => {
+    wait?.cancel();
+    releaseReload();
+    return outcome;
+  };
   let response: Response;
   try {
     response = await fetch(`/api/hub/sessions/${encodeURIComponent(workspaceId)}/start`, { method: "POST" });
   } catch {
-    return { ok: false, unlock: false, message: "start failed" };
+    return refuse({ ok: false, unlock: false, message: "start failed" });
   }
-  if (response.ok) return { ok: true };
+  if (response.ok) {
+    const confirmed = wait ? wait.outcome : Promise.resolve("live" as const);
+    void confirmed.finally(releaseReload);
+    return { ok: true, confirmed };
+  }
   const body = (await response.json().catch(() => ({}))) as { error?: unknown };
   const message = typeof body.error === "string" && body.error !== "" ? body.error : `start failed (${response.status})`;
   if (startFailureNeedsHubUnlock(message)) {
     hubNavigation("/");
-    return { ok: false, unlock: true };
+    return refuse({ ok: false, unlock: true });
   }
-  return { ok: false, unlock: false, message };
+  return refuse({ ok: false, unlock: false, message });
 }
 
 export function submitHubSignOut(doc: Document): void {

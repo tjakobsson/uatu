@@ -248,6 +248,10 @@ export type ConfirmedLiveWait = {
   cancel(): void;
 };
 
+// Waits not yet settled, so a teardown of the channel ends them (and
+// releases whatever they hold) instead of leaving them to their timers.
+const liveWaits = new Set<() => void>();
+
 export function awaitConfirmedLive(): ConfirmedLiveWait {
   const deps = manualDeps;
   let finish!: (outcome: "live" | "timeout" | "cancelled") => void;
@@ -256,6 +260,7 @@ export function awaitConfirmedLive(): ConfirmedLiveWait {
     finish = result => {
       if (settled) return;
       settled = true;
+      liveWaits.delete(cancel);
       unsubscribe();
       deps.timers.clearTimeout(timer);
       resolve(result);
@@ -263,7 +268,9 @@ export function awaitConfirmedLive(): ConfirmedLiveWait {
     const unsubscribe = liveChannel().onStatus(status => { if (status === "live") finish("live"); });
     const timer = deps.timers.setTimeout(() => finish("timeout"), deps.windowMs);
   });
-  return { outcome, cancel: () => finish("cancelled") };
+  const cancel = () => finish("cancelled");
+  liveWaits.add(cancel);
+  return { outcome, cancel };
 }
 
 // Tears the channel down for good. Explicit teardown only — tests, and a
@@ -272,6 +279,7 @@ export function awaitConfirmedLive(): ConfirmedLiveWait {
 export function disposeLiveChannel(): void {
   releasedInBackground = false;
   manualAttempt?.cancel();
+  for (const cancel of [...liveWaits]) cancel();
   channel?.dispose();
   channel = null;
   lifecycle?.dispose();

@@ -12,7 +12,7 @@ import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import type { BuildSummary } from "../shared/types";
 import type { LiveChannelStatus } from "./live-channel";
 import { startWorkspaceSession } from "./hub-nav";
-import { awaitConfirmedLive, holdManualReload, onManualRecovery, requestManualRecovery } from "./live";
+import { onManualRecovery, requestManualRecovery } from "./live";
 import { onCurrentSessionRunning } from "./session-running";
 
 const connectionStateElementMaybe = document.querySelector<HTMLElement>("#connection-state");
@@ -144,10 +144,10 @@ onManualRecovery(inFlight => {
 // `Connected`. The attempt is shown until then, or until the recovery
 // window elapses, after which the indicator says whatever the channel does
 // (the child did start, so the ordinary reconnect applies). The wait for
-// the confirmation is armed before the start is asked for: a quick start
-// can confirm the channel before the hub's answer lands. A refusal is
-// shown under the indicator; a locked-credential refusal has already
-// navigated to the dashboard's unlock flow.
+// that confirmation, and the hold on the recovery's reload meanwhile, are
+// the start routine's own (see hub-nav). A refusal is shown under the
+// indicator; a locked-credential refusal has already navigated to the
+// dashboard's unlock flow.
 async function startStoppedSession(): Promise<void> {
   if (startInFlight) return;
   const workspaceId = workspaceIdFromBasePath(appBasePath());
@@ -155,21 +155,11 @@ async function startStoppedSession(): Promise<void> {
   startInFlight = true;
   clearConnectionError();
   syncAttempting();
-  const confirmed = awaitConfirmedLive();
-  // A recovery asked for elsewhere while the start is under way (Chat's
-  // Reconnect) must not reload on its timeout.
-  const releaseReload = holdManualReload();
   try {
     const outcome = await startWorkspaceSession(workspaceId);
-    if (outcome.ok) {
-      await confirmed.outcome;
-    } else {
-      confirmed.cancel();
-      if (!outcome.unlock) showConnectionError(outcome.message);
-    }
+    if (outcome.ok) await outcome.confirmed;
+    else if (!outcome.unlock) showConnectionError(outcome.message);
   } finally {
-    releaseReload();
-    confirmed.cancel();
     startInFlight = false;
     syncAttempting();
   }

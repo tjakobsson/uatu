@@ -118,9 +118,81 @@ describe("startWorkspaceSession", () => {
 
   test("posts the hub's start route for the workspace and reports success", async () => {
     const calls = answer(200, { id: "pay ments", running: true });
-    expect(await startWorkspaceSession("pay ments")).toEqual({ ok: true });
+    const outcome = await startWorkspaceSession("pay ments");
+    expect(outcome.ok).toBe(true);
+    // Not the current workspace (no hub base path here): nothing to wait for.
+    expect(outcome.ok && await outcome.confirmed).toBe("live");
     expect(calls).toEqual([{ url: "/api/hub/sessions/pay%20ments/start", method: "POST" }]);
     expect(navigations).toEqual([]);
+  });
+
+  test("a start of the current workspace holds the recovery's reload until the channel confirms, from before the request", async () => {
+    const { installManualRecoveryForTests, requestManualRecovery } = await import("./live");
+    const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
+    const { document, window } = parseHTML(html);
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", "/s/uatu/");
+    document.head.appendChild(meta);
+    const savedDocument = globalThis.document;
+    const savedWindow = globalThis.window;
+    Reflect.set(globalThis, "document", document);
+    Reflect.set(globalThis, "window", window);
+    resetAppBasePathForTests();
+    try {
+      const scheduled: (() => void)[] = [];
+      let reloads = 0;
+      installManualRecoveryForTests({
+        reload: () => { reloads += 1; },
+        timers: {
+          setTimeout(callback) { scheduled.push(callback); return scheduled.length as unknown as ReturnType<typeof setTimeout>; },
+          clearTimeout(timer) { scheduled[(timer as unknown as number) - 1] = () => {}; },
+        },
+        sessionStopped: () => false,
+      });
+      const listeners = new Set<(status: "live" | "reconnecting" | "connecting") => void>();
+      installLiveChannelForTests({
+        connect() {},
+        onStatus(listener: (status: "live" | "reconnecting" | "connecting") => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+        suspend() {},
+        dispose() {},
+      } as unknown as LiveChannel);
+      let answerStart!: () => void;
+      globalThis.fetch = (async () => {
+        await new Promise<void>(resolve => { answerStart = resolve; });
+        return Response.json({ id: "uatu", running: true });
+      }) as unknown as typeof fetch;
+      installHubNavigationForTests(href => navigations.push(href));
+
+      // The start is requested; a recovery is asked for and times out
+      // while the hub has not even answered: no reload.
+      const started = startWorkspaceSession("uatu");
+      const recovery = requestManualRecovery();
+      for (const listener of [...listeners]) listener("reconnecting");
+      scheduled.at(-1)!();
+      await recovery;
+      expect(reloads).toBe(0);
+
+      // The hub answers; the channel confirms; the hold is released, and
+      // the next timed-out recovery reloads as it always did.
+      answerStart();
+      const outcome = await started;
+      expect(outcome.ok).toBe(true);
+      for (const listener of [...listeners]) listener("live");
+      expect(outcome.ok && await outcome.confirmed).toBe("live");
+      await Bun.sleep(0);
+      const later = requestManualRecovery();
+      scheduled.at(-1)!();
+      await later;
+      expect(reloads).toBe(1);
+    } finally {
+      installManualRecoveryForTests(null);
+      installLiveChannelForTests(null);
+      disposeLiveChannel();
+      Reflect.set(globalThis, "document", savedDocument);
+      Reflect.set(globalThis, "window", savedWindow);
+      resetAppBasePathForTests();
+    }
   });
 
   test("a locked-credential refusal hands off to the dashboard's unlock flow", async () => {
