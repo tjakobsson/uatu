@@ -606,6 +606,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     // Read-only navigation is single-flight too, but unlike a mutation it
     // must leave Cancel/Escape available while inventory or preflight waits.
     let navigating = false;
+    let discoverInvalidated = false;
     let revision = 0;
     let checkouts: WorktreeCheckout[] = [];
     let refs: { local: string[]; remote: string[] } = { local: [], remote: [] };
@@ -757,6 +758,13 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
         if (!controller.signal.aborted) render();
       } finally {
         navigating = false;
+        // The completed read may predate an invalidation received while it
+        // was in flight. Drain one coalesced read, without reopening a form
+        // or competing with first-click navigation or a mutation.
+        if (discoverInvalidated) {
+          discoverInvalidated = false;
+          if (view === "discover" && !busy && !controller.signal.aborted) void go("discover");
+        }
       }
     }
 
@@ -1070,11 +1078,13 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
       else if (operation === "open") void startWorkspace(model().selected?.id ?? selectedId ?? "");
     });
 
-    // A committed change elsewhere refreshes only the idle register list. An
-    // open form, a pending operation and the active document, terminal and
-    // conversation are all left exactly as they are.
+    // A committed change elsewhere refreshes only the register list. Reads
+    // already in flight coalesce one trailing refresh; forms and mutations,
+    // and the active document, terminal and conversation, remain untouched.
     window.addEventListener("uatu:worktrees-invalidated", () => {
-      if (!busy && view === "discover") void go("discover");
+      if (busy || view !== "discover" || controller.signal.aborted) return;
+      if (navigating) discoverInvalidated = true;
+      else void go("discover");
     }, { signal: controller.signal });
 
     document.body.append(dialog);
@@ -1089,6 +1099,9 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
         render();
       }
     });
+    // Dashboard owns its stream; the SPA already owns one. Expose the dialog
+    // scope, not another transport, and use its abort signal for cleanup.
+    window.dispatchEvent(new CustomEvent("uatu:worktree-dialog-opened", { detail: { source: source.id, signal: controller.signal } }));
   }
 
   return Object.assign(target, {

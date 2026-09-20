@@ -121,7 +121,7 @@ describe("worktreeDialogScript is minification-safe", () => {
         return Response.json(responseBody(url));
       };
       // eslint-disable-next-line no-new-func -- exercising the inlined script exactly as a <script> tag would run it
-      new Function("window", "document", "fetch", script)(window, window.document, fetchResponse);
+      new Function("window", "document", "fetch", "CustomEvent", script)(window, window.document, fetchResponse, window.CustomEvent);
       const globals = window as unknown as Record<string, unknown>;
       expect(typeof globals.openWorktreeFork).toBe("function");
       expect(typeof globals.openWorktreeDialog).toBe("function");

@@ -1350,10 +1350,13 @@ async function prepareWorkspaceResume(workspace, errorTarget) {
     setLocalError(errorTarget, error.message);
     return false;
   }
-  const locked = lockedWorkspaceCredentials(workspace.id);
+  const locked = lockedWorkspaceCredentials(workspacePolicyOwner(workspace).id);
   return !locked.length || await unlockForWorkspace(workspace, locked);
 }
 function workspaceLabel(w) { return (w.parentId && w.branch) || w.displayName || w.id; }
+function workspacePolicyOwner(workspace) {
+  return dashboardWorkspaces.find(entry => entry.id === (workspace.parentId || workspace.id)) || workspace;
+}
 function workspaceById(id) {
   return dashboardWorkspaces.find(entry => entry.id === id)
     || { id, displayName: id, credentialAssignments: { authentication: [], signing: [] } };
@@ -1364,7 +1367,7 @@ function workspaceById(id) {
 // directory browser's Start rows. On success the button STAYS busy — the
 // overlay owns the screen until the session page replaces us.
 async function startRegisteredWorkspace(w, button, errorTarget) {
-  if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(
+  if (!hasCredentialAssignments(workspacePolicyOwner(w).credentialAssignments) && !confirm(
     'No credentials are assigned to "' + workspaceLabel(w) + '". Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?'
   )) return;
   const target = errorTarget || actionErrorFor(button);
@@ -1594,6 +1597,66 @@ async function loadBrowser({ fallbackToParent = false } = {}) {
   renderInto(document.getElementById("browser"), rows, "No subfolders here.");
   return true;
 }
+// The dashboard has no session channel. While a worktree dialog is open,
+// its source owns the page's one brokered stream (never one per repository).
+// Reconnect with the same cursor-free subscription; every attach brings fresh
+// invalidation. The dialog alone decides whether its view is idle.
+function initDashboardWorktreeLive() {
+  let active = null;
+  let stream = null;
+  let retryTimer = null;
+  let failures = 0;
+  let pageHidden = false;
+  const suspend = () => {
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    retryTimer = null;
+    if (stream) stream.close();
+    stream = null;
+  };
+  const resume = () => {
+    if (!active || active.signal.aborted || pageHidden || document.visibilityState === "hidden" || retryTimer !== null) return;
+    if (stream?.readyState === 2) { stream.close(); stream = null; }
+    if (stream) return;
+    const source = active.source;
+    const current = new EventSource("/api/hub/live?ws=" + encodeURIComponent(source) + "&subs=" + encodeURIComponent(JSON.stringify([{ topic: "worktrees" }])));
+    stream = current;
+    current.addEventListener("open", () => { if (stream === current) failures = 0; });
+    current.addEventListener("error", () => {
+      if (stream !== current) return;
+      // Match live-channel's capped exponential retry. Close first so the
+      // browser's native retry cannot race ours, including terminal CLOSED.
+      current.close();
+      stream = null;
+      if (!active || active.signal.aborted || pageHidden || document.visibilityState === "hidden") return;
+      failures = Math.min(failures + 1, 5);
+      retryTimer = setTimeout(() => { retryTimer = null; resume(); }, Math.min(1000 * 2 ** (failures - 1), 15000));
+    });
+    current.addEventListener("live", event => {
+      if (stream !== current || active?.source !== source) return;
+      let envelope;
+      try { envelope = JSON.parse(event.data); } catch { return; }
+      if (envelope?.ws === source && envelope.topic === "worktrees" && envelope.event?.kind === "data") {
+        window.dispatchEvent(new Event("uatu:worktrees-invalidated"));
+      }
+    });
+  };
+  window.addEventListener("uatu:worktree-dialog-opened", event => {
+    suspend();
+    const scope = event.detail;
+    active = scope;
+    failures = 0;
+    scope.signal.addEventListener("abort", () => {
+      if (active !== scope) return;
+      active = null;
+      suspend();
+    }, { once: true });
+    resume();
+  });
+  document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" ? suspend() : resume());
+  window.addEventListener("pagehide", () => { pageHidden = true; suspend(); });
+  window.addEventListener("pageshow", () => { pageHidden = false; resume(); });
+  window.addEventListener("online", resume);
+}
 async function refresh(force) {
   if (!force && uiBusy > 0) return;
   if (!force && document.querySelector('dialog[open], [role="menu"][aria-label="Create worktree"]')) return;
@@ -1738,7 +1801,10 @@ async function refresh(force) {
         // reaches; parent credentials and shared policy are managed there,
         // for every repository, as they always were.
         const forget = actions.querySelector('[aria-label^="Remove "]');
-        if (forget) {
+        // Capability is Hub-wide, not proof that this row is a repository.
+        // Docs folders must keep the ordinary unregister path, which needs
+        // no Git inventory. Repository families retain the guarded dialog.
+        if (forget && (w.parentId || w.createWorktree === true || dashboardWorkspaces.some(child => child.parentId === w.id))) {
           forget.textContent = "Remove from Uatu";
           forget.setAttribute("aria-label", "Remove " + workspaceLabel(w) + " from Uatu");
           forget.onclick = () => openWorktreeDialog({ ...target, view: "forget", id: w.id }, forget);
@@ -2666,6 +2732,7 @@ function initSettingsPage() {
   loadTools();
 }
 if (pageMode === "dashboard") {
+  initDashboardWorktreeLive();
   window.addEventListener("pageshow", event => {
     if (!event.persisted) return;
     for (const overlay of document.querySelectorAll(".nav-overlay")) overlay.remove();

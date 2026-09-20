@@ -26,11 +26,150 @@ function documentFor(page: keyof typeof htmlFor) {
   return parseHTML(htmlFor[page]()).document;
 }
 
+test("dashboard child startup checks and unlocks parent policy but starts the child", async () => {
+  const script = clientScript(htmlFor.dashboard());
+  const source = script.slice(script.indexOf("async function prepareWorkspaceResume"), script.indexOf("// Rename workspace changes"));
+  const parent = { id: "parent", credentialAssignments: { authentication: ["key"], signing: [] } };
+  const child = { id: "child", parentId: "parent", credentialAssignments: { authentication: [], signing: [] } };
+  const checked: string[] = [], started: string[] = [], opened: string[] = [];
+  let confirmations = 0, unlocks = 0, allowUnlock = true;
+  const start = new Function("dashboardWorkspaces", "loadDashboardCredentials", "lockedWorkspaceCredentials", "unlockForWorkspace", "hasCredentialAssignments", "confirm", "setLocalError", "api", "openSession", `let uiBusy = 0; ${source}; return startRegisteredWorkspace;`)(
+    [parent, child], async () => {}, (id: string) => { checked.push(id); return id === "parent" ? [{}] : []; },
+    async () => { unlocks++; return allowUnlock; }, (a: typeof parent.credentialAssignments) => a.authentication.length > 0,
+    () => { confirmations++; return true; }, () => {}, async (url: string) => started.push(url), (id: string) => opened.push(id),
+  );
+  await start(child, { textContent: "Start" }, {});
+  expect({ confirmations, checked, unlocks, started, opened }).toEqual({ confirmations: 0, checked: ["parent"], unlocks: 1, started: ["/api/hub/sessions/child/start"], opened: ["child"] });
+  allowUnlock = false;
+  await start(child, { textContent: "Start" }, {});
+  expect(unlocks).toBe(2);
+  expect(started).toHaveLength(1);
+  expect(opened).toHaveLength(1);
+});
+
+test("dashboard preserves ordinary-folder removal and routes repository removal safely", async () => {
+  const script = clientScript(htmlFor.dashboard());
+  const source = script.slice(script.indexOf("async function refresh(force)"), script.indexOf("// The device-session list"));
+  const { document, window } = parseHTML('<html><body><div id="hub-version"></div><div id="sessions"></div><div id="workspaces"></div></body></html>');
+  const entries = [{ id: "docs" }, { id: "main", createWorktree: true }, { id: "child", parentId: "main" }];
+  const calls: string[] = [];
+  const makeRow = (spec: any) => {
+    const node = document.createElement("div"); node.className = "row";
+    node.innerHTML = '<div class="row-main"><div class="row-title"></div></div><div class="row-actions"></div>';
+    for (const action of spec.buttons) { const button = document.createElement("button"); button.textContent = action.label; button.setAttribute("aria-label", action.ariaLabel || ""); button.onclick = () => action.onClick(button); node.querySelector(".row-actions")!.append(button); }
+    return node;
+  };
+  const bindings: Record<string, unknown> = { document, HTMLElement: window.HTMLElement, fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }), row: makeRow, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows), workspaceLabel: (w: any) => w.id, credentialAssignmentSummary: () => "", actionErrorFor: () => ({}), setLocalError: () => {}, api: async (url: string) => calls.push(url), el: (tag: string) => document.createElement(tag), worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: (options: any) => calls.push(options.view + ":" + options.id) };
+  const refresh = new Function(...Object.keys(bindings), `let uiBusy=0, dashboardWorkspaces=[]; ${source}; return refresh;`)(...Object.values(bindings));
+  await refresh();
+  for (const id of ["docs", "main", "child"]) await (document.querySelector(`[data-workspace="${id}"] [aria-label^="Remove "]`) as any).onclick();
+  expect(calls).toEqual(["/api/hub/workspaces/docs/forget", "forget:main", "forget:child"]);
+});
+
+test("dashboard worktree live subscription follows dialog scope and page lifecycle without duplicate streams", () => {
+  const script = clientScript(htmlFor.dashboard());
+  const start = script.indexOf("function initDashboardWorktreeLive()");
+  expect(start).toBeGreaterThan(-1);
+  const source = script.slice(start, script.indexOf("async function refresh(force)", start));
+  const window = new EventTarget();
+  const document = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  const streams: FakeStream[] = [];
+  class FakeStream extends EventTarget {
+    closed = false;
+    constructor(readonly url: string) { super(); streams.push(this); }
+    close() { this.closed = true; }
+    send(ws: string) { this.dispatchEvent(Object.assign(new Event("live"), { data: JSON.stringify({ ws, topic: "worktrees", event: { kind: "data" } }) })); }
+  }
+  let invalidations = 0;
+  window.addEventListener("uatu:worktrees-invalidated", () => invalidations++);
+  new Function("window", "document", "EventSource", `${source}; initDashboardWorktreeLive();`)(window, document, FakeStream);
+  const open = (source: string) => {
+    const controller = new AbortController();
+    window.dispatchEvent(Object.assign(new Event("uatu:worktree-dialog-opened"), { detail: { source, signal: controller.signal } }));
+    return controller;
+  };
+  const first = open("main");
+  expect(new URL(streams[0]!.url, "http://hub").searchParams.get("subs")).toBe('[{"topic":"worktrees"}]');
+  streams[0]!.send("other"); streams[0]!.send("main");
+  expect(invalidations).toBe(1);
+  window.dispatchEvent(new Event("pageshow"));
+  expect(streams).toHaveLength(1);
+  document.visibilityState = "hidden"; document.dispatchEvent(new Event("visibilitychange"));
+  expect(streams[0]!.closed).toBe(true);
+  document.visibilityState = "visible"; document.dispatchEvent(new Event("visibilitychange"));
+  window.dispatchEvent(new Event("pageshow"));
+  expect(streams).toHaveLength(2);
+  const second = open("second");
+  first.abort(); streams[1]!.send("main"); streams[2]!.send("second");
+  expect(invalidations).toBe(2);
+  expect(streams.filter(stream => !stream.closed)).toHaveLength(1);
+  second.abort(); window.dispatchEvent(new Event("online"));
+  expect(streams.filter(stream => !stream.closed)).toHaveLength(0);
+});
+
 function clientScript(html: string): string {
   const start = html.indexOf("<script>");
   const end = html.lastIndexOf("</script>");
   return start >= 0 && end > start ? html.slice(start + "<script>".length, end) : "";
 }
+
+test("dashboard retries failed live streams with capped backoff and cancels recovery on lifecycle teardown", () => {
+  const script = clientScript(htmlFor.dashboard());
+  const start = script.indexOf("function initDashboardWorktreeLive()");
+  const source = script.slice(start, script.indexOf("async function refresh(force)", start));
+  const window = new EventTarget();
+  const document = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  const timers = new Map<number, { callback: () => void; delay: number }>();
+  let nextTimer = 0;
+  const streams: FakeStream[] = [];
+  class FakeStream extends EventTarget {
+    readyState = 0;
+    constructor(_url: string) { super(); streams.push(this); }
+    close() { this.readyState = 2; }
+    fail() { this.readyState = 2; this.dispatchEvent(new Event("error")); }
+  }
+  new Function("window", "document", "EventSource", "setTimeout", "clearTimeout", `${source}; initDashboardWorktreeLive();`)(
+    window, document, FakeStream,
+    (callback: () => void, delay: number) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
+    (id: number) => timers.delete(id),
+  );
+  const controller = new AbortController();
+  window.dispatchEvent(Object.assign(new Event("uatu:worktree-dialog-opened"), { detail: { source: "main", signal: controller.signal } }));
+  const tick = (delay: number) => {
+    expect(timers.size).toBe(1);
+    const [id, timer] = [...timers][0]!;
+    expect(timer.delay).toBe(delay);
+    timers.delete(id); timer.callback();
+    expect(streams.filter(stream => stream.readyState !== 2)).toHaveLength(1);
+  };
+  for (const delay of [1000, 2000, 4000, 8000, 15000, 15000]) {
+    streams.at(-1)!.fail(); streams.at(-1)!.dispatchEvent(new Event("error"));
+    window.dispatchEvent(new Event("online")); window.dispatchEvent(new Event("pageshow"));
+    tick(delay);
+  }
+  streams.at(-1)!.dispatchEvent(new Event("open"));
+  streams.at(-1)!.fail(); tick(1000);
+  streams.at(-1)!.fail();
+  document.visibilityState = "hidden"; document.dispatchEvent(new Event("visibilitychange"));
+  expect(timers.size).toBe(0);
+  expect(streams.every(stream => stream.readyState === 2)).toBe(true);
+  document.visibilityState = "visible"; document.dispatchEvent(new Event("visibilitychange"));
+  streams.at(-1)!.fail(); window.dispatchEvent(new Event("pagehide"));
+  expect(timers.size).toBe(0);
+  const count = streams.length;
+  window.dispatchEvent(new Event("online"));
+  expect(streams).toHaveLength(count);
+  window.dispatchEvent(new Event("pageshow"));
+  expect(streams).toHaveLength(count + 1);
+  // A terminal CLOSED source without another error must not block wake-up.
+  streams.at(-1)!.readyState = 2;
+  window.dispatchEvent(new Event("online"));
+  expect(streams).toHaveLength(count + 2);
+  streams.at(-1)!.fail(); controller.abort();
+  expect(timers.size).toBe(0);
+  window.dispatchEvent(new Event("pageshow"));
+  expect(streams.every(stream => stream.readyState === 2)).toBe(true);
+});
 
 function folderMutationFunction(html: string) {
   const script = clientScript(html);
@@ -162,7 +301,7 @@ describe("authenticated Hub pages", () => {
     expect(html).toContain('return parts.join(" · ") || "⊘ No credentials assigned"');
     expect(html).toContain('parts.push("🔑 Auth: " + authentication.join(", "))');
     expect(html).toContain('parts.push("✎ Signing: " + signing.join(", "))');
-    expect(html).toContain("if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(");
+    expect(html).toContain("if (!hasCredentialAssignments(workspacePolicyOwner(w).credentialAssignments) && !confirm(");
     expect(html).toContain("Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?");
     const startFlow = html.indexOf("async function startRegisteredWorkspace");
     expect(startFlow).toBeGreaterThan(0);

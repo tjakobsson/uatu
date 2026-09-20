@@ -531,6 +531,81 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     await page.close();
   });
 
+  test("dashboard live inventory refreshes the open register dialog", async ({ hub, hubContext }, info) => {
+    test.setTimeout(90_000);
+    const parent = hub.workspaces.find(workspace => workspace.id === parentId)!;
+    const page = await hubContext.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    // Observe native EventSources without replacing their transport or events.
+    // Keeping the instances also proves Cancel releases the dashboard stream.
+    await page.addInitScript(() => {
+      const sources: EventSource[] = [];
+      let messages = 0;
+      const NativeEventSource = window.EventSource;
+      window.EventSource = class extends NativeEventSource {
+        constructor(url: string | URL, options?: EventSourceInit) {
+          super(url, options);
+          if (new URL(String(url), location.href).pathname === "/api/hub/live") {
+            sources.push(this);
+            this.addEventListener("live", () => { messages += 1; });
+          }
+        }
+      };
+      Object.assign(window, { dashboardLiveProbe: () => ({
+        urls: sources.map(source => source.url),
+        states: sources.map(source => source.readyState),
+        messages,
+      }) });
+    });
+    const live = () => page.evaluate(() => (window as unknown as {
+      dashboardLiveProbe: () => { urls: string[]; states: number[]; messages: number };
+    }).dashboardLiveProbe());
+
+    await page.goto(hub.origin);
+    await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
+    await page.getByRole("menuitem", { name: "Register worktree…", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "Register worktree", exact: true })).toBeVisible();
+    await expect.poll(async () => (await live()).states).toEqual([1]);
+    await expect.poll(async () => (await live()).messages).toBeGreaterThan(0);
+    const before = await live();
+    const subscription = new URL(before.urls[0]!);
+    expect(subscription.searchParams.get("ws")).toBe(parentId);
+    expect(JSON.parse(subscription.searchParams.get("subs")!)).toContainEqual({ topic: "worktrees" });
+    const originalDialog = await dialog.elementHandle();
+    const originalUrl = page.url();
+    let navigations = 0;
+    page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations += 1; });
+
+    // No inventory API calls from the test after opening: only Git changes
+    // disk, and the real Hub live subscription must invalidate the open UI.
+    const external = path.join(path.dirname(parent.path), `${parentId}-dashboard-live`);
+    await git(parent.path, ["worktree", "add", "-b", "live/dashboard-external", external, "main"]);
+    const card = dialog.locator("[data-workspace]", { hasText: "live/dashboard-external" });
+    await expect(card).toBeVisible({ timeout: 15_000 });
+    await expect(card.getByRole("button", { name: "Register workspace", exact: true })).toBeVisible();
+    await expect(card.locator(".wt-card-path")).toHaveAttribute("title", external);
+    expect(await originalDialog!.evaluate(node => node === document.querySelector("dialog[open]"))).toBe(true);
+    expect(page.url()).toBe(originalUrl);
+    expect(navigations).toBe(0);
+    const after = await live();
+    expect(after.messages).toBeGreaterThan(before.messages);
+    expect(after.states).toEqual([1]);
+    await captureScreenshot(page, info, `worktree-ui-${label}-dashboard-live-register`);
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(async () => (await live()).states).toEqual([2]);
+    await saveEvidence(info, `worktree-ui-${label}-dashboard-live.json`, JSON.stringify({
+      realHub: true, realGit: true, viewport: touch ? "390x844 touch" : "1440x1000 desktop",
+      dialogEntryPoint: "Hub dashboard", liveEndpoint: "/api/hub/live",
+      openDialogRefreshedWithoutNavigation: true, streamCount: after.states.length,
+      streamClosedOnCancel: true,
+    }, null, 2));
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
   test("a committed operation elsewhere refreshes the open register list without touching this page's context", async ({ hub, hubContext }, info) => {
     test.setTimeout(90_000);
     const parent = hub.workspaces.find(workspace => workspace.id === parentId)!;

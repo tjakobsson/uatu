@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
+import { dashboardPage } from "../hub/pages";
 
 import { bindWorktreeBranches, openWorktreeDialog, openWorktreeFork, worktreeProvenanceLabel, worktreeRowFrom, type WorktreeDialogOptions } from "./worktree-dialog";
 
@@ -105,6 +106,7 @@ function harness(routes: Record<string, Handler>, options: { pathname?: string }
   // linkedom rejects a native Event on its own targets; the DOM the module
   // dispatches into must own the constructor too.
   setGlobal("Event", (window as unknown as Record<string, unknown>).Event);
+  setGlobal("CustomEvent", (window as unknown as Record<string, unknown>).CustomEvent);
   setGlobal("innerWidth", 1200);
   setGlobal("innerHeight", 900);
   setGlobal("location", {
@@ -153,6 +155,43 @@ async function open(h: Harness, options: Partial<WorktreeDialogOptions> = {}): P
   await settle();
 }
 
+test("dashboard script refreshes the open Register list through its one live stream and leaves creation drafts untouched", async () => {
+  let discovered = false;
+  const h = harness({ "/": () => inventory([mainCheckout(), ...(discovered ? [checkout({ registered: false, workspaceId: undefined, ownership: "external" })] : [])]) });
+  const streams: { closed: boolean; emit: () => void }[] = [];
+  class Stream {
+    closed = false;
+    listener?: (event: { data: string }) => void;
+    constructor() { streams.push(this); }
+    addEventListener(_name: string, listener: (event: { data: string }) => void) { this.listener = listener; }
+    close() { this.closed = true; }
+    emit() { this.listener?.({ data: JSON.stringify({ ws: "atlas", topic: "worktrees", event: { kind: "data" } }) }); }
+  }
+  const script = dashboardPage("test");
+  const start = script.indexOf("function initDashboardWorktreeLive()");
+  new Function("window", "document", "EventSource", `${script.slice(start, script.indexOf("async function refresh(force)", start))}; initDashboardWorktreeLive();`)(h.window, h.document, Stream);
+  await open(h);
+  expect(streams).toHaveLength(1);
+  expect(h.requests).toHaveLength(1);
+  discovered = true;
+  streams[0]!.emit(); streams[0]!.emit();
+  await settle();
+  expect(h.requests).toHaveLength(3);
+  expect(h.text()).toContain("feature/a");
+  (h.dialog() as unknown as { close(): void }).close();
+  expect(streams[0]!.closed).toBe(true);
+  await open(h, { view: "create", mode: "new" });
+  const input = h.main().querySelector<HTMLInputElement>('input[name="branch"]')!;
+  expect(input).toBeTruthy();
+  input.value = "keep/my-draft";
+  const count = h.requests.length;
+  streams[1]!.emit(); streams[1]!.emit();
+  await settle();
+  expect(input.value).toBe("keep/my-draft");
+  expect(input.isConnected).toBe(true);
+  expect(h.requests).toHaveLength(count);
+});
+
 describe("inventory row ownership", () => {
   test("preserves the shared ownership enum and treats unknown values as uncertain", () => {
     for (const ownership of ["main", "uatu", "external", "uncertain"] as const) {
@@ -199,14 +238,14 @@ describe("view navigation requests", () => {
     h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
     release();
     await settle();
-    expect(h.requests).toHaveLength(2);
+    expect(h.requests).toHaveLength(3);
     expect(h.text()).toContain("Request failed. Nothing was retried automatically.");
     h.routes["/"] = () => inventory(rows);
     h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
     await settle();
     h.click(h.main().querySelector('[data-action="view"]'));
     await settle();
-    expect(h.requests).toHaveLength(4);
+    expect(h.requests).toHaveLength(5);
     expect(h.main().querySelector('form[data-operation="register"]')).toBeTruthy();
   });
 
@@ -224,6 +263,7 @@ describe("view navigation requests", () => {
     h.click(buttons[0]);
     h.click(buttons[0]);
     h.click(buttons[1]);
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
     release();
     await settle();
     expect(h.requests.filter(request => request.path === "/")).toHaveLength(2);
@@ -974,6 +1014,37 @@ describe("starting and reopening", () => {
 });
 
 describe("live invalidation", () => {
+  test("closing a discover dialog cancels its queued trailing read", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const h = harness({ "/": async () => { await gate; return inventory([mainCheckout()]); } });
+    await open(h);
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
+    (h.dialog() as unknown as { close(): void }).close();
+    release();
+    await settle();
+    expect(h.requests).toHaveLength(1);
+    expect(h.dialog()).toBeNull();
+  });
+
+  test("invalidations during an old discover read coalesce a trailing read without a third event", async () => {
+    const old = inventory([mainCheckout()]);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const h = harness({ "/": async () => { await gate; return old; } });
+    await open(h);
+    h.routes["/"] = () => inventory([mainCheckout(), checkout({ workspaceId: undefined, registered: false, branch: "newer/branch" })]);
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
+    expect(h.requests).toHaveLength(1);
+    release();
+    await settle();
+    expect(h.requests).toHaveLength(2);
+    expect(h.text()).toContain("newer/branch");
+    await settle();
+    expect(h.requests).toHaveLength(2);
+  });
+
   test("reloads an idle register list and nothing else", async () => {
     let reads = 0;
     const unregistered = checkout({ checkoutId: "c-ext", workspaceId: undefined, registered: false, ownership: "external", branch: "agent/live", sourceRef: undefined });
