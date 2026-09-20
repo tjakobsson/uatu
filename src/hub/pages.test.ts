@@ -66,7 +66,7 @@ test("dashboard preserves ordinary-folder removal and routes repository removal 
   expect(calls).toEqual(["/api/hub/workspaces/docs/forget", "forget:main", "forget:child"]);
 });
 
-test("dashboard worktree live subscription follows dialog scope and page lifecycle without duplicate streams", () => {
+test("dashboard worktree live subscription recovers on visibility-only return before and during a dialog", () => {
   const script = clientScript(htmlFor.dashboard());
   const start = script.indexOf("function initDashboardWorktreeLive()");
   expect(start).toBeGreaterThan(-1);
@@ -88,7 +88,13 @@ test("dashboard worktree live subscription follows dialog scope and page lifecyc
     window.dispatchEvent(Object.assign(new Event("uatu:worktree-dialog-opened"), { detail: { source, signal: controller.signal } }));
     return controller;
   };
+  // Standalone iOS can return from an unpersisted pagehide with only a
+  // visibilitychange. It must not permanently disable dialogs opened later.
+  document.visibilityState = "hidden"; document.dispatchEvent(new Event("visibilitychange"));
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: false }));
+  document.visibilityState = "visible"; document.dispatchEvent(new Event("visibilitychange"));
   const first = open("main");
+  expect(streams).toHaveLength(1);
   expect(new URL(streams[0]!.url, "http://hub").searchParams.get("subs")).toBe('[{"topic":"worktrees"}]');
   streams[0]!.send("other"); streams[0]!.send("main");
   expect(invalidations).toBe(1);
@@ -96,7 +102,9 @@ test("dashboard worktree live subscription follows dialog scope and page lifecyc
   expect(streams).toHaveLength(1);
   document.visibilityState = "hidden"; document.dispatchEvent(new Event("visibilitychange"));
   expect(streams[0]!.closed).toBe(true);
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: false }));
   document.visibilityState = "visible"; document.dispatchEvent(new Event("visibilitychange"));
+  expect(streams).toHaveLength(2);
   window.dispatchEvent(new Event("pageshow"));
   expect(streams).toHaveLength(2);
   const second = open("second");
@@ -105,6 +113,11 @@ test("dashboard worktree live subscription follows dialog scope and page lifecyc
   expect(streams.filter(stream => !stream.closed)).toHaveLength(1);
   second.abort(); window.dispatchEvent(new Event("online"));
   expect(streams.filter(stream => !stream.closed)).toHaveLength(0);
+  const reopened = open("main");
+  streams[3]!.send("main");
+  expect(invalidations).toBe(3);
+  expect(streams.filter(stream => !stream.closed)).toHaveLength(1);
+  reopened.abort();
 });
 
 function clientScript(html: string): string {
@@ -159,6 +172,8 @@ test("dashboard retries failed live streams with capped backoff and cancels reco
   const count = streams.length;
   window.dispatchEvent(new Event("online"));
   expect(streams).toHaveLength(count);
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(streams).toHaveLength(count + 1);
   window.dispatchEvent(new Event("pageshow"));
   expect(streams).toHaveLength(count + 1);
   // A terminal CLOSED source without another error must not block wake-up.

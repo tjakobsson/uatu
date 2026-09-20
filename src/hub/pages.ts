@@ -1652,7 +1652,13 @@ function initDashboardWorktreeLive() {
     }, { once: true });
     resume();
   });
-  document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" ? suspend() : resume());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") { suspend(); return; }
+    // Standalone iOS can wake after pagehide without emitting pageshow.
+    // Visible is itself a return signal, even if no dialog was open before it.
+    pageHidden = false;
+    resume();
+  });
   window.addEventListener("pagehide", () => { pageHidden = true; suspend(); });
   window.addEventListener("pageshow", () => { pageHidden = false; resume(); });
   window.addEventListener("online", resume);

@@ -179,19 +179,30 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     await expect(forkControl).toBeVisible();
     // F2: the fork control sits at the group header's trailing edge, the
     // same edge a row's status text ends on — not beside the name.
-    const groupBox = (await group.boundingBox())!;
-    const forkBox = (await forkControl.boundingBox())!;
-    expect(forkBox.x).toBeGreaterThan(groupBox.x + groupBox.width / 2);
-    expect((groupBox.x + groupBox.width) - (forkBox.x + forkBox.width)).toBeLessThan(10);
+    // Opening the picker starts a background refresh; inventory/activity
+    // updates replace its children too. Re-resolve and measure on each try
+    // rather than assuming the earlier visibility check pins these nodes.
+    await expect(async () => {
+      const groupBox = await group.boundingBox();
+      const forkBox = await forkControl.boundingBox();
+      expect(groupBox).not.toBeNull();
+      expect(forkBox).not.toBeNull();
+      expect(forkBox!.x).toBeGreaterThan(groupBox!.x + groupBox!.width / 2);
+      expect((groupBox!.x + groupBox!.width) - (forkBox!.x + forkBox!.width)).toBeLessThan(10);
+    }).toPass({ timeout: 10_000 });
     const mainRow = page.locator(`#hub-menu .hub-menu-item[data-workspace-id="${parentId}"]`);
     await expect(mainRow).toContainText("main checkout");
     const childRow = page.locator(`#hub-menu .hub-menu-item[data-workspace-id="${child.workspaceId}"]`);
     await expect(childRow.locator(".hub-menu-provenance")).toHaveText("from main");
     // F4: the child shares the main checkout's left edge — the group header
     // above does the grouping, so nothing is indented.
-    const mainLabelBox = (await mainRow.locator(".hub-menu-label").boundingBox())!;
-    const childLabelBox = (await childRow.locator(".hub-menu-label").boundingBox())!;
-    expect(Math.abs(childLabelBox.x - mainLabelBox.x)).toBeLessThan(1);
+    await expect(async () => {
+      const mainLabelBox = await mainRow.locator(".hub-menu-label").boundingBox();
+      const childLabelBox = await childRow.locator(".hub-menu-label").boundingBox();
+      expect(mainLabelBox).not.toBeNull();
+      expect(childLabelBox).not.toBeNull();
+      expect(Math.abs(childLabelBox!.x - mainLabelBox!.x)).toBeLessThan(1);
+    }).toPass({ timeout: 10_000 });
     // F3: consecutive repository groups are divided from one another; the
     // first carries no divider of its own (the menu's dashboard divider is
     // already above it).
@@ -531,7 +542,7 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     await page.close();
   });
 
-  test("dashboard live inventory refreshes the open register dialog", async ({ hub, hubContext }, info) => {
+  test("dashboard live inventory refreshes the open register dialog after a visibility-only return", async ({ hub, hubContext }, info) => {
     test.setTimeout(90_000);
     const parent = hub.workspaces.find(workspace => workspace.id === parentId)!;
     const page = await hubContext.newPage();
@@ -563,6 +574,21 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     }).dashboardLiveProbe());
 
     await page.goto(hub.origin);
+    // The standalone iOS lifecycle can keep the document after unpersisted
+    // pagehide, then signal its return through visibilitychange alone.
+    await page.evaluate(() => {
+      const previous = Object.getOwnPropertyDescriptor(document, "visibilityState");
+      try {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      } finally {
+        if (previous) Object.defineProperty(document, "visibilityState", previous);
+        else Reflect.deleteProperty(document, "visibilityState");
+      }
+    });
     await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
     await page.getByRole("menuitem", { name: "Register worktree…", exact: true }).click();
     const dialog = page.getByRole("dialog");
@@ -599,6 +625,7 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     await saveEvidence(info, `worktree-ui-${label}-dashboard-live.json`, JSON.stringify({
       realHub: true, realGit: true, viewport: touch ? "390x844 touch" : "1440x1000 desktop",
       dialogEntryPoint: "Hub dashboard", liveEndpoint: "/api/hub/live",
+      visibilityOnlyReturnBeforeOpen: true,
       openDialogRefreshedWithoutNavigation: true, streamCount: after.states.length,
       streamClosedOnCancel: true,
     }, null, 2));
