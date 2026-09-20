@@ -415,7 +415,21 @@ export class WorktreeService {
 
     // Stamp the new tree before its identity is recorded anywhere, so a
     // later tree at this path can never inherit it (worktree-git).
-    await stampCheckoutIdentity(plan.destination, { ...this.options.git, run: this.run }).catch(() => undefined);
+    try {
+      await stampCheckoutIdentity(plan.destination, { ...this.options.git, run: this.run });
+    } catch {
+      // Git already created the tree. Keep its files and the creating intent,
+      // but never persist an unstamped, path-derived identity as ownership.
+      // Recovery/retry must refuse this unverified intent, not adopt whatever
+      // later occupies the destination by stamping it on retry.
+      return {
+        ok: false,
+        operationId,
+        kind: "create",
+        phase: "creating",
+        error: WorktreeOperationError.of("identity-uncertain", "The new checkout's identity could not be stamped. Its files are retained; reconcile it outside Uatu before retrying.", { retry: "refresh", phase: "creating" }).detail,
+      };
+    }
     const inspection = await inspectCheckout(plan.destination, { ...this.options.git, run: this.run });
     if (!inspection.present || !inspection.identityReadable || !inspection.identity) {
       return {
@@ -718,7 +732,7 @@ export class WorktreeService {
     const clear = async () => { await this.options.journal.clear(); };
     // Held in an object: the closure below advances it, and the catch reads it.
     // `retained` marks a journal kept on purpose for recovery to reconcile.
-    const progress: { phase: WorktreeDeleteIntent["phase"]; retained: boolean } = { phase: "fencing", retained: false };
+    const progress: { phase: WorktreeDeleteIntent["phase"]; retained: boolean; markerWritten: boolean } = { phase: "fencing", retained: false, markerWritten: false };
     try {
       await this.options.journal.advance(operationId, "fencing");
       if (request.stop === true) {
@@ -744,8 +758,27 @@ export class WorktreeService {
         // `git worktree remove` deletes with it: its survival is what proves
         // "not removed" even when a new tree reuses the same name.
         await writeRemovalMarker(administrativeDirectory, operationId);
+        progress.markerWritten = true;
         progress.phase = "removing";
         await this.options.journal.advance(operationId, "removing");
+        // Marker/journal persistence yields to external writers. Revalidate
+        // after those writes: non-force Git removal protects tracked and
+        // untracked changes, but WILL remove ignored files. This narrows the
+        // preparation race; it cannot atomically fence external writers after
+        // our final probe or during Git's removal.
+        const finalView = await this.repositoryView(request.sourceWorkspaceId);
+        // Ownership/registration remain fenced; probe the already-resolved
+        // path directly rather than inspecting every unrelated checkout again.
+        const finalIdentity = await inspectCheckout(checkout.path, { ...this.options.git, run: this.run });
+        const sameCheckout = finalIdentity.present && finalIdentity.identityReadable
+          && finalIdentity.identity?.checkoutId === checkout.checkoutId
+          && finalIdentity.identity.repositoryId === checkout.repositoryId;
+        const blocker = sameCheckout
+          ? await inspectRemovalSafety({ run: this.run, checkoutPath: checkout.path, records: finalView.records })
+          : undefined;
+        if (!sameCheckout || blocker) {
+          throw WorktreeOperationError.of(blocker?.detail.code ?? "identity-uncertain", `The worktree changed while deletion was prepared. ${blocker?.detail.message ?? "Its identity could not be verified. Nothing was removed."}`, { retry: blocker?.detail.retry ?? "refresh", phase: "removing" });
+        }
         const removed = await runWorktreeRemove(this.run, current.mainPath, checkout.path);
         const after = await inspectCheckout(checkout.path, { ...this.options.git, run: this.run });
         if (after.present && !after.identityReadable) {
@@ -766,8 +799,7 @@ export class WorktreeService {
             throw WorktreeOperationError.of("identity-uncertain", "The worktree's location changed during removal. Nothing more was removed; refresh the inventory.", { retry: "refresh", phase: "removing" });
           }
           // Still ours: nothing was removed, so nothing is left to recover.
-          if (stillOurs) await clearRemovalMarker(administrativeDirectory);
-          else progress.retained = true;
+          if (!stillOurs) progress.retained = true;
           throw removed.ok
             ? WorktreeOperationError.of("conflict", "Git reported success but the worktree is still present. Nothing was unregistered.", { retry: "refresh", phase: "removing" })
             : removed.error;
@@ -794,7 +826,15 @@ export class WorktreeService {
       const { workspaceId: _unregistered, ...removed } = checkout;
       return { ok: true, operationId, kind: "delete", phase: "complete", checkout: { ...removed, registered: false, running: false }, registered: false, started: false };
     } catch (error) {
-      if (!progress.retained) await clear().catch(() => undefined);
+      if (!progress.retained) {
+        // Keep the proof that removal did not happen until the journal is
+        // durably gone. This covers final-probe exceptions and Git refusals
+        // too; if clearing fails, recovery still has the marker it needs.
+        // Intentionally retained/uncertain outcomes must keep both records.
+        await clear().then(async () => {
+          if (progress.markerWritten) await clearRemovalMarker(administrativeDirectory);
+        }).catch(() => undefined);
+      }
       if (progress.phase === "stopping" && !(error instanceof WorktreeOperationError)) {
         return refuse(WorktreeOperationError.of("stop-failed", "Its Uatu sessions could not be stopped, so nothing was removed.", { retry: "retry-delete", phase: "stopping" }), "stopping");
       }

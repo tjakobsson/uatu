@@ -196,7 +196,9 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
       name: main ? sourceName || branch || "Repository" : branch || "detached",
       path: String(checkout.path ?? ""),
       branch,
-      ownership: (checkout.ownership as WorktreeDialogRow["ownership"]) ?? "uncertain",
+      ownership: checkout.ownership === "main" || checkout.ownership === "uatu"
+        || checkout.ownership === "external" || checkout.ownership === "uncertain"
+        ? checkout.ownership : "uncertain",
       registered: checkout.registered === true,
       running: checkout.running === true,
       ...(checkout.availability === "missing" || checkout.availability === "replaced"
@@ -601,6 +603,9 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     const close = () => dialog.close();
 
     let busy = false;
+    // Read-only navigation is single-flight too, but unlike a mutation it
+    // must leave Cancel/Escape available while inventory or preflight waits.
+    let navigating = false;
     let revision = 0;
     let checkouts: WorktreeCheckout[] = [];
     let refs: { local: string[]; remote: string[] } = { local: [], remote: [] };
@@ -735,18 +740,24 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     }
 
     async function go(next: WorktreeDialogOptions["view"], id?: string, nextMode?: "new" | "existing"): Promise<void> {
-      view = next;
-      selectedId = id;
-      mode = nextMode;
-      draft = undefined;
-      message = undefined;
-      error = false;
-      conflictId = undefined;
-      requiresStop = false;
-      blocked = false;
-      await loadInventory();
-      if (view === "delete") await loadPreflight();
-      if (!controller.signal.aborted) render();
+      if (busy || navigating || controller.signal.aborted) return;
+      navigating = true;
+      try {
+        view = next;
+        selectedId = id;
+        mode = nextMode;
+        draft = undefined;
+        message = undefined;
+        error = false;
+        conflictId = undefined;
+        requiresStop = false;
+        blocked = false;
+        await loadInventory();
+        if (!controller.signal.aborted && view === "delete") await loadPreflight();
+        if (!controller.signal.aborted) render();
+      } finally {
+        navigating = false;
+      }
     }
 
     function startBusy(pending: string): HTMLElement {
@@ -1018,10 +1029,10 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
     main.addEventListener("click", event => {
       const target = event.target as Element;
       if (target.closest("[data-cancel]")) { if (!busy) close(); return; }
-      if (target.closest("[data-fetch]")) { if (!busy) void submitFetch(); return; }
+      if (target.closest("[data-fetch]")) { if (!busy && !navigating) void submitFetch(); return; }
       const action = target.closest<HTMLElement>("[data-action]");
       if (action) {
-        if (busy) return;
+        if (busy || navigating) return;
         const kind = action.dataset.action;
         // "Retry refresh" re-reads authoritative inventory and re-renders
         // the view the user is in (it is reachable from an occupancy
@@ -1039,7 +1050,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
       }
       const link = target.closest<HTMLAnchorElement>("a[data-opening]");
       if (!link) return;
-      if (busy) { event.preventDefault(); return; }
+      if (busy || navigating) { event.preventDefault(); return; }
       busy = true;
       const status = main.querySelector<HTMLElement>("#operation-status")!;
       status.hidden = false;
@@ -1049,7 +1060,7 @@ export function installWorktreeDialog<T extends Record<string, unknown>>(
 
     main.addEventListener("submit", event => {
       event.preventDefault();
-      if (busy) return;
+      if (busy || navigating) return;
       const form = event.target as HTMLFormElement;
       const operation = form.dataset.operation;
       if (operation === "create") void submitCreate(form);

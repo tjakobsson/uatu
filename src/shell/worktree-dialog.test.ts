@@ -10,7 +10,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { bindWorktreeBranches, openWorktreeDialog, openWorktreeFork, worktreeProvenanceLabel, type WorktreeDialogOptions } from "./worktree-dialog";
+import { bindWorktreeBranches, openWorktreeDialog, openWorktreeFork, worktreeProvenanceLabel, worktreeRowFrom, type WorktreeDialogOptions } from "./worktree-dialog";
 
 const API = "/api/hub/worktrees";
 
@@ -152,6 +152,104 @@ async function open(h: Harness, options: Partial<WorktreeDialogOptions> = {}): P
   openWorktreeDialog({ api: API, source: { id: "atlas", name: "Atlas" }, view: "discover", ...options } as WorktreeDialogOptions, h.anchor);
   await settle();
 }
+
+describe("inventory row ownership", () => {
+  test("preserves the shared ownership enum and treats unknown values as uncertain", () => {
+    for (const ownership of ["main", "uatu", "external", "uncertain"] as const) {
+      expect(worktreeRowFrom(checkout({ ownership }), "Atlas").ownership).toBe(ownership);
+    }
+    for (const ownership of ["owned", "UATU", "", 1, false, {}, ["uatu"], null, undefined]) {
+      const row = worktreeRowFrom(checkout({ ownership }), "Atlas");
+      expect(row.ownership).toBe("uncertain");
+      expect(worktreeProvenanceLabel(row)).toBe("Ownership uncertain");
+    }
+  });
+});
+
+describe("view navigation requests", () => {
+  for (const pending of ["inventory", "preflight"] as const) {
+    test(`Cancel and Escape remain available during deletion ${pending}`, async () => {
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const h = harness({
+        "/": async () => { if (pending === "inventory") await gate; return inventory([mainCheckout(), checkout()]); },
+        "/preflight-delete": async () => { await gate; return { ok: true, checkout: checkout(), requiresStop: false }; },
+      });
+      await open(h, { view: "delete", id: "atlas-child" });
+      const cancel = new h.window.Event("cancel", { cancelable: true });
+      h.dialog()!.dispatchEvent(cancel);
+      expect(cancel.defaultPrevented).toBe(false);
+      h.click(h.button("Cancel"));
+      expect(h.dialog()).toBeNull();
+      release();
+      await settle();
+      expect(h.requests.map(request => request.path)).toEqual(pending === "inventory" ? ["/"] : ["/", "/preflight-delete"]);
+      expect(h.dialog()).toBeNull();
+    });
+  }
+
+  test("a failed navigation read releases the fence for a later inventory refresh and registration", async () => {
+    const rows = [mainCheckout(), checkout({ workspaceId: undefined, registered: false })];
+    const h = harness({ "/": () => inventory(rows) });
+    await open(h);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.routes["/"] = async () => { await gate; throw new Error("offline"); };
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
+    release();
+    await settle();
+    expect(h.requests).toHaveLength(2);
+    expect(h.text()).toContain("Request failed. Nothing was retried automatically.");
+    h.routes["/"] = () => inventory(rows);
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
+    await settle();
+    h.click(h.main().querySelector('[data-action="view"]'));
+    await settle();
+    expect(h.requests).toHaveLength(4);
+    expect(h.main().querySelector('form[data-operation="register"]')).toBeTruthy();
+  });
+
+  test("rapid registration navigation reads inventory once and keeps the first checkout selected", async () => {
+    const rows = [mainCheckout(), checkout({ workspaceId: undefined, registered: false }), checkout({ checkoutId: "checkout-other", workspaceId: undefined, branch: "feature/b", registered: false })];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const h = harness({
+      "/": () => inventory(rows),
+      "/register": () => ({ ok: false, operationId: "op", kind: "register", error: { code: "registration-failed", message: "Registration failed. Retry registration.", retry: "retry-registration" } }),
+    });
+    await open(h);
+    h.routes["/"] = async () => { await gate; return inventory(rows); };
+    const buttons = h.main().querySelectorAll('[data-action="view"]');
+    h.click(buttons[0]);
+    h.click(buttons[0]);
+    h.click(buttons[1]);
+    release();
+    await settle();
+    expect(h.requests.filter(request => request.path === "/")).toHaveLength(2);
+    expect(h.text()).toContain("Atlas / feature/a");
+    let finishRegistration!: () => void;
+    const registrationGate = new Promise<void>(resolve => { finishRegistration = resolve; });
+    const register = h.routes["/register"]!;
+    h.routes["/register"] = async body => { await registrationGate; return register(body); };
+    h.submit();
+    h.submit();
+    h.click(h.button("Cancel"));
+    const cancel = new h.window.Event("cancel", { cancelable: true });
+    h.dialog()!.dispatchEvent(cancel);
+    expect(cancel.defaultPrevented).toBe(true);
+    h.window.dispatchEvent(new h.window.Event("uatu:worktrees-invalidated"));
+    expect(h.requests).toHaveLength(3);
+    expect(h.dialog()).not.toBeNull();
+    finishRegistration();
+    await settle();
+    expect(h.requests.find(request => request.path === "/register")?.body)
+      .toEqual({ sourceWorkspaceId: "atlas", reference: "checkout-child", start: false });
+    expect(h.text()).toContain("Registration failed. Retry registration.");
+    h.click(h.button("Cancel"));
+    expect(h.dialog()).toBeNull();
+  });
+});
 
 describe("response contract boundary", () => {
   for (const confirmation of [false, true]) {

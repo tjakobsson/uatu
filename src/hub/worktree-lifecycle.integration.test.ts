@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, promises as fs } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +20,7 @@ import { WorktreeJournal, WorktreeProvenanceStore, removalMarkerPresent } from "
 import { createOnboardingWorktreeRegistrar } from "./worktree-registrar";
 import { WORKTREE_API_PATH } from "./worktree-api";
 import { WorktreeService } from "./worktree-service";
+import { CHECKOUT_IDENTITY_FILE } from "./worktree-git";
 import { parseWorktreeDeletionPreflight, parseWorktreeInventory, parseWorktreeOperationResult, type WorktreeInventory } from "../shared/worktree-contract";
 import { parseLiveEnvelope, type LiveEnvelope } from "../shared/live-protocol";
 import { parseHubState } from "../shell/hub-nav";
@@ -211,6 +212,160 @@ afterAll(async () => {
 });
 
 const auth = (init: RequestInit = {}): RequestInit => ({ ...init, headers: { ...(init.headers as Record<string, string>), cookie, origin } });
+
+test("stamp write failure retains an unverified checkout without ownership or registration", async () => {
+  const originalWrite = fs.writeFile.bind(fs);
+  let failedWrites = 0;
+  const write = spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+    if (String(args[0]).endsWith(`/${CHECKOUT_IDENTITY_FILE}`)) {
+      failedWrites++;
+      throw Object.assign(new Error("simulated stamp write failure"), { code: "EACCES" });
+    }
+    return originalWrite(...args);
+  });
+  try {
+    const created = await service.create("reviewer", { sourceWorkspaceId: atlasId, mode: "new-branch", branch: "stamp-failure", base: { kind: "local", ref: "main" }, start: true });
+    expect(failedWrites).toBe(1);
+    expect(created.ok).toBe(false);
+    if (created.ok) throw new Error("must not register an unstamped checkout");
+    expect(created.error.code).toBe("identity-uncertain");
+    expect(created.phase).toBe("creating");
+    const pending = await journal.read();
+    if (pending?.kind !== "create") throw new Error("expected retained creation intent");
+    expect(pending.phase).toBe("creating");
+    expect(pending.checkoutId).toBeUndefined();
+    expect(existsSync(path.join(pending.destination, "README.md"))).toBe(true);
+    expect(registry.byPath(pending.destination)).toBeUndefined();
+    expect((await provenance.load()).some(record => record.path === pending.destination)).toBe(false);
+    expect((await service.retryRegistration("reviewer", created.operationId)).ok).toBe(false);
+    expect((await service.recover())?.kind).toBe("uncertain");
+    expect((await journal.read())?.operationId).toBe(created.operationId);
+    expect((await git(atlas, ["rev-parse", "--verify", "stamp-failure"])).trim()).not.toBe("");
+  } finally {
+    write.mockRestore();
+    // This fixture shares one journal; manual reconciliation is intentionally
+    // required for the retained, unverified checkout.
+    await journal.clear();
+    await git(atlas, ["worktree", "remove", "--", `${atlas}.worktrees/stamp-failure`]);
+  }
+});
+
+test.each(["ignored file", "changed ignore rules"])("ignored data appearing after the recheck (%s) refuses deletion prepared for a clean tree", async scenario => {
+  const branch = scenario === "ignored file" ? "late-ignored" : "late-ignore-rules";
+  const created = await service.create("reviewer", { sourceWorkspaceId: atlasId, mode: "new-branch", branch, base: { kind: "local", ref: "main" } });
+  if (!created.ok || !created.checkout?.workspaceId) throw new Error("expected created workspace");
+  const checkout = created.checkout;
+  const originalAdvance = journal.advance.bind(journal);
+  let injected = false;
+  let administrativeDirectory = "";
+  const filename = scenario === "ignored file" ? "precious.local" : "precious.scratch";
+  journal.advance = async (...args) => {
+    const intent = await originalAdvance(...args);
+    if (args[1] === "removing") {
+      if (intent.kind !== "delete") throw new Error("expected deletion intent");
+      administrativeDirectory = intent.administrativeDirectory;
+      await writeFile(path.join(checkout.path, filename), "keep this data\n");
+      if (scenario === "changed ignore rules") {
+        // The untracked change becomes ignored before Git can protect it.
+        await writeFile(path.join(atlas, ".git", "info", "exclude"), `${filename}\n`);
+      }
+      injected = true;
+    }
+    return intent;
+  };
+  try {
+    const deleted = await service.delete("reviewer", { sourceWorkspaceId: atlasId, reference: checkout.workspaceId! });
+    expect(injected).toBe(true);
+    expect(deleted.ok).toBe(false);
+    if (deleted.ok) throw new Error("must not delete newly ignored data");
+    expect(deleted.error.message).toContain("changed while deletion was prepared");
+    expect(deleted.error.message).toContain("ignored files");
+    expect(deleted.error.message).toContain("Move or delete them");
+    expect(deleted.phase).toBe("removing");
+    expect(deleted.error.phase).toBe(deleted.phase);
+    expect(await Bun.file(path.join(checkout.path, filename)).text()).toBe("keep this data\n");
+    expect(registry.byId(checkout.workspaceId!)).toBeDefined();
+    expect(await provenance.byCheckoutId(checkout.checkoutId)).toBeDefined();
+    expect(await journal.read()).toBeUndefined();
+    expect(await removalMarkerPresent(administrativeDirectory, deleted.operationId)).toBe(false);
+  } finally {
+    journal.advance = originalAdvance;
+    await rm(path.join(checkout.path, filename), { force: true });
+    await service.delete("reviewer", { sourceWorkspaceId: atlasId, reference: checkout.workspaceId! });
+  }
+});
+
+test.each(["blocker", "probe exception", "probe exception with successful cleanup"])("final deletion check %s cleans up safely", async scenario => {
+  const clearFails = scenario !== "probe exception with successful cleanup";
+  const branch = scenario === "blocker" ? "final-check-clear-failure" : clearFails ? "final-probe-clear-failure" : "final-probe-cleanup";
+  const created = await service.create("reviewer", { sourceWorkspaceId: atlasId, mode: "new-branch", branch, base: { kind: "local", ref: "main" } });
+  if (!created.ok || !created.checkout?.workspaceId) throw new Error("expected created workspace");
+  const checkout = created.checkout;
+  const originalAdvance = journal.advance.bind(journal);
+  const originalClear = journal.clear.bind(journal);
+  const originalById = registry.byId.bind(registry);
+  let throwProbe = false;
+  let failedClears = 0;
+  let administrativeDirectory = "";
+  journal.advance = async (...args) => {
+    const intent = await originalAdvance(...args);
+    if (args[1] === "removing") {
+      if (intent.kind !== "delete") throw new Error("expected deletion intent");
+      administrativeDirectory = intent.administrativeDirectory;
+      if (scenario === "blocker") await writeFile(path.join(checkout.path, "precious.local"), "keep this data\n");
+      else throwProbe = true;
+    }
+    return intent;
+  };
+  registry.byId = (...args) => {
+    if (throwProbe) {
+      throwProbe = false;
+      throw new Error("simulated final repository probe failure");
+    }
+    return originalById(...args);
+  };
+  journal.clear = async () => {
+    if (!clearFails) return originalClear();
+    failedClears++;
+    throw new Error("simulated journal cleanup failure");
+  };
+  try {
+    const deleted = await service.delete("reviewer", { sourceWorkspaceId: atlasId, reference: checkout.workspaceId! });
+    expect(deleted.ok).toBe(false);
+    expect(failedClears).toBe(clearFails ? 1 : 0);
+    if (!clearFails) {
+      expect(await journal.read()).toBeUndefined();
+      expect(await removalMarkerPresent(administrativeDirectory, deleted.operationId)).toBe(false);
+      expect(registry.byId(checkout.workspaceId!)).toBeDefined();
+      expect(existsSync(path.join(checkout.path, "README.md"))).toBe(true);
+      return;
+    }
+    const pending = await journal.read();
+    if (pending?.kind !== "delete") throw new Error("expected retained deletion intent");
+    expect(pending.phase).toBe("removing");
+    expect(await removalMarkerPresent(pending.administrativeDirectory, pending.operationId)).toBe(true);
+    expect(registry.byId(checkout.workspaceId!)).toBeDefined();
+    expect(existsSync(path.join(checkout.path, "README.md"))).toBe(true);
+    // A failed recovery cleanup must preserve the same proof for the next
+    // recovery attempt, not strand a surviving tree as identity-uncertain.
+    await expect(service.recover()).rejects.toThrow("simulated journal cleanup failure");
+    expect(await removalMarkerPresent(pending.administrativeDirectory, pending.operationId)).toBe(true);
+    journal.clear = originalClear;
+    expect((await service.recover())?.kind).toBe("removal-not-performed");
+    expect(await journal.read()).toBeUndefined();
+    expect(await removalMarkerPresent(pending.administrativeDirectory, pending.operationId)).toBe(false);
+    expect(registry.byId(checkout.workspaceId!)).toBeDefined();
+    expect(await provenance.byCheckoutId(checkout.checkoutId)).toBeDefined();
+    if (scenario === "blocker") expect(await Bun.file(path.join(checkout.path, "precious.local")).text()).toBe("keep this data\n");
+  } finally {
+    journal.advance = originalAdvance;
+    journal.clear = originalClear;
+    registry.byId = originalById;
+    await journal.clear();
+    await rm(path.join(checkout.path, "precious.local"), { force: true });
+    await service.delete("reviewer", { sourceWorkspaceId: atlasId, reference: checkout.workspaceId! });
+  }
+});
 
 test("removal marker is durable before the removing phase can be persisted", async () => {
   const created = await service.create("reviewer", { sourceWorkspaceId: atlasId, mode: "new-branch", branch: "marker-order", base: { kind: "local", ref: "main" } });

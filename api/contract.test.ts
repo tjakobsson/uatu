@@ -25,6 +25,17 @@ import {
   sanitizeWorkspaceActivity,
   WORKTREE_INVALIDATION,
 } from "../src/shared/live-protocol";
+import {
+  WORKTREE_AVAILABILITIES,
+  WORKTREE_CREATE_MODES,
+  WORKTREE_CREATE_PHASES,
+  WORKTREE_DELETE_PHASES,
+  WORKTREE_ERROR_CODES,
+  WORKTREE_INVENTORY_STATUSES,
+  WORKTREE_OPERATION_KINDS,
+  WORKTREE_OWNERSHIPS,
+  WORKTREE_RETRY_ACTIONS,
+} from "../src/shared/worktree-contract";
 
 type Inventory = { operations: Array<{ operationId: string; domain: string; method: string; path: string; childPath?: string; transport?: string; runtime: string }> };
 type Streaming = { channels: Record<string, unknown>; schemas: Record<string, object> };
@@ -118,6 +129,30 @@ describe("API contract structure", () => {
       expect(typeof item.reason).toBe("string");
       expect("path" in item || "pathPattern" in item).toBe(true);
       expect(Array.isArray(item.methods)).toBe(true);
+    }
+  });
+});
+
+describe("worktree contract agrees with the shared wire protocol", () => {
+  test("published enum families exactly match the runtime vocabulary", async () => {
+    type Schema = { enum?: string[]; properties?: Record<string, Schema> };
+    const openapi = await readYaml<{ components: { schemas: Record<string, Schema> } }>("api/openapi.yaml");
+    const schemas = openapi.components.schemas;
+    const families: Array<[Schema, readonly string[]]> = [
+      [schemas.WorktreeOwnership!, WORKTREE_OWNERSHIPS],
+      [schemas.WorktreeAvailability!, WORKTREE_AVAILABILITIES],
+      [schemas.WorktreeErrorCode!, WORKTREE_ERROR_CODES],
+      [schemas.WorktreeRetryAction!, WORKTREE_RETRY_ACTIONS],
+      // Create and delete share `complete`; the wire schema is their union,
+      // not an ordering of either operation's phase transitions.
+      [schemas.WorktreePhase!, [...new Set([...WORKTREE_CREATE_PHASES, ...WORKTREE_DELETE_PHASES])]],
+      [schemas.WorktreeInventoryResponse!.properties!.inventory!.properties!.status!, WORKTREE_INVENTORY_STATUSES],
+      [schemas.WorktreeOperationResult!.properties!.kind!, WORKTREE_OPERATION_KINDS],
+      [schemas.CreateWorktreeRequest!.properties!.mode!, WORKTREE_CREATE_MODES],
+    ];
+    for (const [schema, values] of families) {
+      expect(schema.enum).toBeDefined();
+      expect([...schema.enum!].sort()).toEqual([...values].sort());
     }
   });
 });

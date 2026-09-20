@@ -595,8 +595,10 @@ async function recoverRemoval(options: WorktreeRecoveryOptions, pending: Worktre
       // and nothing is unregistered.
       return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: "the checkout recorded as removed is still present" };
     }
-    await clearRemovalMarker(pending.administrativeDirectory).catch(() => undefined);
     await options.journal.clear();
+    // Preserve removal proof until the journal is durably gone, so a failed
+    // cleanup or interrupted recovery can safely retry the same decision.
+    await clearRemovalMarker(pending.administrativeDirectory).catch(() => undefined);
     return { kind: "removal-not-performed", operationId: pending.operationId };
   }
   if (!removalMayHaveRun) {
