@@ -4,7 +4,7 @@
 // view in the browser from these shapes alone. Presentation
 // lives in those callers; this module is the transport shape, its bounded
 // phase vocabulary, the ownership/identity rules, and the sanitized error
-// contract. See openspec/changes/add-git-worktree-workspaces/design.md §2–§6.
+// contract. See openspec/changes/archive/2026-09-20-add-git-worktree-workspaces/design.md §2–§6.
 //
 // Pure module: no DOM, no Bun, no Node imports. Every side imports it.
 //

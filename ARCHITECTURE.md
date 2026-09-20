@@ -317,7 +317,7 @@ register list (the fork menu's `Register worktree…`, the checkouts Git lists
 that Uatu has not registered) from the live stream's cursor-free `worktrees`
 topic without touching the page's own document or conversation selection. Design rationale (safety
 model, provenance, parent credential inheritance) is in
-`openspec/changes/add-git-worktree-workspaces/design.md`.
+`openspec/changes/archive/2026-09-20-add-git-worktree-workspaces/design.md`.
 
 The session child is `uatu serve`, and it is no longer a user command. A
 user-shaped invocation (`uatu serve`, the removed `watch` alias, a bare

@@ -1,6 +1,60 @@
 # Worktree verification
 
-Latest integration: [rebase onto `a1ac6d3` and Hub API revision 8](#latest-rebase-and-api-revision-correction-2026-09-19).
+Latest verification: [merged implementation and final review](#merged-implementation-and-final-review-2026-09-20).
+
+## Merged implementation and final review (2026-09-20)
+
+[PR #395](https://github.com/tjakobsson/uatu/pull/395) was squash-merged into
+`main` as `89ddbecca61c8a86e1585aacbfdac6bfb9883966`. The final reviewed PR
+head was `de6e52237dbed531356dba3ef6142af17c38a2e3`, with Hub API revision 8
+and workspace revision 20. This section supersedes earlier verification
+summaries; those sections retain the commands, failures and limitations observed
+at their respective revisions.
+
+The September 20 reviews and fixes covered serialized operation-journal writes
+and operation-qualified cleanup, failed identity-stamp writes, paused Git
+operations during deletion, nested repositories during rename inspection,
+parent-forget protection, ordinary-folder removal, inherited-credential unlock,
+qualified Git refs, shared contract enum checks, and dialog navigation. The
+final two fixes also verify the original parent identity during retained-checkout
+registration retry and restore dashboard live updates after a visibility-only
+return from an unpersisted `pagehide`. The picker geometry assertions now retry
+when background refresh replaces their elements. Unrelated OpenSpec tooling
+regeneration was removed from the feature diff.
+
+### Final-head checks
+
+| Check | Result |
+| --- | --- |
+| Selected unit/integration suites, including worktree, onboarding, credential API, Hub integration and shell recovery | 596 passed, 0 failed across 22 files |
+| `bun run typecheck` | Passed |
+| `bunx tsc --noEmit -p tests/tsconfig.worktree.json` | Passed |
+| `bun run test:e2e tests/e2e/worktree-ui.e2e.ts tests/e2e/worktree-integration.e2e.ts tests/e2e/worktree-webkit.e2e.ts tests/e2e/hub-nav-bounds.e2e.ts tests/e2e/hub-switcher.e2e.ts --workers=1` | 20 passed without retries, including desktop/touch creation and dashboard visibility-only recovery |
+| `bun test src/hub/notifications.test.ts` | 29 passed, 0 failed |
+| `git diff --check` for the final fix commits | Passed |
+| GitHub CI attempt 2 on the final PR head | All jobs passed: full unit/integration suite, dependency audit, license audit, standalone build, compiled-binary smoke, full Playwright suite, contract checks, Swift client generation and strict OpenSpec validation |
+| CodeQL on the final PR head | Passed |
+
+[CI run 35518114046, attempt 2](https://github.com/tjakobsson/uatu/actions/runs/35518114046/attempts/2)
+completed successfully; the validation job took 19 minutes 5 seconds. Attempt 1
+failed two notification-enrollment tests in `src/hub/notifications.test.ts`.
+Those tests passed locally and did not fail in attempt 2. The notification
+implementation and tests were unchanged by the PR. The earlier touch geometry
+failure at `0428737` is superseded by the final-head browser results above.
+
+[Claude's final review](https://github.com/tjakobsson/uatu/pull/395#issuecomment-5750822020)
+confirmed the remaining fixes through source inspection, with no new findings.
+The independent review ran the local checks above and followed the CI rerun to
+completion before posting the [final LGTM](https://github.com/tjakobsson/uatu/pull/395#issuecomment-5751031412).
+
+Native macOS WebView smoke and physical-phone/software-keyboard acceptance were
+not rerun on the final head. Browser lifecycle coverage uses synthetic visibility
+events with real browser transport. Deletion still has the disclosed external
+writer window between its final safety check and non-force Git removal; review
+did not treat that limitation as a merge blocker.
+
+All 61 implementation tasks were complete when the user requested archival.
+The four capability deltas are synced into the main specs as part of that archive.
 
 ## Rebased review fixes (2026-09-19, tasks 12.1–12.8)
 
