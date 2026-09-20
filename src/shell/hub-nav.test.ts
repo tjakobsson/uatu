@@ -173,18 +173,20 @@ describe("startWorkspaceSession", () => {
       await recovery;
       expect(reloads).toBe(0);
 
-      // The hub answers; the channel confirms; the hold is released, and
-      // the next timed-out recovery reloads as it always did.
-      answerStart();
-      const outcome = await started;
-      expect(outcome.ok).toBe(true);
+      // The channel confirms while the hub's answer is still on the way:
+      // the hold goes with the wait, so the next timed-out recovery
+      // reloads as it always did, whatever the stalled request does later.
       for (const listener of [...listeners]) listener("live");
-      expect(outcome.ok && await outcome.confirmed).toBe("live");
       await Bun.sleep(0);
       const later = requestManualRecovery();
       scheduled.at(-1)!();
       await later;
       expect(reloads).toBe(1);
+
+      answerStart();
+      const outcome = await started;
+      expect(outcome.ok).toBe(true);
+      expect(outcome.ok && await outcome.confirmed).toBe("live");
     } finally {
       installManualRecoveryForTests(null);
       installLiveChannelForTests(null);
@@ -924,6 +926,27 @@ describe("initHubNav with the live activity topic", () => {
     page.release(1);
     await waitFor(() => currentSessionRunningFact() === false);
     expect(page.hub.stateFetches).toBe(fetchesBefore + 2);
+  });
+
+  test("the current row offers Start only on the hub's word, not on an unreachable child", async () => {
+    installStopReconcileForTests([0]);
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
+    await page.boot([["uatu", idle], ["two", idle]]);
+    await settle();
+
+    // The stream says not running; the list keeps saying running.
+    page.latest().activity("uatu", stopped);
+    page.latest().documentUnavailable();
+    await settle();
+    expect(currentSessionRunningFact()).toBe(true);
+    const items = page.openMenu();
+    const current = items.find(item => item.getAttribute("href") === "/s/uatu/")!;
+    // Dot dark, like the chip; no "stopped", no Start.
+    expect(current.querySelector(".indicator-dot")!.className).toBe("indicator-dot");
+    expect(current.querySelector(".hub-menu-state.is-stopped")).toBeNull();
+    current.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(page.hub.starts).toEqual([]);
   });
 
   test("a start refused after the menu re-rendered still says so on the current row", async () => {

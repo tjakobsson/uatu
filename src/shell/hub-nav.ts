@@ -230,10 +230,15 @@ export function installStopReconcileForTests(delays: readonly number[] | null): 
 export async function startWorkspaceSession(workspaceId: string): Promise<WorkspaceStartOutcome> {
   const current = workspaceId === workspaceIdFromBasePath(appBasePath());
   const wait = current ? awaitConfirmedLive() : null;
-  const releaseReload = current ? holdManualReload() : () => {};
+  // The hold lasts exactly as long as the wait, however the request fares:
+  // a stalled answer must not keep the page's recovery from reloading once
+  // the wait has run out, and a refusal cancels the wait.
+  if (wait) {
+    const releaseReload = holdManualReload();
+    void wait.outcome.finally(releaseReload);
+  }
   const refuse = (outcome: Exclude<WorkspaceStartOutcome, { ok: true }>): WorkspaceStartOutcome => {
     wait?.cancel();
-    releaseReload();
     return outcome;
   };
   let response: Response;
@@ -243,9 +248,7 @@ export async function startWorkspaceSession(workspaceId: string): Promise<Worksp
     return refuse({ ok: false, unlock: false, message: "start failed" });
   }
   if (response.ok) {
-    const confirmed = wait ? wait.outcome : Promise.resolve("live" as const);
-    void confirmed.finally(releaseReload);
-    return { ok: true, confirmed };
+    return { ok: true, confirmed: wait ? wait.outcome : Promise.resolve("live" as const) };
   }
   const body = (await response.json().catch(() => ({}))) as { error?: unknown };
   const message = typeof body.error === "string" && body.error !== "" ? body.error : `start failed (${response.status})`;
@@ -395,14 +398,19 @@ export function initHubNav(): void {
         detailSpan.textContent = detail;
         item.appendChild(detailSpan);
       }
-      const menuState = workspaceMenuState(workspace, activity);
+      // For the current workspace the word "stopped" and its Start follow
+      // the hub's list, as the connection indicator does — the folded
+      // value (the dot) also goes dark for an unreachable child of a
+      // running session, which a start cannot help.
+      const stopped = workspace.id === currentId ? listedRunning === false : !workspace.running;
+      const menuState = workspaceMenuState(stopped ? { ...workspace, running: false } : { ...workspace, running: true }, activity);
       if (menuState !== null) {
         const state = document.createElement("span");
         state.className = `hub-menu-state is-${menuState.tone}`;
         state.textContent = menuState.text;
         item.appendChild(state);
       }
-      if (workspace.running) {
+      if (!stopped) {
         rowStart.delete(workspace.id);
       } else {
         const state = item.querySelector<HTMLSpanElement>(".hub-menu-state.is-stopped")!;
@@ -609,10 +617,7 @@ export function initHubNav(): void {
       reportedAt.set(ws, reports);
       activity.set(ws, facts);
       latest = applyWorkspaceActivity(latest, ws, facts);
-      updateChip();
-      if (!menu.hidden) {
-        renderMenu();
-      }
+      // Before the chip and menu render: the current row reads the fact.
       if (ws === currentId) {
         // A running report is the hub's own: the feed only says so for a
         // session in its table.
@@ -622,6 +627,10 @@ export function initHubNav(): void {
         } else {
           reconcileStop();
         }
+      }
+      updateChip();
+      if (!menu.hidden) {
+        renderMenu();
       }
       refreshForUnlisted();
     });
