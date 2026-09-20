@@ -937,6 +937,33 @@ html.uatu-desktop-host
   background: light-dark(#d4a72c, #d29922);
 }
 
+/* The hub says the session is stopped: a still dot in the danger tone, no
+   pulse — nothing is being tried until the user asks for the start. The
+   label reads a little stronger than the subtle default so the word is not
+   missed under the wordmark. */
+.connection-state.is-stopped {
+  color: var(--text-strong);
+}
+
+.connection-state.is-stopped .indicator-dot {
+  background: var(--danger);
+}
+
+/* Why a start was refused, under the indicator. Same idiom as the hub
+   pages' local errors; wraps within the header rather than widening it. */
+.connection-error {
+  margin: 0;
+  max-width: 100%;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.connection-error[hidden] {
+  display: none;
+}
+
 /* A requested attempt is under way. The label still follows the channel, so
    what is left to say is that the page is acting on the tap: the chip lifts
    into a pill (negative margins keep the header's box where it was) and the

@@ -8,15 +8,19 @@
 // missing one is a build / template bug we want to surface loudly, not
 // degrade silently.
 
+import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import type { BuildSummary } from "../shared/types";
 import type { LiveChannelStatus } from "./live-channel";
-import { onManualRecovery, requestManualRecovery } from "./live";
+import { startWorkspaceSession } from "./hub-nav";
+import { awaitConfirmedLive, onManualRecovery, requestManualRecovery } from "./live";
+import { onCurrentSessionRunning } from "./session-running";
 
 const connectionStateElementMaybe = document.querySelector<HTMLElement>("#connection-state");
 const connectionLabelElementMaybe = connectionStateElementMaybe?.querySelector<HTMLElement>(".connection-label") ?? null;
+const connectionErrorElementMaybe = document.querySelector<HTMLElement>("#connection-error");
 const buildBadgeElementMaybe = document.querySelector<HTMLElement>("#build-badge");
 
-if (!connectionStateElementMaybe || !connectionLabelElementMaybe || !buildBadgeElementMaybe) {
+if (!connectionStateElementMaybe || !connectionLabelElementMaybe || !connectionErrorElementMaybe || !buildBadgeElementMaybe) {
   throw new Error("uatu UI failed to initialize (connection)");
 }
 
@@ -26,33 +30,66 @@ if (!connectionStateElementMaybe || !connectionLabelElementMaybe || !buildBadgeE
 // scope), so we re-alias to `T` here.
 const connectionStateElement: HTMLElement = connectionStateElementMaybe;
 const connectionLabelElement: HTMLElement = connectionLabelElementMaybe;
+const connectionErrorElement: HTMLElement = connectionErrorElementMaybe;
 const buildBadgeElement: HTMLElement = buildBadgeElementMaybe;
 
 export type ConnectionRawState = "live" | "reconnecting" | "connecting";
 
+// What the indicator shows: the channel's state, except that a session the
+// hub reports stopped reads `Stopped` for as long as the channel cannot
+// confirm live. `Connected` wins over the flag — it is backed by state the
+// page applied, which only a running child can have sent.
+export type ConnectionDisplayState = ConnectionRawState | "stopped";
+
+export function connectionDisplayState(raw: ConnectionRawState, sessionStopped: boolean): ConnectionDisplayState {
+  if (raw === "live") return "live";
+  return sessionStopped ? "stopped" : raw;
+}
+
 let connectionRawState: ConnectionRawState = "connecting";
+let sessionStopped = false;
 
 export function setConnectionState(state: ConnectionRawState, _label: string) {
   // The label argument is preserved for source-call clarity but the actual
   // display text is derived in syncConnectionDisplay.
   connectionRawState = state;
+  if (state === "live") clearConnectionError();
   syncConnectionDisplay();
 }
 
+function clearConnectionError() {
+  connectionErrorElement.textContent = "";
+  connectionErrorElement.hidden = true;
+}
+
+function showConnectionError(message: string) {
+  connectionErrorElement.textContent = message;
+  connectionErrorElement.hidden = false;
+}
+
 function syncConnectionDisplay() {
-  connectionStateElement.classList.remove("is-live", "is-reconnecting", "is-connecting");
-  connectionStateElement.classList.add(`is-${connectionRawState}`);
+  const state = connectionDisplayState(connectionRawState, sessionStopped);
+  connectionStateElement.classList.remove("is-live", "is-reconnecting", "is-connecting", "is-stopped");
+  connectionStateElement.classList.add(`is-${state}`);
   let label: string;
   let title: string;
-  if (connectionRawState === "reconnecting") {
+  let action: string;
+  if (state === "stopped") {
+    label = "Stopped";
+    title = "The workspace session is stopped";
+    action = "Start the workspace session";
+  } else if (state === "reconnecting") {
     label = "Reconnecting";
     title = "Reconnecting to the uatu backend";
-  } else if (connectionRawState === "connecting") {
+    action = "Reconnect to the uatu backend";
+  } else if (state === "connecting") {
     label = "Connecting";
     title = "Connecting to the uatu backend";
+    action = "Reconnect to the uatu backend";
   } else {
     label = "Connected";
     title = "Connected to the uatu backend";
+    action = title;
   }
   connectionLabelElement.textContent = label;
   connectionStateElement.title = title;
@@ -60,26 +97,79 @@ function syncConnectionDisplay() {
   // and it is the string the e2e locators read. The accessible name names
   // the ACTION instead, because that is what activating the control does;
   // only while live, when the control is inert, do the two agree.
-  const live = connectionRawState === "live";
-  connectionStateElement.setAttribute("aria-label", live ? title : "Reconnect to the uatu backend");
+  connectionStateElement.setAttribute("aria-label", action);
   // `aria-disabled`, not `disabled`: a disabled button leaves the tab order
   // and stops showing its tooltip, and the state is still worth reading
   // while the connection is healthy.
-  connectionStateElement.setAttribute("aria-disabled", live ? "true" : "false");
+  connectionStateElement.setAttribute("aria-disabled", state === "live" ? "true" : "false");
 }
 
 // The shell's half of the manual recovery. The Chat surface offers the same
 // action on its interruption line; both call the one `requestManualRecovery`,
 // which joins an attempt already in flight rather than starting a second.
+// While the session is stopped the same control starts it instead: a
+// reconnect cannot bring back a child nobody has started.
 connectionStateElement.addEventListener("click", () => {
-  if (connectionRawState === "live") return;
+  const state = connectionDisplayState(connectionRawState, sessionStopped);
+  if (state === "live") return;
+  if (state === "stopped") {
+    void startStoppedSession();
+    return;
+  }
   void requestManualRecovery();
 });
 
-onManualRecovery(inFlight => {
+// Both the manual recovery and a start show as one attempt under way; the
+// control refuses to pile up either.
+let manualInFlight = false;
+let startInFlight = false;
+
+function syncAttempting() {
+  const inFlight = manualInFlight || startInFlight;
   connectionStateElement.classList.toggle("is-attempting", inFlight);
   if (inFlight) connectionStateElement.setAttribute("aria-busy", "true");
   else connectionStateElement.removeAttribute("aria-busy");
+}
+
+onManualRecovery(inFlight => {
+  manualInFlight = inFlight;
+  syncAttempting();
+});
+
+// Starts the current workspace's session through the hub. A 200 changes
+// nothing here: the hub reopens the page's topics, the document state
+// arrives, and the channel confirms — that is what turns the label back to
+// `Connected`. The attempt is shown until then, or until the recovery
+// window elapses, after which the indicator says whatever the channel does
+// (the child did start, so the ordinary reconnect applies). A refusal is
+// shown under the indicator; a locked-credential refusal has already
+// navigated to the dashboard's unlock flow.
+async function startStoppedSession(): Promise<void> {
+  if (startInFlight) return;
+  const workspaceId = workspaceIdFromBasePath(appBasePath());
+  if (workspaceId === null) return;
+  startInFlight = true;
+  clearConnectionError();
+  syncAttempting();
+  try {
+    const outcome = await startWorkspaceSession(workspaceId);
+    if (outcome.ok) {
+      await awaitConfirmedLive();
+    } else if (!outcome.unlock) {
+      showConnectionError(outcome.message);
+    }
+  } finally {
+    startInFlight = false;
+    syncAttempting();
+  }
+}
+
+// The hub's word on the current session (published by the workspace
+// switcher). Only an explicit "not running" is a stopped session; unknown
+// (a page with no hub) never shows `Stopped`.
+onCurrentSessionRunning(running => {
+  sessionStopped = running === false;
+  syncConnectionDisplay();
 });
 
 // The markup ships the pre-connection state; this states it in the same place

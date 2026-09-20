@@ -15,6 +15,7 @@
 import { appBasePath, workspaceIdFromBasePath } from "../shared/app-url";
 import { createLiveChannel, type LiveChannel } from "./live-channel";
 import { createLifecycleRecovery, type LifecycleRecovery, type LifecycleRecoveryTimers } from "./recovery";
+import { currentSessionRunningFact } from "./session-running";
 
 let channel: LiveChannel | null = null;
 let lifecycle: LifecycleRecovery | null = null;
@@ -129,6 +130,11 @@ export function watchPageLifecycle(): void {
 // round-trip costs today anyway. Reached only after the in-place attempt has
 // had its chance, so a recoverable stall keeps its scroll position, drafts,
 // and view state.
+//
+// Except on a hub page whose session is stopped: a reload there can only
+// reach the hub's "session unavailable" page and its Start button, and the
+// connection indicator now offers that start in place. The attempt settles
+// without navigating, and the indicator says `Stopped`.
 
 // How long an in-place attempt has to confirm live before reloading. Longer
 // than the channel's first reconnect delay and than a state fetch on a slow
@@ -139,6 +145,9 @@ type ManualRecoveryDeps = {
   reload: () => void;
   windowMs: number;
   timers: LifecycleRecoveryTimers;
+  // Whether the hub says this page's session is stopped (see
+  // shell/session-running.ts); a timed-out attempt does not reload then.
+  sessionStopped: () => boolean;
 };
 
 const defaultManualDeps: ManualRecoveryDeps = {
@@ -148,6 +157,7 @@ const defaultManualDeps: ManualRecoveryDeps = {
     setTimeout: (callback, delay) => setTimeout(callback, delay),
     clearTimeout: timer => clearTimeout(timer),
   },
+  sessionStopped: () => currentSessionRunningFact() === false,
 };
 
 let manualDeps: ManualRecoveryDeps = defaultManualDeps;
@@ -195,7 +205,7 @@ export function requestManualRecovery(): Promise<void> {
       deps.timers.clearTimeout(timer);
       manualAttempt = null;
       notifyManual(false);
-      if (result === "timeout") deps.reload();
+      if (result === "timeout" && !deps.sessionStopped()) deps.reload();
     }),
     cancel: () => settle("cancelled"),
   };
@@ -206,6 +216,28 @@ export function requestManualRecovery(): Promise<void> {
   // which arrives over the stream independently of that work.
   void recoverLiveChannel();
   return attempt.promise;
+}
+
+// Waits for the channel to confirm live, for at most the manual-recovery
+// window. What the indicator's start of a stopped session waits on after
+// the hub accepts: the started child's state arriving over the stream is
+// what makes the page current again, and nothing this page does can hurry
+// it. Does not start a recovery and does not reload — after a timeout the
+// indicator simply shows whatever the channel reports.
+export function awaitConfirmedLive(): Promise<"live" | "timeout"> {
+  const deps = manualDeps;
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (outcome: "live" | "timeout") => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      deps.timers.clearTimeout(timer);
+      resolve(outcome);
+    };
+    const unsubscribe = liveChannel().onStatus(status => { if (status === "live") finish("live"); });
+    const timer = deps.timers.setTimeout(() => finish("timeout"), deps.windowMs);
+  });
 }
 
 // Tears the channel down for good. Explicit teardown only — tests, and a

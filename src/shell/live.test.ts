@@ -6,6 +6,7 @@ import { createLiveChannel } from "./live-channel";
 import {
   disposeLiveChannel,
   installLiveChannelForTests,
+  awaitConfirmedLive,
   installManualRecoveryForTests,
   isManualRecoveryInFlight,
   liveChannel,
@@ -383,6 +384,52 @@ describe("manual recovery", () => {
     // Once settled, the next request is a fresh attempt.
     void requestManualRecovery();
     expect(channel.connects).toHaveLength(2);
+  });
+
+  test("a timed-out attempt on a stopped session does not reload: the indicator offers the start instead", async () => {
+    const clock = fakeClock();
+    let reloads = 0;
+    let stopped = false;
+    installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: clock.timers, sessionStopped: () => stopped });
+    const channel = statusChannel();
+
+    // The attempt was under way when the hub reported the session stopped.
+    const attempt = requestManualRecovery();
+    channel.emit("reconnecting");
+    stopped = true;
+    clock.elapse();
+    await attempt;
+    expect(reloads).toBe(0);
+    expect(isManualRecoveryInFlight()).toBe(false);
+
+    // Started again meanwhile: the next timeout reloads as before.
+    stopped = false;
+    const next = requestManualRecovery();
+    clock.elapse();
+    await next;
+    expect(reloads).toBe(1);
+  });
+
+  test("awaitConfirmedLive settles on the channel confirming, or on the window elapsing, without a recovery or a reload", async () => {
+    const clock = fakeClock();
+    let reloads = 0;
+    installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: clock.timers });
+    const channel = statusChannel();
+
+    const confirmed = awaitConfirmedLive();
+    expect(channel.connects).toEqual([]);
+    expect(clock.pending()).toBe(1);
+    channel.emit("live");
+    expect(await confirmed).toBe("live");
+    expect(clock.pending()).toBe(0);
+    expect(channel.listeners.size).toBe(0);
+
+    const late = awaitConfirmedLive();
+    clock.elapse();
+    expect(await late).toBe("timeout");
+    expect(reloads).toBe(0);
+    expect(channel.connects).toEqual([]);
+    expect(channel.listeners.size).toBe(0);
   });
 
   test("an explicit teardown cancels an attempt without reloading", async () => {

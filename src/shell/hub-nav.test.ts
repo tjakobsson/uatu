@@ -4,14 +4,19 @@ import { parseHTML } from "linkedom";
 import { resetAppBasePathForTests } from "../shared/app-url";
 import { createLiveChannel, type LiveChannel, type LiveChannelStatus } from "./live-channel";
 import { disposeLiveChannel, installLiveChannelForTests, watchPageLifecycle } from "./live";
+import { currentSessionRunningFact, onCurrentSessionRunning, resetCurrentSessionRunningForTests } from "./session-running";
 import {
   applyWorkspaceActivity,
   chipLabel,
   chipDotClass,
+  currentSessionRunning,
   initHubNav,
+  installHubNavigationForTests,
+  installStopReconcileForTests,
   parseHubState,
   sortHubWorkspaces,
   startFailureNeedsHubUnlock,
+  startWorkspaceSession,
   submitHubSignOut,
   switcherBadge,
   switcherBadgeLabel,
@@ -76,6 +81,62 @@ describe("chipDotClass", () => {
     expect(chipDotClass([], "uatu")).toBe("indicator-dot");
     expect(chipDotClass([summary("other", true)], "uatu")).toBe("indicator-dot");
     expect(chipDotClass([summary("uatu", true)], null)).toBe("indicator-dot");
+  });
+});
+
+describe("currentSessionRunning", () => {
+  test("reads the current workspace's running flag from the hub list", () => {
+    const list = [summary("uatu", true), summary("two", false)];
+    expect(currentSessionRunning(list, "uatu")).toBe(true);
+    expect(currentSessionRunning(list, "two")).toBe(false);
+  });
+
+  test("an unlisted or absent current workspace is unknown, not stopped", () => {
+    expect(currentSessionRunning([summary("uatu", true)], "gone")).toBeNull();
+    expect(currentSessionRunning([], "uatu")).toBeNull();
+    expect(currentSessionRunning([summary("uatu", false)], null)).toBeNull();
+  });
+});
+
+describe("startWorkspaceSession", () => {
+  const savedFetch = globalThis.fetch;
+  const navigations: string[] = [];
+  afterEach(() => {
+    globalThis.fetch = savedFetch;
+    installHubNavigationForTests(null);
+    navigations.length = 0;
+  });
+  const answer = (status: number, body: unknown) => {
+    const calls: { url: string; method?: string }[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method });
+      return Response.json(body, { status });
+    }) as unknown as typeof fetch;
+    installHubNavigationForTests(href => navigations.push(href));
+    return calls;
+  };
+
+  test("posts the hub's start route for the workspace and reports success", async () => {
+    const calls = answer(200, { id: "pay ments", running: true });
+    expect(await startWorkspaceSession("pay ments")).toEqual({ ok: true });
+    expect(calls).toEqual([{ url: "/api/hub/sessions/pay%20ments/start", method: "POST" }]);
+    expect(navigations).toEqual([]);
+  });
+
+  test("a locked-credential refusal hands off to the dashboard's unlock flow", async () => {
+    answer(500, { error: "an assigned SSH credential is locked; unlock it before starting the workspace" });
+    expect(await startWorkspaceSession("uatu")).toEqual({ ok: false, unlock: true });
+    expect(navigations).toEqual(["/"]);
+  });
+
+  test("any other refusal is surfaced with the hub's message, or the status when there is none", async () => {
+    answer(409, { error: "a folder mutation is pending" });
+    expect(await startWorkspaceSession("uatu")).toEqual({ ok: false, unlock: false, message: "a folder mutation is pending" });
+    answer(502, "not json");
+    expect(await startWorkspaceSession("uatu")).toEqual({ ok: false, unlock: false, message: "start failed (502)" });
+    globalThis.fetch = (async () => { throw new TypeError("network down"); }) as unknown as typeof fetch;
+    expect(await startWorkspaceSession("uatu")).toEqual({ ok: false, unlock: false, message: "start failed" });
+    expect(navigations).toEqual([]);
   });
 });
 
@@ -259,6 +320,9 @@ describe("initHubNav with the live activity topic", () => {
   afterEach(() => {
     disposeLiveChannel();
     installLiveChannelForTests(null);
+    installHubNavigationForTests(null);
+    installStopReconcileForTests(null);
+    resetCurrentSessionRunningForTests();
     for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
     savedGlobals.clear();
     resetAppBasePathForTests();
@@ -335,7 +399,10 @@ describe("initHubNav with the live activity topic", () => {
     expect(toggle.getAttribute("aria-label")).toBe("Switch workspace or open the hub dashboard");
     expect(entryState()).toBeNull();
 
-    // The current workspace stopping elsewhere turns the chip's dot off.
+    // The current workspace stopping elsewhere turns the chip's dot off —
+    // and, the list still saying it runs, asks the list once more (one
+    // read here; the schedule is the reconcile test's concern).
+    installStopReconcileForTests([0]);
     const chipDot = toggle.querySelector<HTMLElement>(".indicator-dot")!;
     expect(chipDot.className).toBe("indicator-dot is-live");
     deliver!("uatu", { running: false, working: false, awaiting: false });
@@ -347,7 +414,10 @@ describe("initHubNav with the live activity topic", () => {
     workspaces.push({ id: "three", displayName: "New", path: "/src/three", running: true });
     deliver!("three", { running: true, working: false, awaiting: true });
     for (let attempt = 0; attempt < 100 && badge.hidden; attempt += 1) await Bun.sleep(1);
-    expect(stateFetches).toBe(fetchesBefore + 1);
+    await Bun.sleep(5);
+    expect(stateFetches).toBe(fetchesBefore + 2);
+    // The list's stale word on the stopped session does not put the dot back.
+    expect(chipDot.className).toBe("indicator-dot");
     expect(badge.className).toBe("hub-activity-badge is-awaiting");
     expect(badge.textContent).toBe("1");
   });
@@ -395,10 +465,15 @@ describe("initHubNav with the live activity topic", () => {
 
     // The hub answers with its list as it is when asked. While answers are
     // held, each waits for its own release, in request order.
-    const hub = { workspaces: initial, stateFetches: 0 };
+    const hub = { workspaces: initial, stateFetches: 0, starts: [] as string[] };
     const held: (() => void)[] = [];
     let holding = false;
-    setGlobal("fetch", async (url: string) => {
+    setGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const start = /^\/api\/hub\/sessions\/([^/]+)\/start$/.exec(url);
+      if (start && init?.method === "POST") {
+        hub.starts.push(decodeURIComponent(start[1]!));
+        return Response.json({ id: start[1], running: true });
+      }
       if (url !== "/api/hub/state") return Response.json({ error: "unexpected" }, { status: 404 });
       hub.stateFetches += 1;
       const answer = Response.json({ workspaces: hub.workspaces });
@@ -444,6 +519,10 @@ describe("initHubNav with the live activity topic", () => {
     });
     const statuses: LiveChannelStatus[] = [];
     channel.onStatus(status => statuses.push(status));
+    const facts: (boolean | null)[] = [];
+    onCurrentSessionRunning(fact => facts.push(fact));
+    const navigations: string[] = [];
+    installHubNavigationForTests(href => navigations.push(href));
     channel.subscribe({ topic: "document", key: "scope=folder" }, {
       data: (_data, _cursor, generation) => channel.confirm(generation),
       ready: generation => channel.confirm(generation),
@@ -463,6 +542,10 @@ describe("initHubNav with the live activity topic", () => {
       hub,
       sources,
       statuses,
+      // Every value the session fact took, starting with the unknown it
+      // held before the probe.
+      facts,
+      navigations,
       badge,
       toggle,
       menu,
@@ -637,6 +720,106 @@ describe("initHubNav with the live activity topic", () => {
       expect(scratch?.querySelector(".hub-menu-state")?.textContent).toBe("stopped");
     });
   }
+
+  test("the stream saying the current workspace stopped is checked against the list on a bounded schedule: a running list keeps the fact, a stopped one publishes it", async () => {
+    installStopReconcileForTests([0, 0, 0]);
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
+    await page.boot([["uatu", idle], ["two", idle]]);
+    await settle();
+    expect(page.facts).toEqual([null, true]);
+    const fetchesBefore = page.hub.stateFetches;
+
+    // The child is unreachable: the stream says not running, the document
+    // topic is unavailable, but the hub's list keeps saying the session
+    // runs. The list is asked as many times as the schedule allows, then
+    // left alone. No `Stopped`; the chip's dot stays off.
+    page.latest().activity("uatu", stopped);
+    page.latest().documentUnavailable();
+    await waitFor(() => page.hub.stateFetches === fetchesBefore + 3);
+    await settle();
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 3);
+    expect(currentSessionRunningFact()).toBe(true);
+    expect(page.facts).toEqual([null, true]);
+    expect(page.toggle.querySelector(".indicator-dot")!.className).toBe("indicator-dot");
+
+    // The child is back: no read, the fact is untouched.
+    page.latest().activity("uatu", idle);
+    await settle();
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 3);
+    expect(currentSessionRunningFact()).toBe(true);
+
+    // Stopped for real, as a stop happens: the child goes first, so the
+    // first read still says running; the next sees the table updated.
+    page.latest().activity("uatu", stopped);
+    await waitFor(() => page.hub.stateFetches === fetchesBefore + 4);
+    page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments")];
+    await waitFor(() => currentSessionRunningFact() === false);
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 5);
+    expect(page.facts).toEqual([null, true, false]);
+    expect(page.toggle.querySelector(".indicator-dot")!.className).toBe("indicator-dot");
+
+    // Started from elsewhere: a running report clears it at once, no read.
+    page.hub.workspaces = [workspace("uatu", "Uatu"), workspace("two", "Payments")];
+    page.latest().activity("uatu", idle);
+    expect(currentSessionRunningFact()).toBe(true);
+    await settle();
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 5);
+    expect(page.toggle.querySelector(".indicator-dot")!.className).toBe("indicator-dot is-live");
+  });
+
+  test("a list answer already on its way confirms the stop without a second read", async () => {
+    installStopReconcileForTests([0, 0]);
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
+    await page.boot([["uatu", idle], ["two", idle]]);
+    await settle();
+    const fetchesBefore = page.hub.stateFetches;
+
+    // A replacement stream's hello reads the list; the stop arrives while
+    // that answer is held.
+    page.hide();
+    page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments")];
+    page.hold();
+    page.show();
+    page.latest().hello("stream-shown");
+    expect(page.heldAnswers()).toBe(1);
+    page.latest().activity("uatu", stopped);
+    page.latest().documentUnavailable();
+    await settle();
+    expect(page.heldAnswers()).toBe(1);
+    expect(currentSessionRunningFact()).toBe(true);
+
+    page.release(0);
+    await waitFor(() => currentSessionRunningFact() === false);
+    expect(page.hub.stateFetches).toBe(fetchesBefore + 1);
+  });
+
+  test("the current workspace's menu row starts its stopped session and stays on the page", async () => {
+    installStopReconcileForTests([0]);
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments", false)]);
+    await page.boot([["uatu", idle], ["two", stopped]]);
+    page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments", false)];
+    page.latest().activity("uatu", stopped);
+    await waitFor(() => currentSessionRunningFact() === false);
+
+    const items = page.openMenu();
+    const current = items.find(item => item.getAttribute("href") === "/s/uatu/")!;
+    const state = current.querySelector<HTMLElement>(".hub-menu-state.is-stopped")!;
+    expect(state.textContent).toBe("stopped");
+    current.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    expect(state.textContent).toBe("starting…");
+    await waitFor(() => page.hub.starts.length === 1);
+    await settle();
+    expect(page.hub.starts).toEqual(["uatu"]);
+    // No navigation: the page is already here, and recovers from the stream.
+    expect(page.navigations).toEqual([]);
+
+    // Another stopped workspace's row still navigates on success.
+    const other = items.find(item => item.getAttribute("href") === "/s/two/")!;
+    other.dispatchEvent(new (globalThis.window as unknown as { Event: typeof Event }).Event("click", { bubbles: true, cancelable: true }));
+    await waitFor(() => page.navigations.length === 1);
+    expect(page.hub.starts).toEqual(["uatu", "two"]);
+    expect(page.navigations).toEqual(["/s/two/"]);
+  });
 
   test("the page's first stream saying hello asks the hub for nothing beyond the boot probe", async () => {
     const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);

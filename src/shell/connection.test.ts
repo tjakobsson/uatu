@@ -36,12 +36,15 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
     Reflect.set(globalThis, key, value);
   }
 
-  const { applyChannelStatus } = await import("./connection");
+  const { applyChannelStatus, connectionDisplayState } = await import("./connection");
   const { createLiveChannel } = await import("./live-channel");
   const { installLiveChannelForTests, installManualRecoveryForTests } = await import("./live");
+  const { installHubNavigationForTests } = await import("./hub-nav");
+  const { setCurrentSessionRunning } = await import("./session-running");
 
   const indicator = document.querySelector("#connection-state") as unknown as HTMLElement;
   const label = indicator.querySelector(".connection-label") as unknown as HTMLElement;
+  const errorLine = document.querySelector("#connection-error") as unknown as HTMLElement;
 
   const readIndicator = () => ({
     label: label.textContent,
@@ -49,6 +52,7 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
     live: indicator.classList.contains("is-live"),
     reconnecting: indicator.classList.contains("is-reconnecting"),
     connecting: indicator.classList.contains("is-connecting"),
+    stopped: indicator.classList.contains("is-stopped"),
   });
 
   type FakeSource = LiveChannelSource & { fail(): void; open(): void };
@@ -235,6 +239,175 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       expect(indicator.hasAttribute("aria-busy")).toBe(false);
       expect(indicator.classList.contains("is-attempting")).toBe(false);
       expect(h.reloads()).toBe(0);
+    });
+  });
+
+  describe("connection indicator on a stopped session", () => {
+    const click = () => indicator.dispatchEvent(new Event("click"));
+    const settled = () => new Promise(resolve => setTimeout(resolve, 0));
+    const savedFetch = globalThis.fetch;
+    const navigations: string[] = [];
+
+    // The page is served at /s/uatu/ on a hub: the start targets that id.
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", "/s/uatu/");
+    document.head.appendChild(meta);
+
+    function stoppedHarness(answer: { status: number; body: unknown } | "network") {
+      const h = harness();
+      installLiveChannelForTests(h.channel);
+      let reloads = 0;
+      installManualRecoveryForTests({ reload: () => { reloads += 1; }, timers: h.timers });
+      installHubNavigationForTests(href => navigations.push(href));
+      const starts: string[] = [];
+      globalThis.fetch = (async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST" && url.endsWith("/start")) {
+          starts.push(url);
+          if (answer === "network") throw new TypeError("network down");
+          return Response.json(answer.body, { status: answer.status });
+        }
+        return new Response("{}");
+      }) as unknown as typeof fetch;
+      // Connected, then the child goes away and the hub says stopped.
+      h.channel.connect();
+      h.channel.confirm(h.channel.currentGeneration());
+      h.channel.invalidate(h.channel.currentGeneration());
+      expect(readIndicator().label).toBe("Reconnecting");
+      setCurrentSessionRunning(false);
+      return { ...h, starts, reloads: () => reloads };
+    }
+
+    afterEach(() => {
+      setCurrentSessionRunning(null);
+      installLiveChannelForTests(null);
+      installManualRecoveryForTests(null);
+      installHubNavigationForTests(null);
+      globalThis.fetch = savedFetch;
+      navigations.length = 0;
+    });
+
+    test("the display state is the channel's, except that a stopped session outranks every state but live", () => {
+      expect(connectionDisplayState("reconnecting", true)).toBe("stopped");
+      expect(connectionDisplayState("connecting", true)).toBe("stopped");
+      expect(connectionDisplayState("live", true)).toBe("live");
+      expect(connectionDisplayState("reconnecting", false)).toBe("reconnecting");
+      expect(connectionDisplayState("connecting", false)).toBe("connecting");
+    });
+
+    test("reads Stopped, names the start action, and does not pulse; clears when the hub says running again", () => {
+      const h = stoppedHarness({ status: 200, body: {} });
+      expect(readIndicator()).toMatchObject({
+        label: "Stopped",
+        title: "The workspace session is stopped",
+        stopped: true,
+        reconnecting: false,
+        live: false,
+      });
+      expect(indicator.getAttribute("aria-label")).toBe("Start the workspace session");
+      expect(indicator.getAttribute("aria-disabled")).toBe("false");
+
+      // Started from elsewhere: the flag clears and the channel's own word
+      // is back until state is applied.
+      setCurrentSessionRunning(true);
+      expect(readIndicator()).toMatchObject({ label: "Reconnecting", stopped: false, reconnecting: true });
+      expect(indicator.getAttribute("aria-label")).toBe("Reconnect to the uatu backend");
+      h.channel.confirm(h.channel.currentGeneration());
+      expect(readIndicator()).toMatchObject({ label: "Connected", live: true });
+    });
+
+    test("a confirmed-live channel outranks a stale stopped flag", () => {
+      const h = stoppedHarness({ status: 200, body: {} });
+      h.channel.confirm(h.channel.currentGeneration());
+      expect(readIndicator()).toMatchObject({ label: "Connected", live: true, stopped: false });
+    });
+
+    test("activation starts the session instead of reconnecting, shows the attempt, and settles on live", async () => {
+      const h = stoppedHarness({ status: 200, body: { id: "uatu", running: true } });
+      const before = h.sources.length;
+
+      click();
+      expect(h.starts).toEqual(["/api/hub/sessions/uatu/start"]);
+      // No superseding connect: a reconnect is not what was asked for.
+      expect(h.sources.length).toBe(before);
+      expect(indicator.getAttribute("aria-busy")).toBe("true");
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+      expect(readIndicator().label).toBe("Stopped");
+
+      // A second tap while the start is in flight is refused.
+      click();
+      await settled();
+      expect(h.starts).toHaveLength(1);
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+
+      // The hub's stream reports the session running, then state lands.
+      setCurrentSessionRunning(true);
+      h.channel.confirm(h.channel.currentGeneration());
+      await settled();
+      expect(readIndicator()).toMatchObject({ label: "Connected", live: true });
+      expect(indicator.hasAttribute("aria-busy")).toBe(false);
+      expect(indicator.classList.contains("is-attempting")).toBe(false);
+      expect(h.reloads()).toBe(0);
+      expect(errorLine.hidden).toBe(true);
+    });
+
+    test("an accepted start that never confirms live drops the attempt after the window, without a reload", async () => {
+      const h = stoppedHarness({ status: 200, body: { id: "uatu", running: true } });
+      click();
+      await settled();
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+      // The child did start: the hub says running, but no state arrives.
+      setCurrentSessionRunning(true);
+      expect(readIndicator().label).toBe("Reconnecting");
+
+      h.fireReconnect();
+      await settled();
+      expect(indicator.classList.contains("is-attempting")).toBe(false);
+      expect(indicator.hasAttribute("aria-busy")).toBe(false);
+      expect(readIndicator().label).toBe("Reconnecting");
+      expect(indicator.getAttribute("aria-label")).toBe("Reconnect to the uatu backend");
+      expect(h.reloads()).toBe(0);
+    });
+
+    test("a refused start shows the hub's message under the indicator and stays actionable", async () => {
+      const h = stoppedHarness({ status: 409, body: { error: "a folder mutation is pending; try again shortly" } });
+      click();
+      await settled();
+      expect(errorLine.hidden).toBe(false);
+      expect(errorLine.textContent).toBe("a folder mutation is pending; try again shortly");
+      expect(readIndicator().label).toBe("Stopped");
+      expect(indicator.getAttribute("aria-disabled")).toBe("false");
+      expect(indicator.classList.contains("is-attempting")).toBe(false);
+      expect(navigations).toEqual([]);
+
+      // Trying again clears the old message first.
+      click();
+      expect(errorLine.hidden).toBe(true);
+      await settled();
+      expect(h.starts).toHaveLength(2);
+      expect(errorLine.hidden).toBe(false);
+
+      // Recovery from any path clears it for good.
+      setCurrentSessionRunning(true);
+      h.channel.confirm(h.channel.currentGeneration());
+      expect(errorLine.hidden).toBe(true);
+    });
+
+    test("a locked-credential refusal hands off to the dashboard rather than showing an error", async () => {
+      stoppedHarness({ status: 500, body: { error: "the assigned OpenPGP credential is locked; unlock it before starting the workspace" } });
+      click();
+      await settled();
+      expect(navigations).toEqual(["/"]);
+      expect(errorLine.hidden).toBe(true);
+    });
+
+    test("a network failure is reported like a refusal", async () => {
+      stoppedHarness("network");
+      click();
+      await settled();
+      expect(errorLine.hidden).toBe(false);
+      expect(errorLine.textContent).toBe("start failed");
+      expect(readIndicator().label).toBe("Stopped");
     });
   });
 
