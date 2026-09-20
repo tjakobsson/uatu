@@ -1,20 +1,13 @@
 ---
-name: openspec-update-change
-description: Update an OpenSpec change by revising its existing planning artifacts and keeping them coherent with one another. Use when the user wants to revise a change's plan, fold new decisions into it, or reconcile its artifacts after an edit. Never edits code.
-allowed-tools: Bash(openspec:*)
-license: MIT
-compatibility: Requires openspec CLI.
-metadata:
-  author: openspec
-  version: "1.0"
-  generatedBy: "1.11.0"
+description: "Update a change - revise existing planning artifacts and keep them coherent (Experimental)"
 ---
 
 Revise a change's existing planning artifacts and keep them coherent. Never edit code.
 
 **Store selection:** If the user names a store (a store is a standalone OpenSpec repo registered on this machine) or the work lives in one, run `openspec store list --json` to discover registered store ids, then pass `--store <id>` on the commands that read or write specs and changes (`new change`, `status`, `instructions`, `list`, `show`, `validate`, `archive`, `doctor`, `context`, `schemas`, `view`). Once selected, treat `--store <id>` as sticky for the rest of the workflow. Every unscoped example of those commands below is shorthand: before running it, append the flag. For example, run `openspec status --change "<name>" --json --store "<id>"`, not the unscoped form shown below. Other commands do not take the flag. Hints printed by commands already carry the flag; keep it on follow-ups. Without a store, commands act on the nearest local `openspec/` root.
 
-**Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
+**Input**: Optionally specify a change name after `/opsx-update` (e.g., `/opsx-update add-auth`). If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
+**Provided arguments**: $ARGUMENTS
 
 `/opsx-continue` is an optional workflow and may not be installed. Before suggesting it anywhere below, verify that it is available. If it is unavailable, `openspec status --change "<name>" --json` shows the next artifact and `openspec instructions "<artifact-id>" --change "<name>" --json` explains how to create it.
 
