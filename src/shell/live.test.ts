@@ -420,15 +420,23 @@ describe("manual recovery", () => {
     expect(channel.connects).toEqual([]);
     expect(clock.pending()).toBe(1);
     channel.emit("live");
-    expect(await confirmed).toBe("live");
+    expect(await confirmed.outcome).toBe("live");
     expect(clock.pending()).toBe(0);
     expect(channel.listeners.size).toBe(0);
 
     const late = awaitConfirmedLive();
     clock.elapse();
-    expect(await late).toBe("timeout");
+    expect(await late.outcome).toBe("timeout");
     expect(reloads).toBe(0);
     expect(channel.connects).toEqual([]);
+    expect(channel.listeners.size).toBe(0);
+
+    // Cancelled (the hub refused the start): listener and timer released.
+    const cancelled = awaitConfirmedLive();
+    expect(clock.pending()).toBe(1);
+    cancelled.cancel();
+    expect(await cancelled.outcome).toBe("cancelled");
+    expect(clock.pending()).toBe(0);
     expect(channel.listeners.size).toBe(0);
   });
 

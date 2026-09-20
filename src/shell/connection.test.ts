@@ -351,6 +351,37 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
       expect(errorLine.hidden).toBe(true);
     });
 
+    test("a start the channel confirms before the hub answers settles at once", async () => {
+      // The hub's answer is held; the started child's state lands first.
+      let answer!: () => void;
+      const held = new Promise<void>(resolve => { answer = resolve; });
+      const h = stoppedHarness({ status: 200, body: { id: "uatu", running: true } });
+      globalThis.fetch = (async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST" && url.endsWith("/start")) {
+          h.starts.push(url);
+          await held;
+          return Response.json({ id: "uatu", running: true });
+        }
+        return new Response("{}");
+      }) as unknown as typeof fetch;
+
+      click();
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+      setCurrentSessionRunning(true);
+      h.channel.confirm(h.channel.currentGeneration());
+      expect(readIndicator().label).toBe("Connected");
+      // Still waiting on the hub's answer, so still an attempt.
+      await settled();
+      expect(indicator.classList.contains("is-attempting")).toBe(true);
+
+      answer();
+      await settled();
+      await settled();
+      expect(indicator.classList.contains("is-attempting")).toBe(false);
+      expect(indicator.hasAttribute("aria-busy")).toBe(false);
+      expect(h.reloads()).toBe(0);
+    });
+
     test("an accepted start that never confirms live drops the attempt after the window, without a reload", async () => {
       const h = stoppedHarness({ status: 200, body: { id: "uatu", running: true } });
       click();

@@ -793,6 +793,32 @@ describe("initHubNav with the live activity topic", () => {
     expect(page.hub.stateFetches).toBe(fetchesBefore + 1);
   });
 
+  test("a list answer asked for while stopped does not undo a running report that arrived after it", async () => {
+    installStopReconcileForTests([0]);
+    const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments")]);
+    await page.boot([["uatu", idle], ["two", idle]]);
+    page.hub.workspaces = [workspace("uatu", "Uatu", false), workspace("two", "Payments")];
+    page.latest().activity("uatu", stopped);
+    await waitFor(() => currentSessionRunningFact() === false);
+
+    // Opening the menu asks for the list; the answer (stopped) is held.
+    page.hold();
+    page.openMenu();
+    expect(page.heldAnswers()).toBe(1);
+    // The session is started meanwhile and the stream says so first.
+    page.hub.workspaces = [workspace("uatu", "Uatu"), workspace("two", "Payments")];
+    page.latest().activity("uatu", idle);
+    expect(currentSessionRunningFact()).toBe(true);
+
+    page.release(0);
+    await settle();
+    expect(currentSessionRunningFact()).toBe(true);
+    expect(page.facts).toEqual([null, true, false, true]);
+    expect(page.toggle.querySelector(".indicator-dot")!.className).toBe("indicator-dot is-live");
+    const current = page.menu.querySelector<HTMLElement>('.hub-menu-item[href="/s/uatu/"]')!;
+    expect(current.querySelector(".hub-menu-state.is-stopped")).toBeNull();
+  });
+
   test("the current workspace's menu row starts its stopped session and stays on the page", async () => {
     installStopReconcileForTests([0]);
     const page = await mountHubPage([workspace("uatu", "Uatu"), workspace("two", "Payments", false)]);

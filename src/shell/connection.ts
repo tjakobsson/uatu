@@ -141,7 +141,9 @@ onManualRecovery(inFlight => {
 // arrives, and the channel confirms — that is what turns the label back to
 // `Connected`. The attempt is shown until then, or until the recovery
 // window elapses, after which the indicator says whatever the channel does
-// (the child did start, so the ordinary reconnect applies). A refusal is
+// (the child did start, so the ordinary reconnect applies). The wait for
+// the confirmation is armed before the start is asked for: a quick start
+// can confirm the channel before the hub's answer lands. A refusal is
 // shown under the indicator; a locked-credential refusal has already
 // navigated to the dashboard's unlock flow.
 async function startStoppedSession(): Promise<void> {
@@ -151,14 +153,17 @@ async function startStoppedSession(): Promise<void> {
   startInFlight = true;
   clearConnectionError();
   syncAttempting();
+  const confirmed = awaitConfirmedLive();
   try {
     const outcome = await startWorkspaceSession(workspaceId);
     if (outcome.ok) {
-      await awaitConfirmedLive();
-    } else if (!outcome.unlock) {
-      showConnectionError(outcome.message);
+      await confirmed.outcome;
+    } else {
+      confirmed.cancel();
+      if (!outcome.unlock) showConnectionError(outcome.message);
     }
   } finally {
+    confirmed.cancel();
     startInFlight = false;
     syncAttempting();
   }

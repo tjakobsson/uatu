@@ -305,6 +305,10 @@ export function initHubNav(): void {
   // `latest`, which folds the stream's activity in. `Stopped` is asserted
   // from this, never from a fold.
   let listedRunning: boolean | null = null;
+  // Activity reports, counted, and the count each workspace was last
+  // reported at: what tells a list answer from a report newer than it.
+  let reports = 0;
+  const reportedAt = new Map<string, number>();
 
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
   const chipBadge = toggle.querySelector<HTMLSpanElement>("#hub-activity-badge");
@@ -425,23 +429,34 @@ export function initHubNav(): void {
   let requested = 0;
   let applied = 0;
   let outstanding = 0;
-  let reports = 0;
-  const reportedAt = new Map<string, number>();
   const isListed = (ws: string) => latest.some(workspace => workspace.id === ws);
   // The list is the authority on whether the current session runs: it is
   // what the shell's `Stopped` state and the manual recovery's no-reload
   // rule are keyed on, so it is published only from the hub's own answer
   // (and from a running report, which is never stale the wrong way).
-  const applyListedRunning = (workspaces: HubWorkspaceSummary[]) => {
-    listedRunning = currentSessionRunning(workspaces, currentId);
+  // A list answer speaks for the moment it was asked. A running report for
+  // the current workspace that arrived after that (`reportsBefore` is the
+  // report count when the request went out) is newer than the answer, and
+  // the hub only reports running for a session in its table: the answer
+  // must not put the fact back to stopped. Boot's probe has no earlier
+  // reports to defer to.
+  const applyListedRunning = (workspaces: HubWorkspaceSummary[], reportsBefore = -1) => {
+    const listed = currentSessionRunning(workspaces, currentId);
+    const facts = activity.get(currentId);
+    const newerRunning = facts?.running === true && (reportedAt.get(currentId) ?? 0) > reportsBefore;
+    listedRunning = listed === false && newerRunning ? true : listed;
     setCurrentSessionRunning(listedRunning);
   };
-  // A list answer replaces the folded list, but the stream's word that the
-  // current child is gone outlives it: the list says running for as long as
-  // a stop is in progress, and the chip must not blink live meanwhile.
-  const foldCurrentStop = (workspaces: HubWorkspaceSummary[]): HubWorkspaceSummary[] => {
+  // A list answer replaces the folded list, but the stream's word on the
+  // current workspace can outlive it: that the child is gone (the list says
+  // running for as long as a stop is in progress, and the chip must not
+  // blink live meanwhile), or that the session runs again, reported after
+  // the answer was asked for.
+  const foldCurrent = (workspaces: HubWorkspaceSummary[], reportsBefore: number): HubWorkspaceSummary[] => {
     const facts = activity.get(currentId);
-    return facts && !facts.running ? applyWorkspaceActivity(workspaces, currentId, facts) : workspaces;
+    if (!facts) return workspaces;
+    const keep = !facts.running || (reportedAt.get(currentId) ?? 0) > reportsBefore;
+    return keep ? applyWorkspaceActivity(workspaces, currentId, facts) : workspaces;
   };
   // Resolves whether the hub answered.
   const refreshHubState = async (): Promise<boolean> => {
@@ -452,14 +467,14 @@ export function initHubNav(): void {
     if (fresh === null) return false;
     if (request < applied) return true;
     applied = request;
-    latest = foldCurrentStop(fresh.workspaces);
+    latest = foldCurrent(fresh.workspaces, reportsBefore);
     for (const ws of [...activity.keys()]) {
       if (!isListed(ws) && (reportedAt.get(ws) ?? 0) <= reportsBefore) {
         activity.delete(ws);
         reportedAt.delete(ws);
       }
     }
-    applyListedRunning(fresh.workspaces);
+    applyListedRunning(fresh.workspaces, reportsBefore);
     updateChip();
     if (!menu.hidden) {
       renderMenu();

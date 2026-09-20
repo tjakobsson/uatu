@@ -219,25 +219,34 @@ export function requestManualRecovery(): Promise<void> {
 }
 
 // Waits for the channel to confirm live, for at most the manual-recovery
-// window. What the indicator's start of a stopped session waits on after
-// the hub accepts: the started child's state arriving over the stream is
-// what makes the page current again, and nothing this page does can hurry
-// it. Does not start a recovery and does not reload — after a timeout the
-// indicator simply shows whatever the channel reports.
-export function awaitConfirmedLive(): Promise<"live" | "timeout"> {
+// window. What the indicator's start of a stopped session waits on: the
+// started child's state arriving over the stream is what makes the page
+// current again, and nothing this page does can hurry it. Armed BEFORE the
+// start is requested, because a quick start confirms the channel before the
+// hub's answer arrives, and `onStatus` does not replay; cancelled if the hub
+// refuses. Does not start a recovery and does not reload — after a timeout
+// the indicator simply shows whatever the channel reports.
+export type ConfirmedLiveWait = {
+  outcome: Promise<"live" | "timeout" | "cancelled">;
+  cancel(): void;
+};
+
+export function awaitConfirmedLive(): ConfirmedLiveWait {
   const deps = manualDeps;
-  return new Promise(resolve => {
+  let finish!: (outcome: "live" | "timeout" | "cancelled") => void;
+  const outcome = new Promise<"live" | "timeout" | "cancelled">(resolve => {
     let settled = false;
-    const finish = (outcome: "live" | "timeout") => {
+    finish = result => {
       if (settled) return;
       settled = true;
       unsubscribe();
       deps.timers.clearTimeout(timer);
-      resolve(outcome);
+      resolve(result);
     };
     const unsubscribe = liveChannel().onStatus(status => { if (status === "live") finish("live"); });
     const timer = deps.timers.setTimeout(() => finish("timeout"), deps.windowMs);
   });
+  return { outcome, cancel: () => finish("cancelled") };
 }
 
 // Tears the channel down for good. Explicit teardown only — tests, and a
