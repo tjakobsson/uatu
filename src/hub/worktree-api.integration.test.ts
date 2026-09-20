@@ -399,7 +399,7 @@ describe("worktree operations over JSON", () => {
       expect(await git(atlas, ["branch", "--list", "feature/second"])).toBe("");
       expect(existsSync(`${atlas}.worktrees/feature-second`)).toBe(false);
     } finally {
-      await journal.clear();
+      await journal.clear("operation-pending");
     }
   });
 

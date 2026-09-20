@@ -132,6 +132,48 @@ afterAll(async () => {
 });
 
 describe("new branch from an explicitly selected base", () => {
+  test.each(["new-branch", "existing-local"] as const)("%s selects the local branch rather than a same-named tag", async mode => {
+    const repository = await createRepository("tag-collision");
+    await git(repository, ["tag", "release"]);
+    await git(repository, ["commit", "--allow-empty", "-m", "branch tip"]);
+    await git(repository, ["branch", "release"]);
+    const expected = (await git(repository, ["rev-parse", "refs/heads/release"])).trim();
+    const { plan: created, outcome } = await create(repository, {
+      mode, ...(mode === "new-branch" ? { branch: "feature/new" } : {}), base: { kind: "local", ref: "release" },
+    });
+    expect(outcome.ok).toBe(true);
+    expect((await git(created.destination, ["rev-parse", "HEAD"])).trim()).toBe(expected);
+    expect((await git(created.destination, ["symbolic-ref", "HEAD"])).trim()).toBe(mode === "new-branch" ? "refs/heads/feature/new" : "refs/heads/release");
+  });
+
+  test.each(["new-branch", "remote-tracking"] as const)("%s preserves the remote namespace despite a same-spelled local branch and tag", async mode => {
+    const repository = await createRepository("namespace-collision");
+    await addOrigin(repository, ["release"]);
+    await git(repository, ["branch", "origin/release", "main"]);
+    await git(repository, ["tag", "origin/release", "main"]);
+    const expected = (await git(repository, ["rev-parse", "refs/remotes/origin/release"])).trim();
+    const { plan: created, outcome } = await create(repository, {
+      mode, ...(mode === "new-branch" ? { branch: "feature/new" } : {}), base: { kind: "remote", ref: "origin/release" },
+    });
+    expect(outcome.ok).toBe(true);
+    expect((await git(created.destination, ["rev-parse", "HEAD"])).trim()).toBe(expected);
+    if (mode === "remote-tracking") {
+      expect((await git(created.destination, ["rev-parse", "--symbolic-full-name", "@{upstream}"])).trim()).toBe("refs/remotes/origin/release");
+    }
+  });
+
+  test.each(["new-branch", "existing-local"] as const)("%s preserves a local branch whose name also names a remote ref", async mode => {
+    const repository = await createRepository("local-namespace-collision");
+    await addOrigin(repository, ["release"]);
+    await git(repository, ["branch", "origin/release", "main"]);
+    const expected = (await git(repository, ["rev-parse", "refs/heads/origin/release"])).trim();
+    const { plan: created, outcome } = await create(repository, {
+      mode, ...(mode === "new-branch" ? { branch: "feature/new" } : {}), base: { kind: "local", ref: "origin/release" },
+    });
+    expect(outcome.ok).toBe(true);
+    expect((await git(created.destination, ["rev-parse", "HEAD"])).trim()).toBe(expected);
+    expect((await git(created.destination, ["symbolic-ref", "HEAD"])).trim()).toBe(mode === "new-branch" ? "refs/heads/feature/new" : "refs/heads/origin/release");
+  });
   test("creates the branch at the selected base with no upstream", async () => {
     const repository = await createRepository("new-branch");
     await git(repository, ["branch", "release"]);
@@ -391,7 +433,7 @@ describe("no force flags are ever passed", () => {
       return recording(args, cwd);
     }, repository, created);
     expect(outcome.ok).toBe(true);
-    expect(invocations).toEqual([["worktree", "add", "--no-track", "-b", "feature/recorded", created.destination, "main"]]);
+    expect(invocations).toEqual([["worktree", "add", "--no-track", "-b", "feature/recorded", created.destination, "refs/heads/main"]]);
   });
 });
 

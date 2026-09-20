@@ -65,8 +65,9 @@ async function exists(fs: NonNullable<RenameGuardOptions["fs"]>, candidate: stri
   try {
     await fs.lstat(candidate);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+    throw error;
   }
 }
 
@@ -108,13 +109,13 @@ async function findGitLocations(
   let truncated = false;
   const walk = async (directory: string, depth: number): Promise<void> => {
     if (truncated) return;
-    if (await exists(fs, path.join(directory, ".git")) || await looksLikeGitDirectory(fs, directory)) {
+    const checkout = await exists(fs, path.join(directory, ".git"));
+    if (checkout || await looksLikeGitDirectory(fs, directory)) {
       locations.push(directory);
-      // The walk stops at a checkout: `worktree list` answers for all of its
-      // contents. Its submodules are picked up from `<common>/modules`
-      // instead, which is cheap and bounded — descending into a checkout's
-      // working tree is not.
-      return;
+      // Git directories are inspected via Git and the modules scan below.
+      // A checkout's contents can hold independent repositories, however;
+      // its own worktree inventory says nothing about those dependencies.
+      if (!checkout) return;
     }
     let entries: Dirent[];
     try {
@@ -124,6 +125,7 @@ async function findGitLocations(
       return;
     }
     for (const entry of entries) {
+      if (entry.name === ".git") continue;
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       // A leaf at the depth limit is fully examined. A child directory is
       // not: it may hide a checkout, so do not report a partial scan as safe.
@@ -199,7 +201,13 @@ export function createWorktreeRenameGuard(options: RenameGuardOptions = {}): Wor
     // /var/folders source and Git's /private/var/folders answer are the same
     // directory, and a lexical comparison would miss every dependency.
     const source = await canonicalPath(normalizeAbsolutePath(rawSource));
-    const { locations, truncated } = await findGitLocations(source, { fs, maxDepth, maxEntries });
+    let scan: Awaited<ReturnType<typeof findGitLocations>>;
+    try {
+      scan = await findGitLocations(source, { fs, maxDepth, maxEntries });
+    } catch {
+      return { kind: "inconclusive", reason: INCONCLUSIVE_REASON };
+    }
+    const { locations, truncated } = scan;
     if (truncated) return { kind: "inconclusive", reason: INCONCLUSIVE_REASON };
     // No Git marker above or below: no worktree dependency can exist, and
     // the rename stays available on a host without Git at all.
@@ -214,7 +222,8 @@ export function createWorktreeRenameGuard(options: RenameGuardOptions = {}): Wor
       if (context.kind === "not-a-repository") continue;
       if (inspected.has(context.identity.repositoryId)) continue;
       inspected.add(context.identity.repositoryId);
-      const submodules = await findSubmoduleGitDirectories(context.commonDirectory, fs, maxDepth, maxEntries);
+      const submodules = await findSubmoduleGitDirectories(context.commonDirectory, fs, maxDepth, maxEntries)
+        .catch(() => ({ locations: [] as string[], truncated: true }));
       if (submodules.truncated) return { kind: "inconclusive", reason: INCONCLUSIVE_REASON };
       queue.push(...submodules.locations);
 

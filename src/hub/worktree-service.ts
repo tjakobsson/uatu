@@ -68,6 +68,15 @@ import {
   type WorktreeRegistrar,
 } from "./worktree-journal";
 
+// Shared by both unregister APIs, including Hubs without the worktree API
+// enabled. Check before deleting ANY Hub state, not merely in registry.remove:
+// registered children retain this id as their live credential/settings owner.
+export function assertNoRegisteredWorktreeDependents(registry: Pick<WorkspaceRegistry, "list">, workspaceId: string): void {
+  if (registry.list().some(candidate => candidate.worktree?.parentWorkspaceId === workspaceId)) {
+    throw WorktreeOperationError.of("conflict", "Remove this repository's worktrees from Uatu first; they inherit its settings.");
+  }
+}
+
 // A repository with an implausible number of linked trees must not turn one
 // inventory read into hundreds of subprocesses.
 const INVENTORY_LIMIT = 64;
@@ -409,7 +418,7 @@ export class WorktreeService {
       // Only a destination Git provably did not create is cleared: an
       // uncertain one keeps its journal so recovery reconciles it, and
       // nothing is ever removed here.
-      if (!inspection.present) await this.options.journal.clear();
+      if (!inspection.present) await this.options.journal.clear(operationId);
       return { ok: false, operationId, kind: "create", phase: "creating", error: outcome.error.detail };
     }
 
@@ -674,7 +683,7 @@ export class WorktreeService {
       const pending = await this.options.journal.read();
       if (pending?.kind === "delete" && (pending.workspaceId === request.reference || pending.checkoutId === request.reference)) {
         if (pending.user !== user) throw WorktreeOperationError.of("permission-denied", "That operation belongs to another user.");
-        const outcome = await this.recover();
+        const outcome = await this.recover(pending.operationId);
         if (outcome?.kind === "removed") return { ok: true, operationId: pending.operationId, kind: "delete", phase: "complete", registered: false, started: false };
         if (outcome?.kind === "removal-cleanup-pending") {
           throw WorktreeOperationError.of("internal", "The worktree's files were removed and its branch kept, but Hub cleanup has not finished. Retry shortly.", { retry: "retry-delete", phase: "unregistering" });
@@ -729,7 +738,7 @@ export class WorktreeService {
       branch: checkout.branch ?? "detached",
       ...(checkout.workspaceId === undefined ? {} : { workspaceId: checkout.workspaceId }),
     });
-    const clear = async () => { await this.options.journal.clear(); };
+    const clear = async () => { await this.options.journal.clear(operationId); };
     // Held in an object: the closure below advances it, and the catch reads it.
     // `retained` marks a journal kept on purpose for recovery to reconcile.
     const progress: { phase: WorktreeDeleteIntent["phase"]; retained: boolean; markerWritten: boolean } = { phase: "fencing", retained: false, markerWritten: false };
@@ -885,17 +894,18 @@ export class WorktreeService {
       }
       // A main workspace owns its children's live policy: removing it first
       // would leave them governed by nothing.
-      if (!entry.worktree && this.options.registry.list().some(candidate => candidate.worktree?.parentWorkspaceId === entry.id)) {
-        throw WorktreeOperationError.of("conflict", "Remove this repository's worktrees from Uatu first; they inherit its settings.");
-      }
-      // Holding the lifecycle queue fences starts; the stop (when authorized)
-      // happens under it, and unregistration runs only once stopped.
+      assertNoRegisteredWorktreeDependents(this.options.registry, entry.id);
+      // Holding the lifecycle queue fences starts AND child onboarding, which
+      // acquires the parent queue together with its own before committing.
+      // The stop (when authorized) and final dependent check happen under it,
+      // and unregistration runs only once stopped.
       const outcome = await sessions.runWithSessionsStopped([entry.id], request.stop === true, async () => {
         await this.options.assertOperationsAllowed?.();
         const current = this.options.registry.byId(entry.id);
         if (!current || current.path !== entry.path) {
           throw WorktreeOperationError.of("not-found", "That workspace changed. Refresh and try again.", { retry: "refresh" });
         }
+        assertNoRegisteredWorktreeDependents(this.options.registry, entry.id);
         await this.options.unregister!(entry.id);
       });
       if (outcome.status === "needs-stop") {
@@ -987,14 +997,24 @@ export class WorktreeService {
     return { operationId: pending.operationId, kind: pending.kind, phase: pending.phase, startedAt: at, updatedAt: at };
   }
 
-  // Startup reconciliation. Never deletes, never claims an uncertain tree.
-  async recover(): Promise<WorktreeRecoveryOutcome | undefined> {
-    return recoverWorktreeOperation({
-      journal: this.options.journal,
-      provenance: this.options.provenance,
-      inspect: checkoutPath => inspectCheckout(checkoutPath, { ...this.options.git, run: this.run }),
-      registeredWorkspaceId: checkoutPath => this.options.registry.byPath(checkoutPath)?.id,
-      ...(this.options.unregister ? { completeRemoval: (intent: WorktreeDeleteIntent) => this.completeRemoval(intent, false) } : {}),
+  // Startup and request-time reconciliation share the same fence as mutation.
+  // A retry must not inspect/clear an ACTIVE deletion, nor recover a successor
+  // that took the single journal slot while it waited for the repository.
+  async recover(expectedOperationId?: string): Promise<WorktreeRecoveryOutcome | undefined> {
+    const changed = () => WorktreeOperationError.of("conflict", "The pending worktree operation changed. Refresh before retrying.", { retry: "refresh" });
+    const pending = await this.options.journal.read();
+    if (expectedOperationId !== undefined && pending?.operationId !== expectedOperationId) throw changed();
+    if (!pending) return undefined;
+    return this.coordinator.run({ repositoryId: pending.repositoryId, paths: [pending.sourcePath, pending.destination] }, async () => {
+      const current = await this.options.journal.read();
+      if (current?.operationId !== pending.operationId) throw changed();
+      return recoverWorktreeOperation({
+        journal: this.options.journal,
+        provenance: this.options.provenance,
+        inspect: checkoutPath => inspectCheckout(checkoutPath, { ...this.options.git, run: this.run }),
+        registeredWorkspaceId: checkoutPath => this.options.registry.byPath(checkoutPath)?.id,
+        ...(this.options.unregister ? { completeRemoval: (intent: WorktreeDeleteIntent) => this.completeRemoval(intent, false) } : {}),
+      });
     });
   }
 

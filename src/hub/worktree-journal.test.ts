@@ -19,6 +19,8 @@ import {
 } from "./worktree-journal";
 import type { CheckoutInspection } from "./worktree-git";
 import { WorktreeOperationError } from "../shared/worktree-contract";
+import { WorktreeOperationCoordinator } from "./worktree-coordinator";
+import { WorktreeService } from "./worktree-service";
 
 const directories: string[] = [];
 
@@ -69,6 +71,129 @@ function failingFs(failOn: keyof typeof nodeFs, message = "disk full"): typeof n
 }
 
 describe("durable operation intent", () => {
+  test.each(["create", "delete"] as const)("stale %s recovery cannot clear a successor operation", async kind => {
+    const root = await stateRoot();
+    const journal = new WorktreeJournal(worktreeJournalPath(root));
+    const provenance = new WorktreeProvenanceStore(worktreeProvenancePath(root));
+    if (kind === "create") await journal.begin(INTENT);
+    else await journal.begin({
+      kind: "delete", phase: "preflight", operationId: "old-delete", user: "dev",
+      repositoryId: IDENTITY.repositoryId, checkoutId: IDENTITY.checkoutId,
+      sourceWorkspaceId: "atlas", sourcePath: root, destination: path.join(root, "absent"),
+      administrativeDirectory: path.join(root, "admin"), branch: "feature",
+    });
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const stale = recoverWorktreeOperation({ journal, provenance, inspect: async () => {
+      entered.resolve();
+      await release.promise;
+      return { present: false, identityReadable: true };
+    } });
+    // Observe the rejection immediately so the gated test never leaks one.
+    const settled = Promise.allSettled([stale]);
+    await entered.promise;
+    await recoverWorktreeOperation({ journal, provenance, inspect: async () => ({ present: false, identityReadable: true }) });
+    const successor = { ...INTENT, operationId: "successor", repositoryId: "other-repository" };
+    await journal.begin(successor);
+    release.resolve();
+    const [outcome] = await settled;
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status === "rejected") expect(outcome.reason.detail.code).toBe("conflict");
+    expect(await journal.read()).toEqual({ ...successor, version: 1 });
+  });
+
+  test.each(["replaced", "cleared", "retained"] as const)("delete retry waits for the active repository operation (%s journal)", async state => {
+    const root = await stateRoot();
+    const journal = new WorktreeJournal(worktreeJournalPath(root));
+    const provenance = new WorktreeProvenanceStore(worktreeProvenancePath(root));
+    const coordinator = new WorktreeOperationCoordinator();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const intent: Omit<WorktreeDeleteIntent, "version"> = {
+      kind: "delete", phase: "preflight", operationId: "active-delete", user: "dev",
+      repositoryId: IDENTITY.repositoryId, checkoutId: IDENTITY.checkoutId,
+      sourceWorkspaceId: "atlas", sourcePath: root, destination: path.join(root, "absent"),
+      administrativeDirectory: path.join(root, "admin"), branch: "feature",
+    };
+    const successor = { ...INTENT, operationId: "successor", repositoryId: "other-repository" };
+    const active = coordinator.run({ repositoryId: intent.repositoryId }, async () => {
+      await journal.begin(intent);
+      entered.resolve();
+      await release.promise;
+      if (state === "retained") await journal.advance(intent.operationId, "complete");
+      else {
+        await journal.clear(intent.operationId);
+        if (state === "replaced") await journal.begin(successor);
+      }
+    });
+    await entered.promise;
+    const queued = Promise.withResolvers<"queued">();
+    const run = coordinator.run.bind(coordinator);
+    coordinator.run = (scope, operation) => {
+      expect(scope.repositoryId).toBe(intent.repositoryId);
+      queued.resolve("queued");
+      return run(scope, operation);
+    };
+    const service = new WorktreeService({
+      journal, provenance, coordinator,
+      registry: { byId: () => undefined, byPath: () => undefined, list: () => [] },
+      sessions: { isRunning: () => false, isStarting: () => false, runExclusive: async (_ids, operation) => operation(),
+        runWithSessionsStopped: async (_ids, _stop, operation) => ({ status: "completed", value: await operation() }) },
+      unregister: async () => {}, registrar: { register: async () => { throw new Error("not used"); } },
+    });
+    const retry = service.delete("dev", { sourceWorkspaceId: "atlas", reference: intent.checkoutId });
+    try {
+      expect(await Promise.race([queued.promise, retry.then(() => "recovered-active")])).toBe("queued");
+      expect((await journal.read())?.operationId).toBe(intent.operationId);
+    } finally {
+      release.resolve();
+      await active;
+      await retry;
+    }
+    const result = await retry;
+    expect(result.ok).toBe(state === "retained");
+    if (!result.ok) expect(result.error.code).toBe("conflict");
+    expect(await journal.read()).toEqual(state === "replaced" ? { ...successor, version: 1 } : undefined);
+  });
+
+  test("concurrent repositories cannot overwrite the shared pending intent", async () => {
+    const filePath = worktreeJournalPath(await stateRoot());
+    // Snapshot absence immediately, rather than depending on filesystem timing:
+    // before the first rename, every read really does observe an empty slot.
+    let published = false;
+    const journal = new WorktreeJournal(filePath, { fs: {
+      ...nodeFs,
+      lstat: (async (...args: Parameters<typeof nodeFs.lstat>) => {
+        if (!published) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+        return nodeFs.lstat(...args);
+      }) as typeof nodeFs.lstat,
+      rename: async (...args) => {
+        await nodeFs.rename(...args);
+        published = true;
+      },
+    } });
+    const coordinator = new WorktreeOperationCoordinator();
+    const other = { ...INTENT, operationId: "operation-2", repositoryId: "other-repository", sourcePath: "/repos/other", destination: "/repos/other.worktrees/feature" };
+    const mutated: string[] = [];
+    const outcomes = await Promise.allSettled([INTENT, other].map(intent =>
+      coordinator.run({ repositoryId: intent.repositoryId, paths: [intent.sourcePath, intent.destination] }, async () => {
+        const record = await journal.begin(intent);
+        mutated.push(record.operationId);
+        return record;
+      }),
+    ));
+    expect(outcomes.map(outcome => outcome.status)).toEqual(["fulfilled", "rejected"]);
+    const refusal = outcomes[1] as PromiseRejectedResult;
+    expect(refusal.reason).toBeInstanceOf(WorktreeOperationError);
+    expect(refusal.reason.detail.code).toBe("conflict");
+    expect(mutated).toEqual([INTENT.operationId]);
+    expect(await new WorktreeJournal(filePath).read()).toEqual({ ...INTENT, version: 1 });
+    // A conflict must not wedge the queue, nor prevent the owner finishing.
+    await journal.advance(INTENT.operationId, "creating");
+    await journal.clear(INTENT.operationId);
+    expect((await journal.begin(other)).operationId).toBe(other.operationId);
+  });
+
   test("records intent before the mutation, with 0600 permissions", async () => {
     const root = await stateRoot();
     const journal = new WorktreeJournal(worktreeJournalPath(root));
@@ -78,6 +203,52 @@ describe("durable operation intent", () => {
     const stats = await nodeFs.lstat(worktreeJournalPath(root));
     expect(stats.mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(worktreeJournalPath(root), "utf8")).operationId).toBe("operation-1");
+  });
+
+  test("begin, phase changes, reads and clearing share invocation order", async () => {
+    const filePath = worktreeJournalPath(await stateRoot());
+    const journal = new WorktreeJournal(filePath);
+    const next = { ...INTENT, operationId: "operation-2" };
+    const outcomes = await Promise.allSettled([
+      journal.begin(INTENT),
+      journal.advance(INTENT.operationId, "verifying", { checkoutId: IDENTITY.checkoutId }),
+      journal.advance(INTENT.operationId, "creating"),
+      journal.begin(INTENT),
+      journal.read(),
+      journal.clear(INTENT.operationId),
+      journal.begin(next),
+      // A stale transition must neither resurrect the old record nor replace
+      // its successor after clear has released the slot.
+      journal.advance(INTENT.operationId, "complete"),
+    ]);
+    expect(outcomes.map(outcome => outcome.status)).toEqual([
+      "fulfilled", "fulfilled", "rejected", "fulfilled", "fulfilled", "fulfilled", "fulfilled", "rejected",
+    ]);
+    for (const index of [3, 4]) {
+      expect((outcomes[index] as PromiseFulfilledResult<WorktreeCreateIntent>).value).toEqual({
+        ...INTENT, version: 1, phase: "verifying", checkoutId: IDENTITY.checkoutId,
+      });
+    }
+    expect(await new WorktreeJournal(filePath).read()).toEqual({ ...next, version: 1 });
+  });
+
+  test("a failed persistence does not poison a queued begin", async () => {
+    const filePath = worktreeJournalPath(await stateRoot());
+    let fail = true;
+    const journal = new WorktreeJournal(filePath, { fs: {
+      ...nodeFs,
+      rename: async (...args) => {
+        if (fail) {
+          fail = false;
+          throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+        }
+        await nodeFs.rename(...args);
+      },
+    } });
+    const next = { ...INTENT, operationId: "operation-2" };
+    const outcomes = await Promise.allSettled([journal.begin(INTENT), journal.begin(next)]);
+    expect(outcomes.map(outcome => outcome.status)).toEqual(["rejected", "fulfilled"]);
+    expect(await new WorktreeJournal(filePath).read()).toEqual({ ...next, version: 1 });
   });
 
   test("re-recording the same operation is idempotent; a different one is refused", async () => {

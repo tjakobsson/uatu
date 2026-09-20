@@ -12,7 +12,7 @@
 //     and Uatu cannot tell them apart. Nothing is copied, so nothing is
 //     recoverable: removal refuses while any exist.
 //   * `git worktree lock` — an explicit "do not remove" from someone.
-//   * a Git operation in progress (index.lock) — somebody outside Uatu is
+//   * a Git operation in progress or paused — somebody outside Uatu is
 //     working in that tree right now; Uatu cannot stop them and says so.
 //   * a linked worktree nested inside — removing the parent directory would
 //     remove another checkout's files with it.
@@ -95,12 +95,18 @@ export async function inspectRemovalSafety(input: RemovalSafetyInput): Promise<W
     return blocker("nested-dependency", "Another worktree is inside this folder. Remove or move it first; nothing was removed.");
   }
 
-  const lockPath = await run(["rev-parse", "--path-format=absolute", "--git-path", "index.lock"], checkoutPath);
-  if (lockPath.exitCode !== 0 || lockPath.timedOut) {
+  // Resolve through Git: linked checkouts have their own operation state,
+  // while some paths can be relocated by repository configuration.
+  const markers = ["index.lock", "rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"];
+  const markerPaths = await run(["rev-parse", "--path-format=absolute", ...markers.flatMap(marker => ["--git-path", marker])], checkoutPath);
+  const resolvedPaths = markerPaths.stdout.trimEnd().split("\n");
+  if (markerPaths.exitCode !== 0 || markerPaths.timedOut || markerPaths.outputExceeded || resolvedPaths.length !== markers.length || resolvedPaths.some(resolved => !path.isAbsolute(resolved))) {
     return blocker("identity-uncertain", "The worktree could not be inspected, so it was not removed.");
   }
-  if (await exists(lockPath.stdout.trim())) {
-    return blocker("external-activity", "A Git operation appears to be running in this worktree outside Uatu. Let it finish, then retry. Nothing was removed.");
+  for (const resolved of resolvedPaths) {
+    if (await exists(resolved)) {
+      return blocker("external-activity", "A Git operation appears to be running or paused in this worktree outside Uatu. Finish or abort it, then retry. Nothing was removed.");
+    }
   }
 
   const status = await run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--no-renames"], checkoutPath);

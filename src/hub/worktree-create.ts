@@ -181,12 +181,15 @@ export function assertNoForceFlags(args: readonly string[]): void {
 export function buildWorktreeAddArguments(plan: WorktreeCreationPlan): string[] {
   const args = ["worktree", "add"];
   if (plan.mode === "existing-local") {
-    // No -b: the existing branch is checked out as it stands.
+    // No -b: Git explicitly looks up this name in refs/heads before DWIM
+    // revision resolution. Unlike a -b start point, a fully qualified name
+    // here detaches HEAD and bypasses branch occupancy protection.
     args.push(plan.destination, plan.branch);
   } else {
     // --track only for the tracking mode, --no-track otherwise: a new branch
     // from a remote base must not acquire an upstream by configuration.
-    args.push(plan.mode === "remote-tracking" ? "--track" : "--no-track", "-b", plan.branch, plan.destination, plan.base.ref);
+    const baseRef = `refs/${plan.base.kind === "local" ? "heads" : "remotes"}/${plan.base.ref}`;
+    args.push(plan.mode === "remote-tracking" ? "--track" : "--no-track", "-b", plan.branch, plan.destination, baseRef);
   }
   assertNoForceFlags(args);
   return args;

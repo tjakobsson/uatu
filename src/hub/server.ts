@@ -55,7 +55,7 @@ import {
 import { LiveBroker } from "./live-broker";
 import { NotificationRequestError, type HubNotifications } from "./notifications";
 import { createWorktreeApi, isWorktreeApiPath, WORKTREE_API_PATH, type WorktreeStartOutcome } from "./worktree-api";
-import type { WorktreeService } from "./worktree-service";
+import { assertNoRegisteredWorktreeDependents, type WorktreeService } from "./worktree-service";
 import { WorktreeReconciler } from "./worktree-reconciler";
 import { checkoutGitLink, readCheckoutHead } from "./worktree-git";
 import { WorktreeOperationError } from "../shared/worktree-contract";
@@ -2007,6 +2007,10 @@ export function createHubFetchHandler(deps: HubDeps) {
               // is gone either way.
               return "reused";
             }
+            // Child onboarding holds this same parent lifecycle queue through
+            // its commit. Keep the dependent check AND all cleanup under it:
+            // no child may appear while personal-state persistence yields.
+            assertNoRegisteredWorktreeDependents(registry, workspaceId);
             await personalState.forgetWorkspace(
               workspaceId,
               () => registry.remove(workspaceId),
@@ -2021,6 +2025,7 @@ export function createHubFetchHandler(deps: HubDeps) {
           return json(200, { id: workspaceId, forgotten: true });
         } catch (error) {
           if (error instanceof FolderManagerError) return folderError(error);
+          if (error instanceof WorktreeOperationError) return json(409, { error: error.detail.message });
           const message = error instanceof Error ? error.message : String(error);
           if (message.includes("before forgetting")) return json(409, { error: message });
           return json(500, { error: "failed to forget workspace" });

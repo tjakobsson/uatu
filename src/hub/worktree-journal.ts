@@ -319,13 +319,30 @@ export type WorktreeJournalOptions = {
 
 export class WorktreeJournal {
   private readonly file: DurableJsonFile;
+  private tail: Promise<void> = Promise.resolve();
 
   constructor(filePath: string, options: WorktreeJournalOptions = {}) {
     const fs = options.fs ?? nodeFs;
     this.file = new DurableJsonFile(filePath, fs, (options.platform ?? process.platform) !== "win32");
   }
 
-  async read(): Promise<WorktreeOperationIntent | undefined> {
+  // The Hub shares one journal instance across repositories. Their coordinator
+  // queues are independent, but this single durable slot is not: serialize the
+  // entire read/check/write, including phase changes and clearing. Only these
+  // short state transitions queue, never the Git operation itself. A second
+  // begin observes the committed intent and conflicts rather than replacing it.
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(operation);
+    // Persistence failures and conflicts must not poison later recovery/retry.
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  read(): Promise<WorktreeOperationIntent | undefined> {
+    return this.serialize(() => this.readRecord());
+  }
+
+  private async readRecord(): Promise<WorktreeOperationIntent | undefined> {
     const value = await this.file.read();
     if (value === undefined) return undefined;
     try {
@@ -348,10 +365,16 @@ export class WorktreeJournal {
   // what makes a retry safe after a failure whose outcome is unknown.
   begin(intent: Omit<WorktreeCreateIntent, "version">): Promise<WorktreeCreateIntent>;
   begin(intent: Omit<WorktreeDeleteIntent, "version">): Promise<WorktreeDeleteIntent>;
-  async begin(
+  begin(
     intent: Omit<WorktreeCreateIntent, "version"> | Omit<WorktreeDeleteIntent, "version">,
   ): Promise<WorktreeOperationIntent> {
-    const pending = await this.read();
+    return this.serialize(() => this.beginRecord(intent));
+  }
+
+  private async beginRecord(
+    intent: Omit<WorktreeCreateIntent, "version"> | Omit<WorktreeDeleteIntent, "version">,
+  ): Promise<WorktreeOperationIntent> {
+    const pending = await this.readRecord();
     if (pending && pending.operationId !== intent.operationId) {
       throw WorktreeOperationError.of(
         "conflict",
@@ -371,12 +394,20 @@ export class WorktreeJournal {
 
   // Phases only advance. A backward or foreign phase is refused, so a
   // tampered or stale record can never replay a mutation already performed.
-  async advance(
+  advance(
     operationId: string,
     phase: WorktreeCreatePhase | WorktreeDeletePhase,
     fields: Partial<Pick<WorktreeCreateIntent, "checkoutId" | "workspaceId" | "sourceRef">> = {},
   ): Promise<WorktreeOperationIntent> {
-    const pending = await this.read();
+    return this.serialize(() => this.advanceRecord(operationId, phase, fields));
+  }
+
+  private async advanceRecord(
+    operationId: string,
+    phase: WorktreeCreatePhase | WorktreeDeletePhase,
+    fields: Partial<Pick<WorktreeCreateIntent, "checkoutId" | "workspaceId" | "sourceRef">>,
+  ): Promise<WorktreeOperationIntent> {
+    const pending = await this.readRecord();
     if (!pending || pending.operationId !== operationId) {
       throw invalid("no pending worktree operation matches this operation id");
     }
@@ -388,8 +419,17 @@ export class WorktreeJournal {
     return record;
   }
 
-  clear(): Promise<void> {
-    return this.file.clear();
+  // Cleanup owns an operation, not the slot itself. Recovery may have read it
+  // long before this call; never let a stale cleanup erase a newer intent.
+  clear(operationId: string): Promise<void> {
+    return this.serialize(async () => {
+      const pending = await this.readRecord();
+      if (!pending) return;
+      if (pending.operationId !== operationId) {
+        throw WorktreeOperationError.of("conflict", "The pending worktree operation changed. Refresh before retrying.", { retry: "refresh" });
+      }
+      await this.file.clear();
+    });
   }
 }
 
@@ -564,7 +604,7 @@ export type WorktreeRecoveryOptions = {
 
 async function recoverRemoval(options: WorktreeRecoveryOptions, pending: WorktreeDeleteIntent): Promise<WorktreeRecoveryOutcome> {
   if (pending.phase === "complete") {
-    await options.journal.clear();
+    await options.journal.clear(pending.operationId);
     return { kind: "removed", operationId: pending.operationId };
   }
   const inspection = await options.inspect(pending.destination);
@@ -595,7 +635,7 @@ async function recoverRemoval(options: WorktreeRecoveryOptions, pending: Worktre
       // and nothing is unregistered.
       return { kind: "uncertain", operationId: pending.operationId, checkoutPath: pending.destination, detail: "the checkout recorded as removed is still present" };
     }
-    await options.journal.clear();
+    await options.journal.clear(pending.operationId);
     // Preserve removal proof until the journal is durably gone, so a failed
     // cleanup or interrupted recovery can safely retry the same decision.
     await clearRemovalMarker(pending.administrativeDirectory).catch(() => undefined);
@@ -605,7 +645,7 @@ async function recoverRemoval(options: WorktreeRecoveryOptions, pending: Worktre
     // Git was never asked to remove anything. A tree that vanished or was
     // replaced meanwhile is someone else's doing: it surfaces as missing or
     // replaced in the inventory, and Uatu cleans up nothing on its behalf.
-    await options.journal.clear();
+    await options.journal.clear(pending.operationId);
     return { kind: "removal-not-performed", operationId: pending.operationId };
   }
   // Our checkout is gone (a new occupant, if any, is left strictly alone).
@@ -619,10 +659,13 @@ async function recoverRemoval(options: WorktreeRecoveryOptions, pending: Worktre
     return { kind: "removal-cleanup-pending", operationId: pending.operationId, intent };
   }
   await options.journal.advance(pending.operationId, "complete");
-  await options.journal.clear();
+  await options.journal.clear(pending.operationId);
   return { kind: "removed", operationId: pending.operationId };
 }
 
+// The caller must hold the pending operation's repository/path fence across
+// this whole reconciliation, not just individual journal transitions. Only
+// startup before serving requests may otherwise rely on exclusive access.
 export async function recoverWorktreeOperation(options: WorktreeRecoveryOptions): Promise<WorktreeRecoveryOutcome | undefined> {
   const pending = await options.journal.read();
   if (!pending) return undefined;
@@ -639,7 +682,7 @@ export async function recoverWorktreeOperation(options: WorktreeRecoveryOptions)
     // Nothing at the destination: whatever ran, it left no tree. The branch
     // it may have created is deliberately left alone — branches are never
     // deleted by Uatu.
-    await options.journal.clear();
+    await options.journal.clear(pending.operationId);
     return { kind: "nothing-created", operationId: pending.operationId };
   }
   if (!inspection.identityReadable) return uncertain(inspection.detail ?? "the destination's identity could not be read");
@@ -674,7 +717,7 @@ export async function recoverWorktreeOperation(options: WorktreeRecoveryOptions)
   // The registry is asked fresh: a journal that reached `complete` still
   // reports a retained checkout if its registration is not actually there.
   const workspaceId = options.registeredWorkspaceId?.(pending.destination);
-  await options.journal.clear();
+  await options.journal.clear(pending.operationId);
   if (workspaceId !== undefined) return { kind: "completed", operationId: pending.operationId, workspaceId };
   return {
     kind: "retained-unregistered",
@@ -792,7 +835,7 @@ export async function registerCreatedWorktree(options: RegisterCreatedWorktreeOp
     );
   }
   await options.journal.advance(pending.operationId, "complete", { workspaceId: registration.workspaceId });
-  await options.journal.clear();
+  await options.journal.clear(pending.operationId);
   return {
     workspaceId: registration.workspaceId,
     started: registration.started,

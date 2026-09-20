@@ -87,11 +87,11 @@ describe("folders with no Git dependency stay renameable", () => {
     expect(await (await guard({ maxDepth: 0 }))(leaf)).toEqual({ kind: "safe" });
   });
 
-  test("an ordinary repository at the depth limit establishes safety without scanning its contents", async () => {
+  test("a repository at the depth limit cannot establish safety without scanning its contents", async () => {
     const { workspace, main } = await repository("depth-solo", path.join("a", "b", "c", "d", "e", "repo"));
     await mkdir(path.join(main, "docs", "nested"), { recursive: true });
-    expect(await (await guard())(workspace)).toEqual({ kind: "safe" });
-    expect(await (await guard({ maxDepth: 0 }))(main)).toEqual({ kind: "safe" });
+    expect((await (await guard())(workspace)).kind).toBe("inconclusive");
+    expect((await (await guard({ maxDepth: 0 }))(main)).kind).toBe("inconclusive");
   });
 
   test("a subfolder inside a checkout that owns worktrees is still safe", async () => {
@@ -112,6 +112,15 @@ describe("folders with no Git dependency stay renameable", () => {
 });
 
 describe("moves that would break Git worktree links are refused", () => {
+  test("an independent repository nested in a checkout owns an external linked tree", async () => {
+    const { workspace, main } = await repository("nested-independent");
+    const nested = path.join(main, "vendor", "independent");
+    await mkdir(nested, { recursive: true });
+    await git(nested, ["init", "--initial-branch=main"]);
+    await git(nested, ["commit", "--allow-empty", "-m", "initial"]);
+    await git(nested, ["worktree", "add", "-b", "external", path.join(workspace, "external")]);
+    expect((await (await guard())(main)).kind).toBe("blocked");
+  });
   test("the main checkout of a repository that owns a linked worktree", async () => {
     const { workspace, main } = await repository("main-checkout");
     await git(main, ["worktree", "add", "-b", "feature/login", "--", path.join(workspace, "linked")]);
@@ -163,6 +172,20 @@ describe("moves that would break Git worktree links are refused", () => {
 });
 
 describe("uncertainty fails closed", () => {
+  test("unreadable nested checkout contents and Git markers are inconclusive", async () => {
+    const { main } = await repository("unreadable-nested");
+    await mkdir(path.join(main, "vendor"));
+    for (const operation of ["lstat", "readdir"] as const) {
+      const probe = await guard({ fs: {
+        ...nodeFs,
+        [operation]: async (candidate: string, options: unknown) => {
+          if (String(candidate).includes(`${path.sep}vendor`)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return (nodeFs[operation] as Function)(candidate, options);
+        },
+      } });
+      expect((await probe(main)).kind).toBe("inconclusive");
+    }
+  });
   test("an unregistered repository beyond the default scan depth makes its ancestor inconclusive", async () => {
     const { workspace, main } = await repository("deep-main", path.join("source", "a", "b", "c", "d", "e", "f", "repo"));
     await git(main, ["worktree", "add", "-b", "feature/deep", "--", path.join(workspace, "linked")]);
@@ -224,7 +247,7 @@ describe("submodules", () => {
     const { main } = await repository("bounded-submodule-super");
     await git(main, ["submodule", "add", "--", dependency, "vendor/dependency"]);
     expect((await (await guard({ maxEntries: 1 }))(main)).kind).toBe("inconclusive");
-    expect(await (await guard({ maxDepth: 1, maxEntries: 2 }))(main)).toEqual({ kind: "safe" });
+    expect(await (await guard({ maxDepth: 2, maxEntries: 2 }))(main)).toEqual({ kind: "safe" });
   });
 
   test("a deeply named submodule with an external linked worktree makes inspection inconclusive", async () => {

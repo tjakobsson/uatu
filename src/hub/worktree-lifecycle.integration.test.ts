@@ -245,7 +245,8 @@ test("stamp write failure retains an unverified checkout without ownership or re
     write.mockRestore();
     // This fixture shares one journal; manual reconciliation is intentionally
     // required for the retained, unverified checkout.
-    await journal.clear();
+    const pending = await journal.read();
+    if (pending) await journal.clear(pending.operationId);
     await git(atlas, ["worktree", "remove", "--", `${atlas}.worktrees/stamp-failure`]);
   }
 });
@@ -324,8 +325,8 @@ test.each(["blocker", "probe exception", "probe exception with successful cleanu
     }
     return originalById(...args);
   };
-  journal.clear = async () => {
-    if (!clearFails) return originalClear();
+  journal.clear = async operationId => {
+    if (!clearFails) return originalClear(operationId);
     failedClears++;
     throw new Error("simulated journal cleanup failure");
   };
@@ -361,7 +362,8 @@ test.each(["blocker", "probe exception", "probe exception with successful cleanu
     journal.advance = originalAdvance;
     journal.clear = originalClear;
     registry.byId = originalById;
-    await journal.clear();
+    const pending = await journal.read();
+    if (pending) await journal.clear(pending.operationId);
     await rm(path.join(checkout.path, "precious.local"), { force: true });
     await service.delete("reviewer", { sourceWorkspaceId: atlasId, reference: checkout.workspaceId! });
   }
