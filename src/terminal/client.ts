@@ -19,6 +19,14 @@ import {
   wheelDeltaToPixels,
   type SwipeGestureMode,
 } from "./touch-scroll";
+import {
+  classifyInventoryResponse,
+  recoverAttachment,
+  type AttachAttemptResult,
+  type InventoryRead,
+  type RecoveryClock,
+  type RecoveryRun,
+} from "./recovery";
 
 const TERMINAL_TOKEN_KEY = "uatu:terminal-token";
 
@@ -136,12 +144,14 @@ export function buildTerminalWebSocketUrl(
   return wsUrl.toString();
 }
 
-// Map a `GET /api/auth` probe status to what a close-before-open WebSocket
-// failure actually was. 204: credentials AND origin fine — the refusal was a
-// sessionId collision. 403: credentials fine, origin gate refused this
+// Map a `GET /api/auth` probe status to what a refused terminal connection
+// was. 204: credentials AND origin fine — the refusal was about the PTY (a
+// sessionId collision). 403: credentials fine, origin gate refused this
 // page's address — unrecoverable by reconnecting or re-pasting a token.
 // Anything else (401, network error mapped to 0 by the caller): credentials
-// are the problem — paste-token form.
+// are the problem — paste-token form. The pane's recovery reads the
+// inventory route instead, which answers the same way and also says what
+// became of the PTY; this remains for callers that only need the verdict.
 export type PreOpenFailureKind = "collision" | "origin-rejected" | "auth-required";
 
 export function classifyAuthProbeStatus(status: number): PreOpenFailureKind {
@@ -168,9 +178,38 @@ export async function persistTerminalToken(token: string): Promise<boolean> {
   }
 }
 
+// What a pane is doing with its PTY right now. The panel reads it to decide
+// what a close means and which panes a page departure releases.
+//   idle             not attached: never attached, or detached/terminated.
+//   connecting       the first attempt of an attach is in flight.
+//   ready            reconstruction was delivered; the shell is interactive.
+//   recovering       an attempt failed or a connection was lost; the pane is
+//                    reconciling with inventory inside one bounded budget.
+//   suspended        released for a page departure; resumes on return.
+//   occupied         the PTY is held by another client (explicit Take over).
+//   ended            the shell exited or the PTY is gone (explicit New shell).
+//   unreachable      recovery ran out of budget without a verdict (Retry).
+//   taken            another client took the PTY over (explicit Take back).
+//   auth-required    credentials refused (paste-token form).
+//   origin-rejected  the origin gate refused this address (no action).
+export type TerminalPaneState =
+  | "idle"
+  | "connecting"
+  | "ready"
+  | "recovering"
+  | "suspended"
+  | "occupied"
+  | "ended"
+  | "unreachable"
+  | "taken"
+  | "auth-required"
+  | "origin-rejected";
+
 export type TerminalPanelHandle = {
-  // Mount xterm in the container and connect to the server. Idempotent: a
-  // second call when already connected is a no-op.
+  // Mount xterm in the container and attach to the PTY, recovering through
+  // inventory when the attach fails. Idempotent: a second call while an
+  // attach is in flight or established is a no-op. From a parked state it
+  // starts a new recovery budget.
   attach(): void;
   // Tear down the WebSocket and free xterm. The container's contents are
   // emptied; the panel can be re-attached later. The server keeps the PTY
@@ -179,7 +218,17 @@ export type TerminalPanelHandle = {
   // Like detach(), but closes the WebSocket with the app-defined
   // user-terminate code so the server kills the PTY. The ONLY client path
   // that ends a shell session; reserved for the confirmed pane/panel close.
-  terminate(): void;
+  // Returns whether the code actually went out on a connection the server
+  // recognises as this PTY's holder — a pane mid-recovery has none, and the
+  // caller then kills the PTY through the inventory route instead.
+  terminate(): boolean;
+  // The page is being hidden: release the transport without touching what
+  // the pane is or shows. Only an attaching, attached or recovering pane
+  // has anything to release; every other state is left as it is.
+  release(): void;
+  // The page runs again: a released pane attaches again, once.
+  resume(): void;
+  state(): TerminalPaneState;
   // Recompute character grid + send resize frame. Call after any panel-height
   // change. Cheap; safe to debounce or invoke from a ResizeObserver.
   fit(): void;
@@ -200,6 +249,8 @@ export type TerminalPanelHandle = {
   showSelectionSheet(): boolean;
   dismissSelectionSheet(): boolean;
   isSelectionSheetOpen(): boolean;
+  // Whether this mount holds, or is working to hold, its PTY: attaching,
+  // attached, or recovering. Parked and released panes are not attached.
   isAttached(): boolean;
   // Scrollback search, driving the pane's own search addon. Reads the buffer
   // and moves xterm's selection only — nothing is written to the PTY, so a
@@ -237,21 +288,17 @@ export type MountTerminalOptions = {
   // renders them as the pane-scoped toast — including the blocked-write
   // fallback, whose pending copy needs a surface to land on.
   onOsc52Notice?: (notice: Osc52Notice) => void;
-  // Fires when the WebSocket closes for a reason OTHER than `detach()`
-  // (shell exited, server gone, connection dropped). Lets the controller
-  // tear down the dead pane automatically. NOT called on auth failure
-  // (close-before-open) — that path shows the paste-token form instead.
-  onClose?: () => void;
-  // Fires when the WebSocket closed before opening but `GET /api/auth`
-  // confirms this window's credentials are valid — i.e. the upgrade was
-  // rejected for a non-auth reason, in practice a sessionId collision
-  // (HTTP 409, another window holds this pane's persisted id). The
-  // controller responds by minting a fresh sessionId and rebuilding the
-  // pane. When absent, the paste-token form is shown as a fallback.
-  onCollision?: () => void;
+  // The user chose "New shell" on a parked card (the shell ended, or the PTY
+  // is held elsewhere): the controller replaces this pane with a fresh one.
+  onNewShell?: () => void;
+  // Fires on every state transition; the controller uses it for nothing
+  // more than bookkeeping today, tests for assertions.
+  onStateChange?: (state: TerminalPaneState) => void;
   // Connect with an explicit takeover claim (session picker attaching to a
-  // session held by another window). The mount also re-arms takeover itself
-  // when the user activates "Take back" on a parked pane.
+  // session held by another window). Consumed by the first attempt of the
+  // first attach: a later resume, retry or reload never inherits it, so a
+  // saved pane reference can never authorize a takeover by itself. The
+  // parked cards' Take over / Take back actions re-arm it explicitly.
   takeover?: boolean;
   // Applied to every typed-input chunk before it is sent to the PTY — the
   // sticky-Ctrl composition hook. MUST be an identity function when its
@@ -261,6 +308,8 @@ export type MountTerminalOptions = {
   // it to badge the Terminal tab when output arrives while another touch
   // tab is active. Keep it cheap — it sits on the output hot path.
   onOutput?: () => void;
+  // Test seam: the clock the recovery budget runs on.
+  clock?: RecoveryClock;
 };
 
 export function pasteTerminalInput(
@@ -309,11 +358,54 @@ export function terminalBufferText(buffer: Pick<IBuffer, "getLine" | "length">):
 // importing across the client/server boundary would drag the other side's
 // dependencies (node-pty / xterm) into the wrong bundle.
 const CLOSE_CODE_USER_TERMINATE = 4001;
+// Server→client: another client took this PTY over with an explicit claim.
+const CLOSE_CODE_SESSION_TAKEN = 4410;
+// Server→client: this socket lost the in-open race for the PTY.
+const CLOSE_CODE_SESSION_HIJACKED = 4409;
+
+const defaultClock: RecoveryClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: timer => clearTimeout(timer as ReturnType<typeof setTimeout>),
+};
+
+// The authenticated inventory read the recovery reconciles against. Classified
+// into the recovery's vocabulary here; a network failure is a `failed` read,
+// which proves nothing about any PTY.
+export async function readTerminalInventory(token: string | null, signal: AbortSignal): Promise<InventoryRead> {
+  const url = token
+    ? appUrl(`/api/terminal/sessions?t=${encodeURIComponent(token)}`)
+    : appUrl("/api/terminal/sessions");
+  try {
+    const response = await fetch(url, { method: "GET", signal });
+    const body: unknown = response.ok ? await response.json().catch(() => null) : null;
+    return classifyInventoryResponse(response.status, body);
+  } catch {
+    return { kind: "failed" };
+  }
+}
 
 // Per-pane terminal mount. The controller owns the panel-level concerns
 // (dock, display mode, split layout, visibility); this function owns the
-// xterm + WebSocket lifecycle for a single pane.
+// xterm + WebSocket lifecycle for a single pane — including what happens
+// when that lifecycle goes wrong. Two ideas carry it:
+//
+// One xterm per attach cycle, many transport attempts. The Terminal (and
+// its addons, observer and input wiring) is created when the pane attaches
+// and disposed when it detaches, terminates, releases or parks; the
+// WebSocket is created per ATTEMPT, and a retry reuses the terminal, resetting
+// it only when the next reconstruction lands. So a pane mid-recovery keeps
+// showing its last screen under a "Reconnecting…" note instead of blanking
+// on every attempt.
+//
+// Every callback is generation-guarded. `generation` advances on each
+// attach cycle and each teardown, and each attempt additionally checks that
+// its socket is still the pane's current one. A late close from a socket
+// the pane has since abandoned — a retry, a suspend/resume, a user hide, a
+// takeover — cannot change what the pane shows, remove it, or attach it to
+// a PTY it no longer means to hold.
 export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanelHandle {
+  const clock = options.clock ?? defaultClock;
   let term: Terminal | null = null;
   // Set by focusNow() when focus is requested before xterm has opened;
   // consumed by openXtermNow() the moment it can actually take focus.
@@ -322,25 +414,32 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   let search: SearchAddon | null = null;
   let searchResultsSubscription: { dispose(): void } | null = null;
   let searchResultsListener: ((result: { index: number; total: number }) => void) | null = null;
+  // The current attempt's socket while connecting; the live socket once
+  // ready; null between attempts and when not attached.
   let socket: WebSocket | null = null;
-  let attached = false;
+  let state: TerminalPaneState = "idle";
   let protocolReady = false;
   let semanticPasteActive = false;
   let resizeObserver: ResizeObserver | null = null;
-  // Set to true when the caller invokes `detach()` so the close-event
-  // handler can distinguish "the panel hid me" from "the server hung up".
-  // Only the latter triggers `onClose` — hiding the panel must be
-  // reversible without auto-removing the pane.
-  let detachInitiated = false;
-  // One-shot guard for the collision hand-off. The controller's replacement
-  // pane is a fresh mount (fresh guard), so this bounds recovery to one
-  // retry per mount rather than a reconnect loop against a broken server.
-  let collisionSignaled = false;
-  // Whether the next connect carries `takeover=1`. Seeded from the mount
-  // options (picker attach) and re-armed by the parked pane's "Take back"
-  // action. Never reset — takeover of a session this mount already owns
-  // degrades to a plain reattach, so over-claiming is harmless.
+  // Advanced by every attach cycle and every teardown. Callbacks captured
+  // an earlier value and bow out when it no longer matches.
+  let generation = 0;
+  let run: RecoveryRun | null = null;
+  let statusNote: HTMLElement | null = null;
+  // Whether the next attempt carries `takeover=1`. Seeded from the mount
+  // options and by the parked cards' explicit actions; consumed by the
+  // attempt that uses it, so nothing automatic ever inherits it.
   let takeoverArmed = options.takeover === true;
+  // xterm open bookkeeping, per Terminal instance.
+  let openDone = false;
+  let lastCols = 0;
+  let lastRows = 0;
+  // Whether the terminal has shown a reconstruction; the next attempt's
+  // snapshot then starts from a reset screen rather than appending.
+  let termWritten = false;
+  let needsReset = false;
+  // Per attempt: the attach-ready frame goes out once per socket.
+  let attemptReadySent = false;
   // Tears down the alternate-screen touch-scroll listeners with the mount.
   let touchScrollAbort: AbortController | null = null;
   let selectionSheet: HTMLElement | null = null;
@@ -350,6 +449,16 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   // lastCols/lastRows and socket); the font-size setter calls it so a grid
   // change without a container resize still reaches the PTY.
   let syncPtySize: (() => void) | null = null;
+
+  function setState(next: TerminalPaneState): void {
+    if (state === next) return;
+    state = next;
+    options.onStateChange?.(next);
+  }
+
+  function liveSocket(): WebSocket | null {
+    return protocolReady && socket && socket.readyState === WebSocket.OPEN ? socket : null;
+  }
 
   function dismissSelectionSheet(restoreFocus = true): boolean {
     if (!selectionSheet) return false;
@@ -466,23 +575,63 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     return true;
   }
 
-  function attach(): void {
-    if (attached) return;
-    // No token in sessionStorage is valid in two distinct cases:
-    //   1) terminal feature off — caller should have guarded; bail safely.
-    //   2) PWA fresh launch — start_url has no ?t=; rely on the auth cookie
-    //      established when the user first opened the URL in a browser. We
-    //      attempt connection without a token and let the cookie do the
-    //      work. If both fail, the close handler shows the paste UI.
-    connect(options.getToken());
+  // The attach-ready frame: sent once per attempt, as soon as BOTH the
+  // socket is open and xterm has real dimensions, whichever comes last.
+  // Sending it is the moment the child is asked for the PTY, which is when
+  // the attempt's readiness clock starts (see `openAttempt`).
+  let onAttachReadySent: (() => void) | null = null;
+  function sendAttachReady(): void {
+    if (attemptReadySent || !term || !openDone || !socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: "attach-ready", cols: term.cols, rows: term.rows }));
+    attemptReadySent = true;
+    onAttachReadySent?.();
   }
 
-  function connect(token: string | null): void {
-    if (attached) return;
-    detachInitiated = false;
-    protocolReady = false;
+  function openXtermNow(): void {
+    if (!term || !fit || openDone) return;
+    openDone = true;
+    try {
+      term.open(options.container);
+      fit.fit();
+      lastCols = term.cols;
+      lastRows = term.rows;
+      // Belt-and-suspenders repaint. xterm buffers any term.write()
+      // calls that happened before open(); the buffered data renders on
+      // first paint after open(), but a canvas that was created during
+      // a transition can hold a stale frame until something forces a
+      // repaint. refresh() does exactly that, cheaply.
+      term.refresh(0, term.rows - 1);
+      // If the WebSocket already opened (data may already be flowing),
+      // send a corrected resize now that we have real dimensions.
+      sendAttachReady();
+      // Honor a focus requested before the terminal could take it.
+      if (pendingFocus) {
+        pendingFocus = false;
+        term.focus();
+      }
+    } catch {
+      // Container vanished between observe() and the callback. Undo so
+      // the next observation tries again.
+      openDone = false;
+      return;
+    }
+    // Best-effort: in installed-PWA standalone mode, ask the browser to
+    // deliver KeyC to the page so Ctrl+Shift+C reaches our handler
+    // instead of opening Edge's DevTools. Page-singleton inside the
+    // helper.
+    acquireKeyboardLockOnce();
+  }
+
+  // Creates the Terminal for an attach cycle: theme, key handling, addons,
+  // the container's touch/wheel listeners and the ResizeObserver that opens
+  // xterm once the container has layout. No-op while one exists.
+  function ensureTerminal(): void {
+    if (term) return;
     dismissSelectionSheet(false);
     delete options.container.dataset.terminalReady;
+    openDone = false;
+    termWritten = false;
+    needsReset = false;
 
     term = new Terminal({
       theme: buildTheme(),
@@ -525,9 +674,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // from key works everywhere and emits the same bytes on desktop.
       const ctrlByte = synthesizeCtrlByte(event);
       if (ctrlByte !== null) {
-        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(new TextEncoder().encode(ctrlByte));
-        }
+        liveSocket()?.send(new TextEncoder().encode(ctrlByte));
         event.preventDefault();
         return false;
       }
@@ -554,160 +701,12 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     });
     options.container.replaceChildren();
 
-    // xterm initialization is driven by ResizeObserver rather than rAF
-    // timing. Reason: on a page refresh that restores the persisted
-    // terminal-visible preference, setVisible(true) unhides the panel and
-    // synchronously calls attach(); calling term.open() before the panel
-    // container has its real layout caches a degenerate cell measurement
-    // that subsequent fit.fit() calls don't fully recover from. rAF
-    // ordering relative to layout varies subtly across browsers and
-    // panel-CSS arrangements, so we wait for the container to actually
-    // have a non-zero contentRect — that's guaranteed to fire only AFTER
-    // layout has settled. The same ResizeObserver also handles subsequent
-    // user-initiated resizes.
-    let openDone = false;
-    let readySent = false;
-    let lastCols = 0;
-    let lastRows = 0;
-
-    function sendAttachReady(): void {
-      if (readySent || !term || !openDone || !socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send(JSON.stringify({ type: "attach-ready", cols: term.cols, rows: term.rows }));
-      readySent = true;
-    }
-
-    function openXtermNow(): void {
-      if (!term || !fit || openDone) return;
-      openDone = true;
-      try {
-        term.open(options.container);
-        fit.fit();
-        lastCols = term.cols;
-        lastRows = term.rows;
-        // Belt-and-suspenders repaint. xterm buffers any term.write()
-        // calls that happened before open(); the buffered data renders on
-        // first paint after open(), but a canvas that was created during
-        // a transition can hold a stale frame until something forces a
-        // repaint. refresh() does exactly that, cheaply.
-        term.refresh(0, term.rows - 1);
-        // If the WebSocket already opened (data may already be flowing),
-        // send a corrected resize now that we have real dimensions.
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          sendAttachReady();
-        }
-        // Honor a focus requested before the terminal could take it.
-        if (pendingFocus) {
-          pendingFocus = false;
-          term.focus();
-        }
-      } catch {
-        // Container vanished between observe() and the callback. Undo so
-        // the next observation tries again.
-        openDone = false;
-        return;
-      }
-      // Best-effort: in installed-PWA standalone mode, ask the browser to
-      // deliver KeyC to the page so Ctrl+Shift+C reaches our handler
-      // instead of opening Edge's DevTools. Page-singleton inside the
-      // helper.
-      acquireKeyboardLockOnce();
-    }
-
-    // Token in URL when we have one (first-tab path); otherwise rely on the
-    // HttpOnly auth cookie set by /api/auth (PWA / subsequent visits).
-    // sessionId is always present — the server requires it for multiplexing.
-    socket = new WebSocket(
-      buildTerminalWebSocketUrl(window.location.href, options.sessionId, token, takeoverArmed),
-    );
-    socket.binaryType = "arraybuffer";
-
-    let didOpen = false;
-
-    socket.addEventListener("open", () => {
-      didOpen = true;
-      // If xterm is already opened (toggle path — container had real
-      // dimensions before observe() fired), send the initial resize now.
-      // If xterm isn't opened yet (auto-restore path), openXtermNow() will
-      // send the resize the moment it opens.
-      sendAttachReady();
-    });
-
-    socket.addEventListener("message", event => {
-      if (!term) return;
-      if (typeof event.data === "string") {
-        // Control frames (e.g. shell-exit) are JSON; render them as a faint
-        // marker rather than swallowing silently so the user knows the
-        // session ended.
-        try {
-          const parsed = JSON.parse(event.data);
-          if (parsed?.type === "exit") {
-            term.write(`\r\n\x1b[2m[shell exited${parsed.exitCode != null ? ` with code ${parsed.exitCode}` : ""}]\x1b[0m\r\n`);
-          }
-        } catch {
-          // Non-JSON text from the server is unexpected; ignore.
-        }
-        return;
-      }
-      const bytes = new Uint8Array(event.data as ArrayBuffer);
-      options.onOutput?.();
-      if (!protocolReady) {
-        term.write(bytes, () => {
-          protocolReady = true;
-          options.container.dataset.terminalReady = "true";
-        });
-        return;
-      }
-      term.write(bytes);
-    });
-
-    socket.addEventListener("close", event => {
-      if (!didOpen) {
-        // Connection failed BEFORE the WebSocket opened. The browser exposes
-        // no upgrade status code on the close event, so a close-without-open
-        // is ambiguous between an auth failure (401/403 — stale cookie after
-        // a uatu restart, fresh PWA window) and a sessionId collision (409 —
-        // another window already holds this pane's persisted id; common now
-        // that PTY sessions persist indefinitely). Probe `GET /api/auth` to
-        // disambiguate: valid credentials → collision → the controller
-        // rebuilds the pane with a fresh sessionId; invalid → paste-token
-        // form.
-        void classifyPreOpenFailure();
-        return;
-      }
-      // 4410 = "session taken": another window claimed this session with an
-      // explicit takeover. Park the pane — notice + take-back action — and
-      // never reconnect on our own; the session is alive, just elsewhere,
-      // and silent re-claims would ping-pong it between windows.
-      if (event.code === 4410) {
-        attached = false;
-        showTakenOverUI();
-        return;
-      }
-      // 4409 = our app-defined "sessionId hijacked" code (see
-      // terminal-server.ts in-open race guard). Close the pane silently —
-      // the controller's onClose callback below tears it down.
-      const isHijacked = event.code === 4409;
-      if (isHijacked && term) {
-        term.write("\r\n\x1b[2m[session claimed by another tab]\x1b[0m\r\n");
-      }
-      // User toggled the panel hidden (or confirmed a close); the teardown
-      // is intentional and the pane should NOT be auto-removed here — for a
-      // plain detach its sessionId is reused to reattach to the still-live
-      // PTY later.
-      if (detachInitiated) return;
-      // Server-initiated close (shell exited or connection dropped).
-      // Surface a brief "[disconnected]" line for debug visibility, then
-      // signal the controller to remove the dead pane.
-      if (term) term.write("\r\n\x1b[2m[disconnected]\x1b[0m\r\n");
-      attached = false;
-      options.onClose?.();
-    });
-
     const encoder = new TextEncoder();
     term.onData(data => {
-      if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
+      const live = liveSocket();
+      if (!live) return;
       const output = applyTerminalInputTransform(data, options.transformInput, semanticPasteActive);
-      socket.send(encoder.encode(output));
+      live.send(encoder.encode(output));
     });
 
     touchScrollAbort?.abort();
@@ -743,9 +742,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
             carry: wheelCarry,
           });
           wheelCarry = translated.carry;
-          if (translated.sequences && protocolReady && socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(encoder.encode(translated.sequences));
-          }
+          if (translated.sequences) liveSocket()?.send(encoder.encode(translated.sequences));
           // Consume it either way — the viewport scrolling scrollback under
           // an alternate-screen TUI is the misbehavior being replaced.
           event.preventDefault();
@@ -851,9 +848,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
             carry: swipeCarry,
           });
           swipeCarry = translated.carry;
-          if (translated.sequences && protocolReady && socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(encoder.encode(translated.sequences));
-          }
+          if (translated.sequences) liveSocket()?.send(encoder.encode(translated.sequences));
           // The swipe is driving the TUI now — keep the page from
           // rubber-banding underneath it. Registered passive: false for this.
           event.preventDefault();
@@ -886,21 +881,21 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       if (term.cols !== lastCols || term.rows !== lastRows) {
         lastCols = term.cols;
         lastRows = term.rows;
-        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-        }
+        liveSocket()?.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       }
     };
 
-    // Re-fit and notify the server whenever the panel height changes.
-    // This SAME observer also drives the initial xterm open: the first
-    // time the container has a non-zero contentRect, openXtermNow() runs
-    // synchronously inside the observer callback. After that, every
-    // observation is a refit. observe() itself fires an initial dispatch
-    // right after layout settles, so on the toggle path (container
-    // already has dimensions) and the auto-restore-on-refresh path
-    // (container dimensions land after observe()), open happens at the
-    // right moment in both cases.
+    // xterm initialization is driven by ResizeObserver rather than rAF
+    // timing. Reason: on a page refresh that restores the persisted
+    // terminal-visible preference, setVisible(true) unhides the panel and
+    // synchronously calls attach(); calling term.open() before the panel
+    // container has its real layout caches a degenerate cell measurement
+    // that subsequent fit.fit() calls don't fully recover from. rAF
+    // ordering relative to layout varies subtly across browsers and
+    // panel-CSS arrangements, so we wait for the container to actually
+    // have a non-zero contentRect — that's guaranteed to fire only AFTER
+    // layout has settled. The same ResizeObserver also handles subsequent
+    // user-initiated resizes.
     resizeObserver = new ResizeObserver(entries => {
       if (!term || !fit) return;
       const entry = entries.at(-1);
@@ -914,26 +909,277 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       syncPtySize?.();
     });
     resizeObserver.observe(options.container);
-
-    attached = true;
   }
 
-  // Replace the xterm host with a small form prompting the user to paste a
-  // fresh token from their `uatu` CLI output. Used when a WebSocket upgrade
-  // fails before opening — typically because uatu was restarted (cookie now
-  // stale) or this is a PWA's first launch with no auth cookie yet.
-  function showPasteTokenUI(): void {
-    // Tear down any partial xterm state inline. `attached` is set at mount
-    // time (end of connect()), not at socket-open — so detach() WOULD work
-    // here, but this path also replaces the container with the form, so it
-    // owns its whole cleanup explicitly.
-    try {
-      socket?.close();
-    } catch {
-      // Already closing.
+  function showStatusNote(text: string): void {
+    if (!statusNote) {
+      statusNote = document.createElement("div");
+      statusNote.className = "terminal-pane-status";
+      statusNote.setAttribute("role", "status");
+      statusNote.setAttribute("aria-live", "polite");
+      options.container.append(statusNote);
     }
+    statusNote.textContent = text;
+  }
+
+  function hideStatusNote(): void {
+    statusNote?.remove();
+    statusNote = null;
+  }
+
+  // One transport attempt: a socket that either reaches readiness within
+  // `deadlineMs` and becomes the pane's live connection, or ends with a
+  // verdict the recovery loop reconciles. Token in the URL when we have one
+  // (first-tab path); otherwise the HttpOnly auth cookie set by /api/auth
+  // (PWA / subsequent visits). The generation and the socket identity are
+  // both checked, so a socket the pane has moved on from changes nothing.
+  function openAttempt(gen: number, deadlineMs: number, signal: AbortSignal): Promise<AttachAttemptResult> {
+    return new Promise<AttachAttemptResult>(resolve => {
+      if (gen !== generation || signal.aborted || !term) {
+        resolve("refused");
+        return;
+      }
+      const takeover = takeoverArmed;
+      takeoverArmed = false;
+      const attempt = new WebSocket(
+        buildTerminalWebSocketUrl(window.location.href, options.sessionId, options.getToken(), takeover),
+      );
+      attempt.binaryType = "arraybuffer";
+      socket = attempt;
+      attemptReadySent = false;
+      protocolReady = false;
+      needsReset = termWritten;
+      const isCurrent = () => gen === generation && socket === attempt;
+      let settled = false;
+      let exitSeen = false;
+      const finish = (result: AttachAttemptResult) => {
+        if (settled) return;
+        settled = true;
+        disarmDeadline();
+        if (onAttachReadySent !== null) onAttachReadySent = null;
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const abandon = (reason: string) => {
+        try {
+          attempt.close(1000, reason);
+        } catch {
+          // Already closing.
+        }
+        if (isCurrent()) socket = null;
+      };
+      // Two silences are bounded, and one wait is not. A socket that never
+      // opens (a hub that hangs the handshake) and a child that never answers
+      // attach-ready with reconstruction (through the hub the browser side
+      // opens before the child has been asked at all) each get `deadlineMs`.
+      // The wait BETWEEN them — an open socket whose attach-ready has not
+      // gone out because xterm has no layout yet (a pane parked behind
+      // another touch tab, a panel not yet painted) — is not a silence: the
+      // child has not been asked, holds nothing for us, and the frame goes
+      // out the moment the pane is laid out.
+      let deadline: unknown = null;
+      const armDeadline = (reason: string) => {
+        if (deadline !== null) clock.clearTimeout(deadline);
+        deadline = clock.setTimeout(() => {
+          if (settled) return;
+          abandon(reason);
+          finish("silent");
+        }, deadlineMs);
+      };
+      const disarmDeadline = () => {
+        if (deadline !== null) clock.clearTimeout(deadline);
+        deadline = null;
+      };
+      armDeadline("connect timeout");
+      onAttachReadySent = () => {
+        if (!isCurrent() || settled) return;
+        armDeadline("readiness timeout");
+      };
+      const onAbort = () => {
+        if (settled) return;
+        abandon("cancelled");
+        finish("refused");
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+
+      attempt.addEventListener("open", () => {
+        if (!isCurrent()) return;
+        disarmDeadline();
+        // If xterm is already opened (toggle path — container had real
+        // dimensions before observe() fired), send the initial resize now.
+        // If xterm isn't opened yet (auto-restore path), openXtermNow() will
+        // send it the moment it opens.
+        sendAttachReady();
+      });
+
+      attempt.addEventListener("message", event => {
+        if (!isCurrent() || !term) return;
+        if (typeof event.data === "string") {
+          // Control frames (e.g. shell-exit) are JSON; render them as a faint
+          // marker rather than swallowing silently so the user knows the
+          // session ended.
+          try {
+            const parsed = JSON.parse(event.data);
+            if (parsed?.type === "exit") {
+              exitSeen = true;
+              term.write(`\r\n\x1b[2m[shell exited${parsed.exitCode != null ? ` with code ${parsed.exitCode}` : ""}]\x1b[0m\r\n`);
+            }
+          } catch {
+            // Non-JSON text from the server is unexpected; ignore.
+          }
+          return;
+        }
+        const bytes = new Uint8Array(event.data as ArrayBuffer);
+        options.onOutput?.();
+        if (!protocolReady) {
+          // The first binary frame is the reconstruction: the child accepted
+          // this socket as the PTY's holder. A retry's snapshot replaces the
+          // previous attempt's screen rather than appending to it.
+          if (needsReset) {
+            needsReset = false;
+            term.reset();
+          }
+          term.write(bytes, () => {
+            if (!isCurrent()) return;
+            protocolReady = true;
+            termWritten = true;
+            options.container.dataset.terminalReady = "true";
+            hideStatusNote();
+            setState("ready");
+            finish("ready");
+          });
+          return;
+        }
+        term.write(bytes);
+      });
+
+      attempt.addEventListener("close", event => {
+        if (!isCurrent()) return;
+        socket = null;
+        protocolReady = false;
+        delete options.container.dataset.terminalReady;
+        if (!settled) {
+          // Ended before readiness: whether it opened first says nothing —
+          // the hub accepts the browser before the child has been asked.
+          if (event.code === CLOSE_CODE_SESSION_TAKEN) finish("taken");
+          else if (exitSeen) finish("exit");
+          else finish("refused");
+          return;
+        }
+        onEstablishedLoss(gen, event.code, exitSeen);
+      });
+    });
+  }
+
+  // An established connection ended. Not a pane closure and not a request
+  // to hide anything: only two facts are final here — a takeover notice and
+  // a confirmed exit. Everything else is a transport loss, and the pane
+  // reconciles it exactly as it would a failed restore.
+  function onEstablishedLoss(gen: number, code: number, exitSeen: boolean): void {
+    if (gen !== generation) return;
+    if (code === CLOSE_CODE_SESSION_TAKEN) {
+      showTakenOverUI();
+      return;
+    }
+    if (exitSeen) {
+      showEndedUI();
+      return;
+    }
+    if (code === CLOSE_CODE_SESSION_HIJACKED && term) {
+      term.write("\r\n\x1b[2m[session claimed by another tab]\x1b[0m\r\n");
+    }
+    begin("recovering");
+  }
+
+  // Starts an attach cycle: one recovery run with one budget, whose outcome
+  // the pane then presents. `initial` is what the pane says while the first
+  // attempt runs — connecting from a fresh attach, recovering after a loss.
+  function begin(initial: "connecting" | "recovering"): void {
+    const gen = ++generation;
+    run?.cancel();
+    hideStatusNote();
+    ensureTerminal();
+    setState(initial);
+    if (initial === "recovering") showStatusNote("Reconnecting…");
+    const current = recoverAttachment(options.sessionId, {
+      clock,
+      readInventory: signal => readTerminalInventory(options.getToken(), signal),
+      attach: (deadlineMs, signal) => openAttempt(gen, deadlineMs, signal),
+      onPhase: phase => {
+        if (gen !== generation || phase.phase !== "reconciling") return;
+        setState("recovering");
+        showStatusNote("Reconnecting…");
+      },
+    });
+    run = current;
+    void current.outcome.then(outcome => {
+      if (gen !== generation || run !== current) return;
+      run = null;
+      switch (outcome) {
+        case "attached":
+          hideStatusNote();
+          setState("ready");
+          return;
+        case "cancelled":
+          return;
+        case "occupied":
+          showOccupiedUI();
+          return;
+        case "ended":
+          showEndedUI();
+          return;
+        case "unreachable":
+          showUnreachableUI();
+          return;
+        case "taken":
+          showTakenOverUI();
+          return;
+        case "auth-required":
+          showPasteTokenUI();
+          return;
+        case "origin-rejected":
+          showOriginRejectedUI();
+          return;
+      }
+    });
+  }
+
+  function attach(): void {
+    if (state === "connecting" || state === "ready" || state === "recovering") return;
+    begin("connecting");
+  }
+
+  // Ends the attach cycle: invalidates every callback it armed, closes the
+  // transport with `closeCode`, disposes xterm and empties the container.
+  // Returns whether the close code went out on the PTY's established
+  // holder — the only close the server acts on as a termination.
+  function teardown(closeCode: number, closeReason: string, next: TerminalPaneState): boolean {
+    generation += 1;
+    const live = socket;
     socket = null;
+    const wasHolder = protocolReady && live !== null && live.readyState === WebSocket.OPEN;
     protocolReady = false;
+    if (live) {
+      try {
+        live.close(closeCode, closeReason);
+      } catch {
+        // Already closing.
+      }
+    }
+    run?.cancel();
+    run = null;
+    hideStatusNote();
+    delete options.container.dataset.terminalReady;
+    touchScrollAbort?.abort();
+    touchScrollAbort = null;
+    syncPtySize = null;
+    dismissSelectionSheet(false);
+    try {
+      resizeObserver?.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+    resizeObserver = null;
     try {
       term?.dispose();
     } catch {
@@ -941,21 +1187,55 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     term = null;
     fit = null;
+    openDone = false;
+    termWritten = false;
     searchResultsSubscription?.dispose();
     searchResultsSubscription = null;
     searchResultsListener = null;
     search = null;
-    try {
-      resizeObserver?.disconnect();
-    } catch {
-      // Already disconnected.
-    }
-    resizeObserver = null;
-    attached = false;
+    options.container.replaceChildren();
+    setState(next);
+    return wasHolder && closeCode === CLOSE_CODE_USER_TERMINATE;
+  }
 
+  // A parked card replaces the terminal: the attach cycle is over, the
+  // transport is gone, and the card names the one way forward.
+  function park(next: TerminalPaneState): HTMLElement {
+    teardown(1000, "parked", next);
     const container = options.container;
     container.replaceChildren();
     const wrap = document.createElement("div");
+    container.append(wrap);
+    return wrap;
+  }
+
+  function card(wrap: HTMLElement, className: string, heading: string, help: string): void {
+    wrap.className = className;
+    const headingEl = document.createElement("p");
+    headingEl.className = `${className}-heading`;
+    headingEl.textContent = heading;
+    const helpEl = document.createElement("p");
+    helpEl.className = `${className}-help`;
+    helpEl.textContent = help;
+    wrap.append(headingEl, helpEl);
+  }
+
+  function actionButton(className: string, label: string, onClick: () => void): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  // Replace the xterm host with a small form prompting the user to paste a
+  // fresh token from their `uatu` CLI output. Used when the inventory read
+  // that reconciles a failed attach answers 401 — typically because uatu
+  // was restarted (cookie now stale) or this is a PWA's first launch with no
+  // auth cookie yet.
+  function showPasteTokenUI(): void {
+    const wrap = park("auth-required");
     wrap.className = "terminal-auth";
     const heading = document.createElement("p");
     heading.className = "terminal-auth-heading";
@@ -982,7 +1262,6 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     status.setAttribute("aria-live", "polite");
     form.append(input, submit);
     wrap.append(heading, help, form, status);
-    container.append(wrap);
     requestAnimationFrame(() => input.focus());
 
     form.addEventListener("submit", async event => {
@@ -1004,54 +1283,18 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         // sessionStorage unavailable; cookie is still set so we can proceed.
       }
       status.textContent = "Connected.";
-      // Re-attempt connection. attach() short-circuits if attached, so call
-      // connect() directly with the now-cached token.
-      connect(candidate);
+      attach();
     });
   }
 
   // Park the pane when credentials are valid but the origin gate refused
-  // this page's address (probe verdict 403). Deliberately a dead end: no
-  // token input (the token is fine), no reconnect (the next attempt fails
+  // this page's address (inventory answered 403). Deliberately a dead end:
+  // no token input (the token is fine), no reconnect (the next attempt fails
   // identically), no claim that uatu restarted (it didn't). Reached only
   // when the browser's address genuinely fails the gate — e.g. a reverse
   // proxy rewriting the Host header.
   function showOriginRejectedUI(): void {
-    try {
-      socket?.close();
-    } catch {
-      // Already closing.
-    }
-    socket = null;
-    protocolReady = false;
-    try {
-      term?.dispose();
-    } catch {
-      // Already disposed.
-    }
-    term = null;
-    fit = null;
-    searchResultsSubscription?.dispose();
-    searchResultsSubscription = null;
-    searchResultsListener = null;
-    search = null;
-    try {
-      resizeObserver?.disconnect();
-    } catch {
-      // Already disconnected.
-    }
-    resizeObserver = null;
-    attached = false;
-
-    const container = options.container;
-    container.replaceChildren();
-    const wrap = document.createElement("div");
-    wrap.className = "terminal-origin-rejected";
-    const heading = document.createElement("p");
-    heading.className = "terminal-origin-rejected-heading";
-    heading.textContent = "Terminal blocked for this address";
-    const help = document.createElement("p");
-    help.className = "terminal-origin-rejected-help";
+    const wrap = park("origin-rejected");
     const address = (() => {
       try {
         return window.location.host;
@@ -1059,152 +1302,108 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         return "this page's address";
       }
     })();
-    help.textContent =
+    card(
+      wrap,
+      "terminal-origin-rejected",
+      "Terminal blocked for this address",
       `Your credentials are valid, but the terminal refused the connection because the address this page uses (${address}) ` +
-      "did not pass its origin check. uatu allows localhost and 127.0.0.1 on the same port the browser is connected to. " +
-      "This can happen when a proxy in front of uatu rewrites the Host header.";
-    wrap.append(heading, help);
-    container.append(wrap);
-  }
-
-  function teardown(closeCode: number, closeReason: string): void {
-    if (!attached) return;
-    attached = false;
-    delete options.container.dataset.terminalReady;
-    detachInitiated = true;
-    touchScrollAbort?.abort();
-    touchScrollAbort = null;
-    syncPtySize = null;
-    dismissSelectionSheet(false);
-    try {
-      resizeObserver?.disconnect();
-    } catch {
-      // Already disconnected.
-    }
-    resizeObserver = null;
-    try {
-      socket?.close(closeCode, closeReason);
-    } catch {
-      // Already closing.
-    }
-    socket = null;
-    protocolReady = false;
-    try {
-      term?.dispose();
-    } catch {
-      // Already disposed.
-    }
-    term = null;
-    fit = null;
-    searchResultsSubscription?.dispose();
-    searchResultsSubscription = null;
-    searchResultsListener = null;
-    search = null;
-    options.container.replaceChildren();
+        "did not pass its origin check. uatu allows localhost and 127.0.0.1 on the same port the browser is connected to. " +
+        "This can happen when a proxy in front of uatu rewrites the Host header.",
+    );
   }
 
   // Park the pane after a takeover: the session is alive in another window.
-  // Same teardown shape as showPasteTokenUI, then a notice with an explicit
-  // "Take back" action — the ONLY path that re-claims the session, so two
-  // windows can never ping-pong it without a human in the loop.
+  // A notice with an explicit "Take back" action — the ONLY path that
+  // re-claims a session lost this way, so two windows can never ping-pong
+  // it without a human in the loop.
   function showTakenOverUI(): void {
-    try {
-      socket?.close();
-    } catch {
-      // Already closing.
-    }
-    socket = null;
-    protocolReady = false;
-    try {
-      term?.dispose();
-    } catch {
-      // Already disposed.
-    }
-    term = null;
-    fit = null;
-    searchResultsSubscription?.dispose();
-    searchResultsSubscription = null;
-    searchResultsListener = null;
-    search = null;
-    try {
-      resizeObserver?.disconnect();
-    } catch {
-      // Already disconnected.
-    }
-    resizeObserver = null;
-    attached = false;
-
-    const container = options.container;
-    container.replaceChildren();
-    const wrap = document.createElement("div");
-    wrap.className = "terminal-taken";
-    const heading = document.createElement("p");
-    heading.className = "terminal-taken-heading";
-    heading.textContent = "Attached in another window";
-    const help = document.createElement("p");
-    help.className = "terminal-taken-help";
-    help.textContent =
-      "Another uatu window took over this session. It keeps running there — take it back to continue here.";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "terminal-taken-takeback";
-    button.textContent = "Take back";
-    button.addEventListener("click", () => {
+    const wrap = park("taken");
+    card(
+      wrap,
+      "terminal-taken",
+      "Attached in another window",
+      "Another uatu window took over this session. It keeps running there — take it back to continue here.",
+    );
+    wrap.append(actionButton("terminal-taken-takeback", "Take back", () => {
       takeoverArmed = true;
       attach();
-    });
-    wrap.append(heading, help, button);
-    container.append(wrap);
+    }));
   }
 
-  // Disambiguate a close-before-open failure via the three-verdict
-  // `GET /api/auth` probe. 204: credentials and origin are both fine, so the
-  // upgrade was refused for the remaining pre-upgrade reason — the 409 for a
-  // sessionId another window holds — and the controller should rebuild the
-  // pane with a fresh id. 403: credentials are valid but the origin gate
-  // refused this page's address — reconnecting or re-pasting a token can
-  // never fix that, so park the pane with the origin diagnostic instead of
-  // a form that blames a restart. 401 (or a network error, where the form's
-  // copy is still the most useful guidance): the paste-token form.
-  async function classifyPreOpenFailure(): Promise<void> {
-    let verdict: PreOpenFailureKind = "auth-required";
-    try {
-      const token = options.getToken();
-      const url = token ? appUrl(`/api/auth?t=${encodeURIComponent(token)}`) : appUrl("/api/auth");
-      // Same-origin GETs carry no Origin header, so ship the page origin
-      // explicitly — without it the server synthesizes the origin from
-      // Host, which matches by construction, and the origin-rejected
-      // verdict (403) could never fire for a Host-rewriting proxy.
-      const response = await fetch(url, {
-        method: "GET",
-        headers: { "X-Uatu-Page-Origin": window.location.origin },
-      });
-      verdict = classifyAuthProbeStatus(response.status);
-    } catch {
-      verdict = "auth-required";
-    }
-    if (verdict === "collision" && options.onCollision && !collisionSignaled) {
-      collisionSignaled = true;
-      options.onCollision();
-      return;
-    }
-    if (verdict === "origin-rejected") {
-      showOriginRejectedUI();
-      return;
-    }
-    showPasteTokenUI();
+  // Recovery found the PTY held by another client for the whole window: a
+  // real second holder, or a copied pane reference. The choice is the
+  // user's — an explicit takeover, or a shell of this pane's own.
+  function showOccupiedUI(): void {
+    const wrap = park("occupied");
+    card(
+      wrap,
+      "terminal-occupied",
+      "Attached in another window",
+      "This shell is attached to another uatu window. Take it over to continue here, or open a new shell in this pane.",
+    );
+    const actions = document.createElement("div");
+    actions.className = "terminal-card-actions";
+    actions.append(
+      actionButton("terminal-occupied-takeover", "Take over", () => {
+        takeoverArmed = true;
+        attach();
+      }),
+      actionButton("terminal-occupied-new", "New shell", () => options.onNewShell?.()),
+    );
+    wrap.append(actions);
+  }
+
+  // The shell exited, or inventory no longer lists the PTY: nothing to
+  // reattach and nothing to take over. The pane stays until the user acts.
+  function showEndedUI(): void {
+    const wrap = park("ended");
+    card(
+      wrap,
+      "terminal-ended",
+      "Shell ended",
+      "This terminal's shell is no longer running. Open a new shell here, or close the pane.",
+    );
+    wrap.append(actionButton("terminal-ended-new", "New shell", () => options.onNewShell?.()));
+  }
+
+  // The recovery budget ran out without a verdict: inventory could not be
+  // read, or the transport never delivered reconstruction. The saved PTY
+  // reference is kept — the shell may well be running — and Retry starts a
+  // fresh budget.
+  function showUnreachableUI(): void {
+    const wrap = park("unreachable");
+    card(
+      wrap,
+      "terminal-unreachable",
+      "Terminal not reachable",
+      "Couldn't reconnect this terminal. Its shell may still be running — try again in a moment.",
+    );
+    wrap.append(actionButton("terminal-unreachable-retry", "Retry", () => attach()));
   }
 
   function detach(): void {
     // 1000 is a plain goodbye: the server detaches the session and the PTY
     // keeps running for a later reattach.
-    teardown(1000, "panel hidden");
+    teardown(1000, "panel hidden", "idle");
   }
 
-  function terminate(): void {
+  function terminate(): boolean {
     // The user confirmed losing the session — tell the server to kill the
     // PTY. Everything else about the teardown is identical to detach().
-    teardown(CLOSE_CODE_USER_TERMINATE, "user-close");
+    return teardown(CLOSE_CODE_USER_TERMINATE, "user-close", "idle");
+  }
+
+  function release(): void {
+    if (state !== "connecting" && state !== "ready" && state !== "recovering") return;
+    // 1000 again: a page departure is a detach, never a termination, and
+    // saying so explicitly is what lets the child release the PTY promptly
+    // instead of whenever the browser gets around to the socket.
+    teardown(1000, "page hidden", "suspended");
+  }
+
+  function resume(): void {
+    if (state !== "suspended") return;
+    begin("connecting");
   }
 
   function fitNow(): void {
@@ -1268,6 +1467,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     attach,
     detach,
     terminate,
+    release,
+    resume,
+    state: () => state,
     fit: fitNow,
     focus: focusNow,
     setFontSize(px: number) {
@@ -1283,13 +1485,12 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       }
     },
     sendInput(data: string) {
-      if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send(new TextEncoder().encode(data));
+      liveSocket()?.send(new TextEncoder().encode(data));
     },
     paste(text: string) {
       pasteTerminalInput(
         term,
-        protocolReady && socket?.readyState === WebSocket.OPEN,
+        liveSocket() !== null,
         text,
         active => {
           semanticPasteActive = active;
@@ -1299,7 +1500,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     showSelectionSheet,
     dismissSelectionSheet: () => dismissSelectionSheet(),
     isSelectionSheetOpen: () => selectionSheet !== null,
-    isAttached: () => attached,
+    isAttached: () => state === "connecting" || state === "ready" || state === "recovering",
     search: terminalSearch,
   };
 }

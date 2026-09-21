@@ -2240,6 +2240,93 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   cursor: pointer;
 }
 
+/* Reconnecting: the pane keeps its last screen while attachment is
+   reconciled, and says so in a corner. Never a form and never a focus
+   target — restoration must not take the keyboard from the document. */
+.terminal-pane-status {
+  position: absolute;
+  top: 0.4rem;
+  /* Clear of the pane's corner close button. */
+  right: 1.8rem;
+  z-index: 2;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(230, 237, 243, 0.12);
+  color: var(--terminal-fg, #e6edf3);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+/* The pane's parked cards after a recovery settled: the PTY is held by
+   another client (occupied), the shell is gone (ended), or the terminal could
+   not be reached within the recovery window (unreachable). Same visual family
+   as the taken-over notice; each names its one or two explicit actions. */
+.terminal-occupied,
+.terminal-ended,
+.terminal-unreachable {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 0.6rem;
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  color: var(--terminal-fg, #e6edf3);
+}
+
+.terminal-occupied-heading,
+.terminal-ended-heading,
+.terminal-unreachable-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.terminal-occupied-help,
+.terminal-ended-help,
+.terminal-unreachable-help {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(230, 237, 243, 0.65);
+}
+
+.terminal-card-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.terminal-occupied-takeover,
+.terminal-ended-new,
+.terminal-unreachable-retry {
+  appearance: none;
+  background: var(--accent, #0969da);
+  border: 0;
+  border-radius: 4px;
+  color: #ffffff;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+}
+
+.terminal-occupied-new {
+  appearance: none;
+  background: transparent;
+  border: 1px solid rgba(230, 237, 243, 0.35);
+  border-radius: 4px;
+  color: var(--terminal-fg, #e6edf3);
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+}
+
 /* Session picker: shown in place of a fresh pane when live sessions exist
    that this window isn't displaying (orphans, other windows' shells). */
 .terminal-picker {

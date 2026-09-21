@@ -156,19 +156,18 @@ test.describe("terminal collision: a second window gets its own session", () => 
     });
 
     // Window 1 reloads onto the stale reference. The upgrade is refused, and
-    // the reconcile must NOT auto-attach it back: inventory reports the
-    // session as held, so it lands on the chooser as a takeover decision.
-    // This is what makes the reconcile self-limiting rather than a loop.
+    // recovery must NOT auto-attach it back: inventory reports the session as
+    // held for the whole recovery window, so the pane parks on an explicit
+    // takeover decision, visible in place. This is what makes recovery
+    // self-limiting rather than a loop.
     await page.evaluate(() => {
       window.sessionStorage.setItem("uatu:terminal-visible", "1");
     });
     await page.reload();
-    await expect(page.locator(".terminal-picker")).toBeVisible({ timeout: 10000 });
-    await expect(page.locator(".terminal-picker-row")).toHaveCount(1);
-    await expect(page.locator(".terminal-picker-meta").first()).toContainText(
-      "attached elsewhere",
-    );
-    await expect(page.locator(".terminal-pane-host")).toHaveCount(0);
+    await expect(page.locator("#terminal-panel")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".terminal-occupied")).toBeVisible({ timeout: 15000 });
+    await expect(page.locator(".terminal-occupied-takeover")).toBeVisible();
+    await expect(page.locator(".terminal-pane-host .xterm")).toHaveCount(0);
 
     // Window 2 keeps the session throughout — no silent ping-pong.
     await expect(page2.locator(".terminal-taken")).toHaveCount(0);

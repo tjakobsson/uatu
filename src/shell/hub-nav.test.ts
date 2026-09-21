@@ -17,6 +17,7 @@ import {
   initHubNav,
   installHubNavigationForTests,
   installStopReconcileForTests,
+  isPlainActivation,
   groupHubWorkspaces,
   parseHubState,
   repositoryTitle,
@@ -1422,5 +1423,158 @@ describe("initHubNav renders the repository title and the grouped menu", () => {
       expect(row.style.marginInlineStart).toBe("");
       expect(row.className).toBe("hub-menu-item");
     }
+  });
+});
+
+describe("isPlainActivation", () => {
+  test("a plain primary click or a keyboard activation is ordinary; modifiers and other buttons are not", () => {
+    expect(isPlainActivation({})).toBe(true);
+    expect(isPlainActivation({ button: 0 })).toBe(true);
+    expect(isPlainActivation({ button: 1 })).toBe(false);
+    expect(isPlainActivation({ button: 2 })).toBe(false);
+    for (const key of ["metaKey", "ctrlKey", "shiftKey", "altKey"] as const) {
+      expect(isPlainActivation({ button: 0, [key]: true })).toBe(false);
+    }
+  });
+});
+
+describe("activating the current workspace in the switcher", () => {
+  const savedGlobals = new Map<string, unknown>();
+  const setGlobal = (key: string, value: unknown) => {
+    if (!savedGlobals.has(key)) savedGlobals.set(key, Reflect.get(globalThis, key));
+    Reflect.set(globalThis, key, value);
+  };
+
+  afterEach(() => {
+    disposeLiveChannel();
+    installLiveChannelForTests(null);
+    installHubNavigationForTests(null);
+    installStopReconcileForTests(null);
+    resetCurrentSessionRunningForTests();
+    for (const [key, value] of savedGlobals) Reflect.set(globalThis, key, value);
+    savedGlobals.clear();
+    resetAppBasePathForTests();
+  });
+
+  // A hub page on `/s/uatu/` whose list holds the current workspace, a
+  // running sibling that shares its display name, and a stopped one.
+  async function mountSwitcher(currentRunning: boolean) {
+    const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
+    const { document, window } = parseHTML(html);
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "uatu-base-path");
+    meta.setAttribute("content", "/s/uatu/");
+    document.head.appendChild(meta);
+    setGlobal("document", document);
+    setGlobal("window", window);
+    setGlobal("Node", (window as unknown as Record<string, unknown>).Node);
+    resetAppBasePathForTests();
+
+    const starts: string[] = [];
+    const workspaces = [
+      { id: "uatu", displayName: "Uatu", path: "/src/uatu", running: currentRunning },
+      { id: "twin", displayName: "Uatu", path: "/src/twin", running: true },
+      { id: "cold", displayName: "Cold", path: "/src/cold", running: false },
+    ];
+    setGlobal("fetch", async (url: string, init?: { method?: string }) => {
+      if (url === "/api/hub/state") return Response.json({ workspaces });
+      const start = /^\/api\/hub\/sessions\/([^/]+)\/start$/.exec(url);
+      if (start && init?.method === "POST") {
+        starts.push(decodeURIComponent(start[1]!));
+        return Response.json({ ok: true });
+      }
+      return Response.json({ error: "unexpected" }, { status: 404 });
+    });
+    installLiveChannelForTests({
+      onActivity() { return () => {}; },
+      onStreamOpened() { return () => {}; },
+      // A start of the current workspace waits for the channel to confirm
+      // live; the wait subscribes here and is released on teardown.
+      onStatus() { return () => {}; },
+      dispose() {},
+    } as unknown as LiveChannel);
+    const navigations: string[] = [];
+    installHubNavigationForTests(href => navigations.push(href));
+
+    initHubNav();
+    const control = document.querySelector<HTMLElement>("#hub-control")!;
+    const toggle = document.querySelector<HTMLButtonElement>("#hub-toggle")!;
+    const menu = document.querySelector<HTMLElement>("#hub-menu")!;
+    for (let attempt = 0; attempt < 100 && control.hidden; attempt += 1) await Bun.sleep(1);
+    expect(control.hidden).toBe(false);
+    // linkedom's focus() does not move activeElement; count the calls.
+    let toggleFocused = 0;
+    toggle.focus = () => { toggleFocused += 1; };
+
+    const open = () => {
+      toggle.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(menu.hidden).toBe(false);
+    };
+    const entry = (id: string) => menu.querySelector<HTMLAnchorElement>(`.hub-menu-item[data-workspace-id="${id}"]`)!;
+    // A click as the browser dispatches one: cancelable, with the gesture's
+    // button and modifiers. Whether the anchor's navigation then happens is
+    // what `defaultPrevented` reports.
+    const click = (target: HTMLElement, init: { button?: number; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean } = {}) => {
+      const event = Object.assign(new window.Event("click", { bubbles: true, cancelable: true }), { button: 0, ...init });
+      target.dispatchEvent(event);
+      return event;
+    };
+    return { document, window, toggle, menu, open, entry, click, starts, navigations, toggleFocused: () => toggleFocused };
+  }
+
+  test("an ordinary click on the current running workspace closes the menu without navigating; siblings and other gestures keep the link", async () => {
+    const page = await mountSwitcher(true);
+    page.open();
+    const current = page.entry("uatu");
+    expect(current.getAttribute("aria-current")).toBe("true");
+    expect(current.getAttribute("href")).toBe("/s/uatu/");
+
+    const plain = page.click(current);
+    expect(plain.defaultPrevented).toBe(true);
+    expect(page.menu.hidden).toBe(true);
+    expect(page.toggleFocused()).toBe(1);
+    expect(page.navigations).toEqual([]);
+    expect(page.starts).toEqual([]);
+
+    // Keyboard activation dispatches the same plain click.
+    page.open();
+    expect(page.click(page.entry("uatu"), {}).defaultPrevented).toBe(true);
+    expect(page.menu.hidden).toBe(true);
+
+    // Open-elsewhere gestures are the anchor's to handle.
+    page.open();
+    expect(page.click(page.entry("uatu"), { metaKey: true }).defaultPrevented).toBe(false);
+    expect(page.click(page.entry("uatu"), { ctrlKey: true }).defaultPrevented).toBe(false);
+    expect(page.click(page.entry("uatu"), { shiftKey: true }).defaultPrevented).toBe(false);
+    expect(page.click(page.entry("uatu"), { button: 1 }).defaultPrevented).toBe(false);
+    expect(page.menu.hidden).toBe(false);
+
+    // A sibling with the same display name is matched by id, not name: its
+    // link navigates as any other running workspace's does.
+    const twin = page.entry("twin");
+    expect(twin.getAttribute("aria-current")).toBeNull();
+    expect(page.click(twin).defaultPrevented).toBe(false);
+    // Both carry the path that tells them apart.
+    expect(current.textContent).toContain("/src/uatu");
+    expect(twin.textContent).toContain("/src/twin");
+  });
+
+  test("the current stopped workspace keeps its Start action and never navigates", async () => {
+    const page = await mountSwitcher(false);
+    page.open();
+    const current = page.entry("uatu");
+    expect(current.textContent).toContain("stopped");
+    const event = page.click(current);
+    expect(event.defaultPrevented).toBe(true);
+    for (let attempt = 0; attempt < 50 && page.starts.length === 0; attempt += 1) await Bun.sleep(1);
+    expect(page.starts).toEqual(["uatu"]);
+    expect(page.navigations).toEqual([]);
+
+    // A stopped sibling starts and then navigates there.
+    const cold = page.entry("cold");
+    expect(page.click(cold).defaultPrevented).toBe(true);
+    for (let attempt = 0; attempt < 50 && page.navigations.length === 0; attempt += 1) await Bun.sleep(1);
+    expect(page.starts).toEqual(["uatu", "cold"]);
+    expect(page.navigations).toEqual(["/s/cold/"]);
   });
 });

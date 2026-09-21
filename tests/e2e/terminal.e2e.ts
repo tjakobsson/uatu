@@ -136,21 +136,17 @@ test.describe("terminal close confirmation", () => {
     await expect(page.locator(".terminal-pane-host .xterm")).toHaveCount(0);
   });
 
-  test("server-initiated disconnect (exit) auto-closes the pane", async ({ page }) => {
+  test("a shell that exits leaves an ended pane whose close needs no confirmation", async ({ page }) => {
     await page.locator("#terminal-toggle").click();
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
     await expect(page.locator(".terminal-pane")).toHaveCount(1);
 
-    // Simulate the WebSocket dropping (shell exit / connection drop) by
-    // closing it from the page side. The terminal handle's close listener
-    // should treat this as server-initiated and tell the controller to
-    // tear the pane down — no confirmation modal.
+    // Type `exit` + Enter into the terminal so the real PTY exits: the
+    // server sends `{type:"exit"}`, then closes the socket. An explicit exit
+    // is the one close the pane reports as the shell ending — it parks on
+    // the ended card rather than vanishing, and a transport drop would not
+    // even do that (it reconciles through inventory instead).
     await page.evaluate(() => {
-      // The xterm helper-textarea's parent contains the terminal; the
-      // socket itself isn't directly exposed, but dispatching a close on
-      // the underlying connection is awkward in the page context. Use a
-      // shortcut: type `exit` + Enter into the terminal so the real PTY
-      // exits, the server sends `{type:"exit"}`, then closes the socket.
       const host = document.querySelector(".terminal-pane-host") as HTMLElement;
       const xtermHelper = host?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
       xtermHelper?.focus();
@@ -158,11 +154,16 @@ test.describe("terminal close confirmation", () => {
     await page.keyboard.type("exit");
     await page.keyboard.press("Enter");
 
-    // Pane disappears once the server's exit/close cascade completes.
-    await expect(page.locator(".terminal-pane")).toHaveCount(0, { timeout: 5000 });
-    // Panel hides because there are no panes left.
+    await expect(page.locator(".terminal-ended")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".terminal-ended-new")).toBeVisible();
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
+    await expect(page.locator("#terminal-panel")).toBeVisible();
+
+    // Nothing left to lose: the pane closes without the confirmation modal,
+    // and the panel hides because there are no panes left.
+    await page.locator(".terminal-pane-close").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(0);
     await expect(page.locator("#terminal-panel")).toBeHidden();
-    // No confirmation modal should ever have appeared.
     await expect(page.locator("#terminal-confirm")).toBeHidden();
   });
 

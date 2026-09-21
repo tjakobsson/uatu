@@ -528,20 +528,27 @@ test.describe("touch terminal switcher", () => {
     });
 
     // Reload window 1. Restore replays both persisted records; the one window
-    // 2 now holds is refused, which is the collision path — distinct from
-    // being taken over, which parks the pane in place. The refused record is
-    // the one that held the active slot.
+    // 2 now holds is refused, and recovery finds it occupied for the whole
+    // window, so that pane parks on the explicit takeover choice in place —
+    // it keeps its saved reference and the active slot it held.
     await page.reload();
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
     // Touch mode shows only the pane carrying data-active, so leaving none
-    // active blanks the tab while a live terminal sits hidden behind it.
+    // active would blank the tab while a live terminal sits hidden behind
+    // it. What the active pane shows here is the occupied card with its
+    // Take over action — a surface, not a blank.
     await expect(page.locator(".terminal-pane[data-active]")).toHaveCount(1, { timeout: 10000 });
     await expect(page.locator(".terminal-pane[data-active]")).toHaveAttribute(
       "data-session-id",
-      staged[0]!,
+      staged[1]!,
     );
+    await expect(page.locator(".terminal-pane[data-active]")).toHaveAttribute("data-state", "occupied", { timeout: 15000 });
+    await expect(page.locator(".terminal-pane[data-active] .terminal-occupied")).toBeVisible();
+    await expect(page.locator(".terminal-pane[data-active] .terminal-occupied-takeover")).toBeVisible();
     await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
+    // The other pane is attached behind it, untouched by the collision.
+    await expect(page.locator(`.terminal-pane[data-session-id="${staged[0]!}"] .xterm`)).toHaveCount(1);
 
     await page2.close();
   });

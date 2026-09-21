@@ -366,6 +366,20 @@ export async function startWorkspaceSession(workspaceId: string): Promise<Worksp
   return refuse({ ok: false, unlock: false, message });
 }
 
+// Whether a click on a link is its ordinary same-tab activation — a plain
+// primary click, or a keyboard activation (which dispatches a click with no
+// modifiers) — as opposed to a gesture asking the browser to open the link
+// elsewhere: a modifier held, or a button other than the primary one.
+export function isPlainActivation(event: {
+  button?: number;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  altKey?: boolean;
+}): boolean {
+  return (event.button ?? 0) === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+}
+
 export function submitHubSignOut(doc: Document): void {
   const form = doc.createElement("form");
   form.method = "post";
@@ -621,6 +635,21 @@ export function initHubNav(): void {
         item.addEventListener("click", event => event.preventDefault());
       } else if (!stopped) {
         rowStart.delete(workspace.id);
+        if (workspace.id === currentId) {
+          // Ordinary activation of the workspace already on screen is a
+          // no-op: the page, its document URL and its terminal connections
+          // stay exactly as they are, and the menu closes as it does on
+          // Escape. Matched on the stable id, never the display name — a
+          // sibling that shares the name is a different workspace. Modified
+          // clicks and middle-click keep the anchor's open-elsewhere
+          // behaviour, which is why the anchor and its href are kept.
+          item.addEventListener("click", event => {
+            if (!isPlainActivation(event)) return;
+            event.preventDefault();
+            close();
+            toggle.focus();
+          });
+        }
       } else {
         const state = item.querySelector<HTMLSpanElement>(".hub-menu-state.is-stopped")!;
         const pending = rowStart.get(workspace.id);

@@ -62,6 +62,14 @@ import type { ChatCapability, ChatModel, ConversationConfiguration, Conversation
 // delivered, so a test can poll for delivery instead of sleeping.
 let terminalSessionsDelay: { ms: number; armed: boolean; pending: boolean } | null = null;
 
+// Standing artificial latency for processing a terminal socket's CLOSE, armed
+// by tests that need a departing holder to release its PTY late — the
+// window a page navigating away leaves behind while its replacement is
+// already attaching. Every close is held by `ms` while armed; a reset
+// disarms it. Server-side for the same reason as the read delay above, and
+// because the departing socket belongs to a page that no longer runs.
+let terminalCloseDelayMs = 0;
+
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
 let activeFollow = true;
@@ -237,6 +245,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   }
 
   terminalSessionsDelay = null;
+  terminalCloseDelayMs = 0;
   fakeChatAgent.reset();
   fakeSecondAgent.reset();
   activeChatRouter = singleAgentRouter;
@@ -544,6 +553,11 @@ server = Bun.serve({
       }
       return Response.json({ pending: terminalSessionsDelay?.pending ?? false });
     }
+    if (pathname === "/__e2e/terminal-close-delay" && request.method === "POST") {
+      const body = (await request.json()) as { ms?: number };
+      terminalCloseDelayMs = typeof body.ms === "number" && body.ms > 0 ? body.ms : 0;
+      return Response.json({ ok: true });
+    }
     if (
       terminalSessionsDelay?.armed
       && request.method === "GET"
@@ -571,6 +585,13 @@ server = Bun.serve({
           terminalServer.message(socket as never, msg as never);
         },
         close: (socket, code) => {
+          // A held close keeps the departing socket as the PTY's holder for
+          // the armed window; an attach arriving meanwhile is refused as a
+          // collision exactly as a late browser teardown would produce.
+          if (terminalCloseDelayMs > 0) {
+            setTimeout(() => terminalServer.close(socket as never, code), terminalCloseDelayMs);
+            return;
+          }
           terminalServer.close(socket as never, code);
         },
       }
