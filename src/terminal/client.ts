@@ -1048,8 +1048,12 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         options.onOutput?.();
         if (!protocolReady) {
           // The first binary frame is the reconstruction: the child accepted
-          // this socket as the PTY's holder. A retry's snapshot replaces the
-          // previous attempt's screen rather than appending to it.
+          // this socket as the PTY's holder. That receipt ends the readiness
+          // silence — the deadline is about the transport, and xterm painting
+          // a large snapshot slowly must not turn a committed attachment into
+          // a timeout. A retry's snapshot replaces the previous attempt's
+          // screen rather than appending to it.
+          disarmDeadline();
           if (needsReset) {
             needsReset = false;
             term.reset();
