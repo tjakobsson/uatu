@@ -864,7 +864,10 @@ export function setupTerminalPanel(
     }
   }
 
-  async function createSessionRemote(): Promise<TerminalSessionInfo | null> {
+  // `onReauth` is what a stale credential's accepted token resumes: the
+  // action this create was part of, so reauthentication finishes that
+  // action rather than adding an unrelated pane.
+  async function createSessionRemote(onReauth?: () => void): Promise<TerminalSessionInfo | null> {
     try {
       const token = getToken();
       const url = token
@@ -875,7 +878,7 @@ export function setupTerminalPanel(
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ cols: 80, rows: 24 }),
       });
-      if (response.status === 401) renderTerminalAuth();
+      if (response.status === 401) renderTerminalAuth(onReauth);
       if (response.status === 403) renderTerminalOriginRejected();
       return response.ok ? await response.json() as TerminalSessionInfo : null;
     } catch {
@@ -883,7 +886,10 @@ export function setupTerminalPanel(
     }
   }
 
-  function renderTerminalAuth(): void {
+  // `resume` runs once a token is accepted: the pane-specific action the
+  // stale credential interrupted, else a fresh pane. A form already showing
+  // keeps its own resume; the later caller's action is simply not retried.
+  function renderTerminalAuth(resume: () => void = () => void addPaneInteractive()): void {
     if (panesContainer!.querySelector(".terminal-auth")) return;
     const wrap = document.createElement("div");
     wrap.className = "terminal-pane terminal-auth";
@@ -931,7 +937,7 @@ export function setupTerminalPanel(
         // The HttpOnly cookie is sufficient when sessionStorage is unavailable.
       }
       wrap.remove();
-      void addPaneInteractive();
+      resume();
     });
   }
 
@@ -1546,7 +1552,7 @@ export function setupTerminalPanel(
   async function replacePaneWithFreshShell(id: string): Promise<void> {
     const parked = panes.get(id);
     if (!parked) return;
-    const created = await createSessionRemote();
+    const created = await createSessionRemote(() => void replacePaneWithFreshShell(id));
     if (!created) return;
     if (panes.get(id) !== parked || panel!.hasAttribute("hidden")) {
       void killSessionRemote(created.id);
