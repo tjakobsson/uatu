@@ -40,3 +40,12 @@ and result. Visible fix notes should describe only confirmed stable-user impact.
 If the correction affects only unreleased functionality, add the documented
 Release Please `chore(chat)` override to the PR body before merging. Do not use
 the issue filing date as proof in either direction.
+
+## Maintainer decision at merge (2026-09-21)
+
+PR #415 was squash-merged as `7287ac0` with a visible `fix(chat)` note and no
+Release Please override. Basis: #354 was filed before the `v0.7.0` tag and
+`src/chat/viewport.ts` had not changed between 2026-09-05 and the tag, so its
+symptoms are attributed to the stable release; #382 and #410 rest partly on
+post-tag code and are carried by the same entry. No tagged-build device
+reproduction was recorded; tasks 6.3 and 6.5 are closed on this decision.
