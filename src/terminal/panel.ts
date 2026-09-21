@@ -1539,17 +1539,20 @@ export function setupTerminalPanel(
   // the remote shell exists: a create that fails (network, 401, 403) leaves
   // the parked pane, its saved PTY reference and its Take over action in
   // place. Freeing the slot never empties the panel: a window at the cap
-  // holds eight panes.
+  // holds eight panes. The parked pane is re-checked after the create: a
+  // second New shell while the first is in flight, or a close meanwhile,
+  // means the pane this action stood for is gone — its shell is killed
+  // rather than added as an extra pane nobody asked for.
   async function replacePaneWithFreshShell(id: string): Promise<void> {
     const parked = panes.get(id);
     if (!parked) return;
     const created = await createSessionRemote();
     if (!created) return;
-    if (panes.size >= TERMINAL_MAX_PANES && panes.get(id) === parked) removePane(id);
-    if (panel!.hasAttribute("hidden")) {
+    if (panes.get(id) !== parked || panel!.hasAttribute("hidden")) {
       void killSessionRemote(created.id);
       return;
     }
+    if (panes.size >= TERMINAL_MAX_PANES) removePane(id);
     const entry = await addPane({ sessionId: created.id, createdAt: parked.record.createdAt });
     if (!entry) {
       void killSessionRemote(created.id);
