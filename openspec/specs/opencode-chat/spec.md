@@ -628,7 +628,9 @@ Only the active unresolved request of a given conversation MAY accept a response
 
 A request's state SHALL be distinguishable without reading its body — whether it awaits the user now, awaits its turn behind another request of the same conversation, or is resolved. That distinction MUST NOT rely on colour alone. A request awaiting its turn MUST NOT be presented as obsolete, superseded, or otherwise not needing an answer, because it will require one.
 
-The surface SHALL report how many requests are outstanding across everything it is showing, and SHALL offer a way to reach an outstanding request without hunting for it.
+The surface SHALL report how many requests are outstanding across everything it is showing, and SHALL offer a way to reach an outstanding request without hunting for it. That report, and any other control the surface floats over the conversation, MUST NOT cover a request's own answer field or its submit and cancel controls; the conversation SHALL reserve room for them so an outstanding request shown at the end of the transcript stays fully operable. The report SHALL NOT be shown while a request it would lead to is already on screen; when it is shown, its count remains that of every outstanding request.
+
+Revealing a request's free-form answer field SHALL hold the conversation's position on the request being answered, so the request does not scroll out of view as the user starts to answer it.
 
 A choice that grants authority beyond the request being answered SHALL state the scope and lifetime of that authority where the choice is offered, so a user learns what they are granting before granting it rather than afterwards. In particular, OpenCode's persistent approval carries past the answered request into later conversations served by the same OpenCode instance and covers the request's saved pattern rather than only the resource displayed, and it is lost when that instance restarts. It MUST NOT be presented as limited to the current conversation, nor as permanent, nor as outliving the OpenCode instance that granted it.
 
@@ -705,6 +707,21 @@ A pending request SHALL remain discoverable and answerable even when the server 
 - **THEN** the surface reports how many are outstanding
 - **AND** offers a way to reach an outstanding request directly
 - **AND** reports none once every request has been answered
+
+#### Scenario: The outstanding-request report does not cover an answer
+- **WHEN** a request at the end of the conversation shows its answer field and submit and cancel controls while the surface reports outstanding requests
+- **THEN** the report does not overlap that field or those controls
+- **AND** each of them can be activated directly where it appears
+
+#### Scenario: The outstanding-request report yields to a visible request
+- **WHEN** the only outstanding request's card is within the visible part of the conversation
+- **THEN** the report is not shown
+- **AND** it reappears once the card is scrolled out of view while the request is still outstanding
+
+#### Scenario: Revealing a free-form answer holds the request in view
+- **WHEN** the user chooses a request's free-form answer and its field is revealed and focused
+- **THEN** the request being answered stays in view
+- **AND** the conversation does not reposition onto a different entry
 
 #### Scenario: User rejects a structured question
 - **WHEN** OpenCode asks a structured question and the user rejects or dismisses it
@@ -1113,6 +1130,32 @@ viewport and safe-area inset while the software keyboard is present, and
 keyboard opening, resizing, or dismissal MUST NOT hide the input or cause the
 current reading position to jump.
 
+The touch surface's geometry SHALL follow the viewport that is actually
+visible. It SHALL be re-derived whenever the page returns to the foreground
+and not only when the platform announces a viewport change, so a keyboard
+dismissed while the app was backgrounded leaves no keyboard-sized surface
+behind and the user does not have to open and dismiss the keyboard to recover
+the full height. Detection of the software keyboard SHALL hold on platforms
+that pan the page under the keyboard rather than only shrinking it.
+
+While the keyboard is present the pinned progress tracks SHALL yield so the
+composer stays inside the visible viewport, and every pinned track that can
+grow SHALL be bounded, so no combination of populated and expanded tracks can
+push the composer out of view. Moving the text caret inside a chat text
+control MUST NOT move the conversation's reading position, even when the
+platform pans the viewport to follow the caret. A reading-position correction
+withheld while the page is hidden SHALL be applied once the page is visible
+again rather than dropped.
+
+While a text control that belongs to a request has focus on a touch device,
+the surface SHALL give the transcript the visible band: chrome that cannot be
+used while the keyboard is open SHALL sit beneath the keyboard rather than
+above it, so the band above the keyboard belongs to the transcript and the
+request; it SHALL reappear as the keyboard dismisses; the transcript SHALL keep enough scroll room below its last entry that a request at the end of the conversation can still be lifted above the keyboard. The focused control
+SHALL be kept inside the visible viewport once the keyboard geometry has
+settled. Focusing that control MUST NOT change the page's scale. When focus
+leaves the request, the surface SHALL return to its normal arrangement.
+
 #### Scenario: Preview updates while the conversation stays visible
 - **WHEN** a desktop user prompts the agent and it modifies the currently
   previewed document
@@ -1133,6 +1176,124 @@ current reading position to jump.
   safe area
 - **AND** the timeline resizes without placing the active content behind the
   composer
+
+#### Scenario: Returning from the background restores the surface
+- **WHEN** a touch user focuses the composer, backgrounds the app with the
+  keyboard open, and returns to it with the keyboard dismissed and no
+  viewport-change notification from the platform
+- **THEN** the Chat surface again fills the visible viewport with no
+  keyboard-sized strip below it
+- **AND** the composer is reachable without opening and dismissing the
+  keyboard again
+- **AND** the conversation shows the reading position it held
+
+#### Scenario: A panned keyboard is still a keyboard
+- **WHEN** the software keyboard opens on a device that pans the page upward,
+  so the strip occluded below the visible viewport is smaller than the
+  keyboard itself
+- **THEN** Chat treats the keyboard as present
+- **AND** the pinned progress tracks give up their rows as they do when the
+  keyboard shrinks the viewport without panning
+
+#### Scenario: Pinch zoom is not a software keyboard
+- **WHEN** the browser magnifies the page and reduces the visual viewport at a
+  non-default scale
+- **THEN** Chat retains its last normal-scale layout and keyboard state without
+  treating the zoom as a keyboard or correcting the browser's zoom pan
+- **AND** normal viewport measurement resumes when the scale returns to normal
+
+#### Scenario: Expanded progress tracks cannot displace the composer
+- **WHEN** the task list, the subagent list, and the background-task list are
+  all populated and expanded while the keyboard is open
+- **THEN** the composer and its send control remain inside the visible
+  viewport
+- **AND** the transcript absorbs the reduction instead of the composer
+
+#### Scenario: Moving the caret does not move the conversation
+- **WHEN** a touch user moves the text caret inside the composer or a
+  request's answer field and the platform pans the visible viewport to follow
+  it
+- **THEN** the conversation's reading position is unchanged
+- **AND** repeated pans during one caret movement do not each reposition the
+  transcript
+
+#### Scenario: The transcript holds still while an answer is typed
+- **WHEN** a touch user has a request's answer field focused and the platform
+  autoscrolls the transcript while the caret is dragged
+- **THEN** the transcript returns to the position that keeps the field in view
+- **AND** it scrolls freely again once the field loses focus
+
+#### Scenario: Resolving a focused answer removes the answering state
+- **WHEN** answering, rejecting, or a remote update removes a focused request
+  field, including on a browser that emits no focusout for a removed node
+- **THEN** the editing and answering state is cleared and the detached field no
+  longer holds the transcript
+- **AND** the normal tabs and chrome return and the transcript can scroll freely
+
+#### Scenario: Answering temporarily preserves the reader's follow choice
+- **WHEN** a reader following the newest content answers a request and its
+  temporary positioning hold ends
+- **THEN** following resumes for the agent's next message
+- **AND** a reader who was already reading older content is not forced to follow
+- **AND** an explicit transcript gesture or Latest action ends the answer hold
+
+#### Scenario: A live refresh preserves an actual answer hold
+- **WHEN** an authoritative snapshot refresh cancels pending scroll work while a
+  focused request field is held in its parent or drill-down timeline
+- **THEN** the retained field is held again after the refresh
+- **AND** a hold already ended by explicit reader action is not resurrected
+
+#### Scenario: Dragging a question choice scrolls the conversation
+- **WHEN** an upward transcript drag starts on a radio or checkbox choice
+- **THEN** following pauses as it does for the same drag starting on its label
+- **AND** caret gestures inside text-editing controls do not pause following
+
+#### Scenario: A keyboard resize and pan together keep the answer visible
+- **WHEN** a touch user is answering a request and the visual viewport's height
+  and offset change together while the chat surface retains its layout height
+- **THEN** the focused field and its submit and cancel controls are repositioned
+  inside the new visible band without waiting for another viewport notification
+- **AND** a subsequent pan with no height change does not reposition the transcript
+
+#### Scenario: A direct focus transfer holds the new answer field
+- **WHEN** focus moves directly between two independently answerable request
+  fields without leaving the answering state
+- **THEN** subsequent platform autoscroll is corrected for the newly focused
+  field rather than the previous field
+- **AND** the previous field's timeline hold is released
+
+#### Scenario: Returning with retained answer focus restores the hold
+- **WHEN** the app returns from the background with a request's answer field
+  still focused and without a new focus event
+- **THEN** the field's timeline hold is restored in its parent or drill-down
+  transcript
+- **AND** later caret autoscroll is corrected after foreground recovery settles
+
+#### Scenario: Answering a request on touch puts the chrome under the keyboard
+- **WHEN** a touch user focuses a request's free-form answer field and the
+  software keyboard opens while the task, subagent and background-task tracks
+  are populated and the conversation has a composer
+- **THEN** the composer and the pinned tracks lie beneath the keyboard's edge
+  rather than above it
+- **AND** the chat header remains visible
+- **AND** the answer field and the request's submit and cancel controls are
+  inside the visible viewport
+- **AND** the field and its submit and cancel controls sit directly above the
+  keyboard's edge, with the conversation filling the band above them
+- **AND** the composer and the pinned tracks are back above the keyboard's
+  former edge once it dismisses
+
+#### Scenario: A parent request pill cannot override child answer clearance
+- **WHEN** a parent request is outstanding while a child request is answered in
+  the pushed drill-down with the keyboard open
+- **THEN** the answering keyboard inset takes precedence over the pill's normal
+  reservation even if the pill's hidden attribute is unset
+- **AND** the child's field and action row remain above the keyboard
+
+#### Scenario: Focusing the answer field does not zoom the page
+- **WHEN** a touch user focuses a request's free-form answer field
+- **THEN** the page's scale is unchanged
+- **AND** the field's text renders at the same size as the composer's
 
 ### Requirement: Conversation file references navigate through UatuCode safely
 Workspace-relative file references in assistant content or normalized
