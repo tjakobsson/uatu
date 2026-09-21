@@ -88,6 +88,17 @@ export function recoveryDelayMs(index: number): number {
   return Math.min(RECOVERY_FIRST_DELAY_MS * 2 ** index, RECOVERY_MAX_DELAY_MS);
 }
 
+// What an attempt may still wait for reconstruction once its handshake has
+// used `connectSpentMs` of the `deadlineMs` it was given. An attempt's two
+// silences — a handshake that never completes and a child that never answers
+// attach-ready — share one deadline, so a socket that opens late cannot then
+// wait a whole second deadline for reconstruction. Time a socket sat open
+// before attach-ready could go out (no layout yet) is not a silence; the
+// caller leaves it out of `connectSpentMs`.
+export function readinessBudgetMs(deadlineMs: number, connectSpentMs: number): number {
+  return Math.max(0, deadlineMs - connectSpentMs);
+}
+
 // One recovery: a single budget, however many attempts fit in it. Never
 // restarts itself — a failed attempt inside the run is a retry within the
 // same budget, and an outcome is final until the pane or the user starts a

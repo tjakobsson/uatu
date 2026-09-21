@@ -13,6 +13,7 @@ import {
   formatTerminalCookie,
   hasValidTerminalCredentials,
   isAllowedOrigin,
+  PAGE_ORIGIN_HEADER,
   terminalCookieName,
 } from "./auth";
 import { handleTerminalSessionsRoute } from "./sessions-route";
@@ -371,7 +372,14 @@ describe("handleTerminalSessionsRoute", () => {
   }
   function run(
     path: string,
-    init: { method?: string; cookie?: boolean; query?: string; origin?: boolean; body?: unknown } = {},
+    init: {
+      method?: string;
+      cookie?: boolean;
+      query?: string;
+      origin?: boolean | string;
+      pageOrigin?: string;
+      body?: unknown;
+    } = {},
     terminal: TerminalServer | null = stubTerminal(),
   ): Response | Promise<Response> | null {
     const url = new URL(`http://127.0.0.1:4711${path}${init.query ?? ""}`);
@@ -379,7 +387,8 @@ describe("handleTerminalSessionsRoute", () => {
     if (init.cookie) {
       headers.set("Cookie", `${terminalCookieName(url)}=${encodeURIComponent(TOKEN)}`);
     }
-    if (init.origin) headers.set("Origin", url.origin);
+    if (init.origin) headers.set("Origin", init.origin === true ? url.origin : init.origin);
+    if (init.pageOrigin !== undefined) headers.set(PAGE_ORIGIN_HEADER, init.pageOrigin);
     if (init.body !== undefined) headers.set("content-type", "application/json");
     const request = new Request(url, {
       method: init.method ?? "GET",
@@ -411,6 +420,24 @@ describe("handleTerminalSessionsRoute", () => {
       query: `?t=${encodeURIComponent(TOKEN)}`,
     })) as Response;
     expect(viaQuery.status).toBe(200);
+  });
+
+  // The pane's recovery reads the inventory to learn why an attach was
+  // refused, so the GET must give the upgrade gate's origin verdict: a
+  // refused address is a 403 the recovery can act on, not a listing that
+  // sends it back to an upgrade that fails the same way.
+  it("GET answers the origin question: a refused page address is 403, a passing one lists", async () => {
+    const query = `?t=${encodeURIComponent(TOKEN)}`;
+    const refusedPage = (await run("/api/terminal/sessions", { query, pageOrigin: "http://localhost:9999" })) as Response;
+    expect(refusedPage.status).toBe(403);
+    expect(refusedPage.headers.get("cache-control")).toBe("no-store");
+
+    const refusedBrowser = (await run("/api/terminal/sessions", { query, origin: "http://localhost:9999" })) as Response;
+    expect(refusedBrowser.status).toBe(403);
+
+    const passingPage = (await run("/api/terminal/sessions", { query, pageOrigin: "http://127.0.0.1:4711" })) as Response;
+    expect(passingPage.status).toBe(200);
+    expect((await passingPage.json()).sessions).toEqual(stubSessions);
   });
 
   it("DELETE kills a known session (204) and 404s an unknown one", async () => {

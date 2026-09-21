@@ -1535,14 +1535,17 @@ export function setupTerminalPanel(
   // `acquireSession`: the replacement lands BEFORE the old pane is removed,
   // because removing the last pane hides the panel and the add would then
   // bail on a hidden panel. At the cap the parked pane IS the slot the
-  // replacement needs, so it is freed first there (never empties the panel:
-  // a window at the cap holds eight panes).
+  // replacement needs, so it is freed there before the add — but only once
+  // the remote shell exists: a create that fails (network, 401, 403) leaves
+  // the parked pane, its saved PTY reference and its Take over action in
+  // place. Freeing the slot never empties the panel: a window at the cap
+  // holds eight panes.
   async function replacePaneWithFreshShell(id: string): Promise<void> {
     const parked = panes.get(id);
     if (!parked) return;
-    if (panes.size >= TERMINAL_MAX_PANES) removePane(id);
     const created = await createSessionRemote();
     if (!created) return;
+    if (panes.size >= TERMINAL_MAX_PANES && panes.get(id) === parked) removePane(id);
     if (panel!.hasAttribute("hidden")) {
       void killSessionRemote(created.id);
       return;

@@ -99,29 +99,32 @@ export const PAGE_ORIGIN_HEADER = "X-Uatu-Page-Origin";
 //   403 — credentials valid, origin rejected (show the origin diagnostic,
 //         NOT the paste-token form)
 //   401 — credentials invalid (paste-token form)
-// The effective origin is resolved in trust order: the browser-set Origin
-// header when present, else the client-supplied page-origin header (see
-// PAGE_ORIGIN_HEADER — required for the 403 verdict to be reachable at all,
-// since same-origin GETs omit Origin and a Host-synthesized origin matches
-// Host by construction), else scheme+Host as the exact same-origin
-// fallback. Deliberately ignores sessionId — a collision is the 204 case
-// by definition. `no-store` because a cached answer would defeat the
+// The origin judged is `effectiveRequestOrigin` — the page-origin header is
+// what makes the 403 verdict reachable at all, since same-origin GETs omit
+// Origin and a Host-synthesized origin matches Host by construction.
+// Deliberately ignores sessionId — a collision is the 204 case by
+// definition. `no-store` because a cached answer would defeat the
 // disambiguation.
 export function authProbeResponse(request: Request, requestUrl: URL, expected: string): Response {
   let status: number;
   if (!hasValidTerminalCredentials(request, requestUrl, expected)) {
     status = 401;
   } else {
-    const effectiveOrigin =
-      request.headers.get("Origin") ??
-      request.headers.get(PAGE_ORIGIN_HEADER) ??
-      requestUrl.origin;
-    status = isAllowedOrigin(effectiveOrigin, requestUrl) ? 204 : 403;
+    status = isAllowedOrigin(effectiveRequestOrigin(request, requestUrl), requestUrl) ? 204 : 403;
   }
   return new Response(null, {
     status,
     headers: { "cache-control": "no-store" },
   });
+}
+
+// The origin a diagnostic read is judged by, in trust order: the browser-set
+// Origin header when present, else the client-supplied page-origin header
+// (PAGE_ORIGIN_HEADER), else scheme+Host as the exact same-origin fallback.
+// Shared by the auth probe and the inventory read so both answer the origin
+// question the way the WebSocket upgrade gate would.
+export function effectiveRequestOrigin(request: Request, requestUrl: URL): string {
+  return request.headers.get("Origin") ?? request.headers.get(PAGE_ORIGIN_HEADER) ?? requestUrl.origin;
 }
 
 // Shared credential check for the terminal's REST surface (auth probe,

@@ -21,6 +21,7 @@ import {
 } from "./touch-scroll";
 import {
   classifyInventoryResponse,
+  readinessBudgetMs,
   recoverAttachment,
   type AttachAttemptResult,
   type InventoryRead,
@@ -371,13 +372,22 @@ const defaultClock: RecoveryClock = {
 
 // The authenticated inventory read the recovery reconciles against. Classified
 // into the recovery's vocabulary here; a network failure is a `failed` read,
-// which proves nothing about any PTY.
+// which proves nothing about any PTY. Same-origin GETs carry no Origin
+// header, so the page's address goes in the page-origin header (the literal
+// mirrors PAGE_ORIGIN_HEADER in terminal/auth.ts): it is what lets the
+// inventory answer 403 for an address the origin gate refuses — the verdict
+// `origin-rejected` is built on, and the reason a refused attach behind a
+// Host-rewriting proxy ends in the origin diagnostic rather than in retries.
 export async function readTerminalInventory(token: string | null, signal: AbortSignal): Promise<InventoryRead> {
   const url = token
     ? appUrl(`/api/terminal/sessions?t=${encodeURIComponent(token)}`)
     : appUrl("/api/terminal/sessions");
   try {
-    const response = await fetch(url, { method: "GET", signal });
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { "X-Uatu-Page-Origin": window.location.origin },
+      signal,
+    });
     const body: unknown = response.ok ? await response.json().catch(() => null) : null;
     return classifyInventoryResponse(response.status, body);
   } catch {
@@ -971,29 +981,33 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // Two silences are bounded, and one wait is not. A socket that never
       // opens (a hub that hangs the handshake) and a child that never answers
       // attach-ready with reconstruction (through the hub the browser side
-      // opens before the child has been asked at all) each get `deadlineMs`.
-      // The wait BETWEEN them — an open socket whose attach-ready has not
-      // gone out because xterm has no layout yet (a pane parked behind
-      // another touch tab, a panel not yet painted) — is not a silence: the
-      // child has not been asked, holds nothing for us, and the frame goes
-      // out the moment the pane is laid out.
+      // opens before the child has been asked at all) share `deadlineMs`:
+      // the readiness wait gets what the handshake left of it, so an attempt
+      // never runs its deadline twice over. The wait BETWEEN them — an open
+      // socket whose attach-ready has not gone out because xterm has no
+      // layout yet (a pane parked behind another touch tab, a panel not yet
+      // painted) — is not a silence and is not charged: the child has not
+      // been asked, holds nothing for us, and the frame goes out the moment
+      // the pane is laid out.
       let deadline: unknown = null;
-      const armDeadline = (reason: string) => {
+      const armDeadline = (reason: string, ms: number) => {
         if (deadline !== null) clock.clearTimeout(deadline);
         deadline = clock.setTimeout(() => {
           if (settled) return;
           abandon(reason);
           finish("silent");
-        }, deadlineMs);
+        }, ms);
       };
       const disarmDeadline = () => {
         if (deadline !== null) clock.clearTimeout(deadline);
         deadline = null;
       };
-      armDeadline("connect timeout");
+      const startedAt = clock.now();
+      let connectSpentMs = 0;
+      armDeadline("connect timeout", deadlineMs);
       onAttachReadySent = () => {
         if (!isCurrent() || settled) return;
-        armDeadline("readiness timeout");
+        armDeadline("readiness timeout", readinessBudgetMs(deadlineMs, connectSpentMs));
       };
       const onAbort = () => {
         if (settled) return;
@@ -1004,6 +1018,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
 
       attempt.addEventListener("open", () => {
         if (!isCurrent()) return;
+        connectSpentMs = clock.now() - startedAt;
         disarmDeadline();
         // If xterm is already opened (toggle path — container had real
         // dimensions before observe() fired), send the initial resize now.

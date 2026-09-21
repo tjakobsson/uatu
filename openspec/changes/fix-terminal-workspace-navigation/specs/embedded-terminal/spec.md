@@ -49,10 +49,16 @@ A terminal connection failure SHALL NOT by itself be treated as shell exit, pane
 - **THEN** the pane retains its saved PTY reference and the panel shows a retry or authentication action appropriate to the failure
 - **AND** unavailable inventory is not presented as proof of another holder or shell exit
 
+#### Scenario: Page address fails the origin gate
+- **WHEN** credentials are valid but the address the page uses does not pass the terminal's origin gate
+- **THEN** the authenticated inventory read reports that refusal and recovery ends with the origin explanation
+- **AND** the pane retains its saved PTY reference and spends no further attach attempts on that address
+
 #### Scenario: Saved shell no longer exists
 - **WHEN** recovery successfully reads inventory and the saved PTY is absent
 - **THEN** the panel reports that terminal as ended or unavailable and offers an explicit way to open a new shell
 - **AND** it neither attempts takeover of that PTY nor silently replaces it
+- **AND** a replacement shell whose creation fails leaves the parked pane and its actions in place
 
 #### Scenario: Explicit takeover does not start a recovery fight
 - **WHEN** another client explicitly takes over an attached terminal

@@ -8,11 +8,13 @@
 //   POST   /api/terminal/sessions       → TerminalSessionInfo
 //   DELETE /api/terminal/sessions/<id>  → 204, or 404 for an unknown id
 //
-// Both are gated by the same credentials as the terminal upgrade. Responses
-// are `no-store`: the inventory is a live view, and a cached 401/200 would
-// confuse the picker after a token rotation.
+// All are gated by the same credentials as the terminal upgrade. POST and
+// DELETE require a passing browser Origin; the GET answers the upgrade's
+// origin question too (403), judged by the effective request origin — see
+// the handler. Responses are `no-store`: the inventory is a live view, and a
+// cached 401/200 would confuse the picker after a token rotation.
 
-import { hasValidTerminalCredentials, isAllowedOrigin } from "./auth";
+import { effectiveRequestOrigin, hasValidTerminalCredentials, isAllowedOrigin } from "./auth";
 import { isValidSessionId, type TerminalServer } from "./server";
 
 const SESSIONS_PATH = "/api/terminal/sessions";
@@ -41,6 +43,18 @@ export function handleTerminalSessionsRoute(
   }
 
   if (path === SESSIONS_PATH && request.method === "GET") {
+    // The inventory is the read a pane's recovery reconciles against, so it
+    // carries the verdict the WebSocket upgrade gate would give: a page
+    // whose address the gate refuses learns it here instead of retrying an
+    // upgrade that fails identically until its budget is spent. Same-origin
+    // GETs carry no Origin, so the client asserts the page's address in the
+    // page-origin header; without either the request's own origin is judged.
+    if (!isAllowedOrigin(effectiveRequestOrigin(request, requestUrl), requestUrl)) {
+      return new Response("forbidden origin", {
+        status: 403,
+        headers: { "cache-control": "no-store" },
+      });
+    }
     return terminalServer.listSessions().then(sessions =>
       Response.json({ sessions }, { headers: { "cache-control": "no-store" } }),
     );

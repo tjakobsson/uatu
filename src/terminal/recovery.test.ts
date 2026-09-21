@@ -4,6 +4,7 @@ import {
   RECOVERY_BUDGET_MS,
   RECOVERY_MAX_DELAY_MS,
   classifyInventoryResponse,
+  readinessBudgetMs,
   recoverAttachment,
   recoveryDelayMs,
   type AttachAttemptResult,
@@ -341,5 +342,14 @@ describe("classifyInventoryResponse", () => {
     expect(classifyInventoryResponse(200, { nope: true })).toEqual({ kind: "failed" });
     expect(classifyInventoryResponse(200, { sessions: [{ id: SESSION, attached: true, label: "zsh" }, { bogus: 1 }] }))
       .toEqual({ kind: "ok", sessions: [{ id: SESSION, attached: true }] });
+  });
+});
+
+describe("readinessBudgetMs", () => {
+  test("reconstruction gets what the handshake left of the attempt's deadline, never a fresh one", () => {
+    expect(readinessBudgetMs(5_000, 0)).toBe(5_000);
+    expect(readinessBudgetMs(5_000, 4_900)).toBe(100);
+    expect(readinessBudgetMs(5_000, 5_000)).toBe(0);
+    expect(readinessBudgetMs(5_000, 6_000)).toBe(0);
   });
 });

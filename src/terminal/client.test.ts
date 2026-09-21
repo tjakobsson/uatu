@@ -228,3 +228,29 @@ describe("persistTerminalToken", () => {
     }
   });
 });
+
+describe("readTerminalInventory", () => {
+  it("asserts the page's address so the inventory can refuse it, and reads that refusal as origin-rejected", async () => {
+    const { readTerminalInventory } = await import("./client");
+    // Unit tests run without a DOM; the read only needs the page's origin.
+    const pageOrigin = "http://localhost:4711";
+    const scope = globalThis as { window?: unknown };
+    const originalWindow = scope.window;
+    const originalFetch = globalThis.fetch;
+    const seen: { headers: Headers | null } = { headers: null };
+    try {
+      scope.window = { location: { origin: pageOrigin } };
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        seen.headers = new Headers(init?.headers);
+        return new Response("forbidden origin", { status: 403 });
+      }) as unknown as typeof fetch;
+      const read = await readTerminalInventory(null, new AbortController().signal);
+      expect(read).toEqual({ kind: "origin-rejected" });
+      expect(seen.headers?.get("X-Uatu-Page-Origin")).toBe(pageOrigin);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalWindow === undefined) delete scope.window;
+      else scope.window = originalWindow;
+    }
+  });
+});
