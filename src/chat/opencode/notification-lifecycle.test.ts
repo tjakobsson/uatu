@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenCodeNotificationLifecycle } from "./notification-lifecycle";
-import { normalizeProviderEvent } from "./normalization";
+import { normalizeProviderEvent } from "./v1/normalization";
+import { createOpenCodeV2Normalizer } from "./v2/normalization";
 
 describe("OpenCode notification execution identity", () => {
   function fixture() {
@@ -52,5 +53,21 @@ describe("OpenCode notification execution identity", () => {
     observe("session.next.step.started", { assistantMessageID: "a", timestamp: 10 });
     expect(observe("session.error", { timestamp: 20, error: { name: "aborted" } })).toMatchObject([{ sourceId: "a", phase: "interrupted" }]);
     expect(observe("session.next.step.ended", { assistantMessageID: "a", timestamp: 30, finish: "stop" })).toEqual([]);
+  });
+
+  test("2.x steps correlate the same way, and an interrupted execution retires them", () => {
+    const lifecycle = new OpenCodeNotificationLifecycle();
+    const normalize = createOpenCodeV2Normalizer("/ws");
+    const observe = (type: string, data: Record<string, unknown>, created: number) => {
+      const event = { id: `evt_${created}`, created, type, location: { directory: "/ws" }, data: { sessionID: "s", ...data } };
+      return lifecycle.observe(event, normalize(event));
+    };
+    expect(observe("session.step.started", { assistantMessageID: "a", agent: "build", model: { id: "m", providerID: "p" }, started: 10 }, 11)).toEqual([{ sourceId: "a", phase: "started", createdAt: 10 }]);
+    expect(observe("session.step.ended", { assistantMessageID: "a", finish: "tool-calls", cost: 0, tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }, 20)).toEqual([{ sourceId: "a", phase: "failed", createdAt: 20 }]);
+    expect(observe("session.step.started", { assistantMessageID: "b", agent: "build", model: { id: "m", providerID: "p" }, started: 30 }, 31)).toHaveLength(1);
+    expect(observe("session.step.ended", { assistantMessageID: "b", finish: "stop", cost: 0, tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }, 40)).toEqual([{ sourceId: "b", phase: "completed", createdAt: 40 }]);
+    expect(observe("session.step.started", { assistantMessageID: "c", agent: "build", model: { id: "m", providerID: "p" }, started: 50 }, 51)).toHaveLength(1);
+    expect(observe("session.execution.interrupted", { reason: "user" }, 60)).toEqual([{ sourceId: "c", phase: "interrupted", createdAt: 60 }]);
+    expect(observe("session.step.failed", { assistantMessageID: "c", error: { type: "aborted", message: "Step interrupted" } }, 61)).toEqual([]);
   });
 });

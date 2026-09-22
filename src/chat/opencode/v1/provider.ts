@@ -1,15 +1,15 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
-import { createHash } from "node:crypto";
+import { stableProviderId } from "../message-id";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { boundedSet } from "../../shared/bounded-map";
-import { OpenCodeNotificationLifecycle } from "./notification-lifecycle";
-import { measureChatWork } from "../performance";
-import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../history-reuse";
-import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
+import { boundedSet } from "../../../shared/bounded-map";
+import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
+import { measureChatWork } from "../../performance";
+import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../../history-reuse";
+import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../../provider";
 import type {
   NormalizedProviderEvent,
   ChatProvider,
@@ -20,9 +20,9 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
   StoredMessageAccounting,
-} from "../provider";
+} from "../../provider";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, pendingPermissionFields, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../types";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 
 type Result<T> = { data?: T; error?: unknown };
 type ReversibleTurn = { id: string; providerId: string; draft: RestoredDraft; summary: string };
@@ -33,7 +33,7 @@ type ReversibleHistoryContext = {
   state: ReversibleHistoryState;
 };
 
-export function createSdkV2Provider(options: {
+export function createOpenCodeV1Provider(options: {
   endpoint: string;
   password: string;
   directory: string;
@@ -44,22 +44,51 @@ export function createSdkV2Provider(options: {
     baseUrl: options.endpoint,
     directory: options.directory,
     headers: { authorization },
-    fetch: options.fetch,
+    fetch: quietCancellation(options.fetch ?? ((input, init) => globalThis.fetch(input, init))),
   });
-  return new SdkV2Provider(client, options.directory);
+  return new OpenCodeV1Provider(client, options.directory);
 }
 
 /**
- * OpenCode's persistent-approval reach, verified against a live OpenCode
- * 1.18.18: an "always" reply carries past the request into every later
- * conversation the same OpenCode server handles, grants the request's
- * `always` pattern rather than only the resource on the card, and is lost
- * when that server restarts (it never reaches `/api/permission/saved`).
- * The card states exactly this and names OpenCode on purpose.
+ * The 1.x SDK's event stream stops on abort with a `void reader.cancel()`,
+ * and on Bun a cancel of a body whose fetch was just aborted rejects — an
+ * unhandled AbortError at every pump stop (reproduced against 1.18.31, and
+ * present before this provider existed). The SDK is pinned and generated,
+ * so the body it reads is wrapped instead: the same bytes, a `cancel` that
+ * settles. Only event streams are wrapped; every other response passes
+ * through untouched.
  */
-export const OPENCODE_PERMISSION_SCOPE_NOTE = "“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.";
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-export class SdkV2Provider implements ChatProvider {
+export function quietCancellation(fetch: FetchLike): typeof globalThis.fetch {
+  const wrapped: FetchLike = async (input, init) => {
+    const response = await fetch(input, init);
+    if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
+    const reader = response.body.getReader();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) controller.close();
+          else controller.enqueue(value);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      cancel(reason) {
+        return reader.cancel(reason).catch(() => undefined);
+      },
+    });
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  };
+  // Bun's `fetch` type carries a `preconnect` member the SDK never calls.
+  return wrapped as typeof globalThis.fetch;
+}
+
+export { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
+import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
+
+export class OpenCodeV1Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
   private readonly historyReuse = new HistoryReuse<ProviderMessage[]>();
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
@@ -719,10 +748,7 @@ const BUILTIN_COMMANDS: ChatCommand[] = [
   { name: "summarize", description: "Summarize and compact the conversation context", argumentHint: "", kind: "command" },
 ];
 
-export function stableProviderId(prefix: "msg", identity: string): string {
-  if (identity.startsWith(`${prefix}_`)) return identity;
-  return `${prefix}_${createHash("sha256").update(identity).digest("hex").slice(0, 26)}`;
-}
+export { stableProviderId } from "../message-id";
 
 function unwrap<T>(result: Result<T>): T {
   if (result.error !== undefined) throw new Error(`OpenCode request failed: ${stringify(result.error)}`);

@@ -29,6 +29,10 @@ const ALLOWED_FILES = new Set([
   // building a URL to request, and it has to match it at the origin root as
   // well as under the base path — appUrl() can only produce the latter.
   "src/shell/pwa.ts",
+  // OpenCode's own loopback server: the readiness probe names OpenCode's
+  // routes (`/api/info` on 2.x), which live on the spawned agent process,
+  // never in the workspace's URL space that appUrl() relocates.
+  "src/chat/opencode/opencode-service.ts",
   // Server-side route matching / response construction:
   "src/terminal/sessions-route.ts",
   "src/terminal/auth.ts",

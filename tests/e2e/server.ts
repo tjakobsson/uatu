@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { MultiAgentChatService } from "../../src/chat/agents";
 import { CLAUDE_PERMISSION_SCOPE_NOTE } from "../../src/chat/claude/provider";
-import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../../src/chat/opencode/sdk-v2-provider";
+import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../../src/chat/opencode/v1/provider";
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "../../src/assets/uatu-logo.svg" with { type: "file" };
 import icon192Asset from "../../src/assets/icon-192.png" with { type: "file" };

@@ -1,0 +1,1156 @@
+{
+ "turnWithPermissionAndTool": [
+  {
+   "id": "evt_0c8cb17b8001R3KXOnwprqthKQ",
+   "created": 1790075148216,
+   "type": "session.created",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "slug": "nimble-island",
+    "version": "2.0.13",
+    "projectID": "global",
+    "location": {
+     "directory": "/tmp/oc-v2-ws"
+    },
+    "subpath": "../../../tmp/oc-v2-ws",
+    "title": "capture4",
+    "model": {
+     "id": "mimo-v2.6-flash-free",
+     "providerID": "opencode"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb1895001sUKpBEXGEoJnHv",
+   "created": 1790075148437,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "inboxID": "msg_0c8cb17f3001CvE3CFrhDOrWQz",
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "Read the file /etc/hosts using the read tool and reply with its first line only."
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb18960011i3Y5cgO7bYm4Z",
+   "created": 1790075148438,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ"
+   }
+  },
+  {
+   "id": "evt_0c8cb189e001fxkKcFKEpqYNf1",
+   "created": 1790075148446,
+   "metadata": {
+    "instructions": {
+     "initial": true
+    }
+   },
+   "type": "session.instructions.updated",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "delta": {
+     "core/environment": "c45500908ac9905523d74d61c5af35b3216a9daaad440f6fec5f853bab9e00d9",
+     "core/date": "8c3d1acb09527012fbc554119a9ab241f20bd1b582c6408edf4ebed258feb826",
+     "core/codemode": "9bbeb19ab2fa0ee4cafd3d2e36b9cfb6c72f8148481e8c67444eb0c9d38b5a22",
+     "core/skill-guidance": "8394362d28c82fa4d13c7a9f5568c05680f6687e07db8f426a0e3c92f3027dc9"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb189e0023aLG446Y6GHU6o",
+   "created": 1790075148446,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "inboxID": "msg_0c8cb17f3001CvE3CFrhDOrWQz"
+   }
+  },
+  {
+   "id": "evt_0c8cb2173001oT3N6t9Ud64IAw",
+   "created": 1790075150707,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "agent": "build",
+    "model": {
+     "id": "mimo-v2.6-flash-free",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "started": 1790075148467
+   }
+  },
+  {
+   "id": "evt_0c8cb2174001Yc2IBL7pesQi2s",
+   "created": 1790075150708,
+   "type": "session.reasoning.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "ordinal": 0,
+    "state": {
+     "reasoningField": "reasoning_content"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb21db001Sblk11SWtIeGn0",
+   "created": 1790075150811,
+   "type": "session.reasoning.delta",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "ordinal": 0,
+    "delta": "The user wants me to read /etc/hosts and reply with"
+   }
+  },
+  {
+   "id": "evt_0c8cb22100015q45im6Gdpdjfb",
+   "created": 1790075150864,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "id": "call_ae43195d825941c99fb33dac",
+    "name": "read"
+   }
+  },
+  {
+   "id": "evt_0c8cb2242001vLfDpZDFywROtV",
+   "created": 1790075150914,
+   "type": "session.reasoning.delta",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "ordinal": 0,
+    "delta": " its first line only."
+   }
+  },
+  {
+   "id": "evt_0c8cb224a001MWpWmjTOYgHjJX",
+   "created": 1790075150922,
+   "type": "session.reasoning.ended",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "ordinal": 0,
+    "text": "The user wants me to read /etc/hosts and reply with its first line only.",
+    "state": {
+     "reasoningField": "reasoning_content"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb224d0013Q1tRhH6zn0eXs",
+   "created": 1790075150926,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "id": "call_ae43195d825941c99fb33dac",
+    "text": "{\"path\": \"/etc/hosts\"}"
+   }
+  },
+  {
+   "id": "evt_0c8cb22500016yyQ7p27QWnIEV",
+   "created": 1790075150928,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "id": "call_ae43195d825941c99fb33dac",
+    "input": {
+     "path": "/etc/hosts"
+    },
+    "executed": false
+   }
+  },
+  {
+   "id": "evt_0c8cb2253001dv608A6USOErdX",
+   "created": 1790075150931,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX"
+   }
+  },
+  {
+   "id": "evt_0c8cb2258002nlF2E17T0wtiWp",
+   "created": 1790075150936,
+   "type": "permission.asked",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "id": "per_0c8cb2258001iGhzwM95thIWg9",
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "action": "external_directory",
+    "resources": [
+     "/etc/*"
+    ],
+    "save": [
+     "/etc/*"
+    ],
+    "source": {
+     "type": "tool",
+     "messageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+     "id": "call_ae43195d825941c99fb33dac"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb22da001bpEmwM5yGSSVV0",
+   "created": 1790075151066,
+   "type": "permission.replied",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "requestID": "per_0c8cb2258001iGhzwM95thIWg9",
+    "reply": "once"
+   }
+  },
+  {
+   "id": "evt_0c8cb22e0001K3FQifRlTvXxDN",
+   "created": 1790075151072,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "id": "call_ae43195d825941c99fb33dac",
+    "content": [
+     {
+      "type": "text",
+      "text": "Read file /etc/hosts, lines 1-9\n1: ##\n2: # Host Database\n3: #\n4: # localhost is used to configure the loopback interface\n5: # when the system is booting.  Do not change this entry.\n6: ##\n7: 127.0.0.1\tlocalhost\n8: 255.255.255.255\tbroadcasthost\n9: ::1             localhost"
+     }
+    ],
+    "metadata": {
+     "truncated": false
+    },
+    "executed": false
+   }
+  },
+  {
+   "id": "evt_0c8cb22e30013LT9CFCSoukiWh",
+   "created": 1790075151075,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0,
+    "tokens": {
+     "input": 2905,
+     "output": 19,
+     "reasoning": 19,
+     "cache": {
+      "read": 3456,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb22e4001JB9vn9EUh2PUey",
+   "created": 1790075151076,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "cost": 0,
+    "tokens": {
+     "input": 2905,
+     "output": 19,
+     "reasoning": 19,
+     "cache": {
+      "read": 3456,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb2d1c001IuDQaxMlNvO9pz",
+   "created": 1790075153692,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "agent": "build",
+    "model": {
+     "id": "mimo-v2.6-flash-free",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "started": 1790075151089
+   }
+  },
+  {
+   "id": "evt_0c8cb2d210011BtMitY4Y0G1oN",
+   "created": 1790075153697,
+   "type": "session.reasoning.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "ordinal": 0,
+    "state": {
+     "reasoningField": "reasoning_content"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb2d68001b7LpVpoOj7cfrs",
+   "created": 1790075153768,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "ordinal": 0
+   }
+  },
+  {
+   "id": "evt_0c8cb2d89001Y8ia7Bxmk8E0x6",
+   "created": 1790075153801,
+   "type": "session.reasoning.delta",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "ordinal": 0,
+    "delta": "First line is \"##\"."
+   }
+  },
+  {
+   "id": "evt_0c8cb2da00013JH1Yt62ypAtD4",
+   "created": 1790075153824,
+   "type": "session.reasoning.ended",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "ordinal": 0,
+    "text": "First line is \"##\".",
+    "state": {
+     "reasoningField": "reasoning_content"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb2da4001LtIRtOVcfq3nLf",
+   "created": 1790075153828,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "ordinal": 0,
+    "delta": "`##`"
+   }
+  },
+  {
+   "id": "evt_0c8cb2da5001lhsmuPmxkqIuRQ",
+   "created": 1790075153829,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "ordinal": 0,
+    "text": "`##`"
+   }
+  },
+  {
+   "id": "evt_0c8cb2da70014nwis1S3UmRtW0",
+   "created": 1790075153831,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1"
+   }
+  },
+  {
+   "id": "evt_0c8cb2dab001Ikz6S7D22CZBp7",
+   "created": 1790075153835,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "assistantMessageID": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0,
+    "tokens": {
+     "input": 171,
+     "output": 5,
+     "reasoning": 7,
+     "cache": {
+      "read": 6336,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb2dae001Zjxy6vtFbMlnFc",
+   "created": 1790075153838,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "cost": 0,
+    "tokens": {
+     "input": 3076,
+     "output": 24,
+     "reasoning": 26,
+     "cache": {
+      "read": 9792,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb2db00019RO05SPTIS17UU",
+   "created": 1790075153840,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ"
+   }
+  },
+  {
+   "id": "evt_0c8cb2df2001JhL0Ya2q79Gnn1",
+   "created": 1790075153906,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "inboxID": "msg_0c8cb2df10017q9V2QftAzY7lt",
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "Reply with exactly: second"
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8cb2df5001wQAT9TSsKo9OZI",
+   "created": 1790075153909,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ"
+   }
+  },
+  {
+   "id": "evt_0c8cb2dfe001onfdyDNZlMG2W2",
+   "created": 1790075153918,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3734e889ffeepqKH1fh3ep8pQ",
+    "inboxID": "msg_0c8cb2df10017q9V2QftAzY7lt"
+   }
+  }
+ ],
+ "formsShellRenameDelete": [
+  {
+   "id": "evt_0c8c2fe35001aTIIgQRqCZXwT6",
+   "created": 1790074617397,
+   "type": "session.created",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "slug": "brave-river",
+    "version": "2.0.13",
+    "projectID": "global",
+    "location": {
+     "directory": "/tmp/oc-v2-ws"
+    },
+    "subpath": "../../../tmp/oc-v2-ws",
+    "title": "capture"
+   }
+  },
+  {
+   "id": "evt_0c8c2fe70001EuSMqFVBIuMvJf",
+   "created": 1790074617456,
+   "type": "session.renamed",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "title": "captured"
+   }
+  },
+  {
+   "id": "evt_0c8c2fe84001gafWoxb5ryBNyF",
+   "created": 1790074617476,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "inboxID": "msg_0c8c2fe83001hcdE7FerGYtmTD",
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "item": {
+     "type": "synthetic",
+     "payload": {
+      "text": "a synthetic note"
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c2febe001kHN98OItOKugZi",
+   "created": 1790074617534,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY"
+   }
+  },
+  {
+   "id": "evt_0c8c2ff1d00152D2AuYge4lnmV",
+   "created": 1790074617629,
+   "metadata": {
+    "instructions": {
+     "initial": true
+    }
+   },
+   "type": "session.instructions.updated",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "delta": {
+     "core/environment": "75cbbc0eaed6e2eab1df413c5d4a8bd9532f9b030dff9faa9fa58fcacc5117be",
+     "core/date": "8c3d1acb09527012fbc554119a9ab241f20bd1b582c6408edf4ebed258feb826",
+     "core/codemode": "9bbeb19ab2fa0ee4cafd3d2e36b9cfb6c72f8148481e8c67444eb0c9d38b5a22",
+     "core/skill-guidance": "8394362d28c82fa4d13c7a9f5568c05680f6687e07db8f426a0e3c92f3027dc9"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c2ff1e001NbsKULMQcfKAg9",
+   "created": 1790074617630,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "inboxID": "msg_0c8c2fe83001hcdE7FerGYtmTD"
+   }
+  },
+  {
+   "id": "evt_0c8c2ff26001KI7Ba4D55G6iRI",
+   "created": 1790074617638,
+   "type": "shell.created",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "info": {
+     "id": "sh_0c8c2ff20001i63q1JWHGwJTGT",
+     "status": "running",
+     "command": "echo hello-from-shell",
+     "cwd": "/tmp/oc-v2-ws",
+     "shell": "/bin/zsh",
+     "file": "/tmp/oc-v2-home/data/opencode/shell/global/sh_0c8c2ff20001i63q1JWHGwJTGT.out",
+     "metadata": {
+      "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+      "background": true
+     },
+     "time": {
+      "started": 1790074617632
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c2ff26002d0oAStkiVV6vJc",
+   "created": 1790074617638,
+   "type": "session.shell.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "shell": {
+     "id": "sh_0c8c2ff20001i63q1JWHGwJTGT",
+     "status": "running",
+     "command": "echo hello-from-shell",
+     "cwd": "/tmp/oc-v2-ws",
+     "shell": "/bin/zsh",
+     "file": "/tmp/oc-v2-home/data/opencode/shell/global/sh_0c8c2ff20001i63q1JWHGwJTGT.out",
+     "metadata": {
+      "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+      "background": true
+     },
+     "time": {
+      "started": 1790074617632
+     },
+     "pid": 21826
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c2ff29001Y1nmsarvie9No7",
+   "created": 1790074617641,
+   "type": "shell.exited",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "id": "sh_0c8c2ff20001i63q1JWHGwJTGT",
+    "exit": 0,
+    "status": "exited"
+   }
+  },
+  {
+   "id": "evt_0c8c2ff290020lE6c0vy0CUqPl",
+   "created": 1790074617641,
+   "type": "session.shell.ended",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "shell": {
+     "id": "sh_0c8c2ff20001i63q1JWHGwJTGT",
+     "status": "exited",
+     "command": "echo hello-from-shell",
+     "cwd": "/tmp/oc-v2-ws",
+     "shell": "/bin/zsh",
+     "file": "/tmp/oc-v2-home/data/opencode/shell/global/sh_0c8c2ff20001i63q1JWHGwJTGT.out",
+     "metadata": {
+      "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+      "background": true
+     },
+     "time": {
+      "started": 1790074617632,
+      "completed": 1790074617640
+     },
+     "pid": 21826,
+     "exit": 0
+    },
+    "output": {
+     "output": "hello-from-shell\n",
+     "cursor": 17,
+     "size": 17,
+     "truncated": false
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c2ff2a002kdFOx3Nl0hNEqu",
+   "created": 1790074617642,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "inboxID": "msg_0c8c2ff2a001LGi8t97FtdcvF4",
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "item": {
+     "type": "synthetic",
+     "payload": {
+      "text": "The following shell command was executed by the user:\n<shell id=\"sh_0c8c2ff20001i63q1JWHGwJTGT\" state=\"completed\" command=\"echo hello-from-shell\">\nhello-from-shell\n\n\nCommand exited with code 0.\n</shell>",
+      "metadata": {
+       "source": "shell",
+       "shellID": "sh_0c8c2ff20001i63q1JWHGwJTGT",
+       "state": "completed",
+       "truncated": false,
+       "exit": 0
+      }
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c3050b002j0zq8s6Z71f9Ys",
+   "created": 1790074619147,
+   "type": "form.created",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "form": {
+     "id": "frm_0c8c3050b001Zn7yW9A5yiArG6",
+     "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+     "title": "Pick one",
+     "fields": [
+      {
+       "key": "choice",
+       "title": "Which?",
+       "type": "string",
+       "options": [
+        {
+         "value": "a",
+         "label": "A"
+        },
+        {
+         "value": "b",
+         "label": "B"
+        }
+       ],
+       "custom": true
+      },
+      {
+       "key": "many",
+       "title": "Several",
+       "type": "multiselect",
+       "options": [
+        {
+         "value": "x",
+         "label": "X"
+        },
+        {
+         "value": "y",
+         "label": "Y"
+        }
+       ]
+      },
+      {
+       "key": "free",
+       "title": "Say more",
+       "type": "string"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c3050e001pfadxRrZ8eOtL3",
+   "created": 1790074619150,
+   "type": "form.replied",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "id": "frm_0c8c3050b001Zn7yW9A5yiArG6",
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "answer": {
+     "choice": "a",
+     "many": [
+      "x",
+      "y"
+     ],
+     "free": "hi"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c3050f002GfSG2bX6Bw3Wlz",
+   "created": 1790074619151,
+   "type": "form.created",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "form": {
+     "id": "frm_0c8c3050f001uCaZoCuQWcKodN",
+     "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+     "title": "Cancel me",
+     "fields": [
+      {
+       "key": "q",
+       "title": "Yes?",
+       "type": "boolean"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c30510001utHtAgHxfutoIt",
+   "created": 1790074619152,
+   "type": "form.cancelled",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "id": "frm_0c8c3050f001uCaZoCuQWcKodN",
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY"
+   }
+  },
+  {
+   "id": "evt_0c8c30523001mOKx2Jo6yLszNP",
+   "created": 1790074619171,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "agent": "build",
+    "model": {
+     "id": "mimo-v2.6-flash-free",
+     "providerID": "opencode"
+    },
+    "assistantMessageID": "msg_0c8c2ff21001A7GEzQ1V5qGbe9",
+    "started": 1790074617650
+   }
+  },
+  {
+   "id": "evt_0c8c30524001mimExOrM6h2MAi",
+   "created": 1790074619172,
+   "type": "session.step.failed",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "assistantMessageID": "msg_0c8c2ff21001A7GEzQ1V5qGbe9",
+    "error": {
+     "type": "aborted",
+     "message": "Step interrupted"
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c30525001uR6u8x3GvZWK0o",
+   "created": 1790074619173,
+   "type": "session.execution.interrupted",
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY",
+    "reason": "user"
+   }
+  },
+  {
+   "id": "evt_0c8c305280019stFa17i4Jhm3o",
+   "created": 1790074619176,
+   "type": "session.deleted",
+   "data": {
+    "sessionID": "ses_f373d020bffe6O2rr5V31OAZHY"
+   }
+  }
+ ],
+ "compactionFailedAndAgentSwitch": [
+  {
+   "id": "evt_0c8ca5d35002gX7PisRsa2iKI6",
+   "created": 1790075100469,
+   "type": "session.compaction.started",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3737ee35ffeWFES3fMtIsjcD9",
+    "reason": "manual",
+    "recent": "",
+    "inputID": "msg_0c8ca5d31001CdfnjWPFbjC9zY"
+   }
+  },
+  {
+   "id": "evt_0c8ca5d37001ioo10OZbjrnJT3",
+   "created": 1790075100471,
+   "type": "session.compaction.failed",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3737ee35ffeWFES3fMtIsjcD9",
+    "reason": "manual",
+    "error": {
+     "type": "compaction.unavailable",
+     "message": "Nothing to compact yet"
+    },
+    "inputID": "msg_0c8ca5d31001CdfnjWPFbjC9zY"
+   }
+  },
+  {
+   "id": "evt_0c8ca67f6001Tq693X3Vz0g9t5",
+   "created": 1790075103222,
+   "type": "session.agent.selected",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f3737ee35ffeWFES3fMtIsjcD9",
+    "agent": "plan"
+   }
+  }
+ ],
+ "interruptedTool": [
+  {
+   "id": "evt_0c8c613a9001YtUDz2PBiDeVgu",
+   "created": 1790074819498,
+   "type": "session.tool.failed",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373c5fc9ffeiWVNXg8rkmpSHL",
+    "assistantMessageID": "msg_0c8c3c1e5001eO5P4mjgFeBHxs",
+    "id": "call_1158a9b5fb4b421e8fbb0942",
+    "error": {
+     "type": "aborted",
+     "message": "Tool execution interrupted"
+    },
+    "executed": false
+   }
+  },
+  {
+   "id": "evt_0c8c613ab001YzwC3zvt0vtLYx",
+   "created": 1790074819499,
+   "type": "session.step.failed",
+   "location": {
+    "directory": "/tmp/oc-v2-ws"
+   },
+   "data": {
+    "sessionID": "ses_f373c5fc9ffeiWVNXg8rkmpSHL",
+    "assistantMessageID": "msg_0c8c3c1e5001eO5P4mjgFeBHxs",
+    "error": {
+     "type": "aborted",
+     "message": "Step interrupted"
+    },
+    "rawFinish": "tool_calls",
+    "cost": 0,
+    "tokens": {
+     "input": 71,
+     "output": 19,
+     "reasoning": 7,
+     "cache": {
+      "read": 6400,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_0c8c613ad002oPLXMrNFCMSqLf",
+   "created": 1790074819501,
+   "type": "session.execution.interrupted",
+   "data": {
+    "sessionID": "ses_f373c5fc9ffeiWVNXg8rkmpSHL",
+    "reason": "user"
+   }
+  }
+ ],
+ "storedMessages": {
+  "data": [
+   {
+    "id": "msg_0c8cb17f3001CvE3CFrhDOrWQz",
+    "time": {
+     "created": 1790075148446
+    },
+    "text": "Read the file /etc/hosts using the read tool and reply with its first line only.",
+    "type": "user"
+   },
+   {
+    "id": "msg_0c8cb18a10011Hi3uT13nOuYkX",
+    "time": {
+     "created": 1790075148467,
+     "streamed": 1790075150931,
+     "completed": 1790075151075
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "mimo-v2.6-flash-free",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "The user wants me to read /etc/hosts and reply with its first line only.",
+      "state": {
+       "reasoningField": "reasoning_content"
+      },
+      "time": {
+       "created": 1790075150708,
+       "completed": 1790075150922
+      }
+     },
+     {
+      "type": "tool",
+      "id": "call_ae43195d825941c99fb33dac",
+      "name": "read",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "path": "/etc/hosts"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "Read file /etc/hosts, lines 1-9\n1: ##\n2: # Host Database\n3: #\n4: # localhost is used to configure the loopback interface\n5: # when the system is booting.  Do not change this entry.\n6: ##\n7: 127.0.0.1\tlocalhost\n8: 255.255.255.255\tbroadcasthost\n9: ::1             localhost"
+        }
+       ],
+       "metadata": {
+        "truncated": false
+       }
+      },
+      "time": {
+       "created": 1790075150864,
+       "ran": 1790075150928,
+       "completed": 1790075151072
+      }
+     }
+    ],
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0,
+    "tokens": {
+     "input": 2905,
+     "output": 19,
+     "reasoning": 19,
+     "cache": {
+      "read": 3456,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_0c8cb22ec001YE89Cnz8j2oFR1",
+    "time": {
+     "created": 1790075151089,
+     "streamed": 1790075153831,
+     "completed": 1790075153835
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "mimo-v2.6-flash-free",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "First line is \"##\".",
+      "state": {
+       "reasoningField": "reasoning_content"
+      },
+      "time": {
+       "created": 1790075153697,
+       "completed": 1790075153824
+      }
+     },
+     {
+      "type": "text",
+      "text": "`##`"
+     }
+    ],
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0,
+    "tokens": {
+     "input": 171,
+     "output": 5,
+     "reasoning": 7,
+     "cache": {
+      "read": 6336,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_0c8cb2db00019RO05SPTIS17UU",
+    "time": {
+     "created": 1790075153840
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   },
+   {
+    "id": "msg_0c8cb2df10017q9V2QftAzY7lt",
+    "time": {
+     "created": 1790075153918
+    },
+    "text": "Reply with exactly: second",
+    "type": "user"
+   }
+  ],
+  "cursor": {
+   "previous": "eyJpZCI6Im1zZ18wYzhjYjE3ZjMwMDFDdkUzQ0ZyaERPcldReiIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoicHJldmlvdXMifQ",
+   "next": "eyJpZCI6Im1zZ18wYzhjYjJkZjEwMDE3cTlWMlFmdEF6WTdsdCIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoibmV4dCJ9"
+  }
+ }
+}

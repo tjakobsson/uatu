@@ -2,10 +2,30 @@ import { describe, expect, test } from "bun:test";
 
 import {
   OpenCodeService,
+  buildOpenCodeEnvironment,
   classifyProbeFailure,
+  normalizeOpenCodeVersion,
   resolveStartupTimeoutMs,
   type SpawnedOpenCode,
 } from "./opencode-service";
+
+// What each generation's server answers on the two readiness resources,
+// verified against real binaries: 1.x knows `/global/health` and 404s the
+// rest; 2.x knows `/api/info` and answers every unknown path — including the
+// 1.x health path — with its web UI's HTML page and a 200.
+function v1Server(version = "1.18.18") {
+  return async (url: string | URL | Request) =>
+    String(url).endsWith("/global/health")
+      ? Response.json({ healthy: true, version })
+      : new Response("Not Found", { status: 404 });
+}
+
+function v2Server(version = "2.0.13") {
+  return async (url: string | URL | Request) =>
+    String(url).endsWith("/api/info")
+      ? Response.json({ version, pid: 4242, urls: ["http://127.0.0.1:43210"], paths: { tmp: "/tmp/opencode" } })
+      : new Response("<!doctype html><html><body>opencode</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+}
 
 // A clock the stubbed `sleep` drives. Without it a no-op `sleep` spins the
 // readiness loop against the real wall clock for the whole budget.
@@ -90,7 +110,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
       calls.push({ argv, options: options as Record<string, unknown> });
       return child;
     },
-    fetch: async () => Response.json({ healthy: true, version: "1.18.18" }),
+    fetch: v1Server(),
     killGroup(_pid, signal) {
       signals.push(signal);
       exit.resolve(signal === "SIGTERM" ? 143 : 137);
@@ -111,10 +131,11 @@ describe("OpenCodeService startup", () => {
 
   test("joins concurrent starts and uses authenticated no-shell loopback arguments", async () => {
     let authorization = "";
+    const server = v1Server();
     const { service, calls } = fixture({
-      fetch: async (_url: string | URL | Request, init?: RequestInit) => {
+      fetch: async (url: string | URL | Request, init?: RequestInit) => {
         authorization = new Headers(init?.headers).get("authorization") ?? "";
-        return Response.json({ healthy: true, version: "1.18.18" });
+        return server(url);
       },
     });
     const [first, second] = await Promise.all([service.status(), service.status()]);
@@ -125,10 +146,13 @@ describe("OpenCodeService startup", () => {
     expect(calls[0]?.argv).toEqual(["/bin/opencode", "serve", "--hostname", "127.0.0.1", "--port", "43210"]);
     expect(calls[0]?.options.cwd).toBe("/workspace");
     expect(calls[0]?.options).not.toHaveProperty("shell");
+    // Both generations' names carry the one secret: 1.x reads the SERVER
+    // name, 2.x prefers the short one.
     expect((calls[0]?.options.env as Record<string, string>).OPENCODE_SERVER_PASSWORD).toBe("secret-password");
+    expect((calls[0]?.options.env as Record<string, string>).OPENCODE_PASSWORD).toBe("secret-password");
     expect(calls[0]?.argv).not.toContain("secret-password");
     expect(authorization).toBe(`Basic ${Buffer.from("opencode:secret-password").toString("base64")}`);
-    expect(service.currentConnection()).toEqual({ endpoint: "http://127.0.0.1:43210", password: "secret-password" });
+    expect(service.currentConnection()).toEqual({ endpoint: "http://127.0.0.1:43210", password: "secret-password", generation: 1 });
   });
 
   test("retries a bind race with a fresh port and password", async () => {
@@ -146,7 +170,7 @@ describe("OpenCodeService startup", () => {
         return { pid: 50 + index, exited: exits[index]!, stderr: stream(index === 0 ? "EADDRINUSE" : ""), kill() {} };
       },
       fetch: async url => String(url).includes("41001")
-        ? Response.json({ healthy: true, version: "1.18.18" })
+        ? v1Server()(url)
         : Promise.reject(new Error("not ready")),
       killGroup() {},
       sleep: async () => undefined,
@@ -155,7 +179,7 @@ describe("OpenCodeService startup", () => {
 
     expect(await service.status()).toEqual({ state: "ready", version: "1.18.18" });
     expect(spawnCount).toBe(2);
-    expect(service.currentConnection()).toEqual({ endpoint: "http://127.0.0.1:41001", password: "second-secret" });
+    expect(service.currentConnection()).toEqual({ endpoint: "http://127.0.0.1:41001", password: "second-secret", generation: 1 });
   });
 
   test("probe attempts accumulate across bind retries", async () => {
@@ -244,7 +268,7 @@ describe("OpenCodeService phase attribution", () => {
     const { service } = fixture({
       ...clock.options,
       startupTimeoutMs: 1_000,
-      fetch: async () => {
+      fetch: async (url: string | URL | Request) => {
         // Refused until just before the bind budget expires, then bound but
         // briefly unhealthy — recovering within the health slice, which must
         // not have shrunk to the sliver left of the bind budget.
@@ -253,7 +277,7 @@ describe("OpenCodeService phase attribution", () => {
           answered = true;
           return new Response("starting", { status: 503 });
         }
-        return Response.json({ healthy: true, version: "1.18.18" });
+        return v1Server()(url);
       },
       bindAttempts: 1,
     });
@@ -303,6 +327,103 @@ describe("OpenCodeService phase attribution", () => {
       killGroup() {},
     });
     expect(await service.status()).toEqual({ state: "ready", version: "1.18.18" });
+  });
+});
+
+describe("OpenCodeService generation", () => {
+  test("a 2.x server is recognized by its info resource and never by its page on the 1.x path", async () => {
+    const requested: string[] = [];
+    const server = v2Server();
+    const { service } = fixture({
+      fetch: async (url: string | URL | Request) => {
+        requested.push(new URL(String(url)).pathname);
+        return server(url);
+      },
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "2.0.13" });
+    expect(service.currentConnection()).toEqual({ endpoint: "http://127.0.0.1:43210", password: "secret-password", generation: 2 });
+    // Info decides on the first cycle, so the HTML page on the health path is
+    // never even fetched on a 2.x server.
+    expect(requested).toEqual(["/api/info"]);
+  });
+
+  test("a 1.x server is recognized by its health resource after its 404 on the info path", async () => {
+    const requested: string[] = [];
+    const server = v1Server("1.18.31");
+    const { service } = fixture({
+      fetch: async (url: string | URL | Request) => {
+        requested.push(new URL(String(url)).pathname);
+        return server(url);
+      },
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "1.18.31" });
+    expect(service.currentConnection()?.generation).toBe(1);
+    expect(requested).toEqual(["/api/info", "/global/health"]);
+  });
+
+  test("a 2.x page on the 1.x path is answered-but-not-ready and fails on the short budget", async () => {
+    const clock = fakeClock();
+    const { service } = fixture({
+      ...clock.options,
+      // A 2.x server whose password the probe does not hold: info refuses,
+      // the page still comes back 200 on the health path. Neither is ready.
+      fetch: async (url: string | URL | Request) => String(url).endsWith("/api/info")
+        ? new Response("Unauthorized", { status: 401 })
+        : new Response("<!doctype html>", { status: 200, headers: { "content-type": "text/html" } }),
+      bindAttempts: 1,
+    });
+    const status = await service.status();
+    if (status.state !== "unavailable") throw new Error("expected unavailable");
+    expect(status.message).toContain("answered at http://127.0.0.1:43210 but never became healthy");
+    expect(status.message).toContain("health: HTTP 200 with a non-healthy body");
+    expect(status.message).toContain("info: HTTP 401");
+    expect(status.diagnostics?.lastProbe).toEqual({ kind: "unhealthy-body", status: 200 });
+    expect(clock.elapsed()).toBeLessThan(10_000);
+  });
+
+  test("a replaced binary is served by its own generation on the next start", async () => {
+    let installed: 1 | 2 = 1;
+    const spawner = respawning();
+    const { service } = fixture({
+      ...spawner,
+      fetch: async (url: string | URL | Request) => (installed === 1 ? v1Server() : v2Server())(url),
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "1.18.18" });
+    expect(service.currentConnection()?.generation).toBe(1);
+
+    installed = 2;
+    expect(await service.restart()).toEqual({ state: "ready", version: "2.0.13" });
+    expect(service.currentConnection()?.generation).toBe(2);
+  });
+
+  test("versions take one form whichever generation reports them", () => {
+    expect(normalizeOpenCodeVersion("1.18.31")).toBe("1.18.31");
+    expect(normalizeOpenCodeVersion("opencode v2.0.13")).toBe("2.0.13");
+    expect(normalizeOpenCodeVersion("v2.0.13")).toBe("2.0.13");
+    expect(normalizeOpenCodeVersion("  2.0.13\n")).toBe("2.0.13");
+    expect(normalizeOpenCodeVersion("")).toBeNull();
+    expect(normalizeOpenCodeVersion(null)).toBeNull();
+  });
+
+  test("the failure-path version probe is normalized too", async () => {
+    const clock = fakeClock();
+    const { service } = fixture({
+      ...clock.options,
+      probeVersion: async () => "opencode v2.0.13",
+      fetch: async () => { throw refusal(); },
+      startupTimeoutMs: 500,
+      bindAttempts: 1,
+    });
+    const status = await service.status();
+    if (status.state !== "unavailable") throw new Error("expected unavailable");
+    expect(status.diagnostics?.version).toBe("2.0.13");
+  });
+
+  test("the spawned environment carries the secret under both generations' names", () => {
+    const env = buildOpenCodeEnvironment({ PATH: "/bin", OPENCODE_PASSWORD: "stale", OPENCODE_SERVER_PASSWORD: "stale" }, "fresh");
+    expect(env.OPENCODE_PASSWORD).toBe("fresh");
+    expect(env.OPENCODE_SERVER_PASSWORD).toBe("fresh");
+    expect(env.PATH).toBe("/bin");
   });
 });
 
@@ -372,7 +493,7 @@ describe("OpenCodeService failure diagnostics", () => {
       ...respawning({
         // The literal, and the Basic credential the health probe sends — a
         // request-header echo carries the password base64-encoded.
-        stderr: `env OPENCODE_SERVER_PASSWORD=secret-password\nauthorization: Basic ${Buffer.from("opencode:secret-password").toString("base64")}\n`,
+        stderr: `env OPENCODE_SERVER_PASSWORD=secret-password OPENCODE_PASSWORD=secret-password\nauthorization: Basic ${Buffer.from("opencode:secret-password").toString("base64")}\n`,
         stdout: "starting with secret-password in view\n",
       }),
       fetch: async () => { throw refusal(); },
@@ -395,9 +516,9 @@ describe("OpenCodeService retry", () => {
     const { service } = fixture({
       ...clock.options,
       ...respawning(),
-      fetch: async () => {
+      fetch: async (url: string | URL | Request) => {
         if (!healthy) throw refusal();
-        return Response.json({ healthy: true, version: "1.18.18" });
+        return v1Server()(url);
       },
       startupTimeoutMs: 500,
       bindAttempts: 1,

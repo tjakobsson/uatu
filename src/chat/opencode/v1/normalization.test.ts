@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId } from "./normalization";
-import { ConversationReplay } from "../replay";
-import { ProviderTextReconciler } from "../text-reconciler";
-import { ConversationProjection } from "../adapter";
-import { parseConversationItem } from "../validation";
+import { ConversationReplay } from "../../replay";
+import { ProviderTextReconciler } from "../../text-reconciler";
+import { ConversationProjection } from "../../adapter";
+import { parseConversationItem } from "../../validation";
 
 describe("OpenCode provider completion timestamps", () => {
   test("classic live parts and history preserve each tool's terminal time, not the message completion", () => {

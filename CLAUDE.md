@@ -32,8 +32,13 @@ src/
 │                   usage carriers and task rows into the cost receipt, which
 │                   receipt-view itemizes by agent, type, or model);
 │                   agent-specific stacks below the seam in
-│                   chat/opencode/ (server runtime + SDK v2 provider +
-│                   normalization) and chat/claude/ (probe runtime,
+│                   chat/opencode/ (the loopback server runtime, which
+│                   decides the spawned server's generation from its
+│                   readiness answer, + one stack per OpenCode generation:
+│                   v1/ is the 1.x provider on `@opencode-ai/sdk` and its
+│                   normalization, v2/ the 2.x provider on
+│                   `@opencode/client`; the shared normalization core sits
+│                   at the root) and chat/claude/ (probe runtime,
 │                   per-conversation SDK sessions, transcript reader,
 │                   model catalog, normalization). One conversation is
 │                   owned by one agent for life; ids are agent-qualified

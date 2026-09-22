@@ -10,6 +10,12 @@ const time = (value: unknown, fallback: number): number => typeof value === "num
 // Native step events and compatibility message events share assistant message
 // identity. Only a final stop qualifies; tool-call/model-step boundaries do not.
 // This memory belongs to the provider, so reconnect does not invent new turns.
+//
+// Both OpenCode generations announce steps: 1.x as `session.next.step.*`, 2.x
+// as `session.step.*` with the same `assistantMessageID`/`finish` fields, so
+// the `next.` segment is dropped before matching. 1.x ends a turn abruptly
+// with `session.error`; 2.x with `session.execution.failed` or
+// `session.execution.interrupted`.
 export class OpenCodeNotificationLifecycle {
   private readonly messages = new Map<string, { conversationId: string; sourceId: string; ended: boolean; startedAt: number }>();
 
@@ -17,13 +23,14 @@ export class OpenCodeNotificationLifecycle {
     const event = record(value);
     const data = record(event.data ?? event.properties);
     const info = record(data.info ?? data.message);
-    const conversationId = normalized.conversationId ?? text(info.sessionID);
+    const conversationId = normalized.conversationId ?? text(info.sessionID) ?? text(data.sessionID);
     if (!conversationId) return [];
-    const at = time(data.timestamp, Date.now());
-    if (event.type === "session.error") return this.cancel(conversationId, at);
-    const nativeStart = event.type === "session.next.step.started";
-    const nativeEnd = event.type === "session.next.step.ended" || event.type === "session.next.step.failed";
-    const message = event.type === "message.updated" && (info.role === "assistant" || info.type === "assistant");
+    const at = time(data.timestamp ?? event.created, Date.now());
+    const type = String(event.type).replace(/^session\.next\./, "session.");
+    if (type === "session.error" || type === "session.execution.failed" || type === "session.execution.interrupted") return this.cancel(conversationId, at);
+    const nativeStart = type === "session.step.started";
+    const nativeEnd = type === "session.step.ended" || type === "session.step.failed";
+    const message = type === "message.updated" && (info.role === "assistant" || info.type === "assistant");
     if (!nativeStart && !nativeEnd && !message) return [];
     const id = text(message ? info.id : data.assistantMessageID);
     if (!id) return [];
@@ -34,7 +41,7 @@ export class OpenCodeNotificationLifecycle {
     const ending = nativeEnd || message && typeof completedAt === "number";
     if (!ending) {
       if (existing) return [];
-      const startedAt = time(message ? record(info.time).created : data.timestamp, at);
+      const startedAt = time(message ? record(info.time).created : data.started ?? data.timestamp, at);
       boundedSet(this.messages, key, { conversationId, sourceId: id, ended: false, startedAt }, 8192);
       return [{ sourceId: id, phase: "started", createdAt: startedAt }];
     }
@@ -43,7 +50,7 @@ export class OpenCodeNotificationLifecycle {
     boundedSet(this.messages, key, { conversationId, sourceId: id, ended: true, startedAt: existing?.startedAt ?? at }, 8192);
     if (!existing) return [];
     const finish = message ? info.finish : data.finish;
-    const failed = event.type === "session.next.step.failed" || Boolean(info.error);
+    const failed = type === "session.step.failed" || Boolean(info.error);
     return [{ sourceId: id, phase: !failed && finish === "stop" ? "completed" : "failed", createdAt: time(completedAt, at) }];
   }
 

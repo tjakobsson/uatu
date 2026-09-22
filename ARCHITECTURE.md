@@ -157,8 +157,11 @@ src/
 │                         inventory), client transport + validation, the
 │                         timeline renderer, and the whole browser UI.
 │                         Agent-specific code lives below the seam:
-│                         chat/opencode/ (loopback server runtime, SDK v2
-│                         provider, wire normalization) and chat/claude/
+│                         chat/opencode/ (loopback server runtime that
+│                         decides the spawned server's generation; v1/ and
+│                         v2/ hold one provider + normalization mapper per
+│                         OpenCode generation over a shared normalization
+│                         core — see "OpenCode generations") and chat/claude/
 │                         (probe-only runtime, per-conversation Claude
 │                         Agent SDK sessions, native-transcript reader,
 │                         model catalog (control-channel probe, manifest fallback), its own normalization)
@@ -472,6 +475,38 @@ The chat surface speaks one timeline model for every agent (`src/chat/types.ts`)
 Conversation status is `idle`, `sending`, `running`, `completed`, `interrupted`, `failed`, plus three named states: `retrying` and `compacting` are live-turn states (the composer offers Cancel, a new prompt is held), `background` means no turn is running but the agent still holds live background work (prompting is possible). `isLiveConversationStatus()` in `types.ts` is the one rule for which statuses are live.
 
 A Claude Code conversation's session lifetime (`src/chat/claude/provider.ts`) follows the work, not the first result: the SDK session is retired on a turn's result only when no accepted prompt is pending, no unprompted follow-up is in flight, and the background set (`background_tasks_changed`, ambient tasks excluded) is empty. While the set is non-empty the conversation reports `background`. When a backgrounded task settles the CLI starts a follow-up turn by itself (see the D9 spike in the change's design notes); the provider reports that turn as running and completed like any other. A set that empties with no follow-up returns the conversation to idle after a short grace window. Conversation titles follow the transcript's own entries: a user rename (`custom-title`) outranks Claude Code's generated title (`ai-title`), which outranks the first prompt.
+
+### OpenCode generations
+
+OpenCode 1.x and 2.x have different server APIs, and a workspace has whichever one its `opencode` on `PATH` is. `src/chat/opencode/opencode-service.ts` spawns `opencode serve` the same way for both (loopback, random port, one password under both `OPENCODE_PASSWORD` and `OPENCODE_SERVER_PASSWORD`) and decides the generation from the readiness answer, never from `--version` text or the binary's path: each probe cycle asks `GET /api/info` (2.x: `{ version, pid, urls }`) and then `GET /global/health` (1.x: `{ healthy, version }`), and the first well-formed body decides. A 2.x server answers every path it does not know — including the 1.x health path — with its web UI's HTML page and a 200, which is why a successful status alone is never readiness. The decision is fixed for that server's lifetime and carried on `OpenCodeConnection.generation`; `openCodeAgentRuntime` in `src/chat/service.ts` picks the provider from it, and a restart decides again, so a replaced binary is served by its own generation without a workspace restart. The reported version is bare semver for both (`1.18.31`, `2.0.13`), so the generation is legible from the status object without a new field.
+
+The two stacks live under `src/chat/opencode/v1/` (`@opencode-ai/sdk`'s `/v2` client — the 1.x SDK's second client, nothing to do with OpenCode 2) and `src/chat/opencode/v2/` (`@opencode/client`, all routes under `/api/…`, events on `/api/event`). They share a normalization core at `src/chat/opencode/normalization.ts`: 2.x's session event vocabulary is 1.18's `session.next.*` generation with the `next.` segment dropped, so the text/reasoning/tool/step/shell/revert/compaction state machines are one implementation keyed by the 2.x names, and each generation contributes a mapper for what it alone has — 1.x its cumulative `message.*` records and `question.*` family, 2.x its `session.execution.*` turn lifecycle, `session.usage.updated`, `form.*` (presented as structured questions, one per field), and `session.message.content.updated` restatements. Every 2.x call is scoped with `location: { directory }`, and events carrying another directory's `location` are dropped before mapping.
+
+**Developing against both generations on one machine.** Homebrew cannot hold both (`anomalyco/tap/opencode-v2` conflicts with `opencode`: both install a binary named `opencode`), but the formula only unpacks a zip, and 2.x honours `XDG_*` for every path it writes. Keep 2.x off `PATH` and give it a private home:
+
+```sh
+mkdir -p ~/.local/opt/opencode-v2/bin
+curl -fsSL https://opencode.ai/files/bin/2.0.13/opencode-darwin-arm64.zip -o /tmp/oc2.zip   # the URL the tap's opencode-v2.rb points at
+unzip -o /tmp/oc2.zip -d ~/.local/opt/opencode-v2/bin/real
+cat > ~/.local/opt/opencode-v2/bin/opencode <<'WRAPPER'
+#!/bin/sh
+V2=$HOME/.local/opt/opencode-v2
+export XDG_DATA_HOME=$V2/xdg/data XDG_STATE_HOME=$V2/xdg/state XDG_CACHE_HOME=$V2/xdg/cache
+exec "$V2/bin/real/opencode" "$@"
+WRAPPER
+chmod +x ~/.local/opt/opencode-v2/bin/opencode
+```
+
+The isolation is not optional: with default paths 2.x opens `~/.local/share/opencode/opencode.db` — the 1.x database — and applies migrations 1.x does not have. Config (`~/.config/opencode/opencode.json`) is shared by design. Credentials are not: run `opencode auth login` inside the wrapper (2.x keeps them in its own database and imports a `<data>/auth.json` only on its first run); do not copy an OAuth entry that both generations would then refresh. 2.x also ships free public models (`opencode/*-free`) that need no login, which is what the integration test runs on.
+
+Then `PATH=~/.local/opt/opencode-v2/bin:$PATH bun run dev` serves the dev hub with 2.x, and the real-OpenCode integration test takes both binaries at once, each in its own temporary home:
+
+```sh
+UATU_REAL_OPENCODE=1 \
+UATU_REAL_OPENCODE_V1=$(which opencode) \
+UATU_REAL_OPENCODE_V2=~/.local/opt/opencode-v2/bin/real/opencode \
+bun test src/chat/opencode/real-opencode.integration.test.ts
+```
 
 ## Terminal subsystem
 

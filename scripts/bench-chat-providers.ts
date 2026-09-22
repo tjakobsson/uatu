@@ -3,7 +3,7 @@ import path from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { ClaudeProvider } from "../src/chat/claude/provider";
 import { claudeProjectDir, sessionTranscriptPath } from "../src/chat/claude/transcript";
-import { SdkV2Provider } from "../src/chat/opencode/sdk-v2-provider";
+import { OpenCodeV1Provider } from "../src/chat/opencode/v1/provider";
 import { CHAT_WORKLOAD_SIZES, claudeHistoryWorkload, opencodeHistoryWorkload } from "../tests/fixtures/chat-performance";
 
 export async function measureProviderHistory(root: string) {
@@ -19,7 +19,7 @@ export async function measureProviderHistory(root: string) {
       executable: "fixture", catalogProbe: false, queryFactory: () => { throw new Error("History must not start a turn"); } });
     const stores = opencodeHistoryWorkload(count);
     const calls = { native: 0, legacy: 0, session: 0 };
-    const opencode = new SdkV2Provider({
+    const opencode = new OpenCodeV1Provider({
       v2: { session: { messages: async ({ cursor, limit }: { cursor?: string; limit: number }) => {
         calls.native++;
         const start = Number(cursor ?? 0);

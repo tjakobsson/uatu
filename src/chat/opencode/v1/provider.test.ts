@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
-import { normalizePersistedConversationConfiguration, resolveNewConversationConfiguration, SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
-import { ReversibleHistoryTargetError } from "../provider";
+import { normalizePersistedConversationConfiguration, quietCancellation, resolveNewConversationConfiguration, OpenCodeV1Provider, stableProviderId } from "./provider";
+import { ReversibleHistoryTargetError } from "../../provider";
 
 describe("OpenCode v2 identity policy", () => {
   test("declares durable conversation rename support", () => {
-    const provider = new SdkV2Provider({} as OpencodeClient, "/workspace");
+    const provider = new OpenCodeV1Provider({} as OpencodeClient, "/workspace");
     expect(provider.describe().capabilities).toContain("conversation-rename");
     // Background work and typed model ids are Claude Code's declarations;
     // OpenCode's stays as it was.
@@ -67,7 +67,7 @@ describe("OpenCode v2 identity policy", () => {
       },
     } as unknown as OpencodeClient;
 
-    const restarted = new SdkV2Provider(client, "/workspace");
+    const restarted = new OpenCodeV1Provider(client, "/workspace");
     expect(await restarted.getConversationConfiguration("ses_restart")).toEqual({
       model: { providerId: "openai", modelId: "gpt-5" },
       mode: "build",
@@ -99,7 +99,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect(await provider.getConversationConfiguration("ses_reuse")).toEqual({
       model: { providerId: "openai", modelId: "gpt" },
@@ -168,7 +168,7 @@ describe("OpenCode v2 identity policy", () => {
         } }),
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect(await provider.listModels()).toEqual([
       { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol", variants: ["high", "xhigh"], contextLimit: 200000 },
@@ -193,7 +193,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect(await provider.listCommands()).toEqual([
       { name: "review", description: "Review changes", argumentHint: "[focus]", kind: "command" },
@@ -216,7 +216,7 @@ describe("OpenCode v2 identity policy", () => {
       // exactly as prompt does; this test's assertions are about the dispatch.
       v2: { session: { switchModel: async () => ({ data: undefined }) } },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
     const model = { providerId: "anthropic", modelId: "claude-sonnet" };
 
     const accepted = await provider.command("ses_provider", { id: "request", name: "review", arguments: "API routes", model });
@@ -254,7 +254,7 @@ describe("OpenCode v2 identity policy", () => {
       },
     } as unknown as OpencodeClient;
     const model = { providerId: "openai", modelId: "gpt-5.6-sol" };
-    const native = new SdkV2Provider(nativeClient, "/workspace");
+    const native = new OpenCodeV1Provider(nativeClient, "/workspace");
     await native.command("ses_native", { id: "r1", name: "review", arguments: "", model, variant: "xhigh" });
     expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol", variant: "xhigh" } }]);
     expect(calls[1]![0]).toBe("command");
@@ -267,7 +267,7 @@ describe("OpenCode v2 identity policy", () => {
     // variant across restarts, so local memory of "none applied" proves
     // nothing. A recreated provider must reset the same way.
     calls.length = 0;
-    const recreated = new SdkV2Provider(nativeClient, "/workspace");
+    const recreated = new OpenCodeV1Provider(nativeClient, "/workspace");
     await recreated.command("ses_native", { id: "r2", name: "review", arguments: "", model });
     expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol" } }]);
     expect(calls[1]![0]).toBe("command");
@@ -285,7 +285,7 @@ describe("OpenCode v2 identity policy", () => {
         summarize: async (input: Record<string, unknown>) => { summarizeInput = input; return { data: true }; },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(classicClient, "/workspace");
+    const provider = new OpenCodeV1Provider(classicClient, "/workspace");
     await provider.createSession("client-uuid");
     await provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" });
     await provider.prompt("ses_classic", { id: "r3", text: "go", delivery: "queue", model, variant: "xhigh" });
@@ -302,11 +302,11 @@ describe("OpenCode v2 identity policy", () => {
     }) as unknown as OpencodeClient;
 
     // Both stores answer not-found: the session is genuinely absent.
-    expect(await new SdkV2Provider(client(404, 404), "/workspace").getSession("ses_x")).toBeNull();
+    expect(await new OpenCodeV1Provider(client(404, 404), "/workspace").getSession("ses_x")).toBeNull();
     // A transient auth/server failure must surface, not read as missing —
     // requireSession's pump path relies on the distinction.
-    await expect(new SdkV2Provider(client(401, 404), "/workspace").getSession("ses_x")).rejects.toThrow("session lookup failed");
-    await expect(new SdkV2Provider(client(404, 500), "/workspace").getSession("ses_x")).rejects.toThrow("session lookup failed");
+    await expect(new OpenCodeV1Provider(client(401, 404), "/workspace").getSession("ses_x")).rejects.toThrow("session lookup failed");
+    await expect(new OpenCodeV1Provider(client(404, 500), "/workspace").getSession("ses_x")).rejects.toThrow("session lookup failed");
   });
 
   test("a command rejected within the admission window propagates to the caller", async () => {
@@ -316,7 +316,7 @@ describe("OpenCode v2 identity policy", () => {
         summarize: async () => ({ error: { message: "provider unavailable" } }),
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     await expect(provider.command("ses", { id: "r1", name: "review", arguments: "" })).rejects.toThrow("OpenCode request failed");
     await expect(provider.command("ses", { id: "r2", name: "compact", arguments: "" })).rejects.toThrow("OpenCode request failed");
@@ -329,7 +329,7 @@ describe("OpenCode v2 identity policy", () => {
         command: () => new Promise(() => {}),
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace", 20);
+    const provider = new OpenCodeV1Provider(client, "/workspace", 20);
 
     const accepted = await provider.command("ses", { id: "slow", name: "review", arguments: "" });
     expect(accepted.messageId).toMatch(/^msg_[a-f0-9]{26}$/);
@@ -344,7 +344,7 @@ describe("OpenCode v2 identity policy", () => {
       event: { subscribe: async () => ({ stream: stream([duplicate, { id: "classic", type: "message.updated", data: {} }]) }) },
       v2: { event: { subscribe: async () => ({ stream: stream([duplicate, { id: "native", type: "session.next.prompted", data: {} }]) }) } },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     const events: string[] = [];
     for await (const event of provider.events(new AbortController().signal)) events.push(event.eventType);
@@ -362,7 +362,7 @@ describe("OpenCode v2 identity policy", () => {
       event: { subscribe: async () => ({ stream: stream([repeat, repeat]) }) },
       v2: { event: { subscribe: async () => ({ stream: stream([repeat, repeat]) }) } },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     const events: unknown[] = [];
     for await (const event of provider.events(new AbortController().signal)) events.push(event);
@@ -390,7 +390,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     const events: unknown[] = [];
     const consume = async () => {
@@ -414,7 +414,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect((await provider.createSession("client-uuid", {
       model: { providerId: "openai", modelId: "gpt-5.6-sol" },
@@ -467,7 +467,7 @@ describe("OpenCode v2 identity policy", () => {
         promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect(await provider.listModes()).toEqual([
       { name: "build", description: "Writes code" },
@@ -492,7 +492,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     await provider.prompt("ses_native", { id: "client-uuid", text: "go", delivery: "queue", mode: "build" });
     expect(calls[0]).toEqual(["switchAgent", { sessionID: "ses_native", agent: "build" }]);
@@ -522,7 +522,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     await provider.createSession("client-uuid");
     // The adapter always resolves the session before replying; that lookup is
@@ -542,7 +542,7 @@ describe("OpenCode v2 identity policy", () => {
         ] }),
       },
     } as unknown as OpencodeClient;
-    const pending = await new SdkV2Provider(client, "/workspace").listPermissions();
+    const pending = await new OpenCodeV1Provider(client, "/workspace").listPermissions();
     // The edit's diff rides along — a card rebuilt from this list is shown to
     // a reader who missed the live event, and they must see the same change.
     // So does the rule an "always" reply installs, under either spelling,
@@ -565,7 +565,7 @@ describe("OpenCode v2 identity policy", () => {
       },
     } as unknown as OpencodeClient;
 
-    const pending = await new SdkV2Provider(client, "/workspace").listQuestions();
+    const pending = await new OpenCodeV1Provider(client, "/workspace").listQuestions();
     expect(pending.map(request => request.questions[0]?.allowFreeForm)).toEqual([true, true, false]);
   });
 
@@ -591,7 +591,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     await provider.listSessions();
     await provider.replyPermission("ses_grandchild", "perm_2", "reject");
@@ -618,7 +618,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect(await provider.listModels()).toEqual([
       {
@@ -653,7 +653,7 @@ describe("OpenCode v2 identity policy", () => {
         },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect(await provider.renameSession("ses_provider", renamed.title)).toEqual(expect.objectContaining({ title: renamed.title }));
     expect(updateInput).toEqual({ sessionID: "ses_provider", directory: "/workspace", title: renamed.title });
@@ -690,7 +690,7 @@ describe("history across both OpenCode message stores", () => {
   const modern = (id: string, created: number) => ({ id, type: "user", time: { created }, text: "hi" });
 
   test("reads the classic store when the v2 store is empty for a session", async () => {
-    const provider = new SdkV2Provider(client([{ data: [] }], [classic("msg_b", 2), classic("msg_a", 1)]), "/workspace");
+    const provider = new OpenCodeV1Provider(client([{ data: [] }], [classic("msg_b", 2), classic("msg_a", 1)]), "/workspace");
     const page = await provider.listMessages("ses_legacy", { limit: 50 });
     expect(page.items.map(messageId)).toEqual(["msg_a", "msg_b"]);
     expect(page.nextCursor).toBeUndefined();
@@ -703,7 +703,7 @@ describe("history across both OpenCode message stores", () => {
     const reply = (id: string, created: number) => ({ id, type: "assistant", agent: "general", time: { created }, content: [], tokens: { input: created }, cost: 0.01 });
     const named = { info: { id: "msg_2", role: "assistant", parentID: "msg_1", time: { created: 2 }, tokens: { input: 2 }, cost: 0.01 }, parts: [] };
     // The fake serves its v2 pages once, so each read gets its own provider.
-    const fresh = () => new SdkV2Provider(client([{ data: [modern("msg_4", 4), reply("msg_5", 5), reply("msg_3", 3)] }], [classic("msg_1", 1), named]), "/workspace");
+    const fresh = () => new OpenCodeV1Provider(client([{ data: [modern("msg_4", 4), reply("msg_5", 5), reply("msg_3", 3)] }], [classic("msg_1", 1), named]), "/workspace");
     const all = await fresh().listMessages("ses_mixed", { limit: 50 });
     expect(all.accounting.map(entry => [entry.messageId, entry.promptId])).toEqual([["msg_2", "msg_1"], ["msg_3", "msg_1"], ["msg_5", "msg_4"]]);
     // The newest page holds only the second task's reply; its prompt is on the page before.
@@ -712,7 +712,7 @@ describe("history across both OpenCode message stores", () => {
   });
 
   test("merges both stores, deduplicates by id, and orders by creation", async () => {
-    const provider = new SdkV2Provider(client([{ data: [modern("msg_new", 3)] }], [classic("msg_old", 1), classic("msg_new", 3)]), "/workspace");
+    const provider = new OpenCodeV1Provider(client([{ data: [modern("msg_new", 3)] }], [classic("msg_old", 1), classic("msg_new", 3)]), "/workspace");
     const page = await provider.listMessages("ses_mixed", { limit: 50 });
     expect(page.items).toHaveLength(2);
     expect(page.items.map(messageId)).toEqual(["msg_old", "msg_new"]);
@@ -720,7 +720,7 @@ describe("history across both OpenCode message stores", () => {
 
   test("pages locally from the newest message backwards", async () => {
     const legacy = [classic("msg_1", 1), classic("msg_2", 2), classic("msg_3", 3)];
-    const provider = new SdkV2Provider(client([{ data: [] }], legacy), "/workspace");
+    const provider = new OpenCodeV1Provider(client([{ data: [] }], legacy), "/workspace");
     const newest = await provider.listMessages("ses_legacy", { limit: 2 });
     expect(newest.items.map(messageId)).toEqual(["msg_2", "msg_3"]);
     expect(newest.completeItems?.map(messageId)).toEqual(["msg_1", "msg_2", "msg_3"]);
@@ -745,7 +745,7 @@ describe("history across both OpenCode message stores", () => {
       return { data: { data: native, cursor: { next: null } } };
     }) as unknown as typeof sdk.v2.session.messages;
     sdk.session.messages = (async () => { legacyReads++; return { data: legacy }; }) as unknown as typeof sdk.session.messages;
-    const provider = new SdkV2Provider(sdk, "/workspace");
+    const provider = new OpenCodeV1Provider(sdk, "/workspace");
     const a = provider.listMessages("ses_mixed", { limit: 1 });
     const b = provider.listMessages("ses_mixed", { limit: 1 });
     release();
@@ -790,7 +790,7 @@ describe("history across both OpenCode message stores", () => {
       },
     } as unknown as OpencodeClient;
 
-    const provider = new SdkV2Provider(paging, "/workspace");
+    const provider = new OpenCodeV1Provider(paging, "/workspace");
     expect((await provider.listMessages("ses_paged", { limit: 10 })).items).toHaveLength(2);
     expect(calls[0]).toEqual({ sessionID: "ses_paged", order: "asc", limit: 100 });
     expect(calls[1]).toEqual({ sessionID: "ses_paged", limit: 100, cursor: "page-2" });
@@ -804,7 +804,7 @@ describe("history across both OpenCode message stores", () => {
         messages: async () => ({ data: { data: [modern("msg_only", 1)], cursor: { next: null } } }),
       } },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(modernOnly, "/workspace");
+    const provider = new OpenCodeV1Provider(modernOnly, "/workspace");
     expect((await provider.listMessages("ses_v2", { limit: 10 })).items).toHaveLength(1);
   });
 });
@@ -887,11 +887,11 @@ describe("reversible history across both OpenCode stores", () => {
       nativeUser("msg_2", 3, "second"),
     ];
     const clear = reversibleClient("native", turns);
-    expect(await new SdkV2Provider(clear.client, "/workspace").getReversibleHistoryState("ses_native"))
+    expect(await new OpenCodeV1Provider(clear.client, "/workspace").getReversibleHistoryState("ses_native"))
       .toEqual({ staged: false, canUndo: true, canRedo: false, revertedMessages: [] });
 
     const oldest = reversibleClient("native", turns, "msg_1");
-    expect(await new SdkV2Provider(oldest.client, "/workspace").getReversibleHistoryState("ses_native"))
+    expect(await new OpenCodeV1Provider(oldest.client, "/workspace").getReversibleHistoryState("ses_native"))
       .toEqual({
         staged: true,
         canUndo: false,
@@ -903,7 +903,7 @@ describe("reversible history across both OpenCode stores", () => {
       });
 
     const newest = reversibleClient("native", turns, "msg_2");
-    expect(await new SdkV2Provider(newest.client, "/workspace").getReversibleHistoryState("ses_native"))
+    expect(await new OpenCodeV1Provider(newest.client, "/workspace").getReversibleHistoryState("ses_native"))
       .toEqual({ staged: true, canUndo: true, canRedo: true, revertedMessages: [{ id: "message:msg_2", text: "second" }] });
   });
 
@@ -937,7 +937,7 @@ describe("reversible history across both OpenCode stores", () => {
             nativeUser("msg_suffix", 2, "also hidden"),
           ];
       const fixture = reversibleClient(store, turns, "msg_a");
-      const provider = new SdkV2Provider(fixture.client, "/workspace");
+      const provider = new OpenCodeV1Provider(fixture.client, "/workspace");
 
       const newest = await provider.listMessages(`ses_${store}`, { limit: 1 });
       // Pagination walks stored messages; the newest is an assistant skeleton
@@ -964,15 +964,15 @@ describe("reversible history across both OpenCode stores", () => {
     const clear = reversibleClient("native", turns);
     const missing = reversibleClient("native", turns, "msg_already_hidden");
 
-    expect((await new SdkV2Provider(clear.client, "/workspace").listMessages("ses_native", { limit: 10 })).items.map(messageId))
+    expect((await new OpenCodeV1Provider(clear.client, "/workspace").listMessages("ses_native", { limit: 10 })).items.map(messageId))
       .toEqual(["msg_1", "msg_2"]);
-    expect((await new SdkV2Provider(missing.client, "/workspace").listMessages("ses_native", { limit: 10 })).items.map(messageId))
+    expect((await new OpenCodeV1Provider(missing.client, "/workspace").listMessages("ses_native", { limit: 10 })).items.map(messageId))
       .toEqual(["msg_1", "msg_2"]);
   });
 
   test("detects an empty metadata-free classic TUI session from the classic lookup", async () => {
     const fixture = reversibleClient("classic", [], undefined, { metadata: false });
-    const provider = new SdkV2Provider(fixture.client, "/workspace");
+    const provider = new OpenCodeV1Provider(fixture.client, "/workspace");
 
     expect(await provider.getReversibleHistoryState("ses_classic"))
       .toEqual({ staged: false, canUndo: false, canRedo: false, revertedMessages: [] });
@@ -989,7 +989,7 @@ describe("reversible history across both OpenCode stores", () => {
       nativeUser("msg_2", 2, "second", "available"),
       nativeUser("msg_3", 3, "third", "missing"),
     ]);
-    const provider = new SdkV2Provider(fixture.client, "/workspace");
+    const provider = new OpenCodeV1Provider(fixture.client, "/workspace");
 
     expect(await provider.undo("ses_native")).toEqual(expect.objectContaining({
       outcome: "changed",
@@ -1022,7 +1022,7 @@ describe("reversible history across both OpenCode stores", () => {
       nativeUser("msg_3", 3, "third"),
       nativeUser("msg_4", 4, "fourth"),
     ]);
-    const provider = new SdkV2Provider(fixture.client, "/workspace");
+    const provider = new OpenCodeV1Provider(fixture.client, "/workspace");
 
     expect(await provider.revert("ses_native", "message:msg_2")).toEqual({
       outcome: "changed",
@@ -1067,7 +1067,7 @@ describe("reversible history across both OpenCode stores", () => {
       classicUser("msg_1", 1, "first"),
       classicUser("msg_2", 2, "second", "available"),
     ]);
-    const provider = new SdkV2Provider(fixture.client, "/workspace");
+    const provider = new OpenCodeV1Provider(fixture.client, "/workspace");
 
     await provider.undo("ses_classic");
     const oldest = await provider.undo("ses_classic");
@@ -1097,7 +1097,7 @@ describe("reversible history across both OpenCode stores", () => {
       classicUser("msg_2", 2, "second"),
       classicUser("msg_3", 3, "third"),
     ]);
-    const provider = new SdkV2Provider(fixture.client, "/workspace");
+    const provider = new OpenCodeV1Provider(fixture.client, "/workspace");
 
     await provider.revert("ses_classic", "message:msg_1");
     await provider.restore("ses_classic", "message:msg_2");
@@ -1111,14 +1111,14 @@ describe("reversible history across both OpenCode stores", () => {
 
   test("reports harmless oldest Undo and unstaged Redo without transport calls", async () => {
     const oldest = reversibleClient("classic", [classicUser("msg_1", 1, "first")], "msg_1");
-    const provider = new SdkV2Provider(oldest.client, "/workspace");
+    const provider = new OpenCodeV1Provider(oldest.client, "/workspace");
     expect(await provider.undo("ses_classic")).toEqual({
       outcome: "nothing-to-undo",
       state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:msg_1", text: "first" }] },
     });
 
     const clear = reversibleClient("native", [nativeUser("msg_1", 1, "first")]);
-    expect(await new SdkV2Provider(clear.client, "/workspace").redo("ses_native")).toEqual({
+    expect(await new OpenCodeV1Provider(clear.client, "/workspace").redo("ses_native")).toEqual({
       outcome: "nothing-to-redo",
       state: { staged: false, canUndo: true, canRedo: false, revertedMessages: [] },
     });
@@ -1152,7 +1152,7 @@ describe("prompt attachments", () => {
   };
 
   test("declares the attachments capability", () => {
-    const provider = new SdkV2Provider({} as unknown as OpencodeClient, "/workspace");
+    const provider = new OpenCodeV1Provider({} as unknown as OpencodeClient, "/workspace");
     expect(provider.describe().capabilities).toContain("attachments");
   });
 
@@ -1171,7 +1171,7 @@ describe("prompt attachments", () => {
         } }),
       },
     } as unknown as OpencodeClient;
-    const models = await new SdkV2Provider(client, "/workspace").listModels();
+    const models = await new OpenCodeV1Provider(client, "/workspace").listModels();
     const byId = new Map(models.map(model => [model.selection.modelId, model.imageInput]));
     expect(byId.get("vision")).toBe(true);
     expect(byId.get("legacy")).toBe(true);
@@ -1185,7 +1185,7 @@ describe("prompt attachments", () => {
     const client = {
       v2: { session: { prompt: async (input: Record<string, unknown>) => { promptInputs.push(input); return { data: { data: { id: "msg_native" } } }; } } },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
     await provider.prompt("ses_native", { id: "r1", text: "look", delivery: "queue", attachments: [attachment] });
     await provider.prompt("ses_native", { id: "r2", text: "plain", delivery: "queue" });
     expect(promptInputs[0]!.prompt).toEqual({
@@ -1203,7 +1203,7 @@ describe("prompt attachments", () => {
         promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
       },
     } as unknown as OpencodeClient;
-    const provider = new SdkV2Provider(client, "/workspace");
+    const provider = new OpenCodeV1Provider(client, "/workspace");
     await provider.createSession("client-uuid");
     await provider.prompt("ses_classic", { id: "r1", text: "look", delivery: "queue", attachments: [attachment] });
     expect(promptInput!.parts).toEqual([
@@ -1212,3 +1212,27 @@ describe("prompt attachments", () => {
     ]);
   });
 });
+
+describe("quietCancellation", () => {
+  test("an event stream's cancel settles even when the underlying body's rejects", async () => {
+    let cancelled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode("data: {}\n\n")); },
+      cancel() { cancelled += 1; return Promise.reject(new DOMException("The operation was aborted.", "AbortError")); },
+    });
+    const fetch = quietCancellation(async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    const response = await fetch("http://opencode.test/event");
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: {}\n\n");
+    await expect(reader.cancel()).resolves.toBeUndefined();
+    expect(cancelled).toBe(1);
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
+  });
+
+  test("every other response passes through untouched", async () => {
+    const original = Response.json({ healthy: true });
+    const fetch = quietCancellation(async () => original);
+    expect(await fetch("http://opencode.test/global/health")).toBe(original);
+  });
+});
+
