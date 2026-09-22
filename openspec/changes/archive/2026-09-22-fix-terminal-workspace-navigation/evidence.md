@@ -6,12 +6,15 @@ and the checks that could not be run here.
 
 ## Reproduction (task 1.1)
 
-**Microsoft Edge: blocker, not confirmed.** No Edge is installed on this
-machine (`/Applications/Microsoft Edge.app` absent; Playwright's `msedge`
-channel resolves to a system install, which `playwright install msedge`
-would add with an administrator prompt). The installed Edge PWA check
-(task 6.2) is likewise not performed. Both remain open; nothing below
-claims Edge verification through emulation.
+**Microsoft Edge: verified by hand, not by suite.** No Edge is installed
+on the development machine (`/Applications/Microsoft Edge.app` absent;
+Playwright's `msedge` channel resolves to a system install, which
+`playwright install msedge` would add with an administrator prompt), so the
+Edge run of the suite was never performed and nothing below claims Edge
+verification through emulation. The maintainer completed task 6.2 manually
+on 2026-09-22 against a hub built from this change's final commit, in the
+Microsoft Edge channel with the installed PWA: workspace navigation and
+history behaved as specified, with the terminal and its shells intact.
 
 **Chromium, through a real Hub (two workspaces, `/s/<id>/` traffic through
 the proxy and bridge): reproduced.** `tests/e2e/terminal-hub-navigation.e2e.ts`
