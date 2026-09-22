@@ -1357,6 +1357,17 @@ function workspaceLabel(w) { return (w.parentId && w.branch) || w.displayName ||
 function workspacePolicyOwner(workspace) {
   return dashboardWorkspaces.find(entry => entry.id === (workspace.parentId || workspace.id)) || workspace;
 }
+// Row summary of a workspace's EFFECTIVE credential policy. A linked
+// worktree's own credentialAssignments field is empty by design (the state API
+// never claims a child holds assignments); its live policy is the parent's,
+// so the row summarises the parent's assignments and discloses the
+// inheritance rather than reporting "no credentials" on a working checkout.
+function workspaceCredentialSummary(w) {
+  if (!w.parentId) return credentialAssignmentSummary(w.credentialAssignments);
+  const owner = workspacePolicyOwner(w);
+  const parentLabel = owner === w ? w.parentId : (owner.displayName || owner.id);
+  return credentialAssignmentSummary(owner.credentialAssignments) + " · inherited from " + parentLabel;
+}
 function workspaceById(id) {
   return dashboardWorkspaces.find(entry => entry.id === id)
     || { id, displayName: id, credentialAssignments: { authentication: [], signing: [] } };
@@ -1693,7 +1704,7 @@ async function refresh(force) {
       title: workspaceLabel(w),
       href: sessionUrl(w.id),
       path: w.path,
-      detail: credentialAssignmentSummary(w.credentialAssignments) + " · " + shellSummary(w.shells),
+      detail: workspaceCredentialSummary(w) + " · " + shellSummary(w.shells),
       live: true,
       buttons: [
         {
@@ -1724,7 +1735,7 @@ async function refresh(force) {
     ...stopped.map(w => row({
       title: workspaceLabel(w),
       path: w.path,
-      detail: credentialAssignmentSummary(w.credentialAssignments),
+      detail: workspaceCredentialSummary(w),
       live: false,
       buttons: [
         {

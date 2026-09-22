@@ -59,11 +59,41 @@ test("dashboard preserves ordinary-folder removal and routes repository removal 
     for (const action of spec.buttons) { const button = document.createElement("button"); button.textContent = action.label; button.setAttribute("aria-label", action.ariaLabel || ""); button.onclick = () => action.onClick(button); node.querySelector(".row-actions")!.append(button); }
     return node;
   };
-  const bindings: Record<string, unknown> = { document, HTMLElement: window.HTMLElement, fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }), row: makeRow, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows), workspaceLabel: (w: any) => w.id, credentialAssignmentSummary: () => "", actionErrorFor: () => ({}), setLocalError: () => {}, api: async (url: string) => calls.push(url), el: (tag: string) => document.createElement(tag), worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: (options: any) => calls.push(options.view + ":" + options.id) };
+  const bindings: Record<string, unknown> = { document, HTMLElement: window.HTMLElement, fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }), row: makeRow, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows), workspaceLabel: (w: any) => w.id, workspaceCredentialSummary: () => "", actionErrorFor: () => ({}), setLocalError: () => {}, api: async (url: string) => calls.push(url), el: (tag: string) => document.createElement(tag), worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: (options: any) => calls.push(options.view + ":" + options.id) };
   const refresh = new Function(...Object.keys(bindings), `let uiBusy=0, dashboardWorkspaces=[]; ${source}; return refresh;`)(...Object.values(bindings));
   await refresh();
   for (const id of ["docs", "main", "child"]) await (document.querySelector(`[data-workspace="${id}"] [aria-label^="Remove "]`) as any).onclick();
   expect(calls).toEqual(["/api/hub/workspaces/docs/forget", "forget:main", "forget:child"]);
+});
+
+test("dashboard rows disclose a linked worktree's inherited parent credentials", async () => {
+  const script = clientScript(htmlFor.dashboard());
+  const summaries = script.slice(script.indexOf("function shellSummary(shells)"), script.indexOf("function el(tag, className, text)"));
+  const helpers = script.slice(script.indexOf("function workspaceLabel(w)"), script.indexOf("// Starts a registered stopped workspace"));
+  const refreshSource = script.slice(script.indexOf("async function refresh(force)"), script.indexOf("// The device-session list"));
+  const { document, window } = parseHTML('<html><body><div id="hub-version"></div><div id="sessions"></div><div id="workspaces"></div></body></html>');
+  const none = { authentication: [], signing: [] };
+  const entries = [
+    { id: "repo", displayName: "Repo", running: true, shells: [], credentialAssignments: { authentication: ["key-a"], signing: ["gpg-b"] } },
+    { id: "repo-child", parentId: "repo", branch: "feature/x", credentialAssignments: none },
+    { id: "bare", displayName: "Bare", credentialAssignments: none },
+    { id: "bare-child", parentId: "bare", branch: "feature/y", credentialAssignments: none },
+    { id: "orphan-child", parentId: "gone", branch: "feature/z", credentialAssignments: none },
+    { id: "plain", credentialAssignments: none },
+  ];
+  const details: Record<string, string> = {};
+  const makeRow = (spec: any) => { details[spec.title] = spec.detail; const node = document.createElement("div"); node.innerHTML = '<div class="row-main"><div class="row-title"></div></div><div class="row-actions"></div>'; return node; };
+  const bindings: Record<string, unknown> = { document, HTMLElement: window.HTMLElement, fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }), row: makeRow, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows), actionErrorFor: () => ({}), setLocalError: () => {}, api: async () => {}, el: (tag: string) => document.createElement(tag), worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: () => {}, sessionUrl: (id: string) => "/s/" + id + "/", lockedWorkspaceCredentials: () => [] };
+  const refresh = new Function(...Object.keys(bindings), `let uiBusy=0, dashboardWorkspaces=[]; ${summaries} ${helpers} ${refreshSource}; return refresh;`)(...Object.values(bindings));
+  await refresh();
+  expect(details).toEqual({
+    "Repo": "🔑 Auth: key-a · ✎ Signing: gpg-b · no shells",
+    "feature/x": "🔑 Auth: key-a · ✎ Signing: gpg-b · inherited from Repo",
+    "Bare": "⊘ No credentials assigned",
+    "feature/y": "⊘ No credentials assigned · inherited from Bare",
+    "feature/z": "⊘ No credentials assigned · inherited from gone",
+    "plain": "⊘ No credentials assigned",
+  });
 });
 
 test("dashboard worktree live subscription recovers on visibility-only return before and during a dialog", () => {
@@ -317,6 +347,10 @@ describe("authenticated Hub pages", () => {
     expect(html).toContain('parts.push("🔑 Auth: " + authentication.join(", "))');
     expect(html).toContain('parts.push("✎ Signing: " + signing.join(", "))');
     expect(html).toContain("if (!hasCredentialAssignments(workspacePolicyOwner(w).credentialAssignments) && !confirm(");
+    // Both row kinds summarise the EFFECTIVE policy (a child's parent), never the child's own empty rows.
+    expect(refreshBody).toContain('detail: workspaceCredentialSummary(w) + " · " + shellSummary(w.shells)');
+    expect(refreshBody).toContain("detail: workspaceCredentialSummary(w),");
+    expect(refreshBody).not.toContain("credentialAssignmentSummary(w.credentialAssignments)");
     expect(html).toContain("Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?");
     const startFlow = html.indexOf("async function startRegisteredWorkspace");
     expect(startFlow).toBeGreaterThan(0);
