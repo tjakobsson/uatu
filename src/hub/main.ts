@@ -449,11 +449,10 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     readiness: credentialId => openPgpRuntime.run(manager => manager.readiness(credentialId)),
   };
   const tokenCredentials = new TokenCredentialManager(credentialMetadata, credentialTokens);
-  // The workspace whose policy governs a given workspace: a registered linked
-  // worktree's parent, else the workspace itself. One seam, shared by the
+  // One seam for "whose policy governs this workspace?", shared by the
   // resolver (which reads the parent's assignments) and the credential API
   // (which refuses to record assignments on a child).
-  const policyWorkspaceId = (workspaceId: string) => registry.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId;
+  const policyWorkspaceId = (workspaceId: string) => registry.policyWorkspaceId(workspaceId);
   const credentialContexts = createStoredCredentialContextResolver({
     metadata: credentialMetadata,
     tokens: credentialTokens,

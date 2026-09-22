@@ -187,6 +187,12 @@ export class WorkspaceRegistry {
     return this.workspaces.find(entry => entry.id === id);
   }
 
+  // The workspace whose policy governs this one: a linked worktree's parent,
+  // else the workspace itself.
+  policyWorkspaceId(workspaceId: string): string {
+    return this.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId;
+  }
+
   byPath(folderPath: string): WorkspaceEntry | undefined {
     return this.workspaces.find(entry => entry.path === folderPath);
   }

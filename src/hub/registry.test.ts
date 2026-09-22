@@ -48,6 +48,19 @@ describe("WorkspaceRegistry", () => {
     expect(second).toEqual({ entry: first.entry, created: false });
   });
 
+  test("resolves the policy owner to a linked worktree's parent and otherwise to the workspace itself", async () => {
+    const registry = await tempRegistry();
+    const parent = await registry.register("/srv/workspaces/repo");
+    const child = (await registry.registerWithStatus("/srv/workspaces/repo-feature", "local", "feature", {
+      parentWorkspaceId: parent.id, repositoryId: "repository", checkoutId: "checkout",
+    })).entry;
+
+    expect(registry.policyWorkspaceId(child.id)).toBe(parent.id);
+    expect(registry.policyWorkspaceId(parent.id)).toBe(parent.id);
+    // An unregistered id owns its own policy rather than resolving to nothing.
+    expect(registry.policyWorkspaceId("absent")).toBe("absent");
+  });
+
   test("collisions get numeric suffixes and existing ids keep theirs", async () => {
     const registry = await tempRegistry();
     const first = await registry.register("/a/docs");

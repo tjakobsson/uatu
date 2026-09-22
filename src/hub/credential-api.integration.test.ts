@@ -178,7 +178,7 @@ async function fixture(root: string) {
       openpgp,
       tokens,
       workspaceExists: id => registry.byId(id) !== undefined,
-      policyWorkspaceId: id => registry.byId(id)?.worktree?.parentWorkspaceId ?? id,
+      policyWorkspaceId: id => registry.policyWorkspaceId(id),
     },
   });
   servers.push(server);
@@ -813,6 +813,20 @@ describe("credential API integration", () => {
     expect(await unassignedChild.json()).toEqual(refusal);
     expect(f.sessions.isRunning(child.id)).toBe(true);
     expect(f.backendEvents.stops).toEqual([]);
+    expect(f.metadata.snapshot().assignments).toHaveLength(1);
+
+    // Without stop the running-session conflict would answer first and tell
+    // the caller to stop a workspace that could never hold the assignment;
+    // the target refusal names the parent instead.
+    const unassignedRunningChild = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: child.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(unassignedRunningChild.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/unassign", unassignedRunningChild);
+    expect(await unassignedRunningChild.json()).toEqual(refusal);
+    expect(f.sessions.isRunning(child.id)).toBe(true);
     expect(f.metadata.snapshot().assignments).toHaveLength(1);
 
     const unassignedParent = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {

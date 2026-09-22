@@ -86,6 +86,37 @@ function dashboardRefreshHarness(entries: unknown[], overrides: Record<string, u
   return { document, refresh };
 }
 
+// Renders the settings page's real credentialCard() — with the credential
+// helpers and the policy-owner lookup it calls — against a given
+// `dashboardWorkspaces` list, so the "Restart required" notice is asserted on
+// the rendered card rather than on source text. Only the card's build path
+// runs; its action handlers are never invoked.
+function credentialCardHarness(workspaces: unknown[]) {
+  const script = clientScript(htmlFor.settings());
+  // As in dashboardRefreshHarness: a moved marker must fail loudly instead of
+  // slicing an empty string and making every assertion vacuous.
+  const mark = (needle: string) => {
+    const index = script.indexOf(needle);
+    if (index < 0) throw new Error(`settings client script no longer contains: ${needle}`);
+    return index;
+  };
+  const elSource = script.slice(mark("function el(tag, className, text)"), mark("function row({ title"));
+  const helpers = script.slice(mark("const capabilityLabels = {"), mark("function credentialCard(credential)"));
+  const cardSource = script.slice(mark("function credentialCard(credential)"), mark("function workspaceAssignmentEntries(workspaceId)"));
+  const ownerSource = script.slice(mark("function workspacePolicyOwner(workspace)"), mark("// Row summary of a workspace's effective credential policy"));
+  const { document } = parseHTML("<html><body></body></html>");
+  const bindings: Record<string, unknown> = {
+    document,
+    credentialAction: async () => {}, loadCredentials: async () => {}, withBusy: async () => {},
+    api: async () => {}, confirm: () => false,
+  };
+  const prelude = `const credentialCatalog = []; const dashboardWorkspaces = ${JSON.stringify(workspaces)};`
+    + ' const openCredentialIds = new Set(); const credentialPath = "/api/hub/credentials";';
+  return new Function(...Object.keys(bindings), `${prelude} ${elSource} ${helpers} ${ownerSource} ${cardSource} return credentialCard;`)(
+    ...Object.values(bindings),
+  ) as (credential: unknown) => Element;
+}
+
 test("dashboard preserves ordinary-folder removal and routes repository removal safely", async () => {
   const calls: string[] = [];
   const { document, refresh } = dashboardRefreshHarness(
@@ -902,9 +933,31 @@ describe("settings page", () => {
     expect(document.querySelectorAll("[data-form-error][role=alert]").length).toBe(5);
     expect(html).toContain("Copy public key");
     expect(html).toContain('else if (credential.type === "ssh")');
-    expect(html).toContain("credentialRestartRequired");
-    expect(html).toContain("Restart required: assignment changes apply fully");
     expect(document.querySelector("[data-shared-uid-warning] span")?.textContent).toBe(LOCAL_CREDENTIAL_ASSIGNMENT_WARNING);
+  });
+
+  test("credential card raises the restart notice on a running row whose policy owner the assignment names", () => {
+    const parent = { id: "repo", displayName: "Repo", credentialAssignments: { authentication: [], signing: [] } };
+    const child = {
+      id: "child", parentId: "repo", branch: "feature/x", credentialRestartRequired: true,
+      credentialAssignments: { authentication: [], signing: [] },
+    };
+    const credential = {
+      id: "token-a", name: "Parent token", type: "token", enabled: true, capabilities: ["https-git"],
+      metadata: { host: "github.com" },
+      readiness: [{ layer: "credential", status: "ready", message: "The token credential is available." }],
+      assignments: [{ workspaceId: "repo", credentialId: "token-a", role: "authentication", host: "github.com" }],
+    };
+    const notice = (workspaces: unknown[]) => {
+      const card = credentialCardHarness(workspaces)(credential);
+      return card.querySelector(".restart-required")?.textContent ?? null;
+    };
+    // The server flags the RUNNING child; the assignment names its parent.
+    expect(notice([parent, child])).toContain("Restart required: assignment changes apply fully");
+    // A flagged row governed by some other policy owner, and an unflagged
+    // child, both leave the card quiet.
+    expect(notice([parent, { ...child, parentId: "elsewhere" }])).toBeNull();
+    expect(notice([parent, { ...child, credentialRestartRequired: false }])).toBeNull();
   });
 
   test("preserves lifecycle actions, tool probes, and responsive controls", () => {

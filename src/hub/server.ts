@@ -1820,31 +1820,25 @@ export function createHubFetchHandler(deps: HubDeps) {
               // stop: true makes stop-and-remove one lifecycle operation: the
               // unassignment runs inside the stop, so a concurrent start
               // cannot slip between them and keep the removed credential
-              // projected into a live session.
-              if (body.stop === true) {
-                // The same single lifecycle operation sessions.stop() would
-                // have taken, opened directly so the onboarding fence is
-                // rechecked BEFORE the stop: a refused unassignment must not
-                // leave the workspace stopped for a change it never made.
-                const removed = await sessions.runExclusive(workspaceId, async () => {
-                  await assertAssignmentsUnfenced();
-                  // The target check `unassign` performs would run only after
-                  // the stop below; a refused id must not cost the workspace
-                  // its session, so it is checked up front.
-                  credentialApi.assertAssignmentTarget(workspaceId);
-                  await sessions.stopWhileLifecycleQueueHeld(workspaceId);
-                  return credentialApi.unassign(credentialId, body);
-                });
-                return json(200, { removed }, headers);
-              }
+              // projected into a live session. Either way this is the single
+              // lifecycle operation sessions.stop() would have taken, opened
+              // directly so the onboarding fence is rechecked BEFORE the stop:
+              // a refused unassignment must not leave the workspace stopped
+              // for a change it never made.
               const removed = await sessions.runExclusive(workspaceId, async () => {
                 await assertAssignmentsUnfenced();
-                // A running child keeps its projected credential
+                // The target check `unassign` performs would run only after
+                // the stop (or after the running-session refusal) below; a
+                // refused id must not cost the workspace its session, nor be
+                // reported as a lifecycle conflict it could act on.
+                credentialApi.assertAssignmentTarget(workspaceId);
+                if (body.stop === true) await sessions.stopWhileLifecycleQueueHeld(workspaceId);
+                // A running workspace keeps its projected credential
                 // configuration, and the Hub-side helper serves tokens by
                 // id — removing only the catalog assignment would report a
                 // revocation that is not in effect. The page sends
                 // stop: true for running workspaces; other clients must too.
-                if (sessions.isRunning(workspaceId)) {
+                else if (sessions.isRunning(workspaceId)) {
                   throw new Error("credential assignment removal conflicts with the running workspace session; stop it first or pass stop: true");
                 }
                 return credentialApi.unassign(credentialId, body);

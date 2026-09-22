@@ -160,7 +160,7 @@ async function fixture(label: string, options: { registrar?: (real: WorktreeRegi
     sshCredentialUsable: async () => true,
     openPgpCredentialUsable: async () => true,
     tools: { ssh: "/usr/bin/ssh", git: "/usr/bin/git", gpg: null, sshKeygen: "/usr/bin/ssh-keygen", gh: null, glab: null },
-    policyWorkspaceId: workspaceId => registry.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId,
+    policyWorkspaceId: workspaceId => registry.policyWorkspaceId(workspaceId),
   });
 
   return {
