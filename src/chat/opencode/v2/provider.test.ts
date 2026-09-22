@@ -47,7 +47,7 @@ function fakeOpenCode(routes: Record<string, Handler>) {
     // list routes answer their own shapes, which it returns whole.
     return Response.json(ENVELOPED.some(pattern => pattern.test(`${request.method} ${url.pathname}`)) ? { data: result } : result);
   }) as typeof globalThis.fetch;
-  const provider = (directory = WORKSPACE) => createOpenCodeV2Provider({ endpoint: "http://opencode.test", password: "pw", directory, fetch }) as OpenCodeV2Provider;
+  const provider = (directory = WORKSPACE, options: { commandAdmissionMs?: number } = {}) => createOpenCodeV2Provider({ endpoint: "http://opencode.test", password: "pw", directory, fetch, ...options }) as OpenCodeV2Provider;
   const requests = (method: string, pathname: string) => calls.filter(call => call.method === method && call.path === pathname);
   return { calls, provider, requests };
 }
@@ -311,16 +311,72 @@ describe("OpenCode 2.x provider: prompting and events", () => {
   test("commands and compaction queue through their own routes; interrupt hits its route", async () => {
     const server = fakeOpenCode({
       "POST /api/session/:id/command": () => undefined,
-      "POST /api/session/:id/compact": () => ({ id: "msg_c", sessionID: "ses_1", time: { created: 1 }, type: "compaction", payload: {}, delivery: "queue" }),
+      "POST /api/session/:id/compact": ({ body }) => ({ id: (body as { id: string }).id, sessionID: "ses_1", time: { created: 1 }, type: "compaction", payload: {}, delivery: "queue" }),
       "POST /api/session/:id/interrupt": () => ({ interrupted: true }),
     });
     const provider = server.provider();
-    await provider.command("ses_1", { id: "req-2", name: "review", arguments: "branch" });
-    await provider.command("ses_1", { id: "req-3", name: "compact", arguments: "" });
+    // With no stream to name the server's row, the local id stands.
+    const command = await provider.command("ses_1", { id: "req-2", name: "review", arguments: "branch" });
+    const compaction = await provider.command("ses_1", { id: "req-3", name: "compact", arguments: "" });
     await provider.interrupt("ses_1");
+    expect(command.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
     expect(server.requests("POST", "/api/session/ses_1/command")[0]?.body).toEqual({ name: "review", text: "branch", delivery: "queue" });
-    expect(server.requests("POST", "/api/session/ses_1/compact")[0]?.body).toEqual({ delivery: "queue" });
+    // Compaction carries the stable id like a prompt, so the inbox item is
+    // the one this process already holds.
+    expect(server.requests("POST", "/api/session/ses_1/compact")[0]?.body).toEqual({ id: compaction.messageId, delivery: "queue" });
+    expect(compaction.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    expect(compaction.messageId).not.toBe(command.messageId);
     expect(server.requests("POST", "/api/session/ses_1/interrupt")).toHaveLength(1);
+  });
+
+  // The stream as the pinned client reads it, with a handle to push frames
+  // after the subscription is open.
+  function pushableEvents() {
+    const encoder = new TextEncoder();
+    let push: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const frame = (event: Record<string, unknown>) => push?.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+    const route = () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { push = controller; frame({ id: "evt_0", type: "server.connected", data: {} }); },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+    return { route, frame };
+  }
+
+  test("a slash command's row takes the inbox id the stream names, ahead of the 204", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": () => {
+        // The server enqueues the item and announces it before answering,
+        // with its own id and the expanded template as the text.
+        events.frame({ id: "evt_1", created: 5, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_srv1", item: { type: "user", payload: { text: "Create or update AGENTS.md" }, delivery: "queue" } } });
+        return undefined;
+      },
+    });
+    const provider = server.provider();
+    const controller = new AbortController();
+    const rows: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) if (update.kind === "upsert") rows.push(update.item.id);
+    })();
+    expect(await provider.command("ses_1", { id: "req-5", name: "init", arguments: "" })).toEqual({ messageId: "msg_srv1" });
+    // The streamed row had already been consumed when the admission returned.
+    expect(rows).toEqual(["message:msg_srv1"]);
+    controller.abort();
+    await pump;
+  });
+
+  test("a slash command the stream never names keeps its local id once the window closes", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const pump = (async () => { for await (const _ of provider.events(controller.signal)) { /* drain */ } })();
+    const started = Date.now();
+    const accepted = await provider.command("ses_1", { id: "req-6", name: "init", arguments: "" });
+    expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(15);
+    controller.abort();
+    await pump;
   });
 
   test("an invalid command rejects within the admission window", async () => {

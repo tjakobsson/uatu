@@ -42,6 +42,7 @@ export function createOpenCodeV2Provider(options: {
   password: string;
   directory: string;
   fetch?: typeof globalThis.fetch;
+  commandAdmissionMs?: number;
 }): ChatProvider {
   const authorization = `Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}`;
   const client = OpenCode.make({
@@ -49,7 +50,7 @@ export function createOpenCodeV2Provider(options: {
     headers: { authorization },
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
-  return new OpenCodeV2Provider(client, options.directory);
+  return new OpenCodeV2Provider(client, options.directory, options.commandAdmissionMs);
 }
 
 export class OpenCodeV2Provider implements ChatProvider {
@@ -57,6 +58,11 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
   private readonly normalize: ReturnType<typeof createOpenCodeV2Normalizer>;
   private readonly workspace: string;
+  // Slash-command admissions waiting for the stream to name their row: one
+  // per session, since the adapter admits one send per conversation at a
+  // time. Only a consumed `events()` can settle one.
+  private readonly enqueuedUserWaiters = new Map<string, (messageId: string) => void>();
+  private streaming = false;
 
   constructor(
     private readonly client: OpenCodeV2Client,
@@ -278,25 +284,52 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.historyReuse.invalidate();
     // Memory scoped to the subscription: one pump, one memory.
     const memory = createOpenCodeV2Memory();
+    this.streaming = true;
     try {
       for await (const event of this.client.event.subscribe({ signal })) {
         // Normalization resolves every failure to an outcome, and anything
         // that still escapes must cost one event rather than ending the stream.
+        let normalized: NormalizedProviderEvent;
         try {
-          const normalized = this.normalize(event, memory);
+          normalized = this.normalize(event, memory);
           const notificationTurns = this.notificationLifecycle.observe(event, normalized);
           if (notificationTurns.length > 0) { normalized.notificationTurns = notificationTurns; normalized.outcome = "handled"; }
           this.historyReuse.invalidate(normalized.conversationId);
-          yield normalized;
         } catch {
-          yield { updates: [], outcome: "unparseable", eventType: "" };
+          normalized = { updates: [], outcome: "unparseable", eventType: "" };
         }
+        yield normalized;
+        // After the yield, not before: the consumer has applied this event
+        // by the time the generator resumes, so a command admission settled
+        // here returns after the streamed row landed — and the caller's own
+        // upsert, the text the user typed, lands last.
+        this.reportEnqueuedUser(normalized);
       }
     } catch (error) {
       // Cancellation ends the stream quietly; anything else must reach the
       // pump's supervisor so it reconnects.
       if (!signal.aborted) throw error;
+    } finally {
+      this.streaming = false;
     }
+  }
+
+  private reportEnqueuedUser(event: NormalizedProviderEvent): void {
+    if (event.eventType !== "session.inbox.enqueued" || !event.conversationId) return;
+    const resolve = this.enqueuedUserWaiters.get(event.conversationId);
+    if (!resolve) return;
+    for (const update of event.updates) {
+      if (update.kind !== "upsert" || update.item.type !== "user_message") continue;
+      resolve(update.item.id.slice("message:".length));
+      return;
+    }
+  }
+
+  private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void } {
+    let resolve!: (messageId: string) => void;
+    const promise = new Promise<string>(settle => { resolve = settle; });
+    this.enqueuedUserWaiters.set(sessionId, resolve);
+    return { promise, release: () => { if (this.enqueuedUserWaiters.get(sessionId) === resolve) this.enqueuedUserWaiters.delete(sessionId); } };
   }
 
   async dispose(): Promise<void> {
@@ -333,6 +366,15 @@ export class OpenCodeV2Provider implements ChatProvider {
    * window: an invalid command or unavailable provider rejects immediately
    * and reaches the caller's draft-restoration path, while a healthy turn
    * outlives the window, detaches, and reports through the event stream.
+   *
+   * The row's id differs by route. Compaction takes the stable id, as a
+   * prompt does. A slash command cannot: `session.command` accepts no id
+   * and answers no content, so the server mints the inbox item's id and
+   * names it only in `session.inbox.enqueued`. The stream hands that id
+   * back here within the window, so the caller's optimistic row and the
+   * streamed one converge on one item; without a live stream the local id
+   * stands. That is also why a retry of an accepted command whose response
+   * was lost can run twice on 2.x: the API carries no key to dedupe on.
    */
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     this.historyReuse.invalidate(sessionId);
@@ -340,17 +382,25 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     if (input.mode) await this.client.session.switchAgent({ sessionID: sessionId, agent: input.mode });
     const compacts = input.name === "compact" || input.name === "summarize";
-    const dispatch = compacts
-      ? this.client.session.compact({ sessionID: sessionId, delivery: "queue" }).then(() => undefined)
+    const dispatch: Promise<unknown> = compacts
+      ? this.client.session.compact({ sessionID: sessionId, id: messageId, delivery: "queue" })
       : this.client.session.command({ sessionID: sessionId, name: input.name, text: input.arguments, delivery: "queue" });
+    const enqueued = !compacts && this.streaming ? this.awaitEnqueuedUser(sessionId) : undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([dispatch, new Promise<void>(resolve => { timer = setTimeout(resolve, this.commandAdmissionMs); })]);
+      const reported = await new Promise<string | undefined>((resolve, reject) => {
+        timer = setTimeout(() => resolve(undefined), this.commandAdmissionMs);
+        enqueued?.promise.then(resolve);
+        // A 204 says the command was accepted, not what its row is called:
+        // with a stream listening, the id can still arrive inside the window.
+        dispatch.then(() => { if (!enqueued) resolve(undefined); }, reject);
+      });
+      return { messageId: reported ?? messageId };
     } finally {
       clearTimeout(timer);
+      enqueued?.release();
       dispatch.catch(() => undefined);
     }
-    return { messageId };
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -373,6 +423,9 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   async listQuestions(): Promise<PendingQuestion[]> {
+    // The workspace's pending forms only: an answered or cancelled form
+    // leaves this list (verified against 2.0.13), and the list record carries
+    // no state — only `form.get` does — so every row here is answerable.
     const { data } = await this.client.form.list(this.scope);
     return data.flatMap(form => {
       if (!form.id || !form.sessionID) return [];
