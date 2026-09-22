@@ -178,6 +178,35 @@ test.describe("terminal close confirmation", () => {
   });
 });
 
+test.describe("terminal page lifecycle", () => {
+  // A pane whose create resolves after pagehide must not attach: the
+  // departing document may live on in the history cache while its
+  // replacement is already attaching to the same shells. The first opening's
+  // inventory read is held server-side so the departure lands mid-request;
+  // the pane is then added suspended and resumes with the return.
+  test("a pane whose creation resolves after pagehide is added suspended, and attaches on pageshow", async ({ page, request }) => {
+    await request.post("/__e2e/terminal-sessions-delay", { data: { ms: 1500 } });
+    await page.locator("#terminal-toggle").click();
+    await expect
+      .poll(async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending, { timeout: 5000 })
+      .toBe(true);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+
+    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1, { timeout: 10000 });
+    const attached = () => page.evaluate(() =>
+      fetch("/api/terminal/sessions").then(r => r.json()).then((b: { sessions: { attached: boolean }[] }) => b.sessions.map(s => s.attached)));
+    await expect.poll(attached).toEqual([false]);
+    // Nothing attaches while the document stays suspended.
+    await page.waitForTimeout(1000);
+    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
+    await expect.poll(attached).toEqual([false]);
+
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    await expect.poll(attached).toEqual([true]);
+  });
+});
+
 test.describe("terminal display modes", () => {
   test("minimize collapses the panes; restore expands again", async ({ page }) => {
     await page.locator("#terminal-toggle").click();

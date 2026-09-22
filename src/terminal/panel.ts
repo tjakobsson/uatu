@@ -7,7 +7,7 @@
 import { appUrl } from "../shared/app-url";
 import { mountTerminalPanel, persistTerminalToken, type TerminalPanelHandle } from "./client";
 import { initTerminalKeybar, selectionSheetKeyRoute } from "./keybar";
-import { createPanelLifecycle } from "./lifecycle";
+import { createPanelLifecycle, type PanelLifecycle } from "./lifecycle";
 import { pasteToActiveTerminal } from "./panel-paste";
 import { refreshFindTarget } from "../find/find-bar";
 import { registerTerminalFind } from "../find/shortcut";
@@ -272,6 +272,12 @@ export function setupTerminalPanel(
   // Suppresses per-pane activation, focus and refit while a planned batch
   // attaches; the batch performs each once when it finishes.
   let batchingAttach = false;
+  // The page lifecycle, consulted by every pane addition: a create or
+  // inventory request that resolves after pagehide must not attach a pane
+  // on a document that is suspended — the replacement page is attaching to
+  // the same shells — so the pane is added suspended and resumes with the
+  // rest when the document runs again.
+  let lifecycle: PanelLifecycle | null = null;
   // Whether the touch terminal switcher is up. Tracked here rather than read
   // off the element because the sheet's content arrives from an async
   // inventory read: between the tap and the first paint the element is still
@@ -821,7 +827,8 @@ export function setupTerminalPanel(
     const entry = buildPaneElement(fullRecord, { takeover: options.takeover });
     panes.set(id, entry);
     rebuildPanesContainer();
-    entry.handle.attach();
+    if (lifecycle?.suspended()) entry.handle.release();
+    else entry.handle.attach();
     // Inside a batch attach, activation, focus and the refit all belong to the
     // batch, which performs them once against the pane it picked. Activating
     // here would also overwrite the saved last-active PTY the batch is about
@@ -2022,7 +2029,7 @@ export function setupTerminalPanel(
   // while visibility, pane records and layout stay exactly as they are.
   // The return resumes each released pane once. Nothing here persists
   // anything: leaving a page is not hiding the terminal.
-  createPanelLifecycle({
+  lifecycle = createPanelLifecycle({
     win: window,
     doc: document,
     release() {

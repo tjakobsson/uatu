@@ -224,8 +224,10 @@ export type TerminalPanelHandle = {
   // caller then kills the PTY through the inventory route instead.
   terminate(): boolean;
   // The page is being hidden: release the transport without touching what
-  // the pane is or shows. Only an attaching, attached or recovering pane
-  // has anything to release; every other state is left as it is.
+  // the pane is or shows. An attaching, attached or recovering pane gives
+  // up its transport; an idle pane (added while the document is suspended)
+  // is marked suspended so the return attaches it; every other state is
+  // left as it is.
   release(): void;
   // The page runs again: a released pane attaches again, once.
   resume(): void;
@@ -1448,6 +1450,13 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   }
 
   function release(): void {
+    if (state === "idle") {
+      // Nothing to release, but the pane must resume with the others: a
+      // pane added while the document is suspended (its create resolved
+      // after pagehide) must not attach until the document runs again.
+      setState("suspended");
+      return;
+    }
     if (state !== "connecting" && state !== "ready" && state !== "recovering") return;
     // 1000 again: a page departure is a detach, never a termination, and
     // saying so explicitly is what lets the child release the PTY promptly
