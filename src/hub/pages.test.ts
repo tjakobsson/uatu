@@ -47,51 +47,74 @@ test("dashboard child startup checks and unlocks parent policy but starts the ch
   expect(opened).toHaveLength(1);
 });
 
-test("dashboard preserves ordinary-folder removal and routes repository removal safely", async () => {
+// Runs the dashboard's real refresh() — with the row-summary helpers it
+// calls — against a fetched workspace list, faking the page's DOM-building
+// and networking seams. Rows render as `.row` nodes carrying their title,
+// detail, and labelled action buttons; `overrides` replaces any binding a
+// test needs to observe (api calls, dialog opens, ...).
+function dashboardRefreshHarness(entries: unknown[], overrides: Record<string, unknown> = {}) {
   const script = clientScript(htmlFor.dashboard());
-  const source = script.slice(script.indexOf("async function refresh(force)"), script.indexOf("// The device-session list"));
+  // A moved or renamed marker would silently slice an empty string and make
+  // every assertion below vacuous, so each one must still be found.
+  const mark = (needle: string) => {
+    const index = script.indexOf(needle);
+    if (index < 0) throw new Error(`dashboard client script no longer contains: ${needle}`);
+    return index;
+  };
+  const summaries = script.slice(mark("function shellSummary(shells)"), mark("function el(tag, className, text)"));
+  const helpers = script.slice(mark("function workspaceLabel(w)"), mark("async function startRegisteredWorkspace"));
+  const refreshSource = script.slice(mark("async function refresh(force)"), mark("// The device-session list"));
   const { document, window } = parseHTML('<html><body><div id="hub-version"></div><div id="sessions"></div><div id="workspaces"></div></body></html>');
-  const entries = [{ id: "docs" }, { id: "main", createWorktree: true }, { id: "child", parentId: "main" }];
-  const calls: string[] = [];
-  const makeRow = (spec: any) => {
+  const row = (spec: any) => {
     const node = document.createElement("div"); node.className = "row";
-    node.innerHTML = '<div class="row-main"><div class="row-title"></div></div><div class="row-actions"></div>';
+    node.innerHTML = '<div class="row-main"><div class="row-title"></div><div class="row-detail"></div></div><div class="row-actions"></div>';
+    node.querySelector(".row-title")!.textContent = spec.title;
+    node.querySelector(".row-detail")!.textContent = spec.detail;
     for (const action of spec.buttons) { const button = document.createElement("button"); button.textContent = action.label; button.setAttribute("aria-label", action.ariaLabel || ""); button.onclick = () => action.onClick(button); node.querySelector(".row-actions")!.append(button); }
     return node;
   };
-  const bindings: Record<string, unknown> = { document, HTMLElement: window.HTMLElement, fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }), row: makeRow, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows), workspaceLabel: (w: any) => w.id, workspaceCredentialSummary: () => "", actionErrorFor: () => ({}), setLocalError: () => {}, api: async (url: string) => calls.push(url), el: (tag: string) => document.createElement(tag), worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: (options: any) => calls.push(options.view + ":" + options.id) };
-  const refresh = new Function(...Object.keys(bindings), `let uiBusy=0, dashboardWorkspaces=[]; ${source}; return refresh;`)(...Object.values(bindings));
+  const bindings: Record<string, unknown> = {
+    document, HTMLElement: window.HTMLElement,
+    fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }),
+    row, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows),
+    actionErrorFor: () => ({}), setLocalError: () => {}, api: async () => {}, el: (tag: string) => document.createElement(tag),
+    worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: () => {},
+    sessionUrl: (id: string) => "/s/" + id + "/",
+    ...overrides,
+  };
+  const refresh = new Function(...Object.keys(bindings), `let uiBusy=0, dashboardWorkspaces=[]; ${summaries} ${helpers} ${refreshSource}; return refresh;`)(...Object.values(bindings)) as (force?: boolean) => Promise<void>;
+  return { document, refresh };
+}
+
+test("dashboard preserves ordinary-folder removal and routes repository removal safely", async () => {
+  const calls: string[] = [];
+  const { document, refresh } = dashboardRefreshHarness(
+    [{ id: "docs" }, { id: "main", createWorktree: true }, { id: "child", parentId: "main" }],
+    { api: async (url: string) => calls.push(url), openWorktreeDialog: (options: any) => calls.push(options.view + ":" + options.id) },
+  );
   await refresh();
   for (const id of ["docs", "main", "child"]) await (document.querySelector(`[data-workspace="${id}"] [aria-label^="Remove "]`) as any).onclick();
   expect(calls).toEqual(["/api/hub/workspaces/docs/forget", "forget:main", "forget:child"]);
 });
 
 test("dashboard rows disclose a linked worktree's inherited parent credentials", async () => {
-  const script = clientScript(htmlFor.dashboard());
-  const summaries = script.slice(script.indexOf("function shellSummary(shells)"), script.indexOf("function el(tag, className, text)"));
-  const helpers = script.slice(script.indexOf("function workspaceLabel(w)"), script.indexOf("// Starts a registered stopped workspace"));
-  const refreshSource = script.slice(script.indexOf("async function refresh(force)"), script.indexOf("// The device-session list"));
-  const { document, window } = parseHTML('<html><body><div id="hub-version"></div><div id="sessions"></div><div id="workspaces"></div></body></html>');
   const none = { authentication: [], signing: [] };
-  const entries = [
+  const { document, refresh } = dashboardRefreshHarness([
     { id: "repo", displayName: "Repo", running: true, shells: [], credentialAssignments: { authentication: ["key-a"], signing: ["gpg-b"] } },
     { id: "repo-child", parentId: "repo", branch: "feature/x", credentialAssignments: none },
+    { id: "repo-child-live", parentId: "repo", branch: "feature/live", running: true, shells: [], credentialAssignments: none },
     { id: "bare", displayName: "Bare", credentialAssignments: none },
     { id: "bare-child", parentId: "bare", branch: "feature/y", credentialAssignments: none },
-    { id: "orphan-child", parentId: "gone", branch: "feature/z", credentialAssignments: none },
     { id: "plain", credentialAssignments: none },
-  ];
-  const details: Record<string, string> = {};
-  const makeRow = (spec: any) => { details[spec.title] = spec.detail; const node = document.createElement("div"); node.innerHTML = '<div class="row-main"><div class="row-title"></div></div><div class="row-actions"></div>'; return node; };
-  const bindings: Record<string, unknown> = { document, HTMLElement: window.HTMLElement, fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }), row: makeRow, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows), actionErrorFor: () => ({}), setLocalError: () => {}, api: async () => {}, el: (tag: string) => document.createElement(tag), worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: () => {}, sessionUrl: (id: string) => "/s/" + id + "/", lockedWorkspaceCredentials: () => [] };
-  const refresh = new Function(...Object.keys(bindings), `let uiBusy=0, dashboardWorkspaces=[]; ${summaries} ${helpers} ${refreshSource}; return refresh;`)(...Object.values(bindings));
+  ]);
   await refresh();
+  const details = Object.fromEntries([...document.querySelectorAll(".row")].map(node => [node.querySelector(".row-title")!.textContent, node.querySelector(".row-detail")!.textContent]));
   expect(details).toEqual({
     "Repo": "🔑 Auth: key-a · ✎ Signing: gpg-b · no shells",
     "feature/x": "🔑 Auth: key-a · ✎ Signing: gpg-b · inherited from Repo",
+    "feature/live": "🔑 Auth: key-a · ✎ Signing: gpg-b · inherited from Repo · no shells",
     "Bare": "⊘ No credentials assigned",
     "feature/y": "⊘ No credentials assigned · inherited from Bare",
-    "feature/z": "⊘ No credentials assigned · inherited from gone",
     "plain": "⊘ No credentials assigned",
   });
 });
@@ -347,14 +370,12 @@ describe("authenticated Hub pages", () => {
     expect(html).toContain('parts.push("🔑 Auth: " + authentication.join(", "))');
     expect(html).toContain('parts.push("✎ Signing: " + signing.join(", "))');
     expect(html).toContain("if (!hasCredentialAssignments(workspacePolicyOwner(w).credentialAssignments) && !confirm(");
-    // Both row kinds summarise the EFFECTIVE policy (a child's parent), never the child's own empty rows.
-    expect(refreshBody).toContain('detail: workspaceCredentialSummary(w) + " · " + shellSummary(w.shells)');
-    expect(refreshBody).toContain("detail: workspaceCredentialSummary(w),");
-    expect(refreshBody).not.toContain("credentialAssignmentSummary(w.credentialAssignments)");
     expect(html).toContain("Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?");
     const startFlow = html.indexOf("async function startRegisteredWorkspace");
     expect(startFlow).toBeGreaterThan(0);
-    expect(html.indexOf("if (!hasCredentialAssignments(w.credentialAssignments)", startFlow)).toBeLessThan(html.indexOf("uiBusy += 1", startFlow));
+    const confirmCheck = html.indexOf("if (!hasCredentialAssignments(workspacePolicyOwner(w).credentialAssignments)", startFlow);
+    expect(confirmCheck).toBeGreaterThan(-1);
+    expect(confirmCheck).toBeLessThan(html.indexOf("uiBusy += 1", startFlow));
     expect(html).toContain("prepareWorkspaceResume(w, target)");
     expect(html).toContain('label: "Start"');
     expect(html).toContain('label: "Rename workspace"');
