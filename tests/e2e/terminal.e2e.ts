@@ -207,6 +207,35 @@ test.describe("terminal page lifecycle", () => {
   });
 });
 
+test.describe("terminal parked cards", () => {
+  // A parked card is the pane's whole surface until its action starts a new
+  // attach cycle; the terminal that cycle mounts must replace the card, not
+  // sit clipped underneath it. The token form is the parked state reachable
+  // without a second window: strip the credentials, reload onto the saved
+  // pane, paste the real token, and the pane must show xterm alone.
+  test("a token pasted into the parked form replaces the form with the terminal", async ({ page, context, request }) => {
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    const { token } = await (await request.get("/__e2e/terminal-token")).json();
+
+    await context.clearCookies();
+    await page.evaluate(() => {
+      try { window.sessionStorage.removeItem("uatu:terminal-token"); } catch { /* best-effort */ }
+    });
+    await page.reload();
+    await expect(page.locator(".terminal-auth")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".terminal-pane[data-state=\"auth-required\"]")).toHaveCount(1);
+
+    await page.locator(".terminal-auth-input").fill(token);
+    await page.locator(".terminal-auth-submit").click();
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 10000 });
+    await expect(page.locator(".terminal-auth")).toHaveCount(0);
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible();
+    // The terminal is the host's only surface: nothing of the card remains.
+    expect(await page.locator(".terminal-pane-host > *").evaluateAll(nodes => nodes.map(n => (n as HTMLElement).classList.contains("xterm")))).toEqual([true]);
+  });
+});
+
 test.describe("terminal display modes", () => {
   test("minimize collapses the panes; restore expands again", async ({ page }) => {
     await page.locator("#terminal-toggle").click();

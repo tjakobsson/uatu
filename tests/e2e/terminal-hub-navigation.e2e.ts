@@ -415,8 +415,10 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     expect(await inventory(hubContext, alpha)).toEqual([{ id: paneIds[0]!, attached: true, createdAt: expect.any(Number), cols: expect.any(Number), rows: expect.any(Number), label: expect.any(String) }]);
 
     // Explicit takeover moves it back; the other window parks with Take back.
+    // The card goes with the attach: the terminal is the pane's whole surface.
     await page.locator(".terminal-occupied-takeover").click();
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".terminal-occupied")).toHaveCount(0);
     await waitForPrompt(page, 0);
     await expectShellValue(page, 0, "UATU_OWNER", "first_window");
     await expect(other.locator(".terminal-taken")).toBeVisible({ timeout: 10_000 });
