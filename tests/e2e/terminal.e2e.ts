@@ -194,6 +194,38 @@ test.describe("terminal display modes", () => {
     await expect(page.locator("#terminal-panes")).toBeVisible();
   });
 
+  // A page suspend (pagehide) releases the shell; the return resumes it.
+  // With the panel minimized the pane has no layout, so the resume attaches
+  // at the grid the pane had before — the shell is held again at once, as it
+  // is across a plain minimize — and the screen paints when the panel is
+  // expanded.
+  test("a page suspend while minimized resumes with the shell held; restore paints it", async ({ page }) => {
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+
+    await page.locator("#terminal-minimize").click();
+    await expect(page.locator("#terminal-panes")).toBeHidden();
+
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
+    await expect.poll(async () =>
+      (await page.evaluate(() => fetch("/api/terminal/sessions").then(r => r.json()))).sessions.map((s: { attached: boolean }) => s.attached),
+    ).toEqual([false]);
+
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "minimized");
+    await expect.poll(async () =>
+      (await page.evaluate(() => fetch("/api/terminal/sessions").then(r => r.json()))).sessions.map((s: { attached: boolean }) => s.attached),
+    ).toEqual([true]);
+
+    await page.locator("#terminal-minimize").click();
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "normal");
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1);
+  });
+
   test("minimize while right-docked rotates the header into a vertical strip", async ({ page }) => {
     await page.locator("#terminal-toggle").click();
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
