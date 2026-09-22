@@ -170,6 +170,7 @@ beforeAll(async () => {
       openpgp: null as never,
       tokens: null as never,
       workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
+      policyWorkspaceId: workspaceId => registry.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId,
     },
   });
   origin = `http://127.0.0.1:${server.port}`;
@@ -687,6 +688,7 @@ describe("register recovers a retained checkout over the wire (8.1)", () => {
         tools: { list: () => [], async set() { throw new Error("unused"); } } as never,
         ssh: null, openpgp: null as never, tokens: null as never,
         workspaceExists: workspaceId => retryRegistry!.byId(workspaceId) !== undefined,
+        policyWorkspaceId: workspaceId => retryRegistry!.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId,
       },
     });
     retryOrigin = `http://127.0.0.1:${retryServer.port}`;

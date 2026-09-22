@@ -1828,6 +1828,10 @@ export function createHubFetchHandler(deps: HubDeps) {
                 // leave the workspace stopped for a change it never made.
                 const removed = await sessions.runExclusive(workspaceId, async () => {
                   await assertAssignmentsUnfenced();
+                  // The target check `unassign` performs would run only after
+                  // the stop below; a refused id must not cost the workspace
+                  // its session, so it is checked up front.
+                  credentialApi.assertAssignmentTarget(workspaceId);
                   await sessions.stopWhileLifecycleQueueHeld(workspaceId);
                   return credentialApi.unassign(credentialId, body);
                 });

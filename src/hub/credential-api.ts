@@ -29,8 +29,20 @@ export type CredentialApiServices = {
   openpgp: OpenPgpCredentialOperations;
   tokens: TokenCredentialManager;
   workspaceExists(workspaceId: string): boolean;
+  // The workspace whose credential policy governs `workspaceId`: a linked
+  // worktree's parent, else the workspace itself.
+  policyWorkspaceId(workspaceId: string): string;
   toolsChanged?(): Promise<void>;
 };
+
+// A credential failure that already knows its HTTP status, so
+// `credentialApiError` does not have to recognise its message.
+export class CredentialApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "CredentialApiError";
+  }
+}
 
 export class CredentialOperationRateLimiter {
   private attempts = new Map<string, number[]>();
@@ -272,10 +284,30 @@ export class CredentialApi {
       && credential.capabilities.some(capability => capability === "github-cli" || capability === "gitlab-cli");
   }
 
+  // An assignment (or its removal) may only name the workspace that OWNS the
+  // policy. A linked worktree inherits its parent's assignments live, so a row
+  // recorded against a child id would never be resolved: refuse it and name
+  // the parent that holds the policy instead.
+  private assignmentTarget(value: unknown): string {
+    const workspaceId = id(value, "workspace id");
+    if (!this.services.workspaceExists(workspaceId)) throw new Error(`unknown workspace: ${workspaceId}`);
+    const owner = this.services.policyWorkspaceId(workspaceId);
+    if (owner !== workspaceId) {
+      throw new CredentialApiError(409, `credentials are managed on the parent workspace ${owner}; linked worktrees inherit them`);
+    }
+    return workspaceId;
+  }
+
+  // The same check as a standalone guard, for callers that must refuse a
+  // target before they act on it — the unassignment route stops the workspace
+  // before it reaches `unassign`.
+  assertAssignmentTarget(workspaceId: string): void {
+    this.assignmentTarget(workspaceId);
+  }
+
   async assign(credentialId: string, body: JsonObject): Promise<CredentialAssignment> {
     fields(body, ["workspaceId", "role", "host", "replace"]);
-    const workspaceId = id(body.workspaceId, "workspace id");
-    if (!this.services.workspaceExists(workspaceId)) throw new Error(`unknown workspace: ${workspaceId}`);
+    const workspaceId = this.assignmentTarget(body.workspaceId);
     if (body.role !== "authentication" && body.role !== "signing") throw new Error("assignment role is invalid");
     if (body.replace !== undefined) bool(body.replace, "replace");
     const assignment = body.role === "authentication"
@@ -286,8 +318,7 @@ export class CredentialApi {
 
   async assignWorkspace(workspaceIdValue: string, body: JsonObject): Promise<CredentialAssignment[]> {
     fields(body, ["authentication", "signing"]);
-    const workspaceId = id(workspaceIdValue, "workspace id");
-    if (!this.services.workspaceExists(workspaceId)) throw new Error(`unknown workspace: ${workspaceId}`);
+    const workspaceId = this.assignmentTarget(workspaceIdValue);
     if (body.authentication === undefined && body.signing === undefined) {
       throw new Error("at least one credential assignment is required");
     }
@@ -320,7 +351,7 @@ export class CredentialApi {
   async unassign(credentialId: string, body: JsonObject): Promise<boolean> {
     fields(body, ["workspaceId", "role", "host", "stop"]);
     if (body.stop !== undefined) bool(body.stop, "stop");
-    const workspaceId = id(body.workspaceId, "workspace id");
+    const workspaceId = this.assignmentTarget(body.workspaceId);
     if (body.role !== undefined && body.role !== "authentication" && body.role !== "signing") throw new Error("assignment role is invalid");
     if (body.role === "authentication" && body.host === undefined) throw new Error("authentication assignment host is required");
     if (body.role !== "authentication" && body.host !== undefined) throw new Error("host applies only to authentication assignments");
@@ -430,10 +461,13 @@ export class CredentialApi {
 }
 
 export function credentialApiError(error: unknown): { status: number; message: string } {
+  if (error instanceof CredentialApiError) return { status: error.status, message: error.message };
   const message = error instanceof Error ? error.message : "credential operation failed";
   if (/unlock failed|could not be unlocked/.test(message)) return { status: 400, message };
-  if (/assigned to|conflicts|already exists|disabled|\blocked\b|requires unlock/.test(message)) return { status: 409, message };
+  // Before the 409 shapes: an unknown id is a 404 even when it happens to
+  // contain one of their words.
   if (/unknown credential|unknown workspace/.test(message)) return { status: 404, message };
+  if (/assigned to|conflicts|already exists|disabled|\blocked\b|requires unlock/.test(message)) return { status: 409, message };
   if (/unavailable|did not cache/.test(message)) return { status: 503, message };
   if (/must|invalid|unknown field|does not|cannot|exceeds|requires confirmation|not support|not have|failed validation|host/.test(message)) {
     return { status: 400, message };

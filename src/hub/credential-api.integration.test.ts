@@ -178,6 +178,7 @@ async function fixture(root: string) {
       openpgp,
       tokens,
       workspaceExists: id => registry.byId(id) !== undefined,
+      policyWorkspaceId: id => registry.byId(id)?.worktree?.parentWorkspaceId ?? id,
     },
   });
   servers.push(server);
@@ -211,6 +212,13 @@ describe("credential API integration", () => {
     });
   });
 
+  test("maps an unknown id to 404 even when its text overlaps a conflict shape", () => {
+    expect(credentialApiError(new Error("unknown workspace: locked-repo"))).toEqual({
+      status: 404,
+      message: "unknown workspace: locked-repo",
+    });
+  });
+
   test("serializes tool mutations through runtime refresh", async () => {
     let activePath = "";
     let releaseFirstRefresh!: () => void;
@@ -234,6 +242,7 @@ describe("credential API integration", () => {
       openpgp: {} as OpenPgpCredentialManager,
       tokens: {} as TokenCredentialManager,
       workspaceExists: () => false,
+      policyWorkspaceId: id => id,
       async toolsChanged() {
         const pathAtStart = activePath;
         if (pathAtStart === "/first") {
@@ -738,6 +747,82 @@ describe("credential API integration", () => {
     // Refusal must not free the policy owner's slug for an unrelated folder.
     const unrelated = await f.registry.register(path.join(root, "unrelated", path.basename(f.workspace.path)));
     expect(unrelated.id).not.toBe(owner);
+  });
+
+  test("refuses credential assignments to a linked worktree and names its parent", async () => {
+    // Policy is resolved on the parent (main.ts: policyWorkspaceId), so a
+    // row recorded against a child id would never take effect. Both
+    // assignment routes refuse the child; the parent remains assignable.
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const child = (await f.registry.registerWithStatus(path.join(root, "linked"), "local", "feature", {
+      parentWorkspaceId: f.workspace.id, repositoryId: "repository", checkoutId: "checkout",
+    })).entry;
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const create = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Parent token",
+      host: "github.com",
+      token: "parent-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await create.json()) as { credential: { id: string } }).credential.id;
+    const refusal = { error: `credentials are managed on the parent workspace ${f.workspace.id}; linked worktrees inherit them` };
+
+    const assigned = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: child.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(assigned.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/assign", assigned);
+    expect(await assigned.json()).toEqual(refusal);
+    const replaced = await post(origin, cookie, `/api/hub/workspaces/${child.id}/credential-assignments`, {
+      authentication: { credentialId, host: "github.com" },
+    });
+    expect(replaced.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/credential-assignments", replaced);
+    expect(await replaced.json()).toEqual(refusal);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+
+    const parentAssigned = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(parentAssigned.status).toBe(200);
+    const parentReplaced = await post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/credential-assignments`, {
+      authentication: { credentialId, host: "github.com" },
+    });
+    expect(parentReplaced.status).toBe(200);
+    expect(f.metadata.snapshot().assignments).toEqual([{ workspaceId: f.workspace.id, credentialId, role: "authentication", host: "github.com" }]);
+
+    // Removal is refused on the same terms, and refused BEFORE the stop the
+    // stop: true route would otherwise take: a child that never held the
+    // assignment must not lose its session to the attempt.
+    await f.sessions.start(child.id);
+    const unassignedChild = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: child.id,
+      role: "authentication",
+      host: "github.com",
+      stop: true,
+    });
+    expect(unassignedChild.status).toBe(409);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/unassign", unassignedChild);
+    expect(await unassignedChild.json()).toEqual(refusal);
+    expect(f.sessions.isRunning(child.id)).toBe(true);
+    expect(f.backendEvents.stops).toEqual([]);
+    expect(f.metadata.snapshot().assignments).toHaveLength(1);
+
+    const unassignedParent = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(unassignedParent.status).toBe(200);
+    expect(await unassignedParent.json()).toEqual({ removed: true });
+    expect(f.metadata.snapshot().assignments).toEqual([]);
   });
 
   test.each([false, true])("parent forget fences child onboarding across personal-state cleanup (reuse slug: %s)", async reuseSlug => {

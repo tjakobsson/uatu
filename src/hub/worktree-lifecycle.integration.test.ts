@@ -198,6 +198,7 @@ beforeAll(async () => {
       openpgp: null as never,
       tokens: null as never,
       workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
+      policyWorkspaceId: workspaceId => registry.byId(workspaceId)?.worktree?.parentWorkspaceId ?? workspaceId,
     },
   });
   origin = `http://127.0.0.1:${server.port}`;
