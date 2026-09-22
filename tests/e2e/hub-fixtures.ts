@@ -35,14 +35,17 @@ type TestFixtures = {
 type WorkerOptions = {
   hubWorkspaces: string[];
   hubWorktrees: boolean;
+  // Serve the credential API (token credentials) — see hub-server.ts.
+  hubCredentials: boolean;
 };
 
 export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
   hubWorkspaces: [["alpha"], { option: true, scope: "worker" }],
   hubWorktrees: [false, { option: true, scope: "worker" }],
+  hubCredentials: [false, { option: true, scope: "worker" }],
 
   hub: [
-    async ({ hubWorkspaces, hubWorktrees }, use, workerInfo) => {
+    async ({ hubWorkspaces, hubWorktrees, hubCredentials }, use, workerInfo) => {
       const hubPort = HUB_BASE_PORT + workerInfo.workerIndex * PORTS_PER_WORKER;
       if (hubWorkspaces.length >= PORTS_PER_WORKER) {
         throw new Error(`a hub worker serves at most ${PORTS_PER_WORKER - 1} workspaces`);
@@ -54,6 +57,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
           UATU_E2E_HUB_CHILD_BASE_PORT: String(hubPort + 1),
           UATU_E2E_HUB_WORKSPACES: hubWorkspaces.join(","),
           UATU_E2E_HUB_WORKTREES: hubWorktrees ? "1" : "0",
+          UATU_E2E_HUB_CREDENTIALS: hubCredentials ? "1" : "0",
         },
         stdio: ["ignore", "pipe", "inherit"],
       });

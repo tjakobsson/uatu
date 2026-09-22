@@ -18,6 +18,14 @@
 //   UATU_E2E_HUB_WORKSPACES      comma-separated workspace folder names;
 //                                each becomes a registered, started
 //                                workspace with that id (default "alpha")
+//   UATU_E2E_HUB_WORKTREES       "1" makes every workspace a committed Git
+//                                repository and serves the worktree API
+//   UATU_E2E_HUB_CREDENTIALS     "1" serves the credential API (token
+//                                credentials only — no ssh/gpg tooling) with
+//                                a resolver that reads a linked worktree's
+//                                policy from its parent, exactly as the real
+//                                Hub's stored resolver does, so the state
+//                                API's credentialRestartRequired flag is real
 //
 // Readiness is one stdout line, `uatu-e2e-hub <json>`, describing the hub
 // origin, the user, and every workspace with its id, folder, session URL,
@@ -32,14 +40,21 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { hashPassword, HubSessionStore } from "../../src/hub/auth";
 import type { RunningSession, SessionBackend } from "../../src/hub/backend";
 import type { HubConfig } from "../../src/hub/config";
-import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "../../src/hub/credential-context";
+import {
+  EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+  EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
+  type CredentialContextResolver,
+} from "../../src/hub/credential-context";
 import { PersonalWorkspaceStateStore } from "../../src/hub/personal-state";
 import { WorkspaceRegistry, type WorkspaceEntry } from "../../src/hub/registry";
 import { startHubServer } from "../../src/hub/server";
 import { SessionManager } from "../../src/hub/sessions";
 import { NotificationStore } from "../../src/hub/notification-store";
 import { HubNotifications } from "../../src/hub/notifications";
-import { CredentialMetadataStore } from "../../src/hub/credential-store";
+import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "../../src/hub/credential-store";
+import { CredentialToolManager } from "../../src/hub/credential-tools";
+import { OpenPgpCredentialManager } from "../../src/hub/openpgp-credentials";
+import { TokenCredentialManager } from "../../src/hub/token-credentials";
 import { WorkspaceOnboardingCoordinator } from "../../src/hub/onboarding";
 import { PathReservationCoordinator } from "../../src/hub/path-reservations";
 import { WorktreeOperationCoordinator } from "../../src/hub/worktree-coordinator";
@@ -75,6 +90,7 @@ const WORKSPACE_NAMES = (process.env.UATU_E2E_HUB_WORKSPACES ?? "alpha")
 const HARNESS_PATH = path.resolve(import.meta.dir, "server.ts");
 const CHILD_START_TIMEOUT_MS = 30_000;
 const WORKTREES = process.env.UATU_E2E_HUB_WORKTREES === "1";
+const CREDENTIALS = process.env.UATU_E2E_HUB_CREDENTIALS === "1";
 
 const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-hub-e2e-")));
 
@@ -176,10 +192,44 @@ const sessionStore = new HubSessionStore(path.join(tempRoot, "sessions.json"));
 await sessionStore.load();
 const backend = new HarnessBackend();
 let worktreesService: WorktreeService | undefined;
-const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
-  workspaceId => worktreesService?.assertStartable(workspaceId) ?? Promise.resolve());
 const credentials = new CredentialMetadataStore(path.join(tempRoot, "credentials.json"));
 await credentials.load();
+// The harness child never receives a credential projection (it has no Git
+// to configure), so the resolver's only observable work is the REVISION:
+// the session manager records it at start and flags credentialRestartRequired
+// once it drifts. Like main.ts's stored resolver, a linked worktree's revision
+// is its parent's assignments, read live through the registry link.
+const policyAssignments = (workspaceId: string) =>
+  JSON.stringify(credentials.snapshot().assignments.filter(item => item.workspaceId === registry.policyWorkspaceId(workspaceId)));
+const credentialContexts: CredentialContextResolver = CREDENTIALS
+  ? {
+    revision: workspaceId => policyAssignments(workspaceId),
+    resolve: async entry => ({ ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT), revision: policyAssignments(entry.id) }),
+    runExclusive: operation => operation(),
+  }
+  : EMPTY_CREDENTIAL_CONTEXT_RESOLVER;
+const sessions = new SessionManager(registry, { local: backend }, credentialContexts,
+  workspaceId => worktreesService?.assertStartable(workspaceId) ?? Promise.resolve());
+let credentialTools: CredentialToolManager | undefined;
+let credentialApi: NonNullable<Parameters<typeof startHubServer>[0]["credentialApi"]> | undefined;
+if (CREDENTIALS) {
+  const tokenStore = new CredentialTokenStore(path.join(tempRoot, "credential-tokens.json"));
+  // An empty service PATH: the tool manager discovers nothing, so no ambient
+  // git/ssh/gpg (or a Hub-managed workspace's projected wrappers) takes part.
+  credentialTools = new CredentialToolManager(new CredentialToolOverrideStore(path.join(tempRoot, "credential-tools.json")), "");
+  await Promise.all([tokenStore.load(), credentialTools.load()]);
+  credentialApi = {
+    metadata: credentials,
+    tools: credentialTools,
+    ssh: null,
+    openpgp: new OpenPgpCredentialManager({
+      gnupgHome: path.join(tempRoot, "gnupg"), metadataStore: credentials, gpgPath: null, gpgconfPath: null,
+    }),
+    tokens: new TokenCredentialManager(credentials, tokenStore),
+    workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
+    policyWorkspaceId: workspaceId => registry.policyWorkspaceId(workspaceId),
+  };
+}
 // One PathReservationCoordinator shared by onboarding and the worktree
 // coordinator, exactly like src/hub/main.ts composes them — a rename, a
 // clone and a worktree creation must not be able to race for one hierarchy.
@@ -250,6 +300,7 @@ const notifications = new HubNotifications({ store: notificationStore, sender: a
 const server = startHubServer({ config, registry, sessions, sessionStore, personalState, notifications,
   ...(WORKTREES ? { onboarding, worktrees: worktreesService,
     worktreeReconcilerOptions: { minIntervalMs: 100, periodMs: 500 } } : {}),
+  ...(credentialApi ? { credentialApi } : {}),
 });
 const origin = `http://127.0.0.1:${server.port}`;
 for (const workspace of workspaces) {
@@ -268,6 +319,7 @@ const shutdown = async () => {
   server.live.endAll();
   server.liveBroker.dispose();
   await sessions.stopAll().catch(() => undefined);
+  await credentialTools?.shutdown().catch(() => undefined);
   // Children stopped outside the manager (a test's /stop) are gone already;
   // anything still tracked is reaped here.
   await Promise.all([...backend.children.values()].map(child => terminate(child)));
