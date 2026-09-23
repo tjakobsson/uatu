@@ -305,7 +305,9 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.historyReuse.invalidate();
     // Memory scoped to the subscription: one pump, one memory.
     const memory = createOpenCodeV2Memory();
-    this.streaming = true;
+    // Live only once a frame has arrived: until the subscription's first
+    // frame (`server.connected`), nothing broadcast can reach this listener,
+    // so a command admitted in that gap must not wait on it.
     this.streamGeneration += 1;
     const source = this.client.event.subscribe({ signal })[Symbol.asyncIterator]();
     let next: ReturnType<typeof source.next> | undefined;
@@ -321,6 +323,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (!arrived) continue;
         next = undefined;
         if (arrived.done) break;
+        this.streaming = true;
         const event = arrived.value;
         // Normalization resolves every failure to an outcome, and anything
         // that still escapes must cost one event rather than ending the stream.

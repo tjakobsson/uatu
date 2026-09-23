@@ -358,6 +358,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     const pump = (async () => {
       for await (const event of provider.events(controller.signal)) for (const update of event.updates) if (update.kind === "upsert") rows.push(update.item.id);
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     expect(await provider.command("ses_1", { id: "req-5", name: "init", arguments: "" })).toEqual({ messageId: "msg_srv1" });
     // The streamed row had already been consumed when the admission returned.
     expect(rows).toEqual(["message:msg_srv1"]);
@@ -377,6 +378,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const accepted = await provider.command("ses_1", { id: "req-7", name: "init", arguments: "" });
     expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
     // The stream names the row only now, after the caller's own upsert.
@@ -400,6 +402,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
     const a = await provider.command("ses_1", { id: "req-a", name: "init", arguments: "" });
     // B is admitted while A's row is still on its way.
@@ -430,6 +433,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
     const a = await provider.command("ses_1", { id: "req-a2", name: "init", arguments: "" });
     const b = await provider.command("ses_1", { id: "req-b2", name: "review", arguments: "" });
@@ -458,6 +462,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "status") seen.push(`status ${update.status}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const accepted = await provider.command("ses_1", { id: "req-n", name: "nope", arguments: "" });
     expect(accepted.messageId).toMatch(/^msg_/);
     let deadline = Date.now() + 2_000;
@@ -488,6 +493,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "status") seen.push(`status ${update.status}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const accepted = await provider.command("ses_1", { id: "req-t", name: "init", arguments: "" });
     await Bun.sleep(120);
     expect(seen).toEqual([]);
@@ -515,6 +521,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "t" }, delivery: "queue" } } });
     const command = await provider.command("ses_1", { id: "req-c", name: "init", arguments: "" });
     const prompt = await provider.prompt("ses_1", { id: "req-p", text: "x", delivery: "queue" });
@@ -545,6 +552,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const command = await provider.command("ses_1", { id: "req-c3", name: "init", arguments: "" });
     const prompt = await provider.prompt("ses_1", { id: "req-p3", text: "x", delivery: "queue" });
     enqueued("msg_cmd3");
@@ -576,6 +584,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "status") seen.push(`status ${update.status}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const deadline = Date.now() + 2_000;
     while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
     expect(seen).toEqual([`remove message:${accepted.messageId}`, "status failed"]);
@@ -640,6 +649,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "status") seen.push(`status ${update.status}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const deadline = Date.now() + 2_000;
     while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
     expect(seen).toEqual([`remove message:${accepted.messageId}`, "status failed"]);
@@ -666,9 +676,41 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         if (update.kind === "status") seen.push(`status ${update.status}`);
       }
     })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const deadline = Date.now() + 2_000;
     while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
     expect(seen).toEqual([`remove message:${accepted.messageId}`, "status failed"]);
+    controller.abort();
+    await pump;
+  });
+
+  test("a command admitted before the stream's first frame waits on nothing and leaves no record", async () => {
+    const encoder = new TextEncoder();
+    let push: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const frame = (event: Record<string, unknown>) => push?.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+    const server = fakeOpenCode({
+      // The subscription opens, but its first frame takes its time.
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { push = controller; setTimeout(() => frame({ id: "evt_0", type: "server.connected", data: {} }), 80); } }), { status: 200, headers: { "content-type": "text/event-stream" } }),
+      "POST /api/session/:id/command": () => undefined,
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    await Bun.sleep(10);
+    const accepted = await provider.command("ses_1", { id: "req-pre", name: "init", arguments: "" });
+    expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    await Bun.sleep(100);
+    frame({ id: "evt_q", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_q", item: { type: "user", payload: { text: "next command" }, delivery: "queue" } } });
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 1 && Date.now() < deadline) await Bun.sleep(5);
+    await Bun.sleep(30);
+    expect(seen).toEqual(["upsert message:msg_q"]);
     controller.abort();
     await pump;
   });
@@ -706,6 +748,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
     const controller = new AbortController();
     const pump = (async () => { for await (const _ of provider.events(controller.signal)) { /* drain */ } })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
     const started = Date.now();
     const accepted = await provider.command("ses_1", { id: "req-6", name: "init", arguments: "" });
     expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
