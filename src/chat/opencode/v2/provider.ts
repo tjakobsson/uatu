@@ -68,6 +68,14 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly lateAdmissions = new Map<string, Array<{ localId: string; until: number }>>();
   private static readonly LATE_ADMISSION_MS = 60_000;
   private streaming = false;
+  // Ids this process minted for prompts. A row under one of them is a
+  // prompt's, never a command's, however many admissions are waiting.
+  private readonly promptIds = new Set<string>();
+  private static readonly PROMPT_ID_LIMIT = 512;
+  // Events the provider itself has to put on the stream — a command refused
+  // after its admission was reported — drained ahead of the next frame.
+  private readonly injected: NormalizedProviderEvent[] = [];
+  private wake: (() => void) | undefined;
 
   constructor(
     private readonly client: OpenCodeV2Client,
@@ -290,8 +298,21 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Memory scoped to the subscription: one pump, one memory.
     const memory = createOpenCodeV2Memory();
     this.streaming = true;
+    const source = this.client.event.subscribe({ signal })[Symbol.asyncIterator]();
+    let next: ReturnType<typeof source.next> | undefined;
     try {
-      for await (const event of this.client.event.subscribe({ signal })) {
+      while (true) {
+        // The provider's own events go first: a refusal reported here must
+        // not queue behind a stream that may stay quiet.
+        while (this.injected.length > 0) yield this.injected.shift()!;
+        next ??= source.next();
+        const woken = new Promise<undefined>(resolve => { this.wake = () => resolve(undefined); });
+        const arrived = await Promise.race([next, woken]);
+        this.wake = undefined;
+        if (!arrived) continue;
+        next = undefined;
+        if (arrived.done) break;
+        const event = arrived.value;
         // Normalization resolves every failure to an outcome, and anything
         // that still escapes must cost one event rather than ending the stream.
         let normalized: NormalizedProviderEvent;
@@ -317,7 +338,22 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (!signal.aborted) throw error;
     } finally {
       this.streaming = false;
+      this.wake = undefined;
+      this.injected.length = 0;
+      // A row this stream never delivered is not coming on the next one:
+      // the 2.x stream has no replay, so an admission still waiting would
+      // only ever claim some later row that is not its own.
+      this.lateAdmissions.clear();
+      // A frame still pending when the consumer stops would reject unheard.
+      next?.catch(() => undefined);
+      await source.return?.().catch(() => undefined);
     }
+  }
+
+  private inject(event: NormalizedProviderEvent): void {
+    if (!this.streaming) return;
+    this.injected.push(event);
+    this.wake?.();
   }
 
   private reportEnqueuedUser(event: NormalizedProviderEvent): NormalizedProviderEvent | undefined {
@@ -325,6 +361,9 @@ export class OpenCodeV2Provider implements ChatProvider {
     const row = event.updates.find(update => update.kind === "upsert" && update.item.type === "user_message");
     if (!row || row.kind !== "upsert") return;
     const serverId = row.item.id.slice("message:".length);
+    // A prompt's row carries the id this process gave it; no command
+    // admission, however old, is waiting for that one.
+    if (this.promptIds.has(serverId)) return;
     // Admission order is wire order: a row belongs to the oldest admission
     // still waiting for one. An admission whose window closed is older than
     // any waiter registered since, so it takes this row and the waiter takes
@@ -394,7 +433,16 @@ export class OpenCodeV2Provider implements ChatProvider {
       delivery: input.delivery,
       resume: true,
     });
+    this.rememberPromptId(admitted.id);
     return { messageId: admitted.id };
+  }
+
+  private rememberPromptId(id: string): void {
+    this.promptIds.add(id);
+    if (this.promptIds.size > OpenCodeV2Provider.PROMPT_ID_LIMIT) {
+      const oldest = this.promptIds.values().next().value;
+      if (oldest !== undefined) this.promptIds.delete(oldest);
+    }
   }
 
   /**
@@ -440,9 +488,20 @@ export class OpenCodeV2Provider implements ChatProvider {
         const queue = this.lateAdmissions.get(sessionId) ?? [];
         queue.push({ localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
         this.lateAdmissions.set(sessionId, queue);
-        // A refusal that lands after the window means no row is coming: the
-        // record must not claim the next command's.
-        dispatch.catch(() => this.forgetLateAdmission(sessionId, messageId));
+        // A refusal that lands after the window means no row is coming. The
+        // record must not claim the next command's, and the caller, already
+        // told the command was admitted, learns of the refusal the way it
+        // learns everything else: as an event. The placeholder goes, the
+        // refusal shows, and the turn that never started ends as failed.
+        dispatch.catch((error: unknown) => {
+          this.forgetLateAdmission(sessionId, messageId);
+          const message = error instanceof Error && error.message ? error.message : "The command was refused";
+          this.inject({ conversationId: sessionId, outcome: "handled", eventType: "session.command.refused", updates: [
+            { kind: "remove", itemId: `message:${messageId}` },
+            { kind: "upsert", item: { id: `notice:${messageId}:refused`, type: "notice", createdAt: Date.now(), level: "error", message } },
+            { kind: "status", status: "failed", message },
+          ] });
+        });
       }
       return { messageId: reported ?? messageId };
     } finally {

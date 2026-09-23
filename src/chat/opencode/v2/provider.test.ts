@@ -442,7 +442,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
-  test("a refusal that lands after the window leaves no claim on the next row", async () => {
+  test("a refusal that lands after the window reaches the stream: placeholder gone, refusal shown, turn failed, no claim on the next row", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({
       "GET /api/event": events.route,
@@ -453,17 +453,77 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     const seen: string[] = [];
     const pump = (async () => {
       for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
-        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}${update.item.type === "notice" ? ` ${update.item.level}` : ""}`);
         if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+        if (update.kind === "status") seen.push(`status ${update.status}`);
       }
     })();
     const accepted = await provider.command("ses_1", { id: "req-n", name: "nope", arguments: "" });
     expect(accepted.messageId).toMatch(/^msg_/);
-    await Bun.sleep(100);
+    let deadline = Date.now() + 2_000;
+    while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual([`remove message:${accepted.messageId}`, `upsert notice:${accepted.messageId}:refused error`, "status failed"]);
     events.frame({ id: "evt_x", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_x", item: { type: "user", payload: { text: "someone else's prompt" }, delivery: "queue" } } });
-    await Bun.sleep(50);
-    expect(seen).toEqual(["upsert message:msg_x"]);
+    deadline = Date.now() + 2_000;
+    while (seen.length < 4 && Date.now() < deadline) await Bun.sleep(5);
+    await Bun.sleep(30);
+    expect(seen.slice(3)).toEqual(["upsert message:msg_x"]);
     controller.abort();
+    await pump;
+  });
+
+  test("a prompt's own row never satisfies a waiting command admission", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": () => undefined,
+      "POST /api/session/:id/prompt": ({ body }) => ({ id: (body as { id: string }).id, sessionID: "ses_1", time: { created: 1 }, type: "user", payload: { text: "x" }, delivery: "queue" }),
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "t" }, delivery: "queue" } } });
+    const command = await provider.command("ses_1", { id: "req-c", name: "init", arguments: "" });
+    const prompt = await provider.prompt("ses_1", { id: "req-p", text: "x", delivery: "queue" });
+    enqueued(prompt.messageId);
+    enqueued("msg_cmd");
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual([`upsert message:${prompt.messageId}`, "upsert message:msg_cmd", `remove message:${command.messageId}`]);
+    controller.abort();
+    await pump;
+  });
+
+  test("an admission still waiting when the stream ends claims nothing on the next stream", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const first = new AbortController();
+    const firstPump = (async () => { for await (const _ of provider.events(first.signal)) { /* drain */ } })();
+    await provider.command("ses_1", { id: "req-s", name: "init", arguments: "" });
+    first.abort();
+    await firstPump;
+    const second = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(second.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    await Bun.sleep(20);
+    events.frame({ id: "evt_y", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_y", item: { type: "user", payload: { text: "later" }, delivery: "queue" } } });
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 1 && Date.now() < deadline) await Bun.sleep(5);
+    await Bun.sleep(30);
+    expect(seen).toEqual(["upsert message:msg_y"]);
+    second.abort();
     await pump;
   });
 
