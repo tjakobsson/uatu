@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, type OpenCodeV2Memory } from "./normalization";
+import { parseConversationItem } from "../../validation";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
 
 // Captured from a real OpenCode 2.0.13 `/api/event` stream (sandboxed home,
@@ -260,6 +261,17 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     expect(question).toMatchObject({ type: "question", questions: [{ prompt: "Region" }] });
     const replied = normalize({ ...base, id: "e2", type: "form.replied", data: { id: "frm_f", sessionID: "ses_f", answer: { login: "done", region: "eu", zone: "z1", token: "abc" } } }, memory);
     expect(upserts(replied)[0]).toMatchObject({ status: "resolved", outcome: { kind: "answered", answers: [["eu"]] } });
+  });
+
+  test("a form with no supported field is still a card: one cancel option, the external URL as its link, and valid on the wire", () => {
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const created = normalize({ created: 5, location: { directory: WORKSPACE }, id: "e1", type: "form.created", data: { form: { id: "frm_x", sessionID: "ses_x", title: "Sign in", fields: [
+      { key: "login", type: "external", url: "https://example.test/login", title: "Sign in" },
+    ] } } });
+    const [card] = upserts(created);
+    expect(card).toMatchObject({ type: "question", status: "pending", intro: "Sign in", link: "https://example.test/login", questions: [{ prompt: "This form can't be completed here", options: [{ label: "Cancel this form" }], allowFreeForm: false }] });
+    // The exact failure this guards: an empty question list fails the whole conversation load.
+    expect(() => parseConversationItem(card)).not.toThrow();
   });
 
   test("a stored system record is silent", () => {

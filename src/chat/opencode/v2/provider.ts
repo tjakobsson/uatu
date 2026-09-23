@@ -20,7 +20,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { pendingPermissionFields } from "../normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, modelSelection, normalizeStoredMessage, storedAccounting, storedPromptId, supportedFormFields } from "./normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, storedAccounting, storedPromptId, supportedFormFields } from "./normalization";
 import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 
 /**
@@ -429,11 +429,13 @@ export class OpenCodeV2Provider implements ChatProvider {
     const { data } = await this.client.form.list(this.scope);
     return data.flatMap(form => {
       if (!form.id || !form.sessionID) return [];
+      const presentation = formPresentation(form as Record<string, unknown>);
       return [{
         requestId: form.id,
         conversationId: form.sessionID,
-        questions: supportedFormFields(form.fields).map(formFieldToQuestion),
+        questions: presentation.questions,
         ...(form.title ? { intro: form.title } : {}),
+        ...(presentation.link ? { link: presentation.link } : {}),
       }];
     });
   }
@@ -441,7 +443,14 @@ export class OpenCodeV2Provider implements ChatProvider {
   async replyQuestion(sessionId: string, requestId: string, answers: string[][]): Promise<void> {
     const detail = await this.client.session.form.get({ sessionID: sessionId, formID: requestId });
     // The same filter the questions were built with, so answer i is field i.
-    const answer = formAnswerFromChoices(supportedFormFields(detail.fields), answers);
+    const fields = supportedFormFields(detail.fields);
+    // A form with nothing to collect here was shown with one option, to
+    // cancel it; that is what its "answer" means.
+    if (fields.length === 0) {
+      await this.client.session.form.cancel({ sessionID: sessionId, formID: requestId });
+      return;
+    }
+    const answer = formAnswerFromChoices(fields, answers);
     await this.client.session.form.reply({ sessionID: sessionId, formID: requestId, answer });
   }
 

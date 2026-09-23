@@ -504,6 +504,21 @@ describe("OpenCode 2.x provider: permissions and forms", () => {
     expect(server.requests("POST", "/api/session/ses_1/form/frm_2/reply")[0]?.body).toEqual({ answer: { region: "eu" } });
   });
 
+  test("a recovered form with no supported field is a cancel-only card, and its reply cancels the form", async () => {
+    const fields = [{ key: "login", type: "external", url: "https://example.test/login" }];
+    const server = fakeOpenCode({
+      "GET /api/form": () => scoped([{ id: "frm_3", sessionID: "ses_1", title: "Sign in", fields }]),
+      "GET /api/session/:id/form/:form": () => ({ id: "frm_3", sessionID: "ses_1", title: "Sign in", fields, state: { status: "pending" } }),
+      "POST /api/session/:id/form/:form/reply": () => undefined,
+      "DELETE /api/session/:id/form/:form": () => undefined,
+    });
+    const provider = server.provider();
+    expect((await provider.listQuestions())[0]).toMatchObject({ intro: "Sign in", link: "https://example.test/login", questions: [{ options: [{ label: "Cancel this form" }] }] });
+    await provider.replyQuestion("ses_1", "frm_3", [["Cancel this form"]]);
+    expect(server.requests("DELETE", "/api/session/ses_1/form/frm_3")).toHaveLength(1);
+    expect(server.requests("POST", "/api/session/ses_1/form/frm_3/reply")).toHaveLength(0);
+  });
+
   test("a multiselect over its maximum is refused; an optional one left empty is not", () => {
     const field = { key: "k", type: "multiselect", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }], maxItems: 1 };
     expect(() => formAnswerFromChoices([field], [["A", "B"]])).toThrow(/at most 1 choices/);

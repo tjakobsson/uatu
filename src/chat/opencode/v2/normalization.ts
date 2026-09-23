@@ -294,18 +294,19 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
       case "form.created": {
         const form = record(data.form);
         const requestId = string(form.id, "form id");
-        const fields = supportedFormFields(form.fields);
-        if (memory) remember(memory.forms, requestId, fields.map(field => text(field.key)));
+        if (memory) remember(memory.forms, requestId, supportedFormFields(form.fields).map(field => text(field.key)));
         const intro = optionalString(form.title);
+        const presentation = formPresentation(form);
         return { conversationId: conversationId ?? optionalString(form.sessionID), updates: [{ kind: "upsert", item: {
           id: `question:${requestId}`,
           type: "question",
           createdAt,
           conversationId: conversationId ?? optionalString(form.sessionID),
           requestId,
-          questions: fields.map(formFieldToQuestion),
+          questions: presentation.questions,
           status: "pending",
           ...(intro ? { intro } : {}),
+          ...(presentation.link ? { link: presentation.link } : {}),
         } }] };
       }
       case "form.replied":
@@ -413,6 +414,36 @@ function restatedContent(messageId: string, content: unknown[], createdAt: numbe
 export function supportedFormFields(value: unknown): RecordValue[] {
   return array(value).map(field => record(field)).filter(field =>
     field.type !== "external" && field.hidden !== true && array(field.when).length === 0);
+}
+
+export const UNSUPPORTED_FORM_CANCEL = "Cancel this form";
+
+/**
+ * What a form's card shows. With supported fields, one question per field.
+ * With none (a sign-in on another page, conditional or provider-filled
+ * fields only) the card still appears, because the agent is waiting on it
+ * and a card is the one place the user can see that; its single option
+ * cancels the form so the turn continues, and the external field's URL rides
+ * as the link. Completing the form in OpenCode clears the card on its own.
+ * A card must carry at least one question: the client refuses an empty
+ * list, and a refused item fails the whole conversation load.
+ */
+export function formPresentation(form: RecordValue): { questions: StructuredQuestion[]; link?: string } {
+  const fields = supportedFormFields(form.fields);
+  if (fields.length > 0) return { questions: fields.map(formFieldToQuestion) };
+  const external = array(form.fields).map(field => record(field)).find(field => field.type === "external");
+  const url = optionalString(external?.url);
+  const link = url && /^https?:\/\//i.test(url) ? url : undefined;
+  return {
+    questions: [{
+      prompt: "This form can't be completed here",
+      header: link ? "Complete it at the link, or cancel it so the agent continues" : "Complete it in OpenCode, or cancel it so the agent continues",
+      options: [{ label: UNSUPPORTED_FORM_CANCEL, description: "The agent continues without it" }],
+      multiple: false,
+      allowFreeForm: false,
+    }],
+    ...(link ? { link } : {}),
+  };
 }
 
 export function formFieldToQuestion(field: RecordValue): StructuredQuestion {
