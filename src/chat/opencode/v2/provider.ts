@@ -495,25 +495,25 @@ export class OpenCodeV2Provider implements ChatProvider {
         // with a stream listening, the id can still arrive inside the window.
         dispatch.then(() => { if (!enqueued) resolve(undefined); }, reject);
       });
-      // The stream is listening but had not named the row when the window
-      // closed: remember the local id so the late row can retire it. Only
-      // while that same stream is still running — a stream that ended
-      // during the window cannot deliver the row, and a record left for a
-      // later stream would claim a row that is not its own.
-      if (enqueued && reported === undefined && this.streaming && enqueued.generation === this.streamGeneration) {
-        // Queued, in admission order: several can close their window before
-        // the stream catches up, and each row goes to the oldest.
-        const queue = this.lateAdmissions.get(sessionId) ?? [];
-        queue.push({ localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
-        this.lateAdmissions.set(sessionId, queue);
+      if (enqueued && reported === undefined) {
+        // The stream had not named the row when the window closed. Remember
+        // the local id so the late row can retire it — but only while that
+        // same stream is still running: a stream that ended during the
+        // window cannot deliver the row, and a record left for a later
+        // stream would claim a row that is not its own.
+        if (this.streaming && enqueued.generation === this.streamGeneration) {
+          const queue = this.lateAdmissions.get(sessionId) ?? [];
+          queue.push({ localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
+          this.lateAdmissions.set(sessionId, queue);
+        }
         // A refusal that lands after the window means no row is coming. The
-        // record must not claim the next command's, and the caller, already
-        // told the command was admitted, learns of the refusal the way it
-        // learns everything else: as an event. The placeholder goes, the
-        // refusal shows, and the turn that never started ends as failed.
-        // Only the server's own refusal, though: a lost response is not a
-        // refusal — the command may be running — so the admission stays and
-        // its row, if it comes, retires the placeholder as usual.
+        // caller, already told the command was admitted, learns of it the
+        // way it learns everything else: as an event — on this stream or,
+        // since the queue outlives a disconnect, the next. The placeholder
+        // goes, the refusal shows, and the turn that never started ends as
+        // failed. Only the server's own refusal, though: a lost response is
+        // not a refusal — the command may be running — so the admission
+        // stays and its row, if it comes, retires the placeholder as usual.
         dispatch.catch((error: unknown) => {
           if (!isServerRefusal(error)) return;
           this.forgetLateAdmission(sessionId, messageId);

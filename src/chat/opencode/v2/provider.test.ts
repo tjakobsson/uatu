@@ -615,6 +615,38 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a refusal after a window the stream did not outlive still reaches the next stream", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": async () => { await Bun.sleep(200); return Response.json({ _tag: "CommandNotFoundError", message: "Command not found: nope" }, { status: 404 }); },
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 120 });
+    const first = new AbortController();
+    const firstPump = (async () => { for await (const _ of provider.events(first.signal)) { /* drain */ } })();
+    await Bun.sleep(10);
+    const admission = provider.command("ses_1", { id: "req-h", name: "nope", arguments: "" });
+    await Bun.sleep(30);
+    first.abort();
+    await firstPump;
+    const accepted = await admission;
+    expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    await Bun.sleep(150);
+    const second = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(second.signal)) for (const update of event.updates) {
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+        if (update.kind === "status") seen.push(`status ${update.status}`);
+      }
+    })();
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual([`remove message:${accepted.messageId}`, "status failed"]);
+    second.abort();
+    await pump;
+  });
+
   test("an admission still waiting when the stream ends claims nothing on the next stream", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
