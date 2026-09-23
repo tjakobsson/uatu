@@ -73,8 +73,12 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly promptIds = new Set<string>();
   private static readonly PROMPT_ID_LIMIT = 512;
   // Events the provider itself has to put on the stream — a command refused
-  // after its admission was reported — drained ahead of the next frame.
+  // after its admission was reported — drained ahead of the next frame. They
+  // are facts about this process's admissions, not about a stream, so they
+  // wait out a disconnect and go out on the next stream. Bounded: with no
+  // stream ever coming they must not grow without limit.
   private readonly injected: NormalizedProviderEvent[] = [];
+  private static readonly INJECTED_LIMIT = 64;
   private wake: (() => void) | undefined;
 
   constructor(
@@ -339,7 +343,6 @@ export class OpenCodeV2Provider implements ChatProvider {
     } finally {
       this.streaming = false;
       this.wake = undefined;
-      this.injected.length = 0;
       // A row this stream never delivered is not coming on the next one:
       // the 2.x stream has no replay, so an admission still waiting would
       // only ever claim some later row that is not its own.
@@ -351,8 +354,8 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   private inject(event: NormalizedProviderEvent): void {
-    if (!this.streaming) return;
     this.injected.push(event);
+    if (this.injected.length > OpenCodeV2Provider.INJECTED_LIMIT) this.injected.shift();
     this.wake?.();
   }
 
@@ -425,15 +428,19 @@ export class OpenCodeV2Provider implements ChatProvider {
       uri: pathToFileURL(attachment.absolutePath).href,
       name: attachment.name,
     }));
+    const messageId = stableProviderId("msg", input.id);
+    // Known before the request goes out: the server can announce the row
+    // before it answers, and the row must already read as a prompt's.
+    this.rememberPromptId(messageId);
     const admitted = await this.client.session.prompt({
       sessionID: sessionId,
-      id: stableProviderId("msg", input.id),
+      id: messageId,
       text: input.text,
       ...(files.length ? { files } : {}),
       delivery: input.delivery,
       resume: true,
     });
-    this.rememberPromptId(admitted.id);
+    if (admitted.id !== messageId) this.rememberPromptId(admitted.id);
     return { messageId: admitted.id };
   }
 

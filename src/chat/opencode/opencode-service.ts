@@ -383,7 +383,12 @@ export class OpenCodeService {
         progress.lastOutcome = outcome;
         progress.outcomes[resource.path] = outcome;
         if (ready) return ready;
-        if (outcome.kind !== "http-status" && outcome.kind !== "unhealthy-body") break;
+        // A refused connection is the socket's answer, the same for every
+        // path: nothing is bound, so the next resource has nothing to ask.
+        // Any other failure is this resource's own — a route an intermediary
+        // hangs, a body that never came — and the other generation's
+        // resource, bounded on its own, still gets its turn this cycle.
+        if (outcome.kind === "refused") break;
       }
       await Promise.race([this.sleep(Math.min(this.healthIntervalMs, Math.max(1, deadline - this.now()))), earlyExit]);
     }

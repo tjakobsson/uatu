@@ -361,6 +361,22 @@ describe("OpenCodeService generation", () => {
     expect(requested).toEqual(["/api/info", "/global/health"]);
   });
 
+  test("a 1.x server whose info path hangs is still recognized by its health resource in the same cycle", async () => {
+    const requested: string[] = [];
+    const server = v1Server("1.18.31");
+    const { service } = fixture({
+      fetch: async (url: string | URL | Request) => {
+        const pathname = new URL(String(url)).pathname;
+        requested.push(pathname);
+        if (pathname === "/api/info") throw new Error("socket hang up");
+        return server(url);
+      },
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "1.18.31" });
+    expect(service.currentConnection()?.generation).toBe(1);
+    expect(requested).toEqual(["/api/info", "/global/health"]);
+  });
+
   test("a 2.x page on the 1.x path is answered-but-not-ready and fails on the short budget", async () => {
     const clock = fakeClock();
     const { service } = fixture({
