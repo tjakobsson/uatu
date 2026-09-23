@@ -20,6 +20,7 @@ import {
   formatHubCookie,
   formatHubCookieClear,
   isSameOriginRequest,
+  isSameOriginValue,
   LoginRateLimiter,
   readPresentedSession,
   safeReturnPath,
@@ -66,6 +67,7 @@ import { OnboardingError, resolveOnboardingAssignments, type WorkspaceOnboarding
 import { HubPreferencesError, type HubPreferencesStore } from "./preferences";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import type { SessionManager } from "./sessions";
+import { PAGE_ORIGIN_HEADER } from "../terminal/auth";
 import type { TerminalSessionInfo } from "../terminal/server";
 import { MetricsRegistry } from "../debug/metrics";
 import { LIVE_STREAM_PATH } from "../shared/live-protocol";
@@ -1581,6 +1583,16 @@ export function createHubFetchHandler(deps: HubDeps) {
     const sessionMatch = SESSION_PATH.exec(pathname);
     if (sessionMatch) {
       if (!csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      // The origin a page asserts for a request that carries no Origin (the
+      // terminal inventory read) is judged here, by the same rule as a
+      // browser-set Origin: the proxy replaces Origin with the child's
+      // loopback one, so only the hub can tell a page whose real address
+      // fails the gate — the address the WebSocket upgrade is refused for —
+      // and answer the 403 the pane's recovery turns into the origin notice.
+      const pageOrigin = request.headers.get(PAGE_ORIGIN_HEADER);
+      if (pageOrigin !== null && session.transport !== "bearer" && !isSameOriginValue(pageOrigin, request)) {
         return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
       }
       let workspaceId: string;

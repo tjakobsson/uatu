@@ -376,6 +376,17 @@ export function isSameOriginRequest(request: Request): boolean {
     // SameSite=Lax cookie is the backstop for those.
     return true;
   }
+  return isSameOriginValue(origin, request);
+}
+
+// Whether an origin names this hub as the request's Host names it — the
+// judgement the gate above applies to a browser-set Origin. Also applied to
+// the origin a page ASSERTS for a same-origin GET that carries no Origin
+// header (the terminal inventory read's page-origin header): the hub is
+// the only party that can compare it against the address the browser is
+// really on, since the child behind the proxy sees nothing but the loopback
+// Origin the hub injects.
+export function isSameOriginValue(origin: string, request: Request): boolean {
   let originHost: string;
   try {
     originHost = new URL(origin).host;

@@ -727,6 +727,29 @@ describe("hub live routes", () => {
     expect(childRequests.length).toBe(before);
   });
 
+  // The pane's recovery reads the inventory with the page's real address in
+  // X-Uatu-Page-Origin. The proxy replaces Origin with the child's loopback
+  // one, so the hub is where that address is judged — by the rule the
+  // WebSocket upgrade is refused by — and a foreign one gets the 403 the
+  // recovery turns into the origin notice, before the child is asked.
+  test("a foreign asserted page origin on a proxied terminal inventory read is refused at the hub", async () => {
+    const before = childRequests.length;
+    const refused = await fetch(`${origin}/s/project/api/terminal/sessions`, {
+      headers: { cookie, "X-Uatu-Page-Origin": "https://public.example" },
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "cross-origin request rejected" });
+    expect(childRequests.length).toBe(before);
+
+    const passed = await fetch(`${origin}/s/project/api/terminal/sessions`, {
+      headers: { cookie, "X-Uatu-Page-Origin": origin },
+    });
+    // The fake child answers 404 to everything but its stream; what matters
+    // is that a matching page origin let the read through to it.
+    expect(passed.status).toBe(404);
+    expect(childRequests.at(-1)).toBe("/s/project/api/terminal/sessions");
+  });
+
   test("sign-out ends that session's live streams", async () => {
     const doomed = (await sessionStore.issue("t", "doomed device")).id;
     const stream = await openStream("ws=project", { cookie: `${hubCookieName(new URL(origin))}=${doomed}` });

@@ -14,6 +14,7 @@ import {
   HUB_SESSION_MAX_AGE,
   HubSessionStore,
   isSameOriginRequest,
+  isSameOriginValue,
   LoginRateLimiter,
   readPresentedSession,
   safeReturnPath,
@@ -268,6 +269,14 @@ describe("isSameOriginRequest", () => {
     expect(isSameOriginRequest(make())).toBe(true);
     expect(isSameOriginRequest(make("https://attacker.example"))).toBe(false);
     expect(isSameOriginRequest(make("null"))).toBe(false);
+  });
+
+  test("an asserted origin is judged by the same rule as a browser-set one", () => {
+    const request = new Request("https://hub.lan/s/project/api/terminal/sessions", { headers: { host: "hub.lan" } });
+    expect(isSameOriginValue("https://hub.lan", request)).toBe(true);
+    expect(isSameOriginValue("https://hub.lan:443", request)).toBe(true);
+    expect(isSameOriginValue("https://public.example", request)).toBe(false);
+    expect(isSameOriginValue("not a url", request)).toBe(false);
   });
 });
 
