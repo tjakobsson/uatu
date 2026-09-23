@@ -588,19 +588,20 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   }
 
   // The attach-ready frame: sent once per attempt, as soon as the socket is
-  // open and the pane knows its grid. Sending it is the moment the child is
-  // asked for the PTY, which is when the attempt's readiness clock starts
-  // (see `openAttempt`). The grid is xterm's first layout when the pane has
-  // one — or, for a pane that has no layout right now (a minimized panel, a
-  // pane behind another touch tab) but had one in an earlier attach cycle,
-  // that cycle's grid. Attaching at the last known grid is what keeps a
-  // shell held across a page suspend while the panel is minimized, exactly
-  // as minimize itself keeps it held: the reconstruction is written into the
-  // not-yet-opened terminal, xterm buffers it, and it paints — refitted —
-  // when the panel is expanded. A pane that has never had a grid waits for
-  // layout: there is nothing known to attach at.
+  // open and the pane has a grid to name. Sending it is the moment the child
+  // is asked for the PTY, which is when the attempt's readiness clock starts
+  // (see `openAttempt`). With layout, the grid is xterm's first measurement
+  // and the frame goes out from openXtermNow. Without layout — a minimized
+  // panel, a pane behind another touch tab, a resumed pane whose panel is
+  // collapsed — the frame goes out now at the grid the Terminal was
+  // constructed with: the pane's last measured grid when it has one, else
+  // xterm's default. The reconstruction is written into the not-yet-opened
+  // terminal, xterm buffers it, and it paints — refitted, with the measured
+  // grid published to the PTY — when the pane is laid out. Attaching
+  // without layout is what keeps a shell held while its panel is collapsed,
+  // exactly as minimize itself keeps it held, and what stops a pane that
+  // cannot be laid out from sitting unattached with its shell claimable.
   let onAttachReadySent: (() => void) | null = null;
-  const knownGrid = (): boolean => lastCols > 0 && lastRows > 0;
   const hasLayout = (): boolean => {
     const rect = options.container.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
@@ -609,7 +610,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     if (attemptReadySent || !term || !socket || socket.readyState !== WebSocket.OPEN) return;
     // With layout, xterm opens on the next observer tick and sends from
     // there with the measured grid.
-    if (!openDone && (hasLayout() || !knownGrid())) return;
+    if (!openDone && hasLayout()) return;
     socket.send(JSON.stringify({ type: "attach-ready", cols: term.cols, rows: term.rows }));
     attemptReadySent = true;
     onAttachReadySent?.();
@@ -695,8 +696,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // selecting one, matching how the preview reads.
       allowProposedApi: true,
       // A grid known from an earlier attach cycle: what attach-ready is sent
-      // with when the pane has no layout, and what a reconstruction written
-      // before open() lays out for. fit() corrects it once there is layout.
+      // with when the pane has no layout (else xterm's default), and what a
+      // reconstruction written before open() lays out for. fit() corrects it
+      // once there is layout.
       ...(lastCols > 0 && lastRows > 0 ? { cols: lastCols, rows: lastRows } : {}),
     });
     // Windows-Terminal-parity clipboard shortcuts. Attached BEFORE open()
@@ -1016,12 +1018,11 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // opens before the child has been asked at all) share `deadlineMs`:
       // the readiness wait gets what the handshake left of it, so an attempt
       // never runs its deadline twice over. The wait BETWEEN them — an open
-      // socket whose attach-ready has not gone out because the pane has no
-      // layout and no grid known from an earlier cycle (a first attach
-      // behind another touch tab, a panel not yet painted) — is not a
-      // silence and is not charged: the child has not been asked, holds
-      // nothing for us, and the frame goes out the moment the pane is laid
-      // out. A pane that knows its grid does not wait (see sendAttachReady).
+      // socket whose attach-ready has not gone out because the pane has
+      // layout but xterm has not opened on it yet (the observer's first
+      // tick) — is a few frames at most and is not charged: the child has
+      // not been asked and the frame goes out the moment xterm opens. A
+      // pane without layout does not wait at all (see sendAttachReady).
       let deadline: unknown = null;
       const armDeadline = (reason: string, ms: number) => {
         if (deadline !== null) clock.clearTimeout(deadline);
@@ -1054,9 +1055,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         connectSpentMs = clock.now() - startedAt;
         disarmDeadline();
         // If xterm is already opened (toggle path — container had real
-        // dimensions before observe() fired), or the pane has no layout but
-        // knows its grid (a resume while minimized), attach-ready goes out
-        // now. Otherwise (auto-restore path) openXtermNow() sends it the
+        // dimensions before observe() fired), or the pane has no layout (a
+        // collapsed panel), attach-ready goes out now. Otherwise
+        // (auto-restore path, layout present) openXtermNow() sends it the
         // moment xterm opens.
         sendAttachReady();
       });

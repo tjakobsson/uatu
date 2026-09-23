@@ -284,6 +284,30 @@ test.describe("terminal display modes", () => {
     await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1);
   });
 
+  // A reload into a minimized panel restores panes that have never measured
+  // a grid and cannot be laid out: they attach at xterm's default grid
+  // rather than waiting for an expand, so the shell is held — and its
+  // output kept — while the panel stays collapsed.
+  test("a reload into a minimized panel restores the shell attached without waiting for layout", async ({ page }) => {
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    await page.locator("#terminal-minimize").click();
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "minimized");
+
+    await page.reload();
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "minimized");
+    await expect(page.locator("#terminal-panes")).toBeHidden();
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    await expect.poll(async () =>
+      (await page.evaluate(() => fetch("/api/terminal/sessions").then(r => r.json()))).sessions.map((s: { attached: boolean }) => s.attached),
+    ).toEqual([true]);
+
+    await page.locator("#terminal-minimize").click();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1);
+  });
+
   test("minimize while right-docked rotates the header into a vertical strip", async ({ page }) => {
     await page.locator("#terminal-toggle").click();
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
