@@ -62,6 +62,11 @@ export class OpenCodeV2Provider implements ChatProvider {
   // per session, since the adapter admits one send per conversation at a
   // time. Only a consumed `events()` can settle one.
   private readonly enqueuedUserWaiters = new Map<string, (messageId: string) => void>();
+  // Admissions whose window closed before the stream named the row: the
+  // caller's optimistic row went in under the local id, and the server's
+  // row, when it lands, retires it.
+  private readonly lateAdmissions = new Map<string, { localId: string; until: number }>();
+  private static readonly LATE_ADMISSION_MS = 60_000;
   private streaming = false;
 
   constructor(
@@ -303,7 +308,8 @@ export class OpenCodeV2Provider implements ChatProvider {
         // by the time the generator resumes, so a command admission settled
         // here returns after the streamed row landed — and the caller's own
         // upsert, the text the user typed, lands last.
-        this.reportEnqueuedUser(normalized);
+        const retirement = this.reportEnqueuedUser(normalized);
+        if (retirement) yield retirement;
       }
     } catch (error) {
       // Cancellation ends the stream quietly; anything else must reach the
@@ -314,15 +320,22 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
   }
 
-  private reportEnqueuedUser(event: NormalizedProviderEvent): void {
+  private reportEnqueuedUser(event: NormalizedProviderEvent): NormalizedProviderEvent | undefined {
     if (event.eventType !== "session.inbox.enqueued" || !event.conversationId) return;
+    const row = event.updates.find(update => update.kind === "upsert" && update.item.type === "user_message");
+    if (!row || row.kind !== "upsert") return;
+    const serverId = row.item.id.slice("message:".length);
     const resolve = this.enqueuedUserWaiters.get(event.conversationId);
-    if (!resolve) return;
-    for (const update of event.updates) {
-      if (update.kind !== "upsert" || update.item.type !== "user_message") continue;
-      resolve(update.item.id.slice("message:".length));
-      return;
-    }
+    if (resolve) { resolve(serverId); return; }
+    const late = this.lateAdmissions.get(event.conversationId);
+    if (!late) return;
+    this.lateAdmissions.delete(event.conversationId);
+    if (late.until < Date.now() || late.localId === serverId) return;
+    // The server's row is on the timeline now; the placeholder under the
+    // local id is the same message twice. Retired rather than re-keyed —
+    // an update cannot rename an item — so the row reads as the server
+    // stored it.
+    return { conversationId: event.conversationId, updates: [{ kind: "remove", itemId: `message:${late.localId}` }], outcome: "handled", eventType: event.eventType };
   }
 
   private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void } {
@@ -395,6 +408,11 @@ export class OpenCodeV2Provider implements ChatProvider {
         // with a stream listening, the id can still arrive inside the window.
         dispatch.then(() => { if (!enqueued) resolve(undefined); }, reject);
       });
+      // The stream is listening but had not named the row when the window
+      // closed: remember the local id so the late row can retire it.
+      if (enqueued && reported === undefined) {
+        this.lateAdmissions.set(sessionId, { localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
+      }
       return { messageId: reported ?? messageId };
     } finally {
       clearTimeout(timer);

@@ -274,6 +274,22 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     expect(() => parseConversationItem(card)).not.toThrow();
   });
 
+  test("a failed step and the turn's own failure make one red row, not two", () => {
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const memory = createOpenCodeV2Memory();
+    const base = { created: 5, location: { directory: WORKSPACE } };
+    const at = (type: string, data: Record<string, unknown>) => normalize({ ...base, id: `e_${type}`, type, data: { sessionID: "ses_f", ...data } }, memory);
+    at("session.execution.started", {});
+    const step = at("session.step.failed", { assistantMessageID: "msg_f", error: { type: "unknown", message: "boom" } });
+    expect(upserts(step)).toEqual([expect.objectContaining({ type: "notice", level: "error", message: "boom" })]);
+    const turn = at("session.execution.failed", { error: { type: "unknown", message: "boom" } });
+    expect(turn.updates).toEqual([{ kind: "status", status: "failed", message: "boom" }]);
+    // A turn that fails on its own, or with a different message, still says so.
+    at("session.execution.started", {});
+    expect(upserts(at("session.execution.failed", { error: { type: "provider.no-route", message: "Model unavailable" } })))
+      .toEqual([expect.objectContaining({ type: "notice", level: "error", message: "Model unavailable" })]);
+  });
+
   test("a stored system record is silent", () => {
     expect(normalizeStoredMessage({ id: "msg_sys", type: "system", time: { created: 1 }, text: "You are a careful agent." })).toEqual([]);
   });

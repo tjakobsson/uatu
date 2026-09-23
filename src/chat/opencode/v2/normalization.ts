@@ -57,10 +57,13 @@ export type OpenCodeV2Memory = ProviderEventMemory & {
   // A form's field keys in order, so an answer map folds back to the ordered
   // answers the seam speaks.
   forms: Map<string, string[]>;
+  // The message of a session's failed step, so the turn's own failure event,
+  // which repeats it, adds no second notice.
+  failures: Map<string, string>;
 };
 
 export function createOpenCodeV2Memory(): OpenCodeV2Memory {
-  return { ...createProviderEventMemory(), toolNames: new Map(), steps: new Map(), forms: new Map() };
+  return { ...createProviderEventMemory(), toolNames: new Map(), steps: new Map(), forms: new Map(), failures: new Map() };
 }
 
 // 2.x wire types recognized as deliberately carrying nothing for the
@@ -212,6 +215,7 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         return { conversationId, updates: [] };
       }
       case "session.execution.started":
+        if (memory && conversationId) memory.failures.delete(conversationId);
         return { conversationId, updates: [{ kind: "status", status: "running" }] };
       case "session.execution.succeeded":
         return { conversationId, updates: [{ kind: "status", status: "completed" }] };
@@ -219,6 +223,11 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         return { conversationId, updates: [{ kind: "status", status: "interrupted" }] };
       case "session.execution.failed": {
         const message = errorMessage(data.error) || "The turn failed";
+        // A step that failed has already shown this message on its own
+        // event; the turn's end repeats it. One red row, not two.
+        const reported = memory && conversationId ? memory.failures.get(conversationId) : undefined;
+        if (memory && conversationId) memory.failures.delete(conversationId);
+        if (reported === message) return { conversationId, updates: [{ kind: "status", status: "failed", message }] };
         return { conversationId, updates: [
           { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message } },
           { kind: "status", status: "failed", message },
@@ -247,6 +256,9 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         // is the turn's end; the step carries no failure to show, only the
         // tokens it spent.
         const aborted = event.type === "session.step.failed" && record(data.error).type === "aborted";
+        if (event.type === "session.step.failed" && !aborted && memory && conversationId) {
+          memory.failures.set(conversationId, errorMessage(data.error) || text(data.message) || "The turn failed");
+        }
         const canonical = (aborted ? undefined : normalizeCanonicalEvent(String(event.type), {
           ...data,
           messageID: messageId,

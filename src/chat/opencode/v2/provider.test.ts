@@ -365,6 +365,29 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a server id that arrives after the window retires the local row", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    const accepted = await provider.command("ses_1", { id: "req-7", name: "init", arguments: "" });
+    expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    // The stream names the row only now, after the caller's own upsert.
+    events.frame({ id: "evt_9", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_late", item: { type: "user", payload: { text: "Create or update AGENTS.md" }, delivery: "queue" } } });
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual(["upsert message:msg_late", `remove message:${accepted.messageId}`]);
+    controller.abort();
+    await pump;
+  });
+
   test("a slash command the stream never names keeps its local id once the window closes", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
