@@ -226,10 +226,12 @@ export type TerminalPanelHandle = {
   // The page is being hidden: release the transport without touching what
   // the pane is or shows. An attaching, attached or recovering pane gives
   // up its transport; an idle pane (added while the document is suspended)
-  // is marked suspended so the return attaches it; every other state is
-  // left as it is.
+  // is marked suspended so the return attaches it; a parked pane keeps its
+  // card. Until resume(), any attach() the pane is asked for — a token
+  // accepted late, a card action whose request settles late — is deferred
+  // to the resume rather than performed on the suspended document.
   release(): void;
-  // The page runs again: a released pane attaches again, once.
+  // The page runs again: a released or deferred pane attaches again, once.
   resume(): void;
   state(): TerminalPaneState;
   // Recompute character grid + send resize frame. Call after any panel-height
@@ -1201,8 +1203,20 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     });
   }
 
+  // Set by release(), cleared by resume(): the document is suspended. An
+  // attach requested meanwhile — a token accepted after pagehide, a parked
+  // card's action whose request settles late — must not open a transport on
+  // a suspended document, which would take the PTY from the page the user
+  // went to. It is deferred: the pane parks as suspended and the lifecycle
+  // resume attaches it, exactly like a pane that was released mid-attach.
+  let pageSuspended = false;
+
   function attach(): void {
     if (state === "connecting" || state === "ready" || state === "recovering") return;
+    if (pageSuspended) {
+      setState("suspended");
+      return;
+    }
     begin("connecting");
   }
 
@@ -1451,6 +1465,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   }
 
   function release(): void {
+    pageSuspended = true;
     if (state === "idle") {
       // Nothing to release, but the pane must resume with the others: a
       // pane added while the document is suspended (its create resolved
@@ -1466,6 +1481,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   }
 
   function resume(): void {
+    pageSuspended = false;
     if (state !== "suspended") return;
     begin("connecting");
   }

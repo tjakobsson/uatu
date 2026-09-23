@@ -255,6 +255,40 @@ test.describe("terminal parked cards", () => {
   });
 });
 
+test.describe("terminal reauthentication across a page suspend", () => {
+  // The token form is a parked card, so pagehide leaves it in place; the
+  // token the user pastes afterwards (or a validation that settles after the
+  // departure) must not attach the shell on the suspended document. The
+  // attach is deferred to the resume.
+  test("a token accepted while the document is suspended attaches on pageshow, not before", async ({ page, context, request }) => {
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    const { token } = await (await request.get("/__e2e/terminal-token")).json();
+    await context.clearCookies();
+    await page.evaluate(() => {
+      try { window.sessionStorage.removeItem("uatu:terminal-token"); } catch { /* best-effort */ }
+    });
+    await page.reload();
+    await expect(page.locator(".terminal-auth")).toBeVisible({ timeout: 10000 });
+    const attached = () => page.evaluate(() =>
+      fetch("/api/terminal/sessions").then(r => r.json()).then((b: { sessions: { attached: boolean }[] }) => b.sessions.map(s => s.attached)));
+
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await expect(page.locator(".terminal-auth")).toBeVisible();
+    await page.locator(".terminal-auth-input").fill(token);
+    await page.locator(".terminal-auth-submit").click();
+    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1, { timeout: 5000 });
+    await page.waitForTimeout(750);
+    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
+    await expect.poll(attached).toEqual([false]);
+
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    await expect(page.locator(".terminal-auth")).toHaveCount(0);
+    await expect.poll(attached).toEqual([true]);
+  });
+});
+
 test.describe("terminal display modes", () => {
   test("minimize collapses the panes; restore expands again", async ({ page }) => {
     await page.locator("#terminal-toggle").click();
