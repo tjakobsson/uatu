@@ -35,7 +35,7 @@ export type { NormalizedProviderEvent };
  *
  * 2.x's session vocabulary is the canonical one, so most events pass through
  * with their payload reshaped onto the canonical field names (part identity
- * is `<assistantMessageID>:<ordinal>`, a tool's call id is `data.id`, a
+ * is `<assistantMessageID>:<kind>:<ordinal>`, a tool's call id is `data.id`, a
  * shell's fields sit under `data.shell`). What 2.x alone announces is handled
  * here: the `session.execution.*` turn lifecycle, the inbox (where a prompt
  * becomes a user message), per-step usage on `session.step.ended` (the
@@ -135,11 +135,11 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
       case "session.text.started":
       case "session.text.delta":
       case "session.text.ended":
-        return { type, data: { ...stamped, textID: partIdentity(data) } };
+        return { type, data: { ...stamped, textID: partIdentity(data, "text") } };
       case "session.reasoning.started":
       case "session.reasoning.delta":
       case "session.reasoning.ended":
-        return { type, data: { ...stamped, reasoningID: partIdentity(data) } };
+        return { type, data: { ...stamped, reasoningID: partIdentity(data, "reasoning") } };
       case "session.tool.called":
       case "session.tool.progress":
       case "session.tool.success":
@@ -234,11 +234,16 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
       case "session.step.ended":
       case "session.step.failed": {
         const messageId = string(data.assistantMessageID, "assistant message id");
-        const canonical = normalizeCanonicalEvent(String(event.type), {
+        // A Stop reaches the wire as `session.step.failed` with an `aborted`
+        // error, followed by `session.execution.interrupted`. The interrupt
+        // is the turn's end; the step carries no failure to show, only the
+        // tokens it spent.
+        const aborted = event.type === "session.step.failed" && record(data.error).type === "aborted";
+        const canonical = (aborted ? undefined : normalizeCanonicalEvent(String(event.type), {
           ...data,
           messageID: messageId,
           timestamp: createdAt,
-        }, { ...context, createdAt }) ?? { conversationId, updates: [] };
+        }, { ...context, createdAt })) ?? { conversationId, updates: [] };
         const usage = tokensToUsage(data.tokens, data.cost);
         if (!usage) return canonical;
         const step = memory?.steps.get(messageId);
@@ -321,10 +326,13 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
   return { own, toCanonical, ignored: IGNORED };
 }
 
-// Streamed parts are identified by their message and per-kind ordinal; the
-// same identity is minted for a content restatement, so the two merge.
-function partIdentity(data: RecordValue): string {
-  return `${string(data.assistantMessageID, "assistant message id")}:${timestamp(data.ordinal, 0)}`;
+// Streamed parts are identified by their message, kind, and per-kind
+// ordinal: OpenCode numbers text and reasoning independently, so one message
+// has a text 0 and a reasoning 0, and an identity without the kind would
+// fold both into one reconciler entry. The same identity is minted for a
+// content restatement, so the two merge.
+function partIdentity(data: RecordValue, kind: "text" | "reasoning"): string {
+  return `${string(data.assistantMessageID, "assistant message id")}:${kind}:${timestamp(data.ordinal, 0)}`;
 }
 
 /**
@@ -339,13 +347,13 @@ export function assistantContentUpdates(messageId: string, content: unknown[], c
   return content.flatMap((value): NormalizedProviderUpdate[] => {
     const part = record(value);
     if (part.type === "text") {
-      const identity = `${messageId}:${ordinals.text++}`;
+      const identity = `${messageId}:text:${ordinals.text++}`;
       const itemId = `part:${identity}`;
       const item: ConversationItem = { id: itemId, type: "assistant_message", createdAt, markdown: text(part.text) };
       return [{ kind: "text", itemId, identity, mode: "cumulative", text: text(part.text), item }];
     }
     if (part.type === "reasoning") {
-      const identity = `${messageId}:${ordinals.reasoning++}`;
+      const identity = `${messageId}:reasoning:${ordinals.reasoning++}`;
       const time = record(part.time);
       const started = number(time.created);
       const completed = number(time.completed);

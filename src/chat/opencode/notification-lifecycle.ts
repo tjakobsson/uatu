@@ -28,6 +28,10 @@ export class OpenCodeNotificationLifecycle {
     const at = time(data.timestamp ?? event.created, Date.now());
     const type = String(event.type).replace(/^session\.next\./, "session.");
     if (type === "session.error" || type === "session.execution.failed" || type === "session.execution.interrupted") return this.cancel(conversationId, at);
+    // 2.x reports a Stop as an aborted step before the interrupted execution
+    // that follows. The step does not end the turn; the interrupt does, as
+    // an interruption, so this is not the failure the step's type suggests.
+    if (type === "session.step.failed" && record(data.error).type === "aborted") return [];
     const nativeStart = type === "session.step.started";
     const nativeEnd = type === "session.step.ended" || type === "session.step.failed";
     const message = type === "message.updated" && (info.role === "assistant" || info.type === "assistant");

@@ -67,7 +67,7 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     const update = delta!.updates[0];
     expect(update).toMatchObject({ kind: "text", mode: "incremental" });
     if (update?.kind !== "text") throw new Error("expected a text update");
-    expect(update.itemId).toMatch(/^reasoning:msg_[A-Za-z0-9]+:0$/);
+    expect(update.itemId).toMatch(/^reasoning:msg_[A-Za-z0-9]+:reasoning:0$/);
     expect(update.item).toMatchObject({ type: "reasoning", status: "running" });
 
     const [ended] = byType("session.reasoning.ended");
@@ -76,7 +76,13 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     const [textDelta] = byType("session.text.delta");
     expect(textDelta!.updates[0]).toMatchObject({ kind: "text", mode: "incremental", text: "`##`" });
     if (textDelta!.updates[0]?.kind !== "text") throw new Error("expected a text update");
-    expect(textDelta!.updates[0].itemId).toMatch(/^part:msg_[A-Za-z0-9]+:0$/);
+    expect(textDelta!.updates[0].itemId).toMatch(/^part:msg_[A-Za-z0-9]+:text:0$/);
+    // Text and reasoning ordinals are numbered independently, so one message
+    // streams a text 0 and a reasoning 0; their reconciler identities must
+    // not meet, or the answer accumulates the thinking.
+    const identities = (type: string) => byType(type).flatMap(entry => entry.updates.flatMap(update => update.kind === "text" ? [update.identity] : []));
+    const reasoning = new Set(identities("session.reasoning.delta"));
+    expect(identities("session.text.delta").some(identity => reasoning.has(identity))).toBe(false);
     const [textEnded] = byType("session.text.ended");
     expect(textEnded!.updates[0]).toMatchObject({ kind: "text", mode: "cumulative", text: "`##`" });
   });
@@ -179,12 +185,9 @@ describe("OpenCode 2.x normalization: forms, shell, lifecycle", () => {
     expect(upserts(rejected!)).toEqual([expect.objectContaining({ id: boolean!.id, status: "resolved", outcome: { kind: "rejected" } })]);
   });
 
-  test("a failed step and an interrupted execution end the turn truthfully", () => {
+  test("a Stop is an aborted step with no failure to show; the interrupted execution ends the turn", () => {
     const [failed] = byType("session.step.failed");
-    expect(failed?.updates).toEqual([
-      { kind: "upsert", item: expect.objectContaining({ type: "notice", level: "error", message: "Step interrupted" }) },
-      { kind: "status", status: "failed", message: "Step interrupted" },
-    ]);
+    expect(failed?.updates).toEqual([]);
     expect(byType("session.execution.interrupted")[0]?.updates).toEqual([{ kind: "status", status: "interrupted" }]);
   });
 
@@ -255,7 +258,7 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     const streamedText = streamed.updates[0];
     if (streamedText?.kind !== "text") throw new Error("expected a text update");
     expect(restated.updates).toEqual([
-      expect.objectContaining({ kind: "text", itemId: "reasoning:msg_s:0", identity: "msg_s:0", mode: "cumulative", text: "thinking", item: expect.objectContaining({ type: "reasoning", status: "completed", durationMs: 2 }) }),
+      expect.objectContaining({ kind: "text", itemId: "reasoning:msg_s:reasoning:0", identity: "msg_s:reasoning:0", mode: "cumulative", text: "thinking", item: expect.objectContaining({ type: "reasoning", status: "completed", durationMs: 2 }) }),
       expect.objectContaining({ kind: "text", itemId: streamedText.itemId, identity: streamedText.identity, mode: "cumulative", text: "hello" }),
       { kind: "upsert", item: expect.objectContaining({ id: "tool:call_1", type: "command", command: "echo hi", status: "completed", output: "hi\n", exitCode: 0, completedAt: 4 }) },
     ]);
@@ -294,8 +297,11 @@ describe("OpenCode 2.x normalization agrees with 1.x for the same activity", () 
     expect(v2("session.revert.staged", { revert: { messageID: "msg_1" } }).revertLifecycle).toBe(v1("session.next.revert.staged", { messageID: "msg_1" }).revertLifecycle);
     expect(shape(v2("session.compaction.ended", { reason: "manual", text: "summary", recent: "msg_1" })))
       .toEqual(shape(v1("session.next.compaction.ended", { summary: "summary" })));
-    expect(shape(v2("session.step.failed", { assistantMessageID: "msg_p", error: { type: "aborted", message: "Step interrupted" } })))
-      .toEqual(shape(v1("session.next.step.failed", { assistantMessageID: "msg_p", error: { message: "Step interrupted" } })));
+    expect(shape(v2("session.step.failed", { assistantMessageID: "msg_p", error: { type: "unknown", message: "boom" } })))
+      .toEqual(shape(v1("session.next.step.failed", { assistantMessageID: "msg_p", error: { message: "boom" } })));
+    // The one divergence: 2.x reports a Stop as an aborted step, which is
+    // not a failure, before the interrupted execution that ends the turn.
+    expect(v2("session.step.failed", { assistantMessageID: "msg_p", error: { type: "aborted", message: "Step interrupted" } }).updates).toEqual([]);
   });
 });
 

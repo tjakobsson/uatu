@@ -69,5 +69,14 @@ describe("OpenCode notification execution identity", () => {
     expect(observe("session.step.started", { assistantMessageID: "c", agent: "build", model: { id: "m", providerID: "p" }, started: 50 }, 51)).toHaveLength(1);
     expect(observe("session.execution.interrupted", { reason: "user" }, 60)).toEqual([{ sourceId: "c", phase: "interrupted", createdAt: 60 }]);
     expect(observe("session.step.failed", { assistantMessageID: "c", error: { type: "aborted", message: "Step interrupted" } }, 61)).toEqual([]);
+    // The wire order of a Stop: the aborted step first, then the interrupt.
+    // The step must not retire the turn as failed, or the interrupt has
+    // nothing left to report and the user is told the turn failed.
+    expect(observe("session.step.started", { assistantMessageID: "d", agent: "build", model: { id: "m", providerID: "p" }, started: 70 }, 71)).toHaveLength(1);
+    expect(observe("session.step.failed", { assistantMessageID: "d", error: { type: "aborted", message: "Step interrupted" } }, 72)).toEqual([]);
+    expect(observe("session.execution.interrupted", { reason: "user" }, 73)).toEqual([{ sourceId: "d", phase: "interrupted", createdAt: 73 }]);
+    // A real failure still ends the turn as one.
+    expect(observe("session.step.started", { assistantMessageID: "e", agent: "build", model: { id: "m", providerID: "p" }, started: 80 }, 81)).toHaveLength(1);
+    expect(observe("session.step.failed", { assistantMessageID: "e", error: { type: "unknown", message: "boom" } }, 82)).toEqual([{ sourceId: "e", phase: "failed", createdAt: 82 }]);
   });
 });
