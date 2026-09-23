@@ -1,5 +1,16 @@
+import type { APIRequestContext } from "@playwright/test";
 import { expect, test, standardBeforeEach } from "./fixtures";
 import { clickTreeFile, treeRow } from "./tree-helpers";
+
+async function expectSavedDocument(request: APIRequestContext, documentPath: string): Promise<void> {
+  // The preview updates before the debounced PATCH completes. Read the
+  // server's state before navigating or asking another browser to resume it.
+  await expect.poll(async () => {
+    const response = await request.get("/api/personal-state");
+    expect(response.ok()).toBe(true);
+    return (await response.json()).documentPath;
+  }).toBe(documentPath);
+}
 
 test.describe("personal workspace resume state", () => {
   test("workspace root resumes the saved document while an explicit document URL wins", async ({
@@ -9,7 +20,7 @@ test.describe("personal workspace resume state", () => {
     await standardBeforeEach(page, request);
     await clickTreeFile(page, "guides/setup.md");
     await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
-    await page.waitForTimeout(75);
+    await expectSavedDocument(request, "guides/setup.md");
 
     await page.goto("/");
     await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
@@ -28,7 +39,7 @@ test.describe("personal workspace resume state", () => {
     await standardBeforeEach(page, request);
     await clickTreeFile(page, "guides/setup.md");
     await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
-    await page.waitForTimeout(75);
+    await expectSavedDocument(request, "guides/setup.md");
 
     const secondContext = await browser.newContext();
     const second = await secondContext.newPage();
@@ -37,7 +48,7 @@ test.describe("personal workspace resume state", () => {
 
     await treeRow(page, "README.md").click();
     await expect(page.locator("#preview-path")).toHaveText("README.md");
-    await page.waitForTimeout(75);
+    await expectSavedDocument(request, "README.md");
     await expect(second.locator("#preview-path")).toHaveText("guides/setup.md");
 
     const laterContext = await browser.newContext();
