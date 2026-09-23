@@ -156,6 +156,11 @@ test.describe("terminal session manager", () => {
     // Window 2 now owns the session — the marker variable proves identity.
     const takenPane = page2.locator(".terminal-pane-host").first();
     await expect(takenPane.locator(".xterm")).toBeVisible({ timeout: 5000 });
+    // A picker choice is a user action: focus lands in the chosen pane (a
+    // boot restore is the one addition that must not take it).
+    await expect
+      .poll(() => page2.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea") ?? false))
+      .toBe(true);
     await page2.evaluate(() => {
       const host = document.querySelector(".terminal-pane-host");
       const helper = host?.querySelector(".xterm-helper-textarea") as

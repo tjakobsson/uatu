@@ -814,9 +814,13 @@ export function setupTerminalPanel(
     });
   }
 
+  // `focus: false` is the boot restore's: saved records come back selected
+  // but keyboard focus stays where the user has it. Every other addition —
+  // a fresh pane, a picker or switcher choice, a replacement — is a user
+  // action and focuses the pane it adds.
   async function addPane(
     record?: Partial<TerminalPaneRecord>,
-    options: { takeover?: boolean } = {},
+    options: { takeover?: boolean; focus?: boolean } = {},
   ): Promise<TerminalPaneEntry | null> {
     if (panes.size >= TERMINAL_MAX_PANES) return null;
     const created = record?.sessionId ? null : await createSessionRemote();
@@ -839,10 +843,7 @@ export function setupTerminalPanel(
     // here would also overwrite the saved last-active PTY the batch is about
     // to consult. See `attachSessionBatch`.
     if (!batchingAttach) {
-      // A saved record is the boot restore (or a replacement, which
-      // activates itself afterwards): select, never focus. A fresh pane is
-      // a user action and focuses as before.
-      setActivePane(id, { focus: !record?.sessionId });
+      setActivePane(id, { focus: options.focus !== false });
       if (focusPaneWhenReady) {
         focusPaneWhenReady = false;
         entry.handle.focus();
@@ -1676,7 +1677,7 @@ export function setupTerminalPanel(
       if (panes.size === 0) {
         if (state.panes.length > 0) {
           for (const record of state.panes.slice(0, TERMINAL_MAX_PANES)) {
-            void addPane(record);
+            void addPane(record, { focus: false });
           }
         } else {
           // Nothing to restore: offer existing sessions (orphans, other
