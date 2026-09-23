@@ -46,7 +46,7 @@ import {
 } from "../../src/server/routes";
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
-import { LiveBroker, type LiveUpstreamSource } from "../../src/hub/live-broker";
+import { LiveBroker, type LiveSessionChange, type LiveUpstreamSource } from "../../src/hub/live-broker";
 import { LiveEndpoint } from "../../src/hub/live-endpoint";
 import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
@@ -186,6 +186,12 @@ const E2E_LIVE_PRINCIPAL = { user: "e2e", sessionId: "e2e-session" };
 // in-process swap can answer from a dead session.) Upstream opens therefore
 // wait for the swap to finish.
 let liveUpstreamsReady: Promise<void> = Promise.resolve();
+let liveSessionRunning = true;
+const liveSessionListeners = new Set<(change: LiveSessionChange) => void>();
+function setLiveSessionRunning(running: boolean): void {
+  liveSessionRunning = running;
+  for (const listener of liveSessionListeners) listener({ workspaceId: E2E_WORKSPACE_ID, running });
+}
 function holdLiveUpstreams(): () => void {
   let release!: () => void;
   liveUpstreamsReady = new Promise<void>(resolve => {
@@ -199,8 +205,12 @@ function holdLiveUpstreams(): () => void {
   };
 }
 const liveUpstreamSource: LiveUpstreamSource = {
-  isRunning: () => true,
+  isRunning: () => liveSessionRunning,
   workspaceIds: () => [E2E_WORKSPACE_ID],
+  onSessionChange(listener) {
+    liveSessionListeners.add(listener);
+    return () => { liveSessionListeners.delete(listener); };
+  },
   async open({ path: childPath, signal }) {
     await liveUpstreamsReady;
     const target = new URL(childPath, `http://127.0.0.1:${server.port}`);
@@ -244,6 +254,11 @@ async function handleE2EReset(request: Request): Promise<Response> {
     body = {};
   }
 
+  // A reset replaces the child in place. Tell the broker just as a real
+  // session restart would, so no lingering upstream serves the previous tree
+  // or keeps listening to the previous agent router.
+  const releaseLiveUpstreams = holdLiveUpstreams();
+  setLiveSessionRunning(false);
   terminalSessionsDelay = null;
   terminalCloseDelayMs = 0;
   fakeChatAgent.reset();
@@ -261,7 +276,6 @@ async function handleE2EReset(request: Request): Promise<Response> {
     }
   }
 
-  const releaseLiveUpstreams = holdLiveUpstreams();
   await watchSession.stop();
   activeFilePath = typeof body.file === "string" ? body.file : null;
   activeRespectGitignore =
@@ -306,6 +320,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
 
   watchSession = await createSession({ resetWorkspace: false });
   releaseLiveUpstreams();
+  setLiveSessionRunning(true);
   return Response.json(watchSession.getStatePayload());
 }
 
@@ -372,9 +387,17 @@ async function handleE2EChat(request: Request): Promise<Response> {
   if (body.item) body.item = stripQualifier(body.item) as typeof body.item;
   const targetFake = body.agent === "claude" ? fakeSecondAgent : fakeChatAgent;
   switch (body.action) {
-    case "agents":
-      activeChatRouter = body.count === 2 ? dualAgentRouter : singleAgentRouter;
+    case "agents": {
+      const next = body.count === 2 ? dualAgentRouter : singleAgentRouter;
+      if (next !== activeChatRouter) {
+        // Existing SSE subscriptions are bound to their original router;
+        // changing the delegating proxy only affects new requests.
+        setLiveSessionRunning(false);
+        activeChatRouter = next;
+        setLiveSessionRunning(true);
+      }
       return Response.json({ agents: body.count === 2 ? 2 : 1 });
+    }
     case "seed":
       return controlJson(targetFake.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration), body.agent ?? "opencode");
     case "externalCreate":
@@ -423,7 +446,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       fakeChatAgent.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, usageReads: [...fakeChatAgent.usageReads, ...fakeSecondAgent.usageReads].map(read => read.mode), ...fakeChatAgent.inventoryStats() });
+      return Response.json({ statusCalls: fakeChatAgent.statusCalls, promptAttempts: fakeChatAgent.promptAttempts, promptModes: fakeChatAgent.promptModes, promptVariants: fakeChatAgent.promptVariants, promptConfigurations: fakeChatAgent.promptConfigurations, reversibleAttempts: fakeChatAgent.reversibleAttempts, permissionChoices: fakeChatAgent.permissionChoices, usageReads: [...fakeChatAgent.usageReads, ...fakeSecondAgent.usageReads].map(read => read.mode), ...targetFake.inventoryStats() });
     case "inventoryInvalidate":
       fakeChatAgent.invalidateInventory();
       return Response.json({ ok: true });

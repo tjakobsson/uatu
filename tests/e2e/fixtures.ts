@@ -11,8 +11,10 @@ import path from "node:path";
 import { treeRow } from "./tree-helpers";
 
 // Workers index 0..N-1; we offset off a base port so concurrent runs in the
-// same shell don't fight each other.
-const BASE_PORT = Number.parseInt(process.env.UATU_E2E_BASE_PORT ?? "4173", 10);
+// same shell don't fight each other. Use a high range: starting at 4173 put
+// worker 17 on 4190, which WebKit blocks as an unsafe port. Retries and
+// repeated runs allocate new worker indices even with only four workers.
+const BASE_PORT = Number.parseInt(process.env.UATU_E2E_BASE_PORT ?? "20000", 10);
 
 type WorkerFixtures = {
   /** The port the worker's dedicated server is listening on. */
