@@ -576,7 +576,12 @@ export function setupTerminalPanel(
     }
   }
 
-  function setActivePane(id: string | null) {
+  // `focus: false` activates without moving keyboard focus: the boot
+  // restore of saved panes selects its active pane, but focus belongs to
+  // whatever the user was doing — restoring the panel at page load MUST
+  // NOT steal it (see the embedded-terminal spec). Every user-initiated
+  // activation (split, close, New shell, a picker choice) keeps the default.
+  function setActivePane(id: string | null, options: { focus?: boolean } = {}) {
     const paneChanged = activePaneId !== id;
     activePaneId = id;
     const activeSessionId = id === null ? undefined : panes.get(id)?.record.sessionId;
@@ -608,10 +613,10 @@ export function setupTerminalPanel(
       if (touchModeNow()) requestAnimationFrame(() => fitAll());
     }
     // Move keyboard focus into the active pane's xterm so the user can
-    // type immediately after a split, restore, or close. requestAnimationFrame
+    // type immediately after a split, New shell, or close. requestAnimationFrame
     // gives xterm.js a tick to finish opening when this runs in the same
     // frame as `addPane()`.
-    if (activeEntry) {
+    if (activeEntry && options.focus !== false) {
       const entry = activeEntry;
       requestAnimationFrame(() => {
         try {
@@ -834,7 +839,10 @@ export function setupTerminalPanel(
     // here would also overwrite the saved last-active PTY the batch is about
     // to consult. See `attachSessionBatch`.
     if (!batchingAttach) {
-      setActivePane(id);
+      // A saved record is the boot restore (or a replacement, which
+      // activates itself afterwards): select, never focus. A fresh pane is
+      // a user action and focuses as before.
+      setActivePane(id, { focus: !record?.sessionId });
       if (focusPaneWhenReady) {
         focusPaneWhenReady = false;
         entry.handle.focus();

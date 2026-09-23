@@ -179,6 +179,25 @@ test.describe("terminal close confirmation", () => {
 });
 
 test.describe("terminal page lifecycle", () => {
+  // Restoring saved panes at page load selects the active pane but must not
+  // move keyboard focus into the shell: the user did not ask for a terminal,
+  // and keystrokes meant for the document would reach the PTY.
+  test("a reload that restores a visible terminal does not move focus into the shell", async ({ page }) => {
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    // The user-initiated show does land focus in xterm (the fit suite pins that).
+    await expect.poll(() => page.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea") ?? false)).toBe(true);
+
+    await page.reload();
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1, { timeout: 5000 });
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible();
+    // Focus is deferred until xterm opens, so give it every chance to land
+    // before asserting it did not.
+    await page.waitForTimeout(500);
+    expect(await page.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea") ?? false)).toBe(false);
+  });
+
   // A pane whose create resolves after pagehide must not attach: the
   // departing document may live on in the history cache while its
   // replacement is already attaching to the same shells. The first opening's
