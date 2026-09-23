@@ -561,7 +561,10 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true):
         const agent = optionalString(message.agent);
         items.push({ id: `usage:${id}`, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}), ...(agent ? { agent } : {}) });
       }
-      const error = storedErrorMessage(message.error);
+      // A Stop is stored as an `aborted` error on the record; live, that
+      // step is an interruption and not a failure, and a reload must not
+      // turn it into one.
+      const error = record(message.error).type === "aborted" ? undefined : storedErrorMessage(message.error);
       if (error) items.push({ id: `notice:${id}:error`, type: "notice", createdAt, level: "error", message: error });
       for (const file of stringArray(record(message.snapshot).files)) {
         items.push({ id: `file:${id}:${file}`, type: "file_change", createdAt, path: file, operation: "update" });

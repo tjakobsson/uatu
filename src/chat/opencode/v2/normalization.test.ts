@@ -311,6 +311,12 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
     ]);
   });
 
+  test("a stored assistant record ended by a Stop carries no failure notice; a real error still does", () => {
+    const stored = (error: Record<string, unknown>) => normalizeStoredMessage({ id: "msg_st", type: "assistant", time: { created: 1 }, content: [], error });
+    expect(stored({ type: "aborted", message: "Step interrupted" }).filter(item => item.type === "notice")).toEqual([]);
+    expect(stored({ type: "unknown", message: "boom" }).filter(item => item.type === "notice")).toEqual([expect.objectContaining({ level: "error", message: "boom" })]);
+  });
+
   test("a stored system record is silent", () => {
     expect(normalizeStoredMessage({ id: "msg_sys", type: "system", time: { created: 1 }, text: "You are a careful agent." })).toEqual([]);
   });

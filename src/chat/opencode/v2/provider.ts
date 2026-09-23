@@ -62,6 +62,10 @@ export class OpenCodeV2Provider implements ChatProvider {
   // per session, since the adapter admits one send per conversation at a
   // time. Only a consumed `events()` can settle one.
   private readonly enqueuedUserWaiters = new Map<string, { resolve: (messageId: string) => void; generation: number }>();
+  // An `events()` run is in progress: from entry to exit, handshake or not.
+  // A waiter registered under an open run can match a row the run delivers
+  // once its first frame has arrived.
+  private streamOpen = false;
   // Counts `events()` runs. A waiter or a late record belongs to the stream
   // that could deliver its row; when that stream ends, neither may act on a
   // later stream's rows.
@@ -306,9 +310,11 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Memory scoped to the subscription: one pump, one memory.
     const memory = createOpenCodeV2Memory();
     // Live only once a frame has arrived: until the subscription's first
-    // frame (`server.connected`), nothing broadcast can reach this listener,
-    // so a command admitted in that gap must not wait on it.
+    // frame (`server.connected`), a row broadcast may not have reached this
+    // listener at all, so an admission from that gap may wait for a row
+    // that arrives, but must not be remembered for one that may be lost.
     this.streamGeneration += 1;
+    this.streamOpen = true;
     const source = this.client.event.subscribe({ signal })[Symbol.asyncIterator]();
     let next: ReturnType<typeof source.next> | undefined;
     try {
@@ -350,6 +356,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (!signal.aborted) throw error;
     } finally {
       this.streaming = false;
+      this.streamOpen = false;
       this.wake = undefined;
       // A row this stream never delivered is not coming on the next one:
       // the 2.x stream has no replay, so an admission still waiting would
@@ -414,12 +421,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     else this.lateAdmissions.set(sessionId, remaining);
   }
 
-  private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void; generation: number } {
+  private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void; generation: number; liveAtDispatch: boolean } {
     let resolve!: (messageId: string) => void;
     const promise = new Promise<string>(settle => { resolve = settle; });
     const waiter = { resolve, generation: this.streamGeneration };
     this.enqueuedUserWaiters.set(sessionId, waiter);
-    return { promise, generation: waiter.generation, release: () => { if (this.enqueuedUserWaiters.get(sessionId) === waiter) this.enqueuedUserWaiters.delete(sessionId); } };
+    return { promise, generation: waiter.generation, liveAtDispatch: this.streaming, release: () => { if (this.enqueuedUserWaiters.get(sessionId) === waiter) this.enqueuedUserWaiters.delete(sessionId); } };
   }
 
   async dispose(): Promise<void> {
@@ -488,7 +495,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     const dispatch: Promise<unknown> = compacts
       ? this.client.session.compact({ sessionID: sessionId, id: messageId, delivery: "queue" })
       : this.client.session.command({ sessionID: sessionId, name: input.name, text: input.arguments, delivery: "queue" });
-    const enqueued = !compacts && this.streaming ? this.awaitEnqueuedUser(sessionId) : undefined;
+    const enqueued = !compacts && this.streamOpen ? this.awaitEnqueuedUser(sessionId) : undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const reported = await new Promise<string | undefined>((resolve, reject) => {
@@ -512,8 +519,11 @@ export class OpenCodeV2Provider implements ChatProvider {
         // can retire it — but only while that same stream is still running:
         // a stream that ended during the window cannot deliver the row, and
         // a record left for a later stream would claim a row that is not
-        // its own. With no stream at dispatch there is no row to wait for.
-        if (enqueued && this.streaming && enqueued.generation === this.streamGeneration) {
+        // its own. And only if the stream was live before the dispatch: a
+        // row broadcast before the subscription's first frame may never
+        // have reached it, and a record for a lost row would claim the next
+        // command's. A duplicate row is the lesser harm there.
+        if (enqueued && enqueued.liveAtDispatch && this.streaming && enqueued.generation === this.streamGeneration) {
           const queue = this.lateAdmissions.get(sessionId) ?? [];
           queue.push({ localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
           this.lateAdmissions.set(sessionId, queue);
@@ -528,7 +538,9 @@ export class OpenCodeV2Provider implements ChatProvider {
         // not a refusal — the command may be running — so the admission
         // stays and its row, if it comes, retires the placeholder as usual.
         dispatch.catch((error: unknown) => {
-          if (!isServerRefusal(error)) return;
+          // The server's refusal, or the socket's: either way no row is
+          // coming. A lost response is neither.
+          if (!isServerRefusal(error) && !isConnectionRefused(error)) return;
           this.forgetLateAdmission(sessionId, messageId);
           const message = error instanceof Error && error.message ? error.message : "The command was refused";
           this.inject({ conversationId: sessionId, outcome: "handled", eventType: "session.command.refused", updates: [

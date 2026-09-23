@@ -715,6 +715,50 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a command admitted before the handshake still takes a row the stream delivers after it", async () => {
+    const encoder = new TextEncoder();
+    let push: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const frame = (event: Record<string, unknown>) => push?.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+    const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) { push = controller; setTimeout(() => frame({ id: "evt_0", type: "server.connected", data: {} }), 80); } }), { status: 200, headers: { "content-type": "text/event-stream" } }),
+      "POST /api/session/:id/command": () => undefined,
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 500 });
+    const controller = new AbortController();
+    const pump = (async () => { for await (const _ of provider.events(controller.signal)) { /* drain */ } })();
+    await Bun.sleep(10);
+    const admission = provider.command("ses_1", { id: "req-hs", name: "init", arguments: "" });
+    await Bun.sleep(120);
+    frame({ id: "evt_h", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_h", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    expect(await admission).toEqual({ messageId: "msg_h" });
+    controller.abort();
+    await pump;
+  });
+
+  test("a connection refused after the window reaches the stream like a server refusal", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": async () => { await Bun.sleep(60); throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); },
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+        if (update.kind === "status") seen.push(`status ${update.status}`);
+      }
+    })();
+    await Bun.sleep(10);
+    const accepted = await provider.command("ses_1", { id: "req-cr", name: "init", arguments: "" });
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual([`remove message:${accepted.messageId}`, "status failed"]);
+    controller.abort();
+    await pump;
+  });
+
   test("an admission still waiting when the stream ends claims nothing on the next stream", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
