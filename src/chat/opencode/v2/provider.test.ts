@@ -647,6 +647,32 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a command dispatched with no stream that is refused after the window is reconciled once a stream starts", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": async () => { await Bun.sleep(60); return Response.json({ _tag: "CommandNotFoundError", message: "Command not found: nope" }, { status: 404 }); },
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    // No stream yet: the pump is starting up or reconnecting.
+    const accepted = await provider.command("ses_1", { id: "req-n2", name: "nope", arguments: "" });
+    expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    await Bun.sleep(80);
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+        if (update.kind === "status") seen.push(`status ${update.status}`);
+      }
+    })();
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual([`remove message:${accepted.messageId}`, "status failed"]);
+    controller.abort();
+    await pump;
+  });
+
   test("an admission still waiting when the stream ends claims nothing on the next stream", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
