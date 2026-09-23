@@ -421,8 +421,14 @@ export function formFieldToQuestion(field: RecordValue): StructuredQuestion {
     case "boolean":
       return { prompt, header, options: [{ label: "Yes", description: "" }, { label: "No", description: "" }], multiple: false, allowFreeForm: false, ...(required ? {} : { optional: true }) };
     case "number":
-    case "integer":
-      return { prompt, header: header || (field.type === "integer" ? "Whole number" : "Number"), options: [], multiple: false, allowFreeForm: true, ...(required ? {} : { optional: true }) };
+    case "integer": {
+      // The accepted range, on the card, for the same reason as the count
+      // above: the reply is refused before dispatch when it falls outside.
+      const kind = field.type === "integer" ? "Whole number" : "Number";
+      const range = numberRangeHint(number(field.minimum), number(field.maximum));
+      const typed = range ? `${kind} ${range}` : kind;
+      return { prompt, header: header ? (range ? `${header}. ${typed}` : header) : typed, options: [], multiple: false, allowFreeForm: true, ...(required ? {} : { optional: true }) };
+    }
     default:
       return options.length > 0
         ? { prompt, header, options, multiple: false, allowFreeForm: field.custom !== false, ...(required ? {} : { optional: true }) }
@@ -434,6 +440,13 @@ export function selectionCountHint(min: number | undefined, max: number | undefi
   if (min !== undefined && max !== undefined) return min === max ? `Choose ${min}` : `Choose ${min} to ${max}`;
   if (min !== undefined) return `Choose at least ${min}`;
   if (max !== undefined) return `Choose up to ${max}`;
+  return "";
+}
+
+export function numberRangeHint(min: number | undefined, max: number | undefined): string {
+  if (min !== undefined && max !== undefined) return `from ${min} to ${max}`;
+  if (min !== undefined) return `of at least ${min}`;
+  if (max !== undefined) return `of at most ${max}`;
   return "";
 }
 

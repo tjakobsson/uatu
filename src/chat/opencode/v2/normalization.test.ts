@@ -320,5 +320,9 @@ describe("form fields as structured questions", () => {
       .toMatchObject({ header: "Any. Choose 1 to 2", optional: true });
     expect(formFieldToQuestion({ key: "b", type: "multiselect", title: "Pick", options: [], minItems: 2, maxItems: 2 }).header).toBe("Choose 2");
     expect(formFieldToQuestion({ key: "b", type: "multiselect", title: "Pick", options: [], maxItems: 3 }).header).toBe("Choose up to 3");
+    expect(formFieldToQuestion({ key: "n", type: "integer", title: "How many?", minimum: 1, maximum: 10 }).header).toBe("Whole number from 1 to 10");
+    expect(formFieldToQuestion({ key: "n", type: "number", title: "Ratio", description: "Weight", minimum: 0 }).header).toBe("Weight. Number of at least 0");
+    expect(formFieldToQuestion({ key: "n", type: "number", title: "Ratio", description: "Weight" }).header).toBe("Weight");
+    expect(formFieldToQuestion({ key: "n", type: "integer", title: "Count", maximum: 5 }).header).toBe("Whole number of at most 5");
   });
 });
