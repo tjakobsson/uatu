@@ -759,6 +759,37 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a compaction's inbox item never satisfies a waiting command admission", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": () => undefined,
+      "POST /api/session/:id/compact": ({ body }) => ({ id: (body as { id: string }).id, sessionID: "ses_1", time: { created: 1 }, type: "compaction", payload: {}, delivery: "queue" }),
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    await Bun.sleep(10);
+    const command = await provider.command("ses_1", { id: "req-c9", name: "init", arguments: "" });
+    const compaction = await provider.command("ses_1", { id: "req-k9", name: "compact", arguments: "" });
+    // As 2.0.13 announces it: a compaction item, which is no row at all.
+    events.frame({ id: "evt_k1", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: compaction.messageId, item: { type: "compaction", payload: {}, delivery: "queue" } } });
+    // And the shape the finding supposed: a user row under the compaction's id.
+    events.frame({ id: "evt_k2", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: compaction.messageId, item: { type: "user", payload: { text: "compact" }, delivery: "queue" } } });
+    events.frame({ id: "evt_k3", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_cmd9", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual([`upsert message:${compaction.messageId}`, "upsert message:msg_cmd9", `remove message:${command.messageId}`]);
+    controller.abort();
+    await pump;
+  });
+
   test("an admission still waiting when the stream ends claims nothing on the next stream", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });

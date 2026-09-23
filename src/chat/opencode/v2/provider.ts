@@ -76,8 +76,9 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly lateAdmissions = new Map<string, Array<{ localId: string; until: number }>>();
   private static readonly LATE_ADMISSION_MS = 60_000;
   private streaming = false;
-  // Ids this process minted for prompts. A row under one of them is a
-  // prompt's, never a command's, however many admissions are waiting.
+  // Ids this process minted itself (prompts, compactions). A row under one
+  // of them is never a slash command's, however many admissions are
+  // waiting: the server mints those.
   private readonly promptIds = new Set<string>();
   private static readonly PROMPT_ID_LIMIT = 512;
   // Events the provider itself has to put on the stream — a command refused
@@ -492,6 +493,10 @@ export class OpenCodeV2Provider implements ChatProvider {
     if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     if (input.mode) await this.client.session.switchAgent({ sessionID: sessionId, agent: input.mode });
     const compacts = input.name === "compact" || input.name === "summarize";
+    // A compaction's id is this process's own; its inbox item is a
+    // `compaction`, which the stream never presents as a user row, but the
+    // id is registered as minted all the same.
+    if (compacts) this.rememberPromptId(messageId);
     const dispatch: Promise<unknown> = compacts
       ? this.client.session.compact({ sessionID: sessionId, id: messageId, delivery: "queue" })
       : this.client.session.command({ sessionID: sessionId, name: input.name, text: input.arguments, delivery: "queue" });
