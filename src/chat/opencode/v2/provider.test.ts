@@ -583,6 +583,38 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a stream that ends during the window leaves no record for the next stream to misapply", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 120 });
+    const first = new AbortController();
+    const firstPump = (async () => { for await (const _ of provider.events(first.signal)) { /* drain */ } })();
+    await Bun.sleep(10);
+    const admission = provider.command("ses_1", { id: "req-g", name: "init", arguments: "" });
+    // The stream dies mid-window; the window then closes on its own.
+    await Bun.sleep(30);
+    first.abort();
+    await firstPump;
+    const accepted = await admission;
+    expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    const second = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(second.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    await Bun.sleep(20);
+    events.frame({ id: "evt_z", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_z", item: { type: "user", payload: { text: "next command" }, delivery: "queue" } } });
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 1 && Date.now() < deadline) await Bun.sleep(5);
+    await Bun.sleep(30);
+    expect(seen).toEqual(["upsert message:msg_z"]);
+    second.abort();
+    await pump;
+  });
+
   test("an admission still waiting when the stream ends claims nothing on the next stream", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });

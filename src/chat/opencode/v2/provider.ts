@@ -61,7 +61,11 @@ export class OpenCodeV2Provider implements ChatProvider {
   // Slash-command admissions waiting for the stream to name their row: one
   // per session, since the adapter admits one send per conversation at a
   // time. Only a consumed `events()` can settle one.
-  private readonly enqueuedUserWaiters = new Map<string, (messageId: string) => void>();
+  private readonly enqueuedUserWaiters = new Map<string, { resolve: (messageId: string) => void; generation: number }>();
+  // Counts `events()` runs. A waiter or a late record belongs to the stream
+  // that could deliver its row; when that stream ends, neither may act on a
+  // later stream's rows.
+  private streamGeneration = 0;
   // Admissions whose window closed before the stream named the row: the
   // caller's optimistic row went in under the local id, and the server's
   // row, when it lands, retires it.
@@ -302,6 +306,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Memory scoped to the subscription: one pump, one memory.
     const memory = createOpenCodeV2Memory();
     this.streaming = true;
+    this.streamGeneration += 1;
     const source = this.client.event.subscribe({ signal })[Symbol.asyncIterator]();
     let next: ReturnType<typeof source.next> | undefined;
     try {
@@ -347,6 +352,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       // the 2.x stream has no replay, so an admission still waiting would
       // only ever claim some later row that is not its own.
       this.lateAdmissions.clear();
+      this.enqueuedUserWaiters.clear();
       // A frame still pending when the consumer stops would reject unheard.
       next?.catch(() => undefined);
       await source.return?.().catch(() => undefined);
@@ -381,7 +387,8 @@ export class OpenCodeV2Provider implements ChatProvider {
         return { conversationId: event.conversationId, updates: [{ kind: "remove", itemId: `message:${late.localId}` }], outcome: "handled", eventType: event.eventType };
       }
     }
-    this.enqueuedUserWaiters.get(event.conversationId)?.(serverId);
+    const waiter = this.enqueuedUserWaiters.get(event.conversationId);
+    if (waiter && waiter.generation === this.streamGeneration) waiter.resolve(serverId);
     return undefined;
   }
 
@@ -404,11 +411,12 @@ export class OpenCodeV2Provider implements ChatProvider {
     else this.lateAdmissions.set(sessionId, remaining);
   }
 
-  private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void } {
+  private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void; generation: number } {
     let resolve!: (messageId: string) => void;
     const promise = new Promise<string>(settle => { resolve = settle; });
-    this.enqueuedUserWaiters.set(sessionId, resolve);
-    return { promise, release: () => { if (this.enqueuedUserWaiters.get(sessionId) === resolve) this.enqueuedUserWaiters.delete(sessionId); } };
+    const waiter = { resolve, generation: this.streamGeneration };
+    this.enqueuedUserWaiters.set(sessionId, waiter);
+    return { promise, generation: waiter.generation, release: () => { if (this.enqueuedUserWaiters.get(sessionId) === waiter) this.enqueuedUserWaiters.delete(sessionId); } };
   }
 
   async dispose(): Promise<void> {
@@ -488,8 +496,11 @@ export class OpenCodeV2Provider implements ChatProvider {
         dispatch.then(() => { if (!enqueued) resolve(undefined); }, reject);
       });
       // The stream is listening but had not named the row when the window
-      // closed: remember the local id so the late row can retire it.
-      if (enqueued && reported === undefined) {
+      // closed: remember the local id so the late row can retire it. Only
+      // while that same stream is still running — a stream that ended
+      // during the window cannot deliver the row, and a record left for a
+      // later stream would claim a row that is not its own.
+      if (enqueued && reported === undefined && this.streaming && enqueued.generation === this.streamGeneration) {
         // Queued, in admission order: several can close their window before
         // the stream catches up, and each row goes to the oldest.
         const queue = this.lateAdmissions.get(sessionId) ?? [];
