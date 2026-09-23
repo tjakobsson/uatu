@@ -65,7 +65,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   // Admissions whose window closed before the stream named the row: the
   // caller's optimistic row went in under the local id, and the server's
   // row, when it lands, retires it.
-  private readonly lateAdmissions = new Map<string, { localId: string; until: number }>();
+  private readonly lateAdmissions = new Map<string, Array<{ localId: string; until: number }>>();
   private static readonly LATE_ADMISSION_MS = 60_000;
   private streaming = false;
 
@@ -329,10 +329,9 @@ export class OpenCodeV2Provider implements ChatProvider {
     // still waiting for one. An admission whose window closed is older than
     // any waiter registered since, so it takes this row and the waiter takes
     // the next.
-    const late = this.lateAdmissions.get(event.conversationId);
+    const late = this.takeLateAdmission(event.conversationId);
     if (late) {
-      this.lateAdmissions.delete(event.conversationId);
-      if (late.until >= Date.now() && late.localId !== serverId) {
+      if (late.localId !== serverId) {
         // The server's row is on the timeline now; the placeholder under
         // the local id is the same message twice. Retired rather than
         // re-keyed — an update cannot rename an item — so the row reads as
@@ -342,6 +341,25 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
     this.enqueuedUserWaiters.get(event.conversationId)?.(serverId);
     return undefined;
+  }
+
+  // The oldest admission still waiting for its row; expired ones are dropped.
+  private takeLateAdmission(sessionId: string): { localId: string; until: number } | undefined {
+    const queue = this.lateAdmissions.get(sessionId);
+    if (!queue) return undefined;
+    const now = Date.now();
+    while (queue.length > 0 && queue[0]!.until < now) queue.shift();
+    const oldest = queue.shift();
+    if (queue.length === 0) this.lateAdmissions.delete(sessionId);
+    return oldest;
+  }
+
+  private forgetLateAdmission(sessionId: string, localId: string): void {
+    const queue = this.lateAdmissions.get(sessionId);
+    if (!queue) return;
+    const remaining = queue.filter(entry => entry.localId !== localId);
+    if (remaining.length === 0) this.lateAdmissions.delete(sessionId);
+    else this.lateAdmissions.set(sessionId, remaining);
   }
 
   private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void } {
@@ -417,10 +435,14 @@ export class OpenCodeV2Provider implements ChatProvider {
       // The stream is listening but had not named the row when the window
       // closed: remember the local id so the late row can retire it.
       if (enqueued && reported === undefined) {
-        this.lateAdmissions.set(sessionId, { localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
+        // Queued, in admission order: several can close their window before
+        // the stream catches up, and each row goes to the oldest.
+        const queue = this.lateAdmissions.get(sessionId) ?? [];
+        queue.push({ localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
+        this.lateAdmissions.set(sessionId, queue);
         // A refusal that lands after the window means no row is coming: the
         // record must not claim the next command's.
-        dispatch.catch(() => { if (this.lateAdmissions.get(sessionId)?.localId === messageId) this.lateAdmissions.delete(sessionId); });
+        dispatch.catch(() => this.forgetLateAdmission(sessionId, messageId));
       }
       return { messageId: reported ?? messageId };
     } finally {

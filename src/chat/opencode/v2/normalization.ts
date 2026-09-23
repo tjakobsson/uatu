@@ -127,8 +127,6 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
           directory: optionalString(record(data.location).directory) ?? optionalString(record(event.location).directory) ?? workspace,
           parentID: data.parentID,
         } } };
-      case "session.deleted":
-        return { type, data: { ...stamped, info: { id: string(data.sessionID, "session id"), title: "", directory: workspace } } };
       case "session.text.started":
       case "session.text.delta":
       case "session.text.ended":
@@ -181,6 +179,14 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
           title: text(data.title),
           sparse: true,
         } };
+      }
+      case "session.deleted": {
+        // Only the id travels, and never a location: a deletion in another
+        // directory on a shared server reads the same as one here. Flagged
+        // sparse, the adapter acts on it only for a session it already
+        // listed, instead of taking the workspace label on trust.
+        const id = string(data.sessionID, "session id");
+        return { conversationId: conversationId ?? id, updates: [], sessionLifecycle: { kind: "deleted", id, directory: workspace, title: "", sparse: true } };
       }
       case "session.inbox.enqueued": {
         const item = record(data.item);

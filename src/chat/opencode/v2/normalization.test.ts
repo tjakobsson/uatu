@@ -195,7 +195,7 @@ describe("OpenCode 2.x normalization: forms, shell, lifecycle", () => {
 
   test("a deletion is a lifecycle event", () => {
     const [deleted] = byType("session.deleted");
-    expect(deleted?.sessionLifecycle).toMatchObject({ kind: "deleted", directory: WORKSPACE });
+    expect(deleted?.sessionLifecycle).toEqual({ kind: "deleted", id: deleted!.conversationId!, directory: WORKSPACE, title: "", sparse: true });
   });
 });
 

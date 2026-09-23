@@ -250,6 +250,10 @@ export class ChatAdapter {
   private readonly announced = new Map<string, { owner: string; destination: string; tick: number }>();
   private readonly sessionParents = new Map<string, string | null>();
   private readonly inventorySessions = new Map<string, InventorySessionMetadata>();
+  // Ids this adapter has listed as visible conversations. A list fetch does
+  // not acknowledge lifecycle metadata (see inventorySessions), but it does
+  // establish what a later sparse deletion can have removed.
+  private readonly listedSessions = new Map<string, true>();
   private readonly inventory = new ConversationInventoryBroadcaster();
   // Conversations with a turn in flight, tracked at the adapter so the fact
   // survives projection eviction. This is what distinguishes "the store says
@@ -393,6 +397,7 @@ export class ChatAdapter {
           // A title repair must not make an otherwise usable conversation disappear.
         }
       }
+      boundedSet(this.listedSessions, session.id, true, INVENTORY_SESSION_LIMIT);
       accepted.push(this.summary(session));
     }
     return accepted.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
@@ -2558,14 +2563,23 @@ export class ChatAdapter {
     // renamed mid-turn must keep mirroring its requests to its parent. A
     // read that fails leaves the cached answer, which is what it would have
     // been cleared to.
+    // A deleted session cannot be read, so a sparse deletion takes the
+    // cached parent and nothing else.
     const parentId = lifecycle.sparse
-      ? await this.parentOf(lifecycle.id).catch(() => this.sessionParents.get(lifecycle.id) ?? null)
+      ? lifecycle.kind === "deleted"
+        ? this.sessionParents.get(lifecycle.id) ?? null
+        : await this.parentOf(lifecycle.id).catch(() => this.sessionParents.get(lifecycle.id) ?? null)
       : lifecycle.parentId ?? null;
     // Classification forgets the activity of a session outside the workspace.
     const next = await this.classifyInventorySession({ ...lifecycle, parentId: parentId ?? undefined }, lifecycle.kind === "deleted");
     if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
     const previous = this.inventorySessions.get(lifecycle.id);
-    const eventDescribesVisibleSession = next.inWorkspace && next.parentId === null;
+    // A sparse event's directory is the workspace by assumption, not by the
+    // wire (2.x's deletion carries none), so it vouches for nothing unseen:
+    // only a session this adapter listed can have left the list.
+    const eventDescribesVisibleSession = lifecycle.sparse
+      ? this.listedSessions.has(lifecycle.id)
+      : next.inWorkspace && next.parentId === null;
     const relevantDeletion = lifecycle.kind === "deleted"
       && previous?.deleted !== true
       && (inventoryVisible(previous) || eventDescribesVisibleSession);

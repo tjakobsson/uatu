@@ -418,6 +418,30 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("several admissions past their window take their rows in admission order", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    const a = await provider.command("ses_1", { id: "req-a2", name: "init", arguments: "" });
+    const b = await provider.command("ses_1", { id: "req-b2", name: "review", arguments: "" });
+    enqueued("msg_a");
+    enqueued("msg_b");
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 4 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual(["upsert message:msg_a", `remove message:${a.messageId}`, "upsert message:msg_b", `remove message:${b.messageId}`]);
+    controller.abort();
+    await pump;
+  });
+
   test("a refusal that lands after the window leaves no claim on the next row", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({

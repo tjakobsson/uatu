@@ -646,6 +646,36 @@ describe("filtered provider event pump", () => {
     await pump;
   });
 
+  test("a sparse deletion invalidates only for a session the adapter listed, and never looks it up", async () => {
+    const provider = new FakeProvider();
+    let lookups = 0;
+    provider.getSession = async () => { lookups += 1; return null; };
+    const listed = fixtureSession("listed");
+    provider.sessions = [listed];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.listConversations();
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    // 2.x's deletion names an id and nothing else. Unknown here, it may be
+    // another directory's on a shared server: nothing listed can have gone.
+    let settled = false;
+    const afterUnknown = inventory.next().then(result => { settled = true; return result; });
+    provider.eventQueue.push({ normalized: { conversationId: "elsewhere", updates: [], outcome: "handled", eventType: "session.deleted", sessionLifecycle: { kind: "deleted", id: "elsewhere", directory: process.cwd(), title: "", sparse: true } } });
+    await Bun.sleep(20);
+    expect(settled).toBe(false);
+
+    // A listed session's deletion is a change to the list.
+    provider.eventQueue.push({ normalized: { conversationId: "listed", updates: [], outcome: "handled", eventType: "session.deleted", sessionLifecycle: { kind: "deleted", id: "listed", directory: process.cwd(), title: "", sparse: true } } });
+    expect((await afterUnknown).done).toBe(false);
+    expect(lookups).toBe(0);
+
+    await adapter.dispose();
+    await pump;
+  });
+
   test("pump stops are restartable while adapter disposal closes inventory subscriptions", async () => {
     const provider = new FakeProvider();
     let starts = 0;
