@@ -325,17 +325,23 @@ export class OpenCodeV2Provider implements ChatProvider {
     const row = event.updates.find(update => update.kind === "upsert" && update.item.type === "user_message");
     if (!row || row.kind !== "upsert") return;
     const serverId = row.item.id.slice("message:".length);
-    const resolve = this.enqueuedUserWaiters.get(event.conversationId);
-    if (resolve) { resolve(serverId); return; }
+    // Admission order is wire order: a row belongs to the oldest admission
+    // still waiting for one. An admission whose window closed is older than
+    // any waiter registered since, so it takes this row and the waiter takes
+    // the next.
     const late = this.lateAdmissions.get(event.conversationId);
-    if (!late) return;
-    this.lateAdmissions.delete(event.conversationId);
-    if (late.until < Date.now() || late.localId === serverId) return;
-    // The server's row is on the timeline now; the placeholder under the
-    // local id is the same message twice. Retired rather than re-keyed —
-    // an update cannot rename an item — so the row reads as the server
-    // stored it.
-    return { conversationId: event.conversationId, updates: [{ kind: "remove", itemId: `message:${late.localId}` }], outcome: "handled", eventType: event.eventType };
+    if (late) {
+      this.lateAdmissions.delete(event.conversationId);
+      if (late.until >= Date.now() && late.localId !== serverId) {
+        // The server's row is on the timeline now; the placeholder under
+        // the local id is the same message twice. Retired rather than
+        // re-keyed — an update cannot rename an item — so the row reads as
+        // the server stored it.
+        return { conversationId: event.conversationId, updates: [{ kind: "remove", itemId: `message:${late.localId}` }], outcome: "handled", eventType: event.eventType };
+      }
+    }
+    this.enqueuedUserWaiters.get(event.conversationId)?.(serverId);
+    return undefined;
   }
 
   private awaitEnqueuedUser(sessionId: string): { promise: Promise<string>; release: () => void } {
@@ -412,6 +418,9 @@ export class OpenCodeV2Provider implements ChatProvider {
       // closed: remember the local id so the late row can retire it.
       if (enqueued && reported === undefined) {
         this.lateAdmissions.set(sessionId, { localId: messageId, until: Date.now() + OpenCodeV2Provider.LATE_ADMISSION_MS });
+        // A refusal that lands after the window means no row is coming: the
+        // record must not claim the next command's.
+        dispatch.catch(() => { if (this.lateAdmissions.get(sessionId)?.localId === messageId) this.lateAdmissions.delete(sessionId); });
       }
       return { messageId: reported ?? messageId };
     } finally {

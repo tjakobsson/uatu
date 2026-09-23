@@ -388,6 +388,61 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a late row goes to the oldest admission; a newer waiter takes the next one", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    const a = await provider.command("ses_1", { id: "req-a", name: "init", arguments: "" });
+    // B is admitted while A's row is still on its way.
+    const b = provider.command("ses_1", { id: "req-b", name: "review", arguments: "" });
+    await Bun.sleep(5);
+    enqueued("msg_a");
+    let deadline = Date.now() + 2_000;
+    while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual(["upsert message:msg_a", `remove message:${a.messageId}`]);
+    enqueued("msg_b");
+    expect(await b).toEqual({ messageId: "msg_b" });
+    deadline = Date.now() + 2_000;
+    while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual(["upsert message:msg_a", `remove message:${a.messageId}`, "upsert message:msg_b"]);
+    controller.abort();
+    await pump;
+  });
+
+  test("a refusal that lands after the window leaves no claim on the next row", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": async () => { await Bun.sleep(60); return Response.json({ _tag: "CommandNotFoundError", message: "Command not found: nope" }, { status: 404 }); },
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+      }
+    })();
+    const accepted = await provider.command("ses_1", { id: "req-n", name: "nope", arguments: "" });
+    expect(accepted.messageId).toMatch(/^msg_/);
+    await Bun.sleep(100);
+    events.frame({ id: "evt_x", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_x", item: { type: "user", payload: { text: "someone else's prompt" }, delivery: "queue" } } });
+    await Bun.sleep(50);
+    expect(seen).toEqual(["upsert message:msg_x"]);
+    controller.abort();
+    await pump;
+  });
+
   test("a slash command the stream never names keeps its local id once the window closes", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
