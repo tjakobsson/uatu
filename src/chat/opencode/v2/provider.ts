@@ -500,7 +500,11 @@ export class OpenCodeV2Provider implements ChatProvider {
         // told the command was admitted, learns of the refusal the way it
         // learns everything else: as an event. The placeholder goes, the
         // refusal shows, and the turn that never started ends as failed.
+        // Only the server's own refusal, though: a lost response is not a
+        // refusal — the command may be running — so the admission stays and
+        // its row, if it comes, retires the placeholder as usual.
         dispatch.catch((error: unknown) => {
+          if (!isServerRefusal(error)) return;
           this.forgetLateAdmission(sessionId, messageId);
           const message = error instanceof Error && error.message ? error.message : "The command was refused";
           this.inject({ conversationId: sessionId, outcome: "handled", eventType: "session.command.refused", updates: [
@@ -756,6 +760,14 @@ const BUILTIN_COMMANDS: ChatCommand[] = [
 // naming the not-found case, `message` "Session not found: …"); anything
 // else — expired auth, a restarting server, a transport failure — is a
 // provider failure.
+// The server's answer, as the client throws it: a tagged error
+// (`CommandNotFoundError`, `SessionNotFoundError`, …) is a decision the
+// server made. An untagged failure never reached one — the socket, a
+// timeout, an aborted fetch — and decides nothing.
+function isServerRefusal(error: unknown): boolean {
+  return stringValue(asRecord(error)._tag) !== undefined;
+}
+
 function isLookupMiss(error: unknown): boolean {
   const record = asRecord(error);
   const tag = stringValue(record._tag);

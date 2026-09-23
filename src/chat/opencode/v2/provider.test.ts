@@ -472,6 +472,33 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a lost response after the window is not a refusal: the admission stays and its row retires the placeholder", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": async () => { await Bun.sleep(60); throw new TypeError("fetch failed"); },
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) {
+        if (update.kind === "upsert") seen.push(`upsert ${update.item.id}`);
+        if (update.kind === "remove") seen.push(`remove ${update.itemId}`);
+        if (update.kind === "status") seen.push(`status ${update.status}`);
+      }
+    })();
+    const accepted = await provider.command("ses_1", { id: "req-t", name: "init", arguments: "" });
+    await Bun.sleep(120);
+    expect(seen).toEqual([]);
+    events.frame({ id: "evt_t", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_t", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    const deadline = Date.now() + 2_000;
+    while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(seen).toEqual(["upsert message:msg_t", `remove message:${accepted.messageId}`]);
+    controller.abort();
+    await pump;
+  });
+
   test("a prompt's own row never satisfies a waiting command admission", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({
