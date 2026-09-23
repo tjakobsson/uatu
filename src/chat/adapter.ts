@@ -2553,8 +2553,16 @@ export class ChatAdapter {
       this.cancelRevertReconciliation(lifecycle.id);
       this.forgetActivity(lifecycle.id);
     }
+    // A sparse update names only what changed (2.x's rename: id and title).
+    // Parentage it does not mention is unchanged, not cleared: a child
+    // renamed mid-turn must keep mirroring its requests to its parent. A
+    // read that fails leaves the cached answer, which is what it would have
+    // been cleared to.
+    const parentId = lifecycle.sparse
+      ? await this.parentOf(lifecycle.id).catch(() => this.sessionParents.get(lifecycle.id) ?? null)
+      : lifecycle.parentId ?? null;
     // Classification forgets the activity of a session outside the workspace.
-    const next = await this.classifyInventorySession(lifecycle, lifecycle.kind === "deleted");
+    const next = await this.classifyInventorySession({ ...lifecycle, parentId: parentId ?? undefined }, lifecycle.kind === "deleted");
     if (!next.inWorkspace) this.cancelRevertReconciliation(lifecycle.id);
     const previous = this.inventorySessions.get(lifecycle.id);
     const eventDescribesVisibleSession = next.inWorkspace && next.parentId === null;

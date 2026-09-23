@@ -107,6 +107,10 @@ class FakeProvider implements ChatProvider {
     signal.addEventListener("abort", () => this.eventQueue.close(), { once: true });
     const memory = createProviderEventMemory();
     for await (const event of this.eventQueue) {
+      // A pre-normalized event, for shapes only another generation's mapper
+      // produces (a sparse 2.x lifecycle update).
+      const passthrough = (event as { normalized?: NormalizedProviderEvent }).normalized;
+      if (passthrough) { yield passthrough; continue; }
       try {
         const normalized = normalizeProviderEvent(event, memory);
         const turns = this.notificationLifecycle.observe(event, normalized);
@@ -592,6 +596,35 @@ describe("filtered provider event pump", () => {
 
     await adapter.dispose();
     expect((await afterDuplicateDelete).done).toBe(true);
+    await pump;
+  });
+
+  test("a sparse lifecycle update keeps a child's parent; a full record without one promotes it", async () => {
+    const provider = new FakeProvider();
+    const local = fixtureSession("local");
+    const child = { ...fixtureSession("child"), parentId: "local" };
+    provider.sessions = [local, child];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    expect((await adapter.listConversations()).map(conversation => conversation.id)).toEqual(["local"]);
+    const inventory = adapter.subscribeInventory();
+    await expectInventorySignal(inventory);
+    const pump = adapter.startEventPump();
+    await expectInventorySignal(inventory);
+
+    // 2.x's rename names the id and the title only. The child stays a child:
+    // nothing to list, so nothing to invalidate.
+    let settled = false;
+    const afterSparse = inventory.next().then(result => { settled = true; return result; });
+    provider.eventQueue.push({ normalized: { conversationId: "child", updates: [], outcome: "handled", eventType: "session.renamed", sessionLifecycle: { kind: "updated", id: "child", directory: process.cwd(), title: "Child renamed", sparse: true } } });
+    await Bun.sleep(20);
+    expect(settled).toBe(false);
+    expect((await adapter.listConversations()).map(conversation => conversation.id)).toEqual(["local"]);
+
+    // A full record with no parent is the promotion it says it is.
+    provider.eventQueue.push({ type: "session.updated", data: { info: { ...child, parentId: undefined, title: "Child promoted" } } });
+    expect((await afterSparse).done).toBe(false);
+
+    await adapter.dispose();
     await pump;
   });
 

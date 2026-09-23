@@ -124,12 +124,6 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
           directory: optionalString(record(data.location).directory) ?? optionalString(record(event.location).directory) ?? workspace,
           parentID: data.parentID,
         } } };
-      case "session.renamed":
-        return { type: "session.updated", data: { ...stamped, info: {
-          id: string(data.sessionID, "session id"),
-          title: text(data.title),
-          directory: optionalString(record(event.location).directory) ?? workspace,
-        } } };
       case "session.deleted":
         return { type, data: { ...stamped, info: { id: string(data.sessionID, "session id"), title: "", directory: workspace } } };
       case "session.text.started":
@@ -171,6 +165,20 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
     const { conversationId, eventId } = context;
     const createdAt = number(event.created) ?? context.createdAt;
     switch (event.type) {
+      case "session.renamed": {
+        // Only the id and the title travel. Passed to the core as a full
+        // `session.updated`, the missing parent would read as "top-level"
+        // and a renamed child would lose its attribution; flagged sparse,
+        // the adapter keeps the parent it knows.
+        const id = string(data.sessionID, "session id");
+        return { conversationId: conversationId ?? id, updates: [], sessionLifecycle: {
+          kind: "updated",
+          id,
+          directory: optionalString(record(event.location).directory) ?? workspace,
+          title: text(data.title),
+          sparse: true,
+        } };
+      }
       case "session.inbox.enqueued": {
         const item = record(data.item);
         const payload = record(item.payload);

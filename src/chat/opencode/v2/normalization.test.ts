@@ -139,9 +139,10 @@ describe("OpenCode 2.x normalization: a real turn", () => {
 describe("OpenCode 2.x normalization: forms, shell, lifecycle", () => {
   const { byType } = run(FIXTURES.formsShellRenameDelete);
 
-  test("a rename is a lifecycle update carrying the workspace directory", () => {
+  test("a rename is a sparse lifecycle update: the workspace directory and the title, no claim on parentage", () => {
     const [renamed] = byType("session.renamed");
-    expect(renamed?.sessionLifecycle).toMatchObject({ kind: "updated", directory: WORKSPACE, title: "captured" });
+    expect(renamed?.outcome).toBe("handled");
+    expect(renamed?.sessionLifecycle).toEqual({ kind: "updated", id: renamed!.conversationId!, directory: WORKSPACE, title: "captured", sparse: true });
   });
 
   test("a synthetic note is a notice; a shell transcript's note is not repeated", () => {
