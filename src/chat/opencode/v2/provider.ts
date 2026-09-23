@@ -20,7 +20,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { pendingPermissionFields } from "../normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, modelSelection, normalizeStoredMessage, storedAccounting, storedPromptId } from "./normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, modelSelection, normalizeStoredMessage, storedAccounting, storedPromptId, supportedFormFields } from "./normalization";
 import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 
 /**
@@ -432,7 +432,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       return [{
         requestId: form.id,
         conversationId: form.sessionID,
-        questions: form.fields.map(field => formFieldToQuestion(field as Record<string, unknown>)),
+        questions: supportedFormFields(form.fields).map(formFieldToQuestion),
         ...(form.title ? { intro: form.title } : {}),
       }];
     });
@@ -440,7 +440,8 @@ export class OpenCodeV2Provider implements ChatProvider {
 
   async replyQuestion(sessionId: string, requestId: string, answers: string[][]): Promise<void> {
     const detail = await this.client.session.form.get({ sessionID: sessionId, formID: requestId });
-    const answer = formAnswerFromChoices(detail.fields as Array<Record<string, unknown>>, answers);
+    // The same filter the questions were built with, so answer i is field i.
+    const answer = formAnswerFromChoices(supportedFormFields(detail.fields), answers);
     await this.client.session.form.reply({ sessionID: sessionId, formID: requestId, answer });
   }
 

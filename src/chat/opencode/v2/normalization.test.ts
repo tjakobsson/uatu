@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { normalizeProviderEvent as normalizeV1 } from "../v1/normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, type OpenCodeV2Memory } from "./normalization";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formFieldToQuestion, normalizeStoredMessage, type OpenCodeV2Memory } from "./normalization";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../provider";
 
 // Captured from a real OpenCode 2.0.13 `/api/event` stream (sandboxed home,
@@ -244,6 +244,26 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
   test("an unknown type is counted as unrecognized", () => {
     const normalize = createOpenCodeV2Normalizer(WORKSPACE);
     expect(normalize({ id: "evt_u", created: 1, type: "session.future.thing", data: { sessionID: "ses_u" } })).toMatchObject({ conversationId: "ses_u", updates: [], outcome: "unrecognized", eventType: "session.future.thing" });
+  });
+
+  test("a form's external, conditional, and hidden fields are not asked, and answers fold on the rest", () => {
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const memory = createOpenCodeV2Memory();
+    const base = { created: 5, location: { directory: WORKSPACE } };
+    const created = normalize({ ...base, id: "e1", type: "form.created", data: { form: { id: "frm_f", sessionID: "ses_f", title: "Setup", fields: [
+      { key: "login", type: "external", url: "https://example.test/login", title: "Sign in" },
+      { key: "region", type: "string", title: "Region", options: [{ value: "eu", label: "EU" }] },
+      { key: "zone", type: "string", title: "Zone", when: [{ key: "region", op: "eq", value: "eu" }] },
+      { key: "token", type: "string", hidden: true, default: "abc" },
+    ] } } }, memory);
+    const [question] = upserts(created);
+    expect(question).toMatchObject({ type: "question", questions: [{ prompt: "Region" }] });
+    const replied = normalize({ ...base, id: "e2", type: "form.replied", data: { id: "frm_f", sessionID: "ses_f", answer: { login: "done", region: "eu", zone: "z1", token: "abc" } } }, memory);
+    expect(upserts(replied)[0]).toMatchObject({ status: "resolved", outcome: { kind: "answered", answers: [["eu"]] } });
+  });
+
+  test("a stored system record is silent", () => {
+    expect(normalizeStoredMessage({ id: "msg_sys", type: "system", time: { created: 1 }, text: "You are a careful agent." })).toEqual([]);
   });
 
   test("a content restatement lands on the streamed identities", () => {

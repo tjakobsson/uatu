@@ -487,6 +487,23 @@ describe("OpenCode 2.x provider: permissions and forms", () => {
     expect(server.requests("DELETE", "/api/session/ses_1/form/frm_1")).toHaveLength(1);
   });
 
+  test("recovered forms drop unsupported fields, and the reply folds against the same filtered list", async () => {
+    const fields = [
+      { key: "login", type: "external", url: "https://example.test/login" },
+      { key: "region", type: "string", title: "Region", options: [{ value: "eu", label: "EU" }] },
+      { key: "token", type: "string", hidden: true },
+    ];
+    const server = fakeOpenCode({
+      "GET /api/form": () => scoped([{ id: "frm_2", sessionID: "ses_1", title: "Setup", fields }]),
+      "GET /api/session/:id/form/:form": () => ({ id: "frm_2", sessionID: "ses_1", title: "Setup", fields, state: { status: "pending" } }),
+      "POST /api/session/:id/form/:form/reply": () => undefined,
+    });
+    const provider = server.provider();
+    expect((await provider.listQuestions())[0]?.questions).toEqual([expect.objectContaining({ prompt: "Region" })]);
+    await provider.replyQuestion("ses_1", "frm_2", [["EU"]]);
+    expect(server.requests("POST", "/api/session/ses_1/form/frm_2/reply")[0]?.body).toEqual({ answer: { region: "eu" } });
+  });
+
   test("a multiselect over its maximum is refused; an optional one left empty is not", () => {
     const field = { key: "k", type: "multiselect", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }], maxItems: 1 };
     expect(() => formAnswerFromChoices([field], [["A", "B"]])).toThrow(/at most 1 choices/);

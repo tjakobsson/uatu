@@ -294,7 +294,7 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
       case "form.created": {
         const form = record(data.form);
         const requestId = string(form.id, "form id");
-        const fields = array(form.fields).map(field => record(field));
+        const fields = supportedFormFields(form.fields);
         if (memory) remember(memory.forms, requestId, fields.map(field => text(field.key)));
         const intro = optionalString(form.title);
         return { conversationId: conversationId ?? optionalString(form.sessionID), updates: [{ kind: "upsert", item: {
@@ -402,6 +402,19 @@ function restatedContent(messageId: string, content: unknown[], createdAt: numbe
  * a number, or an integer is a free-form answer, validated by the provider
  * before the reply.
  */
+/**
+ * The fields a form is presented with. An `external` field is answered on
+ * another surface (its `url`), a conditional one (`when`) depends on answers
+ * the card cannot evaluate, and a hidden one is the provider's to fill; none
+ * is a question for the user. One filter for the live event, the recovered
+ * list, and the answer fold, so the ordered answers line up with the
+ * questions that were asked.
+ */
+export function supportedFormFields(value: unknown): RecordValue[] {
+  return array(value).map(field => record(field)).filter(field =>
+    field.type !== "external" && field.hidden !== true && array(field.when).length === 0);
+}
+
 export function formFieldToQuestion(field: RecordValue): StructuredQuestion {
   const key = text(field.key);
   const prompt = optionalString(field.title) ?? key;
@@ -525,7 +538,10 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true):
       if (optionalString(record(message.metadata).source) === "shell") return [];
       return [{ id: `notice:${id}`, type: "notice", createdAt, level: "info", message: text(message.text) || "synthetic" }];
     case "system":
-      return [{ id: `notice:${id}`, type: "notice", createdAt, level: "info", message: text(message.text) || "system" }];
+      // Provider-owned context with no live counterpart: showing it on a
+      // reload would change the transcript and expose the agent's own
+      // instructions. Silent, per the history design.
+      return [];
     case "compaction":
       if (message.status === "failed") return [{ id: `notice:${id}`, type: "notice", createdAt, level: "warning", message: `Compaction failed: ${storedErrorMessage(message.error) ?? "unknown error"}` }];
       return [{ id: `notice:${id}`, type: "notice", createdAt, level: "info", message: text(message.summary) || (message.status === "running" ? "Compacting conversation context…" : "Conversation context compacted. Earlier turns are summarized.") }];
