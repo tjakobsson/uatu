@@ -458,7 +458,7 @@ describe("OpenCode 2.x provider: permissions and forms", () => {
   test("ordered answers fold back into the form's keyed answer, validated before the reply", async () => {
     const fields = [
       { key: "choice", type: "string", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }], custom: true, required: true },
-      { key: "many", type: "multiselect", options: [{ value: "x", label: "X" }, { value: "y", label: "Y" }] },
+      { key: "many", type: "multiselect", options: [{ value: "x", label: "X" }, { value: "y", label: "Y" }], minItems: 2, maxItems: 2 },
       { key: "sure", type: "boolean", required: true },
       { key: "count", type: "integer", minimum: 1, maximum: 10 },
       { key: "note", type: "string" },
@@ -479,10 +479,18 @@ describe("OpenCode 2.x provider: permissions and forms", () => {
     await expect(provider.replyQuestion("ses_1", "frm_1", [["A"], ["Z"], ["Yes"], ["2"], []])).rejects.toBeInstanceOf(InvalidQuestionAnswerError);
     await expect(provider.replyQuestion("ses_1", "frm_1", [["A"], [], ["maybe"], ["2"], []])).rejects.toBeInstanceOf(InvalidQuestionAnswerError);
     await expect(provider.replyQuestion("ses_1", "frm_1", [["A"], [], ["Yes"], ["11"], []])).rejects.toBeInstanceOf(InvalidQuestionAnswerError);
+    // One choice where the form wants two: refused here, not by the server.
+    await expect(provider.replyQuestion("ses_1", "frm_1", [["A"], ["X"], ["Yes"], ["2"], []])).rejects.toThrow(/at least 2 choices/);
     expect(server.requests("POST", "/api/session/ses_1/form/frm_1/reply")).toHaveLength(2);
 
     await provider.rejectQuestion("ses_1", "frm_1");
     expect(server.requests("DELETE", "/api/session/ses_1/form/frm_1")).toHaveLength(1);
+  });
+
+  test("a multiselect over its maximum is refused; an optional one left empty is not", () => {
+    const field = { key: "k", type: "multiselect", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }], maxItems: 1 };
+    expect(() => formAnswerFromChoices([field], [["A", "B"]])).toThrow(/at most 1 choices/);
+    expect(formAnswerFromChoices([field], [[]])).toEqual({});
   });
 
   test("a required choice with no answer is refused", () => {

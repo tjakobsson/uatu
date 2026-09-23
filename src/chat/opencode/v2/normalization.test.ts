@@ -316,5 +316,9 @@ describe("form fields as structured questions", () => {
       .toEqual({ prompt: "How many?", header: "Whole number", options: [], multiple: false, allowFreeForm: true });
     expect(formFieldToQuestion({ key: "m", type: "multiselect", title: "Pick", options: [{ value: "x", label: "X" }], custom: true, required: true }))
       .toEqual({ prompt: "Pick", header: "", options: [{ label: "X", description: "" }], multiple: true, allowFreeForm: true });
+    expect(formFieldToQuestion({ key: "b", type: "multiselect", title: "Pick", description: "Any", options: [{ value: "x", label: "X" }], minItems: 1, maxItems: 2 }))
+      .toMatchObject({ header: "Any. Choose 1 to 2", optional: true });
+    expect(formFieldToQuestion({ key: "b", type: "multiselect", title: "Pick", options: [], minItems: 2, maxItems: 2 }).header).toBe("Choose 2");
+    expect(formFieldToQuestion({ key: "b", type: "multiselect", title: "Pick", options: [], maxItems: 3 }).header).toBe("Choose up to 3");
   });
 });

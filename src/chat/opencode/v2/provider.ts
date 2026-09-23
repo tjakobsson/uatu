@@ -569,7 +569,15 @@ export function formAnswerFromChoices(fields: Array<Record<string, unknown>>, an
         const values = given.map(item => valueOf(item) ?? (field.custom === true ? item : undefined));
         if (values.some(value => value === undefined)) throw new InvalidQuestionAnswerError(`"${key}" accepts only its listed choices`);
         if (values.length === 0 && required) throw new InvalidQuestionAnswerError(`"${key}" needs at least one choice`);
-        if (values.length > 0) answer[key] = values as string[];
+        if (values.length === 0) return;
+        // The form's own cardinality, checked here rather than learned from
+        // the server's refusal: the card shows the count, so the reply must
+        // hold to it.
+        const minItems = typeof field.minItems === "number" ? field.minItems : undefined;
+        const maxItems = typeof field.maxItems === "number" ? field.maxItems : undefined;
+        if (minItems !== undefined && values.length < minItems) throw new InvalidQuestionAnswerError(`"${key}" needs at least ${minItems} choices`);
+        if (maxItems !== undefined && values.length > maxItems) throw new InvalidQuestionAnswerError(`"${key}" accepts at most ${maxItems} choices`);
+        answer[key] = values as string[];
         return;
       }
       case "boolean": {

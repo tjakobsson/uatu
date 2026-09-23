@@ -412,8 +412,12 @@ export function formFieldToQuestion(field: RecordValue): StructuredQuestion {
   });
   const required = field.required === true;
   switch (field.type) {
-    case "multiselect":
-      return { prompt, header, options, multiple: true, allowFreeForm: field.custom === true, ...(required ? {} : { optional: true }) };
+    case "multiselect": {
+      // The count the form will accept, on the card: the reply is refused
+      // before dispatch when it is missed, so the user must be able to see it.
+      const hint = selectionCountHint(number(field.minItems), number(field.maxItems));
+      return { prompt, header: hint ? (header ? `${header}. ${hint}` : hint) : header, options, multiple: true, allowFreeForm: field.custom === true, ...(required ? {} : { optional: true }) };
+    }
     case "boolean":
       return { prompt, header, options: [{ label: "Yes", description: "" }, { label: "No", description: "" }], multiple: false, allowFreeForm: false, ...(required ? {} : { optional: true }) };
     case "number":
@@ -424,6 +428,13 @@ export function formFieldToQuestion(field: RecordValue): StructuredQuestion {
         ? { prompt, header, options, multiple: false, allowFreeForm: field.custom !== false, ...(required ? {} : { optional: true }) }
         : { prompt, header, options: [], multiple: false, allowFreeForm: true, ...(required ? {} : { optional: true }) };
   }
+}
+
+export function selectionCountHint(min: number | undefined, max: number | undefined): string {
+  if (min !== undefined && max !== undefined) return min === max ? `Choose ${min}` : `Choose ${min} to ${max}`;
+  if (min !== undefined) return `Choose at least ${min}`;
+  if (max !== undefined) return `Choose up to ${max}`;
+  return "";
 }
 
 function answerValues(value: unknown): string[] {
