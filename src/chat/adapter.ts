@@ -1049,6 +1049,12 @@ export class ChatAdapter {
       // acceptance response, and a terminal status that already landed must
       // not be overwritten back to "running".
       if (projection.status === "sending") projection.statusUpdate("running");
+      // The row goes in at acceptance too, before the rename's round trips:
+      // a provider that later retires this placeholder (a 2.x command whose
+      // server-minted row arrived after its admission window) removes it by
+      // id, and a removal that lands before the row exists is a no-op that
+      // leaves the row beside the server's for good.
+      projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId, ...(input.attachments?.length ? { attachments: input.attachments } : {}) });
       if (renameToFirstPrompt) {
         try {
           // A manual rename can finish while prompt validation is still
@@ -1065,7 +1071,6 @@ export class ChatAdapter {
           }
         } catch { /* cosmetic — listConversations repairs default titles later */ }
       }
-      projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId, ...(input.attachments?.length ? { attachments: input.attachments } : {}) });
       const configuration = this.commitConfiguration(conversationId, this.configurations.get(conversationId) ?? {}, input.model, mode, variant);
       return { messageId: accepted.messageId, configuration, ...(conversation ? { conversation } : {}) };
     } catch (error) {

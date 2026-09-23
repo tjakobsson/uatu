@@ -1698,6 +1698,39 @@ describe("prompt, abort, permission, and question mutations", () => {
       .toBe("Implement a deliberately long model selection request that...");
   });
 
+  test("a command's placeholder is published at acceptance, so a retirement during the first-prompt rename still finds it", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [{ ...fixtureSession("session"), title: "New session - 2026-08-15T12:00:00Z" }];
+    provider.renameSession = async (id, title) => {
+      await Bun.sleep(40);
+      const session = provider.sessions.find(candidate => candidate.id === id)!;
+      const renamed = { ...session, title };
+      provider.sessions[0] = renamed;
+      return renamed;
+    };
+    // The provider reports the local id (window closed), and the server's
+    // row lands, with the placeholder's retirement, while the rename runs.
+    provider.command = async () => {
+      setTimeout(() => provider.eventQueue.push({ normalized: { conversationId: "session", outcome: "handled", eventType: "session.inbox.enqueued", updates: [
+        { kind: "upsert", item: { id: "message:msg_server", type: "user_message", createdAt: 2, text: "Review focus", requestId: "msg_server" } },
+        { kind: "remove", itemId: "message:msg_local" },
+      ] } }), 10);
+      return { messageId: "msg_local" };
+    };
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const pump = adapter.startEventPump();
+    await Bun.sleep(10);
+    await adapter.prompt("session", "request", "/review focus");
+    await Bun.sleep(60);
+    // The live projection, which is what a client renders between events.
+    const live = await adapter.subscribe("session");
+    const ids = live.snapshot.items.filter(item => item.type === "user_message").map(item => item.id);
+    expect(ids).toEqual(["message:msg_server"]);
+    live.events.cancel();
+    await adapter.dispose();
+    await pump;
+  });
+
   test("strictly selects a model and gives the first prompt a provider-owned title", async () => {
     const provider = new FakeProvider();
     provider.sessions = [{ ...fixtureSession("session"), title: "New session - 2026-08-15T12:00:00Z" }];
