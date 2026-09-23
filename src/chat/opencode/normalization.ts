@@ -412,9 +412,13 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
     // than a new item type: the requirement is that the transcript stop lying,
     // and a new type would drag the published ConversationItem schema — and an
     // API revision — into a change that otherwise needs none.
+    // One row per compaction, not per phase: the outcome replaces the
+    // "Compacting…" marker instead of leaving it beside itself. 2.x names
+    // the compaction (`inputID`) on every phase; 1.x does not, and there
+    // each phase keeps its own row as before.
     case "session.compaction.started":
       return { conversationId, updates: [{ kind: "upsert", item: {
-        id: `notice:${eventId}`,
+        id: compactionNoticeId(data, eventId),
         type: "notice",
         createdAt,
         level: "info",
@@ -422,7 +426,7 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
       } }] };
     case "session.compaction.ended":
       return { conversationId, updates: [{ kind: "upsert", item: {
-        id: `notice:${eventId}`,
+        id: compactionNoticeId(data, eventId),
         type: "notice",
         createdAt,
         level: "info",
@@ -506,6 +510,10 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
       // No case matched. The wrapper decides whether that is expected.
       return undefined;
   }
+}
+
+export function compactionNoticeId(data: RecordValue, eventId: string): string {
+  return `notice:compaction:${optionalString(data.inputID) ?? eventId}`;
 }
 
 export function normalizeSessionLifecycle(kind: NormalizedSessionLifecycle["kind"], data: RecordValue): NormalizedSessionLifecycle {

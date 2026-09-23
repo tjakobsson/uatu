@@ -24,8 +24,7 @@ import {
   text,
   timestamp,
   tokensToUsage,
-  usageUpsert,
-} from "../normalization";
+  usageUpsert, compactionNoticeId } from "../normalization";
 import type { ConversationItem, StructuredQuestion, TokenUsage } from "../../types";
 
 export type { NormalizedProviderEvent };
@@ -298,8 +297,10 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         return canonical ? normalizeCanonicalEvent(canonical.type, canonical.data, { ...context, createdAt }) : undefined;
       }
       case "session.compaction.failed":
+        // The same row the started phase opened, so the failure replaces
+        // the "Compacting…" marker rather than joining it.
         return { conversationId, updates: [{ kind: "upsert", item: {
-          id: `notice:${eventId}`,
+          id: compactionNoticeId(data, eventId),
           type: "notice",
           createdAt,
           level: "warning",

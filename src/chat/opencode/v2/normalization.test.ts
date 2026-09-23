@@ -202,14 +202,21 @@ describe("OpenCode 2.x normalization: forms, shell, lifecycle", () => {
 describe("OpenCode 2.x normalization: compaction, switches, interrupted tools", () => {
   test("compaction is marked in place, and its failure is a warning", () => {
     const { byType } = run(FIXTURES.compactionFailedAndAgentSwitch);
-    expect(upserts(byType("session.compaction.started")[0]!)).toEqual([expect.objectContaining({ type: "notice", message: "Compacting conversation context…" })]);
-    expect(upserts(byType("session.compaction.failed")[0]!)).toEqual([expect.objectContaining({ type: "notice", level: "warning", message: expect.stringContaining("Compaction failed") })]);
+    const [started] = upserts(byType("session.compaction.started")[0]!);
+    const [failed] = upserts(byType("session.compaction.failed")[0]!);
+    expect(started).toEqual(expect.objectContaining({ type: "notice", message: "Compacting conversation context…" }));
+    expect(failed).toEqual(expect.objectContaining({ type: "notice", level: "warning", message: expect.stringContaining("Compaction failed") }));
+    // One row: the failure replaces the marker instead of standing beside it.
+    expect(failed!.id).toBe(started!.id);
+    expect(started!.id).toMatch(/^notice:compaction:msg_/);
     expect(byType("session.agent.selected")[0]?.configuration).toEqual({ mode: "plan" });
   });
 
   test("a compaction that finishes summarizes in place", () => {
     const normalize = createOpenCodeV2Normalizer(WORKSPACE);
-    const ended = normalize({ id: "evt_c", created: 1_790_000_000_000, type: "session.compaction.ended", location: { directory: WORKSPACE }, data: { sessionID: "ses_c", reason: "manual", text: "Earlier turns, summarized.", recent: "msg_x" } });
+    const started = normalize({ id: "evt_b", created: 1_789_999_999_000, type: "session.compaction.started", location: { directory: WORKSPACE }, data: { sessionID: "ses_c", reason: "manual", recent: "", inputID: "msg_in" } });
+    const ended = normalize({ id: "evt_c", created: 1_790_000_000_000, type: "session.compaction.ended", location: { directory: WORKSPACE }, data: { sessionID: "ses_c", reason: "manual", text: "Earlier turns, summarized.", recent: "msg_x", inputID: "msg_in" } });
+    expect(upserts(ended)[0]?.id).toBe(upserts(started)[0]?.id);
     expect(upserts(ended)).toEqual([expect.objectContaining({ type: "notice", message: "Earlier turns, summarized." })]);
   });
 
