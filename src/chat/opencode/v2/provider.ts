@@ -493,7 +493,14 @@ export class OpenCodeV2Provider implements ChatProvider {
         enqueued?.promise.then(resolve);
         // A 204 says the command was accepted, not what its row is called:
         // with a stream listening, the id can still arrive inside the window.
-        dispatch.then(() => { if (!enqueued) resolve(undefined); }, reject);
+        // A rejection is an answer when the server gave it (a tagged error)
+        // or when nothing reached the server (a refused connection). A lost
+        // response is neither — the command may be running — so with a
+        // stream listening the row or the window decides, and without one
+        // the caller hears the failure, having nothing else to wait for.
+        dispatch.then(() => { if (!enqueued) resolve(undefined); }, (error: unknown) => {
+          if (!enqueued || isServerRefusal(error) || isConnectionRefused(error)) reject(error);
+        });
       });
       if (enqueued && reported === undefined) {
         // The stream had not named the row when the window closed. Remember
@@ -771,12 +778,30 @@ const BUILTIN_COMMANDS: ChatCommand[] = [
 // naming the not-found case, `message` "Session not found: …"); anything
 // else — expired auth, a restarting server, a transport failure — is a
 // provider failure.
+// The client wraps what happened in a `ClientError` whose `cause` is the
+// original failure; the facts sit somewhere down that chain.
+function* causes(error: unknown): Generator<Record<string, unknown>> {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    const record = asRecord(current);
+    yield record;
+    current = record.cause;
+  }
+}
+
 // The server's answer, as the client throws it: a tagged error
 // (`CommandNotFoundError`, `SessionNotFoundError`, …) is a decision the
 // server made. An untagged failure never reached one — the socket, a
 // timeout, an aborted fetch — and decides nothing.
 function isServerRefusal(error: unknown): boolean {
-  return stringValue(asRecord(error)._tag) !== undefined;
+  for (const record of causes(error)) if (stringValue(record._tag) !== undefined) return true;
+  return false;
+}
+
+// The socket's own refusal: nothing was sent, so nothing was accepted.
+function isConnectionRefused(error: unknown): boolean {
+  for (const record of causes(error)) if (record.code === "ConnectionRefused" || record.code === "ECONNREFUSED") return true;
+  return false;
 }
 
 function isLookupMiss(error: unknown): boolean {

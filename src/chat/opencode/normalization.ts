@@ -489,13 +489,19 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
       ] };
     }
     case "session.retry.scheduled":
-      return { conversationId, updates: [{ kind: "upsert", item: {
-        id: `notice:${eventId}`,
-        type: "notice",
-        createdAt,
-        level: "warning",
-        message: text(data.message) || errorMessage(data.error) || "Retrying the turn",
-      } }] };
+      // The failed step that precedes this ended the turn as failed; the
+      // retry means it is still live, and a live turn holds prompts and
+      // stays in the workspace's activity.
+      return { conversationId, updates: [
+        { kind: "upsert", item: {
+          id: `notice:${eventId}`,
+          type: "notice",
+          createdAt,
+          level: "warning",
+          message: text(data.message) || errorMessage(data.error) || "Retrying the turn",
+        } },
+        { kind: "status", status: "retrying" },
+      ] };
     default:
       // No case matched. The wrapper decides whether that is expected.
       return undefined;

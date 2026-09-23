@@ -688,6 +688,42 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await pump;
   });
 
+  test("a lost response inside the window is not a refusal: the row, or the window, decides", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": async () => { await Bun.sleep(10); throw new TypeError("fetch failed"); },
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 500 });
+    const controller = new AbortController();
+    const pump = (async () => { for await (const _ of provider.events(controller.signal)) { /* drain */ } })();
+    await Bun.sleep(10);
+    const admission = provider.command("ses_1", { id: "req-l", name: "init", arguments: "" });
+    await Bun.sleep(40);
+    events.frame({ id: "evt_l", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_l", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    expect(await admission).toEqual({ messageId: "msg_l" });
+    controller.abort();
+    await pump;
+  });
+
+  test("a refused connection inside the window is a refusal even with a stream listening", async () => {
+    const events = pushableEvents();
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "POST /api/session/:id/command": async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); },
+    });
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 500 });
+    const controller = new AbortController();
+    const pump = (async () => { for await (const _ of provider.events(controller.signal)) { /* drain */ } })();
+    await Bun.sleep(10);
+    const started = Date.now();
+    // The client wraps it as a transport error; the refusal sits in its cause.
+    await expect(provider.command("ses_1", { id: "req-r", name: "init", arguments: "" })).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(400);
+    controller.abort();
+    await pump;
+  });
+
   test("an invalid command rejects within the admission window", async () => {
     const server = fakeOpenCode({ "POST /api/session/:id/command": () => Response.json({ _tag: "CommandNotFoundError", message: "Command not found: nope" }, { status: 404 }) });
     await expect(server.provider().command("ses_1", { id: "req-4", name: "nope", arguments: "" })).rejects.toThrow();

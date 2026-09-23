@@ -195,7 +195,9 @@ describe("OpenCode v2 normalization", () => {
     ];
     const normalized = fixtures.flatMap(fixture => normalizeProviderEvent(fixture).updates);
     expect(normalized.map(update => update.kind === "upsert" ? update.item.type : update.kind)).toEqual([
-      "file_change", "permission", "question", "notice", "notice", "status", "status",
+      // The retry's notice is followed by its "retrying" status: a scheduled
+      // retry keeps the turn live.
+      "file_change", "permission", "question", "notice", "status", "notice", "status", "status",
     ]);
     const question = normalized.find(update => update.kind === "upsert" && update.item.type === "question");
     expect(question).toEqual(expect.objectContaining({ item: expect.objectContaining({

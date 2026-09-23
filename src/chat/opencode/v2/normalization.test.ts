@@ -290,6 +290,20 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
       .toEqual([expect.objectContaining({ type: "notice", level: "error", message: "Model unavailable" })]);
   });
 
+  test("a scheduled retry puts a failed step's turn back among the live ones", () => {
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const memory = createOpenCodeV2Memory();
+    const base = { created: 5, location: { directory: WORKSPACE } };
+    const at = (type: string, data: Record<string, unknown>) => normalize({ ...base, id: `e_${type}`, type, data: { sessionID: "ses_r", ...data } }, memory);
+    at("session.execution.started", {});
+    expect(at("session.step.failed", { assistantMessageID: "msg_r", error: { type: "rate-limit", message: "Rate limited" } }).updates).toContainEqual({ kind: "status", status: "failed", message: "Rate limited" });
+    const retry = at("session.retry.scheduled", { message: "Retrying in 3s" });
+    expect(retry.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ type: "notice", level: "warning", message: "Retrying in 3s" }) },
+      { kind: "status", status: "retrying" },
+    ]);
+  });
+
   test("a stored system record is silent", () => {
     expect(normalizeStoredMessage({ id: "msg_sys", type: "system", time: { created: 1 }, text: "You are a careful agent." })).toEqual([]);
   });
