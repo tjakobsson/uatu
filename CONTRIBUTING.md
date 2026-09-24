@@ -126,7 +126,7 @@ declare, what uatu does with it: dedicated, generic, ignored, unhandled, or
 behavior-missing. The matrices, their badges (`docs/agents/*.svg`), and the
 README block between the `agent-coverage` markers are generated; do not edit
 them by hand. After an agent SDK bump (`@anthropic-ai/claude-agent-sdk`,
-`@opencode-ai/sdk`, `@opencode/client`), or after changing how a normalizer or
+`@anthropic-ai/sdk`, `@opencode-ai/sdk`, `@opencode/client`), or after changing how a normalizer or
 renderer treats a type, run:
 
 ```bash

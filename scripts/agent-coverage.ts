@@ -674,12 +674,26 @@ export function generate(root = REPO_ROOT): GeneratedFile[] {
   const files: GeneratedFile[] = reports.flatMap(report => {
     const matrix = `${MATRIX_DIR}/${report.id}.md`;
     return [
-      { path: matrix, content: renderMatrix(report, read(matrix)) },
+      { path: matrix, content: renderMatrix(report, committedBaseline(root, matrix, read)) },
       { path: `${MATRIX_DIR}/${report.id}.svg`, content: renderBadge(report) },
     ];
   });
   files.push({ path: "README.md", content: replaceReadmeBlock(read("README.md") ?? "", renderReadmeBlock(reports)) });
   return files;
+}
+
+/**
+ * The matrix the "since" section compares against: the committed one
+ * (`HEAD`), not the working-tree file the generator overwrites — two runs
+ * across two candidate versions must still compare with what was committed.
+ * Outside a repository (a copied tree) the file on disk is the baseline.
+ */
+export function committedBaseline(root: string, file: string, read: (file: string) => string | undefined): string | undefined {
+  const inRepo = Bun.spawnSync(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], { stdout: "pipe", stderr: "pipe" });
+  if (inRepo.exitCode !== 0 || inRepo.stdout.toString().trim() !== "true") return read(file);
+  const committed = Bun.spawnSync(["git", "-C", root, "show", `HEAD:${file}`], { stdout: "pipe", stderr: "pipe" });
+  // Not in HEAD yet: nothing was committed, so this is the first generation.
+  return committed.exitCode === 0 ? committed.stdout.toString() : undefined;
 }
 
 /** The committed outputs under `root` that differ from what the generator produces now. */

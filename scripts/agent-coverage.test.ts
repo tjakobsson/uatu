@@ -14,6 +14,7 @@ import {
   README_START,
   REPO_ROOT,
   claudeReport,
+  committedBaseline,
   extractClaude,
   extractOpenCode,
   generate,
@@ -183,6 +184,29 @@ describe("agent coverage: outputs", () => {
     // The regenerated matrix, regenerated again, still names the bump.
     const next = renderMatrix(claude, previous);
     expect(renderMatrix(claude, next)).toBe(next);
+  });
+
+  test("the since baseline is the committed matrix, not an intermediate regeneration", () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "uatu-coverage-git-"));
+    const git = (...args: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { stdout: "pipe", stderr: "pipe" });
+    git("init", "-q");
+    const file = `${MATRIX_DIR}/claude-code.md`;
+    mkdirSync(path.join(repo, MATRIX_DIR), { recursive: true });
+    const read = (name: string) => readFileSync(path.join(repo, name), "utf8");
+    // Nothing committed yet: first generation, whatever the working tree holds.
+    writeFileSync(path.join(repo, file), "intermediate\n");
+    expect(committedBaseline(repo, file, read)).toBeUndefined();
+    writeFileSync(path.join(repo, file), "committed\n");
+    git("add", ".");
+    expect(git("commit", "-q", "-m", "baseline").exitCode).toBe(0);
+    // A later run overwrote the working tree; the baseline stays what HEAD holds.
+    writeFileSync(path.join(repo, file), "intermediate\n");
+    expect(committedBaseline(repo, file, read)).toBe("committed\n");
+    // Outside a repository the file on disk is the baseline.
+    const loose = mkdtempSync(path.join(tmpdir(), "uatu-coverage-loose-"));
+    mkdirSync(path.join(loose, MATRIX_DIR), { recursive: true });
+    writeFileSync(path.join(loose, file), "on disk\n");
+    expect(committedBaseline(loose, file, name => readFileSync(path.join(loose, name), "utf8"))).toBe("on disk\n");
   });
 
   test("a hand edit to a carried-forward since section is rejected, even one that still parses", () => {

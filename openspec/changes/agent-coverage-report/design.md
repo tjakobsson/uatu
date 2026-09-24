@@ -153,7 +153,10 @@ them without counting; the part probe reports them as ignored.
 **D6 — "Since previous version" is computed from the committed matrix.**
 The generator parses the matrix it is about to overwrite — the version header
 and the entry names per axis — and writes added/removed lists against that
-version. No separate history file; git holds the history. While the versions stand
+version. No separate history file; git holds the history, and the baseline
+is read from `HEAD` (the working-tree file only outside a repository), so
+regenerating twice across candidate versions still compares with what was
+committed. While the versions stand
 still the section is carried forward, and nothing in the working tree can
 recompute it (its baseline is the previous SDK's vocabulary); its start
 marker therefore carries a seal, a digest of its content and the version
@@ -161,7 +164,9 @@ line, and a carried-forward section whose seal does not match fails the
 generator as a hand edit.
 
 **D7 — Exact pin for the Claude SDK.** `"@anthropic-ai/claude-agent-sdk": "0.3.261"`
-(the version currently in the lockfile). Renovate already opens bump PRs; the
+(the version currently in the lockfile), and `"@anthropic-ai/sdk": "0.124.0"`: the
+agent SDK only names it as an open-ended peer, yet its block unions feed two
+axes, so it is pinned in its own right. Renovate already opens bump PRs; the
 freshness test turns each into the triage point.
 
 **D8 — Where the generator lives.** `scripts/agent-coverage.ts` with its test
