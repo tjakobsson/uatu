@@ -29,6 +29,17 @@ export async function resetE2EWorkspace(workspaceRootOverride?: string): Promise
   // open that directory — not what most tests assume as a starting state.
   // Use a timestamp 10s in the future so that even after second-precision
   // truncation at the fs layer, it's strictly newer than every copied file.
+  await promoteRootReadme(root);
+}
+
+/**
+ * Stamps the root README 10s in the future so it is strictly the newest file
+ * and therefore the session's default selection. A plain write resets the
+ * mtime to "now", which on a coarse-clock filesystem can equal the last
+ * copied fixture's; the path tie-break then prefers an earlier-sorting file
+ * (`metadata/markdown-toml.md` opened instead of the README a test seeded).
+ */
+export async function promoteRootReadme(root: string): Promise<void> {
   const future = new Date(Date.now() + 10_000);
   await fs.utimes(path.join(root, "README.md"), future, future);
 }
