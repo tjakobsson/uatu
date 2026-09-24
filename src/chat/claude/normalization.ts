@@ -568,7 +568,7 @@ function normalizeMessage(
       const notification = parseTaskNotification(rawText);
       // A notification that fails to parse shows nothing rather than its markup.
       if (!notification) return { ...frame, outcome: "ignored" };
-      return backgroundTaskUpdate(storedNotificationRecord(notification, record, memory), memory, base);
+      return backgroundTaskUpdate(storedNotificationRecord(notification, record, memory), memory, frame);
     }
     // A slash command is stored as tag markup; the bubble shows what was
     // typed, the same fold the session title reads.

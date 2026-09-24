@@ -171,6 +171,13 @@ describe("Claude normalization: what it skips, it reports", () => {
     const stored = normalizeClaudeMessage({ type: "user", uuid: "u5", timestamp: at, message: { content: [{ type: "search_result" }] } }, memory, "stored");
     expect(stored.outcome).toBe("ignored");
     expect(stored.skippedBlocks).toEqual(["search_result"]);
+    // A stored task notification settles its row and still reports what it skipped.
+    const notified = normalizeClaudeMessage({ type: "user", uuid: "u6", timestamp: at, origin: "task-notification", message: { content: [
+      { type: "text", text: "<task-notification><task-id>t1</task-id><status>completed</status><summary>done</summary></task-notification>" },
+      { type: "document", source: {} },
+    ] } }, memory, "stored");
+    expect(notified.outcome).toBe("handled");
+    expect(notified.skippedBlocks).toEqual(["document"]);
   });
 
   test("a recognized message whose payload throws is unparseable and the next message still normalizes", () => {
