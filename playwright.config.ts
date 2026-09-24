@@ -13,12 +13,10 @@ export default defineConfig({
   workers: 4,
   // CI re-runs failed tests up to twice so parallel-worker flakes don't
   // block PRs; real regressions still fail consistently. Locally `retries:
-  // 0` keeps tests strict so flakes surface immediately. The trace is
-  // recorded on every attempt and kept only when it fails: a flake that
-  // passes on retry fails first, and "on-first-retry" left exactly that
-  // first failure without evidence. Tests that launch their own browser
-  // (the WebKit viewport and frame-budget suites) are outside this context
-  // and record only the API calls.
+  // 0` keeps tests strict so flakes surface immediately. The `trace:
+  // "on-first-retry"` config below captures debug artifacts when a retry
+  // happens, so chronic flakes remain investigable. Revisit later as part
+  // of a broader e2e-harness pass.
   retries: process.env.CI ? 2 : 0,
   timeout: 30_000,
   expect: {
@@ -29,6 +27,6 @@ export default defineConfig({
     : [["list"], ["html", { open: "never" }]],
   use: {
     ...devices["Desktop Chrome"],
-    trace: "retain-on-failure",
+    trace: "on-first-retry",
   },
 });
