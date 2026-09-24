@@ -4,12 +4,18 @@
 Define documented, reproducible, secure repository workflows for contribution, validation, dependency maintenance, testing, and releases without adding test tooling to the shipped runtime.
 ## Requirements
 ### Requirement: Repository README documents project usage and validation
-The repository SHALL provide a root `README.md` that explains what `uatu` is, how users install and run the application, and where contributors can find the canonical contribution guide. Detailed branch, OpenSpec, validation, and release procedures MUST live in `CONTRIBUTING.md` and `docs/RELEASING.md` rather than expanding the user-facing README.
+The repository SHALL provide a root `README.md` that explains what `uatu` is, how users install and run the application, and where contributors can find the canonical contribution guide. Detailed branch, OpenSpec, validation, and release procedures MUST live in `CONTRIBUTING.md` and `docs/RELEASING.md` rather than expanding the user-facing README. The README SHALL carry a generated block, placed with the feature description rather than among the repository's build and quality badges, that states what the coverage badges measure and shows, per supported agent, a coverage badge linked to that agent's coverage matrix; the block's content is owned by the coverage generator and MUST NOT be edited by hand.
 
 #### Scenario: A user opens the repository homepage
 - **WHEN** a user views the root `README.md`
 - **THEN** they can understand, install, and run `uatu`
 - **AND** a prospective contributor can follow a link to `CONTRIBUTING.md` for development procedures
+
+#### Scenario: A reader checks agent coverage from the README
+- **WHEN** a reader views the root `README.md`
+- **THEN** each supported agent shows a badge naming its version and its count of coverage gaps
+- **AND** the badges are introduced by a sentence saying what they measure
+- **AND** activating the badge opens that agent's coverage matrix
 
 ### Requirement: Repository documents contributor and maintainer workflows
 The repository SHALL provide a root `CONTRIBUTING.md` as the canonical guide for development setup, branch and pull-request practices, Conventional Commit expectations, OpenSpec change management, and required validation — including the project's test policy: changes that add or change functionality MUST include tests. The repository SHALL additionally provide `docs/RELEASING.md` as the canonical maintainer runbook for version semantics, release-note inclusion, the Release Please lifecycle, required repository configuration, release verification, reruns, and failure recovery. The documents MUST describe the actual automated workflow and MUST link to each other where responsibilities cross.
@@ -85,7 +91,7 @@ The repository SHALL organize its GitHub validation workflows so that their stat
 - **THEN** that status can be derived from the GitHub Actions workflow state rather than a separate custom reporting system
 
 ### Requirement: Repository tooling versions are kept current
-The repository SHALL use GitHub-native automation to check for updates to npm dependencies, Bun/runtime versions, and GitHub Actions references so that repository tooling does not silently age behind current releases. Update automation MUST remain compatible with pinned action and runtime versions. The update automation MUST additionally surface published security advisories, including advisories affecting transitive (indirect) dependencies and advisories whose fixed version is already satisfied by an existing manifest version range. To achieve this the automation MUST be configured to refresh the dependency lockfile so in-range and transitive fixes are pulled in, and MUST be configured with a vulnerability-alert data source that does not depend on a separate GitHub feature being enabled out-of-band. Because manifest-driven vulnerability alerting only covers direct dependencies, the repository MUST ALSO run a scheduled, PR-independent audit that scans the full installed dependency tree (including transitive packages) and surfaces advisories through GitHub-native workflow status, so a transitive advisory published between pull requests does not go unsurfaced.
+The repository SHALL use GitHub-native automation to check for updates to npm dependencies, Bun/runtime versions, and GitHub Actions references so that repository tooling does not silently age behind current releases. Update automation MUST remain compatible with pinned action and runtime versions. The update automation MUST additionally surface published security advisories, including advisories affecting transitive (indirect) dependencies and advisories whose fixed version is already satisfied by an existing manifest version range. To achieve this the automation MUST be configured to refresh the dependency lockfile so in-range and transitive fixes are pulled in, and MUST be configured with a vulnerability-alert data source that does not depend on a separate GitHub feature being enabled out-of-band. Because manifest-driven vulnerability alerting only covers direct dependencies, the repository MUST ALSO run a scheduled, PR-independent audit that scans the full installed dependency tree (including transitive packages) and surfaces advisories through GitHub-native workflow status, so a transitive advisory published between pull requests does not go unsurfaced. Every package whose declarations feed the agent coverage report — each agent SDK, and the API SDK whose content-block types an agent SDK refers to — MUST be pinned to an exact version in the manifest, so the version the report names is the version the code runs against and an update arrives as a reviewable pull request that carries the regenerated report.
 
 #### Scenario: A dependency or workflow version becomes outdated
 - **WHEN** a newer compatible version of an npm dependency, Bun runtime, or GitHub Action is available
@@ -100,6 +106,11 @@ The repository SHALL use GitHub-native automation to check for updates to npm de
 - **WHEN** a security advisory is published against a transitive dependency and no pull request is open to trigger the per-PR audit gate
 - **THEN** the scheduled dependency-audit workflow scans the full installed tree on its next run and fails on a moderate-or-higher advisory
 - **AND** the failing scheduled run surfaces the advisory through GitHub-native workflow status rather than relying on the advisory being noticed manually
+
+#### Scenario: An agent SDK update carries its coverage report
+- **WHEN** the update automation proposes a new version of an agent SDK
+- **THEN** the manifest names that exact version
+- **AND** the pull request cannot pass validation until the coverage report is regenerated against it
 
 ### Requirement: Test-only DOM-simulation tooling runs under the pinned Bun runtime
 Any third-party library used by the repository's test suite to simulate a browser DOM (creating `Document`/`Window` objects, parsing `innerHTML`, executing `querySelector`/`querySelectorAll`, reading inline styles, etc.) MUST run cleanly under the project's pinned Bun runtime version. A library that depends on Node-specific runtime behavior that Bun does not faithfully reproduce — most notably installing global constructors on a contextified `Window` via `vm.createContext` and `Script.runInContext` — MUST NOT be selected, even if it is otherwise the fastest or most popular option.

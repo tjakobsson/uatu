@@ -110,7 +110,11 @@ completion, warnings, errors, and per-message token usage attributed to
 the reporting model. Assistant text SHALL be delivered as it streams, not
 only per completed block. An event the server does not recognize, or whose
 payload it cannot parse, SHALL be skipped without ending the stream and
-SHALL be counted by type without recording payloads.
+SHALL be counted by type without recording payloads. A content block of a
+type the server does not recognize inside a recognized message SHALL
+likewise be skipped and counted by block type without recording its
+payload, so an unknown block is measured the same way an unknown message
+is.
 
 #### Scenario: A streamed turn renders as shared timeline items
 - **WHEN** a Claude Code turn streams assistant text, reasoning, and tool activity
@@ -130,6 +134,21 @@ SHALL be counted by type without recording payloads.
 #### Scenario: An unrecognized event does not end the stream
 - **WHEN** a Claude Code session emits an event shape the workspace does not recognize
 - **THEN** the event is skipped and counted by type
+- **AND** the conversation stream continues
+
+#### Scenario: An unrecognized content block is counted
+- **WHEN** an assistant or user message carries a content block of a type the workspace does not recognize
+- **THEN** the recognized blocks of that message are rendered as usual
+- **AND** the unknown block is skipped and counted by its block type without recording its payload
+
+#### Scenario: An unrecognized system subtype is counted by subtype
+- **WHEN** a Claude Code session emits a `system` message whose subtype the workspace neither handles nor deliberately ignores
+- **THEN** the message is skipped and counted as unrecognized under its subtype, not as a deliberately ignored message
+- **AND** the conversation stream continues
+
+#### Scenario: A recognized event with an unusable payload does not end the stream
+- **WHEN** a Claude Code session emits a recognized event type whose payload lacks what its handling requires
+- **THEN** the event is skipped and counted as unparseable
 - **AND** the conversation stream continues
 
 ### Requirement: Tool permissions are brokered interactively
