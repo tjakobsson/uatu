@@ -527,6 +527,11 @@ function normalizeMessage(
     if (!envelope) return { ...base, outcome: "unparseable" };
     const message = asRecord(record.message);
     const blocks = contentBlocks(message.content);
+    // Unknown blocks are reported whatever becomes of the frame — a live
+    // echo or an otherwise empty record is dropped, but what it carried
+    // that no reader handles is still counted.
+    const skipped = skippedBlockTypes(blocks, USER_BLOCKS);
+    const frame = { ...base, ...(skipped.length ? { skippedBlocks: skipped } : {}) };
     const results = blocks.filter(block => block.type === "tool_result");
     if (results.length > 0) {
       const toolOutcome = asRecord(record.toolUseResult ?? record.tool_use_result);
@@ -534,18 +539,17 @@ function normalizeMessage(
         .map(block => toolResultUpdate(block, envelope, memory, toolOutcome, parentSessionId))
         .filter((update): update is NormalizedProviderUpdate => update !== null);
       rememberFrameItems(memory, envelope.uuid, updates);
-      const skippedBlocks = skippedBlockTypes(blocks, USER_BLOCKS);
-      return { ...base, outcome: updates.length > 0 ? "handled" : "ignored", updates, ...(skippedBlocks.length ? { skippedBlocks } : {}) };
+      return { ...frame, outcome: updates.length > 0 ? "handled" : "ignored", updates };
     }
     if (source === "live") {
       // The provider minted this user message when it accepted the prompt.
-      return { ...base, outcome: "ignored" };
+      return { ...frame, outcome: "ignored" };
     }
     // A record the CLI wrote on the person's behalf — a skill's preamble,
     // a local-command caveat, an image caption — is not the person's words
     // and gets no bubble (spec: harness-authored records are never
     // presented as the user's messages).
-    if (record.isMeta === true) return { ...base, outcome: "ignored" };
+    if (record.isMeta === true) return { ...frame, outcome: "ignored" };
     const rawText = typeof message.content === "string"
       ? message.content
       : blocks.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text as string).join("\n");
@@ -563,7 +567,7 @@ function normalizeMessage(
     if (readsAsTaskNotification(authored, rawText)) {
       const notification = parseTaskNotification(rawText);
       // A notification that fails to parse shows nothing rather than its markup.
-      if (!notification) return { ...base, outcome: "ignored" };
+      if (!notification) return { ...frame, outcome: "ignored" };
       return backgroundTaskUpdate(storedNotificationRecord(notification, record, memory), memory, base);
     }
     // A slash command is stored as tag markup; the bubble shows what was
@@ -579,12 +583,10 @@ function normalizeMessage(
         const mimeType = typeof media === "string" ? media : "image/png";
         return { name: `attachment-${index + 1}.${mimeType.split("/")[1] ?? "png"}`, mimeType };
       });
-    if (!text && attachments.length === 0) return { ...base, outcome: "ignored" };
-    const skippedBlocks = skippedBlockTypes(blocks, USER_BLOCKS);
+    if (!text && attachments.length === 0) return { ...frame, outcome: "ignored" };
     return {
-      ...base,
+      ...frame,
       outcome: "handled",
-      ...(skippedBlocks.length ? { skippedBlocks } : {}),
       updates: [{ kind: "upsert", item: {
         id: `message:${envelope.uuid}`,
         type: "user_message",

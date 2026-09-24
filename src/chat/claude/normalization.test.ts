@@ -161,6 +161,18 @@ describe("Claude normalization: what it skips, it reports", () => {
     expect(normalized.skippedBlocks).toEqual(["document"]);
   });
 
+  test("unknown blocks are reported even when the user frame itself is dropped", () => {
+    const memory = createClaudeEventMemory();
+    // A live echo is dropped whole (the provider minted the message), and a
+    // stored record of nothing readable is dropped too; both still report.
+    const echo = normalizeClaudeMessage({ type: "user", uuid: "u4", timestamp: at, message: { content: [{ type: "text", text: "hi" }, { type: "document", source: {} }] } }, memory, "live");
+    expect(echo.outcome).toBe("ignored");
+    expect(echo.skippedBlocks).toEqual(["document"]);
+    const stored = normalizeClaudeMessage({ type: "user", uuid: "u5", timestamp: at, message: { content: [{ type: "search_result" }] } }, memory, "stored");
+    expect(stored.outcome).toBe("ignored");
+    expect(stored.skippedBlocks).toEqual(["search_result"]);
+  });
+
   test("a recognized message whose payload throws is unparseable and the next message still normalizes", () => {
     const memory = createClaudeEventMemory();
     const broken = { type: "assistant", uuid: "a4", timestamp: at, get message(): unknown { throw new Error("broken payload"); } };

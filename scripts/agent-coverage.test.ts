@@ -115,6 +115,8 @@ describe("agent coverage: classification", () => {
       .toThrow(/annotates system\/no_such_subtype, which the installed SDK does not declare/);
     expect(() => claudeReport(vocabulary, { ...claudeCoverageAnnotations, behaviorMissing: { NoSuchTool: "x" } }))
       .toThrow(/annotates NoSuchTool/);
+    expect(() => claudeReport(vocabulary, { ...claudeCoverageAnnotations, behaviorMissing: { ...claudeCoverageAnnotations.behaviorMissing, active_goal: "x" } }))
+      .toThrow(/marks active_goal behavior-missing, but it is unhandled, not rendered/);
     expect(() => claudeReport(vocabulary, { ...claudeCoverageAnnotations, toolNames: { NoSuchInput: "NoSuch" } }))
       .toThrow(/maps NoSuchInput, which sdk-tools\.d\.ts does not declare/);
     expect(() => openCodeReport(extractOpenCode(), { reasons: { "2.x:no.such.event": "stale" }, behaviorMissing: {} }))

@@ -411,6 +411,9 @@ export function annotate(axes: Axis[], annotations: CoverageAnnotations, module:
   for (const [key, reason] of Object.entries(annotations.behaviorMissing)) {
     const entry = resolve(key);
     if (!reason.trim()) throw new Error(`agent coverage: ${module} marks ${key} behavior-missing without a reason`);
+    // Behavior-missing means "renders, but does not work": an entry that is
+    // not rendered at all has nothing to be missing behavior behind.
+    if (entry.state !== "dedicated" && entry.state !== "generic") throw new Error(`agent coverage: ${module} marks ${key} behavior-missing, but it is ${entry.state}, not rendered`);
     entry.state = "behavior-missing";
     entry.reason = reason;
   }
