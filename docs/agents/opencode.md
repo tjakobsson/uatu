@@ -18,7 +18,7 @@ Each entry is classified by running uatu's own normalizers and renderers on a st
 | unhandled | not used yet, and no decision made: a gap |
 | behavior-missing | shown, but uatu does not yet deliver what it does: a gap; the reason says what fails |
 
-<!-- agent-coverage:since:start -->
+<!-- agent-coverage:since:start seal=44c9210c134ccd90 -->
 ## Since the previous generation
 
 First generation: there is no previous matrix to compare against.

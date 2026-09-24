@@ -178,6 +178,22 @@ describe("agent coverage: outputs", () => {
     expect(renderMatrix(claude, next)).toBe(next);
   });
 
+  test("a hand edit to a carried-forward since section is rejected, even one that still parses", () => {
+    const previous = renderMatrix(claude, undefined)
+      .replace(/^Generated against .*$/m, "Generated against `@anthropic-ai/claude-agent-sdk` 0.0.1.")
+      .replace(/^\| `active_goal` \|.*\n/m, "");
+    const next = renderMatrix(claude, previous);
+    expect(next).toContain("added `active_goal`");
+    for (const edited of [
+      next.replace("added `active_goal`", "added `something_else`"),
+      next.replace("## Since `@anthropic-ai/claude-agent-sdk` 0.0.1", "## Since `@anthropic-ai/claude-agent-sdk` 0.0.2"),
+      next.replace(/^<!-- agent-coverage:since:start seal=[0-9a-f]+ -->$/m, "<!-- agent-coverage:since:start -->"),
+    ]) {
+      expect(edited).not.toBe(next);
+      expect(() => renderMatrix(claude, edited)).toThrow(/does not match its seal, so it was edited by hand/);
+    }
+  });
+
   test("the badge carries agent, version, and gap count, is green only at zero gaps, and has no timestamp", () => {
     const svg = renderBadge(claude);
     expect(svg).toContain(`Claude Code: ${claude.badgeVersion} · `);

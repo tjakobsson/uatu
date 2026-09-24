@@ -14,6 +14,7 @@
  * `scripts/agent-coverage.test.ts` regenerates in memory and fails when the
  * committed files differ.
  */
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
@@ -471,7 +472,12 @@ export function gapCount(report: AgentReport): number {
 // Rendering
 
 export const MATRIX_DIR = "docs/agents";
-const SINCE_START = "<!-- agent-coverage:since:start -->";
+// The start marker carries a seal: a digest of the block's content and the
+// version line it was written under. A carried-forward block has no other
+// source to be checked against (its baseline is the previous SDK's
+// vocabulary, which only git remembers), so the seal is what makes a hand
+// edit to it detectable.
+const SINCE_START_PREFIX = "<!-- agent-coverage:since:start seal=";
 const SINCE_END = "<!-- agent-coverage:since:end -->";
 const VERSION_PREFIX = "Generated against ";
 
@@ -485,7 +491,7 @@ const STATE_MEANING: Record<CoverageState, string> = {
 
 export type Since = { previous?: string; changes: Array<{ axis: string; added: string[]; removed: string[] }> };
 
-/** The previous matrix's version line, its entry names per axis, and its "since" record, parsed from the committed file. */
+/** The previous matrix's version line, its entry names per axis, and its "since" record (when its seal holds), parsed from the committed file. */
 export function parseMatrix(markdown: string): { versionLine?: string; axes: Map<string, Set<string>>; since?: Since } {
   const lines = markdown.split("\n");
   const versionLine = lines.find(line => line.startsWith(VERSION_PREFIX))?.slice(VERSION_PREFIX.length).replace(/\.$/, "");
@@ -498,30 +504,36 @@ export function parseMatrix(markdown: string): { versionLine?: string; axes: Map
     const cell = /^\| `([^`]+)` \|/.exec(line);
     if (axis && cell) axis.add(cell[1]!);
   }
-  const since = parseSince(lines);
+  const since = versionLine === undefined ? undefined : parseSince(lines, versionLine);
   return { versionLine, axes, ...(since === undefined ? {} : { since }) };
 }
 
-// The "since" block back into data, so carrying it forward re-renders it
-// rather than copying text a hand edit could have changed.
-function parseSince(lines: string[]): Since | undefined {
-  const start = lines.indexOf(SINCE_START);
+// The "since" block back into data, or undefined when it is missing,
+// unparseable, or its content no longer matches its seal.
+function parseSince(lines: string[], versionLine: string): Since | undefined {
+  const start = lines.findIndex(line => line.startsWith(SINCE_START_PREFIX) && line.endsWith(" -->"));
   const end = lines.indexOf(SINCE_END);
   if (start < 0 || end < start) return undefined;
+  const seal = lines[start]!.slice(SINCE_START_PREFIX.length, -" -->".length);
   const block = lines.slice(start + 1, end).filter(Boolean);
   const heading = block.shift();
-  if (heading === "## Since the previous generation") return { changes: [] };
-  if (!heading?.startsWith("## Since ")) return undefined;
-  const names = (list: string | undefined): string[] => [...(list ?? "").matchAll(/`([^`]+)`/g)].map(match => match[1]!);
-  const changes = block.flatMap(line => {
-    const change = /^- \*\*(.+?)\*\*(?: — added (.+?))?(?:(?:;| —) removed (.+))?$/.exec(line);
-    return change ? [{ axis: change[1]!, added: names(change[2]), removed: names(change[3]) }] : [];
-  });
-  return { previous: heading.slice("## Since ".length), changes };
+  let since: Since;
+  if (heading === "## Since the previous generation") since = { changes: [] };
+  else if (heading?.startsWith("## Since ")) {
+    const names = (list: string | undefined): string[] => [...(list ?? "").matchAll(/`([^`]+)`/g)].map(match => match[1]!);
+    since = {
+      previous: heading.slice("## Since ".length),
+      changes: block.flatMap(line => {
+        const change = /^- \*\*(.+?)\*\*(?: — added (.+?))?(?:(?:;| —) removed (.+))?$/.exec(line);
+        return change ? [{ axis: change[1]!, added: names(change[2]), removed: names(change[3]) }] : [];
+      }),
+    };
+  } else return undefined;
+  return sealOf(versionLine, sinceBody(since)) === seal ? since : undefined;
 }
 
-function renderSince(since: Since): string {
-  const body = since.previous === undefined
+function sinceBody(since: Since): string[] {
+  return since.previous === undefined
     ? ["## Since the previous generation", "", "First generation: there is no previous matrix to compare against."]
     : [
       `## Since ${since.previous}`,
@@ -529,7 +541,15 @@ function renderSince(since: Since): string {
       ...(since.changes.length === 0 ? ["No vocabulary was added or removed."] : since.changes.map(({ axis, added, removed }) =>
         `- **${axis}**${added.length ? ` — added ${added.map(code).join(", ")}` : ""}${removed.length ? `${added.length ? ";" : " —"} removed ${removed.map(code).join(", ")}` : ""}`)),
     ];
-  return [SINCE_START, ...body, SINCE_END].join("\n");
+}
+
+function sealOf(versionLine: string, body: string[]): string {
+  return createHash("sha256").update(`${versionLine}\n${body.join("\n")}`).digest("hex").slice(0, 16);
+}
+
+function renderSince(since: Since, versionLine: string): string {
+  const body = sinceBody(since);
+  return [`${SINCE_START_PREFIX}${sealOf(versionLine, body)} -->`, ...body, SINCE_END].join("\n");
 }
 
 /**
@@ -539,8 +559,13 @@ function renderSince(since: Since): string {
  */
 export function sinceSection(report: AgentReport, previous: string | undefined): string {
   const parsed = previous === undefined ? undefined : parseMatrix(previous);
-  if (parsed?.since && parsed.versionLine === report.versionLine) return renderSince(parsed.since);
-  if (!parsed?.versionLine) return renderSince({ changes: [] });
+  if (parsed?.versionLine === report.versionLine) {
+    // Nothing to recompute it from: the committed block must be the one the
+    // generator wrote, or the report would vouch for a hand edit.
+    if (!parsed.since) throw new Error(`agent coverage: the "since" section of ${MATRIX_DIR}/${report.id}.md does not match its seal, so it was edited by hand; restore it with \`git checkout -- ${MATRIX_DIR}/${report.id}.md\` and rerun \`bun run coverage:agents\``);
+    return renderSince(parsed.since, report.versionLine);
+  }
+  if (!parsed?.versionLine) return renderSince({ changes: [] }, report.versionLine);
   const changes = report.axes.flatMap(axis => {
     const before = parsed.axes.get(axis.id) ?? new Set<string>();
     const now = new Set(axis.entries.map(entry => entry.name));
@@ -548,7 +573,7 @@ export function sinceSection(report: AgentReport, previous: string | undefined):
     const removed = [...before].filter(name => !now.has(name)).sort();
     return added.length || removed.length ? [{ axis: axis.title, added, removed }] : [];
   });
-  return renderSince({ previous: parsed.versionLine, changes });
+  return renderSince({ previous: parsed.versionLine, changes }, report.versionLine);
 }
 
 export function renderMatrix(report: AgentReport, previous: string | undefined): string {
