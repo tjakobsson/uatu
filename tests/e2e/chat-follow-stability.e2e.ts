@@ -21,6 +21,11 @@ declare global {
 
 for (const browserName of ["chromium", "webkit"] as const) for (const touch of [false, true]) for (const child of [false, true]) {
   test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} integrated shell frame budget`, async ({ request, baseURL }, testInfo) => {
+    // A long scenario (its own browser launch, then ~25 update/settle cycles
+    // across inline, floating, and maximized phases). On a loaded CI runner
+    // WebKit spends ~13s booting alone and was timing out at 30s while still
+    // progressing; the budget is time, not a frame assertion.
+    test.slow();
     const browser = await ({ chromium, webkit })[browserName].launch();
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });

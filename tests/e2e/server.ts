@@ -18,7 +18,7 @@ import nerdFontsLicenseAsset from "../../src/assets/fonts/LICENSE-nerdfonts.txt"
 import fontNoticesAsset from "../../src/assets/fonts/NOTICES.md" with { type: "file" };
 
 import index from "../../src/index.html";
-import { e2ePort, resetE2EWorkspace, workspaceRoot } from "./config";
+import { e2ePort, promoteRootReadme, resetE2EWorkspace, workspaceRoot } from "./config";
 
 // Per-process workspace root. Captured once at startup from the lazy
 // workspaceRoot() helper (which reads process.env.UATU_E2E_WORKSPACE if
@@ -289,6 +289,8 @@ async function handleE2EReset(request: Request): Promise<Response> {
   if (body.nonGit) {
     activeWorkspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "uatu-e2e-non-git-"));
     await fs.cp(E2E_WORKSPACE_ROOT, activeWorkspaceRoot, { recursive: true });
+    // The copy stamps every file "now", losing the README's lead.
+    await promoteRootReadme(activeWorkspaceRoot);
   }
   if (previousWorkspaceRoot !== E2E_WORKSPACE_ROOT) {
     await fs.rm(previousWorkspaceRoot, { recursive: true, force: true });
@@ -299,6 +301,9 @@ async function handleE2EReset(request: Request): Promise<Response> {
       await fs.mkdir(path.dirname(target), { recursive: true });
       await fs.writeFile(target, contents, "utf8");
     }
+    // A seeded root README must stay the default selection; the write above
+    // just reset the mtime the workspace reset gave it.
+    if (Object.hasOwn(body.extras, "README.md")) await promoteRootReadme(activeWorkspaceRoot);
   }
   if (body.uatuConfig) {
     await fs.writeFile(
