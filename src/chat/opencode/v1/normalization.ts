@@ -213,9 +213,12 @@ function own(event: RecordValue, data: RecordValue, context: EventContext, memor
       // `message.updated` and lands on the message's own carrier, so a part
       // needs no bookkeeping about where a figure should go.
       const partCreatedAt = timestamp(record(data.message).time, createdAt);
+      const skippedBlocks: string[] = [];
+      const updates = normalizePart(part, partCreatedAt, skippedBlocks);
       return {
         conversationId: conversationId ?? optionalString(part.sessionID),
-        updates: normalizePart(part, partCreatedAt),
+        updates,
+        ...(skippedBlocks.length ? { skippedBlocks } : {}),
       };
     }
     case "message.part.removed": {

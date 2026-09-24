@@ -233,6 +233,8 @@ export type KnownEvent = {
   replaceModel?: boolean;
   sessionLifecycle?: NormalizedSessionLifecycle;
   revertLifecycle?: "staged" | "committed" | "cleared";
+  // Part types the event carried that no part reader handles, by type only.
+  skippedBlocks?: string[];
 };
 
 // The identity every handler needs, computed once per event from its payload:
@@ -669,7 +671,16 @@ export function normalizeAssistant(message: RecordValue, messageId: string, crea
   return items;
 }
 
-export function normalizePart(part: RecordValue, createdAt: number): NormalizedProviderUpdate[] {
+// Part types that deliberately carry nothing for the timeline, so they are
+// neither rendered nor reported as skipped: step boundaries and snapshots
+// arrive on nearly every step, and the one figure a step's end carries (its
+// cost and tokens) is restated on the message's `message.updated`, which is
+// what the usage carrier reads.
+export const IGNORED_PARTS: ReadonlySet<string> = new Set(["step-start", "step-finish", "snapshot"]);
+
+// `skipped` collects the type of a part no case reads, so a caller on the
+// live path can report it the way an unrecognized event is reported.
+export function normalizePart(part: RecordValue, createdAt: number, skipped?: string[]): NormalizedProviderUpdate[] {
   const id = string(part.id, "part id");
   if (part.type === "text") {
     const item: ConversationItem = { id: `part:${id}`, type: "assistant_message", createdAt, markdown: text(part.text) };
@@ -695,6 +706,8 @@ export function normalizePart(part: RecordValue, createdAt: number): NormalizedP
     } }];
   }
   if (part.type === "tool") return [normalizeToolPart(part, createdAt)];
+  const type = optionalString(part.type) ?? "unknown";
+  if (!IGNORED_PARTS.has(type)) skipped?.push(type);
   return [];
 }
 
@@ -855,8 +868,11 @@ function activityStatus(value: unknown): "pending" | "running" | "completed" | "
   return value === "pending" ? "pending" : value === "completed" ? "completed" : value === "error" ? "failed" : "running";
 }
 
+// Tool names whose part renders as a command row rather than a tool row.
+export const COMMAND_TOOL_NAMES: readonly string[] = ["bash", "shell", "command", "terminal"];
+
 function isCommand(name: string, state: RecordValue): boolean {
-  return /^(bash|shell|command|terminal)$/i.test(name) || optionalString(record(state.structured).command) !== undefined;
+  return COMMAND_TOOL_NAMES.includes(name.toLowerCase()) || optionalString(record(state.structured).command) !== undefined;
 }
 
 function commandText(state: RecordValue): string {

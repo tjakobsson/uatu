@@ -118,6 +118,31 @@ bun run test:e2e
 bunx @fission-ai/openspec validate --all --strict
 ```
 
+### Agent SDK coverage
+
+`docs/agents/claude-code.md` and `docs/agents/opencode.md` record, for every
+message type, content-block or part type, and tool the installed agent SDKs
+declare, what uatu does with it: dedicated, generic, ignored, unhandled, or
+behavior-missing. The matrices, their badges (`docs/agents/*.svg`), and the
+README block between the `agent-coverage` markers are generated; do not edit
+them by hand. After an agent SDK bump (`@anthropic-ai/claude-agent-sdk`,
+`@opencode-ai/sdk`, `@opencode/client`), or after changing how a normalizer or
+renderer treats a type, run:
+
+```bash
+bun run coverage:agents
+```
+
+and commit the regenerated files in the same PR. `bun test` fails with the
+stale path until you do; it never fails because coverage is incomplete. Only
+two things are written by hand, in `src/chat/claude/sdk-coverage.ts` and
+`src/chat/opencode/sdk-coverage.ts`: why an ignored type is dropped (every one
+needs a reason; a key ending in `*` covers a family), and which entries render
+without working (and what fixes them, by name). The generator rejects an
+annotation naming anything the installed SDK does not declare, and an ignored
+type nobody has explained — state why, or stop ignoring it so it reports as
+unhandled.
+
 The full Playwright suite takes longer than unit tests. Focused Playwright
 files are appropriate while iterating, but CI remains the final full-suite
 gate. Playwright is development-only and is not included in the compiled uatu

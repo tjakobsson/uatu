@@ -88,6 +88,11 @@ export type NormalizedProviderEvent = {
   // The event's own type, so a caller can count drops per type. Never a
   // payload — a payload can carry file contents.
   eventType: string;
+  // Content blocks (Claude) or parts (OpenCode) of a type the normalizer
+  // does not read, skipped inside an otherwise recognized event: by type
+  // only, never payload, so the caller can count them the way it counts
+  // dropped events.
+  skippedBlocks?: string[];
   // Correlated live execution signals, separate from the UI's unqualified
   // status transitions. History readers never populate these.
   notificationTurns?: Array<{

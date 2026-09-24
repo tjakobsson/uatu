@@ -69,7 +69,6 @@ export function createOpenCodeV2Memory(): OpenCodeV2Memory {
 // timeline, beyond the core's canonical list.
 const IGNORED: ReadonlySet<string> = new Set([
   "session.inbox.delivered",
-  "session.inbox.cancelled",
   "session.inbox.delivery.changed",
   "session.instructions.updated",
   "session.step.streamed",
@@ -78,9 +77,6 @@ const IGNORED: ReadonlySet<string> = new Set([
   "session.usage.recorded",
   "session.viewed",
   "session.permissions",
-  "session.forked",
-  "session.moved",
-  "session.skill.activated",
   "shell.created",
   "shell.exited",
   "shell.deleted",
@@ -308,7 +304,9 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         } }] };
       case "session.message.content.updated": {
         const messageId = string(data.messageID, "message id");
-        return { conversationId, updates: restatedContent(messageId, array(data.content), createdAt) };
+        const skippedBlocks: string[] = [];
+        const updates = assistantContentUpdates(messageId, array(data.content), createdAt, skippedBlocks);
+        return { conversationId, updates, ...(skippedBlocks.length ? { skippedBlocks } : {}) };
       }
       case "form.created": {
         const form = record(data.form);
@@ -368,9 +366,10 @@ function partIdentity(data: RecordValue, kind: "text" | "reasoning"): string {
  * reasoning under the streamed identities (so a restatement deduplicates
  * against what already streamed), tools through the shared tool-part reader.
  * Used by the live `session.message.content.updated` path and by the stored
- * assistant record, which is the same array.
+ * assistant record, which is the same array. A part of any other type is
+ * skipped; its type lands in `skipped` when the caller reports skips.
  */
-export function assistantContentUpdates(messageId: string, content: unknown[], createdAt: number): NormalizedProviderUpdate[] {
+export function assistantContentUpdates(messageId: string, content: unknown[], createdAt: number, skipped?: string[]): NormalizedProviderUpdate[] {
   const ordinals = { text: 0, reasoning: 0 };
   return content.flatMap((value): NormalizedProviderUpdate[] => {
     const part = record(value);
@@ -406,12 +405,9 @@ export function assistantContentUpdates(messageId: string, content: unknown[], c
         time: { end: time.completed },
       }, createdAt)];
     }
+    skipped?.push(optionalString(part.type) ?? "unknown");
     return [];
   });
-}
-
-function restatedContent(messageId: string, content: unknown[], createdAt: number): NormalizedProviderUpdate[] {
-  return assistantContentUpdates(messageId, content, createdAt);
 }
 
 /**

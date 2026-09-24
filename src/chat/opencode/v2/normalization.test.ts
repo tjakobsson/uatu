@@ -341,6 +341,34 @@ describe("OpenCode 2.x normalization: scoping and restatement", () => {
   });
 });
 
+describe("OpenCode normalization reports parts it skips", () => {
+  test("2.x: a content restatement reports an unread part type and still renders the rest", () => {
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const restated = normalize({ created: 5, location: { directory: WORKSPACE }, id: "e1", type: "session.message.content.updated", data: { sessionID: "ses_s", messageID: "msg_s", content: [
+      { type: "snapshot", snapshot: "private-tree-hash" },
+      { type: "text", text: "hello" },
+    ] } }, createOpenCodeV2Memory());
+    expect(restated.outcome).toBe("handled");
+    expect(restated.skippedBlocks).toEqual(["snapshot"]);
+    expect(restated.updates).toEqual([expect.objectContaining({ kind: "text", text: "hello" })]);
+    expect(JSON.stringify(restated)).not.toContain("private-tree-hash");
+  });
+
+  test("1.x: a live part of an unread type is reported, not silently dropped", () => {
+    const normalized = normalizeV1({ type: "message.part.updated", properties: { part: { id: "prt_p", messageID: "msg", sessionID: "s", type: "patch", hash: "abc", files: ["a.ts"] } } });
+    expect(normalized.outcome).toBe("ignored");
+    expect(normalized.skippedBlocks).toEqual(["patch"]);
+  });
+
+  test("1.x: step boundaries and snapshots are dropped on purpose, not reported", () => {
+    for (const type of ["step-start", "step-finish", "snapshot"]) {
+      const normalized = normalizeV1({ type: "message.part.updated", properties: { part: { id: `prt_${type}`, messageID: "msg", sessionID: "s", type } } });
+      expect(normalized.outcome).toBe("ignored");
+      expect(normalized.skippedBlocks).toBeUndefined();
+    }
+  });
+});
+
 describe("OpenCode 2.x normalization agrees with 1.x for the same activity", () => {
   const normalizeV2 = createOpenCodeV2Normalizer(WORKSPACE);
   const shape = (event: NormalizedProviderEvent) => event.updates.map(update => {

@@ -19,7 +19,7 @@ import type {
 import type { AgentUsageReport, ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion, UsageReadMode, UsageReadResult } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
-import { createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, type ClaudeEventMemory } from "./normalization";
+import { claudeToolInteraction, createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, type ClaudeEventMemory } from "./normalization";
 import { ClaudeNotificationLifecycle } from "./notification-lifecycle";
 import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
 
@@ -1576,10 +1576,11 @@ export class ClaudeProvider implements ChatProvider {
   private brokerToolUse(sessionId: string, toolName: string, input: Record<string, unknown>, options: ClaudeCanUseToolOptions): Promise<ClaudePermissionResult> {
     const requestId = options.toolUseID ?? randomUUID();
     const createdAt = this.now();
-    const questions = toolName === "AskUserQuestion" ? normalizeAskUserQuestions(input) : null;
     // A completed plan asks for its own kind of approval: the card carries
     // the plan and intents rather than the generic allow pair (D5).
-    const plan = toolName === "ExitPlanMode" && typeof input.plan === "string" ? input.plan : null;
+    const interaction = claudeToolInteraction(toolName, input);
+    const questions = interaction.kind === "question" ? interaction.questions : null;
+    const plan = interaction.kind === "plan" ? interaction.plan : null;
     const returnMode = this.modeBeforePlan.get(sessionId);
     const item: PermissionRequest | QuestionRequest = questions
       ? { id: `question:${requestId}`, type: "question", createdAt, requestId, questions, status: "pending" }
@@ -3004,35 +3005,6 @@ function dialogQuestions(request: ClaudeUserDialogRequest): { intro: string; que
     }],
     result: () => ({ behavior: "cancelled" }),
   };
-}
-
-/** AskUserQuestion input → the shared structured-question shape. */
-function normalizeAskUserQuestions(input: Record<string, unknown>): StructuredQuestion[] | null {
-  if (!Array.isArray(input.questions) || input.questions.length === 0) return null;
-  const questions: StructuredQuestion[] = [];
-  for (const value of input.questions) {
-    if (!value || typeof value !== "object") return null;
-    const record = value as Record<string, unknown>;
-    if (typeof record.question !== "string") return null;
-    const options = Array.isArray(record.options)
-      ? record.options.flatMap(option => {
-        if (!option || typeof option !== "object") return [];
-        const optionRecord = option as Record<string, unknown>;
-        if (typeof optionRecord.label !== "string") return [];
-        return [{ label: optionRecord.label, description: typeof optionRecord.description === "string" ? optionRecord.description : "" }];
-      })
-      : [];
-    questions.push({
-      prompt: record.question,
-      header: typeof record.header === "string" ? record.header : "",
-      options,
-      multiple: record.multiSelect === true,
-      // Claude Code's "Other" free-form entry is host-provided, not an
-      // option in the schema — the host always offers it.
-      allowFreeForm: true,
-    });
-  }
-  return questions;
 }
 
 function permissionResources(input: Record<string, unknown>, options: ClaudeCanUseToolOptions): string[] {

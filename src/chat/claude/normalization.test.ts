@@ -122,3 +122,63 @@ describe("Claude Code session-scoped permission updates", () => {
     expect(describeSessionScopedUpdates(suggestions)).toHaveLength(sessionScopedSuggestions(suggestions).length);
   });
 });
+
+describe("Claude normalization: what it skips, it reports", () => {
+  const at = "2026-09-24T10:00:00Z";
+
+  test("unknown content blocks are skipped by type while the known blocks still render", () => {
+    const memory = createClaudeEventMemory();
+    const normalized = normalizeClaudeMessage({ type: "assistant", uuid: "a1", timestamp: at, message: { id: "msg_1", content: [
+      { type: "redacted_thinking", data: "opaque-secret" },
+      { type: "text", text: "Here is the answer." },
+      { type: "server_tool_use", id: "srv_1", name: "web_search", input: { query: "q" } },
+      { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "pwd" } },
+    ] } }, memory, "live");
+    expect(normalized.outcome).toBe("handled");
+    expect(normalized.skippedBlocks).toEqual(["redacted_thinking", "server_tool_use"]);
+    const items = normalized.updates.flatMap(update => update.kind === "upsert" ? [update.item] : []);
+    expect(items.map(item => item.id)).toEqual(["tool:toolu_1", "message:a1"]);
+    // Types only: the skipped payload never rides the event.
+    expect(JSON.stringify(normalized)).not.toContain("opaque-secret");
+  });
+
+  test("a message of known blocks reports nothing skipped", () => {
+    const normalized = normalizeClaudeMessage({ type: "assistant", uuid: "a2", timestamp: at, message: { content: [
+      { type: "thinking", thinking: "hmm" },
+      { type: "text", text: "ok" },
+    ] } }, createClaudeEventMemory(), "live");
+    expect(normalized.skippedBlocks).toBeUndefined();
+  });
+
+  test("a user frame reports blocks beside its tool results that no reader handles", () => {
+    const memory = createClaudeEventMemory();
+    normalizeClaudeMessage({ type: "assistant", uuid: "a3", timestamp: at, message: { content: [{ type: "tool_use", id: "toolu_2", name: "Read", input: {} }] } }, memory, "live");
+    const normalized = normalizeClaudeMessage({ type: "user", uuid: "u3", timestamp: at, message: { content: [
+      { type: "tool_result", tool_use_id: "toolu_2", content: "file" },
+      { type: "document", source: { type: "text", data: "private" } },
+    ] } }, memory, "live");
+    expect(normalized.outcome).toBe("handled");
+    expect(normalized.skippedBlocks).toEqual(["document"]);
+  });
+
+  test("a recognized message whose payload throws is unparseable and the next message still normalizes", () => {
+    const memory = createClaudeEventMemory();
+    const broken = { type: "assistant", uuid: "a4", timestamp: at, get message(): unknown { throw new Error("broken payload"); } };
+    expect(normalizeClaudeMessage(broken, memory, "live")).toEqual({ updates: [], eventType: "assistant", outcome: "unparseable" });
+    const next = normalizeClaudeMessage({ type: "assistant", uuid: "a5", timestamp: at, message: { content: [{ type: "text", text: "still here" }] } }, memory, "live");
+    expect(next.outcome).toBe("handled");
+    expect(JSON.stringify(next.updates)).toContain("still here");
+  });
+
+  test("an unmatched system subtype is unrecognized under its subtype unless deliberately ignored", () => {
+    const memory = createClaudeEventMemory();
+    const noFallback = normalizeClaudeMessage({ type: "system", subtype: "model_refusal_no_fallback", uuid: "s1", timestamp: at }, memory, "live");
+    expect(noFallback.outcome).toBe("unrecognized");
+    expect(noFallback.eventType).toBe("system.model_refusal_no_fallback");
+    const hook = normalizeClaudeMessage({ type: "system", subtype: "hook_started", uuid: "s2", timestamp: at, hook_id: "h", hook_name: "n", hook_event: "Stop" }, memory, "live");
+    expect(hook.outcome).toBe("ignored");
+    expect(hook.eventType).toBe("system");
+    // An init that names no model has nothing to configure; it is not new vocabulary.
+    expect(normalizeClaudeMessage({ type: "system", subtype: "init", uuid: "s3", timestamp: at }, memory, "live").outcome).toBe("ignored");
+  });
+});

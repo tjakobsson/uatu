@@ -15,6 +15,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check:licenses": "bun run src/shared/license-check.ts",
+    "coverage:agents": "bun run scripts/agent-coverage.ts",
     "e2e:install": "playwright install chromium webkit",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
@@ -34,7 +35,7 @@
     "api:swift": "bash scripts/verify-swift-openapi.sh"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.252",
+    "@anthropic-ai/claude-agent-sdk": "0.3.261",
     "@asciidoctor/core": "^4.0.7",
     "@block65/webcrypto-web-push": "2.0.0",
     "@opencode-ai/sdk": "1.18.30",
@@ -67,6 +68,7 @@
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "astro": "^7.0.6",
+    "badge-maker": "^6.0.0",
     "bun-types": "^1.4.0",
     "fast-check": "^4.9.0",
     "linkedom": "^0.18.13",

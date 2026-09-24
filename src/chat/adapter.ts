@@ -1670,13 +1670,25 @@ export class ChatAdapter {
   // a payload can carry file contents, and the count is what is actionable.
   private countDiscard(outcome: "unrecognized" | "unparseable", eventType: string): void {
     if (!this.metrics) return;
-    const type = eventType || "unknown";
-    let key = type;
-    if (!this.countedEventTypes.has(type)) {
-      if (this.countedEventTypes.size >= MAX_COUNTED_EVENT_TYPES) key = "other";
-      else this.countedEventTypes.add(type);
-    }
-    this.metrics.inc(`chat.event.${outcome}.${key}`);
+    this.metrics.inc(`chat.event.${outcome}.${this.countedType("event", eventType)}`);
+  }
+
+  // Counts a content block (or part) skipped inside a recognized event, by
+  // block type, under the same distinct-type cap as events.
+  private countSkippedBlock(blockType: string): void {
+    if (!this.metrics) return;
+    this.metrics.inc(`chat.block.unrecognized.${this.countedType("block", blockType)}`);
+  }
+
+  // The counter key for a type: itself while the bounded key space has room,
+  // `other` once it is full. Events and blocks share the one budget.
+  private countedType(space: "event" | "block", name: string): string {
+    const type = name || "unknown";
+    const seen = `${space}:${type}`;
+    if (this.countedEventTypes.has(seen)) return type;
+    if (this.countedEventTypes.size >= MAX_COUNTED_EVENT_TYPES) return "other";
+    this.countedEventTypes.add(seen);
+    return type;
   }
 
   /**
@@ -2186,6 +2198,7 @@ export class ChatAdapter {
         if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
           this.countDiscard(normalized.outcome, normalized.eventType);
         }
+        for (const blockType of normalized.skippedBlocks ?? []) this.countSkippedBlock(blockType);
         if (normalized.sessionLifecycle) {
           await this.applySessionLifecycle(normalized.sessionLifecycle);
           if (signal.aborted) break;

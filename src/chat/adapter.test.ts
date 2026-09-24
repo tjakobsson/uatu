@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
+import { createClaudeEventMemory, normalizeClaudeMessage } from "./claude/normalization";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -2573,6 +2574,40 @@ describe("discarded event accounting", () => {
     const keys = Object.keys(metrics.values).filter(key => key.startsWith("chat.event.unrecognized."));
     expect(keys.length).toBe(65);
     expect(metrics.values["chat.event.unrecognized.other"]).toBe(6);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a skipped content block is counted by block type under the shared cap", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ id: "p1", type: "message.part.updated", data: { sessionID: "local", part: { id: "prt", messageID: "m", sessionID: "local", type: "patch" } } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "after" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(metrics.values["chat.block.unrecognized.patch"]).toBe(1);
+    expect(Object.keys(metrics.values).filter(key => key.startsWith("chat.event."))).toEqual([]);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a Claude system subtype nobody reads is counted under its subtype", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    const normalized = { ...normalizeClaudeMessage({ type: "system", subtype: "model_refusal_no_fallback", uuid: "s1" }, createClaudeEventMemory(), "live"), conversationId: "local" };
+    provider.eventQueue.push({ normalized } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "after" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(metrics.values["chat.event.unrecognized.system.model_refusal_no_fallback"]).toBe(1);
     await adapter.stopEventPump();
     await pump;
   });
