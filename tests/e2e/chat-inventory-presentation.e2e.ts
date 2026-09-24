@@ -145,7 +145,13 @@ test.describe("touch conversation inventory presentation", () => {
     await expect(page.locator("#touch-tab-chat .chat-inventory-attention")).toBeHidden();
     await expect(page.locator("#chat-conversation-unseen-count")).toHaveAttribute("aria-label", "Acknowledge 1 new conversation");
 
-    await applyChatInventoryFixture(page, { unseenCount: 3, announce: true, selectedConversationDeleted: true });
+    // This case already uses live inventory. Keep driving server state:
+    // painting a fictional deletion can be overwritten by the pending read
+    // triggered when Chat becomes visible again.
+    const conversationId = await page.locator("#chat-conversation-select").inputValue();
+    await control(request, { action: "externalCreate", title: "Another unseen conversation" });
+    await control(request, { action: "externalCreate", title: "Third unseen conversation" });
+    await control(request, { action: "externalDelete", conversationId });
     await expect(page.locator("#chat-conversation-unseen-count")).toHaveAttribute("aria-label", "Acknowledge 3 new conversations");
     await expect(page.locator("#chat-conversation-unavailable")).toBeVisible();
     await expect(page.locator("#chat-new-conversation")).toBeEnabled();

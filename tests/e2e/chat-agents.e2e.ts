@@ -18,9 +18,39 @@ async function bootDualAgentChat(page: Page, request: APIRequestContext): Promis
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await openChatPanel(page);
   await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
+  // These tests seed conversations after boot. Wait for both inventory
+  // subscriptions so seeding cannot fall between the initial list and SSE.
+  for (const agent of ["opencode", "claude"]) {
+    await expect.poll(async () => {
+      const stats = await control(request, { action: "stats", agent }) as { inventorySubscribers: number };
+      return stats.inventorySubscribers;
+    }).toBeGreaterThan(0);
+  }
 }
 
 test.describe("multi-agent chat", () => {
+  test("enabling a second fixture agent replaces lingering inventory subscriptions", async ({ page, request }) => {
+    await request.post("/__e2e/reset");
+    const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await openChatPanel(page);
+    // Establish the single-agent upstream before swapping the fixture router.
+    // It can survive a page reload in the broker's linger window.
+    await expect.poll(async () => {
+      const stats = await control(request, { action: "stats" }) as { inventorySubscribers: number };
+      return stats.inventorySubscribers;
+    }).toBeGreaterThan(0);
+    await control(request, { action: "agents", count: 2 });
+    await page.reload();
+    await openChatPanel(page);
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Newly enabled agent", items: [],
+    }) as { conversation: { id: string } };
+    await expect(page.locator("#chat-conversation-select option", { hasText: "Newly enabled agent" })).toHaveCount(1);
+    await page.locator("#chat-conversation-select").selectOption(seeded.conversation.id);
+    await expect(page.locator("#chat-context")).toContainText("Claude Code");
+  });
+
   test("creation offers the agents, the chooser attributes them, and the header follows the selection", async ({ page, request }) => {
     await bootDualAgentChat(page, request);
 

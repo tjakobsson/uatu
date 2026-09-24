@@ -80,6 +80,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       const output = log(200);
       const { outputView, viewport, timeline, update, parentId } = await bootShell(page, request, { shape, output });
       await viewport.hover(); await page.mouse.wheel(0, -800); await frames(page);
+      await settleScroll(viewport);
       const anchor = await position(viewport);
       expect(anchor.bottom).toBeGreaterThan(100);
       await update(shell(shape, output, "completed"));
@@ -771,6 +772,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         createdAt: i + 2, markdown: `History ${i}\n\n${"Read this earlier answer. ".repeat(25)}` }));
       const { timeline, outputView, viewport, id } = await bootShell(page, request, { child, extra: history });
       await viewport.hover(); await page.mouse.wheel(0, -800); await frames(page);
+      await settleScroll(viewport);
       const shellAnchor = await position(viewport);
       const outerBefore = await position(timeline);
       const height = outputView.getByRole("separator", { name: /Output height/ });
@@ -784,6 +786,9 @@ for (const engine of ["chromium", "webkit"] as const) {
       const beforeReading = await position(timeline);
       await page.mouse.move(box.x + box.width - 25, box.y + box.height / 2);
       await page.mouse.wheel(0, -500); await frames(page);
+      // Wheel scrolling can continue past the four paint frames, especially
+      // in WebKit. Capture the reader's settled position before returning.
+      await settleScroll(timeline);
       const reader = await position(timeline);
       expect(reader.top).toBeLessThan(beforeReading.top - 100);
       await window.getByRole("button", { name: "Return to chat" }).focus();

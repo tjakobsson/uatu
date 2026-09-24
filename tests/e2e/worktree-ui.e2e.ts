@@ -302,23 +302,32 @@ for (const touch of [false, true]) test.describe(touch ? "worktree dialog on tou
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
 
-    // A real remote: a local bare repository, so a fetch is a real fetch
-    // with no network and no credential.
+    // Seed the bare remote without pushing from the workspace: pushing via
+    // origin would create the tracking ref this test expects Fetch to add.
     const remote = path.join(path.dirname(parent.path), `${parentId}-remote.git`);
     await rm(remote, { recursive: true, force: true });
-    await git(path.dirname(parent.path), ["init", "--bare", "--initial-branch=main", remote]);
+    await git(path.dirname(parent.path), ["clone", "--bare", "--single-branch", "--branch", "main", parent.path, remote]);
     await git(parent.path, ["remote", "add", "origin", remote]);
-    await git(parent.path, ["push", "-q", "origin", "main"]);
+    const remoteMain = await git(remote, ["rev-parse", "refs/heads/main"]);
+    const trackingRef = () => git(parent.path, ["for-each-ref", "--format=%(objectname)", "refs/remotes/origin/main"]);
+    expect(await trackingRef()).toBe("");
 
     await page.goto(`${hub.origin}/s/${parentId}/`);
     await fork(page, parentId, "New branch / worktree");
     const dialog = page.getByRole("dialog");
-    // Opening never fetches: the remote branch pushed above is not listed yet.
+    // Opening never fetches: neither Git nor the dialog has the tracking ref.
     await expect(dialog.locator('[role="option"][data-value="remote:origin/main"]')).toHaveCount(0);
+    expect(await trackingRef()).toBe("");
     await dialog.getByLabel("Name", { exact: true }).fill("feature/fetched");
-    await dialog.getByRole("button", { name: "Fetch remote branches", exact: true }).click();
+    const [fetched] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === "/api/hub/worktrees/fetch" && response.request().method() === "POST"),
+      dialog.getByRole("button", { name: "Fetch remote branches", exact: true }).click(),
+    ]);
+    expect(fetched.ok()).toBe(true);
+    expect(await fetched.json()).toMatchObject({ ok: true });
     // The draft survives the fetch exactly: name and the committed choice.
     await expect(dialog.locator('[role="option"][data-value="remote:origin/main"]')).toHaveCount(1);
+    expect(await trackingRef()).toBe(remoteMain);
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("feature/fetched");
     await expect(dialog.locator("[name=selection]")).toHaveValue("local:main");
     await captureScreenshot(page, info, `worktree-ui-${label}-fetched`);

@@ -249,6 +249,10 @@ if (WORKTREES) {
     provenance: new WorktreeProvenanceStore(path.join(tempRoot, "worktree-provenance.json")),
     registrar: createOnboardingWorktreeRegistrar({ onboarding, registry }),
     coordinator: new WorktreeOperationCoordinator(reservations),
+    // Worktree suites fetch from local fixture repositories without credentials.
+    // A missing policy disables Fetch entirely, even for those local remotes.
+    fetchPolicy: { async select() { return { kind: "none" }; } },
+    fetchEnv: { ...process.env, GIT_ALLOW_PROTOCOL: "file" },
     unregister: async id => {
       await personalState.forgetWorkspace(id, () => registry.remove(id), async () => {
         await credentials.removeWorkspaceAssignments(id);

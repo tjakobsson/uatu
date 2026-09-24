@@ -5,7 +5,7 @@
 // through a hub import `{ test, expect }` from THIS file; everything else
 // keeps using ./fixtures.
 //
-// Ports: the worker harness fixture takes 4173+workerIndex. Hubs start at
+// Ports: the worker harness fixture takes 20000+workerIndex. Hubs start at
 // 4300 and each worker gets a block of ten (hub + up to nine children), so
 // the two families can never meet however many workers run.
 

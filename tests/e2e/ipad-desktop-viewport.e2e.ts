@@ -19,6 +19,7 @@ async function boot(page: Page, request: APIRequestContext) {
   }, LANDSCAPE);
   await page.goto(`/?t=${encodeURIComponent(credential.token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await expect(page.locator("#preview h1")).toHaveText("Viewport fixture");
   await page.evaluate(() => {
     for (const [edge, value] of Object.entries({ top: 24, right: 0, bottom: 20, left: 0 })) document.documentElement.style.setProperty(`--device-safe-${edge}`, `${value}px`);
     window.dispatchEvent(new Event("resize"));
@@ -115,11 +116,13 @@ for (const engine of ["chromium", "webkit"] as const) {
       await page.locator("#sidebar-collapse").click();
       await expect(page.locator("#rail-ui-mode-toggle")).toBeVisible();
       expect((await page.locator("#rail-ui-mode-toggle").boundingBox())!.y).toBeGreaterThanOrEqual(24);
+      await page.locator("#chat-input").blur();
       await page.setViewportSize({ width: 834, height: 1194 });
       await viewport(page, { width: 834, height: 1194 });
       await expect(page.locator(".app-shell")).toHaveCSS("position", "static");
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight)).toBeGreaterThan(0);
       await page.locator(".preview").evaluate(element => { element.scrollIntoView({ block: "end" }); });
-      expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
       await page.locator("#rail-ui-mode-toggle").click();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
       expect(await page.locator("html").evaluate(element => element.style.getPropertyValue("--desktop-visual-height"))).toBe("");
