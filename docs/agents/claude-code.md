@@ -6,7 +6,7 @@ uatu treats Claude Code as a first-class agent. The aim is to use what its SDK o
 
 Generated against `@anthropic-ai/claude-agent-sdk` 0.3.261 (bundled Claude Code CLI 2.1.261) · content blocks from `@anthropic-ai/sdk` 0.124.0.
 
-**Gaps: 26** (unhandled or behavior-missing) · dedicated 34 · generic 32 · ignored 13 · unhandled 24 · behavior-missing 2
+**Gaps: 28** (unhandled or behavior-missing) · dedicated 36 · generic 32 · ignored 13 · unhandled 26 · behavior-missing 2
 
 Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the page cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet.
 
@@ -97,6 +97,17 @@ Source: `@anthropic-ai/sdk` `BetaContentBlock`.
 | `tool_use` | dedicated |  |
 | `web_fetch_tool_result` | unhandled |  |
 | `web_search_tool_result` | unhandled |  |
+
+## User-only content blocks <a id="axis-user-blocks"></a>
+
+Source: `@anthropic-ai/sdk` `ContentBlockParam` (the content of `SDKUserMessage.message`) minus every type a response can contain (`ContentBlock`); blocks both sides carry, such as `text`, are listed with the assistant blocks. Annotation keys are `user:<type>`.
+
+| Name | State | Reason |
+| --- | --- | --- |
+| `document` | unhandled |  |
+| `image` | dedicated |  |
+| `search_result` | unhandled |  |
+| `tool_result` | dedicated |  |
 
 ## Tools <a id="axis-tools"></a>
 

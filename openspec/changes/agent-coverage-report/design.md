@@ -31,6 +31,11 @@ See proposal.md — Why. The relevant current state:
     `session-message.d.ts`.
   - Claude content blocks: `@anthropic-ai/sdk`'s `BetaContentBlock` union
     (the type `SDKAssistantMessage.message` refers to).
+    User-only blocks: `ContentBlockParam` (what `SDKUserMessage.message`
+    carries) minus every type the response union `ContentBlock` declares —
+    `ContentBlockParam` is the request union for either role, so the
+    difference is what only a user turn carries (`image`, `document`,
+    `search_result`, `tool_result`), probed through a stored user frame.
   - OpenCode does not enumerate tool names in either SDK (`tool: string`).
 - `@anthropic-ai/claude-agent-sdk` is a caret range; both OpenCode packages
   are exact pins.

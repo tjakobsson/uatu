@@ -111,6 +111,7 @@ export type ClaudeVocabulary = {
   apiSdkVersion: string;
   messages: ExtractedAxis;
   blocks: ExtractedAxis;
+  userBlocks: ExtractedAxis;
   tools: ExtractedAxis;
 };
 
@@ -124,6 +125,7 @@ export const CLAUDE_SOURCES: ClaudeSources = {
 export const FLOORS = {
   claudeMessages: 30,
   claudeBlocks: 10,
+  claudeUserBlocks: 3,
   claudeTools: 30,
   openCodeV1Events: 80,
   openCodeV1Parts: 8,
@@ -134,8 +136,11 @@ export const FLOORS = {
 /**
  * Claude Code's vocabulary: the `SDKMessage` union plus the extra message
  * types the CLI's stdout carries (`StdoutMessage`'s `coreTypes.*` members),
- * as `type` or `type/subtype`; the assistant content blocks the API SDK
- * declares; one tool per `*Input` in `sdk-tools.d.ts`.
+ * as `type` or `type/subtype`; the content blocks the API SDK declares for
+ * an assistant message (`BetaContentBlock`), and the blocks only a user
+ * message carries — `MessageParam`'s `ContentBlockParam` minus every type a
+ * response can contain (`ContentBlock`), since `ContentBlockParam` is the
+ * request union for either role; one tool per `*Input` in `sdk-tools.d.ts`.
  */
 export function extractClaude(sources: ClaudeSources = CLAUDE_SOURCES): ClaudeVocabulary {
   const sdkFile = path.join(sources.sdkDir, "sdk.d.ts");
@@ -159,6 +164,7 @@ export function extractClaude(sources: ClaudeSources = CLAUDE_SOURCES): ClaudeVo
   for (const member of [...(unionMembers(sdk, "SDKMessage") ?? []), ...extra]) visit(member);
 
   const blocksFile = path.join(sources.apiSdkDir, "resources/beta/messages/messages.d.mts");
+  const userBlocksFile = path.join(sources.apiSdkDir, "resources/messages/messages.d.mts");
   const toolsFile = path.join(sources.sdkDir, "sdk-tools.d.ts");
   const tools = sortedUnique((unionMembers(readDeclarations(toolsFile), "ToolInputSchemas") ?? []).filter(name => name.endsWith("Input")));
   const manifestFile = path.join(sources.sdkDir, "manifest.json");
@@ -170,8 +176,14 @@ export function extractClaude(sources: ClaudeSources = CLAUDE_SOURCES): ClaudeVo
     apiSdkVersion: packageVersion(sources.apiSdkDir),
     messages: requireFloor({ names: sortedUnique(messages), file: sdkFile, pattern: "the SDKMessage and StdoutMessage unions' type/subtype literals" }, FLOORS.claudeMessages),
     blocks: requireFloor({ names: unionTypeLiterals(readDeclarations(blocksFile), "BetaContentBlock"), file: blocksFile, pattern: "the BetaContentBlock union's type literals" }, FLOORS.claudeBlocks),
+    userBlocks: requireFloor({ names: userOnly(readDeclarations(userBlocksFile)), file: userBlocksFile, pattern: "the ContentBlockParam union's type literals not in ContentBlock" }, FLOORS.claudeUserBlocks),
     tools: requireFloor({ names: tools, file: toolsFile, pattern: "the ToolInputSchemas union's *Input members" }, FLOORS.claudeTools),
   };
+}
+
+function userOnly(source: string): string[] {
+  const response = new Set(unionTypeLiterals(source, "ContentBlock"));
+  return unionTypeLiterals(source, "ContentBlockParam").filter(type => !response.has(type));
 }
 
 export type OpenCodeVocabulary = {
@@ -272,6 +284,12 @@ export function probeClaudeMessage(name: string): CoverageState {
   return stateOf(outcome, INTENTIONALLY_IGNORED.has(subtype ?? type));
 }
 
+/** A user-message block, through a stored frame: the source whose user records become bubbles. */
+export function probeClaudeUserBlock(type: string): CoverageState {
+  const normalized = normalizeClaudeMessage({ type: "user", uuid: PROBE, timestamp: 0, message: { content: [{ type }] } }, createClaudeEventMemory(), "stored");
+  return normalized.skippedBlocks?.includes(type) ? "unhandled" : "dedicated";
+}
+
 export function probeClaudeBlock(type: string): CoverageState {
   const normalized = normalizeClaudeMessage({ type: "assistant", uuid: PROBE, timestamp: 0, message: { content: [{ type }] } }, createClaudeEventMemory(), "live");
   return normalized.skippedBlocks?.includes(type) ? "unhandled" : "dedicated";
@@ -347,6 +365,7 @@ function runControls(): void {
   assertControl("unknown Claude message", probeClaudeMessage(PROBE), "unhandled");
   assertControl("unknown Claude system subtype", probeClaudeMessage(`system/${PROBE}`), "unhandled");
   assertControl("unknown Claude block", probeClaudeBlock(PROBE), "unhandled");
+  assertControl("unknown Claude user block", probeClaudeUserBlock(PROBE), "unhandled");
   assertControl("unknown Claude tool", probeClaudeTool(PROBE).state, "generic");
   for (const generation of ["1.x", "2.x"] as const) {
     assertControl(`unknown OpenCode ${generation} event`, probeOpenCodeEvent(generation, PROBE), "unhandled");
@@ -439,6 +458,7 @@ export function claudeReport(vocabulary: ClaudeVocabulary = extractClaude(), ann
   const axes = annotate([
     { id: "messages", title: "Message types", source: "`@anthropic-ai/claude-agent-sdk` `sdk.d.ts`: the `SDKMessage` union and the extra `StdoutMessage` members, as `type` or `type/subtype`", keyPrefix: "", entries: vocabulary.messages.names.map(name => ({ name, state: probeClaudeMessage(name) })) },
     { id: "blocks", title: "Assistant content blocks", source: "`@anthropic-ai/sdk` `BetaContentBlock`", keyPrefix: "", entries: vocabulary.blocks.names.map(name => ({ name, state: probeClaudeBlock(name) })) },
+    { id: "user-blocks", title: "User-only content blocks", source: "`@anthropic-ai/sdk` `ContentBlockParam` (the content of `SDKUserMessage.message`) minus every type a response can contain (`ContentBlock`); blocks both sides carry, such as `text`, are listed with the assistant blocks. Annotation keys are `user:<type>`", keyPrefix: "user:", entries: vocabulary.userBlocks.names.map(name => ({ name, state: probeClaudeUserBlock(name) })) },
     { id: "tools", title: "Tools", source: "`@anthropic-ai/claude-agent-sdk` `sdk-tools.d.ts`: one `*Input` per tool, shown by wire name", keyPrefix: "", entries: tools },
   ], annotations, "src/chat/claude/sdk-coverage.ts");
   return {

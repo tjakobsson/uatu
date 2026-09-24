@@ -40,6 +40,7 @@ describe("agent coverage: vocabulary extraction", () => {
     const claudeVocabulary = extractClaude();
     expect(claudeVocabulary.messages.names.length).toBeGreaterThanOrEqual(FLOORS.claudeMessages);
     expect(claudeVocabulary.blocks.names.length).toBeGreaterThanOrEqual(FLOORS.claudeBlocks);
+    expect(claudeVocabulary.userBlocks.names.length).toBeGreaterThanOrEqual(FLOORS.claudeUserBlocks);
     expect(claudeVocabulary.tools.names.length).toBeGreaterThanOrEqual(FLOORS.claudeTools);
     expect(claudeVocabulary.cliVersion).toMatch(/^\d+\.\d+\.\d+/);
     const openCodeVocabulary = extractOpenCode();
@@ -82,6 +83,10 @@ describe("agent coverage: classification", () => {
     expect(entry(claude, "tools", "AskUserQuestion")).toMatchObject({ state: "dedicated", renders: "question card" });
     expect(entry(claude, "blocks", "text").state).toBe("dedicated");
     expect(entry(claude, "blocks", "redacted_thinking").state).toBe("unhandled");
+    // User-message blocks are their own axis, observed through a stored user frame.
+    expect(entry(claude, "user-blocks", "tool_result").state).toBe("dedicated");
+    expect(entry(claude, "user-blocks", "image").state).toBe("dedicated");
+    expect(entry(claude, "user-blocks", "document").state).toBe("unhandled");
   });
 
   test("behavior-missing entries carry a reason naming the fix, and /loop's tools are both covered", () => {
