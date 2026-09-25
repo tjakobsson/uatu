@@ -680,6 +680,18 @@ export class ChatAdapter {
       const current = projection.find(candidate => candidate.id === item.id);
       if (current?.type === "background_task" && current.status !== "running") items[index] = current;
     }
+    // Likewise the wakeup snapshot: a wakeup that fired or was cancelled
+    // during those awaits keeps that row, not the pending or paused copy read
+    // before — the copy would offer a Cancel for a wakeup that is gone. Only
+    // those two are final for an id; paused and lost are not (a resume turns
+    // a paused cron pending again), so a projection row in either state may
+    // be the older one and the snapshot's read stands.
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (item.type !== "scheduled_wakeup" || (item.status !== "pending" && item.status !== "paused")) continue;
+      const current = projection.find(candidate => candidate.id === item.id);
+      if (current?.type === "scheduled_wakeup" && (current.status === "fired" || current.status === "cancelled")) items[index] = current;
+    }
     projection.seed(items);
     // A reopened conversation whose agent still holds live work is in the
     // background state, not idle: the list and the status must agree.

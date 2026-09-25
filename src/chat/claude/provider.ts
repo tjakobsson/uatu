@@ -17,7 +17,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ScheduledWakeupItem } from "../types";
+import type { ConversationItem, ScheduledWakeupItem } from "../types";
 import { ScheduledWakeupUnavailableError } from "../provider";
 import type { AgentUsageReport, ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion, UsageReadMode, UsageReadResult } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
@@ -260,9 +260,10 @@ type LiveSession = {
   // set holds the session past its turn's result, like background work (D2).
   wakeups: Map<string, SessionWakeup>;
   // Wakeups that started a turn since the last Stop, by id → that turn's
-  // user_message id: a one-shot gone from the next Stop fired rather than
-  // being cancelled (spike, D2).
-  firedSinceStop: Map<string, string>;
+  // opening user_message: a one-shot gone from the next Stop fired rather
+  // than being cancelled (spike, D2). The whole message is kept so a fire
+  // the Stop shows went to a same-prompt sibling can be re-attributed.
+  firedSinceStop: Map<string, WakeupFire>;
   // What each wakeup is, from the calls this process saw (D10): ids a
   // CronCreate result returned, and prompts a ScheduleWakeup call asked for.
   // A cron the CLI rebuilt on resume matches neither and is a cron: a
@@ -285,6 +286,13 @@ type LiveSession = {
 };
 
 type SessionWakeup = { prompt: string; recurring: boolean; schedule: string; createdAt: number; nextFireAt?: number };
+
+/** The turn a wakeup's fire opened: its user_message id, text, and time. */
+type WakeupFire = { turnId: string; text: string; createdAt: number };
+
+function wakeupTurnItem(fire: WakeupFire, wakeupId: string | undefined): ConversationItem {
+  return { id: fire.turnId, type: "user_message", createdAt: fire.createdAt, text: fire.text, origin: "wakeup", ...(wakeupId !== undefined ? { wakeupId } : {}) };
+}
 
 /**
  * Whether the CLI rebuilds this wakeup when the conversation's session is
@@ -2144,10 +2152,26 @@ export class ClaudeProvider implements ChatProvider {
       if (known && known.prompt === wakeup.prompt && known.recurring === wakeup.recurring && known.schedule === wakeup.schedule && known.nextFireAt === wakeup.nextFireAt) continue;
       updates.push({ kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") });
     }
+    // A fire attributed to a one-shot this Stop still lists went to a
+    // same-prompt sibling that is gone: the disappearance is the CLI's word
+    // on which one fired, so the fire moves there and its header follows.
+    const misattributed = [...session.firedSinceStop].filter(([wakeupId]) => {
+      const kept = next.get(wakeupId);
+      return kept !== undefined && !kept.recurring;
+    });
+    const firedTurn = (wakeupId: string, prompt: string): string | undefined => {
+      const own = session.firedSinceStop.get(wakeupId);
+      if (own && !misattributed.some(([id]) => id === wakeupId)) return own.turnId;
+      const index = misattributed.findIndex(([, fire]) => wakeupPromptMatches(prompt, fire.text));
+      if (index < 0) return undefined;
+      const [[, fire]] = misattributed.splice(index, 1) as [[string, WakeupFire]];
+      updates.push({ kind: "upsert", item: wakeupTurnItem(fire, wakeupId) });
+      return fire.turnId;
+    };
     for (const [wakeupId, wakeup] of session.wakeups) {
       if (next.has(wakeupId)) continue;
-      const firedTurnId = session.firedSinceStop.get(wakeupId);
-      updates.push({ kind: "upsert", item: firedTurnId !== undefined && !wakeup.recurring
+      const firedTurnId = wakeup.recurring ? undefined : firedTurn(wakeupId, wakeup.prompt);
+      updates.push({ kind: "upsert", item: firedTurnId !== undefined
         ? wakeupRow(wakeupId, wakeup, "fired", { firedTurnId })
         : wakeupRow(wakeupId, wakeup, "cancelled") });
     }
@@ -2159,8 +2183,8 @@ export class ClaudeProvider implements ChatProvider {
       for (const [wakeupId, cron] of session.revived) {
         if (next.has(wakeupId) || session.wakeups.has(wakeupId) || this.cancelledWakeups.get(session.id)?.has(wakeupId)) continue;
         const wakeup: SessionWakeup = { prompt: cron.prompt, recurring: cron.recurring, schedule: cron.cron, createdAt: cron.createdAt };
-        const firedTurnId = session.firedSinceStop.get(wakeupId);
-        updates.push({ kind: "upsert", item: firedTurnId !== undefined && !cron.recurring
+        const firedTurnId = cron.recurring ? undefined : firedTurn(wakeupId, cron.prompt);
+        updates.push({ kind: "upsert", item: firedTurnId !== undefined
           ? wakeupRow(wakeupId, wakeup, "fired", { firedTurnId })
           : wakeupRow(wakeupId, wakeup, "lost", { message: WAKEUP_NOT_RESTORED_MESSAGE }) });
       }
@@ -2256,18 +2280,24 @@ export class ClaudeProvider implements ChatProvider {
     const prompt = typeof input.prompt === "string" ? input.prompt : "";
     const source = typeof input.source === "string" ? input.source : undefined;
     const cancelled = this.cancelledWakeups.get(session.id);
-    const matched = [...session.wakeups].find(([, wakeup]) => wakeupPromptMatches(wakeup.prompt, prompt))
-      ?? [...session.revived].find(([id, cron]) => !cancelled?.has(id) && wakeupPromptMatches(cron.prompt, prompt));
+    // Wakeups can share a prompt: the one firing is the one due soonest,
+    // and a one-shot that already fired this round cannot fire again. The
+    // next Stop corrects a guess it proves wrong (trackWakeups).
+    const firable = (id: string, recurring: boolean) => recurring || !session.firedSinceStop.has(id);
+    const matched = [...session.wakeups]
+      .filter(([id, wakeup]) => firable(id, wakeup.recurring) && wakeupPromptMatches(wakeup.prompt, prompt))
+      .sort(([, left], [, right]) => (left.nextFireAt ?? Infinity) - (right.nextFireAt ?? Infinity))[0]
+      ?? [...session.revived].find(([id, cron]) => !cancelled?.has(id) && firable(id, cron.recurring) && wakeupPromptMatches(cron.prompt, prompt));
     if (source !== undefined) {
       if (source !== "loop_wakeup" && source !== "schedule_wakeup") return;
     } else if (!matched || session.pendingTurns > 0 || session.queuedTurns > 0) {
       return;
     }
     const promptId = typeof input.prompt_id === "string" && input.prompt_id ? input.prompt_id : randomUUID();
-    const turnId = `message:wakeup:${promptId}`;
-    if (matched) session.firedSinceStop.set(matched[0], turnId);
+    const fire: WakeupFire = { turnId: `message:wakeup:${promptId}`, text: prompt, createdAt: this.now() };
+    if (matched) session.firedSinceStop.set(matched[0], fire);
     this.emit(session.id, {
-      updates: [{ kind: "upsert", item: { id: turnId, type: "user_message", createdAt: this.now(), text: prompt, origin: "wakeup", ...(matched ? { wakeupId: matched[0] } : {}) } }],
+      updates: [{ kind: "upsert", item: wakeupTurnItem(fire, matched?.[0]) }],
       outcome: "handled",
       eventType: "wakeup.fired",
     });
@@ -2345,12 +2375,16 @@ export class ClaudeProvider implements ChatProvider {
     return true;
   }
 
-  /** Records cancelled wakeups durably; the block must survive a restart. */
+  /**
+   * Records cancelled wakeups durably; the block must survive a restart.
+   * No count cap: a record dropped while its cron can still be rebuilt
+   * would let a resume run a wakeup the user cancelled. The set shrinks
+   * only when the transcript stops yielding the cron (listPausedWakeups).
+   */
   private async recordCancelled(sessionId: string, wakeups: Array<[string, string]>): Promise<void> {
     if (wakeups.length === 0) return;
     const cancelled = this.cancelledWakeups.get(sessionId) ?? new Map<string, string>();
     for (const [wakeupId, prompt] of wakeups) cancelled.set(wakeupId, prompt);
-    if (cancelled.size > 256) cancelled.delete(cancelled.keys().next().value!);
     this.cancelledWakeups.set(sessionId, cancelled);
     await this.queuePersist(this.durableSnapshot());
   }

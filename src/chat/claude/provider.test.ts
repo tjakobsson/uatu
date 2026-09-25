@@ -3882,6 +3882,62 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     await provider.dispose();
   });
 
+  test("releasing more than 256 wakeups keeps every cancellation: the oldest still blocks its rebuilt fire", async () => {
+    const many = Array.from({ length: 300 }, (_, index) => ({ id: `m${index}`, schedule: "*/5 * * * *", recurring: true, prompt: `CRON job ${index}` }));
+    const { provider, queries, events, stop, session } = await scheduled(many);
+    await provider.release(session.id);
+    // Resumed with every cron rebuilt and one more holding the session.
+    const other = { id: "o1", schedule: "*/10 * * * *", recurring: true, prompt: "OTHER check" };
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    const next = queries[1]!;
+    await promptHook(next, { prompt: "again", prompt_id: "typed-2" });
+    await stopHook(next, { session_crons: [...many, other] });
+    next.push(result(session.id, "res2"));
+    await waitFor(() => events.filter(event => event.eventType === "turn.scheduled").length === 2);
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["o1"]);
+    expect(await promptHook(next, { prompt: many[0]!.prompt, prompt_id: "fired-0" })).toEqual({ decision: "block", reason: expect.any(String) });
+    stop();
+    await provider.dispose();
+  });
+
+  test("of two pending one-shots sharing a prompt, the fire goes to the one due first", async () => {
+    // Created first but due later (a fixed time) vs. due within the minute.
+    const later = { id: "wa", schedule: "3 20 * * *", recurring: false, prompt: "WAKEUP same words" };
+    const sooner = { id: "wb", schedule: "* * * * *", recurring: false, prompt: "WAKEUP same words" };
+    const { provider, events, stop, query } = await scheduled([later, sooner]);
+    await promptHook(query, { prompt: later.prompt, prompt_id: "fired-1" });
+    await waitFor(() => events.some(event => event.eventType === "wakeup.fired"));
+    expect(events.find(event => event.eventType === "wakeup.fired")!.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "message:wakeup:fired-1", wakeupId: "wb" }) }]);
+    await stopHook(query, { session_crons: [later] });
+    await waitFor(() => rows(events).some(row => row.id === "wakeup:wb" && row.status !== "pending"));
+    const reconciled = events.filter(event => event.eventType === "wakeups.reconciled").at(-1)!;
+    expect(reconciled.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "wakeup:wb", status: "fired", firedTurnId: "message:wakeup:fired-1" }) }]);
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["wa"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a same-prompt fire the Stop proves went to the other one-shot moves there, header and all", async () => {
+    // Identical schedules: nothing tells them apart at fire time.
+    const first = { id: "wa", schedule: "3 20 * * *", recurring: false, prompt: "WAKEUP same words" };
+    const second = { id: "wb", schedule: "3 20 * * *", recurring: false, prompt: "WAKEUP same words" };
+    const { provider, events, stop, query } = await scheduled([first, second]);
+    await promptHook(query, { prompt: first.prompt, prompt_id: "fired-1" });
+    await waitFor(() => events.some(event => event.eventType === "wakeup.fired"));
+    expect(events.find(event => event.eventType === "wakeup.fired")!.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ wakeupId: "wa" }) }]);
+    // The CLI still lists wa: wb is the one that fired, and it was not cancelled.
+    await stopHook(query, { session_crons: [first] });
+    await waitFor(() => rows(events).some(row => row.id === "wakeup:wb" && row.status !== "pending"));
+    const reconciled = events.filter(event => event.eventType === "wakeups.reconciled").at(-1)!;
+    expect(reconciled.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "message:wakeup:fired-1", type: "user_message", origin: "wakeup", wakeupId: "wb", text: first.prompt }) },
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:wb", status: "fired", firedTurnId: "message:wakeup:fired-1" }) },
+    ]);
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["wa"]);
+    stop();
+    await provider.dispose();
+  });
+
   test("release is refused while a turn runs or background work would die with it", async () => {
     const { provider, stop, session, query } = await scheduled([oneShot]);
     await provider.prompt(session.id, { id: "r2", text: "meanwhile", delivery: "queue" });

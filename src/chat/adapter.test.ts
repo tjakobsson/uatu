@@ -2235,6 +2235,30 @@ describe("prompt, abort, permission, and question mutations", () => {
     await adapter.dispose();
   });
 
+  test("a wakeup that fires or is cancelled while the snapshot is read is not seeded back to pending", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "scheduled-wakeups"] };
+    provider.sessions = [fixtureSession("session")];
+    const pending = (wakeupId: string) => ({ conversationId: "session", wakeupId, prompt: `check ${wakeupId}`, recurring: false, schedule: "3 20 * * *", nextFireAt: 9, createdAt: 5 });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const projection = adapter.projectionForTests("session");
+    const settled = (wakeupId: string, status: "fired" | "cancelled") => ({ id: `wakeup:${wakeupId}`, type: "scheduled_wakeup" as const, createdAt: 5, wakeupId, prompt: `check ${wakeupId}`, recurring: false, schedule: "3 20 * * *", status, ...(status === "fired" ? { firedTurnId: "message:wakeup:f1" } : {}) });
+    Object.assign(provider, {
+      listScheduledWakeups: async () => [pending("w1"), pending("w2"), pending("w3")],
+      // Read after the wakeup list: the provider's events land meanwhile.
+      listPermissions: async () => {
+        projection.apply({ kind: "upsert", item: settled("w1", "fired") });
+        projection.apply({ kind: "upsert", item: settled("w2", "cancelled") });
+        return [];
+      },
+    });
+    const snapshot = await adapter.history("session");
+    const rows = (items: ConversationItem[]) => items.filter(item => item.type === "scheduled_wakeup").map(item => [item.id, (item as { status: string }).status]);
+    expect(rows(snapshot.items)).toEqual([["wakeup:w1", "fired"], ["wakeup:w2", "cancelled"], ["wakeup:w3", "pending"]]);
+    expect(rows(projection.items())).toEqual([["wakeup:w1", "fired"], ["wakeup:w2", "cancelled"], ["wakeup:w3", "pending"]]);
+    await adapter.dispose();
+  });
+
   test("an agent without the scheduled-wakeups capability cannot release", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
