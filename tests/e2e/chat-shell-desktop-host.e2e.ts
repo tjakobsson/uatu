@@ -1,5 +1,6 @@
-import { chromium, webkit, type Page, type Locator } from "@playwright/test";
+import type { Page, Locator } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
 import { bootShell, drag } from "./chat-shell-helpers";
 
 const outputWindow = (page: Page) => page.getByRole("region", { name: "Shell output window" });
@@ -12,9 +13,11 @@ async function titlebar(page: Page, inset: number, hosted = true) {
   }, { inset, hosted });
 }
 
+attachPageDiagnosticsOnFailure(test);
+
 for (const engine of ["chromium", "webkit"] as const) {
   for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} stale-build recovery stays clickable above full-area output`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -51,7 +54,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} shell window respects native titlebar bounds and live inset changes`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { outputView } = await bootShell(page, request);
@@ -87,7 +90,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} floating shell controls stack above desktop chrome and below modals`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { outputView } = await bootShell(page, request);

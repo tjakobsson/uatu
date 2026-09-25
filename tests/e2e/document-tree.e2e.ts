@@ -4,8 +4,8 @@
 // (role="treeitem", aria-expanded, aria-selected, data-item-path) which
 // Playwright reaches through the shadow DOM via standard CSS selectors.
 
-import { chromium, webkit } from "@playwright/test";
 import { expect, test, type Page } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
@@ -811,9 +811,11 @@ test("folder clicks only toggle: no folder looks selected, and the focus ring is
   await expect(page.locator('[role="treeitem"][aria-selected="true"]')).toHaveCount(0);
 });
 
+attachPageDiagnosticsOnFailure(test);
+
 for (const browserName of ["chromium", "webkit"] as const) {
   test(`${browserName} touch: a tapped folder keeps the plain row background even while :hover sticks`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[browserName].launch();
+    const browser = await launchBrowser(browserName);
     try {
       const page = await browser.newPage({ baseURL, hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
       await bootSession(page, request);

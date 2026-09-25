@@ -1,5 +1,6 @@
-import { chromium, webkit, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 import { chatWorkload } from "../fixtures/chat-performance";
@@ -43,9 +44,11 @@ const work = (page: Page) => page.evaluate(() => {
     transcriptRenders: globalThis.__uatuChatPerformance?.counts["transcript-render"] ?? 0 };
 });
 
+attachPageDiagnosticsOnFailure(test);
+
 for (const engine of ["chromium", "webkit"] as const) {
   for (const child of [false, true]) for (const collapsed of ["row", "group"] as const) test(`${engine} ${child ? "child" : "parent"} return focuses the visible collapsed ${collapsed} summary`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { outputView, timeline } = await bootShell(page, request, { child, extra: [98, 99].map(createdAt => ({
@@ -74,7 +77,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} scrolling alone preserves inspection through completion and unchanged reconstruction`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const output = log(200);
@@ -107,7 +110,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} full-area output protects covered prompt navigation`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -141,7 +144,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} floating Find excludes hidden inline chrome and restores it on return`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { outputView, update } = await bootShell(page, request, { output: "visible-output-needle" });
@@ -176,7 +179,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find reveals inline error matches on both axes`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { update, outputView, timeline } = await bootShell(page, request, { shape: "bash", child });
@@ -210,7 +213,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} covered Preview find cannot receive focus behind full-area shell output`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: true, viewport: { width: 1440, height: 1000 } });
     const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
     try {
@@ -251,7 +254,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} normalized completion time reaches the floating header`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { update, outputView } = await bootShell(page, request, { shape });
@@ -276,7 +279,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   for (const agent of ["opencode", "claude"] as const) {
     for (const shape of ["command", "bash"] as const) {
       for (const child of [false, true]) test(`${engine} ${agent} ${shape} ${child ? "child" : "parent"} full running scrollback flow`, async ({ request, baseURL }, testInfo) => {
-        const browser = await ({ chromium, webkit })[engine].launch();
+        const browser = await launchBrowser(engine);
         const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
         const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
         try {
@@ -376,7 +379,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   }
 
   for (const outcome of ["completed", "failed", "cancelled"] as const) for (const shape of ["command", "bash"] as const) for (const child of [false, true]) test(`${engine} ${shape} ${child ? "child" : "parent"} ${outcome} keeps selected identity through regrouping`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
     try {
       const { outputView, update, viewport } = await bootShell(page, request, { shape, child, agent: shape === "bash" ? "claude" : "opencode" });
@@ -403,7 +406,7 @@ for (const engine of ["chromium", "webkit"] as const) {
 
   for (const agent of ["opencode", "claude"] as const) test(`${engine} ${agent} long output parse and DOM work stays incremental`, async ({ request, baseURL }, testInfo) => {
     test.setTimeout(60_000);
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     const evidence: Record<string, unknown> = { engine, agent, initialLines: 5000, updates: 20, conversationWorkloadItems: 50 };
     const requests: Record<string, unknown>[] = [];
@@ -518,7 +521,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const child of [false, true]) for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} hidden popped output completes without painting`, async ({ request, baseURL }, testInfo) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -564,7 +567,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const touch of [false, true]) for (const theme of ["light", "dark"] as const) test(`${engine} ${touch ? "touch" : "desktop"} ${theme} layout bounds and return controls`, async ({ request, baseURL }, testInfo) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: true, isMobile: touch, colorScheme: theme,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -662,7 +665,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} find and native selection survive streaming and reparenting`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -719,7 +722,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} item A and B retain separate geometry through navigation and mode changes`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: true, viewport: { width: 1440, height: 1000 } });
     try {
       await page.addInitScript(() => localStorage.setItem("uatu:presentation:v1:%2F:uatu:ui-mode", "desktop"));
@@ -770,7 +773,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} return preserves deliberate outer reading and releases ownership`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const history = Array.from({ length: 30 }, (_, i) => ({ id: `history:${i}`, type: "assistant_message" as const,
@@ -819,7 +822,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} disconnection does not invent completion`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { outputView } = await bootShell(page, request);
@@ -835,7 +838,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find materializes completed-only shell output once`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const output = "lazy-earliest-needle\n" + log(200) + "\nlazy-latest-needle";

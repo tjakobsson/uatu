@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { chromium, webkit } from "@playwright/test";
+import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
 import { bootShell, frames as settleFrames, log, shell, position, drag } from "./chat-shell-helpers";
 
@@ -19,6 +19,8 @@ declare global {
   }
 }
 
+attachPageDiagnosticsOnFailure(test);
+
 for (const browserName of ["chromium", "webkit"] as const) for (const touch of [false, true]) for (const child of [false, true]) {
   test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} integrated shell frame budget`, async ({ request, baseURL }, testInfo) => {
     // A long scenario (its own browser launch, then ~25 update/settle cycles
@@ -26,7 +28,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
     // WebKit spends ~13s booting alone and was timing out at 30s while still
     // progressing; the budget is time, not a frame assertion.
     test.slow();
-    const browser = await ({ chromium, webkit })[browserName].launch();
+    const browser = await launchBrowser(browserName);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
     const errors: string[] = [];
@@ -249,7 +251,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
 for (const browserName of ["chromium", "webkit"] as const) {
   for (const touch of [false, true]) {
     for (const child of [false, true]) test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} coordinated following`, async ({ request, baseURL }, testInfo) => {
-      const browser = await ({ chromium, webkit })[browserName].launch();
+      const browser = await launchBrowser(browserName);
       const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
         viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
       const errors: string[] = [];

@@ -1,5 +1,6 @@
-import { chromium, webkit, type APIRequestContext, type Page } from "@playwright/test";
+import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 
@@ -74,9 +75,11 @@ async function expectChromeFits(page: Page) {
   await expect(page.locator("#chat-input")).toHaveValue("Keep this iPad draft");
 }
 
+attachPageDiagnosticsOnFailure(test);
+
 for (const engine of ["chromium", "webkit"] as const) {
   test(`${engine} iPad desktop headers and composer fit accessory-bar and software-keyboard viewports`, async ({ request, baseURL }, testInfo) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: true, isMobile: true });
     try {
       testInfo.annotations.push({ type: "simulation", description: "Controlled safe-area and visual-viewport measurements; native iPad blur/keyboard still require physical verification." });
@@ -109,7 +112,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} iPad rotation and mode switches clear desktop geometry without losing drafts`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: true, isMobile: true });
     try {
       await boot(page, request);
@@ -145,7 +148,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} docked and fullscreen terminals inherit the desktop viewport once`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: true, isMobile: true });
     try {
       const credential = await boot(page, request);
@@ -179,7 +182,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} safe areas work with fine pointers, zoom stays browser-owned, and native titlebar remains separate`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: false });
     try {
       await boot(page, request);

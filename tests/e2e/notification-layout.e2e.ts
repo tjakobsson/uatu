@@ -1,5 +1,6 @@
-import { chromium, webkit, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { expect, test } from "./hub-fixtures";
+import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
 import { captureScreenshot } from "./evidence";
 
 async function expectSidebarControlsFit(page: Page) {
@@ -19,10 +20,12 @@ async function expectSidebarControlsFit(page: Page) {
   })).toBe(true);
 }
 
+attachPageDiagnosticsOnFailure(test);
+
 for (const engine of ["chromium", "webkit"] as const) {
   test(`${engine} hub notification controls clear the brand at iPad sidebar widths and in touch mode`, async ({ hub, hubContext }, testInfo) => {
     const workspace = hub.workspaces[0]!;
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const context = await browser.newContext({ storageState: await hubContext.storageState(),
       viewport: { width: 1194, height: 834 }, hasTouch: true, isMobile: true });
     const page = await context.newPage();
