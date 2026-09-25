@@ -136,6 +136,12 @@ test("Switching to single layout preserves the Source / Rendered preference", as
   // Enter side-by-side; the chooser stays visible (so Diff stays
   // reachable) and the persisted Source preference is preserved.
   await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  // Wait for the split to actually mount. Entering split fetches the missing
+  // Rendered view and then rebuilds the layout toolbar; a click on Single
+  // that is still in progress when that rebuild lands is dropped (mousedown
+  // and mouseup hit different buttons), leaving the preview in split.
+  await expect(page.locator(".uatu-layout-toolbar [data-layout-value='split-h']")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#preview.is-split-h")).toBeVisible();
   await expect(page.locator("#view-control")).toBeVisible();
   await expect(page.locator("#view-source")).toHaveAttribute("aria-checked", "true");
 
