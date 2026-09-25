@@ -98,3 +98,39 @@ test("read-only restoration cannot write Hub fields, but user navigation after e
     appState.roots = roots;
   }
 });
+
+test("a watcher frame re-confirming the held selection does not re-save it over another client's newer choice", async () => {
+  const roots = appState.roots;
+  const patches: unknown[] = [];
+  setPersonalStateFetchForTests(async (_input, init) => {
+    if (init?.method === "PATCH") patches.push(JSON.parse(String(init.body)));
+    return Response.json({ version: 1 });
+  });
+  try {
+    await loadPersonalWorkspaceState();
+    appState.roots = [{ id: "docs", label: "docs", path: "/docs", hiddenCount: 0, docs: [
+      { id: "/docs/a.md", rootId: "docs", name: "a.md", relativePath: "a.md", kind: "markdown", mtimeMs: 1 },
+      { id: "/docs/b.md", rootId: "docs", name: "b.md", relativePath: "b.md", kind: "markdown", mtimeMs: 2 },
+    ] }];
+    // Boot restores a.md read-only, then the page becomes interactive.
+    setSelectedId("/docs/a.md");
+    enablePersonalStatePersistence();
+    // Its live frames (the stream's first snapshot, any file event) keep the
+    // selection where it is. Meanwhile another client saved b.md; these
+    // frames must not put a.md back as the newest choice.
+    setSelectedId("/docs/a.md");
+    setSelectedId("/docs/a.md");
+    await flushPersonalWorkspaceState();
+    expect(patches).toEqual([]);
+    // A real move is saved, whatever drove it (Follow's switch included) ...
+    setSelectedId("/docs/b.md");
+    await flushPersonalWorkspaceState();
+    expect(patches).toEqual([{ documentPath: "b.md" }]);
+    // ... and so is the user activating the document already shown.
+    setSelectedId("/docs/b.md", "navigation");
+    await flushPersonalWorkspaceState();
+    expect(patches).toEqual([{ documentPath: "b.md" }, { documentPath: "b.md" }]);
+  } finally {
+    appState.roots = roots;
+  }
+});
