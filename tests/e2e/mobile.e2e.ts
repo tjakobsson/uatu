@@ -7,6 +7,7 @@
 // deterministic viewport shim; final behavior remains gated on real iOS.
 
 import fs from "node:fs/promises";
+import path from "node:path";
 
 import { expect, test } from "./fixtures";
 import { waitForPreviewToSettle } from "./fixtures";
@@ -32,6 +33,39 @@ function readStoredValue(page: import("@playwright/test").Page, suffix: string):
     }
     return null;
   }, suffix);
+}
+
+// Terminal input typed before the pane's attach is ready is dropped (the
+// client forwards keystrokes only once the reconstruction has arrived), so
+// every test that types waits on the readiness marker first — the xterm
+// element is visible well before that.
+async function waitForTerminalReady(page: import("@playwright/test").Page) {
+  const host = page.locator(".terminal-pane-host").first();
+  await expect(host.locator(".xterm")).toBeVisible({ timeout: 5000 });
+  await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10_000 });
+  return host;
+}
+
+// A file the shell polls for, so a test decides when delayed PTY output is
+// printed instead of racing a `sleep` against the page. It lives in a fresh
+// directory under /tmp (the PTY backend is POSIX-only): outside the watched
+// workspace, and a short path, since the command carrying it is typed key by
+// key (macOS's per-user os.tmpdir() alone is ~50 characters).
+const gateDirectories: string[] = [];
+async function terminalGate(): Promise<{ shellWait: string; open: () => Promise<void> }> {
+  const directory = await fs.mkdtemp("/tmp/uatu-gate-");
+  gateDirectories.push(directory);
+  const gatePath = path.join(directory, "open");
+  return {
+    shellWait: `while [ ! -e '${gatePath}' ]; do sleep 0.1; done`,
+    open: () => fs.writeFile(gatePath, "", "utf8"),
+  };
+}
+
+// Resolves once the page has rendered a frame after everything already
+// scheduled with requestAnimationFrame.
+async function nextAnimationFrame(page: import("@playwright/test").Page): Promise<void> {
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
 }
 
 // Touch-mode variant of the standard boot: the sidebar (tree, follow chip)
@@ -109,6 +143,9 @@ async function terminalBeforeEach(
 
 test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
+  for (const directory of gateDirectories.splice(0)) {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test.describe("touch tab navigation", () => {
@@ -165,8 +202,12 @@ test.describe("touch tab navigation", () => {
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
 
     // A watched-file event (programmatic tree update) must not steal it.
+    // The added sibling is the delivery receipt: once its row renders, the
+    // client has applied the file events, so the check below is not a bet
+    // on how long delivery takes.
     await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nTouched while browsing.\n", "utf8");
-    await page.waitForTimeout(600);
+    await fs.writeFile(workspacePath("guides", "touched.md"), "# Touched\n", "utf8");
+    await expect(treeRow(page, "guides/touched.md")).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
     await expect(page.locator(".sidebar")).toBeVisible();
 
@@ -307,7 +348,7 @@ test.describe("touch terminal tab", () => {
 
   test("the terminal survives tab round-trips with its PTY attached and output intact", async ({ page }) => {
     await page.locator("#touch-tab-terminal").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    await waitForTerminalReady(page);
 
     // Touch emulation doesn't reliably deliver the show-path's deferred
     // focus; land it explicitly before typing (same recipe as terminal.e2e).
@@ -356,21 +397,29 @@ test.describe("touch terminal tab", () => {
 
   test("PTY output while another tab is active badges the Terminal tab", async ({ page }) => {
     await page.locator("#touch-tab-terminal").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    const host = await waitForTerminalReady(page);
 
-    // Kick off delayed output, then leave before it arrives.
+    // Kick off gated output, then leave before it is released. The armed
+    // line is printed after the command's own echo, so once it shows, the
+    // shell is silent until the gate opens.
+    const gate = await terminalGate();
     await page.evaluate(() => {
       document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
     });
-    await page.keyboard.type("sleep 1 && echo badge-ping");
+    await page.keyboard.type(`printf 'badge-%s\\n' armed; ${gate.shellWait}; printf 'badge-%s\\n' ping`);
     await page.keyboard.press("Enter");
+    await expect.poll(() => host.locator(".xterm").textContent()).toContain("badge-armed");
     await page.locator("#touch-tab-preview").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+    await expect(page.locator("#touch-tab-terminal")).not.toHaveAttribute("data-badge", "");
 
-    await expect(page.locator("#touch-tab-terminal")).toHaveAttribute("data-badge", "", { timeout: 5000 });
+    await gate.open();
+    await expect(page.locator("#touch-tab-terminal")).toHaveAttribute("data-badge", "");
 
     // Activating the tab clears the dot.
     await page.locator("#touch-tab-terminal").click();
     await expect(page.locator("#touch-tab-terminal")).not.toHaveAttribute("data-badge", "");
+    await expect.poll(() => host.locator(".xterm").textContent()).toContain("badge-ping");
   });
 
   test("keybar shows the grown key set and the sticky Ctrl latch arms and cancels", async ({ page }) => {
@@ -400,14 +449,15 @@ test.describe("touch terminal tab", () => {
 
   test("Select opens a document-level transcript with native text selection and Done restores terminal", async ({ page }) => {
     await page.locator("#touch-tab-terminal").click();
-    const host = page.locator(".terminal-pane-host").first();
+    const host = await waitForTerminalReady(page);
     const terminal = host.locator(".xterm");
-    await expect(terminal).toBeVisible({ timeout: 5000 });
-    await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10_000 });
+    // The later marker is released only after the transcript snapshot has
+    // been read, so it is output that arrives while the sheet is open.
+    const gate = await terminalGate();
     await page.evaluate(() => {
       document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
     });
-    await page.keyboard.type("seq 1 80; printf '%0500d\\n' 0; printf 'snapshot-%s-ready\\n' sheet; sleep 1 && printf 'sheet-%s-marker\\n' later");
+    await page.keyboard.type(`seq 1 80; printf '%0500d\\n' 0; printf 'snapshot-%s-ready\\n' sheet; ${gate.shellWait}; printf 'sheet-%s-marker\\n' later`);
     await page.keyboard.press("Enter");
     await expect.poll(() => host.locator(".xterm").textContent()).toContain("snapshot-sheet-ready");
 
@@ -427,6 +477,7 @@ test.describe("touch terminal tab", () => {
     const snapshot = await text.textContent();
     expect(snapshot).toContain("snapshot-sheet-ready");
     expect(snapshot).not.toContain("sheet-later-marker");
+    await gate.open();
     await expect.poll(() => host.locator(".xterm").textContent()).toContain("sheet-later-marker");
     expect(await text.textContent()).toBe(snapshot);
     await expect.poll(() => page.evaluate(() => (
@@ -466,17 +517,16 @@ test.describe("touch terminal tab", () => {
 
   test("keybar Paste sends multiline clipboard text exactly once through bracketed paste", async ({ page }) => {
     await page.locator("#touch-tab-terminal").click();
-    const host = page.locator(".terminal-pane-host").first();
-    await expect(host.locator(".xterm")).toBeVisible({ timeout: 5000 });
-    await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10_000 });
-    await page.waitForTimeout(400);
+    const host = await waitForTerminalReady(page);
     await page.evaluate(() => {
       document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
     });
 
     // Explicitly enable the terminal mode so this assertion does not depend
     // on which interactive shell the E2E host happens to use.
-    await page.keyboard.type("printf '\\033[?2004h'; echo bracket-mode-ready");
+    // The marker is assembled by printf so the wait below sees the command's
+    // output, not the echo of the command line itself.
+    await page.keyboard.type("printf '\\033[?2004h'; printf 'bracket-mode-%s\\n' ready");
     await page.keyboard.press("Enter");
     await expect(host).toContainText("bracket-mode-ready", { timeout: 5000 });
 
@@ -489,8 +539,10 @@ test.describe("touch terminal tab", () => {
 
     await page.getByRole("button", { name: "Paste from clipboard" }).click();
     // Bracketed paste holds embedded newlines in the editor until the user
-    // submits. A raw socket write would have created the marker already.
-    await page.waitForTimeout(200);
+    // submits. A raw socket write would have run the first line before the
+    // shell echoed the second, so once the second line shows, the marker
+    // must still be absent.
+    await expect(host).toContainText("'second");
     expect(await fs.readFile(markerPath, "utf8").catch(() => null)).toBeNull();
 
     await page.keyboard.press("Enter");
@@ -590,8 +642,9 @@ test.describe("touch mermaid viewer", () => {
     await expect(trigger).toBeVisible();
     await trigger.tap();
     await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
-    // Let the deferred fit-to-viewport RAF settle before measuring.
-    await page.waitForTimeout(120);
+    // Let the deferred fit-to-viewport RAF (scheduled with the open) run
+    // before measuring.
+    await nextAnimationFrame(page);
   }
 
   function stageTransform(page: import("@playwright/test").Page): Promise<string> {
