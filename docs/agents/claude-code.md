@@ -6,7 +6,7 @@ uatu treats Claude Code as a first-class agent. The aim is to use what its SDK o
 
 Generated against `@anthropic-ai/claude-agent-sdk` 0.3.261 (bundled Claude Code CLI 2.1.261) · content blocks from `@anthropic-ai/sdk` 0.124.0.
 
-**Gaps: 28** (unhandled or behavior-missing) · dedicated 36 · generic 32 · ignored 13 · unhandled 26 · behavior-missing 2
+**Gaps: 26** (unhandled or behavior-missing) · dedicated 40 · generic 30 · ignored 13 · unhandled 26 · behavior-missing 0
 
 Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the page cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet.
 
@@ -120,9 +120,9 @@ Source: `@anthropic-ai/claude-agent-sdk` `sdk-tools.d.ts`: one `*Input` per tool
 | `AskUserQuestion` | `AskUserQuestionInput` | dedicated | question card |  |
 | `Bash` | `BashInput` | dedicated | bash row |  |
 | `ClaudeDesign` | `ClaudeDesignInput` | generic | tool row |  |
-| `CronCreate` | `CronCreateInput` | behavior-missing | tool row | Renders as a tool row, but the session is retired when the turn ends and the cron never fires; /loop's interval mode depends on it. Planned in the claude-scheduled-wakeups change. |
-| `CronDelete` | `CronDeleteInput` | generic | tool row |  |
-| `CronList` | `CronListInput` | generic | tool row |  |
+| `CronCreate` | `CronCreateInput` | dedicated | schedule row |  |
+| `CronDelete` | `CronDeleteInput` | dedicated | schedule row |  |
+| `CronList` | `CronListInput` | dedicated | schedule row |  |
 | `Edit` | `FileEditInput` | dedicated | edit row |  |
 | `EnterPlanMode` | `EnterPlanModeInput` | generic | tool row |  |
 | `EnterWorktree` | `EnterWorktreeInput` | generic | tool row |  |
@@ -146,7 +146,7 @@ Source: `@anthropic-ai/claude-agent-sdk` `sdk-tools.d.ts`: one `*Input` per tool
 | `RemoteTrigger` | `RemoteTriggerInput` | generic | tool row |  |
 | `REPL` | `REPLInput` | generic | tool row |  |
 | `ReportFindings` | `ReportFindingsInput` | generic | tool row |  |
-| `ScheduleWakeup` | `ScheduleWakeupInput` | behavior-missing | tool row | Renders as a tool row, but the session is retired when the turn ends and the wakeup never fires; /loop's self-paced mode depends on it. Planned in the claude-scheduled-wakeups change. |
+| `ScheduleWakeup` | `ScheduleWakeupInput` | dedicated | schedule row |  |
 | `SendFeedback` | `SendFeedbackInput` | generic | tool row |  |
 | `ShowOnboardingRolePicker` | `ShowOnboardingRolePickerInput` | generic | tool row |  |
 | `TaskCreate` | `TaskCreateInput` | generic | tool row |  |

@@ -1,0 +1,676 @@
+{
+  "note": "Trimmed from scripts/spike-claude-wakeups.ts runs (task 1.1 of claude-scheduled-wakeups): the conversation records of the fire phase, plus the hook/stream order the live session observed. Attachment records are dropped (they carry the recording machine environment).",
+  "runs": [
+    {
+      "tool": "ScheduleWakeup",
+      "cli": "2.1.261 (SDK-bundled)",
+      "sdk": "@anthropic-ai/claude-agent-sdk@0.3.261",
+      "recordedAt": "2026-09-24T18:05:17.396Z",
+      "killPhaseTranscriptLines": {
+        "before": 22,
+        "after": 22
+      },
+      "order": [
+        {
+          "at": "+3.6s",
+          "event": "hook:UserPromptSubmit",
+          "source": null,
+          "prompt_id": "42448ef7-648c-4a61-9d70-5162bc4b838b",
+          "prompt": "Use the ScheduleWakeup tool with delaySeconds 60, reason \"spike\", and prompt \"WAKEUP-FIRED reply with exactly the word pong\". Then stop and do nothing else."
+        },
+        {
+          "at": "+3.6s",
+          "event": "msg:system/init"
+        },
+        {
+          "at": "+6.1s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+6.1s",
+          "event": "msg:user"
+        },
+        {
+          "at": "+6.1s",
+          "event": "hook:Stop",
+          "session_crons": [
+            {
+              "id": "58f8952a",
+              "schedule": "3 20 * * *",
+              "recurring": false,
+              "prompt": "WAKEUP-FIRED reply with exactly the word pong"
+            }
+          ],
+          "background_tasks": []
+        },
+        {
+          "at": "+6.1s",
+          "event": "msg:result/success"
+        },
+        {
+          "at": "+115.8s",
+          "event": "msg:command_lifecycle",
+          "command_uuid": "0f8d776f-098b-4004-993d-06f70ca99b1a",
+          "state": "started"
+        },
+        {
+          "at": "+115.8s",
+          "event": "hook:UserPromptSubmit",
+          "source": null,
+          "prompt_id": "1a44e46d-b525-464d-8900-10f40b79ada2",
+          "prompt": "WAKEUP-FIRED reply with exactly the word pong"
+        },
+        {
+          "at": "+115.8s",
+          "event": "msg:system/init"
+        },
+        {
+          "at": "+117.2s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+117.2s",
+          "event": "hook:Stop",
+          "session_crons": [],
+          "background_tasks": []
+        },
+        {
+          "at": "+117.2s",
+          "event": "msg:result/success"
+        }
+      ],
+      "transcript": [
+        {
+          "parentUuid": null,
+          "isSidechain": false,
+          "promptId": "42448ef7-648c-4a61-9d70-5162bc4b838b",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the ScheduleWakeup tool with delaySeconds 60, reason \"spike\", and prompt \"WAKEUP-FIRED reply with exactly the word pong\". Then stop and do nothing else."
+              }
+            ]
+          },
+          "uuid": "9bebb714-fc22-47ce-800a-6fe4b645dd02",
+          "timestamp": "2026-09-24T18:01:08.505Z",
+          "promptSource": "sdk",
+          "sessionId": "02a8485c-6d57-473a-a8ef-a205484b6422",
+          "version": "2.1.261"
+        },
+        {
+          "parentUuid": "ac749e04-095e-4f72-9eda-78290186eac2",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_01Qp3LS3SKiq5imc6e478Gop",
+                "name": "ScheduleWakeup",
+                "input": {
+                  "delaySeconds": 60,
+                  "reason": "spike",
+                  "prompt": "WAKEUP-FIRED reply with exactly the word pong",
+                  "noop": false
+                },
+                "caller": {
+                  "type": "direct"
+                }
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "96cf9197-0201-418b-8ecf-76d9813014a0",
+          "timestamp": "2026-09-24T18:01:10.998Z",
+          "sessionId": "02a8485c-6d57-473a-a8ef-a205484b6422",
+          "version": "2.1.261"
+        },
+        {
+          "parentUuid": "96cf9197-0201-418b-8ecf-76d9813014a0",
+          "isSidechain": false,
+          "promptId": "42448ef7-648c-4a61-9d70-5162bc4b838b",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "tool_use_id": "toolu_01Qp3LS3SKiq5imc6e478Gop",
+                "type": "tool_result",
+                "content": "Next wakeup scheduled for 20:03:00 (in 109s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
+              }
+            ]
+          },
+          "uuid": "39759a9a-4662-4f14-9444-da8a8d421a71",
+          "timestamp": "2026-09-24T18:01:11.013Z",
+          "toolUseResult": {
+            "scheduledFor": 1790272980000,
+            "clampedDelaySeconds": 60,
+            "wasClamped": false
+          },
+          "sessionId": "02a8485c-6d57-473a-a8ef-a205484b6422",
+          "version": "2.1.261"
+        },
+        {
+          "parentUuid": "2af33c90-f21d-4a96-b2c8-cd32d42f6801",
+          "isSidechain": false,
+          "promptId": "1a44e46d-b525-464d-8900-10f40b79ada2",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "WAKEUP-FIRED reply with exactly the word pong"
+          },
+          "isMeta": true,
+          "uuid": "0f8d776f-098b-4004-993d-06f70ca99b1a",
+          "timestamp": "2026-09-24T18:03:00.725Z",
+          "promptSource": "sdk",
+          "sessionId": "02a8485c-6d57-473a-a8ef-a205484b6422",
+          "version": "2.1.261"
+        },
+        {
+          "parentUuid": "0f8d776f-098b-4004-993d-06f70ca99b1a",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "text",
+                "text": "pong"
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "d8a1ff84-a2f8-423c-b6a3-b4552ee540b5",
+          "timestamp": "2026-09-24T18:03:02.009Z",
+          "sessionId": "02a8485c-6d57-473a-a8ef-a205484b6422",
+          "version": "2.1.261"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "cli": "2.1.281",
+      "sdk": "@anthropic-ai/claude-agent-sdk@0.3.261",
+      "recordedAt": "2026-09-24T18:10:15.529Z",
+      "killPhaseTranscriptLines": {
+        "before": 27,
+        "after": 27
+      },
+      "order": [
+        {
+          "at": "+0.5s",
+          "event": "hook:UserPromptSubmit",
+          "source": null,
+          "prompt_id": "9bb59f81-5b54-4066-8cf2-0fdf020436ff",
+          "prompt": "Use the ScheduleWakeup tool with delaySeconds 60, reason \"spike\", and prompt \"WAKEUP-FIRED reply with exactly the word pong\". Then stop and do nothing else."
+        },
+        {
+          "at": "+0.5s",
+          "event": "msg:system/init"
+        },
+        {
+          "at": "+3.0s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+3.0s",
+          "event": "msg:user"
+        },
+        {
+          "at": "+3.0s",
+          "event": "hook:Stop",
+          "session_crons": [
+            {
+              "id": "311d8ec9",
+              "schedule": "8 20 * * *",
+              "recurring": false,
+              "prompt": "WAKEUP-FIRED reply with exactly the word pong"
+            }
+          ],
+          "background_tasks": []
+        },
+        {
+          "at": "+3.0s",
+          "event": "msg:result/success"
+        },
+        {
+          "at": "+117.8s",
+          "event": "msg:command_lifecycle",
+          "command_uuid": "3c62502f-2399-4e1f-8a77-b7f7d53fa560",
+          "state": "started"
+        },
+        {
+          "at": "+117.8s",
+          "event": "hook:UserPromptSubmit",
+          "source": null,
+          "prompt_id": "95d3f77b-6d99-4cfc-b1b1-2c5b21cd5d95",
+          "prompt": "WAKEUP-FIRED reply with exactly the word pong"
+        },
+        {
+          "at": "+117.8s",
+          "event": "msg:system/init"
+        },
+        {
+          "at": "+118.8s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+118.8s",
+          "event": "hook:Stop",
+          "session_crons": [],
+          "background_tasks": []
+        },
+        {
+          "at": "+118.8s",
+          "event": "msg:result/success"
+        }
+      ],
+      "transcript": [
+        {
+          "parentUuid": null,
+          "isSidechain": false,
+          "promptId": "9bb59f81-5b54-4066-8cf2-0fdf020436ff",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the ScheduleWakeup tool with delaySeconds 60, reason \"spike\", and prompt \"WAKEUP-FIRED reply with exactly the word pong\". Then stop and do nothing else."
+              }
+            ]
+          },
+          "uuid": "65223c9a-3d96-4c32-8252-cbbe9f96cef6",
+          "timestamp": "2026-09-24T18:06:03.154Z",
+          "promptSource": "sdk",
+          "turnOrigin": "sdk",
+          "sessionId": "b4fa76f0-294f-4aeb-9c91-d6b4f82d1d01",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "c3d4fb34-401c-4a12-81bb-bc48f6626a2b",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_01P7v6jWaqHup5WQa4cbk4x7",
+                "name": "ScheduleWakeup",
+                "input": {
+                  "delaySeconds": 60,
+                  "noop": false,
+                  "prompt": "WAKEUP-FIRED reply with exactly the word pong",
+                  "reason": "spike"
+                },
+                "caller": {
+                  "type": "direct"
+                }
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "626ffb20-fa1a-41de-b594-d17ae947229e",
+          "timestamp": "2026-09-24T18:06:05.601Z",
+          "sessionId": "b4fa76f0-294f-4aeb-9c91-d6b4f82d1d01",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "626ffb20-fa1a-41de-b594-d17ae947229e",
+          "isSidechain": false,
+          "promptId": "9bb59f81-5b54-4066-8cf2-0fdf020436ff",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "tool_use_id": "toolu_01P7v6jWaqHup5WQa4cbk4x7",
+                "type": "tool_result",
+                "content": "Next wakeup scheduled for 20:08:00 (in 114s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
+              }
+            ]
+          },
+          "uuid": "423702bb-d694-4bbf-8c6c-4f14b0c31683",
+          "timestamp": "2026-09-24T18:06:05.607Z",
+          "toolUseResult": {
+            "scheduledFor": 1790273280000,
+            "clampedDelaySeconds": 60,
+            "wasClamped": false
+          },
+          "sessionId": "b4fa76f0-294f-4aeb-9c91-d6b4f82d1d01",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "95b115ce-8e71-4a48-91c6-fce81a8135de",
+          "isSidechain": false,
+          "promptId": "95d3f77b-6d99-4cfc-b1b1-2c5b21cd5d95",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "WAKEUP-FIRED reply with exactly the word pong"
+          },
+          "isMeta": true,
+          "uuid": "3c62502f-2399-4e1f-8a77-b7f7d53fa560",
+          "timestamp": "2026-09-24T18:08:00.384Z",
+          "promptSource": "system",
+          "turnOrigin": "scheduled",
+          "sessionId": "b4fa76f0-294f-4aeb-9c91-d6b4f82d1d01",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "5162a5c1-b7b9-4435-b4d4-e14f198ac28d",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "text",
+                "text": "pong"
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "a44de7d2-ca33-462a-8c33-c8d5907c96a1",
+          "timestamp": "2026-09-24T18:08:01.349Z",
+          "sessionId": "b4fa76f0-294f-4aeb-9c91-d6b4f82d1d01",
+          "version": "2.1.281"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "cli": "2.1.281",
+      "sdk": "@anthropic-ai/claude-agent-sdk@0.3.261",
+      "recordedAt": "2026-09-24T18:13:21.141Z",
+      "killPhaseTranscriptLines": {
+        "before": 39,
+        "after": 39
+      },
+      "order": [
+        {
+          "at": "+0.5s",
+          "event": "hook:UserPromptSubmit",
+          "source": null,
+          "prompt_id": "db9c440d-542d-4951-aaf1-d8cae4bc07a6",
+          "prompt": "Use the CronCreate tool to schedule a recurring task with the cron expression \"* * * * *\" (every minute) and the prompt: CRON-FIRED reply with exactly the word ping. Then stop and do nothing else."
+        },
+        {
+          "at": "+0.5s",
+          "event": "msg:system/init"
+        },
+        {
+          "at": "+2.5s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+2.5s",
+          "event": "msg:user"
+        },
+        {
+          "at": "+4.7s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+4.7s",
+          "event": "msg:user"
+        },
+        {
+          "at": "+6.6s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+6.6s",
+          "event": "hook:Stop",
+          "session_crons": [
+            {
+              "id": "0898e09c",
+              "schedule": "* * * * *",
+              "recurring": true,
+              "prompt": "CRON-FIRED reply with exactly the word ping"
+            }
+          ],
+          "background_tasks": []
+        },
+        {
+          "at": "+6.6s",
+          "event": "msg:result/success"
+        },
+        {
+          "at": "+43.6s",
+          "event": "msg:command_lifecycle",
+          "command_uuid": "ea536d00-457c-4560-8a37-df58e07f55ff",
+          "state": "started"
+        },
+        {
+          "at": "+43.6s",
+          "event": "hook:UserPromptSubmit",
+          "source": null,
+          "prompt_id": "65901a49-0ecb-487c-9010-9be64926b212",
+          "prompt": "CRON-FIRED reply with exactly the word ping"
+        },
+        {
+          "at": "+43.6s",
+          "event": "msg:system/init"
+        },
+        {
+          "at": "+45.6s",
+          "event": "msg:assistant"
+        },
+        {
+          "at": "+45.6s",
+          "event": "hook:Stop",
+          "session_crons": [
+            {
+              "id": "0898e09c",
+              "schedule": "* * * * *",
+              "recurring": true,
+              "prompt": "CRON-FIRED reply with exactly the word ping"
+            }
+          ],
+          "background_tasks": []
+        },
+        {
+          "at": "+45.6s",
+          "event": "msg:result/success"
+        }
+      ],
+      "transcript": [
+        {
+          "parentUuid": null,
+          "isSidechain": false,
+          "promptId": "db9c440d-542d-4951-aaf1-d8cae4bc07a6",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the CronCreate tool to schedule a recurring task with the cron expression \"* * * * *\" (every minute) and the prompt: CRON-FIRED reply with exactly the word ping. Then stop and do nothing else."
+              }
+            ]
+          },
+          "uuid": "d1250d38-9170-4bb5-a764-68fe19ac2145",
+          "timestamp": "2026-09-24T18:10:18.061Z",
+          "promptSource": "sdk",
+          "turnOrigin": "sdk",
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "0409d591-2341-439d-86f5-79cc59bcbe96",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_01NpwRqwVQ56uQqt2FZntbme",
+                "name": "ToolSearch",
+                "input": {
+                  "query": "select:CronCreate",
+                  "max_results": 1
+                },
+                "caller": {
+                  "type": "direct"
+                }
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "b7457ffa-95fe-44cf-98c6-e78d8d1ffead",
+          "timestamp": "2026-09-24T18:10:20.057Z",
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "b7457ffa-95fe-44cf-98c6-e78d8d1ffead",
+          "isSidechain": false,
+          "promptId": "db9c440d-542d-4951-aaf1-d8cae4bc07a6",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_01NpwRqwVQ56uQqt2FZntbme",
+                "content": [
+                  {
+                    "type": "tool_reference",
+                    "tool_name": "CronCreate"
+                  }
+                ]
+              }
+            ]
+          },
+          "uuid": "58322eba-face-4a1f-b6a4-bca77cd09f59",
+          "timestamp": "2026-09-24T18:10:20.076Z",
+          "toolUseResult": {
+            "matches": [
+              "CronCreate"
+            ],
+            "query": "select:CronCreate",
+            "total_deferred_tools": 78
+          },
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "f9c0ab94-de3b-40c1-be25-e2117a862407",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_01MzMiM8E7Cs1ddHfkwHAA6E",
+                "name": "CronCreate",
+                "input": {
+                  "cron": "* * * * *",
+                  "prompt": "CRON-FIRED reply with exactly the word ping",
+                  "recurring": true
+                },
+                "caller": {
+                  "type": "direct"
+                }
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "44dae28f-b6a2-4fd4-840b-4455d20d8923",
+          "timestamp": "2026-09-24T18:10:22.206Z",
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "44dae28f-b6a2-4fd4-840b-4455d20d8923",
+          "isSidechain": false,
+          "promptId": "db9c440d-542d-4951-aaf1-d8cae4bc07a6",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "tool_use_id": "toolu_01MzMiM8E7Cs1ddHfkwHAA6E",
+                "type": "tool_result",
+                "content": "Scheduled recurring job 0898e09c (Every minute). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+              }
+            ]
+          },
+          "uuid": "045dd125-db1a-4cda-ba69-120c672431b7",
+          "timestamp": "2026-09-24T18:10:22.217Z",
+          "toolUseResult": {
+            "id": "0898e09c",
+            "humanSchedule": "Every minute",
+            "recurring": true,
+            "durable": false
+          },
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "8a8b900b-1b59-4cfe-a5e6-f5434b192ac6",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "text",
+                "text": "Scheduled job `0898e09c` to run every minute with that prompt. It's session-only (gone when this session exits) and auto-expires after 7 days."
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "59c5f496-a9b8-4719-870a-a99d81219175",
+          "timestamp": "2026-09-24T18:10:24.090Z",
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "d89f0f86-52d0-4324-9c02-55309c21c12c",
+          "isSidechain": false,
+          "promptId": "65901a49-0ecb-487c-9010-9be64926b212",
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "CRON-FIRED reply with exactly the word ping"
+          },
+          "isMeta": true,
+          "uuid": "ea536d00-457c-4560-8a37-df58e07f55ff",
+          "timestamp": "2026-09-24T18:11:01.123Z",
+          "promptSource": "system",
+          "turnOrigin": "scheduled",
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        },
+        {
+          "parentUuid": "ea536d00-457c-4560-8a37-df58e07f55ff",
+          "isSidechain": false,
+          "message": {
+            "role": "assistant",
+            "model": "claude-fable-5-1",
+            "content": [
+              {
+                "type": "text",
+                "text": "ping"
+              }
+            ]
+          },
+          "type": "assistant",
+          "uuid": "67008566-c731-4f59-a242-d66c8fe41133",
+          "timestamp": "2026-09-24T18:11:03.089Z",
+          "sessionId": "e77b853d-9229-4acd-9812-0d2f3b66b7f1",
+          "version": "2.1.281"
+        }
+      ]
+    }
+  ]
+}

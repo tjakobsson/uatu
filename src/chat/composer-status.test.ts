@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { composerRoutineState, latestPlanUtilization, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, planSummaryLabel, planUtilizationLabel, planUtilizationLevel, rateLimitBadgeLabel, relativeReset, sessionCostLabel, sessionTotalsTitle } from "./composer-status";
-import { isRateLimitStanding, RATE_LIMIT_ITEM_ID, type ConversationItem } from "./types";
+import { isRateLimitStanding, RATE_LIMIT_ITEM_ID, type ConversationItem, type ScheduledWakeupItem } from "./types";
 import type { RateLimitStanding } from "./composer-status";
 
 const base = { cancelling: false, submitting: false, backgroundDeclared: true, backgroundTasks: [] as [] };
@@ -51,6 +51,20 @@ describe("composer routine state", () => {
     const task: ConversationItem = { id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "Sleep then report", status: "running" };
     expect(composerRoutineState({ ...base, status: "background", backgroundTasks: [task] as never })).toEqual({ stateName: "background", label: "1 background task running · Sleep then report" });
     expect(composerRoutineState({ ...base, status: "background", backgroundDeclared: false })).toEqual({ stateName: "ready", label: "Ready" });
+  });
+
+  test("the scheduled state names the pending count and the next fire time, only where the agent declares it", () => {
+    const now = new Date(2026, 8, 24, 20, 1).getTime();
+    const wakeup = (id: string, nextFireAt?: number): ScheduledWakeupItem => ({ id: `wakeup:${id}`, type: "scheduled_wakeup", createdAt: 1, wakeupId: id, prompt: "check", recurring: false, schedule: "3 20 * * *", ...(nextFireAt === undefined ? {} : { nextFireAt }), status: "pending" });
+    const soon = new Date(2026, 8, 24, 20, 3).getTime();
+    const time = new Date(soon).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    expect(composerRoutineState({ ...base, status: "scheduled", scheduledDeclared: true, scheduledWakeups: [wakeup("a", soon)], now })).toEqual({ stateName: "scheduled", label: `1 wakeup scheduled · next about ${time}` });
+    expect(composerRoutineState({ ...base, status: "scheduled", scheduledDeclared: true, scheduledWakeups: [wakeup("a", soon), wakeup("b")], now }).label).toBe(`2 wakeups scheduled · next about ${time}`);
+    // A schedule the workspace could not read still names the state.
+    expect(composerRoutineState({ ...base, status: "scheduled", scheduledDeclared: true, scheduledWakeups: [wakeup("a")], now }).label).toBe("1 wakeup scheduled");
+    expect(composerRoutineState({ ...base, status: "scheduled", scheduledDeclared: false })).toEqual({ stateName: "ready", label: "Ready" });
+    // Sending outranks it: a prompt typed in the scheduled state is on its way.
+    expect(composerRoutineState({ ...base, status: "scheduled", scheduledDeclared: true, submitting: true }).stateName).toBe("sending");
   });
 });
 

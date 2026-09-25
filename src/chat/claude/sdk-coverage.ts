@@ -25,10 +25,7 @@ export const claudeCoverageAnnotations: CoverageAnnotations & {
     "system/worker_shutting_down": "Emitted by the remote-worker bridge; uatu runs the CLI locally through the SDK.",
     tool_use_summary: "A one-line summary of tool calls the timeline already shows as rows.",
   },
-  behaviorMissing: {
-    ScheduleWakeup: "Renders as a tool row, but the session is retired when the turn ends and the wakeup never fires; /loop's self-paced mode depends on it. Planned in the claude-scheduled-wakeups change.",
-    CronCreate: "Renders as a tool row, but the session is retired when the turn ends and the cron never fires; /loop's interval mode depends on it. Planned in the claude-scheduled-wakeups change.",
-  },
+  behaviorMissing: {},
   toolNames: {
     AgentInput: ["Agent", "Task"],
     FileEditInput: "Edit",

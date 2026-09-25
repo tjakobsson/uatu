@@ -11,17 +11,21 @@ import type {
   PendingBackgroundTask,
   PendingPermission,
   PendingQuestion,
+  PendingScheduledWakeup,
   ProviderAttachment,
   ProviderHistoryPage,
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
+import type { ScheduledWakeupItem } from "../types";
+import { ScheduledWakeupUnavailableError } from "../provider";
 import type { AgentUsageReport, ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, PermissionRequest, PlanExtraUsage, PlanModelWindow, PlanUtilization, PlanUtilizationWindow, QuestionRequest, ReversibleHistoryResult, ReversibleHistoryState, SessionModelTotals, SessionTotals, StructuredQuestion, UsageReadMode, UsageReadResult } from "../types";
-import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
+import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
+import { nextCronFire } from "./cron";
 import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
 import { claudeToolInteraction, createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, type ClaudeEventMemory } from "./normalization";
 import { ClaudeNotificationLifecycle } from "./notification-lifecycle";
-import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir } from "./transcript";
+import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir, transcriptCrons, type TranscriptCron } from "./transcript";
 
 /**
  * The slice of an SDK `Query` this provider drives. Narrow on purpose: tests
@@ -95,6 +99,12 @@ export type ClaudeQueryInput = {
      * behaviour when declared).
      */
     perTaskStopAffordance?: boolean;
+    /**
+     * In-process hook callbacks (structurally the SDK's `hooks` option):
+     * `Stop` carries the session's crons, `UserPromptSubmit` names a prompt
+     * the CLI submits by itself (scheduled wakeups, D1/D4).
+     */
+    hooks?: Partial<Record<"Stop" | "UserPromptSubmit", Array<{ hooks: Array<(input: Record<string, unknown>, toolUseID: string | undefined, options: { signal: AbortSignal }) => Promise<{ continue: true } | { decision: "block"; reason: string }>> }>>>;
   };
 };
 
@@ -245,17 +255,99 @@ type LiveSession = {
   // Armed when the set empties with nothing pending: retires the session if
   // no follow-up turn starts within the grace window.
   idleTimer?: ReturnType<typeof setTimeout>;
+  // Future turns the session scheduled for itself (ScheduleWakeup, CronCreate,
+  // /loop), replaced on every Stop hook's `session_crons` (D1). A non-empty
+  // set holds the session past its turn's result, like background work (D2).
+  wakeups: Map<string, SessionWakeup>;
+  // Wakeups that started a turn since the last Stop, by id → that turn's
+  // user_message id: a one-shot gone from the next Stop fired rather than
+  // being cancelled (spike, D2).
+  firedSinceStop: Map<string, string>;
+  // What each wakeup is, from the calls this process saw (D10): ids a
+  // CronCreate result returned, and prompts a ScheduleWakeup call asked for.
+  // A cron the CLI rebuilt on resume matches neither and is a cron: a
+  // ScheduleWakeup never survives its process (spike, D9).
+  cronIds: Set<string>;
+  selfPacedPrompts: Set<string>;
+  // Fires the hook blocked whose frames (init, informational, result) have
+  // not all been read yet: they are no turn and are swallowed (D12).
+  blockedFires: number;
+  // Crons the transcript says the CLI rebuilt when this session resumed
+  // (D11), read once in the background: their fires are attributed before
+  // the first Stop lists them, and the first Stop settles the ones the CLI
+  // did not in fact restore.
+  revived: Map<string, TranscriptCron>;
+  revivedSettled: boolean;
   // This query's own running totals as last read: folded into the
   // conversation's ledger when the query retires, since a resumed query
   // starts its counters fresh (SDK: "resumed sessions start fresh").
   lastTotals?: SessionTotals;
 };
 
+type SessionWakeup = { prompt: string; recurring: boolean; schedule: string; createdAt: number; nextFireAt?: number };
+
+/**
+ * Whether the CLI rebuilds this wakeup when the conversation's session is
+ * resumed (D9, D10): a CronCreate cron does, a ScheduleWakeup does not.
+ */
+function wakeupRevives(session: Pick<LiveSession, "cronIds" | "selfPacedPrompts">, wakeupId: string, wakeup: SessionWakeup): boolean {
+  if (session.cronIds.has(wakeupId)) return true;
+  return !(session.selfPacedPrompts.has(wakeup.prompt) && !wakeup.recurring);
+}
+
+// The notice a pending wakeup carries when its session ends any way but a
+// release: the CLI owns the schedule, and it lives only as long as the process.
+const WAKEUP_LOST_MESSAGE = "The agent's schedule did not survive its session: Claude Code keeps scheduled wakeups only while its process runs.";
+// A cron outlives its process: Claude Code rebuilds it when the session
+// resumes. A one-shot whose time passes meanwhile is dropped (spike, D9).
+// What the CLI records in the transcript when the hook blocks a cancelled
+// wakeup's fire.
+const CANCELLED_FIRE_REASON = "Cancelled in uatu: this scheduled wakeup no longer fires.";
+export const WAKEUP_PAUSED_MESSAGE = "Paused: the agent's session ended. Claude Code restores this schedule when the conversation runs again.";
+const WAKEUP_NOT_RESTORED_MESSAGE = "Claude Code did not restore this schedule when the conversation ran again.";
+export const WAKEUP_PAUSED_ONCE_MESSAGE = "Paused: the agent's session ended. It fires only if the conversation is running again by its time.";
+
 // What retired queries of one conversation spent, and when this process began
 // observing it. The SDK's `/usage` session counters cover the current query
 // only, and an idle conversation's next turn resumes a fresh one, so "this
 // conversation" is the sum over the generations this process saw.
 type SessionTotalsLedger = { settled?: SessionTotals; since: number };
+
+function pausedRow(cron: TranscriptCron): ScheduledWakeupItem {
+  return wakeupRow(cron.id, { prompt: cron.prompt, recurring: cron.recurring, schedule: cron.cron, createdAt: cron.createdAt }, "paused", { message: cron.recurring ? WAKEUP_PAUSED_MESSAGE : WAKEUP_PAUSED_ONCE_MESSAGE });
+}
+
+function boundedAdd(set: Set<string>, value: string): void {
+  if (set.size >= 256) set.delete(set.values().next().value!);
+  set.add(value);
+}
+
+function wakeupRow(wakeupId: string, wakeup: SessionWakeup, status: ScheduledWakeupItem["status"], extra: { firedTurnId?: string; message?: string } = {}): ScheduledWakeupItem {
+  return {
+    id: `wakeup:${wakeupId}`,
+    type: "scheduled_wakeup",
+    createdAt: wakeup.createdAt,
+    wakeupId,
+    prompt: wakeup.prompt,
+    recurring: wakeup.recurring,
+    schedule: wakeup.schedule,
+    // A fire time is a pending wakeup's fact; a settled row keeps none.
+    ...(status === "pending" && wakeup.nextFireAt !== undefined ? { nextFireAt: wakeup.nextFireAt } : {}),
+    status,
+    ...extra,
+  };
+}
+
+/**
+ * A fired prompt against a cron's prompt. The Stop payload clips a prompt
+ * past 1000 characters with an in-string "… [+N chars]" marker, while the
+ * submitted prompt is whole: a clipped cron matches by its kept prefix.
+ */
+export function wakeupPromptMatches(cronPrompt: string, submitted: string): boolean {
+  if (cronPrompt === submitted) return true;
+  const clipped = /… \[\+\d+ chars\]$/.exec(cronPrompt);
+  return clipped !== null && clipped.index > 0 && submitted.startsWith(cronPrompt.slice(0, clipped.index));
+}
 
 /** Sums two tallies: scalars added, per-model rows merged by model id. */
 export function mergeSessionTotals(base: SessionTotals | undefined, next: SessionTotals): SessionTotals {
@@ -360,6 +452,11 @@ export class ClaudeProvider implements ChatProvider {
   // A rename asked for before the native transcript existed: written to it
   // once the first turn has created it.
   private readonly deferredRenames = new Map<string, string>();
+  // Wakeups the user cancelled, by conversation: id → the prompt it fires.
+  // The CLI rebuilds a cron when its session resumes, so a cancel is
+  // enforced here, durably: a cancelled wakeup never holds a session and
+  // its fires are blocked at the UserPromptSubmit hook (D12).
+  private readonly cancelledWakeups = new Map<string, Map<string, string>>();
   private readonly titleRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // The login's plan usage as last read on this workspace — after a turn or
   // on demand, through any conversation. Per login, not per conversation,
@@ -396,7 +493,7 @@ export class ClaudeProvider implements ChatProvider {
     return {
       id: "claude",
       name: "Claude Code",
-      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "conversation-rename", "usage"],
+      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "scheduled-wakeups", "conversation-rename", "usage"],
       permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
     };
   }
@@ -985,6 +1082,10 @@ export class ClaudeProvider implements ChatProvider {
     for (const session of sessions) {
       this.clearIdleTimer(session);
       this.abandonInteractions(session.id, "The workspace shut down before the user answered.");
+      // Shutdown is the process exit a schedule cannot survive (D6): a
+      // reader still attached sees the rows lost and the state cleared.
+      const lost = this.settleWakeups(session, "ended");
+      if (lost.length > 0) this.emit(session.id, { updates: [...lost, { kind: "status", status: "idle" }], outcome: "handled", eventType: "wakeups.lost" });
     }
     await Promise.all(sessions.map(async session => {
       await session.query.interrupt().catch(() => undefined);
@@ -1003,12 +1104,26 @@ export class ClaudeProvider implements ChatProvider {
   private async ensureLive(sessionId: string, model?: ModelSelection, mode?: string, variant?: string): Promise<LiveSession> {
     const existing = this.live.get(sessionId);
     if (existing) return existing;
+    // The cancelled wakeups must be known before a resumed session can
+    // rebuild and fire one of them.
+    await this.restoreDurableState();
+    const raced = this.live.get(sessionId);
+    if (raced) return raced;
     const known = this.pending.has(sessionId) || await this.getSession(sessionId);
     if (!known) throw new Error(`unknown Claude conversation: ${sessionId}`);
     const nativeId = this.nativeId(sessionId);
     const hasTranscript = await fs.access(sessionTranscriptPath(this.workspacePath, nativeId, this.configDir)).then(() => true, () => false);
     const queue = new PushQueue<ClaudeUserEnvelope>();
     const configuration = this.configurations.get(sessionId) ?? {};
+    // The hooks close over the session they belong to, which exists only
+    // once the query does; a hook that fires first (it cannot: hooks follow
+    // a prompt) or for a retired session finds no owner and does nothing.
+    let owner: LiveSession | undefined;
+    const observe = (handler: (session: LiveSession, input: Record<string, unknown>) => void) => async (input: Record<string, unknown>) => {
+      // Observers only: a hook that throws or blocks would change the turn.
+      try { if (owner) handler(owner, input); } catch { /* observation is best-effort */ }
+      return { continue: true as const };
+    };
     const query = this.queryFactory({
       prompt: queue,
       options: {
@@ -1039,9 +1154,20 @@ export class ClaudeProvider implements ChatProvider {
         onUserDialog: (request, options) => this.brokerDialog(sessionId, request, options),
         supportedDialogKinds: [...CLAUDE_SUPPORTED_DIALOG_KINDS],
         perTaskStopAffordance: true,
+        hooks: {
+          Stop: [{ hooks: [observe((session, input) => this.trackWakeups(session, input))] }],
+          UserPromptSubmit: [{ hooks: [async (input: Record<string, unknown>) => {
+            try {
+              if (owner && this.blocksCancelledFire(owner, input)) return { decision: "block" as const, reason: CANCELLED_FIRE_REASON };
+              if (owner) this.attributeWakeupTurn(owner, input);
+            } catch { /* observation is best-effort */ }
+            return { continue: true as const };
+          }] }],
+        },
       },
     });
-    const session: LiveSession = { id: sessionId, notificationLifecycle: new ClaudeNotificationLifecycle(), queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0 };
+    const session: LiveSession = { id: sessionId, notificationLifecycle: new ClaudeNotificationLifecycle(), queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), wakeups: new Map(), firedSinceStop: new Map(), cronIds: new Set(), selfPacedPrompts: new Set(), blockedFires: 0, revived: new Map(), revivedSettled: false, unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0 };
+    owner = session;
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
     // Observation begins with the conversation's first query in this
@@ -1058,6 +1184,7 @@ export class ClaudeProvider implements ChatProvider {
     // models, skills appear mid-session — so every session start re-reads
     // both (captureModels also refreshes the command inventory).
     void this.captureModels(query);
+    if (hasTranscript) void this.primeRevivedCrons(session, nativeId);
     return session;
   }
 
@@ -1067,11 +1194,20 @@ export class ClaudeProvider implements ChatProvider {
     memory.rateLimit = this.rateLimitedSessions.get(session.id);
     try {
       for await (const message of session.query) {
+        // A blocked fire is no turn: its init, informational notice, and
+        // result are swallowed whole — no running status, no completed
+        // status, no notification, no retirement decision (D12).
+        if (session.blockedFires > 0) {
+          const frame = message as { type?: unknown; subtype?: unknown; parent_tool_use_id?: unknown };
+          if (!frame.parent_tool_use_id && frame.type === "system" && (frame.subtype === "init" || frame.subtype === "informational")) continue;
+          if (!frame.parent_tool_use_id && frame.type === "result") { session.blockedFires -= 1; continue; }
+        }
         const resultId = !(message as { parent_tool_use_id?: unknown }).parent_tool_use_id && (message as { type?: unknown; uuid?: unknown }).type === "result" && typeof (message as { uuid?: unknown }).uuid === "string"
           ? (message as { uuid: string }).uuid : undefined;
         if (resultId && session.notificationLifecycle.hasResult(resultId)) continue;
         this.captureCommands(message);
         this.trackSessionLevel(session, message, memory);
+        this.trackSchedulingCalls(session, message, memory);
         const normalized = normalizeClaudeMessage(message, memory, "live", session.id);
         if (memory.rateLimit) this.rateLimitedSessions.set(session.id, memory.rateLimit); else this.rateLimitedSessions.delete(session.id);
         this.adoptRefusalFallback(session.id, message);
@@ -1154,7 +1290,14 @@ export class ClaudeProvider implements ChatProvider {
           if (session.backgroundTasks.size > 0 && session.pendingTurns === 0) {
             // Not idle: the composer shows background work, prompting stays
             // possible, and the process stays up for the tasks (spec).
+            // Running work outranks pending wakeups: both hold the session,
+            // background is the more urgent fact (D2).
             this.emit(session.id, { updates: [{ kind: "status", status: "background" }], outcome: "handled", eventType: "turn.background" });
+          } else if (session.wakeups.size > 0 && session.pendingTurns === 0 && session.queuedTurns === 0) {
+            // Nothing runs, but the session holds the agent's future turns:
+            // the scheduled state, kept up until they fire or end (D2). The
+            // Stop hook precedes this result (spike), so the set is current.
+            this.emit(session.id, { updates: [{ kind: "status", status: "scheduled" }], outcome: "handled", eventType: "turn.scheduled" });
           }
           void report.then(async generation => {
             // A set that emptied while the report was out has armed the
@@ -1179,7 +1322,11 @@ export class ClaudeProvider implements ChatProvider {
         // status the adapter keeps the conversation running, prompts stay
         // held, and cancellation finds nothing to interrupt. Background
         // work died with the process: its rows settle and the state clears.
-        const settled = this.settleBackgroundTasks(session, "The Claude Code session ended before this task finished.", memory);
+        const settled = [
+          ...this.settleBackgroundTasks(session, "The Claude Code session ended before this task finished.", memory),
+          // The crons were inside the process; they end with it (D6).
+          ...this.settleWakeups(session, "ended"),
+        ];
         // A turn the CLI reported queued behind its follow-up is lost with
         // the process too: it was accepted, so it fails rather than vanishes.
         if (session.pendingTurns > 0 || session.unpromptedTurn || session.queuedTurns > 0) {
@@ -1201,6 +1348,7 @@ export class ClaudeProvider implements ChatProvider {
       this.emit(session.id, {
         updates: [
           ...this.settleBackgroundTasks(session, "The Claude Code session failed before this task finished.", memory),
+          ...this.settleWakeups(session, "ended"),
           { kind: "upsert", item: { id: `notice:session-error:${this.now()}`, type: "notice", createdAt: this.now(), level: "error", message: error instanceof Error ? error.message : "Claude Code session failed" } },
           { kind: "status", status: "failed", message: "Claude Code session ended unexpectedly" },
         ],
@@ -1467,7 +1615,16 @@ export class ClaudeProvider implements ChatProvider {
           deferredRenames?: Record<string, string>;
           pending?: Record<string, { title: string; createdAt: number; updatedAt: number }>;
           usage?: AgentUsageReport;
+          cancelledWakeups?: Record<string, Record<string, string>>;
         };
+        for (const [id, wakeups] of Object.entries(stored.cancelledWakeups ?? {})) {
+          if (!wakeups || typeof wakeups !== "object") continue;
+          const cancelled = this.cancelledWakeups.get(id) ?? new Map<string, string>();
+          for (const [wakeupId, prompt] of Object.entries(wakeups)) {
+            if (typeof prompt === "string" && !cancelled.has(wakeupId)) cancelled.set(wakeupId, prompt);
+          }
+          this.cancelledWakeups.set(id, cancelled);
+        }
         if (stored.usage && typeof stored.usage.readAt === "number" && (!this.lastUsage || stored.usage.readAt > this.lastUsage.readAt)) this.lastUsage = stored.usage;
         for (const [id, configuration] of Object.entries(stored.configurations ?? {})) {
           if (!this.configurations.has(id)) this.configurations.set(id, configuration);
@@ -1559,6 +1716,7 @@ export class ClaudeProvider implements ChatProvider {
       pending: Object.fromEntries([...this.pending.values()].map(session =>
         [session.id, { title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt }])),
       usage: this.lastUsage,
+      cancelledWakeups: Object.fromEntries([...this.cancelledWakeups].map(([id, wakeups]) => [id, Object.fromEntries(wakeups)])),
     });
   }
 
@@ -1905,7 +2063,14 @@ export class ClaudeProvider implements ChatProvider {
       this.clearIdleTimer(session);
       session.idleTimer = setTimeout(() => {
         session.idleTimer = undefined;
-        if (this.live.get(session.id) !== session || !this.idleExceptReads(session)) return;
+        if (this.live.get(session.id) !== session) return;
+        // Background work is gone and no follow-up came, but the session
+        // still holds wakeups: it stays up, in the scheduled state (D2).
+        if (session.wakeups.size > 0 && session.backgroundTasks.size === 0 && session.pendingTurns === 0 && session.queuedTurns === 0 && !session.unpromptedTurn) {
+          this.emit(session.id, { updates: [{ kind: "status", status: "scheduled" }], outcome: "handled", eventType: "turn.scheduled" });
+          return;
+        }
+        if (!this.idleExceptReads(session)) return;
         this.emit(session.id, { updates: [{ kind: "status", status: "idle" }], outcome: "handled", eventType: "turn.background-cleared" });
         void this.retireIfIdle(session);
       }, this.backgroundGraceMs);
@@ -1944,6 +2109,276 @@ export class ClaudeProvider implements ChatProvider {
     return updates;
   }
 
+  /**
+   * The Stop hook's `session_crons`, level-set like the background set
+   * (D1): each cron is a pending row; one the set dropped fired (a one-shot
+   * that started a wakeup turn since the last Stop) or was cancelled (the
+   * agent removed it, or a loop ended). A recurring cron stays pending and
+   * its next fire time moves on. A payload without the field (a CLI that
+   * does not report crons) changes nothing.
+   */
+  private trackWakeups(session: LiveSession, input: Record<string, unknown>): void {
+    if (this.live.get(session.id) !== session) return;
+    // A subagent's stop is not the conversation's.
+    if (typeof input.agent_id === "string" && input.agent_id) return;
+    if (!Array.isArray(input.session_crons)) return;
+    const now = this.now();
+    const next = new Map<string, SessionWakeup>();
+    const updates: NormalizedProviderUpdate[] = [];
+    for (const value of input.session_crons) {
+      if (!value || typeof value !== "object") continue;
+      const cron = value as Record<string, unknown>;
+      if (typeof cron.id !== "string" || !cron.id || typeof cron.schedule !== "string" || !cron.schedule) continue;
+      // Cancelled by the user: the CLI still holds it, uatu does not (D12).
+      if (this.cancelledWakeups.get(session.id)?.has(cron.id)) continue;
+      const known = session.wakeups.get(cron.id);
+      const wakeup: SessionWakeup = {
+        prompt: typeof cron.prompt === "string" ? cron.prompt : "",
+        recurring: cron.recurring === true,
+        schedule: cron.schedule,
+        createdAt: known?.createdAt ?? now,
+      };
+      const nextFireAt = nextCronFire(wakeup.schedule, now);
+      if (nextFireAt !== undefined) wakeup.nextFireAt = nextFireAt;
+      next.set(cron.id, wakeup);
+      if (known && known.prompt === wakeup.prompt && known.recurring === wakeup.recurring && known.schedule === wakeup.schedule && known.nextFireAt === wakeup.nextFireAt) continue;
+      updates.push({ kind: "upsert", item: wakeupRow(cron.id, wakeup, "pending") });
+    }
+    for (const [wakeupId, wakeup] of session.wakeups) {
+      if (next.has(wakeupId)) continue;
+      const firedTurnId = session.firedSinceStop.get(wakeupId);
+      updates.push({ kind: "upsert", item: firedTurnId !== undefined && !wakeup.recurring
+        ? wakeupRow(wakeupId, wakeup, "fired", { firedTurnId })
+        : wakeupRow(wakeupId, wakeup, "cancelled") });
+    }
+    // The first Stop of a resumed session is the CLI's own word on what it
+    // rebuilt: a paused cron it lists is pending again (above); one that
+    // fired meanwhile is fired; one it does not list was not restored.
+    if (!session.revivedSettled) {
+      session.revivedSettled = true;
+      for (const [wakeupId, cron] of session.revived) {
+        if (next.has(wakeupId) || session.wakeups.has(wakeupId) || this.cancelledWakeups.get(session.id)?.has(wakeupId)) continue;
+        const wakeup: SessionWakeup = { prompt: cron.prompt, recurring: cron.recurring, schedule: cron.cron, createdAt: cron.createdAt };
+        const firedTurnId = session.firedSinceStop.get(wakeupId);
+        updates.push({ kind: "upsert", item: firedTurnId !== undefined && !cron.recurring
+          ? wakeupRow(wakeupId, wakeup, "fired", { firedTurnId })
+          : wakeupRow(wakeupId, wakeup, "lost", { message: WAKEUP_NOT_RESTORED_MESSAGE }) });
+      }
+    }
+    session.wakeups = next;
+    session.firedSinceStop.clear();
+    if (updates.length > 0) this.emit(session.id, { updates, outcome: "handled", eventType: "wakeups.reconciled" });
+  }
+
+  /** Reads which crons the CLI rebuilt for a resumed session (D11). */
+  private async primeRevivedCrons(session: LiveSession, nativeId: string): Promise<void> {
+    try {
+      const { entries } = await readSessionTranscript(sessionTranscriptPath(this.workspacePath, nativeId, this.configDir));
+      const { alive, created } = transcriptCrons(entries, this.now());
+      for (const id of created) boundedAdd(session.cronIds, id);
+      // A Stop that already ran settled nothing it did not know about.
+      if (session.revivedSettled) return;
+      for (const cron of alive) session.revived.set(cron.id, cron);
+    } catch {
+      // No transcript to read: nothing was rebuilt.
+    }
+  }
+
+  /**
+   * A conversation's paused crons (D11), for opening it without a live
+   * session: what its transcript says the CLI rebuilds on resume, minus
+   * what the user cancelled. A live session answers with nothing — its own
+   * Stop is the truth then. Cancelled ids the transcript no longer yields
+   * are dropped from the durable set.
+   */
+  async listPausedWakeups(sessionId: string): Promise<ScheduledWakeupItem[]> {
+    await this.restoreDurableState();
+    if (this.live.has(sessionId)) return [];
+    let alive: TranscriptCron[];
+    try {
+      const { entries } = await readSessionTranscript(sessionTranscriptPath(this.workspacePath, this.nativeId(sessionId), this.configDir));
+      alive = transcriptCrons(entries, this.now()).alive;
+    } catch {
+      return [];
+    }
+    const cancelled = this.cancelledWakeups.get(sessionId);
+    if (cancelled) {
+      const aliveIds = new Set(alive.map(cron => cron.id));
+      let pruned = false;
+      for (const wakeupId of cancelled.keys()) if (!aliveIds.has(wakeupId)) { cancelled.delete(wakeupId); pruned = true; }
+      if (cancelled.size === 0) this.cancelledWakeups.delete(sessionId);
+      if (pruned) this.persistDurableState();
+    }
+    return alive.filter(cron => !cancelled?.has(cron.id)).map(cron => pausedRow(cron));
+  }
+
+  /**
+   * Cancel one wakeup (D12). A live one leaves the session's schedule — the
+   * rest stay, and a session held by nothing else retires; a paused one
+   * needs no session. Either way the cancel is recorded durably and the
+   * wakeup's fires are blocked from then on.
+   */
+  async cancelWakeup(sessionId: string, wakeupId: string): Promise<void> {
+    await this.restoreDurableState();
+    const session = this.live.get(sessionId);
+    const live = session?.wakeups.get(wakeupId);
+    if (session && live) {
+      await this.recordCancelled(sessionId, [[wakeupId, live.prompt]]);
+      if (this.live.get(sessionId) !== session || !session.wakeups.has(wakeupId)) return;
+      session.wakeups.delete(wakeupId);
+      const updates: NormalizedProviderUpdate[] = [{ kind: "upsert", item: wakeupRow(wakeupId, live, "cancelled") }];
+      const idle = this.idleExceptReads(session) && session.idleTimer === undefined;
+      if (idle) updates.push({ kind: "status", status: "idle" });
+      this.emit(sessionId, { updates, outcome: "handled", eventType: "wakeup.cancelled" });
+      if (idle) await this.retireIfIdle(session);
+      return;
+    }
+    const revived = session?.revived.get(wakeupId);
+    const paused = revived ? pausedRow(revived) : (await this.listPausedWakeups(sessionId)).find(item => item.wakeupId === wakeupId);
+    if (!paused) throw new ScheduledWakeupUnavailableError("that wakeup is no longer scheduled");
+    await this.recordCancelled(sessionId, [[wakeupId, paused.prompt]]);
+    const { message: _message, ...row } = paused;
+    this.emit(sessionId, { updates: [{ kind: "upsert", item: { ...row, status: "cancelled" } }], outcome: "handled", eventType: "wakeup.cancelled" });
+  }
+
+  /**
+   * A prompt the CLI submits by itself because a wakeup fired (D4). No `user`
+   * message reaches the stream for it (spike), so the provider mints the
+   * turn's opening item here, as it does for a typed prompt at accept time —
+   * a wakeup header, never a bubble the user did not type. Attributed by the
+   * hook's `source` when the CLI sends one; otherwise (every CLI the spike
+   * saw) by the prompt matching a pending wakeup while no accepted prompt is
+   * outstanding. The `init` that follows starts the unprompted turn (D9).
+   */
+  private attributeWakeupTurn(session: LiveSession, input: Record<string, unknown>): void {
+    if (this.live.get(session.id) !== session) return;
+    if (typeof input.agent_id === "string" && input.agent_id) return;
+    const prompt = typeof input.prompt === "string" ? input.prompt : "";
+    const source = typeof input.source === "string" ? input.source : undefined;
+    const cancelled = this.cancelledWakeups.get(session.id);
+    const matched = [...session.wakeups].find(([, wakeup]) => wakeupPromptMatches(wakeup.prompt, prompt))
+      ?? [...session.revived].find(([id, cron]) => !cancelled?.has(id) && wakeupPromptMatches(cron.prompt, prompt));
+    if (source !== undefined) {
+      if (source !== "loop_wakeup" && source !== "schedule_wakeup") return;
+    } else if (!matched || session.pendingTurns > 0 || session.queuedTurns > 0) {
+      return;
+    }
+    const promptId = typeof input.prompt_id === "string" && input.prompt_id ? input.prompt_id : randomUUID();
+    const turnId = `message:wakeup:${promptId}`;
+    if (matched) session.firedSinceStop.set(matched[0], turnId);
+    this.emit(session.id, {
+      updates: [{ kind: "upsert", item: { id: turnId, type: "user_message", createdAt: this.now(), text: prompt, origin: "wakeup", ...(matched ? { wakeupId: matched[0] } : {}) } }],
+      outcome: "handled",
+      eventType: "wakeup.fired",
+    });
+  }
+
+  /**
+   * Which scheduling call made which wakeup (D10), from the conversation's
+   * own frames: a ScheduleWakeup call's prompt, a CronCreate result's id.
+   * Read before the frame is normalized, while the tool memory still holds
+   * the call a result answers.
+   */
+  private trackSchedulingCalls(session: LiveSession, message: unknown, memory: ReturnType<typeof createClaudeEventMemory>): void {
+    if (!message || typeof message !== "object") return;
+    const record = message as Record<string, unknown>;
+    if (record.parent_tool_use_id) return;
+    const content = (record.message as { content?: unknown } | undefined)?.content;
+    if (!Array.isArray(content)) return;
+    for (const value of content) {
+      if (!value || typeof value !== "object") continue;
+      const block = value as Record<string, unknown>;
+      if (record.type === "assistant" && block.type === "tool_use" && block.name === "ScheduleWakeup") {
+        const prompt = (block.input as { prompt?: unknown } | undefined)?.prompt;
+        if (typeof prompt === "string" && prompt) boundedAdd(session.selfPacedPrompts, prompt);
+      }
+      if (record.type === "user" && block.type === "tool_result" && typeof block.tool_use_id === "string" && memory.tools.get(block.tool_use_id)?.name === "CronCreate") {
+        const id = (record.tool_use_result as { id?: unknown } | undefined)?.id;
+        if (typeof id === "string" && id) boundedAdd(session.cronIds, id);
+      }
+    }
+  }
+
+  /**
+   * The pending wakeup rows of a session whose schedule ends, settled and
+   * cleared. `ended` is the process going away (D6, D10): a cron is paused,
+   * a self-paced wakeup lost. `cancelled` is the user's call.
+   */
+  private settleWakeups(session: LiveSession, outcome: "cancelled" | "ended"): NormalizedProviderUpdate[] {
+    const updates: NormalizedProviderUpdate[] = [...session.wakeups].map(([wakeupId, wakeup]) => {
+      if (outcome === "cancelled") return { kind: "upsert" as const, item: wakeupRow(wakeupId, wakeup, "cancelled") };
+      const revives = wakeupRevives(session, wakeupId, wakeup);
+      return { kind: "upsert" as const, item: revives
+        ? wakeupRow(wakeupId, wakeup, "paused", { message: wakeup.recurring ? WAKEUP_PAUSED_MESSAGE : WAKEUP_PAUSED_ONCE_MESSAGE })
+        : wakeupRow(wakeupId, wakeup, "lost", { message: WAKEUP_LOST_MESSAGE }) };
+    });
+    session.wakeups = new Map();
+    session.firedSinceStop.clear();
+    return updates;
+  }
+
+  /** Every pending wakeup, for a reopened conversation's rows and list. */
+  async listScheduledWakeups(): Promise<PendingScheduledWakeup[]> {
+    const wakeups: PendingScheduledWakeup[] = [];
+    for (const session of this.live.values()) {
+      for (const [wakeupId, wakeup] of session.wakeups) {
+        wakeups.push({ conversationId: session.id, wakeupId, prompt: wakeup.prompt, recurring: wakeup.recurring, schedule: wakeup.schedule, ...(wakeup.nextFireAt !== undefined ? { nextFireAt: wakeup.nextFireAt } : {}), createdAt: wakeup.createdAt });
+      }
+    }
+    return wakeups;
+  }
+
+  /**
+   * A fire of a wakeup the user cancelled (D12): the prompt of a cancelled
+   * wakeup, submitted while no accepted prompt is outstanding (a person who
+   * types the same words is still a person). The hook blocks it — no model
+   * call — and the frames it produces are swallowed.
+   */
+  private blocksCancelledFire(session: LiveSession, input: Record<string, unknown>): boolean {
+    if (this.live.get(session.id) !== session) return false;
+    if (typeof input.agent_id === "string" && input.agent_id) return false;
+    const cancelled = this.cancelledWakeups.get(session.id);
+    if (!cancelled || cancelled.size === 0 || session.pendingTurns > 0 || session.queuedTurns > 0) return false;
+    const prompt = typeof input.prompt === "string" ? input.prompt : "";
+    if (![...cancelled.values()].some(cancelledPrompt => wakeupPromptMatches(cancelledPrompt, prompt))) return false;
+    session.blockedFires += 1;
+    return true;
+  }
+
+  /** Records cancelled wakeups durably; the block must survive a restart. */
+  private async recordCancelled(sessionId: string, wakeups: Array<[string, string]>): Promise<void> {
+    if (wakeups.length === 0) return;
+    const cancelled = this.cancelledWakeups.get(sessionId) ?? new Map<string, string>();
+    for (const [wakeupId, prompt] of wakeups) cancelled.set(wakeupId, prompt);
+    if (cancelled.size > 256) cancelled.delete(cancelled.keys().next().value!);
+    this.cancelledWakeups.set(sessionId, cancelled);
+    await this.queuePersist(this.durableSnapshot());
+  }
+
+  /**
+   * Release (D5): retire a session held only for its wakeups. The process
+   * ends and its crons with it, so the rows read as cancelled — the user's
+   * call, not a loss — and the conversation is idle; the next prompt resumes
+   * fresh. Refused while a turn runs or background work would die with it.
+   */
+  async release(sessionId: string): Promise<void> {
+    const session = this.live.get(sessionId);
+    if (!session) return;
+    if (session.pendingTurns > 0 || session.queuedTurns > 0 || session.unpromptedTurn) {
+      throw new ReleaseUnavailableError("a turn is running; release is possible once it ends");
+    }
+    if (session.backgroundTasks.size > 0) {
+      throw new ReleaseUnavailableError("background work is running; stop it before releasing the session");
+    }
+    // Recorded before the process goes: the next resume rebuilds every
+    // cron, and each must already be blocked when it does (D12).
+    await this.recordCancelled(sessionId, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
+    if (this.live.get(sessionId) !== session) return;
+    const cancelled = this.settleWakeups(session, "cancelled");
+    this.emit(sessionId, { updates: [...cancelled, { kind: "status", status: "idle" }], outcome: "handled", eventType: "session.released" });
+    await this.retireSession(session);
+  }
+
   private clearIdleTimer(session: LiveSession): void {
     if (session.idleTimer === undefined) return;
     clearTimeout(session.idleTimer);
@@ -1956,7 +2391,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   private idleExceptReads(session: LiveSession): boolean {
-    return session.pendingTurns === 0 && session.queuedTurns === 0 && !session.unpromptedTurn && session.backgroundTasks.size === 0;
+    return session.pendingTurns === 0 && session.queuedTurns === 0 && !session.unpromptedTurn && session.backgroundTasks.size === 0 && session.wakeups.size === 0;
   }
 
   /**

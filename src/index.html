@@ -820,6 +820,17 @@
             <summary><span id="chat-background-tasks-label"></span></summary>
             <ul id="chat-background-tasks-items" aria-label="Background tasks"></ul>
           </details>
+          <!-- The agent's own future turns, while its session is held for
+               them: one row per pending wakeup (prompt, whether it recurs,
+               when it next fires) and the release that ends them all. -->
+          <details id="chat-scheduled-wakeups" class="chat-task-list chat-scheduled-wakeups" hidden>
+            <summary><span id="chat-scheduled-wakeups-label"></span></summary>
+            <ul id="chat-scheduled-wakeups-items" aria-label="Scheduled wakeups"></ul>
+            <div class="chat-wakeups-release">
+              <span id="chat-wakeups-release-note" class="chat-wakeups-release-note"></span>
+              <button id="chat-wakeups-release" class="chat-task-stop" type="button">Release session</button>
+            </div>
+          </details>
           <details id="chat-reverted" class="chat-reverted" hidden open>
             <summary><span id="chat-reverted-label">Reverted messages</span></summary>
             <div id="chat-reverted-items" class="chat-reverted-items" role="list" aria-label="Reverted messages"></div>

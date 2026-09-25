@@ -11,9 +11,9 @@
 
 import type { Serve } from "bun";
 
-import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
-import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../chat/provider";
+import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, ScheduledWakeupUnavailableError } from "../chat/provider";
 import { encodeReplayCursor } from "../chat/replay";
 import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
 import { HistoryChangedError } from "../chat/history-reuse";
@@ -1005,6 +1005,22 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return run(() => deps.chatService.stopTask(id, taskId, requestId));
       }),
     },
+    [p("/api/chat/conversations/:conversationId/wakeups/:wakeupId/cancel")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const wakeupId = routeIdentity(request, "wakeupId");
+        const requestId = bodyIdentity(body, "requestId");
+        if (wakeupId instanceof Response) return wakeupId;
+        if (requestId instanceof Response) return requestId;
+        return run(() => deps.chatService.cancelWakeup(id, wakeupId, requestId));
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/release")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        return run(() => deps.chatService.release(id, requestId));
+      }),
+    },
     [p("/api/chat/conversations/:conversationId/questions/:interactionId")]: {
       POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
         const interactionId = routeIdentity(request, "interactionId");
@@ -1159,6 +1175,9 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof ReversibleHistoryTargetError) return chatError(409, error.message);
   if (error instanceof InvalidQuestionAnswerError) return chatError(400, error.message);
   if (error instanceof BackgroundTaskUnavailableError) return chatError(409, error.message);
+  if (error instanceof ReleaseUnavailableError) return chatError(409, error.message);
+  if (error instanceof ScheduledWakeupUnavailableError) return chatError(409, error.message);
+  if (error instanceof ScheduledWakeupsUnsupportedError) return chatError(409, error.message);
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);

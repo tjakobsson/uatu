@@ -1,4 +1,4 @@
-import type { AgentUsageReport, ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+import type { AgentUsageReport, ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -30,6 +30,19 @@ export type PendingBackgroundTask = {
   taskType?: string;
   toolUseId?: string;
   startedAt: number;
+};
+
+// One wakeup a live session holds, for a reader opening a conversation whose
+// wakeup announcements they missed — the scheduled state's equivalent of
+// PendingBackgroundTask.
+export type PendingScheduledWakeup = {
+  conversationId: string;
+  wakeupId: string;
+  prompt: string;
+  recurring: boolean;
+  schedule: string;
+  nextFireAt?: number;
+  createdAt: number;
 };
 
 export type ProviderSession = {
@@ -175,6 +188,31 @@ export class BackgroundTaskUnavailableError extends Error {
   }
 }
 
+/**
+ * A release the session cannot take right now: a turn is running, or live
+ * background work would die with it. A conflict with the current state —
+ * the scheduled state is the only one Release ends.
+ */
+export class ReleaseUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReleaseUnavailableError";
+  }
+}
+
+/**
+ * A cancel for a wakeup the agent no longer holds or the transcript no
+ * longer yields — it fired, expired, or was removed first. A conflict with
+ * the current state, not a failure: the row's own settling says what became
+ * of it.
+ */
+export class ScheduledWakeupUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScheduledWakeupUnavailableError";
+  }
+}
+
 export class ReversibleHistoryTargetError extends Error {
   constructor(message = "reversible-history message is no longer available") {
     super(message);
@@ -266,6 +304,29 @@ export interface ChatProvider {
    * task settling. Optional: only an agent declaring `background-tasks`.
    */
   stopTask?(sessionId: string, taskId: string): Promise<void>;
+  /**
+   * Every pending wakeup the provider's live sessions hold, each naming its
+   * owning session. Optional: only an agent declaring `scheduled-wakeups`.
+   */
+  listScheduledWakeups?(): Promise<PendingScheduledWakeup[]>;
+  /**
+   * End a session held only for its scheduled wakeups: the process retires,
+   * its wakeups end with it and read as cancelled, the conversation is idle.
+   * A no-op for a conversation with no live session. Optional: only an agent
+   * declaring `scheduled-wakeups`.
+   */
+  release?(sessionId: string): Promise<void>;
+  /**
+   * A conversation's paused wakeups: ones its session no longer holds but
+   * the agent rebuilds when the conversation runs again. Empty while a
+   * session is live. Optional: only an agent declaring `scheduled-wakeups`.
+   */
+  listPausedWakeups?(sessionId: string): Promise<ScheduledWakeupItem[]>;
+  /**
+   * Cancel one wakeup, live or paused; it never fires again. Optional: only
+   * an agent declaring `scheduled-wakeups`.
+   */
+  cancelWakeup?(sessionId: string, wakeupId: string): Promise<void>;
   /**
    * The login's plan usage as last read, from memory: no I/O. Optional:
    * only an agent declaring `usage`.

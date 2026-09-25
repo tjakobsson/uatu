@@ -266,6 +266,14 @@ export class ChatApiClient {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/tasks/${encodeURIComponent(taskId)}/stop`), { requestId }, value => value);
   }
 
+  cancelWakeup(conversationId: string, wakeupId: string, requestId: string): Promise<unknown> {
+    return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/wakeups/${encodeURIComponent(wakeupId)}/cancel`), { requestId }, value => value);
+  }
+
+  release(conversationId: string, requestId: string): Promise<unknown> {
+    return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/release`), { requestId }, value => value);
+  }
+
   inventoryStream(handlers: InventoryStreamHandlers): ChatEventStream {
     let closed = false;
     const subscription = this.live().subscribe({ topic: "inventory" }, {

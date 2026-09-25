@@ -18,6 +18,10 @@ export type ToolDetail =
   // agent sent to the background (Claude Code's `run_in_background`), which
   // is what a later background-task row links to by tool_use_id.
   | { kind: "bash"; label: string; command: string; description?: string; background: boolean }
+  // Claude Code scheduling its own future turns (ScheduleWakeup, CronCreate,
+  // CronDelete, CronList): what was scheduled, when, and with which prompt.
+  // The schedule's life is the `scheduled_wakeup` row's; this is the call.
+  | { kind: "schedule"; label: string; action: "wakeup" | "end-loop" | "create" | "delete" | "list"; prompt?: string; delaySeconds?: number; reason?: string; cron?: string; recurring?: boolean; durable?: boolean; cronId?: string }
   | { kind: "generic"; label: string };
 
 // A subject is one line of a row; a shell pipeline is cut there and bounded
@@ -156,6 +160,38 @@ function parseToolDetail(item: DetailInput): ToolDetail {
       if (skillName === undefined) break;
       return { kind: "skill", label: "Skill", name: skillName };
     }
+    // The tool name alone says what the call does; the fields refine it.
+    case "schedulewakeup": {
+      if (input.stop === true) return { kind: "schedule", label: "End loop", action: "end-loop" };
+      const delay = number(input.delaySeconds);
+      return {
+        kind: "schedule",
+        label: "Schedule wakeup",
+        action: "wakeup",
+        ...(optionalText(input.prompt) === undefined ? {} : { prompt: text(input.prompt) }),
+        ...(delay === undefined ? {} : { delaySeconds: delay }),
+        ...(optionalText(input.reason) === undefined ? {} : { reason: text(input.reason) }),
+      };
+    }
+    case "croncreate": {
+      const cron = optionalText(input.cron);
+      return {
+        kind: "schedule",
+        label: "Schedule task",
+        action: "create",
+        ...(optionalText(input.prompt) === undefined ? {} : { prompt: text(input.prompt) }),
+        ...(cron === undefined ? {} : { cron }),
+        // CronCreate's own default: recurring unless told otherwise.
+        recurring: input.recurring !== false,
+        ...(input.durable === true ? { durable: true } : {}),
+      };
+    }
+    case "crondelete": {
+      const cronId = optionalText(input.id);
+      return { kind: "schedule", label: "Cancel scheduled task", action: "delete", ...(cronId === undefined ? {} : { cronId }) };
+    }
+    case "cronlist":
+      return { kind: "schedule", label: "List scheduled tasks", action: "list" };
     case "todowrite": {
       const todos = Array.isArray(input.todos) ? input.todos : undefined;
       if (!todos) break;
@@ -207,9 +243,30 @@ export function toolSubject(detail: ToolDetail): string | undefined {
       return detail.name;
     case "bash":
       return commandSubject(detail.command);
+    case "schedule":
+      return scheduleSubject(detail);
     default:
       return undefined;
   }
+}
+
+/** "in 1 min", "every 0 9 * * 1-5", "once at 3 20 * * *", or the task id. */
+function scheduleSubject(detail: Extract<ToolDetail, { kind: "schedule" }>): string | undefined {
+  if (detail.action === "wakeup") return detail.delaySeconds === undefined ? undefined : `in ${formatDelay(detail.delaySeconds)}`;
+  if (detail.action === "create") return detail.cron === undefined ? undefined : `${detail.recurring ? "every" : "once at"} ${detail.cron}`;
+  if (detail.action === "delete") return detail.cronId;
+  return undefined;
+}
+
+/** A wakeup delay as a person says it: "45s", "1 min", "20 min", "1 h 30 min". */
+export function formatDelay(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole < 60) return `${whole}s`;
+  const minutes = Math.round(whole / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
 }
 
 /** The first line of a command, bounded, with a marker when more follows. */

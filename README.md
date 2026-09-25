@@ -54,7 +54,7 @@ cognitive debt.
 Claude Code and OpenCode are first-class agents in uatu: the aim is to use what each SDK offers, not the subset they share. Each badge opens a page listing everything the installed SDK declares and what uatu does with it; the gap count is the work still to do.
 
 <p>
-  <a href="./docs/agents/claude-code.md"><img src="./docs/agents/claude-code.svg" alt="Claude Code SDK coverage: SDK 0.3.261, 28 gaps" /></a>
+  <a href="./docs/agents/claude-code.md"><img src="./docs/agents/claude-code.svg" alt="Claude Code SDK coverage: SDK 0.3.261, 26 gaps" /></a>
   <a href="./docs/agents/opencode.md"><img src="./docs/agents/opencode.svg" alt="OpenCode SDK coverage: 1.18.30 · 2.0.13, 30 gaps" /></a>
 </p>
 <!-- agent-coverage:end -->

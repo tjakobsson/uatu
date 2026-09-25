@@ -5,11 +5,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import spike from "../../../tests/fixtures/claude-sdk/spike-messages.json";
+import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
-import { BackgroundTaskUnavailableError } from "../provider";
+import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
 
 class FakeQuery implements ClaudeQueryHandle {
@@ -1827,6 +1828,7 @@ describe("ClaudeProvider sessions", () => {
   test("the agent declares background tasks and asks the CLI for a per-task stop affordance", async () => {
     const { provider, queries } = fixture();
     expect(provider.describe().capabilities).toContain("background-tasks");
+    expect(provider.describe().capabilities).toContain("scheduled-wakeups");
     const session = await provider.createSession("x");
     await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
     expect(queries[0]!.input.options.perTaskStopAffordance).toBe(true);
@@ -3675,4 +3677,497 @@ test("disposing the provider mid-probe ends the probe query instead of leaving i
   await provider.dispose();
   expect(queries[0]!.returned).toBe(true);
   expect(await pending).toEqual({ report: null, reason: expect.stringMatching(/timeout|unavailable/) });
+});
+
+describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wakeups)", () => {
+  const signal = new AbortController().signal;
+  const stopHook = (query: FakeQuery, input: Record<string, unknown>) =>
+    query.input.options.hooks!.Stop![0]!.hooks[0]!({ hook_event_name: "Stop", stop_hook_active: false, background_tasks: [], ...input }, undefined, { signal });
+  const promptHook = (query: FakeQuery, input: Record<string, unknown>) =>
+    query.input.options.hooks!.UserPromptSubmit![0]!.hooks[0]!({ hook_event_name: "UserPromptSubmit", ...input }, undefined, { signal });
+  const oneShot = { id: "w1", schedule: "3 20 * * *", recurring: false, prompt: "WAKEUP check the build" };
+  const recurring = { id: "c1", schedule: "*/5 * * * *", recurring: true, prompt: "CRON poll the queue" };
+  const result = (sessionId: string, uuid: string) => ({ type: "result", subtype: "success", uuid, timestamp: "2026-09-24T18:01:10.000Z", session_id: sessionId, is_error: false });
+  const statuses = (events: NormalizedProviderEvent[]) => events.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status);
+  const rows = (events: NormalizedProviderEvent[]) => events.flatMap(event => event.updates)
+    .filter(update => update.kind === "upsert" && update.item.type === "scheduled_wakeup")
+    .map(update => (update as { item: Record<string, unknown> }).item);
+
+  // The spike's sequence for the turn that schedules: tool call, Stop (with
+  // the crons), then the result.
+  async function scheduled(crons: unknown[], options: { background?: boolean } = {}) {
+    const context = fixture();
+    const { events, stop } = collect(context.provider);
+    const session = await context.provider.createSession("x");
+    await context.provider.prompt(session.id, { id: "r1", text: "wake me in a minute", delivery: "queue" });
+    const query = context.queries[0]!;
+    query.push({ type: "system", subtype: "init", uuid: "i1", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    if (options.background) {
+      query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Long job" }] });
+    }
+    await waitFor(() => events.some(event => event.eventType !== "prompt.accepted"));
+    await promptHook(query, { prompt: "wake me in a minute", prompt_id: "typed-1" });
+    // The calls that made them, as the stream carries them: a ScheduleWakeup
+    // (no id comes back) and a CronCreate (its result names the cron) — D10.
+    query.push({ type: "assistant", uuid: "sw", session_id: session.id, message: { role: "assistant", content: [
+      { type: "tool_use", id: "toolu_sw", name: "ScheduleWakeup", input: { delaySeconds: 60, prompt: oneShot.prompt } },
+      { type: "tool_use", id: "toolu_cc", name: "CronCreate", input: { cron: recurring.schedule, prompt: recurring.prompt, recurring: true } },
+    ] } });
+    query.push({ type: "user", uuid: "cc-result", session_id: session.id, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_cc", content: "Scheduled recurring job c1." }] }, tool_use_result: { id: "c1", recurring: true, durable: false } });
+    await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "tool:toolu_cc" && update.item.type === "tool" && update.item.status === "completed")));
+    await stopHook(query, { session_crons: crons });
+    query.push(result(session.id, "res1"));
+    await waitFor(() => events.some(event => event.eventType === "turn.scheduled" || event.eventType === "turn.background"));
+    return { ...context, events, stop, session, query };
+  }
+
+  test("a Stop payload's crons become the session's wakeups, each a pending row", async () => {
+    const { provider, events, stop, session } = await scheduled([oneShot, recurring]);
+    expect(await provider.listScheduledWakeups()).toEqual([
+      expect.objectContaining({ conversationId: session.id, wakeupId: "w1", prompt: oneShot.prompt, recurring: false, schedule: "3 20 * * *", nextFireAt: expect.any(Number) }),
+      expect.objectContaining({ conversationId: session.id, wakeupId: "c1", recurring: true, schedule: "*/5 * * * *" }),
+    ]);
+    expect(rows(events)).toEqual([
+      expect.objectContaining({ id: "wakeup:w1", wakeupId: "w1", status: "pending", recurring: false, nextFireAt: expect.any(Number) }),
+      expect.objectContaining({ id: "wakeup:c1", wakeupId: "c1", status: "pending", recurring: true }),
+    ]);
+    // The typed prompt's own hook is not a wakeup turn.
+    expect(events.flatMap(event => event.updates).some(update => update.kind === "upsert" && update.item.type === "user_message" && "origin" in update.item)).toBe(false);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a result under a pending wakeup keeps the session and reports the scheduled state", async () => {
+    const { provider, events, stop, query } = await scheduled([oneShot]);
+    await Bun.sleep(20);
+    expect(provider.liveSessionCount()).toBe(1);
+    expect(query.returned).toBe(false);
+    expect(statuses(events)).toEqual(["running", "completed", "scheduled"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("live background work outranks pending wakeups; once it clears the session stays scheduled", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-wakeup-grace-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      backgroundGraceMs: 20,
+      queryFactory: input => { const query = new FakeQuery(input); queries.push(query); return query; },
+    });
+    const { events, stop } = collect(provider);
+    const session = await provider.createSession("x");
+    await provider.prompt(session.id, { id: "r1", text: "go", delivery: "queue" });
+    const query = queries[0]!;
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg1", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Job" }] });
+    await waitFor(() => events.some(event => event.eventType === "background.reconciled"));
+    await stopHook(query, { session_crons: [oneShot] });
+    query.push(result(session.id, "res1"));
+    await waitFor(() => events.some(event => event.eventType === "turn.background"));
+    expect(events.some(event => event.eventType === "turn.scheduled")).toBe(false);
+    // The task settles with no follow-up: the grace window ends in the
+    // scheduled state, not idle, and the process stays up for the wakeup.
+    query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg2", session_id: session.id, tasks: [] });
+    await waitFor(() => events.some(event => event.eventType === "turn.scheduled"));
+    await Bun.sleep(20);
+    expect(statuses(events).at(-1)).toBe("scheduled");
+    expect(provider.liveSessionCount()).toBe(1);
+    expect(query.returned).toBe(false);
+    stop();
+    await provider.dispose();
+  });
+
+  test("an emptied cron set cancels the pending rows, and the session retires at the turn's end", async () => {
+    const { provider, events, stop, session, query } = await scheduled([oneShot, recurring]);
+    // The agent ends its loop in a turn the user prompted (CronDelete).
+    await provider.prompt(session.id, { id: "r2", text: "stop polling", delivery: "queue" });
+    await promptHook(query, { prompt: "stop polling", prompt_id: "typed-2" });
+    await stopHook(query, { session_crons: [] });
+    query.push(result(session.id, "res2"));
+    await waitFor(() => query.returned);
+    expect(provider.liveSessionCount()).toBe(0);
+    expect(rows(events).slice(-2)).toEqual([
+      expect.objectContaining({ id: "wakeup:w1", status: "cancelled" }),
+      expect.objectContaining({ id: "wakeup:c1", status: "cancelled" }),
+    ]);
+    expect(rows(events).slice(-2).every(row => row.nextFireAt === undefined)).toBe(true);
+    // At rest, not scheduled: the second turn ends as completed and nothing holds the process.
+    expect(statuses(events).slice(-2)).toEqual(["running", "completed"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a fired wakeup opens its own turn, attributed to the wakeup, and a fired one-shot's row links it", async () => {
+    const { provider, events, stop, session, query } = await scheduled([oneShot]);
+    // The spike's fired sequence: lifecycle, UserPromptSubmit (no source on
+    // this CLI), init, assistant, Stop (the one-shot gone), result.
+    query.push({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started", uuid: "cl1", session_id: session.id });
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
+    const opening = events.find(event => event.eventType === "wakeup.fired")!;
+    expect(opening.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "message:wakeup:fired-1", type: "user_message", text: oneShot.prompt, origin: "wakeup", wakeupId: "w1" }) }]);
+    query.push({ type: "assistant", uuid: "a2", timestamp: "2026-09-24T18:03:02.000Z", session_id: session.id, message: { role: "assistant", model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "pong" }], usage: { input_tokens: 5, output_tokens: 1 } } });
+    await stopHook(query, { session_crons: [] });
+    query.push(result(session.id, "res2"));
+    await waitFor(() => query.returned);
+    expect(rows(events).at(-1)).toEqual(expect.objectContaining({ id: "wakeup:w1", status: "fired", firedTurnId: "message:wakeup:fired-1" }));
+    expect(statuses(events).slice(-3)).toEqual(["scheduled", "running", "completed"]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a recurring cron fires and stays pending; a typed prompt during the scheduled state is the user's", async () => {
+    const { provider, events, stop, session, query } = await scheduled([recurring]);
+    await promptHook(query, { prompt: recurring.prompt, prompt_id: "fired-1" });
+    query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await stopHook(query, { session_crons: [recurring] });
+    query.push(result(session.id, "res2"));
+    await waitFor(() => events.filter(event => event.eventType === "turn.scheduled").length === 2);
+    expect(rows(events).every(row => row.status === "pending")).toBe(true);
+    // The user types the cron's very text while it is pending: an accepted
+    // prompt is outstanding, so its hook is theirs, not a wakeup.
+    await provider.prompt(session.id, { id: "r3", text: recurring.prompt, delivery: "queue" });
+    await promptHook(query, { prompt: recurring.prompt, prompt_id: "typed-3" });
+    await stopHook(query, { session_crons: [recurring] });
+    query.push(result(session.id, "res3"));
+    await waitFor(() => events.filter(event => event.eventType === "turn.scheduled").length === 3);
+    const wakeupTurns = events.flatMap(event => event.updates).filter(update => update.kind === "upsert" && update.item.type === "user_message" && (update.item as { origin?: string }).origin === "wakeup");
+    expect(wakeupTurns.map(update => (update as { item: { id: string } }).item.id)).toEqual(["message:wakeup:fired-1"]);
+    // The pending wakeup is still listed after the typed turn (spec).
+    expect(await provider.listScheduledWakeups()).toHaveLength(1);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a hook source is honored when the CLI sends one", async () => {
+    const { provider, events, stop, query } = await scheduled([oneShot]);
+    await promptHook(query, { prompt: "a peer message", prompt_id: "sys-1", source: "system" });
+    await promptHook(query, { prompt: "continue the loop", prompt_id: "loop-1", source: "loop_wakeup" });
+    await waitFor(() => events.some(event => event.eventType === "wakeup.fired"));
+    const opened = events.filter(event => event.eventType === "wakeup.fired").flatMap(event => event.updates);
+    // Only the wakeup source opens a wakeup turn; a prompt matching no cron has no wakeup id.
+    expect(opened).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: "message:wakeup:loop-1", origin: "wakeup" }) }]);
+    expect((opened[0] as { item: Record<string, unknown> }).item.wakeupId).toBeUndefined();
+    stop();
+    await provider.dispose();
+  });
+
+  test("release ends a scheduled session: rows cancelled, idle, and the next prompt resumes fresh", async () => {
+    const { provider, queries, events, stop, session, query } = await scheduled([oneShot, recurring]);
+    await provider.release(session.id);
+    expect(query.returned).toBe(true);
+    expect(provider.liveSessionCount()).toBe(0);
+    const released = events.find(event => event.eventType === "session.released")!;
+    expect(released.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:w1", status: "cancelled" }) },
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "cancelled" }) },
+      { kind: "status", status: "idle" },
+    ]);
+    // The process is gone on purpose: nothing reads as lost afterwards.
+    await Bun.sleep(10);
+    expect(rows(events).some(row => row.status === "lost")).toBe(false);
+    expect(await provider.listScheduledWakeups()).toEqual([]);
+    // Releasing again is a no-op; the next prompt starts a fresh query.
+    await provider.release(session.id);
+    await provider.prompt(session.id, { id: "r2", text: "again", delivery: "queue" });
+    expect(queries).toHaveLength(2);
+    queries[1]!.push(result(session.id, "res2"));
+    await waitFor(() => queries[1]!.returned);
+    stop();
+    await provider.dispose();
+  });
+
+  test("release is refused while a turn runs or background work would die with it", async () => {
+    const { provider, stop, session, query } = await scheduled([oneShot]);
+    await provider.prompt(session.id, { id: "r2", text: "meanwhile", delivery: "queue" });
+    await expect(provider.release(session.id)).rejects.toBeInstanceOf(ReleaseUnavailableError);
+    query.push(result(session.id, "res2"));
+    await waitFor(() => provider.liveSessionCount() === 1 && !query.returned);
+    stop();
+    await provider.dispose();
+    const busy = await scheduled([oneShot], { background: true });
+    await expect(busy.provider.release(busy.session.id)).rejects.toThrow(/background work/);
+    expect(busy.provider.liveSessionCount()).toBe(1);
+    busy.stop();
+    await busy.provider.dispose();
+  });
+
+  test("a process that exits with wakeups pending marks them lost with the notice and returns to idle", async () => {
+    const { provider, events, stop, query } = await scheduled([oneShot]);
+    await query.return();
+    await waitFor(() => events.some(event => event.eventType === "turn.background-cleared"));
+    const cleared = events.find(event => event.eventType === "turn.background-cleared")!;
+    expect(cleared.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:w1", status: "lost", message: expect.stringContaining("did not survive its session") }) },
+      { kind: "status", status: "idle" },
+    ]);
+    expect(await provider.listScheduledWakeups()).toEqual([]);
+    stop();
+    await provider.dispose();
+  });
+
+  test("a process that exits with a cron pending marks it paused, not lost, and a self-paced wakeup lost", async () => {
+    const { provider, events, stop, query } = await scheduled([oneShot, recurring]);
+    await query.return();
+    await waitFor(() => events.some(event => event.eventType === "turn.background-cleared"));
+    expect(events.find(event => event.eventType === "turn.background-cleared")!.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:w1", status: "lost", message: expect.stringContaining("did not survive its session") }) },
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "paused", message: WAKEUP_PAUSED_MESSAGE }) },
+      { kind: "status", status: "idle" },
+    ]);
+    // A paused row carries no fire time: nothing fires until a session runs.
+    expect(rows(events).find(row => row.id === "wakeup:c1" && row.status === "paused")!.nextFireAt).toBeUndefined();
+    stop();
+    await provider.dispose();
+  });
+
+  test("a cron the resumed session rebuilt, with no call seen in this process, is a cron; a one-shot cron's pause says when it lapses", async () => {
+    const rebuilt = { id: "r9", schedule: "34 21 24 9 *", recurring: false, prompt: "ONCE remind me" };
+    const context = fixture();
+    const { events, stop } = collect(context.provider);
+    const session = await context.provider.createSession("x");
+    await context.provider.prompt(session.id, { id: "r1", text: "hi", delivery: "queue" });
+    const query = context.queries[0]!;
+    await promptHook(query, { prompt: "hi", prompt_id: "typed-1" });
+    await stopHook(query, { session_crons: [rebuilt] });
+    query.push(result(session.id, "res1"));
+    await waitFor(() => events.some(event => event.eventType === "turn.scheduled"));
+    await query.return();
+    await waitFor(() => events.some(event => event.eventType === "turn.background-cleared"));
+    expect(rows(events).at(-1)).toEqual(expect.objectContaining({ id: "wakeup:r9", status: "paused", message: WAKEUP_PAUSED_ONCE_MESSAGE }));
+    stop();
+    await context.provider.dispose();
+  });
+
+  test("a failed process and a workspace shutdown each mark pending wakeups lost", async () => {
+    const failed = await scheduled([oneShot, recurring]);
+    failed.query.fail(new Error("child process died"));
+    await waitFor(() => failed.events.some(event => event.eventType === "session.failed"));
+    expect(failed.events.find(event => event.eventType === "session.failed")!.updates.slice(0, 2)).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:w1", status: "lost" }) },
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "paused" }) },
+    ]);
+    failed.stop();
+    await failed.provider.dispose();
+
+    const shutdown = await scheduled([oneShot, recurring]);
+    await shutdown.provider.dispose();
+    await waitFor(() => shutdown.events.some(event => event.eventType === "wakeups.lost"));
+    expect(shutdown.events.find(event => event.eventType === "wakeups.lost")!.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:w1", status: "lost", message: expect.stringContaining("did not survive") }) },
+      { kind: "upsert", item: expect.objectContaining({ id: "wakeup:c1", status: "paused", message: WAKEUP_PAUSED_MESSAGE }) },
+      { kind: "status", status: "idle" },
+    ]);
+    expect(shutdown.query.returned).toBe(true);
+    shutdown.stop();
+  });
+
+  test("a released cron the resumed session rebuilds is blocked: no model turn, no status, no notification", async () => {
+    const { provider, queries, events, stop, session } = await scheduled([recurring]);
+    await provider.release(session.id);
+    // The next prompt resumes the session; the CLI rebuilds the cron.
+    await provider.prompt(session.id, { id: "r2", text: "something else", delivery: "queue" });
+    const resumed = queries[1]!;
+    await promptHook(resumed, { prompt: "something else", prompt_id: "typed-2" });
+    await stopHook(resumed, { session_crons: [recurring] });
+    resumed.push(result(session.id, "res2"));
+    await waitFor(() => events.filter(event => event.eventType === "result").length >= 2);
+    // A cancelled cron holds nothing: the turn ends and the session retires.
+    await waitFor(() => resumed.returned);
+    expect(events.some(event => event.eventType === "turn.scheduled" && events.indexOf(event) > events.findIndex(candidate => candidate.eventType === "session.released"))).toBe(false);
+    // The row is not reopened by the rebuilt cron.
+    expect(rows(events).at(-1)).toEqual(expect.objectContaining({ id: "wakeup:c1", status: "cancelled" }));
+    stop();
+    await provider.dispose();
+  });
+
+  test("a cancelled cron's fire is blocked at the hook and its frames are swallowed", async () => {
+    const { provider, queries, events, stop, session } = await scheduled([recurring]);
+    await provider.release(session.id);
+    await provider.prompt(session.id, { id: "r2", text: "keep going", delivery: "queue" });
+    const resumed = queries[1]!;
+    await promptHook(resumed, { prompt: "keep going", prompt_id: "typed-2" });
+    // Another wakeup keeps this session up, so the cancelled cron can fire in it.
+    const other = { id: "o1", schedule: "*/10 * * * *", recurring: true, prompt: "OTHER check" };
+    await stopHook(resumed, { session_crons: [recurring, other] });
+    resumed.push(result(session.id, "res2"));
+    await waitFor(() => events.filter(event => event.eventType === "turn.scheduled").length === 2);
+    const before = events.length;
+    // The spike's blocked fire: the hook answers block, then the CLI sends
+    // init, an informational notice, and a result — no assistant frame.
+    const answer = await promptHook(resumed, { prompt: recurring.prompt, prompt_id: "fired-9" });
+    expect(answer).toEqual({ decision: "block", reason: expect.stringContaining("no longer fires") });
+    resumed.push({ type: "system", subtype: "init", uuid: "i9", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    resumed.push({ type: "system", subtype: "informational", uuid: "n9", session_id: session.id, content: "UserPromptSubmit operation blocked by hook" });
+    resumed.push(result(session.id, "res9"));
+    // The next real turn still reads normally: the other wakeup fires.
+    await promptHook(resumed, { prompt: other.prompt, prompt_id: "fired-10" });
+    resumed.push({ type: "system", subtype: "init", uuid: "i10", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await waitFor(() => events.some(event => event.eventType === "turn.unprompted"));
+    const after = events.slice(before);
+    // Nothing from the blocked fire: the first events are the next real
+    // turn's (its opening header, its start, its own init).
+    expect(after.map(event => event.eventType)).toEqual(["wakeup.fired", "turn.unprompted", "system"]);
+    expect(after.flatMap(event => event.updates).filter(update => update.kind === "status").map(update => (update as { status: string }).status)).toEqual(["running"]);
+    expect(after.flatMap(event => event.notificationTurns ?? []).map(turn => turn.phase)).toEqual(["started"]);
+    expect(provider.liveSessionCount()).toBe(1);
+    stop();
+    await provider.dispose();
+  });
+
+  test("the cancel survives a restart: a new provider blocks the rebuilt cron", async () => {
+    const context = fixture();
+    const { events, stop } = collect(context.provider);
+    const session = await context.provider.createSession("x");
+    await context.provider.prompt(session.id, { id: "r1", text: "poll", delivery: "queue" });
+    const query = context.queries[0]!;
+    await promptHook(query, { prompt: "poll", prompt_id: "typed-1" });
+    await stopHook(query, { session_crons: [recurring] });
+    query.push(result(session.id, "res1"));
+    await waitFor(() => events.some(event => event.eventType === "turn.scheduled"));
+    await context.provider.release(session.id);
+    stop();
+    await context.provider.dispose();
+    // Same workspace, same state file, a fresh process.
+    const queries: FakeQuery[] = [];
+    const restarted = new ClaudeProvider({
+      workspacePath: context.workspace, stateFile: path.join(context.workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir: context.configDir, catalogProbe: false,
+      queryFactory: input => { const next = new FakeQuery(input); queries.push(next); return next; },
+    });
+    await restarted.prompt(session.id, { id: "r2", text: "hello again", delivery: "queue" });
+    await promptHook(queries[0]!, { prompt: "hello again", prompt_id: "typed-2" });
+    queries[0]!.push(result(session.id, "res2"));
+    await waitFor(() => queries[0]!.returned);
+    // Resumed again with the cancelled cron rebuilt and another one holding
+    // the session: the cancelled one is not listed, and its fire is refused.
+    const other = { id: "o1", schedule: "*/10 * * * *", recurring: true, prompt: "OTHER check" };
+    const after = collect(restarted);
+    await restarted.prompt(session.id, { id: "r3", text: "and again", delivery: "queue" });
+    await promptHook(queries[1]!, { prompt: "and again", prompt_id: "typed-3" });
+    await stopHook(queries[1]!, { session_crons: [recurring, other] });
+    queries[1]!.push(result(session.id, "res3"));
+    await waitFor(() => after.events.some(event => event.eventType === "turn.scheduled"));
+    expect((await restarted.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["o1"]);
+    expect(await promptHook(queries[1]!, { prompt: recurring.prompt, prompt_id: "fired-1" })).toEqual({ decision: "block", reason: expect.any(String) });
+    expect(await promptHook(queries[1]!, { prompt: other.prompt, prompt_id: "fired-2" })).toEqual({ continue: true });
+    after.stop();
+    await restarted.dispose();
+  });
+
+  test("cancelling one of two live wakeups keeps the session scheduled for the other; the last one retires it", async () => {
+    const { provider, events, stop, session, query } = await scheduled([oneShot, recurring]);
+    await provider.cancelWakeup(session.id, "c1");
+    await waitFor(() => events.some(event => event.eventType === "wakeup.cancelled"));
+    expect(rows(events).at(-1)).toEqual(expect.objectContaining({ id: "wakeup:c1", status: "cancelled" }));
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["w1"]);
+    expect(query.returned).toBe(false);
+    expect(statuses(events).at(-1)).toBe("scheduled");
+    // The CLI still lists c1 at the next Stop; it holds nothing.
+    await provider.prompt(session.id, { id: "r2", text: "anything", delivery: "queue" });
+    await promptHook(query, { prompt: "anything", prompt_id: "typed-2" });
+    await stopHook(query, { session_crons: [oneShot, recurring] });
+    query.push(result(session.id, "res2"));
+    await waitFor(() => events.filter(event => event.eventType === "turn.scheduled").length === 2);
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["w1"]);
+    await provider.cancelWakeup(session.id, "w1");
+    await waitFor(() => query.returned);
+    expect(statuses(events).at(-1)).toBe("idle");
+    await expect(provider.cancelWakeup(session.id, "nope")).rejects.toBeInstanceOf(ScheduledWakeupUnavailableError);
+    stop();
+    await provider.dispose();
+  });
+
+  describe("paused crons of a conversation with no live session (D11)", () => {
+    function transcriptProvider(name: keyof typeof spikeRevival.sessions, at: (records: Array<Record<string, unknown>>) => number) {
+      const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-paused-")));
+      const workspace = path.join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const configDir = path.join(root, "config");
+      mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+      const records = spikeRevival.sessions[name].map(record => ({ ...record, cwd: workspace })) as Array<Record<string, unknown>>;
+      writeFileSync(path.join(claudeProjectDir(workspace, configDir), "resumable.jsonl"), records.map(record => JSON.stringify(record)).join("\n") + "\n");
+      const created = Date.parse(String(records.find(record => (record.toolUseResult as { id?: unknown } | undefined)?.id)!.timestamp));
+      const queries: FakeQuery[] = [];
+      const provider = new ClaudeProvider({
+        workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+        now: () => at(records) || created + 60_000,
+        queryFactory: input => { const next = new FakeQuery(input); queries.push(next); return next; },
+      });
+      return { provider, queries, workspace, configDir };
+    }
+
+    test("a reopened conversation lists its surviving cron as paused; cancelling it needs no session and sticks", async () => {
+      const { provider, queries } = transcriptProvider("delete", () => 0);
+      const { events, stop } = collect(provider);
+      const paused = await provider.listPausedWakeups("resumable");
+      expect(paused).toEqual([expect.objectContaining({ type: "scheduled_wakeup", status: "paused", prompt: "KEEP reply with exactly the word keep", recurring: true, message: WAKEUP_PAUSED_MESSAGE })]);
+      expect(paused[0]!.nextFireAt).toBeUndefined();
+      await provider.cancelWakeup("resumable", paused[0]!.wakeupId);
+      expect(queries).toHaveLength(0);
+      await waitFor(() => events.some(event => event.eventType === "wakeup.cancelled"));
+      expect(events.find(event => event.eventType === "wakeup.cancelled")!.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ id: paused[0]!.id, status: "cancelled" }) }]);
+      expect(await provider.listPausedWakeups("resumable")).toEqual([]);
+      await expect(provider.cancelWakeup("resumable", paused[0]!.wakeupId)).rejects.toBeInstanceOf(ScheduledWakeupUnavailableError);
+      stop();
+      await provider.dispose();
+    });
+
+    test("a resumed session attributes a rebuilt cron's fire before any Stop, and the first Stop settles the rest", async () => {
+      const { provider, queries } = transcriptProvider("block", () => 0);
+      const { events, stop } = collect(provider);
+      const [paused] = await provider.listPausedWakeups("resumable");
+      await provider.prompt("resumable", { id: "r1", text: "back again", delivery: "queue" });
+      const query = queries[0]!;
+      expect(query.input.options.resume).toBe("resumable");
+      await promptHook(query, { prompt: "back again", prompt_id: "typed-1" });
+      query.push(result("resumable", "res1"));
+      // The rebuilt cron fires within the minute, before any Stop listed it.
+      await waitFor(() => query.returned || events.some(event => event.eventType === "result"));
+      await Bun.sleep(5);
+      // The session retired (no Stop reported crons); resume and let it fire.
+      await provider.prompt("resumable", { id: "r2", text: "once more", delivery: "queue" });
+      const next = queries.at(-1)!;
+      await Bun.sleep(5);
+      await promptHook(next, { prompt: "once more", prompt_id: "typed-2" });
+      await stopHook(next, { session_crons: [{ id: paused!.wakeupId, schedule: "* * * * *", recurring: true, prompt: paused!.prompt }] });
+      next.push(result("resumable", "res2"));
+      await waitFor(() => events.some(event => event.eventType === "turn.scheduled"));
+      await promptHook(next, { prompt: paused!.prompt, prompt_id: "fired-1" });
+      await waitFor(() => events.some(event => event.eventType === "wakeup.fired"));
+      expect(events.find(event => event.eventType === "wakeup.fired")!.updates).toEqual([{ kind: "upsert", item: expect.objectContaining({ origin: "wakeup", wakeupId: paused!.wakeupId }) }]);
+      stop();
+      await provider.dispose();
+    });
+
+    test("a rebuilt one-shot the CLI did not restore reads as lost at the first Stop", async () => {
+      const { provider, queries } = transcriptProvider("missed", () => 0);
+      const { events, stop } = collect(provider);
+      // Read before the fire time: the transcript says it would come back.
+      const [paused] = await provider.listPausedWakeups("resumable");
+      expect(paused).toEqual(expect.objectContaining({ status: "paused", recurring: false, message: WAKEUP_PAUSED_ONCE_MESSAGE }));
+      await provider.prompt("resumable", { id: "r1", text: "hello", delivery: "queue" });
+      const query = queries[0]!;
+      await waitFor(() => query.input.options.resume === "resumable");
+      await Bun.sleep(20);
+      await promptHook(query, { prompt: "hello", prompt_id: "typed-1" });
+      await stopHook(query, { session_crons: [] });
+      query.push(result("resumable", "res1"));
+      await waitFor(() => events.some(event => event.eventType === "wakeups.reconciled"));
+      expect(rows(events).at(-1)).toEqual(expect.objectContaining({ id: paused!.id, status: "lost", message: expect.stringContaining("did not restore") }));
+      stop();
+      await provider.dispose();
+    });
+  });
+
+  test("a clipped cron prompt still matches the whole prompt it fires", () => {
+    expect(wakeupPromptMatches("same", "same")).toBe(true);
+    expect(wakeupPromptMatches("check the build and… [+120 chars]", "check the build and then the deploy")).toBe(true);
+    expect(wakeupPromptMatches("check the build", "check the build twice")).toBe(false);
+    expect(wakeupPromptMatches("… [+5 chars]", "anything")).toBe(false);
+  });
 });

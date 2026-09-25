@@ -117,6 +117,8 @@ export interface MultiAgentWorkspaceChatService {
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }>;
+  release(id: string, requestId: string): Promise<{ released: true }>;
+  cancelWakeup(id: string, wakeupId: string, requestId: string): Promise<{ cancelled: true }>;
   usage(agentId: string): Promise<AgentUsageReport | null>;
   readUsage(agentId: string, requestId: string, mode: UsageReadMode): Promise<UsageReadResult>;
   dispose(): Promise<void>;
@@ -382,6 +384,16 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
   async stopTask(id: string, taskId: string, requestId: string) {
     const { agent, conversationId } = this.resolve(id);
     return agent.service.stopTask(conversationId, taskId, requestId);
+  }
+
+  async release(id: string, requestId: string) {
+    const { agent, conversationId } = this.resolve(id);
+    return agent.service.release(conversationId, requestId);
+  }
+
+  async cancelWakeup(id: string, wakeupId: string, requestId: string) {
+    const { agent, conversationId } = this.resolve(id);
+    return agent.service.cancelWakeup(conversationId, wakeupId, requestId);
   }
 
   async usage(agentId: string): Promise<AgentUsageReport | null> { return this.requireAgent(agentId).service.usage(); }

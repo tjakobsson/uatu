@@ -1,0 +1,909 @@
+{
+  "note": "Trimmed from scripts/spike-claude-cron-revival.ts sessions (claude-scheduled-wakeups D9/D11), CLI 2.1.281: the user, assistant, and system records of each resumed session. Attachment and bookkeeping records are dropped (they carry the recording machine environment).",
+  "sessions": {
+    "block": [
+      {
+        "parentUuid": null,
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use the CronCreate tool with cron \"* * * * *\", recurring true, and prompt \"BLOCK-ME reply with exactly the word ping\". Then stop."
+            }
+          ]
+        },
+        "uuid": "0fa065dd-8b1a-4586-8239-2238a12fdfd0",
+        "timestamp": "2026-09-24T19:32:01.193Z",
+        "promptSource": "sdk",
+        "turnOrigin": "sdk"
+      },
+      {
+        "parentUuid": "88895955-82fd-431b-b9de-22fda1f8242d",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01Vbq42cnGMeNaaSvHavtnuH",
+              "name": "ToolSearch",
+              "input": {
+                "query": "select:CronCreate",
+                "max_results": 1
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "20b80975-6497-4de2-8957-280b6afd89e1",
+        "timestamp": "2026-09-24T19:32:03.206Z"
+      },
+      {
+        "parentUuid": "20b80975-6497-4de2-8957-280b6afd89e1",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01Vbq42cnGMeNaaSvHavtnuH",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronCreate"
+                }
+              ]
+            }
+          ]
+        },
+        "uuid": "67786116-bf4a-407d-842c-a0c590518c4e",
+        "timestamp": "2026-09-24T19:32:03.223Z",
+        "toolUseResult": {
+          "matches": [
+            "CronCreate"
+          ],
+          "query": "select:CronCreate",
+          "total_deferred_tools": 78
+        }
+      },
+      {
+        "parentUuid": "6762f565-24d9-4005-acfa-786091318531",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01JnxDEXCeNAZvwAaBJJW4uU",
+              "name": "CronCreate",
+              "input": {
+                "cron": "* * * * *",
+                "recurring": true,
+                "prompt": "BLOCK-ME reply with exactly the word ping"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "175cdfb5-8c3b-4867-9e9f-f72d66053c2c",
+        "timestamp": "2026-09-24T19:32:05.098Z"
+      },
+      {
+        "parentUuid": "175cdfb5-8c3b-4867-9e9f-f72d66053c2c",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "toolu_01JnxDEXCeNAZvwAaBJJW4uU",
+              "type": "tool_result",
+              "content": "Scheduled recurring job 1bab7309 (Every minute). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+            }
+          ]
+        },
+        "uuid": "efcad1e8-7745-44b0-bdab-bfc109b3fde6",
+        "timestamp": "2026-09-24T19:32:05.100Z",
+        "toolUseResult": {
+          "id": "1bab7309",
+          "humanSchedule": "Every minute",
+          "recurring": true,
+          "durable": false
+        }
+      },
+      {
+        "parentUuid": "90768e18-5892-4897-bc71-6d975b85cf94",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Scheduled recurring job `1bab7309` — fires every minute with the prompt \"BLOCK-ME reply with exactly the word ping\". It's session-only (gone when this session exits) and auto-expires after 7 days; use CronDelete with that ID to cancel sooner."
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "df772b09-fd5f-448d-9059-211e85cb7ec4",
+        "timestamp": "2026-09-24T19:32:06.982Z"
+      },
+      {
+        "parentUuid": "df772b09-fd5f-448d-9059-211e85cb7ec4",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-24T19:32:07.058Z",
+        "uuid": "31d3a9f9-07fe-43b7-9983-edc2d1bcd5e0"
+      },
+      {
+        "parentUuid": "31d3a9f9-07fe-43b7-9983-edc2d1bcd5e0",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "informational",
+        "content": "UserPromptSubmit operation blocked by hook:\nReleased in uatu: this schedule no longer fires.\n\nOriginal prompt: BLOCK-ME reply with exactly the word ping",
+        "isMeta": false,
+        "timestamp": "2026-09-24T19:33:04.251Z",
+        "uuid": "04567256-e0c8-4a4d-a5ec-29f12d1b997f"
+      },
+      {
+        "parentUuid": "04567256-e0c8-4a4d-a5ec-29f12d1b997f",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "informational",
+        "content": "UserPromptSubmit operation blocked by hook:\nReleased in uatu: this schedule no longer fires.\n\nOriginal prompt: BLOCK-ME reply with exactly the word ping",
+        "isMeta": false,
+        "timestamp": "2026-09-24T19:34:03.395Z",
+        "uuid": "2ce92756-af57-45b8-8ee3-2addf328f84c"
+      }
+    ],
+    "delete": [
+      {
+        "parentUuid": null,
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use the CronCreate tool twice: once with cron \"* * * * *\", recurring true, prompt \"KEEP reply with exactly the word keep\"; once with cron \"* * * * *\", recurring true, prompt \"DROP reply with exactly the word drop\". Then stop."
+            }
+          ]
+        },
+        "uuid": "4c0a7e45-cea2-4247-bcb2-80859a21fb5d",
+        "timestamp": "2026-09-24T19:32:01.224Z",
+        "promptSource": "sdk",
+        "turnOrigin": "sdk"
+      },
+      {
+        "parentUuid": "4ad0e822-3c24-4895-8b76-e4cdfc3918d8",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_0152bzBTcrVnvFyK9gQUWd6U",
+              "name": "ToolSearch",
+              "input": {
+                "query": "select:CronCreate",
+                "max_results": 1
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "b97e1f43-10d8-4cc0-bd2b-d09fd9ab7ce4",
+        "timestamp": "2026-09-24T19:32:03.594Z"
+      },
+      {
+        "parentUuid": "b97e1f43-10d8-4cc0-bd2b-d09fd9ab7ce4",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_0152bzBTcrVnvFyK9gQUWd6U",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronCreate"
+                }
+              ]
+            }
+          ]
+        },
+        "uuid": "0f98954a-f80e-4f85-a099-357a28a54014",
+        "timestamp": "2026-09-24T19:32:03.613Z",
+        "toolUseResult": {
+          "matches": [
+            "CronCreate"
+          ],
+          "query": "select:CronCreate",
+          "total_deferred_tools": 78
+        }
+      },
+      {
+        "parentUuid": "7eb680eb-21ee-45d8-aa60-54060faac0c0",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01GLo3YkL69jJPg7tBzTjd73",
+              "name": "CronCreate",
+              "input": {
+                "cron": "* * * * *",
+                "recurring": true,
+                "prompt": "KEEP reply with exactly the word keep"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "0dce2c26-5a02-4e82-aa49-67690c2e271a",
+        "timestamp": "2026-09-24T19:32:05.702Z"
+      },
+      {
+        "parentUuid": "0dce2c26-5a02-4e82-aa49-67690c2e271a",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "toolu_01GLo3YkL69jJPg7tBzTjd73",
+              "type": "tool_result",
+              "content": "Scheduled recurring job e0b52abc (Every minute). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+            }
+          ]
+        },
+        "uuid": "48b7461b-8f72-46a6-88ec-89349850d49c",
+        "timestamp": "2026-09-24T19:32:05.710Z",
+        "toolUseResult": {
+          "id": "e0b52abc",
+          "humanSchedule": "Every minute",
+          "recurring": true,
+          "durable": false
+        }
+      },
+      {
+        "parentUuid": "48b7461b-8f72-46a6-88ec-89349850d49c",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01D6WhQwXdzUHpA2t4KWnHHB",
+              "name": "CronCreate",
+              "input": {
+                "cron": "* * * * *",
+                "recurring": true,
+                "prompt": "DROP reply with exactly the word drop"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "c4b38ac6-3236-42e3-85da-4e43f4ed992f",
+        "timestamp": "2026-09-24T19:32:06.444Z"
+      },
+      {
+        "parentUuid": "c4b38ac6-3236-42e3-85da-4e43f4ed992f",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "toolu_01D6WhQwXdzUHpA2t4KWnHHB",
+              "type": "tool_result",
+              "content": "Scheduled recurring job 26c4950f (Every minute). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner."
+            }
+          ]
+        },
+        "uuid": "f9b35a89-06e2-423f-b0a2-04e9c145abc9",
+        "timestamp": "2026-09-24T19:32:06.448Z",
+        "toolUseResult": {
+          "id": "26c4950f",
+          "humanSchedule": "Every minute",
+          "recurring": true,
+          "durable": false
+        }
+      },
+      {
+        "parentUuid": "5653017e-d099-4349-8e2b-1c3c17159fb8",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Both jobs are scheduled:\n\n- `e0b52abc` — every minute, prompt \"KEEP reply with exactly the word keep\"\n- `26c4950f` — every minute, prompt \"DROP reply with exactly the word drop\"\n\nBoth are session-only and auto-expire after 7 days. Use CronDelete with the job ID to cancel either one sooner."
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "8f7c6f13-0486-4b0e-ac04-60dcf7d347d7",
+        "timestamp": "2026-09-24T19:32:08.553Z"
+      },
+      {
+        "parentUuid": "8f7c6f13-0486-4b0e-ac04-60dcf7d347d7",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-24T19:32:08.599Z",
+        "uuid": "7fead663-ad79-49b7-9a65-702b4ec80e84"
+      },
+      {
+        "parentUuid": "7fead663-ad79-49b7-9a65-702b4ec80e84",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use CronDelete to delete the job whose prompt starts with \"DROP\". Do nothing else, then stop."
+            }
+          ]
+        },
+        "uuid": "c27bb792-c900-4f2b-8994-746b68cd4bbd",
+        "timestamp": "2026-09-24T19:32:08.602Z",
+        "promptSource": "sdk",
+        "turnOrigin": "sdk"
+      },
+      {
+        "parentUuid": "b27c155b-14b7-419b-9143-b1a5c43aadf5",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_016upbDqNLQwBWMUEzzGzJNE",
+              "name": "ToolSearch",
+              "input": {
+                "query": "select:CronDelete",
+                "max_results": 1
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "12f6e4ab-4330-467b-9879-681e4ef27b51",
+        "timestamp": "2026-09-24T19:32:10.620Z"
+      },
+      {
+        "parentUuid": "12f6e4ab-4330-467b-9879-681e4ef27b51",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_016upbDqNLQwBWMUEzzGzJNE",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronDelete"
+                }
+              ]
+            }
+          ]
+        },
+        "uuid": "b9646199-4ef9-4368-abe6-e23f0c70d614",
+        "timestamp": "2026-09-24T19:32:10.629Z",
+        "toolUseResult": {
+          "matches": [
+            "CronDelete"
+          ],
+          "query": "select:CronDelete",
+          "total_deferred_tools": 78
+        }
+      },
+      {
+        "parentUuid": "2c093e8e-5ce4-4d87-bb4b-c1fbdb1d40bd",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01G2QsYxZWH1SVj18zSGqXRF",
+              "name": "CronDelete",
+              "input": {
+                "id": "26c4950f"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "e7f55068-09a8-40b6-a553-6c23b4e40552",
+        "timestamp": "2026-09-24T19:32:12.186Z"
+      },
+      {
+        "parentUuid": "e7f55068-09a8-40b6-a553-6c23b4e40552",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "toolu_01G2QsYxZWH1SVj18zSGqXRF",
+              "type": "tool_result",
+              "content": "Cancelled job 26c4950f."
+            }
+          ]
+        },
+        "uuid": "29a13998-4cb9-40f2-afdc-d7fc36ba3723",
+        "timestamp": "2026-09-24T19:32:12.203Z",
+        "toolUseResult": {
+          "id": "26c4950f"
+        }
+      },
+      {
+        "parentUuid": "321a5929-24e5-4595-9438-ccd46129bc1e",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Deleted job `26c4950f` (the \"DROP\" job). The \"KEEP\" job `e0b52abc` is still scheduled."
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "e9ae7631-63e7-4abf-bb52-e42a4587c4f3",
+        "timestamp": "2026-09-24T19:32:14.012Z"
+      },
+      {
+        "parentUuid": "e9ae7631-63e7-4abf-bb52-e42a4587c4f3",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-24T19:32:14.047Z",
+        "uuid": "66f34fde-19b3-483c-adcd-bb1c8a05559e"
+      },
+      {
+        "parentUuid": "66f34fde-19b3-483c-adcd-bb1c8a05559e",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": "KEEP reply with exactly the word keep"
+        },
+        "isMeta": true,
+        "uuid": "a4448442-f086-44b0-a795-0fb0332a1152",
+        "timestamp": "2026-09-24T19:33:27.099Z",
+        "promptSource": "system",
+        "turnOrigin": "scheduled"
+      },
+      {
+        "parentUuid": "a4448442-f086-44b0-a795-0fb0332a1152",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "keep"
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "3a6248c0-0362-4080-b003-82a03fa28366",
+        "timestamp": "2026-09-24T19:33:28.802Z"
+      },
+      {
+        "parentUuid": "3a6248c0-0362-4080-b003-82a03fa28366",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-24T19:33:28.849Z",
+        "uuid": "4c4e5b9e-d0f0-4150-81ad-f48520e23ccb"
+      }
+    ],
+    "oneshot": [
+      {
+        "parentUuid": null,
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use the CronCreate tool with cron \"34 21 24 9 *\", recurring false, and prompt \"ONCE reply with exactly the word once\". Then stop."
+            }
+          ]
+        },
+        "uuid": "f38f68c8-e142-48bd-93b5-f7b78aa9f6ab",
+        "timestamp": "2026-09-24T19:32:01.160Z",
+        "promptSource": "sdk",
+        "turnOrigin": "sdk"
+      },
+      {
+        "parentUuid": "11696407-bcbf-407f-bf50-ab7753b876d3",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_0156CgoFRXdZyvJy2drpEB8i",
+              "name": "ToolSearch",
+              "input": {
+                "query": "select:CronCreate",
+                "max_results": 1
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "a7658a24-4276-4cfa-81c6-66e4c9f08578",
+        "timestamp": "2026-09-24T19:32:03.260Z"
+      },
+      {
+        "parentUuid": "a7658a24-4276-4cfa-81c6-66e4c9f08578",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_0156CgoFRXdZyvJy2drpEB8i",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronCreate"
+                }
+              ]
+            }
+          ]
+        },
+        "uuid": "1a8dabd2-3d2c-4d79-a419-3134eef3adb8",
+        "timestamp": "2026-09-24T19:32:03.266Z",
+        "toolUseResult": {
+          "matches": [
+            "CronCreate"
+          ],
+          "query": "select:CronCreate",
+          "total_deferred_tools": 78
+        }
+      },
+      {
+        "parentUuid": "6bf62c2e-2c2a-4828-a404-a63762ebd397",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01S3i1Bg9KFJvAGNaeQ1BRih",
+              "name": "CronCreate",
+              "input": {
+                "cron": "34 21 24 9 *",
+                "recurring": false,
+                "prompt": "ONCE reply with exactly the word once"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "b2bc4364-dfb2-4451-8dca-ccfe1c410529",
+        "timestamp": "2026-09-24T19:32:05.370Z"
+      },
+      {
+        "parentUuid": "b2bc4364-dfb2-4451-8dca-ccfe1c410529",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "toolu_01S3i1Bg9KFJvAGNaeQ1BRih",
+              "type": "tool_result",
+              "content": "Scheduled one-shot task 60ebe6d1 (34 21 24 9 *). Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete."
+            }
+          ]
+        },
+        "uuid": "37f14e80-0291-41d9-8c33-52067ef2f618",
+        "timestamp": "2026-09-24T19:32:05.386Z",
+        "toolUseResult": {
+          "id": "60ebe6d1",
+          "humanSchedule": "34 21 24 9 *",
+          "recurring": false,
+          "durable": false
+        }
+      },
+      {
+        "parentUuid": "874e88e1-75d2-4e46-ba10-f5c72b41cc27",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Scheduled one-shot task `60ebe6d1` for today at 21:34 local time. It's session-only and will fire once, then auto-delete."
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "55566b9d-c3cb-41a0-8048-11dcab1a6022",
+        "timestamp": "2026-09-24T19:32:07.306Z"
+      },
+      {
+        "parentUuid": "55566b9d-c3cb-41a0-8048-11dcab1a6022",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-24T19:32:07.350Z",
+        "uuid": "3ab37b36-c851-43e0-ada5-c6548306f040"
+      },
+      {
+        "parentUuid": "3ab37b36-c851-43e0-ada5-c6548306f040",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": "ONCE reply with exactly the word once"
+        },
+        "isMeta": true,
+        "uuid": "70867393-8bc8-4449-a560-03d959af2038",
+        "timestamp": "2026-09-24T19:34:00.684Z",
+        "promptSource": "system",
+        "turnOrigin": "scheduled"
+      },
+      {
+        "parentUuid": "70867393-8bc8-4449-a560-03d959af2038",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "once"
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "c062ad15-6a15-4619-9c12-31273ce60471",
+        "timestamp": "2026-09-24T19:34:02.248Z"
+      },
+      {
+        "parentUuid": "c062ad15-6a15-4619-9c12-31273ce60471",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-24T19:34:02.281Z",
+        "uuid": "9abce340-da43-4710-a002-f64e7dca5199"
+      }
+    ],
+    "missed": [
+      {
+        "parentUuid": null,
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use the CronCreate tool with cron \"54 2 25 9 *\", recurring false, and prompt \"MISSED reply with exactly the word late\". Then stop."
+            }
+          ]
+        },
+        "uuid": "3edac6bc-6be5-47e1-a0f2-af84c31639b8",
+        "timestamp": "2026-09-25T00:52:40.581Z",
+        "promptSource": "sdk",
+        "turnOrigin": "sdk"
+      },
+      {
+        "parentUuid": "8f89d461-f055-466d-be08-529ab5a51581",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01CFso6sLJACA3e3KRs1Yy7j",
+              "name": "ToolSearch",
+              "input": {
+                "query": "select:CronCreate",
+                "max_results": 1
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "92c9f4b2-6bb9-4e93-823e-4abaeab19743",
+        "timestamp": "2026-09-25T00:52:42.593Z"
+      },
+      {
+        "parentUuid": "92c9f4b2-6bb9-4e93-823e-4abaeab19743",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01CFso6sLJACA3e3KRs1Yy7j",
+              "content": [
+                {
+                  "type": "tool_reference",
+                  "tool_name": "CronCreate"
+                }
+              ]
+            }
+          ]
+        },
+        "uuid": "4e979e95-ecd5-4cd5-9d03-5a390628121f",
+        "timestamp": "2026-09-25T00:52:42.612Z",
+        "toolUseResult": {
+          "matches": [
+            "CronCreate"
+          ],
+          "query": "select:CronCreate",
+          "total_deferred_tools": 78
+        }
+      },
+      {
+        "parentUuid": "808ca063-502d-4fa8-a530-dfb54c2166ab",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01MujdsSZfSBWYhsb4x7yjUF",
+              "name": "CronCreate",
+              "input": {
+                "cron": "54 2 25 9 *",
+                "recurring": false,
+                "prompt": "MISSED reply with exactly the word late"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "85138738-ea33-491b-8a3d-5fcd40c91b83",
+        "timestamp": "2026-09-25T00:52:44.288Z"
+      },
+      {
+        "parentUuid": "85138738-ea33-491b-8a3d-5fcd40c91b83",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "tool_use_id": "toolu_01MujdsSZfSBWYhsb4x7yjUF",
+              "type": "tool_result",
+              "content": "Scheduled one-shot task 4777c6c7 (54 2 25 9 *). Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete."
+            }
+          ]
+        },
+        "uuid": "d9f91552-ad13-4ac7-a27e-8023e0c54036",
+        "timestamp": "2026-09-25T00:52:44.298Z",
+        "toolUseResult": {
+          "id": "4777c6c7",
+          "humanSchedule": "54 2 25 9 *",
+          "recurring": false,
+          "durable": false
+        }
+      },
+      {
+        "parentUuid": "f8cd162f-620a-4e1f-865e-15735ecc0db2",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Done. One-shot job `4777c6c7` is scheduled for Sep 25 at 02:54 local time with the prompt \"MISSED reply with exactly the word late\". It's session-only, so it fires once (while this session is idle) and then auto-deletes."
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "c06b97f6-e6ea-4f4d-9970-515f3632b36d",
+        "timestamp": "2026-09-25T00:52:46.230Z"
+      },
+      {
+        "parentUuid": "c06b97f6-e6ea-4f4d-9970-515f3632b36d",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-25T00:52:46.272Z",
+        "uuid": "5d6ab9b7-5211-4838-baef-ad61b680da8e"
+      },
+      {
+        "parentUuid": "5d6ab9b7-5211-4838-baef-ad61b680da8e",
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Reply with exactly \"ok\"."
+            }
+          ]
+        },
+        "uuid": "ec68ef2e-a1d9-4f92-ac83-c7f73d0a4ca6",
+        "timestamp": "2026-09-25T00:57:10.151Z",
+        "promptSource": "sdk",
+        "turnOrigin": "sdk"
+      },
+      {
+        "parentUuid": "31605d20-5577-47b8-8eb6-82e3464005c0",
+        "isSidechain": false,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        },
+        "type": "assistant",
+        "uuid": "b8151458-84da-4ecd-8853-ed49911e5127",
+        "timestamp": "2026-09-25T00:57:12.247Z"
+      },
+      {
+        "parentUuid": "b8151458-84da-4ecd-8853-ed49911e5127",
+        "isSidechain": false,
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-25T00:57:12.296Z",
+        "uuid": "9f032523-1a27-4bbf-a23d-c955a9fcabca"
+      }
+    ]
+  }
+}

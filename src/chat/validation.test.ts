@@ -345,6 +345,23 @@ describe("chat domain validation", () => {
     expect(() => parseConversationItem({ id: "task:1", type: "background_task", createdAt: 1, taskId: "1", description: "d", status: "paused" })).toThrow(/background task status/);
   });
 
+  test("the scheduled status, wakeup rows, and a wakeup turn's origin parse; malformed ones fail", () => {
+    expect(parseConversationItem({ id: "s", type: "turn_status", createdAt: 1, status: "scheduled" })).toBeTruthy();
+    const row = { id: "wakeup:a1", type: "scheduled_wakeup", createdAt: 1, wakeupId: "a1", prompt: "check the build", recurring: false, schedule: "3 20 * * *", nextFireAt: 5, status: "pending" };
+    expect(parseConversationItem(row)).toBeTruthy();
+    expect(parseConversationItem({ ...row, status: "fired", firedTurnId: "message:wakeup:p1" })).toBeTruthy();
+    expect(parseConversationItem({ ...row, status: "lost", message: "The schedule did not survive the session." })).toBeTruthy();
+    expect(parseConversationItem({ ...row, status: "paused", message: "Fires again once this conversation runs." })).toBeTruthy();
+    expect(() => parseConversationItem({ ...row, status: "snoozed" })).toThrow(/scheduled wakeup status/);
+    expect(() => parseConversationItem({ ...row, recurring: "no" })).toThrow(/recurring/);
+    expect(() => parseConversationItem({ ...row, schedule: "" })).toThrow(/schedule/);
+    expect(() => parseConversationItem({ ...row, nextFireAt: -1 })).toThrow(/nextFireAt/);
+    expect(() => parseConversationItem({ ...row, jitter: 3 })).toThrow(/unknown scheduled_wakeup field/);
+    const turn = { id: "message:wakeup:p1", type: "user_message", createdAt: 1, text: "check the build", origin: "wakeup", wakeupId: "a1" };
+    expect(parseConversationItem(turn)).toBeTruthy();
+    expect(() => parseConversationItem({ ...turn, origin: "cron" })).toThrow(/user message origin/);
+  });
+
   test("a usage report parses with the plan's own rules; a read result is a report or a named failure", () => {
     const report = { plan: { subscription: "pro", fiveHour: { utilization: 9, resetsAt: 5 }, sevenDay: { utilization: 25 } }, readAt: 1_700_000_000_000, conversationId: "c1" };
     expect(parseAgentUsageReport(report)).toEqual(report);

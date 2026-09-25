@@ -1332,6 +1332,97 @@ describe("background task rows and tool elapsed time", () => {
   });
 });
 
+describe("scheduled wakeup rows and wakeup turns", () => {
+  const fireAt = new Date(2026, 8, 24, 20, 3).getTime();
+  const row = (status: "pending" | "fired" | "cancelled" | "paused" | "lost", extra: Partial<ConversationItem> = {}): ConversationItem => ({
+    id: "wakeup:w1", type: "scheduled_wakeup", createdAt: 1, wakeupId: "w1", prompt: "check the build", recurring: false, schedule: "3 20 * * *",
+    ...(status === "pending" ? { nextFireAt: fireAt } : {}), status, ...extra,
+  } as ConversationItem);
+  const render = (items: ConversationItem[], status: "scheduled" | "completed" | "running" = "completed") => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith(items, { status }), new Set());
+    return host;
+  };
+
+  test("a pending wakeup is a timeline row with its prompt and fire time", () => {
+    const host = render([row("pending")], "scheduled");
+    const node = host.querySelector('[data-chat-item-id="wakeup:w1"]')!;
+    const time = new Date(fireAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    expect(node.className).toContain("chat-wakeup is-pending");
+    expect(node.querySelector(".chat-wakeup-label")?.textContent).toContain(`Wakeup scheduled · about ${time}`);
+    expect(node.querySelector(".chat-wakeup-subject")?.textContent).toBe("check the build");
+    expect(node.querySelector("[data-chat-jump]")).toBeNull();
+  });
+
+  test("a recurring wakeup says so and names its next fire", () => {
+    const host = render([row("pending", { id: "wakeup:c1", wakeupId: "c1", recurring: true, schedule: "*/5 * * * *" } as never)], "scheduled");
+    expect(host.querySelector('[data-chat-item-id="wakeup:c1"] .chat-wakeup-label')?.textContent).toMatch(/^Recurring wakeup scheduled · next about /);
+  });
+
+  test("a fired wakeup links the turn it started", () => {
+    const host = render([row("fired", { firedTurnId: "message:wakeup:p1" } as never)]);
+    const node = host.querySelector('[data-chat-item-id="wakeup:w1"]')!;
+    expect(node.className).toContain("is-fired");
+    expect(node.querySelector(".chat-wakeup-label")?.textContent).toBe("Wakeup fired");
+    expect(node.querySelector("[data-chat-jump]")?.getAttribute("data-chat-jump")).toBe("message:wakeup:p1");
+  });
+
+  test("cancelled and lost wakeups read as such; a lost one carries its reason", () => {
+    const cancelled = render([row("cancelled")]).querySelector('[data-chat-item-id="wakeup:w1"]')!;
+    expect(cancelled.querySelector(".chat-wakeup-label")?.textContent).toBe("Wakeup cancelled");
+    expect(cancelled.querySelector(".chat-wakeup-message")).toBeNull();
+    const lost = render([row("lost", { message: "The agent's schedule did not survive its session." } as never)]).querySelector('[data-chat-item-id="wakeup:w1"]')!;
+    expect(lost.className).toContain("is-lost");
+    expect(lost.querySelector(".chat-wakeup-label")?.textContent).toBe("Wakeup lost");
+    expect(lost.querySelector(".chat-wakeup-message")?.textContent).toBe("The agent's schedule did not survive its session.");
+  });
+
+  test("the scheduling call is its own row: what was scheduled, when, with which prompt", () => {
+    const host = render([
+      { id: "tool:w", type: "tool", createdAt: 1, name: "ScheduleWakeup", status: "completed", input: JSON.stringify({ delaySeconds: 60, reason: "waiting on CI", prompt: "check the build" }), output: "Next wakeup scheduled for 20:03:00." },
+      { id: "tool:c", type: "tool", createdAt: 2, name: "CronCreate", status: "completed", input: JSON.stringify({ cron: "*/5 * * * *", prompt: "poll the queue", recurring: true }), output: "Scheduled recurring job c1." },
+    ].map(item => item as ConversationItem));
+    const wakeup = host.querySelector('[data-chat-item-id="tool:w"]')!;
+    expect(wakeup.querySelector("summary > span")?.textContent).toBe("Schedule wakeup");
+    expect(wakeup.querySelector(".chat-activity-subject")?.textContent).toBe("in 1 min");
+    const cron = host.querySelector('[data-chat-item-id="tool:c"]')!;
+    expect(cron.querySelector("summary > span")?.textContent).toBe("Schedule task");
+    expect(cron.querySelector(".chat-activity-subject")?.textContent).toBe("every */5 * * * *");
+    const opened = render([{ id: "tool:c", type: "tool", createdAt: 2, name: "CronCreate", status: "running", input: JSON.stringify({ cron: "*/5 * * * *", prompt: "poll the queue" }) } as ConversationItem]);
+    expect(opened.querySelector('[data-chat-item-id="tool:c"] .chat-tool-command')?.textContent).toBe("poll the queue");
+    expect(opened.querySelector('[data-chat-item-id="tool:c"] .chat-tool-meta')?.textContent).toBe("Repeats on */5 * * * *");
+  });
+
+  test("a paused cron reads as paused with its notice, and a durable call is not promised to survive", () => {
+    const paused = render([row("paused", { recurring: true, message: "Paused: the agent's session ended. Claude Code restores this schedule when the conversation runs again." } as never)]).querySelector('[data-chat-item-id="wakeup:w1"]')!;
+    expect(paused.className).toContain("is-paused");
+    expect(paused.querySelector(".chat-wakeup-label")?.textContent).toBe("Recurring wakeup paused");
+    expect(paused.querySelector(".chat-wakeup-message")?.textContent).toContain("restores this schedule");
+    const durable = render([{ id: "tool:d", type: "tool", createdAt: 1, name: "CronCreate", status: "running", input: JSON.stringify({ cron: "0 9 * * *", prompt: "standup", durable: true }) } as ConversationItem]);
+    expect(durable.textContent).not.toContain("restarts");
+  });
+
+  test("a wakeup turn opens with a wakeup header, never a user bubble, and points back at its wakeup", () => {
+    const host = render([
+      row("fired", { firedTurnId: "message:wakeup:p1" } as never),
+      { id: "message:wakeup:p1", type: "user_message", createdAt: 2, text: "check the build", origin: "wakeup", wakeupId: "w1" },
+      { id: "a1", type: "assistant_message", createdAt: 3, markdown: "Build is green.", completedAt: 4 },
+    ]);
+    const header = host.querySelector('[data-chat-item-id="message:wakeup:p1"]')!;
+    expect(header.className).toContain("chat-wakeup-turn");
+    expect(header.className).not.toContain("chat-user-message");
+    expect(header.querySelector(".chat-wakeup-turn-label")?.textContent).toBe("Wakeup");
+    expect(header.querySelector(".chat-wakeup-turn-prompt")?.textContent).toBe("check the build");
+    expect(header.querySelector("[data-chat-jump]")?.getAttribute("data-chat-jump")).toBe("wakeup:w1");
+    expect(host.querySelectorAll(".chat-user-message")).toHaveLength(0);
+    // Without a known wakeup the header still names the origin, with no link.
+    const unattributed = render([{ id: "message:wakeup:p2", type: "user_message", createdAt: 2, text: "continue", origin: "wakeup" }]);
+    expect(unattributed.querySelector(".chat-wakeup-turn [data-chat-jump]")).toBeNull();
+    expect(unattributed.querySelector(".chat-wakeup-turn-label")?.textContent).toBe("Wakeup");
+  });
+});
+
 describe("compaction markers and context reports", () => {
   const tool = (id: string, createdAt: number): ConversationItem => ({ id, type: "tool", createdAt, name: "Bash", status: "completed", input: JSON.stringify({ command: `echo ${id}` }), output: id });
 

@@ -2,7 +2,7 @@ import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import { RATE_LIMIT_ITEM_ID, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
-import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, type TranscriptEntry } from "./transcript";
+import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, readsAsWakeupPrompt, scheduledWakeupPrompt, type TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
 
@@ -59,6 +59,10 @@ export type ClaudeEventMemory = {
   // on every request, and all those restatements are this one record, so a
   // return to allowed retires one item rather than appending a third notice.
   rateLimit?: { level: "warning" | "rejected"; since: number };
+  // Prompts earlier scheduling calls (ScheduleWakeup, CronCreate) asked to
+  // be woken with: how a stored fired wakeup is told from other injected
+  // records where the store names no turn origin (D8).
+  wakeupPrompts?: Set<string>;
 };
 
 export function createClaudeEventMemory(): ClaudeEventMemory {
@@ -85,6 +89,10 @@ export const INTENTIONALLY_IGNORED: ReadonlySet<string> = new Set([
   "prompt_suggestion",
   "mirror_error",
   "user_message_replay",
+  // A queued command's lifecycle edge. The one that matters here — a fired
+  // wakeup's prompt starting — is read from the UserPromptSubmit hook, which
+  // carries the prompt this frame does not (claude-scheduled-wakeups, D4).
+  "command_lifecycle",
 ]);
 
 /**
@@ -545,14 +553,22 @@ function normalizeMessage(
       // The provider minted this user message when it accepted the prompt.
       return { ...frame, outcome: "ignored" };
     }
+    const rawText = typeof message.content === "string"
+      ? message.content
+      : blocks.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text as string).join("\n");
+    // The prompt a fired wakeup submitted opens that wakeup's turn: it
+    // replays as a wakeup header, not as the person's words and not as
+    // nothing (D8). No pending row replays with it — the session that held
+    // the schedule is gone.
+    const turnOrigin = typeof record.turnOrigin === "string" ? record.turnOrigin : undefined;
+    if (readsAsWakeupPrompt({ ...(turnOrigin ? { turnOrigin } : {}), ...(record.isMeta === true ? { isMeta: true } : {}) }, rawText, memory.wakeupPrompts ?? new Set())) {
+      return { ...frame, outcome: "handled", updates: [{ kind: "upsert", item: { id: `message:${envelope.uuid}`, type: "user_message", createdAt: envelope.createdAt, text: rawText, origin: "wakeup" } }] };
+    }
     // A record the CLI wrote on the person's behalf — a skill's preamble,
     // a local-command caveat, an image caption — is not the person's words
     // and gets no bubble (spec: harness-authored records are never
     // presented as the user's messages).
     if (record.isMeta === true) return { ...frame, outcome: "ignored" };
-    const rawText = typeof message.content === "string"
-      ? message.content
-      : blocks.filter(block => block.type === "text" && typeof block.text === "string").map(block => block.text as string).join("\n");
     // The store keeps no task edges; what it keeps of a background task is
     // the notification the model was sent when the task settled, as a
     // user record. That becomes the same settled row the live stream
@@ -654,6 +670,7 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
         ...(entry.toolUseResult ? { toolUseResult: entry.toolUseResult } : {}),
         ...(entry.origin ? { origin: entry.origin } : {}),
         ...(entry.isMeta ? { isMeta: true } : {}),
+        ...(entry.turnOrigin ? { turnOrigin: entry.turnOrigin } : {}),
       },
       memory,
       "stored",
@@ -751,6 +768,12 @@ function contentBlockUpdates(content: unknown[], envelope: Envelope, memory: Cla
           } });
         }
         continue;
+      }
+      const wakeupPrompt = scheduledWakeupPrompt(name, block.input);
+      if (wakeupPrompt !== undefined) {
+        memory.wakeupPrompts ??= new Set();
+        if (memory.wakeupPrompts.size >= MEMORY_LIMIT) memory.wakeupPrompts.clear();
+        memory.wakeupPrompts.add(wakeupPrompt);
       }
       const input = block.input === undefined ? undefined : stringify(block.input);
       boundedSet(memory.tools, block.id, { name, ...(input === undefined ? {} : { input }), createdAt: envelope.createdAt }, MEMORY_LIMIT);

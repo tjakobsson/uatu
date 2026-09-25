@@ -75,7 +75,7 @@ describe("agent coverage: vocabulary extraction", () => {
 describe("agent coverage: classification", () => {
   test("states are observed from the product code for the installed Claude SDK", () => {
     expect(entry(claude, "tools", "Bash")).toMatchObject({ state: "dedicated", declared: "BashInput" });
-    expect(entry(claude, "tools", "ScheduleWakeup").state).toBe("behavior-missing");
+    expect(entry(claude, "tools", "ScheduleWakeup")).toMatchObject({ state: "dedicated", renders: "schedule row" });
     expect(entry(claude, "tools", "Monitor").state).toBe("generic");
     expect(entry(claude, "messages", "system/hook_started").state).toBe("ignored");
     expect(entry(claude, "messages", "active_goal").state).toBe("unhandled");
@@ -90,13 +90,17 @@ describe("agent coverage: classification", () => {
     expect(entry(claude, "user-blocks", "document").state).toBe("unhandled");
   });
 
-  test("behavior-missing entries carry a reason naming the fix, and /loop's tools are both covered", () => {
-    for (const name of ["ScheduleWakeup", "CronCreate"]) {
-      const found = entry(claude, "tools", name);
-      expect(found.state).toBe("behavior-missing");
-      expect(found.reason).toContain("/loop");
-      expect(found.reason).toContain("claude-scheduled-wakeups");
+  test("/loop's tools and the cron family are dedicated now that the session holds its wakeups", () => {
+    for (const name of ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList"]) {
+      expect(entry(claude, "tools", name)).toMatchObject({ state: "dedicated", renders: "schedule row" });
     }
+  });
+
+  test("a behavior-missing annotation marks a rendered entry and carries its reason", () => {
+    const report = claudeReport(extractClaude(), { ...claudeCoverageAnnotations, behaviorMissing: { Monitor: "Renders as a tool row, but nothing watches. Fixed by some-change." } });
+    const found = report.axes.flatMap(axis => axis.entries).find(candidate => candidate.name === "Monitor")!;
+    expect(found.state).toBe("behavior-missing");
+    expect(found.reason).toContain("some-change");
   });
 
   test("every annotation key resolves to an extracted entry", () => {

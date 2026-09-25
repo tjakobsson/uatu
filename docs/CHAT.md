@@ -49,11 +49,74 @@ OpenCode conversation is first needed. The private endpoint and password
 are never sent to a browser or exposed by the hub.
 
 **Claude Code** has no long-lived service. Availability is a bounded
-`claude --version` probe; each conversation with an active turn runs as
-its own Claude Agent SDK session against your installed `claude`, and an
-idle conversation holds no process. Conversations resume from Claude
-Code's own session storage (`~/.claude/projects/...`), which uatu reads
-but never writes.
+`claude --version` probe; each conversation with an active turn, live
+background work, or a pending scheduled wakeup runs as its own Claude
+Agent SDK session against your installed `claude`, and an idle
+conversation holds no process. Conversations resume from Claude Code's
+own session storage (`~/.claude/projects/...`), which uatu reads but
+never writes.
+
+### Scheduled wakeups (Claude Code)
+
+Claude Code can schedule a future turn for itself with `ScheduleWakeup`,
+`CronCreate`, or `/loop`. uatu learns about these wakeups from the SDK's
+`Stop` hook, whose `session_crons` field lists what the session holds when
+a turn ends. While at least one wakeup is pending and nothing else runs,
+uatu keeps the session alive and the conversation is in the scheduled
+state. The composer names it, as in "1 wakeup scheduled · next about
+20:03", and lists each wakeup with its prompt, whether it repeats, and
+roughly when it next fires. The time is uatu's reading of the cron
+expression. Claude Code fires on its own clock. You can still prompt in
+this state. Each wakeup also gets a timeline row that moves from
+scheduled to fired, cancelled, or lost. A fired row links to the turn it
+started.
+
+When a wakeup fires, Claude Code starts a turn by itself. The turn opens
+with a Wakeup header that carries the wakeup's prompt, so it never looks
+like a message you typed. uatu spots the turn through the
+`UserPromptSubmit` hook. It uses the hook's `source` field when the CLI
+sends one. The CLIs tested so far don't, so uatu falls back to matching
+the prompt against a pending wakeup while none of your prompts is
+outstanding. A reopened conversation replays fired wakeup turns with the
+same header when the transcript records their origin. Claude Code 2.1.281
+and later write that down. For older transcripts, uatu matches the prompt
+against the scheduling call earlier in the same file.
+
+Each wakeup in the list has a **Cancel**. **Release session** cancels every
+wakeup, then ends the session, and the conversation goes idle. uatu refuses
+a release while a turn runs, or while background work would die with the
+process.
+
+Ending the process is not enough to stop a cron. When a session resumes,
+Claude Code rebuilds its `CronCreate` crons from the transcript, and a
+recurring one fires again within a minute, without a prompt. So uatu
+enforces a cancel itself. It remembers the cancelled wakeups for the
+conversation, and when one of them fires in a later session, it blocks
+the prompt through the `UserPromptSubmit` hook. The blocked fire makes no
+model call and starts no turn, and uatu never keeps a session alive for a
+cancelled wakeup. The agent's own `CronList` still shows the cron, because
+Claude Code has no way for a host to delete one.
+
+What happens when a session ends with wakeups pending depends on the
+tool that made them:
+
+- A `ScheduleWakeup` lives only as long as its process. Its row reads as
+  lost, with a notice that the agent's schedule did not survive its
+  session.
+- A `CronCreate` cron reads as paused. It fires again once the
+  conversation runs, which means once you prompt it. Claude Code drops
+  a one-shot cron whose time passes before then.
+
+A conversation opened without a live session lists its paused crons next
+to the composer, read from its transcript, each with a Cancel. uatu never
+starts a session on its own to keep a schedule running. The paused list
+is uatu's reading of the transcript: the first turn after a resume
+reports what Claude Code actually rebuilt, and any row it did not restore
+reads as lost.
+
+`CronCreate` accepts `durable: true`, but Claude Code downgrades it to
+session-only when the session runs through the SDK. Chat never sees a
+durable cron.
 
 The canonical first watched root is the immutable working directory for
 both agents. For a direct multi-root command, later roots remain available
@@ -62,7 +125,8 @@ select another working directory, and conversations belonging to another
 canonical directory are not listed or accepted.
 
 Stopping the uatu workspace stops its OpenCode child and any live Claude
-Code sessions, ending their active turns. Completed history remains in
+Code sessions, ending their active turns and any scheduled wakeups they
+held. Completed history remains in
 each agent's own storage and is available when the workspace starts
 again. Closing a browser, PWA, or UatuCode Desktop window does not stop a
 hub workspace.
@@ -110,6 +174,12 @@ complete trust model and network guidance.
   retained events. A workspace restart or a long retention gap requires a
   fresh history snapshot automatically; completed agent history is not
   deleted.
+- **A scheduled wakeup never fired:** a row that reads as lost means the
+  workspace stopped or the process exited before it fired, so ask the
+  agent to schedule it again. A row that reads as paused fires again once
+  you prompt the conversation. A row that reads as cancelled was removed
+  by the agent, or by you through Cancel or Release; uatu blocks it even
+  if the agent's `CronList` still shows it.
 - **Hub Chat is unauthorized:** sign in again and verify the workspace is
   running. Do not proxy a child session directly or rewrite its base path.
 

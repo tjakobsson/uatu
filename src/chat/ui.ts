@@ -19,6 +19,7 @@ import { insertCommand, localHistoryOperation, matchingCommands, type LocalHisto
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, statusLabel, subagentEntries, subagentLabel, workingLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
+import { pausedStatusLabel, pausedWakeups, pendingWakeups, scheduledStatusLabel, wakeupFireTime } from "./scheduled-wakeups";
 import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
@@ -870,6 +871,134 @@ export function initChat(api = new ChatApiClient()): void {
     });
   });
 
+  const scheduledWakeups = document.querySelector<HTMLDetailsElement>("#chat-scheduled-wakeups");
+  const scheduledWakeupsLabel = document.querySelector<HTMLElement>("#chat-scheduled-wakeups-label");
+  const scheduledWakeupsItems = document.querySelector<HTMLElement>("#chat-scheduled-wakeups-items");
+  const releaseButton = document.querySelector<HTMLButtonElement>("#chat-wakeups-release");
+  const releaseNote = document.querySelector<HTMLElement>("#chat-wakeups-release-note");
+
+  /**
+   * The wakeups the agent scheduled for itself, pinned above the composer
+   * while its session is held for them: each with its prompt, whether it
+   * recurs, and when it next fires, and one release that ends the session
+   * and every wakeup in it (spec). There is no per-wakeup cancel — the agent
+   * holds that control, not the user. Rebuilt only on change.
+   */
+  let paintedScheduledWakeups: string | null = null;
+  // A release in flight, by conversation: the control stays inert until the
+  // agent reports the wakeups ended, so it cannot be sent twice.
+  const releasing = new Set<string>();
+  // Cancels in flight, by wakeup id: a rebuild mid-request must not hand
+  // back an enabled button that would send the cancel twice.
+  const cancellingWakeups = new Set<string>();
+  const syncScheduledWakeups = () => {
+    if (!scheduledWakeups || !scheduledWakeupsLabel || !scheduledWakeupsItems || !releaseButton || !releaseNote) return;
+    const declared = Boolean(projection && declares("scheduled-wakeups"));
+    const pending = declared ? pendingWakeups(projection!.items) : [];
+    // Paused crons (D11): the session is gone, the agent rebuilds them when
+    // the conversation runs again. Listed so a prompt never revives one by
+    // surprise, each with its own Cancel.
+    const paused = declared ? pausedWakeups(projection!.items) : [];
+    const entries = [...pending, ...paused];
+    const status = projection?.status;
+    const inFlight = projection ? releasing.has(projection.conversationId) : false;
+    const signature = [status ?? "", inFlight ? "releasing" : "", ...entries.map(entry => [entry.wakeupId, entry.status, entry.prompt, entry.recurring, entry.nextFireAt ?? "", entry.schedule, cancellingWakeups.has(entry.wakeupId) ? "cancelling" : ""].join("\u0001"))].join("\u0002");
+    if (signature === paintedScheduledWakeups) return;
+    paintedScheduledWakeups = signature;
+    if (entries.length === 0) {
+      scheduledWakeups.hidden = true;
+      scheduledWakeupsItems.replaceChildren();
+      return;
+    }
+    scheduledWakeupsLabel.textContent = pending.length > 0 ? scheduledStatusLabel(pending) : pausedStatusLabel(paused);
+    scheduledWakeupsItems.replaceChildren(...entries.map(entry => {
+      const row = document.createElement("li");
+      row.dataset.scheduledWakeup = entry.wakeupId;
+      row.className = `is-${entry.status}`;
+      const text = document.createElement("span");
+      text.className = "chat-wakeup-prompt";
+      text.textContent = entry.prompt || "(no prompt)";
+      text.title = entry.prompt;
+      row.append(text);
+      if (entry.recurring) {
+        const recurs = document.createElement("span");
+        recurs.className = "chat-wakeup-recurring";
+        recurs.textContent = "Repeats";
+        recurs.title = `Recurring: ${entry.schedule}`;
+        row.append(recurs);
+      }
+      const when = document.createElement("span");
+      when.className = "chat-wakeup-when";
+      if (entry.status === "paused") {
+        when.textContent = "Paused";
+        when.title = entry.message ?? "Fires again when this conversation runs.";
+      } else {
+        // An expression the workspace cannot read is still stated, as written.
+        when.textContent = wakeupFireTime(entry.nextFireAt) ?? entry.schedule;
+        if (entry.nextFireAt !== undefined) when.title = new Date(entry.nextFireAt).toLocaleString();
+      }
+      row.append(when);
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "chat-task-stop";
+      cancel.dataset.cancelWakeup = entry.wakeupId;
+      cancel.textContent = cancellingWakeups.has(entry.wakeupId) ? "Cancelling…" : "Cancel";
+      cancel.disabled = cancellingWakeups.has(entry.wakeupId) || inFlight;
+      cancel.setAttribute("aria-label", `Cancel wakeup: ${entry.prompt}`);
+      row.append(cancel);
+      return row;
+    }));
+    // Release ends the session, so it is offered only where nothing else
+    // would end with it: a running turn, or background work, says so and
+    // waits (the agent would refuse the release anyway). With only paused
+    // crons there is no session to release; each has its own Cancel.
+    const release = releaseButton.parentElement as HTMLElement | null;
+    if (release) release.hidden = pending.length === 0;
+    const releasable = status === "scheduled" && !inFlight;
+    releaseButton.disabled = !releasable;
+    releaseButton.textContent = inFlight ? "Releasing…" : "Release session";
+    releaseNote.textContent = status === "background"
+      ? "Release is possible once the background work ends."
+      : status !== "scheduled" && !inFlight
+        ? "Release is possible once this turn ends."
+        : "Releasing cancels every wakeup and ends the agent's session.";
+    scheduledWakeups.hidden = false;
+  };
+  scheduledWakeupsItems?.addEventListener("click", event => {
+    const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-cancel-wakeup]");
+    if (!button || button.disabled || !projection) return;
+    const source = projection;
+    const wakeupId = button.dataset.cancelWakeup ?? "";
+    if (cancellingWakeups.has(wakeupId)) return;
+    // The agent reports the cancel as the row settling, which is what moves
+    // it out of this list; until then the control stays inert.
+    cancellingWakeups.add(wakeupId);
+    paintedScheduledWakeups = null;
+    syncScheduledWakeups();
+    void api.cancelWakeup(source.conversationId, wakeupId, newRequestId()).catch(error => {
+      announceFailureFor(source)(messageOf(error), true);
+    }).finally(() => {
+      cancellingWakeups.delete(wakeupId);
+      paintedScheduledWakeups = null;
+      syncScheduledWakeups();
+    });
+  });
+  releaseButton?.addEventListener("click", () => {
+    if (!projection || releaseButton.disabled) return;
+    const source = projection;
+    if (releasing.has(source.conversationId)) return;
+    releasing.add(source.conversationId);
+    paintedScheduledWakeups = null;
+    syncScheduledWakeups();
+    void api.release(source.conversationId, newRequestId()).catch(error => {
+      announceFailureFor(source)(messageOf(error), true);
+    }).finally(() => {
+      releasing.delete(source.conversationId);
+      paintedScheduledWakeups = null;
+      syncScheduledWakeups();
+    });
+  });
+
   const subagents = document.querySelector<HTMLDetailsElement>("#chat-subagents");
   const subagentsLabel = document.querySelector<HTMLElement>("#chat-subagents-label");
   const subagentsItems = document.querySelector<HTMLElement>("#chat-subagents-items");
@@ -1368,6 +1497,7 @@ export function initChat(api = new ChatApiClient()): void {
     syncTaskList();
     syncSubagents();
     syncBackgroundTasks();
+    syncScheduledWakeups();
     syncOutstandingRequests();
     syncContextIndicator();
     syncPromptRail();
@@ -2139,6 +2269,8 @@ export function initChat(api = new ChatApiClient()): void {
       submitting,
       backgroundDeclared: declares("background-tasks"),
       backgroundTasks: runningBackgroundTasks(projection?.items ?? []),
+      scheduledDeclared: declares("scheduled-wakeups"),
+      scheduledWakeups: pendingWakeups(projection?.items ?? []),
     });
     // The rate-limit standing and plan utilization ride beside the status as
     // one chip, from the standing / report the timeline holds (D11, spec).
@@ -3113,6 +3245,17 @@ export function initChat(api = new ChatApiClient()): void {
       const form = input.form;
       if (!form?.matches("form[data-question-form]")) return;
       syncQuestionControl(input);
+    });
+    // A wakeup row and the turn it started point at each other: the link
+    // brings the other one into view in this same timeline and focuses it.
+    container.addEventListener("click", event => {
+      const link = (event.target as Element).closest<HTMLButtonElement>("[data-chat-jump]");
+      if (!link) return;
+      const destination = container.querySelector(`[data-chat-item-id="${CSS.escape(link.dataset.chatJump ?? "")}"]`);
+      if (!(destination instanceof HTMLElement)) return;
+      destination.scrollIntoView({ block: "center" });
+      if (!destination.hasAttribute("tabindex")) destination.tabIndex = -1;
+      destination.focus?.({ preventScroll: true });
     });
     container.addEventListener("click", event => {
       const tab = (event.target as Element).closest<HTMLButtonElement>("[data-question-tab]");

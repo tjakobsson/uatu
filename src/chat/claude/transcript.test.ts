@@ -3,8 +3,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { claudeProjectDir, foldCommandMarkup, listTranscriptSessions, parseTaskNotification, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
+import { CRON_EXPIRY_MS, transcriptCrons, claudeProjectDir, foldCommandMarkup, listTranscriptSessions, parseTaskNotification, promptText, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath } from "./transcript";
 import { normalizeTranscriptEntries } from "./normalization";
+import spikeWakeups from "../../../tests/fixtures/claude-sdk/spike-wakeups.json";
+import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.json";
+import { nextCronFire } from "./cron";
 
 function line(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -186,6 +189,107 @@ describe("reading one transcript", () => {
     const blockEntry = { ...stringEntry, message: { role: "user", content: [{ type: "text", text: markup }] } };
     expect(promptText(stringEntry)).toBe("/openspec-explore why is the build slow?");
     expect(promptText(blockEntry)).toBe("/openspec-explore why is the build slow?");
+  });
+});
+
+describe("fired wakeups in a stored transcript (claude-scheduled-wakeups D8)", () => {
+  // The spike's own records: a ScheduleWakeup one-shot on the SDK-bundled
+  // CLI (no turnOrigin) and on 2.1.281 (turnOrigin "scheduled"), and a
+  // recurring CronCreate on 2.1.281.
+  for (const run of spikeWakeups.runs) {
+    test(`${run.tool} on CLI ${run.cli}: the fired prompt replays as a wakeup turn, the typed one as the user's`, async () => {
+      const { projectDir } = fixture();
+      const file = path.join(projectDir, `${run.tool}-${run.cli.split(" ")[0]}.jsonl`);
+      writeFileSync(file, run.transcript.map(record => line(record)).join(""));
+      const { entries } = await readSessionTranscript(file);
+      const { items } = normalizeTranscriptEntries(entries);
+      const prompts = items.filter(item => item.type === "user_message");
+      const fired = (run.order.find(event => event.event === "hook:Stop" && Array.isArray(event.session_crons) && event.session_crons.length > 0) as { session_crons: Array<{ prompt: string }> }).session_crons[0]!.prompt;
+      expect(prompts).toEqual([
+        expect.objectContaining({ text: expect.stringContaining(`Use the ${run.tool} tool`) }),
+        expect.objectContaining({ text: fired, origin: "wakeup" }),
+      ]);
+      expect(prompts[0]).not.toHaveProperty("origin");
+      // No pending row replays: the session that held the schedule is gone.
+      expect(items.some(item => item.type === "scheduled_wakeup")).toBe(false);
+      // The agent's reply to the wakeup follows its header.
+      const header = items.findIndex(item => item.type === "user_message" && item.origin === "wakeup");
+      expect(items.slice(header + 1).some(item => item.type === "assistant_message" && /pong|ping/.test(item.markdown))).toBe(true);
+    });
+  }
+
+  test("only a scheduled turn origin, or an injected record matching a scheduling call, is a wakeup", async () => {
+    const { projectDir } = fixture();
+    const file = path.join(projectDir, "wakeup-inference.jsonl");
+    const schedule = line({ type: "assistant", uuid: "a1", parentUuid: null, isSidechain: false, timestamp: "2026-09-24T18:01:00.000Z", message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "ScheduleWakeup", input: { delaySeconds: 60, prompt: "check the build" } }] } });
+    writeFileSync(file, [
+      schedule,
+      // A skill preamble: injected, but no scheduling call asked for it.
+      userLine("u1", "Base directory for this skill: /x", "2026-09-24T18:01:01.000Z", { isMeta: true }),
+      // The person typing the scheduled text themselves is still the person.
+      userLine("u2", "check the build", "2026-09-24T18:01:02.000Z"),
+      // A record whose turn origin names something else is not a wakeup.
+      userLine("u3", "check the build", "2026-09-24T18:01:03.000Z", { isMeta: true, turnOrigin: "sdk" }),
+      // The fired prompt, as an older CLI stores it.
+      userLine("u4", "check the build", "2026-09-24T18:03:00.000Z", { isMeta: true }),
+      // A newer CLI's scheduled turn is one whatever its text.
+      userLine("u5", "<<autonomous-loop-dynamic>>", "2026-09-24T18:05:00.000Z", { isMeta: true, turnOrigin: "scheduled" }),
+    ].join(""));
+    const { entries } = await readSessionTranscript(file);
+    expect(entries.map(entry => entry.turnOrigin)).toEqual([undefined, undefined, undefined, "sdk", undefined, "scheduled"]);
+    const { items } = normalizeTranscriptEntries(entries);
+    expect(items.filter(item => item.type === "user_message").map(item => [item.id, item.type === "user_message" ? item.origin ?? "user" : ""])).toEqual([
+      ["message:u2", "user"], ["message:u4", "wakeup"], ["message:u5", "wakeup"],
+    ]);
+    // Neither is a title or a first prompt.
+    expect(promptText(entries[4]!)).toBeNull();
+    expect(promptText(entries[5]!)).toBeNull();
+  });
+});
+
+describe("paused crons derived from a transcript (claude-scheduled-wakeups D11)", () => {
+  async function entriesOf(name: keyof typeof spikeRevival.sessions) {
+    const { projectDir } = fixture();
+    const file = path.join(projectDir, `${name}.jsonl`);
+    writeFileSync(file, spikeRevival.sessions[name].map(record => line(record)).join(""));
+    return (await readSessionTranscript(file)).entries;
+  }
+  const createdAt = (entries: Awaited<ReturnType<typeof entriesOf>>) => entries.find(entry => entry.toolUseResult?.id)!.timestamp;
+
+  test("a cron CronDelete removed does not come back; the survivor does", async () => {
+    const entries = await entriesOf("delete");
+    const { alive, created } = transcriptCrons(entries, createdAt(entries) + 60_000);
+    expect(created.size).toBe(2);
+    expect(alive).toEqual([expect.objectContaining({ prompt: "KEEP reply with exactly the word keep", cron: "* * * * *", recurring: true })]);
+  });
+
+  test("a recurring cron lives until the CLI's 7-day expiry, blocked fires or not", async () => {
+    const entries = await entriesOf("block");
+    const at = createdAt(entries);
+    expect(transcriptCrons(entries, at + 3_600_000).alive).toEqual([expect.objectContaining({ prompt: "BLOCK-ME reply with exactly the word ping", recurring: true })]);
+    expect(transcriptCrons(entries, at + CRON_EXPIRY_MS).alive).toEqual([]);
+    // The blocked-fire notices the CLI wrote are not replayed as anything.
+    const { items } = normalizeTranscriptEntries(entries);
+    expect(items.some(item => item.type === "notice" || (item.type === "user_message" && item.text.includes("blocked by hook")))).toBe(false);
+  });
+
+  test("a one-shot that fired is gone; before it fired it was pending", async () => {
+    const entries = await entriesOf("oneshot");
+    const firedAt = entries.find(entry => entry.turnOrigin === "scheduled")!.timestamp;
+    expect(transcriptCrons(entries, firedAt + 1_000).alive).toEqual([]);
+    // Read as of creation (the fired record is later in the file but not yet written then).
+    const beforeFire = entries.filter(entry => entry.timestamp < firedAt);
+    expect(transcriptCrons(beforeFire, createdAt(entries) + 1_000).alive).toEqual([expect.objectContaining({ prompt: "ONCE reply with exactly the word once", recurring: false })]);
+  });
+
+  test("a one-shot whose time passed with no process is gone (the CLI drops it)", async () => {
+    const entries = await entriesOf("missed");
+    const at = createdAt(entries);
+    // The cron is in the recording host's local time and so is its reading;
+    // the fire time is taken from the evaluator rather than assumed.
+    const fireAt = nextCronFire("54 2 25 9 *", at)!;
+    expect(transcriptCrons(entries, fireAt - 1_000).alive).toEqual([expect.objectContaining({ prompt: "MISSED reply with exactly the word late", recurring: false })]);
+    expect(transcriptCrons(entries, fireAt + 60_000).alive).toEqual([]);
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deriveTodoActivities, describeToolDetail, humanizeToolName, naiveLineDiff, patchDiffLines, patchFiles, taskResultText, todoActivitySummary, toolSubject } from "./tool-detail";
+import { deriveTodoActivities, describeToolDetail, formatDelay, humanizeToolName, naiveLineDiff, patchDiffLines, patchFiles, taskResultText, todoActivitySummary, toolSubject } from "./tool-detail";
 
 describe("describeToolDetail", () => {
   test("classifies edit calls and diffs only the changed region", () => {
@@ -264,5 +264,33 @@ describe("todo activity", () => {
     expect(todoActivitySummary(activities, current)).toEqual({ label: "Completed +1", task: "one" });
     expect(todoActivitySummary([], current)).toEqual({ label: "Todos 1/3" });
     expect(todoActivitySummary([{ type: "created", count: 3 }], current)).toEqual({ label: "Added 3 todos" });
+  });
+});
+
+describe("Claude Code scheduling calls (claude-scheduled-wakeups)", () => {
+  const detail = (name: string, input: Record<string, unknown>) => describeToolDetail({ name, input: JSON.stringify(input) });
+
+  test("a wakeup names its delay and carries its prompt and reason; a stop ends the loop", () => {
+    const wakeup = detail("ScheduleWakeup", { delaySeconds: 1200, reason: "waiting on CI", prompt: "check the build", noop: false });
+    expect(wakeup).toEqual({ kind: "schedule", label: "Schedule wakeup", action: "wakeup", prompt: "check the build", delaySeconds: 1200, reason: "waiting on CI" });
+    expect(toolSubject(wakeup)).toBe("in 20 min");
+    expect(detail("ScheduleWakeup", { stop: true, prompt: "ignored" })).toEqual({ kind: "schedule", label: "End loop", action: "end-loop" });
+  });
+
+  test("cron calls say what repeats, what runs once, and what is cancelled", () => {
+    const every = detail("CronCreate", { cron: "*/5 * * * *", prompt: "poll the queue" });
+    expect(every).toEqual({ kind: "schedule", label: "Schedule task", action: "create", prompt: "poll the queue", cron: "*/5 * * * *", recurring: true });
+    expect(toolSubject(every)).toBe("every */5 * * * *");
+    const once = detail("CronCreate", { cron: "30 14 28 2 *", prompt: "remind me", recurring: false, durable: true });
+    expect(once).toEqual(expect.objectContaining({ recurring: false, durable: true }));
+    expect(toolSubject(once)).toBe("once at 30 14 28 2 *");
+    const cancel = detail("CronDelete", { id: "0898e09c" });
+    expect(cancel).toEqual({ kind: "schedule", label: "Cancel scheduled task", action: "delete", cronId: "0898e09c" });
+    expect(toolSubject(cancel)).toBe("0898e09c");
+    expect(detail("CronList", {})).toEqual({ kind: "schedule", label: "List scheduled tasks", action: "list" });
+  });
+
+  test("a delay reads the way a person says it", () => {
+    expect([45, 60, 90, 1200, 3600, 5400].map(formatDelay)).toEqual(["45s", "1 min", "2 min", "20 min", "1 h", "1 h 30 min"]);
   });
 });

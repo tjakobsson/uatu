@@ -80,6 +80,13 @@ export class BackgroundTasksUnsupportedError extends Error {
   }
 }
 
+export class ScheduledWakeupsUnsupportedError extends Error {
+  constructor() {
+    super("this agent does not schedule wakeups");
+    this.name = "ScheduledWakeupsUnsupportedError";
+  }
+}
+
 export class InvalidModelSelectionError extends Error {
   constructor() {
     super("selected model is not available");
@@ -384,7 +391,8 @@ export class ChatAdapter {
             else items.push(...page.items);
           }
           const firstUserMessage = items
-            .filter(item => item.type === "user_message" && item.text.trim())
+            // A wakeup's prompt was the agent's, not a title the user gave.
+            .filter(item => item.type === "user_message" && item.origin === undefined && item.text.trim())
             .sort((left, right) => left.createdAt - right.createdAt)[0];
           if (firstUserMessage?.type === "user_message") {
             const renamed = await this.provider.renameSession(session.id, deriveConversationTitle(firstUserMessage.text));
@@ -527,6 +535,34 @@ export class ChatAdapter {
         }
       }
     }
+    // Pending wakeups live in the provider's session, never in the
+    // transcript (spec: a reopened conversation replays no pending row): a
+    // reader opening a conversation that is scheduled right now gets its
+    // rows from the provider's list, so the composer shows the held state.
+    const liveWakeups = await this.liveScheduledWakeups(id);
+    for (const wakeup of liveWakeups) {
+      const index = items.findIndex(item => item.id === wakeup.id);
+      if (index < 0) items.push(wakeup); else items[index] = wakeup;
+    }
+    // With no session holding them, the crons the agent rebuilds when the
+    // conversation runs again are listed as paused (D11). The conversation
+    // stays idle: nothing is held. A row this page already settled keeps
+    // its settled state.
+    if (liveWakeups.length === 0 && this.provider.listPausedWakeups) {
+      try {
+        for (const paused of await this.provider.listPausedWakeups(id)) {
+          const index = items.findIndex(item => item.id === paused.id);
+          const current = index >= 0 ? items[index] : this.projection(id).find(item => item.id === paused.id);
+          if (current?.type === "scheduled_wakeup" && (current.status === "cancelled" || current.status === "fired")) {
+            if (index < 0) items.push(current);
+            continue;
+          }
+          if (index < 0) items.push(paused); else items[index] = paused;
+        }
+      } catch {
+        // No paused list: the conversation reads as it would without one.
+      }
+    }
     // A subagent's attribution reached the parent as a live upsert, and the
     // parent's own store has no memory of it — so a reopened conversation
     // would show costs that simply vanished. The child's stored messages do
@@ -649,6 +685,9 @@ export class ChatAdapter {
     // background state, not idle: the list and the status must agree.
     if (items.some(item => item.type === "background_task" && item.status === "running") && !isLiveConversationStatus(projection.status) && projection.status !== "background") {
       projection.statusUpdate("background");
+    } else if (items.some(item => item.type === "scheduled_wakeup" && item.status === "pending") && !isLiveConversationStatus(projection.status) && projection.status !== "background" && projection.status !== "scheduled") {
+      // Likewise a session held for its wakeups is scheduled, not idle.
+      projection.statusUpdate("scheduled");
     }
     const reversibleHistory = await this.readReversibleHistoryState(id);
     return {
@@ -1628,6 +1667,31 @@ export class ChatAdapter {
     });
   }
 
+  /**
+   * Release a conversation held for its scheduled wakeups (D5): the agent's
+   * session ends, its wakeups read as cancelled, and the conversation is
+   * idle. Serialized with deliveries so a held prompt the idle status
+   * releases lands in a fresh session, not the one being retired.
+   */
+  /** Cancel one wakeup, live or paused (D12): it never fires again. */
+  cancelWakeup(conversationId: string, wakeupId: string, clientRequestId: string): Promise<{ cancelled: true }> {
+    return this.receipts.run(`cancel-wakeup:${conversationId}:${wakeupId}:${clientRequestId}`, async () => {
+      await this.requireSession(conversationId);
+      if (!this.provider.cancelWakeup || !this.provider.describe().capabilities.includes("scheduled-wakeups")) throw new ScheduledWakeupsUnsupportedError();
+      await this.provider.cancelWakeup(conversationId, wakeupId);
+      return { cancelled: true as const };
+    });
+  }
+
+  release(conversationId: string, clientRequestId: string): Promise<{ released: true }> {
+    return this.receipts.run(`release:${conversationId}:${clientRequestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
+      await this.requireSession(conversationId);
+      if (!this.provider.release || !this.provider.describe().capabilities.includes("scheduled-wakeups")) throw new ScheduledWakeupsUnsupportedError();
+      await this.provider.release(conversationId);
+      return { released: true as const };
+    }));
+  }
+
   respondQuestion(conversationId: string, requestId: string, clientRequestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }> {
     return this.receipts.run(`question:${conversationId}:${requestId}:${clientRequestId}`, async () => {
       const session = await this.requireSession(conversationId);
@@ -2349,6 +2413,27 @@ export class ChatAdapter {
       const attribution = attributions.get(item.id);
       if (!attribution || Object.keys(attribution).length === 0) continue;
       items[index] = { ...item, ...attribution };
+    }
+  }
+
+  private async liveScheduledWakeups(id: string): Promise<ConversationItem[]> {
+    if (!this.provider.listScheduledWakeups) return [];
+    try {
+      return (await this.provider.listScheduledWakeups())
+        .filter(wakeup => wakeup.conversationId === id)
+        .map(wakeup => ({
+          id: `wakeup:${wakeup.wakeupId}`,
+          type: "scheduled_wakeup" as const,
+          createdAt: wakeup.createdAt,
+          wakeupId: wakeup.wakeupId,
+          prompt: wakeup.prompt,
+          recurring: wakeup.recurring,
+          schedule: wakeup.schedule,
+          ...(wakeup.nextFireAt === undefined ? {} : { nextFireAt: wakeup.nextFireAt }),
+          status: "pending" as const,
+        }));
+    } catch {
+      return [];
     }
   }
 

@@ -7,8 +7,8 @@ import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster"
 import type { WorkspaceChatService } from "../chat/service";
 import { isLiveConversationStatus, type AgentUsageReport, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
-import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError } from "../chat/adapter";
-import { ReversibleHistoryTargetError, InvalidQuestionAnswerError } from "../chat/provider";
+import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError } from "../chat/adapter";
+import { ReversibleHistoryTargetError, InvalidQuestionAnswerError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../chat/provider";
 import { MetricsRegistry } from "../debug/metrics";
 import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
 import { buildRoutes } from "./routes";
@@ -32,6 +32,8 @@ class FakeChatService implements WorkspaceChatService {
   questionResponses: QuestionOutcome[] = [];
   rejectAnswers: Error | null = null;
   stoppedTasks: string[] = [];
+  released: string[] = [];
+  cancelledWakeups: string[] = [];
   removals: string[] = [];
   reversibleMutations = { undo: 0, redo: 0, revert: 0, restore: 0 };
   private readonly reversibleReceipts = new Map<string, ReversibleHistoryResult>();
@@ -177,6 +179,16 @@ class FakeChatService implements WorkspaceChatService {
     this.require(id);
     this.stoppedTasks.push(taskId);
     return { stopped: true as const };
+  }
+  async cancelWakeup(id: string, wakeupId: string) {
+    this.require(id);
+    this.cancelledWakeups.push(wakeupId);
+    return { cancelled: true as const };
+  }
+  async release(id: string) {
+    this.require(id);
+    this.released.push(id);
+    return { released: true as const };
   }
   private require(id: string) { if (id !== "local") throw new ConversationNotFoundError(); }
 }
@@ -762,6 +774,50 @@ describe("workspace chat routes", () => {
     expect((await send({})).status).toBe(400);
     expect((await send({ requestId: crypto.randomUUID(), extra: 1 })).status).toBe(400);
     expect(service.stoppedTasks).toEqual(["b2f6"]);
+  });
+
+  test("releases a scheduled conversation through the chat service; a refused release is a conflict", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/release"] as {
+      POST(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const send = (body: Record<string, unknown>) => handler.POST(request("/api/chat/conversations/opencode:local/release", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }, { conversationId: "opencode:local" }) as never);
+
+    const response = await send({ requestId: crypto.randomUUID() });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ released: true });
+    expect(service.released).toEqual(["local"]);
+    expect((await send({})).status).toBe(400);
+    expect((await send({ requestId: crypto.randomUUID(), extra: 1 })).status).toBe(400);
+    service.release = async () => { throw new ReleaseUnavailableError("a turn is running; release is possible once it ends"); };
+    const busy = await send({ requestId: crypto.randomUUID() });
+    expect(busy.status).toBe(409);
+    expect(await busy.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("a turn is running") }));
+    service.release = async () => { throw new ScheduledWakeupsUnsupportedError(); };
+    expect((await send({ requestId: crypto.randomUUID() })).status).toBe(409);
+  });
+
+  test("cancels one wakeup through the chat service; one the agent no longer holds is a conflict", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/wakeups/:wakeupId/cancel"] as {
+      POST(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const send = (body: Record<string, unknown>) => handler.POST(request("/api/chat/conversations/opencode:local/wakeups/w1/cancel", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }, { conversationId: "opencode:local", wakeupId: "w1" }) as never);
+    const response = await send({ requestId: crypto.randomUUID() });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ cancelled: true });
+    expect(service.cancelledWakeups).toEqual(["w1"]);
+    expect((await send({})).status).toBe(400);
+    service.cancelWakeup = async () => { throw new ScheduledWakeupUnavailableError("that wakeup is no longer scheduled"); };
+    expect((await send({ requestId: crypto.randomUUID() })).status).toBe(409);
   });
 
   test("rejects empty and whitespace-only question answers before calling the service", async () => {

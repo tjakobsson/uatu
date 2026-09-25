@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
+import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage } from "./claude/normalization";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
 import type { ChatAgent } from "./types";
@@ -2168,6 +2168,79 @@ describe("prompt, abort, permission, and question mutations", () => {
     // the list must not demote it to background.
     projection.statusUpdate("retrying");
     expect((await adapter.history("session")).conversation.status).toBe("retrying");
+    await adapter.dispose();
+  });
+
+  test("a scheduled conversation accepts prompts, reopens scheduled with its live wakeups, and releases once per request", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "scheduled-wakeups"] };
+    provider.sessions = [fixtureSession("session")];
+    const releases: string[] = [];
+    let listed = [
+      { conversationId: "session", wakeupId: "w1", prompt: "check the build", recurring: false, schedule: "3 20 * * *", nextFireAt: 9, createdAt: 5 },
+      { conversationId: "other", wakeupId: "w2", prompt: "elsewhere", recurring: true, schedule: "* * * * *", createdAt: 6 },
+    ];
+    Object.assign(provider, {
+      release: async (sessionId: string) => { releases.push(sessionId); },
+      listScheduledWakeups: async () => listed,
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const projection = adapter.projectionForTests("session");
+    projection.statusUpdate("running");
+    projection.statusUpdate("completed");
+    projection.statusUpdate("scheduled");
+    // Not live: a prompt is delivered into the held session, not held back.
+    expect((await adapter.prompt("session", "r1", "meanwhile")).held).toBe(false);
+    projection.statusUpdate("completed");
+    // Reopened while the provider still holds the wakeup: its row (this
+    // conversation's only) and the scheduled state.
+    const snapshot = await adapter.history("session");
+    expect(snapshot.items.filter(item => item.type === "scheduled_wakeup")).toEqual([
+      expect.objectContaining({ id: "wakeup:w1", wakeupId: "w1", status: "pending", recurring: false, nextFireAt: 9, createdAt: 5 }),
+    ]);
+    expect(snapshot.conversation.status).toBe("scheduled");
+    // Release is idempotent per request id and addressed to the owning session.
+    expect(await adapter.release("session", "req-1")).toEqual({ released: true });
+    expect(await adapter.release("session", "req-1")).toEqual({ released: true });
+    expect(releases).toEqual(["session"]);
+    listed = [];
+    projection.statusUpdate("idle");
+    const after = await adapter.history("session");
+    expect(after.items.some(item => item.type === "scheduled_wakeup")).toBe(false);
+    expect(after.conversation.status).not.toBe("scheduled");
+    await adapter.dispose();
+  });
+
+  test("a conversation opened without a live session lists its paused crons, stays idle, and cancels one", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "scheduled-wakeups"] };
+    provider.sessions = [fixtureSession("session")];
+    const cancels: Array<[string, string]> = [];
+    const paused = { id: "wakeup:c1", type: "scheduled_wakeup" as const, createdAt: 5, wakeupId: "c1", prompt: "poll the queue", recurring: true, schedule: "*/5 * * * *", status: "paused" as const, message: "Paused." };
+    Object.assign(provider, {
+      listScheduledWakeups: async () => [],
+      listPausedWakeups: async (id: string) => id === "session" ? [paused] : [],
+      cancelWakeup: async (id: string, wakeupId: string) => { cancels.push([id, wakeupId]); },
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const snapshot = await adapter.history("session");
+    expect(snapshot.items.filter(item => item.type === "scheduled_wakeup")).toEqual([paused]);
+    expect(snapshot.conversation.status).not.toBe("scheduled");
+    expect(await adapter.cancelWakeup("session", "c1", "req-1")).toEqual({ cancelled: true });
+    expect(await adapter.cancelWakeup("session", "c1", "req-1")).toEqual({ cancelled: true });
+    expect(cancels).toEqual([["session", "c1"]]);
+    // A row this page already saw cancelled is not reopened by a stale list.
+    adapter.projectionForTests("session").apply({ kind: "upsert", item: { ...paused, status: "cancelled" } });
+    expect((await adapter.history("session")).items.find(item => item.id === "wakeup:c1")).toEqual(expect.objectContaining({ status: "cancelled" }));
+    await adapter.dispose();
+  });
+
+  test("an agent without the scheduled-wakeups capability cannot release", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    Object.assign(provider, { release: async () => {} });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await expect(adapter.release("session", "req-1")).rejects.toBeInstanceOf(ScheduledWakeupsUnsupportedError);
     await adapter.dispose();
   });
 

@@ -436,6 +436,140 @@ describe("chat permission confirmation", () => {
   });
 });
 
+describe("chat scheduled wakeups", () => {
+  test("the composer lists pending wakeups and Release calls the control once, then the state clears", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const fireAt = new Date(2026, 8, 24, 20, 3).getTime();
+    const oneShot = { id: "wakeup:w1", type: "scheduled_wakeup" as const, createdAt: 2, wakeupId: "w1", prompt: "check the build", recurring: false, schedule: "3 20 * * *", nextFireAt: fireAt, status: "pending" as const };
+    const recurring = { id: "wakeup:c1", type: "scheduled_wakeup" as const, createdAt: 3, wakeupId: "c1", prompt: "poll the queue", recurring: true, schedule: "*/5 * * * *", nextFireAt: fireAt + 60_000, status: "pending" as const };
+    const releases: Array<{ conversationId: string; requestId: string }> = [];
+    const released = deferred<unknown>();
+    let emit: ((event: unknown) => void) | undefined;
+    const api = {
+      status: async () => ([{
+        agent: { id: "test", name: "Test" },
+        availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["scheduled-wakeups"] } },
+      }]),
+      conversations: async () => [{ ...conversation("one"), status: "scheduled" }],
+      commands: async () => [],
+      snapshot: async (id: string) => ({ ...snapshot(id), conversation: { ...conversation(id), status: "scheduled" }, items: [{ id: "message:u", type: "user_message", createdAt: 1, text: "wake me later" }, oneShot, recurring] }),
+      stream: (_id: string, _cursor: string, handlers: { event(event: unknown, cursor: string): void }) => {
+        emit = event => handlers.event(event, "cursor-next");
+        return { close() {} };
+      },
+      inventoryStream: () => ({ close() {} }),
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+      release: async (conversationId: string, requestId: string) => {
+        releases.push({ conversationId, requestId });
+        return released.promise;
+      },
+    } as unknown as ChatApiClient;
+
+    try {
+      const { initChat } = await import(`./ui.ts?scheduled-wakeups-ui-test=${Date.now()}`);
+      initChat(api);
+      const panel = () => document.querySelector<HTMLElement>("#chat-scheduled-wakeups")!;
+      const button = () => document.querySelector<HTMLButtonElement>("#chat-wakeups-release")!;
+      await waitUntil(() => !panel().hidden, () => document.querySelector("#chat-state")?.textContent ?? "no panel");
+      const time = new Date(fireAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      expect(document.querySelector("#chat-scheduled-wakeups-label")?.textContent).toBe(`2 wakeups scheduled · next about ${time}`);
+      const rows = [...document.querySelectorAll("#chat-scheduled-wakeups-items li")];
+      expect(rows.map(row => row.querySelector(".chat-wakeup-prompt")?.textContent)).toEqual(["check the build", "poll the queue"]);
+      expect(rows.map(row => row.querySelector(".chat-wakeup-recurring")?.textContent ?? null)).toEqual([null, "Repeats"]);
+      expect(rows[0]!.querySelector(".chat-wakeup-when")?.textContent).toBe(`about ${time}`);
+      expect(document.querySelector("#chat-wakeups-release-note")?.textContent).toBe("Releasing cancels every wakeup and ends the agent's session.");
+      // Each wakeup has its own Cancel.
+      expect(rows.map(row => row.querySelector("[data-cancel-wakeup]")?.getAttribute("data-cancel-wakeup"))).toEqual(["w1", "c1"]);
+      expect(document.querySelector(".chat-composer-status")?.getAttribute("data-state")).toBe("scheduled");
+      // Pending rows are in the timeline too.
+      expect(document.querySelector('#chat-timeline [data-chat-item-id="wakeup:w1"]')?.className).toContain("is-pending");
+
+      button().dispatchEvent(new Event("click", { bubbles: true }));
+      await waitUntil(() => releases.length === 1);
+      expect(releases[0]!.conversationId).toBe("one");
+      // Inert until the agent answers: a second press sends nothing.
+      expect(button().disabled).toBe(true);
+      expect(button().textContent).toBe("Releasing…");
+      button().dispatchEvent(new Event("click", { bubbles: true }));
+      await Bun.sleep(5);
+      expect(releases).toHaveLength(1);
+
+      // The agent reports the wakeups cancelled and the conversation idle.
+      let sequence = 1;
+      const frame = (body: Record<string, unknown>) => emit!({ generation: "g", sequence: sequence++, conversationId: "one", ...body });
+      frame({ type: "item.upsert", item: { ...oneShot, nextFireAt: undefined, status: "cancelled" } });
+      frame({ type: "item.upsert", item: { ...recurring, nextFireAt: undefined, status: "cancelled" } });
+      frame({ type: "conversation.status", status: "idle" });
+      released.resolve({ released: true });
+      await waitUntil(() => panel().hidden === true, () => `panel still shown: ${document.querySelector("#chat-scheduled-wakeups-label")?.textContent}`);
+      expect(document.querySelector(".chat-composer-status")?.getAttribute("data-state")).toBe("ready");
+      expect(document.querySelector('#chat-timeline [data-chat-item-id="wakeup:w1"] .chat-wakeup-label')?.textContent).toBe("Wakeup cancelled");
+    } finally {
+      await Bun.sleep(20);
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+});
+
+describe("chat paused crons", () => {
+  test("a reopened conversation lists its paused cron with a Cancel and no release; Cancel calls the control once", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const paused = { id: "wakeup:c1", type: "scheduled_wakeup" as const, createdAt: 2, wakeupId: "c1", prompt: "poll the queue", recurring: true, schedule: "*/5 * * * *", status: "paused" as const, message: "Paused: the agent's session ended." };
+    const cancels: Array<{ conversationId: string; wakeupId: string }> = [];
+    const cancelled = deferred<unknown>();
+    let emit: ((event: unknown) => void) | undefined;
+    const api = {
+      status: async () => ([{ agent: { id: "test", name: "Test" }, availability: { state: "ready", version: "test", agent: { id: "test", name: "Test", capabilities: ["scheduled-wakeups"] } } }]),
+      conversations: async () => [conversation("one")],
+      commands: async () => [],
+      snapshot: async (id: string) => ({ ...snapshot(id), items: [{ id: "message:u", type: "user_message", createdAt: 1, text: "poll every five minutes" }, paused] }),
+      stream: (_id: string, _cursor: string, handlers: { event(event: unknown, cursor: string): void }) => {
+        emit = event => handlers.event(event, "cursor-next");
+        return { close() {} };
+      },
+      inventoryStream: () => ({ close() {} }),
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+      cancelWakeup: async (conversationId: string, wakeupId: string) => { cancels.push({ conversationId, wakeupId }); return cancelled.promise; },
+    } as unknown as ChatApiClient;
+    try {
+      const { initChat } = await import(`./ui.ts?paused-crons-ui-test=${Date.now()}`);
+      initChat(api);
+      const panel = () => document.querySelector<HTMLElement>("#chat-scheduled-wakeups")!;
+      await waitUntil(() => !panel().hidden, () => document.querySelector("#chat-state")?.textContent ?? "no panel");
+      expect(document.querySelector("#chat-scheduled-wakeups-label")?.textContent).toBe("1 schedule paused · fires again when this conversation runs");
+      expect(document.querySelector("#chat-scheduled-wakeups-items li")?.className).toBe("is-paused");
+      expect(document.querySelector("#chat-scheduled-wakeups-items .chat-wakeup-when")?.textContent).toBe("Paused");
+      // No session to release: only the per-row Cancel.
+      expect(document.querySelector<HTMLElement>(".chat-wakeups-release")?.hidden).toBe(true);
+      expect(document.querySelector(".chat-composer-status")?.getAttribute("data-state")).toBe("ready");
+      const cancel = () => document.querySelector<HTMLButtonElement>('[data-cancel-wakeup="c1"]')!;
+      cancel().dispatchEvent(new Event("click", { bubbles: true }));
+      await waitUntil(() => cancels.length === 1);
+      expect(cancels[0]).toEqual({ conversationId: "one", wakeupId: "c1" });
+      expect(cancel().disabled).toBe(true);
+      cancel().dispatchEvent(new Event("click", { bubbles: true }));
+      await Bun.sleep(5);
+      expect(cancels).toHaveLength(1);
+      const { message: _message, ...row } = paused;
+      emit!({ generation: "g", sequence: 1, conversationId: "one", type: "item.upsert", item: { ...row, status: "cancelled" } });
+      cancelled.resolve({ cancelled: true });
+      await waitUntil(() => panel().hidden === true, () => "panel still shown");
+      expect(document.querySelector('#chat-timeline [data-chat-item-id="wakeup:c1"] .chat-wakeup-label')?.textContent).toBe("Recurring wakeup cancelled");
+    } finally {
+      await Bun.sleep(20);
+      window.dispatchEvent(new Event("pagehide"));
+    }
+  });
+});
+
 describe("chat cost receipt", () => {
   test("itemizes three ways, remembers the choice across conversations and a reload, and leaves an agent's own totals alone", async () => {
     // One storage across two boots: the second boot is the reload.

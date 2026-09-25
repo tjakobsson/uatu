@@ -4,11 +4,12 @@
 // the projection so the live surface and the unit tests read one rule.
 
 import { backgroundStatusLabel } from "./background-tasks";
+import { scheduledStatusLabel } from "./scheduled-wakeups";
 import { statusLabel } from "./timeline-renderer";
-import { isRateLimitStanding, type BackgroundTaskItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals, type UsageReadFailure } from "./types";
+import { isRateLimitStanding, type BackgroundTaskItem, type ScheduledWakeupItem, type ContextReportItem, type ConversationItem, type ConversationStatus, type NoticeItem, type PlanUtilization, type PlanUtilizationWindow, type SessionTotals, type UsageReadFailure } from "./types";
 
 export type ComposerRoutineState = {
-  stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "failed" | "ready";
+  stateName: "cancelling" | "sending" | "working" | "retrying" | "compacting" | "background" | "scheduled" | "failed" | "ready";
   label: string;
   // The reason that came with the state (a retry's attempt and HTTP status).
 };
@@ -20,6 +21,10 @@ export function composerRoutineState(input: {
   submitting: boolean;
   backgroundDeclared: boolean;
   backgroundTasks: readonly BackgroundTaskItem[];
+  scheduledDeclared?: boolean;
+  // Pending, soonest first (pendingWakeups).
+  scheduledWakeups?: readonly ScheduledWakeupItem[];
+  now?: number;
 }): ComposerRoutineState {
   const { status } = input;
   if (input.cancelling) return { stateName: "cancelling", label: "Cancelling" };
@@ -32,9 +37,12 @@ export function composerRoutineState(input: {
   if (status === "retrying") return { stateName: "retrying", label: input.statusMessage ? `Retrying (${input.statusMessage})` : "Retrying" };
   if (status === "compacting") return { stateName: "compacting", label: statusLabel(status) };
   if (status === "background" && input.backgroundDeclared) return { stateName: "background", label: backgroundStatusLabel(input.backgroundTasks) };
+  // Nothing runs, but the session is held for the agent's own future turns
+  // (spec: the composer names the state, the pending count, and the next fire).
+  if (status === "scheduled" && input.scheduledDeclared) return { stateName: "scheduled", label: scheduledStatusLabel(input.scheduledWakeups ?? [], input.now) };
   if (status === "failed") return { stateName: "failed", label: statusLabel(status) };
   if (status === undefined) return { stateName: "ready", label: "Select a conversation" };
-  return { stateName: "ready", label: status === "background" ? "Ready" : statusLabel(status) };
+  return { stateName: "ready", label: status === "background" || status === "scheduled" ? "Ready" : statusLabel(status) };
 }
 
 export type RateLimitStanding = { level: "warning" | "rejected"; message: string; resetsAt?: number };

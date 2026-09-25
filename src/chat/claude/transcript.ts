@@ -3,6 +3,7 @@ import { promises as fs, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { measureChatWork } from "../performance";
+import { nextCronFire } from "./cron";
 
 /**
  * Read-only access to Claude Code's native session storage:
@@ -84,6 +85,10 @@ export type TranscriptEntry = {
   // behalf — a skill's preamble, a local-command caveat, an image caption.
   // Not the person's words, so never a prompt or a bubble.
   isMeta?: boolean;
+  // What started the turn this record opens, as newer CLIs store it:
+  // "sdk" for a prompt an SDK host sent, "scheduled" for a fired wakeup
+  // (spike, claude-scheduled-wakeups D8). Absent from older records.
+  turnOrigin?: string;
 };
 
 export type TranscriptReadResult = {
@@ -153,6 +158,7 @@ function validateEntry(value: unknown): TranscriptEntry | null {
       : {}),
     ...(origin ? { origin } : {}),
     ...(record.isMeta === true ? { isMeta: true } : {}),
+    ...(typeof record.turnOrigin === "string" && record.turnOrigin ? { turnOrigin: record.turnOrigin } : {}),
   };
 }
 
@@ -178,6 +184,98 @@ export function readsAsTaskNotification(origin: string | undefined, text: string
 }
 
 export const TASK_NOTIFICATION_ORIGIN = "task-notification";
+
+/** The `turnOrigin` newer CLIs store on a fired wakeup's prompt. */
+export const WAKEUP_TURN_ORIGIN = "scheduled";
+
+/**
+ * The prompt a scheduling tool call asked to be woken with — `ScheduleWakeup`
+ * and `CronCreate` both carry it as `prompt` — or undefined for any other
+ * call. What an older transcript's fired prompts are recognized by.
+ */
+export function scheduledWakeupPrompt(toolName: string, input: unknown): string | undefined {
+  if (toolName !== "ScheduleWakeup" && toolName !== "CronCreate") return undefined;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const prompt = (input as Record<string, unknown>).prompt;
+  return typeof prompt === "string" && prompt ? prompt : undefined;
+}
+
+/**
+ * Whether a stored user record is the prompt a fired wakeup submitted,
+ * rather than something the person typed or another injected record.
+ *
+ * The store says so where it can: `turnOrigin: "scheduled"` (2.1.281 on).
+ * A record that names another turn origin is not one. Where the store
+ * names none (older CLIs), the fired prompt is an `isMeta` record whose
+ * text is exactly the prompt of a scheduling call made earlier in the same
+ * transcript — the only trace of its origin the record's file keeps.
+ */
+export function readsAsWakeupPrompt(entry: { turnOrigin?: string; isMeta?: boolean }, text: string, scheduledPrompts: ReadonlySet<string>): boolean {
+  if (entry.turnOrigin === WAKEUP_TURN_ORIGIN) return true;
+  if (entry.turnOrigin !== undefined) return false;
+  return entry.isMeta === true && text !== "" && scheduledPrompts.has(text);
+}
+
+/** A cron the transcript says the CLI will rebuild when the session resumes. */
+export type TranscriptCron = { id: string; prompt: string; cron: string; recurring: boolean; createdAt: number };
+
+/** The CLI auto-expires a cron this long after it was created. */
+export const CRON_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The `CronCreate` crons a session's transcript still holds (D11): every
+ * `CronCreate` result, minus crons a `CronDelete` removed, one-shots that
+ * already fired, one-shots whose time passed without a process (the CLI
+ * drops those, spike D9), and crons past the CLI's 7-day expiry. `created`
+ * is every `CronCreate` id, alive or not, which is what classifies a
+ * wakeup as a cron. `ScheduleWakeup` never appears: it does not survive
+ * its process.
+ */
+export function transcriptCrons(entries: readonly TranscriptEntry[], now: number): { alive: TranscriptCron[]; created: Set<string> } {
+  const calls = new Map<string, { name: string; input: Record<string, unknown> }>();
+  const crons = new Map<string, TranscriptCron>();
+  const deleted = new Set<string>();
+  const firedPrompts: Array<{ text: string; at: number }> = [];
+  for (const entry of entries) {
+    if (entry.isSidechain) continue;
+    const content = entry.message.content;
+    if (entry.kind === "user" && !Array.isArray(content) && typeof content === "string") {
+      if (readsAsWakeupPrompt(entry, content, new Set(crons.size ? [...crons.values()].map(cron => cron.prompt) : []))) firedPrompts.push({ text: content, at: entry.timestamp });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const value of content) {
+      if (!value || typeof value !== "object") continue;
+      const block = value as Record<string, unknown>;
+      if (entry.kind === "assistant" && block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
+        const input = block.input && typeof block.input === "object" && !Array.isArray(block.input) ? block.input as Record<string, unknown> : {};
+        calls.set(block.id, { name: block.name, input });
+        continue;
+      }
+      if (entry.kind !== "user" || block.type !== "tool_result" || typeof block.tool_use_id !== "string" || block.is_error === true) continue;
+      const call = calls.get(block.tool_use_id);
+      if (call?.name === "CronCreate") {
+        const id = entry.toolUseResult?.id;
+        const prompt = call.input.prompt;
+        const cron = call.input.cron;
+        if (typeof id !== "string" || !id || typeof prompt !== "string" || typeof cron !== "string") continue;
+        crons.set(id, { id, prompt, cron, recurring: call.input.recurring !== false, createdAt: entry.timestamp });
+      } else if (call?.name === "CronDelete" && typeof call.input.id === "string") {
+        deleted.add(call.input.id);
+      }
+    }
+  }
+  const alive = [...crons.values()].filter(cron => {
+    if (deleted.has(cron.id)) return false;
+    if (now - cron.createdAt >= CRON_EXPIRY_MS) return false;
+    if (cron.recurring) return true;
+    if (firedPrompts.some(fired => fired.text === cron.prompt && fired.at >= cron.createdAt)) return false;
+    // Still ahead, or unreadable (kept: the next session's Stop is the truth).
+    const fireAt = nextCronFire(cron.cron, cron.createdAt);
+    return fireAt === undefined || fireAt > now;
+  });
+  return { alive, created: new Set(crons.keys()) };
+}
 
 /**
  * A subagent run's own transcript: the store keeps each run beside its

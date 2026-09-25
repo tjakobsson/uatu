@@ -73,6 +73,8 @@ class StubAgentService implements WorkspaceChatService {
     return this.record("respondQuestion", [id, interactionId], { outcome: { kind: "rejected" as const } });
   }
   async stopTask(id: string, taskId: string) { return this.record("stopTask", [id, taskId], { stopped: true as const }); }
+  async release(id: string) { return this.record("release", [id], { released: true as const }); }
+  async cancelWakeup(id: string, wakeupId: string) { return this.record("cancelWakeup", [id, wakeupId], { cancelled: true as const }); }
   async usage() { return this.record("usage", [], null); }
   async readUsage(requestId: string, mode: UsageReadMode) { return this.record("readUsage", [requestId, mode], { report: null, reason: "no-live-session" as const }); }
   async dispose() { this.calls.push({ method: "dispose", args: [] }); }
@@ -89,6 +91,16 @@ describe("background task stops route to the owning agent", () => {
     expect(b.calls).toContainEqual({ method: "stopTask", args: ["conv-1", "task-9"] });
     expect(a.calls.some(call => call.method === "stopTask")).toBe(false);
     await expect(service.stopTask("nope:conv-1", "task-9", "req-1")).rejects.toThrow();
+  });
+
+  test("release strips the qualifier and reaches the agent that owns the conversation", async () => {
+    const { service, a, b } = fixture();
+    expect(await service.release("claude:conv-1", "req-1")).toEqual({ released: true });
+    expect(b.calls).toContainEqual({ method: "release", args: ["conv-1"] });
+    expect(a.calls.some(call => call.method === "release")).toBe(false);
+    await expect(service.release("nope:conv-1", "req-1")).rejects.toThrow();
+    expect(await service.cancelWakeup("claude:conv-1", "w1", "req-2")).toEqual({ cancelled: true });
+    expect(b.calls).toContainEqual({ method: "cancelWakeup", args: ["conv-1", "w1"] });
   });
 });
 

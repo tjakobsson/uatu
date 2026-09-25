@@ -9,6 +9,7 @@ import { resolveWorkspaceFileReference } from "./file-references";
 import { commandSubject, describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
 import { formatUsd } from "./usage";
+import { wakeupRowLabel } from "./scheduled-wakeups";
 import { isLiveConversationStatus, isRateLimitStanding, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string; shellVariant?: string };
@@ -981,6 +982,14 @@ type RequestOrigin = { conversationId: string; label: string };
 export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
+  // A prompt a scheduled wakeup submitted opens that wakeup's turn. It is
+  // not the user's message, so it is never drawn as their bubble: a header
+  // names the wakeup and the prompt it carried, and points back at the
+  // wakeup's row when the turn is attributed to one (spec).
+  if (item.type === "user_message" && item.origin === "wakeup") {
+    const back = item.wakeupId ? ` <button type="button" class="chat-wakeup-link" data-chat-jump="${escapeHtmlAttribute(`wakeup:${item.wakeupId}`)}">Show schedule</button>` : "";
+    return `<div class="chat-item chat-wakeup-turn" data-chat-item-id="${id}"${stamp} role="note" aria-label="Wakeup turn"><div class="chat-wakeup-turn-head">${WAKEUP_ICON}<span class="chat-wakeup-turn-label">Wakeup</span>${back}</div>${item.text ? `<div class="chat-wakeup-turn-prompt">${escapeHtml(item.text)}</div>` : ""}</div>`;
+  }
   if (item.type === "user_message") {
     const action = allowRevert
       ? `<footer class="chat-message-actions"><button type="button" class="chat-message-revert" data-history-revert="${id}" aria-label="Revert message" title="Revert message"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6 4 2.5 7.5 6 11M3 7.5h6a4 4 0 0 1 4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button></footer>`
@@ -1010,6 +1019,15 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
     const outcome = item.status === "completed" ? "completed" : item.status === "failed" ? "failed" : item.status === "stopped" ? "cancelled" : "running";
     const body = deferClosed && !open ? "" : `${item.summary ? `<pre class="chat-task-summary">${escapeHtml(item.summary)}</pre>` : ""}${item.toolUseId ? `<p class="chat-tool-meta">Started by the ${escapeHtml(item.taskType === "local_agent" ? "Agent" : "Bash")} step above.</p>` : ""}`;
     return activityShell(id, outcome, backgroundTaskLabel(item), item.description, body, open, false, readerClosed, stamp, item.status === "stopped" ? "stopped" : undefined);
+  }
+  // A wakeup the agent scheduled for itself, drawn at every point of its
+  // life: pending with its fire time, fired with a link to the turn it
+  // started, cancelled, or lost with the reason. Pending rows show here as
+  // well as in the composer's list — the timeline is where it was set.
+  if (item.type === "scheduled_wakeup") {
+    const turn = item.status === "fired" && item.firedTurnId ? ` <button type="button" class="chat-wakeup-link" data-chat-jump="${escapeHtmlAttribute(item.firedTurnId)}">Go to its turn</button>` : "";
+    const why = item.message ? `<p class="chat-wakeup-message">${escapeHtml(item.message)}</p>` : "";
+    return `<aside class="chat-item chat-wakeup is-${item.status}" data-chat-item-id="${id}"${stamp} role="status"><div class="chat-wakeup-head">${WAKEUP_ICON}<span class="chat-wakeup-label">${escapeHtml(wakeupRowLabel(item))}</span>${turn}</div>${item.prompt ? `<div class="chat-wakeup-subject">${escapeHtml(item.prompt)}</div>` : ""}${why}</aside>`;
   }
   if (item.type === "file_change") {
     return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(item.operation)}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
@@ -1189,6 +1207,16 @@ function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): 
       // The command in full (the summary showed its first line), what the
       // agent said it was for, then the bounded output.
       return `<pre class="chat-tool-command">${escapeHtml(detail.command)}</pre>${detail.description || detail.background ? `<p class="chat-tool-meta">${detail.description ? escapeHtml(detail.description) : ""}${detail.background ? `${detail.description ? " · " : ""}<span class="chat-tool-background">started in the background</span>` : ""}</p>` : ""}${outputBlock(item, true)}${errorBlock(true)}`;
+    case "schedule": {
+      // The prompt the agent will be woken with, then what kind of schedule
+      // it is, in words; the CLI's own confirmation follows as output.
+      const kind = detail.action === "create"
+        ? `${detail.recurring ? "Repeats" : "Runs once"}${detail.cron ? ` on <code>${escapeHtml(detail.cron)}</code>` : ""}`
+        : detail.action === "wakeup" && detail.reason ? escapeHtml(detail.reason)
+          : detail.action === "end-loop" ? "Ends the self-paced loop: no further wakeups."
+            : "";
+      return `${detail.prompt ? `<pre class="chat-tool-command">${escapeHtml(detail.prompt)}</pre>` : ""}${kind ? `<p class="chat-tool-meta">${kind}</p>` : ""}${outputBlock(item)}${error}`;
+    }
     default:
       // An unknown tool: show its input, then bound its output like any other.
       return `${item.input ? `<pre>${escapeHtml(item.input)}</pre>` : ""}${outputBlock(item)}${error}`;
@@ -1485,8 +1513,12 @@ export function compactionLabel(item: Extract<ConversationItem, { type: "compact
   return figures ? `${trigger} · ${figures}` : trigger;
 }
 
+// A clock, drawn rather than a glyph: the text clock renders a few pixels
+// tall in most UI fonts. Decoration — the label beside it says the words.
+const WAKEUP_ICON = `<svg class="chat-wakeup-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.75V8l2.25 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
 export function statusLabel(status: ConversationStatus): string {
-  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed", background: "Background work running", retrying: "Retrying", compacting: "Compacting context" })[status];
+  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed", background: "Background work running", retrying: "Retrying", compacting: "Compacting context", scheduled: "Wakeup scheduled" })[status];
 }
 
 function counts(additions?: number, deletions?: number): string {

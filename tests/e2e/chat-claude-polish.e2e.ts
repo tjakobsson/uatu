@@ -893,3 +893,163 @@ test.describe("Claude Code plan readout at phone width", () => {
     await expect(page.locator("#chat-plan-pin")).toBeHidden();
   });
 });
+
+// claude-scheduled-wakeups: a wakeup the agent scheduled holds the session in
+// a named state, fires as a wakeup turn (never a user bubble), and the user
+// can release the session to end every wakeup in it.
+test.describe("Claude Code scheduled wakeups (fixture-driven)", () => {
+  test.use({ viewport: { width: 1400, height: 1000 } });
+
+  const clock = (time: number) => new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  test("schedule → scheduled state → fire → wakeup turn → release", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Scheduled wakeups", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Check the build in a minute and tell me whether it is green" },
+    ]);
+    // The turn that schedules: the tool call, the agent's reply, the pending
+    // wakeup the session reports, and the scheduled state after the result.
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { id: "tool:wake", type: "tool", createdAt: 10, name: "ScheduleWakeup", status: "completed", input: JSON.stringify({ delaySeconds: 60, reason: "check the build", prompt: "Check whether the build is green and report" }), output: "Next wakeup scheduled." } });
+    await control(request, { action: "item", conversationId: id, item: { id: "message:a1", type: "assistant_message", createdAt: 11, markdown: "I'll look again in a minute.", completedAt: 11 } });
+    const fireAt = Date.now() + 60_000;
+    const oneShot: ConversationItem = { id: "wakeup:w1", type: "scheduled_wakeup", createdAt: 12, wakeupId: "w1", prompt: "Check whether the build is green and report", recurring: false, schedule: "3 20 * * *", nextFireAt: fireAt, status: "pending" };
+    await control(request, { action: "item", conversationId: id, item: oneShot });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    await control(request, { action: "status", conversationId: id, status: "scheduled" });
+
+    const status = page.locator("#chat-composer-status");
+    await expect(status).toHaveAttribute("data-state", "scheduled");
+    await expect(status).toHaveAttribute("aria-label", `1 wakeup scheduled · next about ${clock(fireAt)}`);
+    const panel = page.locator("#chat-scheduled-wakeups");
+    await expect(panel).toBeVisible();
+    await panel.locator("summary").click();
+    await expect(panel.locator("li .chat-wakeup-prompt")).toHaveText("Check whether the build is green and report");
+    await expect(panel.locator("li .chat-wakeup-when")).toHaveText(`about ${clock(fireAt)}`);
+    await expect(panel.locator("#chat-wakeups-release-note")).toHaveText("Releasing cancels every wakeup and ends the agent's session.");
+    await expect(page.locator('[data-chat-item-id="wakeup:w1"]')).toContainText(`Wakeup scheduled · about ${clock(fireAt)}`);
+    // Prompting stays possible: Send, not Cancel.
+    await page.locator("#chat-input").fill("anything new?");
+    await expect(page.locator("#chat-send")).toBeEnabled();
+    await expect(page.locator("#chat-send")).not.toHaveAttribute("aria-label", /Cancel/);
+    await page.locator("#chat-input").fill("");
+    await capture(page, testInfo, "scheduled-composer");
+
+    // The wakeup fires: the CLI starts a turn by itself. It opens with a
+    // wakeup header attributed to the wakeup, and the one-shot's row links it.
+    await control(request, { action: "status", conversationId: id, status: "running" });
+    await control(request, { action: "item", conversationId: id, item: { id: "message:wakeup:p1", type: "user_message", createdAt: 20, text: "Check whether the build is green and report", origin: "wakeup", wakeupId: "w1" } });
+    await control(request, { action: "item", conversationId: id, item: { id: "message:a2", type: "assistant_message", createdAt: 21, markdown: "The build is green.", completedAt: 21 } });
+    const { nextFireAt: _fire, ...firedRow } = oneShot as Extract<ConversationItem, { type: "scheduled_wakeup" }>;
+    await control(request, { action: "item", conversationId: id, item: { ...firedRow, status: "fired", firedTurnId: "message:wakeup:p1" } });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    const header = page.locator('[data-chat-item-id="message:wakeup:p1"]');
+    await expect(header).toHaveClass(/chat-wakeup-turn/);
+    await expect(header.locator(".chat-wakeup-turn-label")).toHaveText("Wakeup");
+    await expect(page.locator(".chat-user-message")).toHaveCount(1);
+    const row = page.locator('[data-chat-item-id="wakeup:w1"]');
+    await expect(row.locator(".chat-wakeup-label")).toHaveText("Wakeup fired");
+    await expect(panel).toBeHidden();
+    await expect(status).toHaveAttribute("data-state", "ready");
+    await row.getByRole("button", { name: "Go to its turn" }).click();
+    await expect(header).toBeFocused();
+    await capture(page, testInfo, "wakeup-fired-turn");
+
+    // Two recurring crons the agent created: one cancelled on its own — the
+    // session stays scheduled for the other — then the rest released.
+    const recurring: ConversationItem = { id: "wakeup:c1", type: "scheduled_wakeup", createdAt: 30, wakeupId: "c1", prompt: "Poll the deploy queue", recurring: true, schedule: "*/5 * * * *", nextFireAt: Date.now() + 5 * 60_000, status: "pending" };
+    const digest: ConversationItem = { id: "wakeup:c2", type: "scheduled_wakeup", createdAt: 31, wakeupId: "c2", prompt: "Summarise new issues", recurring: true, schedule: "0 * * * *", nextFireAt: Date.now() + 30 * 60_000, status: "pending" };
+    await control(request, { action: "item", conversationId: id, item: recurring });
+    await control(request, { action: "item", conversationId: id, item: digest });
+    await control(request, { action: "status", conversationId: id, status: "scheduled" });
+    await expect(status).toHaveAttribute("data-state", "scheduled");
+    await expect(panel.locator("li")).toHaveCount(2);
+    const cancelRequest = page.waitForResponse(response => response.url().includes("/wakeups/c2/cancel"));
+    await panel.getByRole("button", { name: "Cancel wakeup: Summarise new issues" }).click();
+    expect((await cancelRequest).status()).toBe(200);
+    await expect(panel.locator("li")).toHaveCount(1);
+    await expect(page.locator('[data-chat-item-id="wakeup:c2"] .chat-wakeup-label')).toHaveText("Recurring wakeup cancelled");
+    await expect(status).toHaveAttribute("data-state", "scheduled");
+    await expect(panel.locator("li .chat-wakeup-recurring")).toHaveText("Repeats");
+    await capture(page, testInfo, "scheduled-recurring-before-release");
+    const releaseRequest = page.waitForResponse(response => response.url().includes(`/release`));
+    await panel.getByRole("button", { name: "Release session" }).click();
+    expect((await releaseRequest).status()).toBe(200);
+    await expect(panel).toBeHidden();
+    await expect(page.locator('[data-chat-item-id="wakeup:c1"] .chat-wakeup-label')).toHaveText("Recurring wakeup cancelled");
+    await expect(status).toHaveAttribute("data-state", "ready");
+    await capture(page, testInfo, "wakeup-released");
+  });
+
+  test("a reopened conversation lists its paused cron, idle, with a Cancel that ends it for good", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Paused cron", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Check the deploy every five minutes" },
+      { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "Polling every five minutes.", completedAt: 2 },
+      { id: "wakeup:c1", type: "scheduled_wakeup", createdAt: 3, wakeupId: "c1", prompt: "Poll the deploy queue and report anything stuck", recurring: true, schedule: "*/5 * * * *", status: "paused", message: "Paused: the agent's session ended. Claude Code restores this schedule when the conversation runs again." },
+    ]);
+    const panel = page.locator("#chat-scheduled-wakeups");
+    await expect(panel).toBeVisible();
+    await expect(page.locator("#chat-composer-status")).toHaveAttribute("data-state", "ready");
+    await expect(panel.locator("#chat-scheduled-wakeups-label")).toHaveText("1 schedule paused · fires again when this conversation runs");
+    await panel.locator("summary").click();
+    await expect(panel.locator("li .chat-wakeup-when")).toHaveText("Paused");
+    await expect(panel.locator(".chat-wakeups-release")).toBeHidden();
+    const row = page.locator('[data-chat-item-id="wakeup:c1"]');
+    await expect(row.locator(".chat-wakeup-label")).toHaveText("Recurring wakeup paused");
+    await expect(row.locator(".chat-wakeup-message")).toContainText("restores this schedule");
+    await capture(page, testInfo, "paused-cron-reopened");
+    const cancelRequest = page.waitForResponse(response => response.url().includes("/wakeups/c1/cancel"));
+    await panel.getByRole("button", { name: /Cancel wakeup/ }).click();
+    expect((await cancelRequest).status()).toBe(200);
+    await expect(panel).toBeHidden();
+    await expect(row.locator(".chat-wakeup-label")).toHaveText("Recurring wakeup cancelled");
+    await capture(page, testInfo, "paused-cron-cancelled");
+  });
+
+  test("a schedule that did not survive its session reads as lost, with the reason", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Lost wakeup", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Remind me in ten minutes" },
+      { id: "wakeup:w1", type: "scheduled_wakeup", createdAt: 2, wakeupId: "w1", prompt: "Remind the user", recurring: false, schedule: "10 20 * * *", nextFireAt: Date.now() + 600_000, status: "pending" },
+    ]);
+    await control(request, { action: "status", conversationId: id, status: "scheduled" });
+    await expect(page.locator("#chat-composer-status")).toHaveAttribute("data-state", "scheduled");
+    await control(request, { action: "item", conversationId: id, item: { id: "wakeup:w1", type: "scheduled_wakeup", createdAt: 2, wakeupId: "w1", prompt: "Remind the user", recurring: false, schedule: "10 20 * * *", status: "lost", message: "The agent's schedule did not survive its session: Claude Code keeps scheduled wakeups only while its process runs." } });
+    await control(request, { action: "status", conversationId: id, status: "idle" });
+    const row = page.locator('[data-chat-item-id="wakeup:w1"]');
+    await expect(row.locator(".chat-wakeup-label")).toHaveText("Wakeup lost");
+    await expect(row.locator(".chat-wakeup-message")).toContainText("did not survive its session");
+    await expect(page.locator("#chat-scheduled-wakeups")).toBeHidden();
+    await expect(page.locator("#chat-composer-status")).toHaveAttribute("data-state", "ready");
+    await capture(page, testInfo, "wakeup-lost");
+  });
+});
+
+test.describe("Claude Code scheduled wakeups at phone width", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the scheduled state and its release fit the touch composer", async ({ page, request }, testInfo) => {
+    await request.post("/__e2e/reset");
+    await control(request, { action: "agents", count: 2 });
+    await control(request, { action: "models", agent: "claude", models: claudeModels });
+    const seeded = await control(request, {
+      action: "seed", agent: "claude", title: "Scheduled on a phone",
+      items: [
+        { id: "message:u1", type: "user_message", createdAt: 1, text: "Check the deploy every five minutes" },
+        { id: "message:a1", type: "assistant_message", createdAt: 2, markdown: "Polling every five minutes.", completedAt: 2 },
+        { id: "wakeup:c1", type: "scheduled_wakeup", createdAt: 3, wakeupId: "c1", prompt: "Poll the deploy queue and report anything stuck", recurring: true, schedule: "*/5 * * * *", nextFireAt: Date.now() + 5 * 60_000, status: "pending" },
+      ],
+    }) as { conversation: { id: string } };
+    const id = seeded.conversation.id;
+    const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-surface")).toBeVisible();
+    await page.locator("#chat-conversation-select").selectOption(id);
+    await control(request, { action: "status", conversationId: id, status: "scheduled" });
+    const panel = page.locator("#chat-scheduled-wakeups");
+    await expect(panel).toBeVisible();
+    await panel.locator("summary").click();
+    await expect(panel.getByRole("button", { name: "Release session" })).toBeVisible();
+    await capture(page, testInfo, "scheduled-composer-phone");
+  });
+});

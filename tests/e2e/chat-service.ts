@@ -541,6 +541,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   // What each stop request carried, for spec assertions.
   readonly stoppedTasks: string[] = [];
+  readonly releasedConversations: string[] = [];
 
   // The workspace's last-known plan usage and how the next read answers,
   // both set by control actions (design D9).
@@ -597,6 +598,43 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const item = this.items.get(id)!.get(`task:${taskId}`);
     if (item?.type === "background_task") this.publishItem(id, { ...item, status: "stopped", summary: "Stopped by the user." });
     const result = { stopped: true } as const;
+    this.receipts.set(key, result);
+    return result;
+  }
+
+  // Cancel one wakeup, as the Claude provider does: the row reads cancelled.
+  async cancelWakeup(id: string, wakeupId: string, requestId: string): Promise<{ cancelled: true }> {
+    this.require(id);
+    const key = `cancel-wakeup:${id}:${wakeupId}:${requestId}`;
+    const existing = this.receipts.get(key) as { cancelled: true } | undefined;
+    if (existing) return existing;
+    const item = this.items.get(id)!.get(`wakeup:${wakeupId}`);
+    if (item?.type === "scheduled_wakeup" && (item.status === "pending" || item.status === "paused")) {
+      const { nextFireAt: _next, message: _message, ...rest } = item;
+      this.publishItem(id, { ...rest, status: "cancelled" });
+      const stillPending = [...this.items.get(id)!.values()].some(other => other.type === "scheduled_wakeup" && other.status === "pending");
+      if (item.status === "pending" && !stillPending) this.setStatus(id, "idle");
+    }
+    const result = { cancelled: true } as const;
+    this.receipts.set(key, result);
+    return result;
+  }
+
+  // Release the agent's session: as the Claude provider does, every pending
+  // wakeup reads as cancelled and the conversation is idle (D5).
+  async release(id: string, requestId: string): Promise<{ released: true }> {
+    this.require(id);
+    const key = `release:${id}:${requestId}`;
+    const existing = this.receipts.get(key) as { released: true } | undefined;
+    if (existing) return existing;
+    this.releasedConversations.push(id);
+    for (const item of [...this.items.get(id)!.values()]) {
+      if (item.type !== "scheduled_wakeup" || item.status !== "pending") continue;
+      const { nextFireAt: _next, ...rest } = item;
+      this.publishItem(id, { ...rest, status: "cancelled" });
+    }
+    this.setStatus(id, "idle");
+    const result = { released: true } as const;
     this.receipts.set(key, result);
     return result;
   }

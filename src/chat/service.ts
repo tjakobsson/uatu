@@ -70,6 +70,10 @@ export interface WorkspaceChatService {
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome, choiceId?: string): Promise<{ outcome: PermissionOutcome }>;
   respondQuestion(id: string, interactionId: string, requestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }>;
   stopTask(id: string, taskId: string, requestId: string): Promise<{ stopped: true }>;
+  /** End a session held for its scheduled wakeups (design D5 of claude-scheduled-wakeups). */
+  release(id: string, requestId: string): Promise<{ released: true }>;
+  /** Cancel one scheduled wakeup, live or paused; it never fires again. */
+  cancelWakeup(id: string, wakeupId: string, requestId: string): Promise<{ cancelled: true }>;
   /** The agent's last-known plan usage; null when nothing has been read. */
   usage(): Promise<AgentUsageReport | null>;
   /** Read plan usage now; the agent picks the session (design D3). */
@@ -279,6 +283,12 @@ export class LazyChatService implements WorkspaceChatService {
   }
   async stopTask(id: string, taskId: string, requestId: string) {
     return (await this.requireAdapter()).stopTask(id, taskId, requestId);
+  }
+  async release(id: string, requestId: string) {
+    return (await this.requireAdapter()).release(id, requestId);
+  }
+  async cancelWakeup(id: string, wakeupId: string, requestId: string) {
+    return (await this.requireAdapter()).cancelWakeup(id, wakeupId, requestId);
   }
   async usage() { return (await this.requireAdapter()).usage(); }
   async readUsage(requestId: string, mode: UsageReadMode) { return (await this.requireAdapter()).readUsage(requestId, mode); }

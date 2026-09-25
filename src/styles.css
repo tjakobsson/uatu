@@ -6168,6 +6168,107 @@ html[data-ui-mode="desktop"][data-notification-chat] .chat-expand-strip {
   text-overflow: ellipsis;
 }
 
+/* A scheduled wakeup's row: a quiet card like a notice, keyed by a clock.
+   Pending is accented (something will happen), fired and cancelled recede,
+   lost carries the reason in the warning colour — the schedule is gone and
+   the reader should know it will not fire. */
+.chat-wakeup {
+  border: 1px solid var(--border-soft);
+  border-radius: 0.55rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--surface-raised);
+  color: var(--chat-activity-fg);
+  font-size: 0.9em;
+}
+
+.chat-wakeup.is-pending {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft));
+}
+
+.chat-wakeup.is-fired,
+.chat-wakeup.is-cancelled {
+  color: var(--text-subtle);
+}
+
+.chat-wakeup.is-paused {
+  border-style: dashed;
+}
+
+.chat-wakeup.is-paused .chat-wakeup-icon {
+  color: var(--text-subtle);
+}
+
+.chat-wakeup.is-lost {
+  border-color: color-mix(in srgb, var(--warning, #c9a227) 55%, var(--border-soft));
+}
+
+.chat-wakeup-head,
+.chat-wakeup-turn-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.chat-wakeup-icon {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--accent);
+}
+
+/* One clock for every wakeup surface that draws it in CSS (the composer's
+   status and list rows); the timeline inlines the same shape as SVG. */
+:root {
+  --chat-clock-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6.25' fill='none' stroke='black' stroke-width='1.5'/%3E%3Cpath d='M8 4.75V8l2.25 1.5' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.chat-wakeup-label,
+.chat-wakeup-turn-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.chat-wakeup-subject,
+.chat-wakeup-turn-prompt {
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-wakeup-subject {
+  color: var(--text-subtle);
+}
+
+.chat-wakeup-message {
+  margin: 0.35rem 0 0;
+}
+
+.chat-wakeup-link {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.9em;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* The turn a wakeup started opens with a header, not a bubble: the agent
+   asked for this turn, the user did not type it. Full width and left-set,
+   where the agent's own content runs, with the prompt it carried beneath. */
+.chat-wakeup-turn {
+  margin: 0.75rem 0 0.25rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 0.45rem 0.45rem 0;
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+  font-size: 0.9em;
+}
+
 .chat-request,
 .chat-file-change,
 .chat-notice,
@@ -7597,6 +7698,17 @@ html[data-ui-mode="touch"] .plan-meter {
   animation: chat-live-pulse 2.4s ease-in-out infinite;
 }
 
+/* Scheduled: nothing runs, the session waits for the agent's own next turn.
+   A still clock rather than a pulse — nothing is happening until it fires. */
+.chat-composer-status[data-state="scheduled"]::before {
+  content: "";
+  width: 0.95rem;
+  height: 0.95rem;
+  background: var(--accent);
+  -webkit-mask: var(--chat-clock-icon) center / contain no-repeat;
+  mask: var(--chat-clock-icon) center / contain no-repeat;
+}
+
 .chat-composer-status[data-state="cancelling"]::before {
   content: "×";
 }
@@ -9011,7 +9123,8 @@ html[data-ui-mode="touch"] .chat-task-list {
 
 #chat-task-list-items,
 #chat-subagents-items,
-#chat-background-tasks-items {
+#chat-background-tasks-items,
+#chat-scheduled-wakeups-items {
   max-height: 8.5rem;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -9020,6 +9133,8 @@ html[data-ui-mode="touch"] .chat-task-list {
 html[data-chat-keyboard] #chat-task-list-items,
 html[data-chat-keyboard] #chat-subagents-items,
 html[data-chat-keyboard] #chat-background-tasks-items,
+html[data-chat-keyboard] #chat-scheduled-wakeups-items,
+html[data-chat-keyboard] .chat-wakeups-release,
 html[data-chat-keyboard] .chat-reverted-items,
 html[data-chat-keyboard] .chat-queue {
   display: none;
@@ -9099,6 +9214,84 @@ html[data-ui-mode="touch"][data-chat-answering] #chat-drilldown-timeline {
 .chat-task-stop:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Rows of the scheduled-wakeup list: the prompt the wakeup will submit
+   leads, a recurring one says so, and the fire time closes the row. The
+   release sits under the list, beside the sentence saying what it ends. */
+#chat-scheduled-wakeups-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0 0.7rem 0.45rem 1.75rem;
+  list-style: none;
+}
+
+#chat-scheduled-wakeups-items li::before {
+  content: "";
+  flex: 0 0 auto;
+  align-self: center;
+  width: 0.85rem;
+  height: 0.85rem;
+  background: var(--accent);
+  -webkit-mask: var(--chat-clock-icon) center / contain no-repeat;
+  mask: var(--chat-clock-icon) center / contain no-repeat;
+}
+
+.chat-scheduled-wakeups li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.chat-wakeup-prompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-wakeup-recurring {
+  flex: 0 0 auto;
+  padding: 0 0.35rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.3rem;
+  color: var(--text-subtle);
+  font-size: 0.8em;
+}
+
+.chat-wakeup-when {
+  flex: 0 0 auto;
+  color: var(--text-subtle);
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-wakeups-release {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.15rem 0.7rem 0.6rem 1.75rem;
+}
+
+.chat-wakeups-release[hidden] {
+  display: none;
+}
+
+/* A paused cron waits for the conversation, not for a clock: its clock is
+   greyed and its "Paused" reads where a fire time would. */
+#chat-scheduled-wakeups-items li.is-paused::before {
+  background: var(--text-subtle);
+}
+
+.chat-wakeups-release-note {
+  min-width: 0;
+  color: var(--text-subtle);
+  font-size: 0.85em;
 }
 
 .chat-task-summary {

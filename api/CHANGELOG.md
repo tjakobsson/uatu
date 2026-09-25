@@ -2,6 +2,21 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 8 / Workspace 21 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `ConversationStatus` gains `scheduled`. No turn runs and nothing executes, but the agent's session holds one or more future turns it scheduled for itself. Prompting stays possible. Only agents declaring the new `scheduled-wakeups` capability report it, which today means Claude Code. When the session also holds live background work, the status is `background`.
+- A new `scheduled_wakeup` conversation item follows one scheduled wakeup through its life. A `pending` row carries the cron `schedule`, whether it is `recurring`, and the workspace's `nextFireAt` reading. It then becomes `fired` (a one-shot, with `firedTurnId`), `cancelled` because the agent removed it or the user cancelled it or released the session, `paused` because the session ended but the agent will rebuild it (a cron) when the conversation runs again, or `lost` because the session ended and the schedule with it. A paused or lost row carries a `message` that says so. A recurring wakeup stays `pending` across its fires. A conversation opened without a live session lists its paused wakeups.
+- A cancelled wakeup stays cancelled. Claude Code rebuilds a session's crons when the session resumes; the workspace blocks the fires of the ones the user cancelled, without a model call, and no turn, status change, or notification follows a blocked fire.
+- `user_message` items gain optional `origin` (`wakeup`) and `wakeupId`. Such an item is the prompt a fired wakeup submitted, and it opens that wakeup's turn. The user did not type it, and clients must not present it as theirs.
+
+### Migration
+
+Strict workspace Chat consumers must regenerate against workspace revision 21. `ConversationStatus` is a closed enum, the `ConversationItem` union is closed, and `user_message` is a closed object, so a revision 20 validator rejects the `scheduled` status, the `scheduled_wakeup` item, and `origin`/`wakeupId` on the conversation topic. A consumer that cannot present the scheduled state should treat `scheduled` like an idle conversation, where prompting works, and should skip unknown item types instead of failing the event. The Hub revision stays 8.
+
 ## Hub 8 / Workspace 20 - Unreleased
 
 Compatibility: breaking (Hub)

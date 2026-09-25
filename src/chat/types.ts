@@ -58,6 +58,11 @@ export type ChatCapability =
   // are listed with a stop action, settled tasks land in the timeline, and
   // the conversation presents a background-work state.
   | "background-tasks"
+  // The agent can schedule future turns for itself (a wakeup, a cron, a
+  // loop) and reports them: the session is held while they are pending,
+  // each is a timeline row that follows its life, a fired one starts a
+  // wakeup turn, and the user can release the session to end them all.
+  | "scheduled-wakeups"
   // The agent's login has plan usage that can be asked for: the workspace
   // keeps the newest report and a read can be requested on demand.
   | "usage";
@@ -127,7 +132,11 @@ export type ChatAvailability =
 // `retrying`: the turn is live but the agent is waiting to retry a failed API
 // request; `compacting`: the turn is live and the agent is compacting its
 // context. Both are working states with a name, never idle ones.
-export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed" | "background" | "retrying" | "compacting";
+// `scheduled`: nothing runs and nothing executes, but the agent's session
+// holds one or more future wakeups it scheduled for itself. Distinct from
+// `background` (live work, stoppable) and from idle (no session held):
+// prompting is possible, and the composer lists the wakeups with a release.
+export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed" | "background" | "retrying" | "compacting" | "scheduled";
 
 /** A turn is in flight: the composer offers Cancel, a new prompt is held. */
 export function isLiveConversationStatus(status: ConversationStatus | undefined): boolean {
@@ -247,6 +256,11 @@ export type UserMessageItem = TimelineItemBase & {
   requestId?: string;
   // Images sent with this message, as references (see MessageAttachment).
   attachments?: MessageAttachment[];
+  // Who put this prompt in the conversation when it was not the user:
+  // `wakeup` is a scheduled wakeup firing. Absent means the user typed it.
+  // `wakeupId` names the `scheduled_wakeup` that fired, when known.
+  origin?: "wakeup";
+  wakeupId?: string;
 };
 
 /**
@@ -659,6 +673,35 @@ export type BackgroundTaskItem = TimelineItemBase & {
   summary?: string;
 };
 
+/**
+ * One future turn the agent scheduled for itself — a self-paced wakeup, a
+ * cron, a loop — as its session reports it, updated in place through its
+ * life. `pending` rows are listed by the composer (with the release that
+ * ends them) and shown in the timeline; a one-shot that fired reads
+ * `fired` and links the wakeup turn it started (`firedTurnId`, the id of
+ * that turn's `user_message`); a recurring one stays `pending` across its
+ * fires. `cancelled`: the agent removed it, or the user cancelled it or
+ * released the session; the workspace blocks it from firing again.
+ * `paused`: the session ended, but the agent's tooling rebuilds this wakeup
+ * (a cron) when the conversation runs again; `message` says so.
+ * `lost`: the session ended some other way, taking the schedule with it.
+ * `nextFireAt` is the workspace's reading of `schedule` (a five-field cron
+ * expression in the workspace host's local time, which is what the agent
+ * fires on), for display only: the agent keeps its own clock.
+ */
+export type ScheduledWakeupItem = TimelineItemBase & {
+  type: "scheduled_wakeup";
+  wakeupId: string;
+  prompt: string;
+  recurring: boolean;
+  schedule: string;
+  nextFireAt?: number;
+  status: "pending" | "fired" | "cancelled" | "paused" | "lost";
+  firedTurnId?: string;
+  // Why it ended, when it did not fire: the notice a lost schedule carries.
+  message?: string;
+};
+
 export type ConversationItem =
   | UserMessageItem
   | AssistantMessageItem
@@ -673,7 +716,8 @@ export type ConversationItem =
   | NoticeItem
   | ContextReportItem
   | CompactionItem
-  | BackgroundTaskItem;
+  | BackgroundTaskItem
+  | ScheduledWakeupItem;
 
 export type InteractionRequest = PermissionRequest | QuestionRequest;
 

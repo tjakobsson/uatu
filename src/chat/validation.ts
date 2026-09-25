@@ -38,6 +38,7 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "background",
   "retrying",
   "compacting",
+  "scheduled",
 ]);
 const ACTIVITY_STATUSES = new Set<ActivityStatus>(["pending", "running", "completed", "failed", "cancelled"]);
 
@@ -363,9 +364,11 @@ export function parseConversationItem(value: unknown): ConversationItem {
 
   switch (type) {
     case "user_message":
-      expectKeys(record, ["id", "type", "createdAt", "text", "requestId", "attachments"], type);
+      expectKeys(record, ["id", "type", "createdAt", "text", "requestId", "attachments", "origin", "wakeupId"], type);
       expectString(record.text, "user message text");
       expectOptionalIdentity(record.requestId, "user message request id");
+      if (record.origin !== undefined) expectOneOf(record.origin, ["wakeup"], "user message origin");
+      expectOptionalIdentity(record.wakeupId, "user message wakeup id");
       if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "user message attachment");
       break;
     case "assistant_message":
@@ -485,6 +488,17 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOneOf(record.status, ["running", "completed", "failed", "stopped"], "background task status");
       expectOptionalString(record.progress, "background task progress");
       expectOptionalString(record.summary, "background task summary");
+      break;
+    case "scheduled_wakeup":
+      expectKeys(record, ["id", "type", "createdAt", "wakeupId", "prompt", "recurring", "schedule", "nextFireAt", "status", "firedTurnId", "message"], type);
+      expectIdentity(record.wakeupId, "scheduled wakeup id");
+      expectString(record.prompt, "scheduled wakeup prompt");
+      if (typeof record.recurring !== "boolean") throw new Error("scheduled wakeup recurring must be a boolean");
+      expectNonEmptyString(record.schedule, "scheduled wakeup schedule");
+      expectOptionalTimestamp(record.nextFireAt, "scheduled wakeup nextFireAt");
+      expectOneOf(record.status, ["pending", "fired", "cancelled", "paused", "lost"], "scheduled wakeup status");
+      expectOptionalIdentity(record.firedTurnId, "scheduled wakeup fired turn id");
+      expectOptionalString(record.message, "scheduled wakeup message");
       break;
     case "compaction":
       expectKeys(record, ["id", "type", "createdAt", "trigger", "preTokens", "postTokens"], type);
