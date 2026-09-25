@@ -3900,6 +3900,52 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     await provider.dispose();
   });
 
+  test("a cancel or release whose write fails leaves nothing cancelled: the wakeup stays listed and unblocked", async () => {
+    const { provider, events, stop, session, query, workspace } = await scheduled([oneShot, recurring]);
+    // The state file's temporary path is a directory: every write fails.
+    mkdirSync(path.join(workspace, ".uatu-test-state.json.tmp"));
+    await expect(provider.cancelWakeup(session.id, "c1")).rejects.toThrow();
+    await expect(provider.release(session.id)).rejects.toThrow();
+    expect(events.some(event => event.eventType === "wakeup.cancelled" || event.eventType === "session.released")).toBe(false);
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["w1", "c1"]);
+    expect(query.returned).toBe(false);
+    expect(await promptHook(query, { prompt: recurring.prompt, prompt_id: "fired-1" })).toEqual({ continue: true });
+    stop();
+    await provider.dispose();
+  });
+
+  test("release is refused, and records nothing, when a turn starts while its cancellations are written", async () => {
+    const { provider, events, stop, session, query } = await scheduled([oneShot]);
+    const releasing = provider.release(session.id);
+    // The CLI starts a turn of its own (its init) while the write is in flight.
+    query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await expect(releasing).rejects.toBeInstanceOf(ReleaseUnavailableError);
+    expect(query.returned).toBe(false);
+    expect(events.some(event => event.eventType === "session.released")).toBe(false);
+    // Nothing stays cancelled: the wakeup is still held, and its fire is not blocked.
+    expect((await provider.listScheduledWakeups()).map(wakeup => wakeup.wakeupId)).toEqual(["w1"]);
+    await stopHook(query, { session_crons: [oneShot] });
+    query.push(result(session.id, "res2"));
+    await waitFor(() => events.filter(event => event.eventType === "turn.scheduled").length === 2);
+    expect(await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" })).toEqual({ continue: true });
+    stop();
+    await provider.dispose();
+  });
+
+  test("release is refused while a wakeup that passed its hook has not yet started its turn", async () => {
+    const { provider, events, stop, session, query } = await scheduled([oneShot]);
+    await promptHook(query, { prompt: oneShot.prompt, prompt_id: "fired-1" });
+    await expect(provider.release(session.id)).rejects.toBeInstanceOf(ReleaseUnavailableError);
+    // The turn runs to its Stop and the one-shot reads fired, not cancelled.
+    query.push({ type: "system", subtype: "init", uuid: "i2", session_id: session.id, model: "claude-haiku-4-5-20251001" });
+    await stopHook(query, { session_crons: [] });
+    query.push(result(session.id, "res2"));
+    await waitFor(() => query.returned);
+    expect(rows(events).at(-1)).toEqual(expect.objectContaining({ id: "wakeup:w1", status: "fired", firedTurnId: "message:wakeup:fired-1" }));
+    stop();
+    await provider.dispose();
+  });
+
   test("of two pending one-shots sharing a prompt, the fire goes to the one due first", async () => {
     // Created first but due later (a fixed time) vs. due within the minute.
     const later = { id: "wa", schedule: "3 20 * * *", recurring: false, prompt: "WAKEUP same words" };

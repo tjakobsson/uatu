@@ -2386,13 +2386,32 @@ export class ClaudeProvider implements ChatProvider {
    * No count cap: a record dropped while its cron can still be rebuilt
    * would let a resume run a wakeup the user cancelled. The set shrinks
    * only when the transcript stops yielding the cron (listPausedWakeups).
+   * A failed write takes the records back out: a cancel reported as failed
+   * must not go on blocking and hiding the wakeup in this process while a
+   * restart would bring it back. Resolves to the same undo, for a caller
+   * that finds after the write that it cannot go through with the cancel.
    */
-  private async recordCancelled(sessionId: string, wakeups: Array<[string, string]>): Promise<void> {
-    if (wakeups.length === 0) return;
+  private async recordCancelled(sessionId: string, wakeups: Array<[string, string]>): Promise<() => void> {
+    if (wakeups.length === 0) return () => {};
     const cancelled = this.cancelledWakeups.get(sessionId) ?? new Map<string, string>();
+    const prior = new Map(wakeups.map(([wakeupId]) => [wakeupId, cancelled.get(wakeupId)]));
     for (const [wakeupId, prompt] of wakeups) cancelled.set(wakeupId, prompt);
     this.cancelledWakeups.set(sessionId, cancelled);
-    await this.queuePersist(this.durableSnapshot());
+    const undo = () => {
+      const current = this.cancelledWakeups.get(sessionId);
+      if (!current) return;
+      for (const [wakeupId, previous] of prior) {
+        if (previous === undefined) current.delete(wakeupId); else current.set(wakeupId, previous);
+      }
+      if (current.size === 0) this.cancelledWakeups.delete(sessionId);
+    };
+    try {
+      await this.queuePersist(this.durableSnapshot());
+    } catch (error) {
+      undo();
+      throw error;
+    }
+    return undo;
   }
 
   /**
@@ -2404,7 +2423,9 @@ export class ClaudeProvider implements ChatProvider {
   async release(sessionId: string): Promise<void> {
     const session = this.live.get(sessionId);
     if (!session) return;
-    if (session.pendingTurns > 0 || session.queuedTurns > 0 || session.unpromptedTurn) {
+    // A wakeup attributed at its hook is a turn already, before its init.
+    const turning = () => session.pendingTurns > 0 || session.queuedTurns > 0 || session.unpromptedTurn || session.firedSinceStop.size > 0;
+    if (turning()) {
       throw new ReleaseUnavailableError("a turn is running; release is possible once it ends");
     }
     if (session.backgroundTasks.size > 0) {
@@ -2412,8 +2433,19 @@ export class ClaudeProvider implements ChatProvider {
     }
     // Recorded before the process goes: the next resume rebuilds every
     // cron, and each must already be blocked when it does (D12).
-    await this.recordCancelled(sessionId, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
+    const undo = await this.recordCancelled(sessionId, [...session.wakeups].map(([wakeupId, wakeup]) => [wakeupId, wakeup.prompt] as [string, string]));
     if (this.live.get(sessionId) !== session) return;
+    // A wakeup that passed its hook while the write ran has started a turn:
+    // retiring now would kill it under its own header. The release is
+    // refused as it would have been a moment later, and nothing it recorded
+    // stays cancelled.
+    if (turning() || session.backgroundTasks.size > 0) {
+      undo();
+      await this.queuePersist(this.durableSnapshot()).catch(() => undefined);
+      throw new ReleaseUnavailableError(session.backgroundTasks.size > 0
+        ? "background work is running; stop it before releasing the session"
+        : "a turn is running; release is possible once it ends");
+    }
     const cancelled = this.settleWakeups(session, "cancelled");
     this.emit(sessionId, { updates: [...cancelled, { kind: "status", status: "idle" }], outcome: "handled", eventType: "session.released" });
     await this.retireSession(session);
