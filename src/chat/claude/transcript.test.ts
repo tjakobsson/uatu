@@ -282,6 +282,28 @@ describe("paused crons derived from a transcript (claude-scheduled-wakeups D11)"
     expect(transcriptCrons(beforeFire, createdAt(entries) + 1_000).alive).toEqual([expect.objectContaining({ prompt: "ONCE reply with exactly the word once", recurring: false })]);
   });
 
+  test("one fire spends one one-shot: a later same-prompt one-shot stays alive", async () => {
+    const records = spikeRevival.sessions.oneshot as Array<Record<string, unknown>>;
+    const call = records.findIndex(record => JSON.stringify(record).includes('"name":"CronCreate"'));
+    const created = records.findIndex(record => (record.toolUseResult as { id?: unknown } | undefined)?.id === "60ebe6d1");
+    // A second one-shot with the very same prompt, due a minute after the
+    // first in any zone: the fire spends the first, and the second's time
+    // is still ahead when the transcript is read.
+    const twin = (record: Record<string, unknown>) => JSON.parse(JSON.stringify(record)
+      .replaceAll("toolu_01S3i1Bg9KFJvAGNaeQ1BRih", "toolu_twin")
+      .replaceAll("60ebe6d1", "7a1b2c3d")
+      .replaceAll("34 21 24 9 *", "35 21 24 9 *")) as Record<string, unknown>;
+    const withTwin = [...records.slice(0, created + 1), twin(records[call]!), twin(records[created]!), ...records.slice(created + 1)];
+    const { projectDir } = fixture();
+    const file = path.join(projectDir, "twin.jsonl");
+    writeFileSync(file, withTwin.map(record => line(record)).join(""));
+    const { entries } = await readSessionTranscript(file);
+    const firedAt = entries.find(entry => entry.turnOrigin === "scheduled")!.timestamp;
+    const { alive, created: ids } = transcriptCrons(entries, firedAt + 1_000);
+    expect([...ids]).toEqual(["60ebe6d1", "7a1b2c3d"]);
+    expect(alive).toEqual([expect.objectContaining({ id: "7a1b2c3d", prompt: "ONCE reply with exactly the word once", recurring: false })]);
+  });
+
   test("a one-shot whose time passed with no process is gone (the CLI drops it)", async () => {
     const entries = await entriesOf("missed");
     const at = createdAt(entries);

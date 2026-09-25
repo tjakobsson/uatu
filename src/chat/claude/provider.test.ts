@@ -4220,6 +4220,38 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
     });
   });
 
+  test("the hooks wait for the resumed session's transcript read: a first Stop before it still settles an unrestored cron", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-prime-race-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    const records = spikeRevival.sessions.missed.map(record => ({ ...record, cwd: workspace })) as Array<Record<string, unknown>>;
+    writeFileSync(path.join(claudeProjectDir(workspace, configDir), "resumable.jsonl"), records.map(record => JSON.stringify(record)).join("\n") + "\n");
+    const created = Date.parse(String(records.find(record => (record.toolUseResult as { id?: unknown } | undefined)?.id)!.timestamp));
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace, stateFile: path.join(workspace, ".uatu-test-state.json"), executable: "/usr/local/bin/claude", configDir, catalogProbe: false,
+      now: () => created + 60_000,
+      queryFactory: input => { const next = new FakeQuery(input); queries.push(next); return next; },
+    });
+    const { events, stop } = collect(provider);
+    const [paused] = await provider.listPausedWakeups("resumable");
+    expect(paused).toBeDefined();
+    await provider.prompt("resumable", { id: "r1", text: "hello", delivery: "queue" });
+    const query = queries[0]!;
+    // No pause for the read: the CLI's hooks arrive at once.
+    await Promise.all([
+      promptHook(query, { prompt: "hello", prompt_id: "typed-1" }),
+      stopHook(query, { session_crons: [] }),
+    ]);
+    query.push(result("resumable", "res1"));
+    await waitFor(() => events.some(event => event.eventType === "wakeups.reconciled"));
+    expect(rows(events).at(-1)).toEqual(expect.objectContaining({ id: paused!.id, status: "lost" }));
+    stop();
+    await provider.dispose();
+  });
+
   test("a clipped cron prompt still matches the whole prompt it fires", () => {
     expect(wakeupPromptMatches("same", "same")).toBe(true);
     expect(wakeupPromptMatches("check the build and… [+120 chars]", "check the build and then the deploy")).toBe(true);

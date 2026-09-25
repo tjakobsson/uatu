@@ -279,6 +279,11 @@ type LiveSession = {
   // did not in fact restore.
   revived: Map<string, TranscriptCron>;
   revivedSettled: boolean;
+  // Settles once that read is done (or was never needed). The Stop and
+  // UserPromptSubmit hooks wait on it: a restored cron can fire, or the
+  // first Stop arrive, before a large transcript is read, and either would
+  // otherwise act on an empty `revived`.
+  revivedReady: Promise<void>;
   // This query's own running totals as last read: folded into the
   // conversation's ledger when the query retires, since a resumed query
   // starts its counters fresh (SDK: "resumed sessions start fresh").
@@ -1129,7 +1134,7 @@ export class ClaudeProvider implements ChatProvider {
     let owner: LiveSession | undefined;
     const observe = (handler: (session: LiveSession, input: Record<string, unknown>) => void) => async (input: Record<string, unknown>) => {
       // Observers only: a hook that throws or blocks would change the turn.
-      try { if (owner) handler(owner, input); } catch { /* observation is best-effort */ }
+      try { if (owner) { await owner.revivedReady; handler(owner, input); } } catch { /* observation is best-effort */ }
       return { continue: true as const };
     };
     const query = this.queryFactory({
@@ -1166,6 +1171,7 @@ export class ClaudeProvider implements ChatProvider {
           Stop: [{ hooks: [observe((session, input) => this.trackWakeups(session, input))] }],
           UserPromptSubmit: [{ hooks: [async (input: Record<string, unknown>) => {
             try {
+              if (owner) await owner.revivedReady;
               if (owner && this.blocksCancelledFire(owner, input)) return { decision: "block" as const, reason: CANCELLED_FIRE_REASON };
               if (owner) this.attributeWakeupTurn(owner, input);
             } catch { /* observation is best-effort */ }
@@ -1174,7 +1180,7 @@ export class ClaudeProvider implements ChatProvider {
         },
       },
     });
-    const session: LiveSession = { id: sessionId, notificationLifecycle: new ClaudeNotificationLifecycle(), queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), wakeups: new Map(), firedSinceStop: new Map(), cronIds: new Set(), selfPacedPrompts: new Set(), blockedFires: 0, revived: new Map(), revivedSettled: false, unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0 };
+    const session: LiveSession = { id: sessionId, notificationLifecycle: new ClaudeNotificationLifecycle(), queue, query, reader: Promise.resolve(), pendingTurns: 0, backgroundTasks: new Map(), wakeups: new Map(), firedSinceStop: new Map(), cronIds: new Set(), selfPacedPrompts: new Set(), blockedFires: 0, revived: new Map(), revivedSettled: false, revivedReady: Promise.resolve(), unpromptedTurn: false, resultsSeen: 0, queuedTurns: 0, usageReads: 0, usageSeq: 0, usageAdopted: 0 };
     owner = session;
     session.reader = this.readSession(session);
     this.live.set(sessionId, session);
@@ -1192,7 +1198,7 @@ export class ClaudeProvider implements ChatProvider {
     // models, skills appear mid-session — so every session start re-reads
     // both (captureModels also refreshes the command inventory).
     void this.captureModels(query);
-    if (hasTranscript) void this.primeRevivedCrons(session, nativeId);
+    if (hasTranscript) session.revivedReady = this.primeRevivedCrons(session, nativeId);
     return session;
   }
 

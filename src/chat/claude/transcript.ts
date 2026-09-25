@@ -265,11 +265,26 @@ export function transcriptCrons(entries: readonly TranscriptEntry[], now: number
       }
     }
   }
+  // Each recorded fire used up one one-shot, not every one-shot sharing its
+  // prompt: the one it was, among those created before it and not yet
+  // spent, is the one whose time had come — the earliest due by then, or,
+  // if none was due yet (a fire a little early), the earliest due at all.
+  const fired = new Set<string>();
+  const oneShots = [...crons.values()]
+    .filter(cron => !cron.recurring && !deleted.has(cron.id))
+    .map(cron => ({ cron, fireAt: nextCronFire(cron.cron, cron.createdAt) ?? Infinity }));
+  for (const record of firedPrompts) {
+    const candidates = oneShots
+      .filter(({ cron }) => !fired.has(cron.id) && cron.prompt === record.text && cron.createdAt <= record.at)
+      .sort((left, right) => left.fireAt - right.fireAt || left.cron.createdAt - right.cron.createdAt);
+    const spent = candidates.find(({ fireAt }) => fireAt <= record.at) ?? candidates[0];
+    if (spent) fired.add(spent.cron.id);
+  }
   const alive = [...crons.values()].filter(cron => {
     if (deleted.has(cron.id)) return false;
     if (now - cron.createdAt >= CRON_EXPIRY_MS) return false;
     if (cron.recurring) return true;
-    if (firedPrompts.some(fired => fired.text === cron.prompt && fired.at >= cron.createdAt)) return false;
+    if (fired.has(cron.id)) return false;
     // Still ahead, or unreadable (kept: the next session's Stop is the truth).
     const fireAt = nextCronFire(cron.cron, cron.createdAt);
     return fireAt === undefined || fireAt > now;
