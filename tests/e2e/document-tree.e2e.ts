@@ -107,15 +107,17 @@ test("starting with follow on and a nested file as default reveals its ancestors
   const fresh = new Date(Date.now() + 30_000);
 
   // Reset first (this also bumps README's mtime by 10s), then make setup.md
-  // strictly newer. Wait for the indexed mtime, not a watcher-sized sleep,
-  // before the SPA asks for initial state.
+  // strictly newer. The SPA takes its default from the server at boot, so
+  // wait until the server itself names setup.md the default document — not
+  // a watcher-sized sleep, which loses to a slow refresh under load and
+  // leaves the page booting onto README.
   await request.post("/__e2e/reset", { data: { follow: true } });
   await fs.utimes(workspacePath("guides", "setup.md"), fresh, fresh);
   await expect.poll(async () => {
     const state = await request.get("/api/state").then(response => response.json());
-    const setup = state.roots.flatMap((root: any) => root.docs).find((doc: any) => doc.relativePath === "guides/setup.md");
-    return setup && Math.abs(setup.mtimeMs - fresh.getTime()) < 2;
-  }).toBe(true);
+    const docs = state.roots.flatMap((root: any) => root.docs);
+    return docs.find((doc: any) => doc.id === state.defaultDocumentId)?.relativePath;
+  }).toBe("guides/setup.md");
 
   await page.goto("/");
   await page.evaluate(() => {
@@ -128,10 +130,9 @@ test("starting with follow on and a nested file as default reveals its ancestors
   await page.reload();
 
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  // Allow up to 15s for the watcher to observe the utimes change and the SSE
-  // refresh to land on the SPA. The default expect timeout (10s) is enough
-  // most of the time but can race under load.
-  await expect(page.locator("#preview-path")).toHaveText("guides/setup.md", { timeout: 15_000 });
+  // The server already reported setup.md as the default before the page
+  // loaded, so this is the boot selection, not a watcher refresh landing.
+  await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
 
   // The tree should have revealed `guides/` on first paint and marked
   // `guides/setup.md` as selected.
