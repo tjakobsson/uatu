@@ -13,6 +13,7 @@
     "bench:render": "bun run scripts/bench-render.ts",
     "bench:chat": "bun run scripts/bench-chat.ts",
     "test": "bun test",
+    "test:ci": "bun test --parallel=4 --timings=tests/unit-timings.json",
     "typecheck": "tsc --noEmit",
     "check:licenses": "bun run src/shared/license-check.ts",
     "coverage:agents": "bun run scripts/agent-coverage.ts",

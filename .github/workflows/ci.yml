@@ -166,7 +166,10 @@ jobs:
         run: bun audit --audit-level=moderate
 
       - name: Run unit and integration tests
-        run: bun test
+        # Four worker processes, one per runner core, each running whole test
+        # files in isolation; the committed timings start the slowest files
+        # first. Refresh them with `bun run test:ci --update-timings`.
+        run: bun run test:ci
 
       - name: Run license audit
         run: bun run check:licenses
