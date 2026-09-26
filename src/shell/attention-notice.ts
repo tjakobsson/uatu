@@ -88,12 +88,12 @@ export function attentionNoticeHref(workspaceId: string): string {
 
 /**
  * Renders the stack into `host` (created on first use, appended to <body>). Rebuilt on every change: at most one entry
- * per workspace, so the stack is small. `label` names a workspace as the switcher does; `open` navigates.
+ * per workspace, so the stack is small. `label` names a workspace as the switcher does.
  */
 export function renderAttentionNotices(
   doc: Document,
   notices: readonly AttentionNotice[],
-  options: { label: (workspaceId: string) => string; open: (workspaceId: string) => void; dismiss: (workspaceId: string) => void },
+  options: { label: (workspaceId: string) => string; dismiss: (workspaceId: string) => void },
 ): void {
   let host = doc.getElementById("attention-notices");
   if (!host) {
@@ -123,12 +123,10 @@ export function renderAttentionNotices(
     open.className = "attention-notice-open";
     open.href = attentionNoticeHref(notice.workspaceId);
     open.textContent = "Open";
-    open.addEventListener("click", event => {
-      // Modified clicks keep the anchor's open-elsewhere behaviour.
-      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      event.preventDefault();
-      options.open(notice.workspaceId);
-    });
+    // The browser navigates, here or elsewhere as the click asks; either way
+    // the user has acted on the notice. Middle-click fires only `auxclick`.
+    open.addEventListener("click", () => options.dismiss(notice.workspaceId));
+    open.addEventListener("auxclick", event => { if (event.button === 1) options.dismiss(notice.workspaceId); });
     const dismiss = doc.createElement("button");
     dismiss.type = "button";
     dismiss.className = "attention-notice-dismiss";

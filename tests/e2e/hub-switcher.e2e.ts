@@ -385,7 +385,7 @@ test.describe("in-app notice for questions elsewhere", () => {
     } finally { await answer(question); }
   });
 
-  test("the notice clears when the question is answered elsewhere, and Dismiss removes it", async ({ hub, hubContext }) => {
+  test("the notice clears when the question is answered elsewhere, and Dismiss or opening it elsewhere removes it", async ({ hub, hubContext }) => {
     const page = await openSessionTab(hubContext, hub.workspaces[0]!);
     await settled(page);
     const first = await ask(hub, "beta", "Answered elsewhere", "permission:notice-answered");
@@ -402,6 +402,21 @@ test.describe("in-app notice for questions elsewhere", () => {
       // Still awaiting: the badge carries it, the notice stays gone.
       await expect(page.locator("#hub-activity-badge")).toHaveClass(/is-awaiting/);
     } finally { await answer(second); }
+
+    // Opening it elsewhere (a modified click) leaves this page where it is
+    // and still clears the notice.
+    await settled(page);
+    const third = await ask(hub, "beta", "Opened in a new tab", "permission:notice-new-tab");
+    try {
+      await expect(notice(page, "beta")).toBeVisible();
+      const opened = hubContext.waitForEvent("page");
+      await notice(page, "beta").getByRole("link", { name: "Open" }).click({ modifiers: ["ControlOrMeta"] });
+      const elsewhere = await opened;
+      await expect(elsewhere).toHaveURL(/\/s\/beta\//);
+      await expect(page).toHaveURL(/\/s\/alpha\//);
+      await expect(notice(page, "beta")).toHaveCount(0);
+      await elsewhere.close();
+    } finally { await answer(third); }
   });
 
   test("a workspace already waiting on load, the served workspace, and a finished turn raise nothing", async ({ hub, hubContext }) => {

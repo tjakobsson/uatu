@@ -29,7 +29,7 @@
 import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "../chat/surface-visibility";
 import { appBasePath, appUrl, workspaceIdFromBasePath } from "../shared/app-url";
 import type { WorkspaceActivity } from "../shared/live-protocol";
-import { AttentionNotices, attentionNoticeHref, renderAttentionNotices } from "./attention-notice";
+import { AttentionNotices, renderAttentionNotices } from "./attention-notice";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
 import { openWorktreeFork, worktreeForkIcon, worktreeProvenanceLabel } from "./worktree-dialog";
@@ -512,10 +512,6 @@ export function initHubNav(): void {
     label: ws => {
       const workspace = latest.find(entry => entry.id === ws);
       return workspace ? workspaceMenuLabel(workspace) : ws;
-    },
-    open: ws => {
-      attention.dismiss(ws);
-      hubNavigation(attentionNoticeHref(ws));
     },
     dismiss: ws => attention.dismiss(ws),
   });
