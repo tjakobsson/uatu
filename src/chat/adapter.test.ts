@@ -3476,6 +3476,30 @@ describe("pending permission recovery", () => {
     expect(rows.map(row => row.usage?.costUsd)).toEqual([expect.closeTo(0.53, 10), 0.02]);
   });
 
+  // Only the prompt that creates the child carries the preamble. A message
+  // typed into the child during the first task that happens to end with the
+  // next task's prompt is still the first task's.
+  test("a 2.x child message that ends with a later task's prompt does not open that task early", async () => {
+    const subagentRow = (part: string, created: number, gave: string, resumed: boolean) => ({
+      id: `launch_${part}`, type: "assistant", time: { created },
+      content: [{ id: part, type: "tool", tool: "subagent", callID: part, state: {
+        status: "completed", input: { agent: "general", description: part, prompt: gave, ...(resumed ? { sessionID: "child" } : {}) },
+        metadata: { sessionID: "child", status: "completed" }, output: "done",
+      } }],
+    });
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [subagentRow("prt_t1", 1, "Audit the renderer.", false), subagentRow("prt_t2", 9, "Run tests", true)] });
+    const listMessages = provider.readMessages.bind(provider);
+    provider.readMessages = async (sessionId, options) => (sessionId === "child" ? { items: [
+      asked("p1", 2, "You are a subagent spawned by another session.\nAudit the renderer."), answered("m1", 3, "p1", 1_000, 0.1),
+      asked("pu", 4, "Before you finish:\nRun tests"), answered("mu", 5, "pu", 2_000, 0.2),
+      asked("p2", 10, "Run tests"), answered("m2", 11, "p2", 300, 0.03),
+    ] as never[] } : listMessages(sessionId, options));
+    const rows = rowsOf((await new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" }).history("parent")).items);
+    expect(rows.map(row => row.usage?.input)).toEqual([3_000, 300]);
+  });
+
   test("live, a compaction between two tasks stays with the first as the second task's row and prompt arrive", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
