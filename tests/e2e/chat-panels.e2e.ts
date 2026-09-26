@@ -277,13 +277,19 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Open A");
 
     await control(request, { action: "failOlderHistory" });
+    const staleOlder = page.waitForRequest(candidate => new URL(candidate.url()).searchParams.get("cursor") === "older");
     await page.locator("#chat-drilldown-older").click();
+    const staleOlderRequest = await staleOlder;
     const nested = page.locator('[data-chat-item-id="tool:nested"]');
     await nested.locator(":scope > summary").click();
     await nested.getByRole("button", { name: "Open transcript" }).click();
     await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Open B");
     await expect(page.locator("#chat-drilldown-items")).toContainText("child B findings");
-    await page.waitForTimeout(350);
+    // The stale page read has settled — refused, or aborted by the switch —
+    // and the page has had a frame to handle it, before its error's absence
+    // means anything.
+    await (await staleOlderRequest.response())?.finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve(null))));
     await expect(page.locator("#chat-drilldown-state")).not.toContainText("older transcript unavailable");
     await expect(page.locator("#chat-drilldown-older")).toBeEnabled();
     await page.locator("#chat-drilldown-older").click();
