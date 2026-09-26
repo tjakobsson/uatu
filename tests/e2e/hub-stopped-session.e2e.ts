@@ -15,7 +15,7 @@ import type { BrowserContext, Page, TestInfo } from "@playwright/test";
 
 import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot } from "./evidence";
-import { childChatControl, expect, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
+import { childChatControl, expect, openHubMenu, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
 import { treeRow } from "./tree-helpers";
 
 test.use({ hubWorkspaces: ["alpha", "beta"] });
@@ -162,9 +162,8 @@ test.describe("desktop", () => {
     await stopSession(hub, page, "alpha");
     await expectStopped(page);
 
-    await page.locator("#hub-toggle").click();
+    await openHubMenu(page);
     const menu = page.locator("#hub-menu");
-    await expect(menu).toBeVisible();
     const current = menu.locator('.hub-menu-item[href="/s/alpha/"]');
     await expect(current).toHaveAttribute("aria-current", "true");
     await expect(current.locator(".hub-menu-state")).toHaveText("stopped");

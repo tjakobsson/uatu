@@ -88,6 +88,10 @@ describe("session directory validation", () => {
     const foreign = await tempDirectory();
     const missing = requireWorkspaceSession("missing", workspace, async () => null);
     const outside = requireWorkspaceSession("foreign", workspace, async () => ({ id: "foreign", directory: foreign }));
+    // Both are awaited below, one after the other; mark them handled now so the
+    // second cannot settle first and be reported as an unhandled rejection.
+    missing.catch(() => undefined);
+    outside.catch(() => undefined);
 
     await expect(missing).rejects.toBeInstanceOf(ConversationNotFoundError);
     await expect(outside).rejects.toBeInstanceOf(ConversationNotFoundError);

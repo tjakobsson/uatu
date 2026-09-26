@@ -784,7 +784,10 @@ describe("filtered provider event pump", () => {
   test("coalesces streamed deltas into a single published event per window", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
-    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 5 });
+    // The window is real time; it has to outlast the pump's handling of three queued deltas on a loaded machine, or
+    // they straddle two windows.
+    const windowMs = 100;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: windowMs });
     const pump = adapter.startEventPump();
     const { events } = await adapter.subscribe("local");
     const received: ChatEvent[] = [];
@@ -793,7 +796,9 @@ describe("filtered provider event pump", () => {
     for (const delta of ["He", "ll", "o"]) {
       provider.eventQueue.push({ id: `e-${delta}`, type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta } });
     }
-    await Bun.sleep(40);
+    for (let i = 0; i < 200 && received.length === 0; i++) await Bun.sleep(10);
+    // A second window passes, so a split publication would have arrived.
+    await Bun.sleep(windowMs * 2);
     await adapter.stopEventPump();
     await pump;
 
@@ -3326,9 +3331,13 @@ describe("pending permission recovery", () => {
     let releaseGrandchild = () => {};
     const gate = new Promise<void>(resolve => { releaseGrandchild = resolve; });
     let grandchildReads = 0;
+    let childReads = 0;
     const listMessages = provider.readMessages.bind(provider);
     provider.readMessages = async (sessionId, options) => {
-      if (sessionId === "child") return { items: [launcher("launch_grandchild", "grandchild"), priced("child_msg", 0.5)] as never[] };
+      if (sessionId === "child") {
+        childReads += 1;
+        return { items: [launcher("launch_grandchild", "grandchild"), priced("child_msg", 0.5)] as never[] };
+      }
       if (sessionId === "grandchild") {
         grandchildReads += 1;
         await gate;
@@ -3342,6 +3351,10 @@ describe("pending permission recovery", () => {
     const childOpen = adapter.history("child");
     while (grandchildReads === 0) await Bun.sleep(1);
     const parentOpen = adapter.history("parent");
+    // The top-level open has read its way down to the child's transcript (the
+    // second read of it) before the grandchild is released; waiting on that,
+    // rather than on a fixed delay, keeps a loaded machine from releasing first.
+    while (childReads < 2) await Bun.sleep(1);
     await Bun.sleep(5);
     releaseGrandchild();
     await childOpen;

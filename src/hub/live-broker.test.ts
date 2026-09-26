@@ -5,6 +5,7 @@ import { MetricsRegistry } from "../debug/metrics";
 import { upstreamActiveGauge, upstreamCounter } from "../debug/stream-metrics";
 import type { LiveEnvelope } from "../shared/live-protocol";
 import {
+  createRepeatFoldingDiagnosticSink,
   LiveBroker,
   setLiveUpstreamDiagnostics,
   type LiveSessionChange,
@@ -471,10 +472,17 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
 
     const behind = sink();
     live.subscribe(behind, "ws", { topic: "inventory", cursor: inventoryTicks[0]!.cursor });
-    live.subscribe(behind, "ws", { topic: "inventory" });
-    await waitFor(() => behind.envelopes.length === 3, "one tick + two ready");
-    expect(behind.envelopes.filter(e => e.event.kind === "data")).toHaveLength(1);
-    expect(behind.envelopes.find(e => e.event.kind === "data")!.cursor).toBe(inventoryHead);
+    await waitFor(() => behind.envelopes.length === 2, "one tick + ready");
+    expect(kinds(behind.envelopes)).toEqual(["data", "ready"]);
+    expect(behind.envelopes[0]!.cursor).toBe(inventoryHead);
+
+    // A first attach presents no cursor: it is owed the opening tick the
+    // child gave this upstream's first subscriber long ago.
+    const joiner = sink();
+    live.subscribe(joiner, "ws", { topic: "inventory" });
+    await waitFor(() => joiner.envelopes.length === 2, "opening tick + ready");
+    expect(kinds(joiner.envelopes)).toEqual(["data", "ready"]);
+    expect(joiner.envelopes[0]!.cursor).toBe(inventoryHead);
 
     const unplaceable = sink();
     live.subscribe(unplaceable, "ws", { topic: "document", key: "", cursor: "from-another-hub-life.9" });
@@ -482,6 +490,34 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     await waitFor(() => unplaceable.envelopes.length === 4, "snapshot, tick, ready ×2");
     expect(unplaceable.envelopes.find(e => e.topic === "document")!.event).toEqual({ kind: "data", data: { generatedAt: 1 } });
     expect(unplaceable.envelopes.find(e => e.topic === "inventory")!.event).toEqual({ kind: "data", data: { type: "conversation.inventory" } });
+  });
+
+  test("inventory: a page attaching to a lingering upstream gets its own opening tick, a fresh upstream's first page only the child's", async () => {
+    const child = fakeSource();
+    const live = broker(child.source, { lingerMs: 500 });
+    const before = sink();
+    const first = live.subscribe(before, "ws", { topic: "inventory" });
+    await waitFor(() => child.opened.length === 1, "one upstream");
+    child.opened[0]!.push(": open\n\n");
+    // The child's route opens every subscription with a reconcile tick.
+    child.opened[0]!.push('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+    await waitFor(() => before.envelopes.length === 2, "ready + the child's opening tick");
+    // Fresh upstream: the child's own tick is the only one — no duplicate.
+    expect(kinds(before.envelopes)).toEqual(["ready", "data"]);
+
+    // A reload: the page leaves, the upstream lingers, the reloaded page
+    // read its baseline inventory and now attaches without a cursor. A
+    // conversation created between that read and this attach is announced
+    // by nothing else.
+    first.detach();
+    const reloaded = sink();
+    live.subscribe(reloaded, "ws", { topic: "inventory" });
+    await waitFor(() => reloaded.envelopes.length === 2, "opening tick + ready");
+    expect(reloaded.envelopes.map(envelope => envelope.event)).toEqual([
+      { kind: "data", data: { type: "conversation.inventory" } },
+      { kind: "ready" },
+    ]);
+    expect(child.opened).toHaveLength(1);
   });
 
   test("the conversation buffer is byte-bounded", async () => {
@@ -500,6 +536,87 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     await waitFor(() => child.opened.length === 2, "catch-up fetch");
     child.opened[1]!.end();
     await waitFor(() => late.envelopes.some(e => e.event.kind === "resync"), "resync from a failed catch-up");
+  });
+});
+
+describe("failure log repeat folding", () => {
+  function folding(windowMs = 60_000) {
+    const lines: string[] = [];
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const log = createRepeatFoldingDiagnosticSink({
+      log: line => lines.push(line),
+      windowMs,
+      setTimer: (fn, ms) => timers.push({ fn, ms }),
+    });
+    const fire = () => {
+      for (const timer of timers.splice(0)) timer.fn();
+    };
+    return { lines, timers, log, fire };
+  }
+
+  test("the first failure of a topic and status logs at once, exactly as before", () => {
+    const { lines, log } = folding();
+    log({ topic: "document", status: "unreachable" });
+    expect(lines).toEqual(["uatu hub: live upstream document subscription failed (unreachable)"]);
+  });
+
+  test("repeats within the window are counted and summarized in one line when it closes", () => {
+    const { lines, timers, log, fire } = folding();
+    log({ topic: "document", status: "unreachable" });
+    log({ topic: "document", status: "unreachable" });
+    log({ topic: "document", status: "unreachable" });
+    log({ topic: "document", status: "unreachable" });
+    expect(lines).toHaveLength(1);
+    expect(timers.map(t => t.ms)).toEqual([60_000]);
+    fire();
+    expect(lines).toEqual([
+      "uatu hub: live upstream document subscription failed (unreachable)",
+      "uatu hub: live upstream document subscription failed (unreachable) 3 more times in the last 60s",
+    ]);
+  });
+
+  test("a window without repeats closes silently, and the next failure logs at once again", () => {
+    const { lines, log, fire } = folding();
+    log({ topic: "inventory", status: "unreachable" });
+    fire();
+    expect(lines).toHaveLength(1);
+    log({ topic: "inventory", status: "unreachable" });
+    expect(lines).toEqual([
+      "uatu hub: live upstream inventory subscription failed (unreachable)",
+      "uatu hub: live upstream inventory subscription failed (unreachable)",
+    ]);
+  });
+
+  test("each topic and status pair folds on its own", () => {
+    const { lines, log, fire } = folding();
+    log({ topic: "document", status: "unreachable" });
+    log({ topic: "conversation", status: "unreachable" });
+    log({ topic: "document", status: "5xx" });
+    log({ topic: "document", status: "unreachable" });
+    expect(lines).toEqual([
+      "uatu hub: live upstream document subscription failed (unreachable)",
+      "uatu hub: live upstream conversation subscription failed (unreachable)",
+      "uatu hub: live upstream document subscription failed (5xx)",
+    ]);
+    fire();
+    expect(lines.slice(3)).toEqual([
+      "uatu hub: live upstream document subscription failed (unreachable) 1 more time in the last 60s",
+    ]);
+  });
+
+  test("folding the log leaves the broker reporting every failure episode to the sink", async () => {
+    const child = fakeSource({ refuse: () => new Error("connection refused"), workspaces: ["a", "b"], running: new Set(["a", "b"]) });
+    const records: LiveUpstreamDiagnostic[] = [];
+    setLiveUpstreamDiagnostics(record => records.push(record));
+    const live = broker(child.source, { retryMinMs: 5_000, retryMaxMs: 5_000 });
+    const sinks = [sink(), sink()];
+    live.subscribe(sinks[0]!, "a", { topic: "document", key: "" });
+    live.subscribe(sinks[1]!, "b", { topic: "document", key: "" });
+    await waitFor(() => sinks.every(s => s.envelopes.length === 1), "unavailable on each");
+    expect(records).toEqual([
+      { topic: "document", status: "unreachable" },
+      { topic: "document", status: "unreachable" },
+    ]);
   });
 });
 

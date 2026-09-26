@@ -1,6 +1,6 @@
 import { expect, test } from "./fixtures";
 
-import { clickTreeFile, treeRow } from "./tree-helpers";
+import { clickTreeFile, openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -79,7 +79,7 @@ test("clicking a Table of Contents link in the AsciiDoc cheat sheet navigates to
   // (sanitize prefixes heading ids; rewriteInPageAnchors mirrors that on the
   // hrefs), and an in-page anchor click handler in app.ts intercepts the click
   // and scrolls the matching heading into view directly.
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
 
   // Pick a section near the bottom of the document so the click triggers
@@ -158,7 +158,7 @@ test("AsciiDoc cross-document links render with the original .adoc extension (no
   // `href` verbatim so the in-app click handler can resolve it to a known
   // document. Drives the permanent `testdata/watch-docs/links-demo.adoc`
   // fixture.
-  await treeRow(page, "links-demo.adoc").click();
+  await openTreeFile(page, "links-demo.adoc");
   await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cross-Document Links");
 
   // xref:, <<>>, and link: macros all targeting the existing cheat sheet —
@@ -178,7 +178,7 @@ test("clicking an AsciiDoc cross-document link switches the preview in-app (no d
   // raw bytes (download or plain-text view). The in-app click handler must
   // intercept the click and switch the preview through the same code path
   // the sidebar uses.
-  await treeRow(page, "links-demo.adoc").click();
+  await openTreeFile(page, "links-demo.adoc");
   await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cross-Document Links");
 
   await page.locator('#preview a[href="asciidoc-cheatsheet.adoc"]').first().click();
@@ -199,7 +199,7 @@ test("clicking an AsciiDoc cross-document link switches the preview in-app (no d
 test("clicking an AsciiDoc cross-document link into a subdirectory switches the preview", async ({ page }) => {
   // Same handler, exercised through `xref:guides/notes.adoc[…]` so the
   // resolved URL has a directory segment in it.
-  await treeRow(page, "links-demo.adoc").click();
+  await openTreeFile(page, "links-demo.adoc");
   await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cross-Document Links");
 
   await page.locator('#preview a[href="guides/notes.adoc"]').click();
@@ -214,7 +214,7 @@ test("clicking a deep TOC entry positions the heading clear of the sticky previe
   // `scrollIntoView` aligned the wrapper to the viewport top — the inner
   // heading then sat *behind* the frosted-glass sticky header. Adding
   // `scroll-margin-top` to the `.sectN[id]` selectors clears the header.
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
 
   const tocLink = page.locator("#preview .toc a[href='#user-content-_unordered']");
@@ -246,7 +246,7 @@ test("clicking a TOC entry pushes history; browser back returns to the same docu
   // history entry, so the user's previous navigation (probably a different
   // document) stayed at the top of the back stack — pressing back jumped
   // them out of the doc instead of returning to the top.
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
   expect(new URL(page.url()).pathname).toBe("/asciidoc-cheatsheet.adoc");
   expect(new URL(page.url()).hash).toBe("");
@@ -283,7 +283,7 @@ test("an intra-document cross-reference to a non-heading block lands the block c
   // on the scroll container, which covers every anchored target type. Drives
   // the `testdata/watch-docs/xref-demo.adoc` fixture, whose `<<metrics-table>>`
   // cross-reference targets a `[#metrics-table]` table anchor.
-  await treeRow(page, "xref-demo.adoc").click();
+  await openTreeFile(page, "xref-demo.adoc");
   await expect(page.locator("#preview-title")).toHaveText("Cross-Reference Demo");
 
   // The inline `<<metrics-table>>` xref renders as a same-document fragment
@@ -318,7 +318,7 @@ test("an inter-document cross-reference to a non-heading block lands the block c
   // in a deep section of the sibling doc, so this covers the post-load scroll
   // path against the element type the old heading-only offset failed to clear.
   // Drives `xref-demo.adoc` → `xref-targets.adoc#deep-target`.
-  await treeRow(page, "xref-demo.adoc").click();
+  await openTreeFile(page, "xref-demo.adoc");
   await expect(page.locator("#preview-title")).toHaveText("Cross-Reference Demo");
 
   const xref = page.locator("#preview a[href='xref-targets.adoc#deep-target']").first();

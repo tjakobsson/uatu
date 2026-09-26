@@ -53,6 +53,19 @@ async function highlightCounts(page: import("@playwright/test").Page) {
   });
 }
 
+// The text of the painted current match, or null when it is not inside the
+// mounted preview (nothing painted, or a range into replaced content).
+async function currentMatchText(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    const registry = (CSS as unknown as { highlights: Map<string, Iterable<Range>> }).highlights;
+    const current = registry.get("uatu-find-current");
+    const range = current ? [...current][0] : undefined;
+    const preview = document.querySelector("#preview");
+    if (!range || !preview || !preview.contains(range.startContainer)) return null;
+    return range.toString();
+  });
+}
+
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
   await request.post("/__e2e/reset", { data: { extras: FIXTURES } });
@@ -95,10 +108,20 @@ test("finds matches in the rendered view, counts them, and wraps both ways", asy
 
 test("⌘G steps matches without focus in the query box", async ({ page }) => {
   await treeRow(page, "find-target.md").click();
+  // Open find on the loaded document, not on the README it is replacing.
+  await expect(page.locator("#preview-title")).toHaveText("Find Target");
   await openFind(page);
   await page.locator("#find-query").fill("alpha");
   await expect(page.locator("#find-status")).toHaveText("1 of 4");
   await page.locator("#preview").click({ position: { x: 20, y: 20 } });
+
+  // Step only from a settled search: focus has left the query box, the count
+  // still describes this document, and the painted current match lives in
+  // the mounted preview rather than in content a remount has replaced.
+  await expect(page.locator("#find-query")).not.toBeFocused();
+  await expect(page.locator("#find-status")).toHaveText("1 of 4");
+  await expect.poll(() => currentMatchText(page)).toBe("alpha");
+  expect(await highlightCounts(page)).toEqual({ matches: 3, current: 1 });
 
   await page.keyboard.press(STEP);
   await expect(page.locator("#find-status")).toHaveText("2 of 4");

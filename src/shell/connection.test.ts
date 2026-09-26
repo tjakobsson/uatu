@@ -26,7 +26,10 @@ if (process.env[CHILD_PROCESS_FLAG] !== "1") {
         child.exited,
       ]);
       expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
-    });
+      // The child starts a fresh bun and runs this whole file; with other test
+      // files sharing the cores (`bun test --parallel`) that can pass the
+      // default five seconds, and a timeout here reports as the wrong failure.
+    }, 60_000);
   });
 } else {
   const { document, window } = parseHTML(html);

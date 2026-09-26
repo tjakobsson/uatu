@@ -151,9 +151,57 @@ export type LiveUpstreamDiagnosticSink = (record: LiveUpstreamDiagnostic) => voi
 
 // Only failures speak, and they say nothing but the topic class and the
 // status category (design D6).
-const defaultDiagnosticSink: LiveUpstreamDiagnosticSink = record => {
-  console.error(`uatu hub: live upstream ${record.topic} subscription failed (${record.status})`);
-};
+function failureLine(record: LiveUpstreamDiagnostic): string {
+  return `uatu hub: live upstream ${record.topic} subscription failed (${record.status})`;
+}
+
+export const LIVE_DIAGNOSTIC_REPEAT_WINDOW_MS = 60_000;
+
+// The log sink folds repeats. Each upstream already reports once per failure
+// episode, but many upstreams can fail together (a child restarting drops
+// every topic open on it), and since a line names only the topic class and
+// status, repeats of one line carry nothing but a count. So the first failure
+// of a (topic, status) pair logs at once; further ones within the window are
+// counted, and when the window closes one line reports how many there were.
+// A failure after a quiet window logs at once again. Metrics are untouched:
+// the failed counter still moves once per episode.
+export function createRepeatFoldingDiagnosticSink(options: {
+  log: (line: string) => void;
+  windowMs?: number;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+}): LiveUpstreamDiagnosticSink {
+  const windowMs = options.windowMs ?? LIVE_DIAGNOSTIC_REPEAT_WINDOW_MS;
+  const setTimer = options.setTimer ?? ((fn: () => void, ms: number) => {
+    const timer = setTimeout(fn, ms);
+    // A pending summary never keeps the hub process alive.
+    (timer as { unref?: () => void }).unref?.();
+    return timer;
+  });
+  // Pairs inside an open window, with the repeats seen since it opened.
+  const open = new Map<string, number>();
+  return record => {
+    const key = `${record.topic}\u0000${record.status}`;
+    const repeats = open.get(key);
+    if (repeats !== undefined) {
+      open.set(key, repeats + 1);
+      return;
+    }
+    open.set(key, 0);
+    options.log(failureLine(record));
+    setTimer(() => {
+      const count = open.get(key) ?? 0;
+      open.delete(key);
+      if (count > 0) {
+        const seconds = Math.round(windowMs / 1000);
+        options.log(`${failureLine(record)} ${count} more time${count === 1 ? "" : "s"} in the last ${seconds}s`);
+      }
+    }, windowMs);
+  };
+}
+
+const defaultDiagnosticSink: LiveUpstreamDiagnosticSink = createRepeatFoldingDiagnosticSink({
+  log: line => console.error(line),
+});
 
 let diagnosticSink: LiveUpstreamDiagnosticSink = defaultDiagnosticSink;
 
@@ -709,7 +757,17 @@ export class LiveBroker implements PresenceSource {
         // A cursor that is not the head — from an earlier epoch or behind
         // this one — means an invalidation may have been missed: one tick
         // stands for every tick it would have replayed.
-        if (subscriber.cursor !== undefined && subscriber.cursor !== upstream.head) {
+        //
+        // A first attach (no cursor) is owed the tick the child's own route
+        // opens every subscription with: the client read its baseline
+        // inventory before subscribing, so a change between that read and
+        // this attach is only announced by that opening tick. A fresh upstream
+        // still carries it (seq 0: the child's first frame is on its way and
+        // fans out to this subscriber); a shared or lingering one delivered
+        // it already, to someone else, so the joiner gets one of its own.
+        const joinerOwedOpeningTick = subscriber.cursor === undefined && upstream.seq > 0;
+        const behindHead = subscriber.cursor !== undefined && subscriber.cursor !== upstream.head;
+        if (joinerOwedOpeningTick || behindHead) {
           this.emitData(subscriber, { type: "conversation.inventory" }, upstream.head);
         }
         this.emitSignal(subscriber, { kind: "ready" }, upstream);

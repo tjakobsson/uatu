@@ -103,6 +103,6 @@ test.describe("legacy .uatu.json terminal block", () => {
       }
     });
     await page.locator("#terminal-toggle").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible();
   });
 });

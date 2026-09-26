@@ -132,3 +132,28 @@ export function mergeResult(
 export function countMatches(results: readonly SearchFileResult[]): number {
   return results.reduce((total, result) => total + result.matches.length, 0);
 }
+
+// The results list is re-rendered on every streamed chunk and once more when
+// the stream ends. Rebuilding it wholesale destroyed the hit that had keyboard
+// focus, so an ArrowDown into results while the search was still finishing
+// left focus on <body> and the next keys went nowhere. Markup identical to
+// what is already shown is left alone; changed markup is swapped in and the
+// hit that was focused (same document, line and offset) is handed back for
+// the caller to refocus.
+const renderedResultsMarkup = new WeakMap<Element, string>();
+
+function hitIdentity(hit: Element): string {
+  return [hit.getAttribute("data-document-id"), hit.getAttribute("data-line"), hit.getAttribute("data-start")].join("\u0000");
+}
+
+export function replaceResultsMarkup(container: Element, html: string, focused: Element | null): HTMLElement | null {
+  if (renderedResultsMarkup.get(container) === html) return null;
+  const focusedHit = focused !== null && container.contains(focused) && focused.classList.contains("search-hit")
+    ? hitIdentity(focused)
+    : null;
+  container.innerHTML = html;
+  renderedResultsMarkup.set(container, html);
+  if (focusedHit === null) return null;
+  return Array.from(container.querySelectorAll<HTMLElement>(".search-hit"))
+    .find(hit => hitIdentity(hit) === focusedHit) ?? null;
+}

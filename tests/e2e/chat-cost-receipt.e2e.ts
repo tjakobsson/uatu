@@ -146,7 +146,7 @@ test.describe("an OpenCode conversation's cost is a receipt", () => {
     await expect(chip).toHaveText("$2.00 this conversation");
     await chip.click();
     await expect(views.getByRole("radio", { name: "Types" })).toHaveAttribute("aria-checked", "true");
-    expect(await lines(page)).toEqual([["plan", "GPT-5 · main agent", "$2.00", ""]]);
+    await expect.poll(() => lines(page)).toEqual([["plan", "GPT-5 · main agent", "$2.00", ""]]);
     await page.reload();
     await openChatPanel(page);
     await page.locator("#chat-conversation-select").selectOption(seeded.main);

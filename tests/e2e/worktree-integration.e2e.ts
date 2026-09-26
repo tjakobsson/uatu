@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { writeFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "@playwright/test";
-import { test, expect, openEventSources } from "./hub-fixtures";
+import { test, expect, openEventSources, openHubMenu } from "./hub-fixtures";
 import { captureScreenshot, saveEvidence } from "./evidence";
 
 const exec = promisify(execFile);
@@ -42,7 +42,7 @@ async function surface(page: Page, name: "Files" | "Preview" | "Terminal" | "Cha
 }
 async function picker(page: Page) {
   await surface(page, "Files");
-  if (!await page.locator("#hub-menu").isVisible()) await page.locator("#hub-toggle").click();
+  await openHubMenu(page);
 }
 async function chat(page: Page, id: string, body: Record<string, unknown>) {
   const response = await page.request.post(`/s/${id}/__e2e/chat`, { data: body });
@@ -61,11 +61,11 @@ async function terminal(page: Page, folder: string, marker: string) {
   await surface(page, "Terminal");
   const pane = page.locator('.terminal-pane[data-active="true"]');
   await expect(pane.locator('[data-terminal-ready="true"]')).toBeVisible();
-  await pane.locator(".xterm-helper-textarea").focus();
   // The shell writes cwd into a temporary checkout file. This proves the PTY
   // cwd independently of labels or the browser's terminal presentation.
-  await page.keyboard.type(`pwd -P > ${marker}.txt`);
-  await page.keyboard.press("Enter");
+  const input = pane.locator(".xterm-helper-textarea");
+  await input.pressSequentially(`pwd -P > ${marker}.txt`);
+  await input.press("Enter");
   await expect.poll(async () => {
     try { return await (await import("node:fs/promises")).readFile(path.join(folder, `${marker}.txt`), "utf8").then(s => s.trim()); }
     catch { return ""; }

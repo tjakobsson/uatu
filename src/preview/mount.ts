@@ -39,6 +39,7 @@ import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata
 import { syncViewToggle } from "./view-mode";
 import { getSelectedDestination, getSelectionGeneration, setPreviewMode } from "../shell/selection";
 import { createDocumentLoadGuard } from "./load-generation";
+import { createDocumentLoadRetry, isTransientDocumentFailure } from "./load-retry";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -82,6 +83,7 @@ const previewShellElement: HTMLElement = previewShellElementMaybe;
 // yank them back to the top).
 let lastLoadedDocumentId: string | null = null;
 const documentLoadGuard = createDocumentLoadGuard(getSelectionGeneration);
+const documentLoadRetry = createDocumentLoadRetry();
 const alwaysCurrent = () => true;
 
 // `DocumentDiffPayload` is imported from `./document-diff-view` (above) so
@@ -412,11 +414,13 @@ async function executeLoadDocument(documentId: string) {
   // path that used to surface as "The selected file no longer exists."
   const doc = findDocumentById(documentId);
   if (!doc) {
+    documentLoadRetry.settle();
     renderUnavailableDocument(documentId);
     return;
   }
   setPreviewMode({ kind: "document" });
   if (doc.kind === "binary") {
+    documentLoadRetry.settle();
     if (isViewableImageName(doc.name)) {
       renderImagePreview(doc);
     } else {
@@ -429,6 +433,7 @@ async function executeLoadDocument(documentId: string) {
   // own endpoint and renderer. The /api/document fetch is skipped for now;
   // toggling out of Diff will lazy-load the rendered/source view on demand.
   if (appState.viewMode === "diff") {
+    documentLoadRetry.settle();
     await applyDiffForActiveDocument(documentId);
     return;
   }
@@ -437,26 +442,54 @@ async function executeLoadDocument(documentId: string) {
   // the viewMode is somehow "diff" we already short-circuited above; this
   // assertion narrows the param so the response stays well-typed.
   const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
-  const response = await fetch(
-    contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(apiView)}`)),
-  );
+  let payload: RenderedDocument | null = null;
+  let failedStatus: number | null = null;
+  try {
+    const response = await fetch(
+      contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(apiView)}`)),
+    );
+    if (response.ok) payload = (await response.json()) as RenderedDocument;
+    else failedStatus = response.status;
+  } catch {
+    // No answer (or an unreadable one): transient, like a 5xx.
+    failedStatus = null;
+  }
 
   if (!isCurrent()) return;
-  if (!response.ok) {
-    renderUnavailableDocument(documentId);
+  if (!payload) {
+    if (!isTransientDocumentFailure(failedStatus)) {
+      // The server says the file is not there (or not viewable). The live
+      // document topic re-fetches if that changes (see shouldRefreshPreview).
+      documentLoadRetry.settle();
+      renderUnavailableDocument(documentId);
+      return;
+    }
+    // The server failed, not the file. Nothing else will ask again, so retry
+    // while this is still the load the user is waiting on.
+    const retrying = documentLoadRetry.failed(`${loadToken.selectionGeneration}\u0000${documentId}`, () => {
+      if (isCurrent()) void loadDocument(documentId);
+    });
+    renderUnavailableDocument(
+      documentId,
+      retrying
+        ? "This file couldn't be loaded. Retrying…"
+        : "This file couldn't be loaded. Select it again to retry.",
+    );
     return;
   }
 
-  const payload = (await response.json()) as RenderedDocument;
-  if (!isCurrent()) return;
+  documentLoadRetry.settle();
   rememberDocumentPayload(payload);
   await applyDocumentPayload(payload, isCurrent);
 }
 
-function renderUnavailableDocument(documentId: string): void {
+function renderUnavailableDocument(
+  documentId: string,
+  message = "File unavailable. It may have been removed or excluded from this workspace.",
+): void {
   const destination = getSelectedDestination();
   setPreviewMode({ kind: "empty" });
-  renderEmptyPreview(destination?.name ?? "File unavailable", "File unavailable. It may have been removed or excluded from this workspace.");
+  renderEmptyPreview(destination?.name ?? "File unavailable", message);
   previewPathElement.textContent = destination?.relativePath ?? documentId;
   refreshOutline(null);
   syncFileFactsStrip({ kind: "hidden" });

@@ -12,9 +12,13 @@
 // a hub is Bun.serve, so it lives in its own Bun process). Configuration is
 // env:
 //
-//   UATU_E2E_HUB_PORT            the hub's port (default 4300)
+//   UATU_E2E_HUB_PORT            the hub's port (default 21000)
 //   UATU_E2E_HUB_CHILD_BASE_PORT first child port; children take
 //                                consecutive ports (default hub port + 1)
+//   UATU_E2E_HUB_CHILD_PORT_END  first port past this hub's block; a child
+//                                that would need it fails to start instead
+//                                of taking the next worker's hub port
+//                                (default: no bound)
 //   UATU_E2E_HUB_WORKSPACES      comma-separated workspace folder names;
 //                                each becomes a registered, started
 //                                workspace with that id (default "alpha")
@@ -38,7 +42,15 @@
 // Readiness is one stdout line, `uatu-e2e-hub <json>`, describing the hub
 // origin, the user, and every workspace with its id, folder, session URL,
 // and the child's direct origin (for the fake chat controls, which need no
-// hub credential).
+// hub credential). After that, stdin takes one command, `reset <serial>`,
+// which puts the hub back to its booted state between tests (see
+// resetForTest below).
+//
+// Under UATU_E2E_EXIT_ON_STDIN_CLOSE=1 (hub-fixtures.ts sets it) the hub
+// shuts down with its children when stdin closes — the worker gone, however
+// it went. Each child always exits when the hub's pipe to it closes. So
+// nothing outlives the worker to hold the ports its replacement is given
+// (ports.ts).
 
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -73,6 +85,7 @@ import { WorktreeService } from "../../src/hub/worktree-service";
 
 export const HUB_E2E_USER = { name: "e2e", password: "e2e-hub-password" };
 export const HUB_E2E_READY_PREFIX = "uatu-e2e-hub ";
+export const HUB_E2E_RESET_PREFIX = "uatu-e2e-hub-reset ";
 
 export type HubE2EWorkspace = {
   id: string;
@@ -92,17 +105,22 @@ export type HubE2EInfo = {
   pushLog?: string;
 };
 
-const HUB_PORT = Number.parseInt(process.env.UATU_E2E_HUB_PORT ?? "4300", 10);
+const HUB_PORT = Number.parseInt(process.env.UATU_E2E_HUB_PORT ?? "21000", 10);
 const CHILD_BASE_PORT = Number.parseInt(process.env.UATU_E2E_HUB_CHILD_BASE_PORT ?? String(HUB_PORT + 1), 10);
+const CHILD_PORT_END = Number.parseInt(process.env.UATU_E2E_HUB_CHILD_PORT_END ?? String(Number.MAX_SAFE_INTEGER), 10);
 const WORKSPACE_NAMES = (process.env.UATU_E2E_HUB_WORKSPACES ?? "alpha")
   .split(",")
   .map(name => name.trim())
   .filter(name => name.length > 0);
 const HARNESS_PATH = path.resolve(import.meta.dir, "server.ts");
+// The harness reads tests/e2e/bunfig.toml (see there for why); keep this in
+// step with the worker fixture's command in fixtures.ts.
+const HARNESS_BUNFIG = path.resolve(import.meta.dir, "bunfig.toml");
 const CHILD_START_TIMEOUT_MS = 30_000;
 const WORKTREES = process.env.UATU_E2E_HUB_WORKTREES === "1";
 const CREDENTIALS = process.env.UATU_E2E_HUB_CREDENTIALS === "1";
 const PUSH = process.env.UATU_E2E_HUB_PUSH === "1";
+const EXIT_ON_STDIN_CLOSE = process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1";
 const PRESENCE_GRACE_MS = Number.parseInt(process.env.UATU_E2E_HUB_PRESENCE_GRACE_MS ?? "1500", 10);
 
 const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-hub-e2e-")));
@@ -114,12 +132,23 @@ const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu
 // harness, told its port, folder, and hub-shaped base path through env.
 class HarnessBackend implements SessionBackend {
   private nextPort = CHILD_BASE_PORT;
+  // A workspace keeps its port across restarts, so the `childOrigin` the
+  // readiness line published stays true after a test (or the per-test
+  // reset) stops and starts it, and restarts do not walk the port counter
+  // out of this worker's block.
+  private readonly ports = new Map<string, number>();
   readonly children = new Map<string, ChildProcess>();
 
   async start(workspace: WorkspaceEntry, basePath: string): Promise<RunningSession> {
-    const port = this.nextPort;
-    this.nextPort += 1;
-    const child = spawn("bun", ["run", HARNESS_PATH], {
+    let port = this.ports.get(workspace.id);
+    if (port === undefined) {
+      if (this.nextPort >= CHILD_PORT_END) {
+        throw new Error(`no port left for '${workspace.id}': this hub's block ends at ${CHILD_PORT_END}`);
+      }
+      port = this.nextPort++;
+      this.ports.set(workspace.id, port);
+    }
+    const child = spawn("bun", [`--config=${HARNESS_BUNFIG}`, "run", HARNESS_PATH], {
       cwd: path.resolve(import.meta.dir, "..", ".."),
       env: {
         ...process.env,
@@ -127,8 +156,9 @@ class HarnessBackend implements SessionBackend {
         UATU_E2E_WORKSPACE: workspace.path,
         UATU_E2E_BASE_PATH: basePath,
         ...(WORKTREES ? { UATU_E2E_PRESERVE_WORKSPACE: "1" } : {}),
+        UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
       },
-      stdio: ["ignore", "pipe", "inherit"],
+      stdio: ["pipe", "pipe", "inherit"],
     });
     this.children.set(workspace.id, child);
 
@@ -335,6 +365,47 @@ if (PUSH) notifications.start();
 const info: HubE2EInfo = { origin, user: HUB_E2E_USER, workspaces, ...(PUSH ? { pushLog } : {}) };
 console.log(`${HUB_E2E_READY_PREFIX}${JSON.stringify(info)}`);
 
+// The per-test reset: hub-fixtures.ts writes `reset <serial>` to stdin and
+// waits for `uatu-e2e-hub-reset <serial> ok`. The hub is worker-scoped, so
+// without it a test inherits whatever the previous one left: a stopped
+// session, a child's staged chat, live PTYs or armed terminal delays, the
+// broker's finished/viewed marks, and the personal state. Every workspace
+// the hub started with is restarted (a stop the hub observes is what
+// forgets the marks, and a fresh child has no conversations and no shells),
+// and the personal state of every registered workspace is dropped.
+// Workspaces a test registered (linked worktrees) are left to the suites
+// that create them.
+// The first test of a worker gets the hub exactly as it booted.
+let pristine = true;
+async function resetForTest(): Promise<void> {
+  if (pristine) {
+    pristine = false;
+    return;
+  }
+  await Promise.all(workspaces.map(async workspace => {
+    await sessions.stop(workspace.id);
+    await sessions.start(workspace.id);
+  }));
+  for (const entry of registry.list()) await personalState.removeWorkspace(entry.id);
+}
+
+let controlBuffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk: string) => {
+  controlBuffer += chunk;
+  let newline = controlBuffer.indexOf("\n");
+  while (newline >= 0) {
+    const [command, serial] = controlBuffer.slice(0, newline).trim().split(" ");
+    controlBuffer = controlBuffer.slice(newline + 1);
+    newline = controlBuffer.indexOf("\n");
+    if (command !== "reset") continue;
+    void resetForTest().then(
+      () => console.log(`${HUB_E2E_RESET_PREFIX}${serial} ok`),
+      error => console.log(`${HUB_E2E_RESET_PREFIX}${serial} error ${JSON.stringify(String(error))}`),
+    );
+  }
+});
+
 let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
@@ -358,3 +429,11 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   void shutdown();
 });
+// Set by hub-fixtures.ts, which holds our stdin for the worker's lifetime:
+// EOF means the worker is gone. Opt-in, because a spawner that leaves stdin
+// unset (tests/worktree-native-smoke.ts) hands us an EOF at once. Bun
+// reports one EOF as both `end` and `close`; shutdown runs once.
+if (EXIT_ON_STDIN_CLOSE) {
+  process.stdin.on("end", () => void shutdown());
+  process.stdin.on("close", () => void shutdown());
+}

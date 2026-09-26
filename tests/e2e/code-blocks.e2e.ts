@@ -1,6 +1,6 @@
 import { expect, test } from "./fixtures";
 
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 import { installClipboardMock, readClipboardMock } from "./chat-helpers";
 
@@ -18,7 +18,7 @@ test("code blocks expose a copy-to-clipboard control", async ({ page, request })
   });
   await page.goto("/");
   await installClipboardMock(page);
-  await treeRow(page, "config.yaml").click();
+  await openTreeFile(page, "config.yaml");
 
   const copyButton = page.locator("#preview pre .code-copy");
   await expect(copyButton).toHaveCount(1);
@@ -48,7 +48,7 @@ test("non-Markdown code views show line numbers; Markdown fenced blocks do not",
   // Code view: per-line gutter present — one `.uatu-cl` block per source
   // line, each carrying its number in `data-ln` (rendered via CSS ::before,
   // so the number is not DOM text).
-  await treeRow(page, "config.yaml").click();
+  await openTreeFile(page, "config.yaml");
   await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(1);
   const codeLines = page.locator("#preview pre.has-line-numbers .uatu-cl");
   await expect(codeLines).toHaveCount(3);
@@ -56,7 +56,7 @@ test("non-Markdown code views show line numbers; Markdown fenced blocks do not",
   await expect(codeLines.nth(2)).toHaveAttribute("data-ln", "3");
 
   // Markdown view: fenced block has NO per-line gutter
-  await treeRow(page, "with-code.md").click();
+  await openTreeFile(page, "with-code.md");
   await expect(page.locator("#preview pre")).toHaveCount(1);
   await expect(page.locator("#preview pre .uatu-cl")).toHaveCount(0);
   await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(0);

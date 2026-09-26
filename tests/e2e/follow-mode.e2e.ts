@@ -2,10 +2,12 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { recordDocumentFrames, waitForAppliedDocumentFrame } from "./sync-helpers";
 
 test.beforeEach(async ({ page, request }) => {
+  await recordDocumentFrames(page);
   await standardBeforeEach(page, request);
 });
 
@@ -18,7 +20,13 @@ test("manual selection disables follow mode and keeps the current preview pinned
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 
   await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nChanged while pinned.\n", "utf8");
+  // The change has reached the page — only then does "still README" mean
+  // follow stayed off rather than that the event had not arrived yet.
+  await waitForAppliedDocumentFrame(page, { changed: "guides/setup.md" });
 
+  // Selection moves synchronously with a frame (the URL follows it at once);
+  // the preview path would only follow after a document load.
+  expect(await page.evaluate(() => window.location.pathname)).toBe("/README.md");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator("#preview-title")).toHaveText("Uatu");
 });
@@ -47,9 +55,9 @@ test("follow mode switches the preview when a non-Markdown text file changes", a
   // is a no-op for the library's selection state, so the boot-time
   // follow=true wouldn't be disabled and the next follow-toggle click
   // would flip true→false instead of false→true.
-  await treeRow(page, "diagram.md").click();
+  await openTreeFile(page, "diagram.md");
   await expect(page.locator("#preview-path")).toHaveText("diagram.md");
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
 
@@ -72,15 +80,13 @@ test("enabling follow jumps to the most recently modified file", async ({ page }
   const fresher = new Date(Date.now() + 30_000);
   await fs.utimes(workspacePath("guides", "setup.md"), fresher, fresher);
 
-  // Give the polling watcher (100ms interval, 100ms stability) time to
-  // observe the bumped mtime and let the SSE refresh land in the SPA. We
-  // no longer have the `.tree-mtime[data-mtime]` spans as a deterministic
-  // readiness signal, so this is a bounded delay tied to the watcher's
-  // poll cadence.
-  await page.waitForTimeout(800);
+  // The catch-up below reads the page's own index, so the bumped mtime must
+  // have reached it: wait until the page has applied a frame naming setup.md
+  // the newest document.
+  await waitForAppliedDocumentFrame(page, { defaultPath: "guides/setup.md" });
 
   // Manually re-select README to ensure follow is OFF and selection is README.
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
 

@@ -2,8 +2,9 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { afterAnimationFrames } from "./sync-helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -187,10 +188,10 @@ test("preview header shows a file-type chip for the selected document", async ({
     data: { extras: { "config.yaml": "key: value\n" } },
   });
   await page.goto("/");
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview-type")).toHaveText("markdown");
 
-  await treeRow(page, "config.yaml").click();
+  await openTreeFile(page, "config.yaml");
   await expect(page.locator("#preview-type")).toHaveText("yaml");
 });
 
@@ -199,7 +200,7 @@ test("Markdown cross-document links render with the original .md extension", asy
   // preserves the author's URL verbatim — this test locks that behavior in
   // so a future renderer swap can't silently regress it. Drives the
   // permanent `testdata/watch-docs/links-demo.md` fixture.
-  await treeRow(page, "links-demo.md").click();
+  await openTreeFile(page, "links-demo.md");
   await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
 
   await expect(page.locator('#preview a[href="README.md"]')).toBeVisible();
@@ -208,7 +209,7 @@ test("Markdown cross-document links render with the original .md extension", asy
 });
 
 test("clicking a Markdown cross-document link switches the preview in-app", async ({ page }) => {
-  await treeRow(page, "links-demo.md").click();
+  await openTreeFile(page, "links-demo.md");
   await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
 
   await page.locator('#preview a[href="guides/setup.md"]').click();
@@ -243,7 +244,7 @@ test("switching to a different document resets the preview scroll to the top", a
   await page.goto("/");
 
   // Open doc A and scroll it well past the top.
-  await treeRow(page, "long-doc.md").click();
+  await openTreeFile(page, "long-doc.md");
   await expect(page.locator("#preview-title")).toHaveText("Long Doc");
   await expect(page.locator("#preview")).toContainText("Paragraph 80.");
   await page.locator(".preview-shell").evaluate(element => {
@@ -252,7 +253,7 @@ test("switching to a different document resets the preview scroll to the top", a
   await expect.poll(() => page.locator(".preview-shell").evaluate(el => el.scrollTop)).toBeGreaterThan(500);
 
   // Switch to doc B — preview scroll must reset to the top.
-  await treeRow(page, "short-doc.md").click();
+  await openTreeFile(page, "short-doc.md");
   await expect(page.locator("#preview-title")).toHaveText("Short Doc");
 
   const scrollTop = await page.locator(".preview-shell").evaluate(el => el.scrollTop);
@@ -263,14 +264,15 @@ test("preview header stays visible while scrolling and the sidebar scroll is ind
   const padding = Array.from({ length: 80 }, (_, index) => `Paragraph ${index + 1}.`).join("\n\n");
   await fs.writeFile(workspacePath("README.md"), `# Uatu\n\n${padding}\n`, "utf8");
 
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview")).toContainText("Paragraph 80.");
 
   const headerBefore = await page.locator(".preview-header").boundingBox();
   await page.locator(".preview-shell").evaluate(element => {
     element.scrollTop = 600;
   });
-  await page.waitForTimeout(100);
+  await expect.poll(() => page.locator(".preview-shell").evaluate(el => el.scrollTop)).toBeGreaterThan(500);
+  await afterAnimationFrames(page);
   const headerAfter = await page.locator(".preview-header").boundingBox();
 
   expect(headerBefore?.y ?? 0).toBeCloseTo(headerAfter?.y ?? 0, 0);

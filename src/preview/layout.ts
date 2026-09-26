@@ -11,6 +11,7 @@ import {
 import { appState, safeLocalStorage } from "../shell/state";
 import { applyDocumentPayload, documentViewCache, loadDocument, type RenderedDocument } from "./mount";
 import { syncViewToggle } from "./view-mode";
+import { ensureLayoutToolbar } from "./layout-toolbar";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 const previewShellElementMaybe = document.querySelector<HTMLElement>(".preview-shell");
@@ -22,62 +23,20 @@ if (!previewElementMaybe || !previewShellElementMaybe) {
 const previewElement: HTMLElement = previewElementMaybe;
 const previewShellElement: HTMLElement = previewShellElementMaybe;
 
-// Reflect the persisted layout preference on the layout chooser. The chooser
-// is hidden when the active document has no separate rendered representation,
-// The layout chooser lives inline inside `#preview` now (see
-// `renderLayoutToolbar`), so there's no header element to keep in sync —
-// it's rebuilt every render to reflect `appState.viewLayout`. The
-// function is kept as a no-op so existing call sites stay valid.
+// The layout chooser lives inline above `#preview` (see `mountLayoutToolbar`),
+// so there's no header element to keep in sync — its active segment is
+// refreshed on every render to reflect `appState.viewLayout`. The function is
+// kept as a no-op so existing call sites stay valid.
 export function syncLayoutChooser(_payload: RenderedDocument | null): void {
   // Intentional no-op: layout toolbar is rendered as part of #preview.
 }
 
 // Ensure a layout toolbar exists (or doesn't) as a sibling above #preview
-// inside .preview-shell. Builds fresh each call so the active-segment
-// state always matches `appState.viewLayout` without a separate sync pass.
+// inside .preview-shell, with its active segment matching
+// `appState.viewLayout`. An existing toolbar is updated in place rather than
+// rebuilt, so a render landing mid-click can't swallow the click.
 export function mountLayoutToolbar(show: boolean): void {
-  const previousToolbar = previewShellElement.querySelector<HTMLElement>(".uatu-layout-toolbar");
-  if (previousToolbar) {
-    previousToolbar.remove();
-  }
-  if (!show) return;
-  const toolbar = renderLayoutToolbar();
-  previewShellElement.insertBefore(toolbar, previewElement);
-}
-
-// Build the inline layout chooser that sits above the document body for
-// Markdown / AsciiDoc. Mirrors the .uatu-diff-toolbar pattern: small
-// segmented pill with text labels, an "is-active" segment, and a click
-// handler that defers to applyViewLayout.
-export function renderLayoutToolbar(): HTMLElement {
-  const toolbar = document.createElement("div");
-  toolbar.className = "uatu-layout-toolbar";
-  toolbar.setAttribute("role", "radiogroup");
-  toolbar.setAttribute("aria-label", "Layout");
-
-  const segments: Array<{ value: ViewLayout; label: string; title: string }> = [
-    { value: "single", label: "Single", title: "Single pane" },
-    { value: "split-h", label: "Side by side", title: "Side-by-side split" },
-    { value: "split-v", label: "Stacked", title: "Stacked (top / bottom) split" },
-  ];
-
-  for (const segment of segments) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "uatu-layout-toolbar-segment";
-    button.setAttribute("role", "radio");
-    button.setAttribute("data-layout-value", segment.value);
-    button.setAttribute("aria-checked", String(segment.value === appState.viewLayout));
-    if (segment.value === appState.viewLayout) {
-      button.classList.add("is-active");
-    }
-    button.title = segment.title;
-    button.textContent = segment.label;
-    button.addEventListener("click", () => applyViewLayout(segment.value));
-    toolbar.appendChild(button);
-  }
-
-  return toolbar;
+  ensureLayoutToolbar(previewShellElement, previewElement, show, appState.viewLayout, applyViewLayout);
 }
 
 export function applyViewLayout(next: ViewLayout): void {

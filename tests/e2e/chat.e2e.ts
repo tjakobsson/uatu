@@ -402,16 +402,20 @@ test.describe("desktop OpenCode chat", () => {
     const firstId = await page.locator("#chat-conversation-select").inputValue();
     await page.locator("#chat-input").fill("Keep timing this turn");
     await page.locator("#chat-input").press("Enter");
-    await expect(page.locator("#chat-composer-status")).toHaveAttribute("aria-label", "Working");
-    await page.waitForTimeout(1_100);
-    const before = elapsedSeconds(await page.locator("#chat-composer-status").getAttribute("title"));
-    expect(before).toBeGreaterThanOrEqual(1);
+    const status = page.locator("#chat-composer-status");
+    await expect(status).toHaveAttribute("aria-label", "Working");
+    const elapsed = async () => elapsedSeconds(await status.getAttribute("title"));
+    await expect.poll(elapsed).toBeGreaterThanOrEqual(1);
+    const before = await elapsed();
 
     await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue(firstId);
     await page.locator("#chat-conversation-select").selectOption(firstId);
-    await expect(page.locator("#chat-composer-status")).toHaveAttribute("aria-label", "Working");
-    expect(elapsedSeconds(await page.locator("#chat-composer-status").getAttribute("title"))).toBeGreaterThanOrEqual(before);
+    await expect(status).toHaveAttribute("aria-label", "Working");
+    // One read once the timer shows at all: polling would let a timer that
+    // restarted from zero count back up past `before` and pass.
+    await expect(status).toHaveAttribute("title", /\d+s/);
+    expect(await elapsed()).toBeGreaterThanOrEqual(before);
   });
 
   test("streams Markdown, exposes code copy on completion, and updates one tool entry in place", async ({ page, request }) => {
@@ -443,8 +447,10 @@ test.describe("desktop OpenCode chat", () => {
     await installClipboardMock(page);
     const beforeCopy = await assistantNode.boundingBox();
     await assistantNode.locator("[data-chat-copy='code']").click();
-    expect(await readClipboardMock(page)).toBe("const value = 1;\n");
+    // The copied state is set once the clipboard write has resolved, and it
+    // clears again after a moment: assert it first, then read the clipboard.
     await expect(assistantNode.locator("[data-chat-copy='code']")).toHaveAttribute("data-state", "copied");
+    expect(await readClipboardMock(page)).toBe("const value = 1;\n");
     const afterCopy = await assistantNode.boundingBox();
     expect(afterCopy?.width).toBeCloseTo(beforeCopy?.width ?? 0, 1);
     expect(afterCopy?.height).toBeCloseTo(beforeCopy?.height ?? 0, 1);
@@ -493,14 +499,16 @@ test.describe("desktop OpenCode chat", () => {
     page.on("request", request => {
       if (new URL(request.url()).pathname.endsWith(`/questions/${question.requestId}`)) replies += 1;
     });
+    // Choosing an option only arms Answer. Whether it also sent a reply is
+    // settled below: requests leave in order, so once Answer's own reply has
+    // answered, any reply the choice had sent was already counted.
     await questionCard.getByRole("radio", { name: "Minimal Small change" }).check();
     await expect(answer).toBeEnabled();
-    await page.waitForTimeout(100);
-    expect(replies).toBe(0);
 
     const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith(`/questions/${question.requestId}`));
     await answer.click();
     expect((await response).request().postDataJSON()).toMatchObject({ outcome: { kind: "answered", answers: [["Minimal"]] } });
+    expect(replies).toBe(1);
     await expect(questionCard).toContainText("Answered");
     await expect(answer).toHaveCount(0);
   });
@@ -700,11 +708,17 @@ test.describe("desktop OpenCode chat", () => {
 test("the chat backend starts only when the panel opens", async ({ page, request }) => {
   await request.post("/__e2e/reset");
   const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+  // Chat initializes once the workspace state has loaded and the URL
+  // credential has become the workspace cookie — the moment an eager
+  // bootstrap would call status.
+  const credentialPromoted = page.waitForResponse(response => new URL(response.url()).pathname.endsWith("/api/auth"));
   await page.goto(`/?t=${encodeURIComponent(token.token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await (await credentialPromoted).finished();
+  // One rendered frame lets the page run what that promotion resolved.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve(null))));
   // Booting with the panel collapsed must not touch chat status — in
   // production that call lazily launches the OpenCode server.
-  await page.waitForTimeout(250);
   expect(((await control(request, { action: "stats" })) as { statusCalls: number }).statusCalls).toBe(0);
   await openChatPanel(page);
   await expect(page.locator("#chat-state")).not.toContainText("Loading chat");

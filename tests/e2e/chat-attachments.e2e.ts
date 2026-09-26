@@ -1,4 +1,4 @@
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { APIRequestContext, Page, Route } from "@playwright/test";
 
 import { chooseChatModel, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
@@ -26,6 +26,41 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
   expect(response.ok()).toBe(true);
   return response.json();
 }
+
+type HeldRoute = {
+  /** Resolves once `count` requests are waiting at (or have passed) the route. */
+  held(count?: number): Promise<void>;
+  /** Lets every held request, and every later one, through. */
+  release(): void;
+};
+
+// Holds matching requests at the route until the test releases them, so a
+// request is provably in flight across the steps that must interleave with
+// it — a timer in the handler only makes that likely.
+async function holdRoute(
+  page: Page,
+  url: string,
+  respond: (route: Route) => Promise<void> = route => route.continue(),
+): Promise<HeldRoute> {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let arrived = 0;
+  await page.route(url, async route => {
+    arrived += 1;
+    await gate;
+    await respond(route);
+  });
+  return {
+    held: async (count = 1) => { await expect.poll(() => arrived).toBeGreaterThanOrEqual(count); },
+    release,
+  };
+}
+
+const refuseUpload = (route: Route) => route.fulfill({
+  status: 415,
+  contentType: "application/json",
+  body: JSON.stringify({ error: "attachments must be PNG, JPEG, GIF, or WebP images" }),
+});
 
 async function newConversation(page: Page): Promise<string> {
   const select = page.locator("#chat-conversation-select");
@@ -251,15 +286,16 @@ test.describe("chat image attachments — review regressions", () => {
 
   test("a submit racing an in-flight upload waits and sends the image with that message", async ({ page }) => {
     await newConversation(page);
-    // Stall the upload long enough for Enter to land while it is in flight.
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 700));
-      await route.continue();
-    });
+    // Hold the upload until Enter has landed while it is in flight.
+    const upload = await holdRoute(page, "**/attachments");
     await page.locator("#chat-attach-input").setInputFiles({ name: "racing.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     await page.locator("#chat-input").fill("message with a racing image");
     const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-input").press("Enter");
+    // The submit took the text and is waiting on the upload.
+    await expect(page.locator("#chat-input")).toHaveValue("");
+    upload.release();
     const promptBody = (await accepted).request().postDataJSON() as { attachments?: unknown[] };
     // The prompt carried the attachment despite Enter beating the upload.
     expect(promptBody.attachments).toHaveLength(1);
@@ -326,17 +362,19 @@ test.describe("staging chain regressions", () => {
 
   test("an upload started while submission drains still joins the message", async ({ page }) => {
     await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 400));
-      await route.continue();
-    });
+    const upload = await holdRoute(page, "**/attachments");
     // First upload in flight; Enter lands during it; a second attach starts
     // while submission is draining the chain. Both must ride this message.
     await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     await page.locator("#chat-input").fill("both images please");
     const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-input")).toHaveValue("");
+    // Staging is serialized: this intake joins the chain behind the held
+    // upload the moment its change event fires.
     await page.locator("#chat-attach-input").setInputFiles({ name: "second.png", mimeType: "image/png", buffer: PNG });
+    upload.release();
     const body = (await accepted).request().postDataJSON() as { attachments?: Array<{ name: string }> };
     expect(body.attachments?.map(entry => entry.name).sort()).toEqual(["first.png", "second.png"]);
     await expect(page.locator("#chat-attachments")).toBeHidden();
@@ -360,15 +398,15 @@ test.describe("image-only staging wait", () => {
 
   test("an image-only submit during its own upload waits and sends", async ({ page }) => {
     await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await route.continue();
-    });
+    const upload = await holdRoute(page, "**/attachments");
     await page.locator("#chat-attach-input").setInputFiles({ name: "only.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     // Send lights up on the in-flight staging, before the chip lands.
     await expect(page.locator("#chat-send")).toBeEnabled();
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(0);
     const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-send").click();
+    upload.release();
     const body = (await accepted).request().postDataJSON() as { text: string; attachments?: unknown[] };
     expect(body.text).toBe("");
     expect(body.attachments).toHaveLength(1);
@@ -383,14 +421,17 @@ test.describe("restore stays within the cap", () => {
     await newConversation(page);
     for (let index = 0; index < 8; index += 1) await attachViaPicker(page, `full-${index}.png`);
     await control(request, { action: "failPrompt" });
+    const prompt = await holdRoute(page, "**/prompts");
     const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-input").fill("send all eight");
     await page.locator("#chat-input").press("Enter");
-    // The submitted batch is in flight (failPrompt stalls 500ms); a ninth
+    // The submitted batch is in flight (held until released); a ninth
     // intake now must be refused against the reserved eight, so the failure
     // restore lands at exactly eight sendable references.
+    await prompt.held();
     await pasteImage(page, { name: "ninth-during-flight.png" });
     await expect(page.locator("#chat-composer-error")).toContainText("at most 8 images");
+    prompt.release();
     await failed;
     await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(8);
@@ -448,17 +489,17 @@ test.describe("composer edits during the upload drain", () => {
 
   test("typing while submission waits becomes the next draft, not part of the sent message", async ({ page }) => {
     await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 600));
-      await route.continue();
-    });
+    const upload = await holdRoute(page, "**/attachments");
     await page.locator("#chat-attach-input").setInputFiles({ name: "slow.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     await page.locator("#chat-input").fill("the message that sends");
     const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-input").press("Enter");
     // The submit is draining the upload; the composer is already empty and
     // editable — this text belongs to the NEXT message.
+    await expect(page.locator("#chat-input")).toHaveValue("");
     await page.locator("#chat-input").pressSequentially("draft for later");
+    upload.release();
     const body = (await accepted).request().postDataJSON() as { text: string };
     expect(body.text).toBe("the message that sends");
     await expect(page.locator("#chat-input")).toHaveValue("draft for later");
@@ -472,19 +513,19 @@ test.describe("conversation switch during the upload drain", () => {
   test("the submitted text survives a switch, ahead of edits typed meanwhile", async ({ page }) => {
     const first = await newConversation(page);
     const second = await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 700));
-      await route.continue();
-    });
+    const upload = await holdRoute(page, "**/attachments");
     await page.locator("#chat-attach-input").setInputFiles({ name: "slow.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     await page.locator("#chat-input").fill("the submitted text");
     await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-input")).toHaveValue("");
     await page.locator("#chat-input").pressSequentially("newer edits");
     // Switch away before the drain completes: the switch stores the newer
     // edits as the conversation's draft, and the drained submission must
     // merge its never-sent text ahead of them rather than yielding to the
     // occupied slot.
     await page.locator("#chat-conversation-select").selectOption(first);
+    upload.release();
     await expect.poll(() => page.evaluate(() =>
       Object.keys(localStorage).some(key => key.includes("chat-presentation")
         && (localStorage.getItem(key) ?? "").includes("the submitted text\\nnewer edits")),
@@ -502,15 +543,15 @@ test.describe("upload refusal during the drain", () => {
     await newConversation(page);
     // The upload outlives Enter, then fails: the submit drained a chain
     // that lost a piece of this very message, so nothing may send.
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await route.fulfill({ status: 415, contentType: "application/json", body: JSON.stringify({ error: "attachments must be PNG, JPEG, GIF, or WebP images" }) });
-    });
+    const upload = await holdRoute(page, "**/attachments", refuseUpload);
     await page.locator("#chat-attach-input").setInputFiles({ name: "doomed.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     let prompted = false;
     page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
     await page.locator("#chat-input").fill("words that need their image");
     await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-input")).toHaveValue("");
+    upload.release();
     await expect(page.locator("#chat-composer-error")).toContainText("Could not attach");
     // The send stopped: the draft is intact and no prompt left the client.
     await expect(page.locator("#chat-input")).toHaveValue("words that need their image");
@@ -521,15 +562,14 @@ test.describe("upload refusal during the drain", () => {
 
   test("a mixed intake during the drain blocks the send like any refusal", async ({ page }) => {
     await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 600));
-      await route.continue();
-    });
+    const upload = await holdRoute(page, "**/attachments");
     await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     let prompted = false;
     page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
     await page.locator("#chat-input").fill("needs every file");
     await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-input")).toHaveValue("");
     // A mixed drop while the submit drains: the image joins this message,
     // the text file is refused — a piece of the message went missing, so
     // nothing may send.
@@ -541,6 +581,7 @@ test.describe("upload refusal during the drain", () => {
       form.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
     }, { bytes: Array.from(PNG) });
     await expect(page.locator("#chat-composer-error")).toContainText("notes.txt is not a supported image");
+    upload.release();
     // Both staged images survive as pending, the draft is intact, no prompt.
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(2);
     await expect(page.locator("#chat-input")).toHaveValue("needs every file");
@@ -550,15 +591,14 @@ test.describe("upload refusal during the drain", () => {
 
   test("an all-unsupported drop during the drain blocks the send too", async ({ page }) => {
     await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 600));
-      await route.continue();
-    });
+    const upload = await holdRoute(page, "**/attachments");
     await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     let prompted = false;
     page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
     await page.locator("#chat-input").fill("meant to carry the notes");
     await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-input")).toHaveValue("");
     // Nothing in this drop could stage, but it was meant for the message
     // being drained — the refusal must stop the send all the same.
     await page.evaluate(() => {
@@ -568,6 +608,7 @@ test.describe("upload refusal during the drain", () => {
       form.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
     });
     await expect(page.locator("#chat-composer-error")).toContainText("Only PNG, JPEG, GIF, or WebP");
+    upload.release();
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
     await expect(page.locator("#chat-input")).toHaveValue("meant to carry the notes");
     expect(prompted).toBe(false);
@@ -576,15 +617,14 @@ test.describe("upload refusal during the drain", () => {
 
   test("an all-unsupported paste during the drain blocks the send too", async ({ page }) => {
     await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 600));
-      await route.continue();
-    });
+    const upload = await holdRoute(page, "**/attachments");
     await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     let prompted = false;
     page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
     await page.locator("#chat-input").fill("meant to carry the spec");
     await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-input")).toHaveValue("");
     // A paste is no different from a drop here: the file was meant for the
     // message being drained, so its refusal must stop the send.
     await page.evaluate(() => {
@@ -595,6 +635,7 @@ test.describe("upload refusal during the drain", () => {
       input.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
     });
     await expect(page.locator("#chat-composer-error")).toContainText("Only PNG, JPEG, GIF, or WebP");
+    upload.release();
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
     await expect(page.locator("#chat-input")).toHaveValue("meant to carry the spec");
     expect(prompted).toBe(false);
@@ -608,12 +649,16 @@ test.describe("draft restoration with mid-flight edits", () => {
   test("a failing submission restores its text ahead of edits typed meanwhile", async ({ page, request }) => {
     await newConversation(page);
     await control(request, { action: "failPrompt" });
+    const prompt = await holdRoute(page, "**/prompts");
     const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-input").fill("the failed message");
     await page.locator("#chat-input").press("Enter");
+    await prompt.held();
+    await expect(page.locator("#chat-input")).toHaveValue("");
     // Typed while the refusal is in flight — the next draft, until the
     // failure makes the sent text a draft again too. Both survive.
     await page.locator("#chat-input").pressSequentially("meanwhile edits");
+    prompt.release();
     await failed;
     await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
     await expect(page.locator("#chat-input")).toHaveValue("the failed message\nmeanwhile edits");
@@ -644,14 +689,15 @@ test.describe("upload refusals stay with their conversation", () => {
   test("a refusal landing after a switch waits for its own conversation", async ({ page }) => {
     const first = await newConversation(page);
     const second = await newConversation(page);
-    await page.route("**/attachments", async route => {
-      await new Promise(resolve => setTimeout(resolve, 600));
-      await route.fulfill({ status: 415, contentType: "application/json", body: JSON.stringify({ error: "attachments must be PNG, JPEG, GIF, or WebP images" }) });
-    });
+    const upload = await holdRoute(page, "**/attachments", refuseUpload);
     await page.locator("#chat-attach-input").setInputFiles({ name: "doomed.png", mimeType: "image/png", buffer: PNG });
+    await upload.held();
     // Switch away before the refusal lands: it must not flash here...
     await page.locator("#chat-conversation-select").selectOption(first);
-    await page.waitForResponse(response => response.url().includes("/attachments"));
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(first);
+    const refused = page.waitForResponse(response => response.url().includes("/attachments"));
+    upload.release();
+    await refused;
     await expect(page.locator("#chat-composer-error")).toBeHidden();
     // ...and the reason is waiting where the upload belonged.
     await page.locator("#chat-conversation-select").selectOption(second);
@@ -665,11 +711,15 @@ test.describe("upload refusals stay with their conversation", () => {
     const first = await newConversation(page);
     const second = await newConversation(page);
     await control(request, { action: "failPrompt" });
+    const prompt = await holdRoute(page, "**/prompts");
     const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-input").fill("doomed message");
     await page.locator("#chat-input").press("Enter");
+    await prompt.held();
     // Switch away while the refusal is in flight: it must not flash here.
     await page.locator("#chat-conversation-select").selectOption(first);
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(first);
+    prompt.release();
     await failed;
     // Same rule as the chat.e2e sibling: the handler's status note is the
     // proof the rejection actually ran before the error's absence means

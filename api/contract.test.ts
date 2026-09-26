@@ -43,7 +43,9 @@ type Streaming = { channels: Record<string, unknown>; schemas: Record<string, ob
 describe("API contract structure", () => {
   test("metadata, schemas, and all source examples validate", async () => {
     await validateApi();
-  });
+    // CPU-bound: about a second alone, several when other test files share the
+    // cores (`bun test --parallel`), so the default five seconds is no bound.
+  }, 30_000);
 
   test("OpenAPI operations exactly match the public inventory", async () => {
     const [openapi, inventory] = await Promise.all([

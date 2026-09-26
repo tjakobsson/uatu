@@ -8,13 +8,22 @@ import { test as base, expect, type APIRequestContext, type Page } from "@playwr
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 
+import { waitForPortsFree, workerServerPort } from "./ports";
 import { treeRow } from "./tree-helpers";
 
-// Workers index 0..N-1; we offset off a base port so concurrent runs in the
-// same shell don't fight each other. Use a high range: starting at 4173 put
-// worker 17 on 4190, which WebKit blocks as an unsafe port. Retries and
-// repeated runs allocate new worker indices even with only four workers.
-const BASE_PORT = Number.parseInt(process.env.UATU_E2E_BASE_PORT ?? "20000", 10);
+// The worker workspaces live in `.e2e/`, a git-ignored directory INSIDE the
+// uatu checkout. Left alone, git discovery from a workspace without its own
+// `.git` walks up to the checkout, so every watcher refresh diffs the whole
+// developer tree (seconds under load, and `maxBuffer` overflows on a large
+// diff) and the tests see whatever the developer has uncommitted. Stopping
+// discovery at the workspace's parent makes those workspaces what they look
+// like — plain folders — while a `git: true` reset still finds the repository
+// it initializes at the workspace root.
+function gitCeilingFor(workspace: string): string {
+  const inherited = process.env.GIT_CEILING_DIRECTORIES;
+  const ceiling = path.dirname(workspace);
+  return inherited ? `${ceiling}${path.delimiter}${inherited}` : ceiling;
+}
 
 type WorkerFixtures = {
   /** The port the worker's dedicated server is listening on. */
@@ -24,7 +33,10 @@ type WorkerFixtures = {
 export const test = base.extend<{}, WorkerFixtures>({
   serverPort: [
     async ({}, use, workerInfo) => {
-      const port = BASE_PORT + workerInfo.workerIndex;
+      // The port follows the worker's parallel slot (see ports.ts for why
+      // not workerIndex). The workspace keeps workerIndex: a replacement
+      // worker must not inherit a predecessor's leftover files.
+      const port = workerServerPort(workerInfo.parallelIndex);
       const workspace = path.resolve(
         process.cwd(),
         ".e2e",
@@ -39,20 +51,29 @@ export const test = base.extend<{}, WorkerFixtures>({
       process.env.UATU_E2E_PORT = String(port);
       process.env.UATU_E2E_WORKSPACE = workspace;
 
+      await waitForPortsFree([port]);
+
       const binary = process.env.UATU_E2E_BINARY;
-      const child = spawn(binary ?? "bun", binary ? [] : ["run", "tests/e2e/server.ts"], {
+      // The harness reads tests/e2e/bunfig.toml (see there for why); keep
+      // this command in step with HarnessBackend in hub-server.ts.
+      const harness = ["--config=tests/e2e/bunfig.toml", "run", "tests/e2e/server.ts"];
+      const child = spawn(binary ?? "bun", binary ? [] : harness, {
         env: {
           ...process.env,
           UATU_E2E_PORT: String(port),
           UATU_E2E_WORKSPACE: workspace,
+          GIT_CEILING_DIRECTORIES: gitCeilingFor(workspace),
+          // The harness exits when this worker's stdin pipe closes, so a
+          // worker that dies without its teardown frees the port anyway.
+          UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
         },
-        stdio: ["ignore", "pipe", "inherit"],
+        stdio: ["pipe", "pipe", "inherit"],
       });
 
       // Wait for the "http://127.0.0.1:<port>" announce line on stdout.
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
-          reject(new Error(`e2e server (worker ${workerInfo.workerIndex}) did not start within 30s`));
+          reject(new Error(`e2e server (worker ${workerInfo.workerIndex}, port ${port}) did not start within 30s`));
         }, 30_000);
         child.stdout?.on("data", (chunk: Buffer) => {
           if (chunk.toString().includes(`127.0.0.1:${port}`)) {
@@ -63,7 +84,7 @@ export const test = base.extend<{}, WorkerFixtures>({
         child.on("error", reject);
         child.on("exit", code => {
           clearTimeout(timeout);
-          reject(new Error(`e2e server exited early (code ${code}) before announcing readiness`));
+          reject(new Error(`e2e server (port ${port}) exited early (code ${code}) before announcing readiness`));
         });
       });
 
@@ -104,6 +125,15 @@ export { expect };
 // Rather than assert a specific boot state, normalize to follow=false by
 // clicking the chip if and only if it's currently `aria-pressed="true"`.
 // Either way the assertion below locks the deterministic post-state in.
+//
+// Two waits end the baseline, both on real conditions:
+//  - Follow is normalized before the path is asserted, so no watcher frame
+//    that lands after this function returns can move the selection.
+//  - The client's semantic persistence coalesces writes for 50ms. Many tests
+//    reset the harness again straight after this baseline; the follow=false
+//    PATCH must have landed first, or it would repopulate the personal state
+//    that later reset cleared. Every path to follow=false persists it, so the
+//    server holding follow=false is the proof.
 export async function standardBeforeEach(page: Page, request: APIRequestContext): Promise<void> {
   await request.post("/__e2e/reset");
   await page.goto("/");
@@ -126,16 +156,28 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
   await expect(page.locator("#document-count")).toHaveText("18 files");
   await waitForPreviewToSettle(page);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
-  // Normalize follow to off — click the chip iff it's currently on.
-  const pressed = await page.locator("#follow-toggle").getAttribute("aria-pressed");
-  if (pressed === "true") {
-    await page.locator("#follow-toggle").click();
-  }
-  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-  // Semantic persistence coalesces writes for 50ms. Many tests reset the
-  // harness again immediately after this baseline; let the baseline PATCH
-  // settle first so it cannot repopulate state after that later reset.
-  await page.waitForTimeout(75);
+  await normalizeFollowOff(page);
+  // Follow is off, so the selection can no longer be moved by a file event.
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  await expect.poll(
+    async () => (await request.get("/api/personal-state").then(response => response.json())).follow,
+    { message: "follow=false persisted to the personal state" },
+  ).toBe(false);
+}
+
+// Turn Follow off by clicking the chip iff it is on. Reading the chip and
+// clicking it are two steps, and the boot-time Rule A flip (above) can land
+// between them — the click would then turn Follow back ON. Re-check after the
+// click and repeat until the chip rests at off; the flip only ever turns
+// Follow off, so this converges.
+export async function normalizeFollowOff(page: Page): Promise<void> {
+  const chip = page.locator("#follow-toggle");
+  await expect(async () => {
+    if ((await chip.getAttribute("aria-pressed")) === "true") {
+      await chip.click();
+    }
+    await expect(chip).toHaveAttribute("aria-pressed", "false", { timeout: 1_000 });
+  }, "follow normalized to off").toPass({ timeout: 10_000 });
 }
 
 // Git Log defaults to hidden (declutter-sidebar-defaults change); tests
@@ -149,23 +191,23 @@ export async function showGitLogPane(page: Page): Promise<void> {
   await expect(pane).toBeVisible();
 }
 
+// The preview has caught up with the selection: the document the URL names
+// is the one on screen. Selecting a document rewrites the URL at once
+// (push/replaceSelection), while `#preview-path` is written only when that
+// document's payload has been applied — so the two agree exactly when no
+// selection is still loading. Fails, rather than falling through, when they
+// never agree. For the e2e harness's root-mounted session.
 export async function waitForPreviewToSettle(page: Page): Promise<void> {
-  let previousPath = "";
-
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const currentPath = (await page.locator("#preview-path").textContent())?.trim() ?? "";
-    if (currentPath.length > 0 && currentPath === previousPath) {
-      await page.waitForTimeout(300);
-
-      const settledPath = (await page.locator("#preview-path").textContent())?.trim() ?? "";
-      if (settledPath === currentPath) {
-        return;
-      }
-    }
-
-    previousPath = currentPath;
-    await page.waitForTimeout(150);
-  }
+  await expect.poll(
+    () => page.evaluate(() => {
+      const shown = document.querySelector("#preview-path")?.textContent?.trim() ?? "";
+      const selected = decodeURIComponent(window.location.pathname).replace(/^\//, "");
+      return shown.length > 0 && shown === selected
+        ? "settled"
+        : `preview shows "${shown}" while the selection is "${selected}"`;
+    }),
+    { message: "preview settled on the selected document" },
+  ).toBe("settled");
 }
 
 export function sidebarPanesFitVisibleHeight(page: Page): () => Promise<boolean> {

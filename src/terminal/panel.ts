@@ -209,10 +209,17 @@ type TerminalPaneEntry = {
 // toggle + keyboard shortcuts + the close-confirmation modal. The controller
 // is the only thing that mutates panel state; UI handlers all funnel through
 // its named methods so persistence and refit happen consistently.
+//
+// `mountPane` defaults to the real xterm mount; unit tests substitute a
+// stand-in so the controller runs without a canvas or a PTY connection.
+// The returned teardown is for those tests too: the page never tears the
+// panel down, but a test must leave the shared tab-bar, UI-mode and find
+// registries as it found them.
 export function setupTerminalPanel(
   enabled: boolean,
   initialLastPtyId?: string,
-) {
+  { mountPane = mountTerminalPanel }: { mountPane?: typeof mountTerminalPanel } = {},
+): (() => void) | undefined {
   if (terminalSetupRan) return;
   terminalSetupRan = true;
 
@@ -658,7 +665,7 @@ export function setupTerminalPanel(
 
     const copyToast = createCopyToast(element);
 
-    const handle = mountTerminalPanel({
+    const handle = mountPane({
       container: host,
       getToken,
       sessionId: record.sessionId,
@@ -992,7 +999,9 @@ export function setupTerminalPanel(
   // held by another window (takeover is destructive to that window) and
   // detached overflow past the pane cap. Empty inventory falls straight
   // through to a fresh pane, keeping the zero-friction default.
-  async function addPaneInteractive(): Promise<void> {
+  // `focus: false` adds without moving keyboard focus into the pane — the
+  // touch tab bar's arrow-key navigation, which keeps focus on the tab.
+  async function addPaneInteractive(options: { focus?: boolean } = {}): Promise<void> {
     if (panes.size >= TERMINAL_MAX_PANES) return;
     // A failed read falls through to the fresh-shell path, as it always has:
     // the user asked for a terminal and we cannot prove one already exists.
@@ -1007,11 +1016,11 @@ export function setupTerminalPanel(
       TERMINAL_MAX_PANES - panes.size,
     );
     if (plan.attach.length > 0) {
-      await attachSessionBatch(plan.attach);
+      await attachSessionBatch(plan.attach, options);
       return;
     }
     if (plan.decide.length === 0) {
-      await addPane();
+      await addPane(undefined, options);
       return;
     }
     // Touch mode has no room for two competing session surfaces: the switcher
@@ -1037,7 +1046,10 @@ export function setupTerminalPanel(
   // path activates mid-batch. Suppression also spares N-1 refits, N-1 focus
   // grabs (each one a software-keyboard flash on touch), and N-1 personal-
   // state writes.
-  async function attachSessionBatch(sessions: TerminalSessionInfo[]): Promise<void> {
+  async function attachSessionBatch(
+    sessions: TerminalSessionInfo[],
+    options: { focus?: boolean } = {},
+  ): Promise<void> {
     const savedLastPtyId = lastPtyId;
     const landed: TerminalSessionInfo[] = [];
     batchingAttach = true;
@@ -1056,7 +1068,7 @@ export function setupTerminalPanel(
     const activeEntry =
       ordered.find(entry => entry.record.sessionId === activeSessionId) ?? ordered.at(-1);
     if (activeEntry) {
-      setActivePane(activeEntry.record.id);
+      setActivePane(activeEntry.record.id, options);
       // A user-initiated show parks its focus intent until a pane exists.
       // Consume it here rather than in `addPane`, so focus lands on the pane
       // the batch chose instead of whichever one happened to attach first.
@@ -1662,7 +1674,10 @@ export function setupTerminalPanel(
     setVisible(false);
   }
 
-  function setVisible(visible: boolean, persist = true, focusOnShow = false) {
+  // `holdFocus` is a show from the touch tab bar's arrow-key navigation:
+  // keyboard focus stays on the tab, so no pane focus is parked, and the
+  // panes this show creates or attaches do not take it either.
+  function setVisible(visible: boolean, persist = true, focusOnShow = false, holdFocus = false) {
     if (visible) {
       panel!.removeAttribute("hidden");
       resizer!.removeAttribute("hidden");
@@ -1682,7 +1697,7 @@ export function setupTerminalPanel(
         } else {
           // Nothing to restore: offer existing sessions (orphans, other
           // windows' shells) before minting a fresh one.
-          void addPaneInteractive();
+          void addPaneInteractive({ focus: !holdFocus });
         }
       }
       requestAnimationFrame(() => fitAll());
@@ -1693,7 +1708,9 @@ export function setupTerminalPanel(
       // no pane exists yet (fresh spawn, session chooser), addPane consumes
       // the flag once the pane is created. Restore-on-boot shows pass
       // focusOnShow=false so page load never steals focus.
-      if (focusOnShow) {
+      if (holdFocus) {
+        focusPaneWhenReady = false;
+      } else if (focusOnShow) {
         const entry = activePaneId ? panes.get(activePaneId) : undefined;
         if (entry) {
           entry.handle.focus();
@@ -1977,20 +1994,26 @@ export function setupTerminalPanel(
   // lives in terminalActionForTabChange (unit-pinned): leaving the Terminal
   // tab NEVER routes through setVisible(false) — the surface hides via CSS
   // only, panes and PTYs stay attached, exactly like minimize.
-  onActiveTabChange(tab => {
+  const stopTabChanges = onActiveTabChange((tab, _previous, { holdFocus = false }) => {
     if (!touchModeNow()) return;
     if (tab === "terminal") setTerminalTabBadge(false);
     const action = terminalActionForTabChange(tab === "terminal", panel!.hasAttribute("hidden"));
     switch (action) {
       case "show":
         // Same spawn/reattach path as the desktop toggle.
-        setVisible(true, true, true);
+        setVisible(true, true, !holdFocus, holdFocus);
         break;
       case "reveal": {
         // Panes stayed attached while parked; the surface reappears via
         // CSS. Recompute the display promotion, refit, focus.
         applyDisplayModeToDom();
         requestAnimationFrame(() => fitAll());
+        // Arrow-key navigation reveals without focusing, and drops any focus
+        // a pointer show parked for a pane that has not attached yet.
+        if (holdFocus) {
+          focusPaneWhenReady = false;
+          break;
+        }
         const entry = activePaneId ? panes.get(activePaneId) : undefined;
         entry?.handle.focus();
         break;
@@ -2015,7 +2038,7 @@ export function setupTerminalPanel(
   // dock/display (the promotion evaporates with the mode), touch re-applies
   // the active tab's surface. An active Terminal tab with no live panel
   // falls back to Preview instead of a blank surface.
-  onUiModeChange(() => {
+  const stopModeChanges = onUiModeChange(() => {
     if (touchModeNow() && activeTab() === "terminal" && panel!.hasAttribute("hidden")) {
       setActiveTab("preview");
     }
@@ -2076,4 +2099,12 @@ export function setupTerminalPanel(
     // no-auto-spawn boot contract, so land on Preview instead.
     setActiveTab("preview");
   }
+
+  return () => {
+    stopTabChanges();
+    stopModeChanges();
+    registerTerminalFind(null);
+    lifecycle?.dispose();
+    terminalSetupRan = false;
+  };
 }

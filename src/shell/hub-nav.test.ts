@@ -1717,8 +1717,12 @@ describe("activating the current workspace in the switcher", () => {
       { id: "twin", displayName: "Uatu", path: "/src/twin", running: true },
       { id: "cold", displayName: "Cold", path: "/src/cold", running: false },
     ];
+    let stateReads = 0;
     setGlobal("fetch", async (url: string, init?: { method?: string }) => {
-      if (url === "/api/hub/state") return Response.json({ workspaces });
+      if (url === "/api/hub/state") {
+        stateReads += 1;
+        return Response.json({ workspaces });
+      }
       const start = /^\/api\/hub\/sessions\/([^/]+)\/start$/.exec(url);
       if (start && init?.method === "POST") {
         starts.push(decodeURIComponent(start[1]!));
@@ -1760,8 +1764,36 @@ describe("activating the current workspace in the switcher", () => {
       target.dispatchEvent(event);
       return event;
     };
-    return { document, window, toggle, menu, open, entry, click, starts, navigations, toggleFocused: () => toggleFocused };
+    return { document, window, toggle, menu, open, entry, click, starts, navigations, workspaces, stateReads: () => stateReads, toggleFocused: () => toggleFocused };
   }
+
+  test("the refresh an opening starts keeps every unchanged entry as the node already on screen", async () => {
+    const page = await mountSwitcher(true);
+    const readsBefore = page.stateReads();
+    page.open();
+    const shown = [...page.menu.children];
+    const twin = page.entry("twin");
+    const cold = page.entry("cold");
+    // The opening's background read answers with the same list: nothing a
+    // pointer, a keyboard focus or an in-flight click is on may be replaced.
+    for (let attempt = 0; attempt < 100 && page.stateReads() === readsBefore; attempt += 1) await Bun.sleep(1);
+    await Bun.sleep(5);
+    expect(page.stateReads()).toBe(readsBefore + 1);
+    // Identity, compared as booleans: a linkedom node diff never finishes printing.
+    expect(page.menu.children.length).toBe(shown.length);
+    expect([...page.menu.children].every((node, index) => node === shown[index])).toBe(true);
+
+    // A changed workspace re-renders only its own entry.
+    page.workspaces[1] = { ...page.workspaces[1]!, path: "/src/twin-moved" };
+    page.toggle.dispatchEvent(new page.window.Event("click", { bubbles: true }));
+    expect(page.menu.hidden).toBe(true);
+    page.open();
+    for (let attempt = 0; attempt < 100 && !page.entry("twin").textContent?.includes("twin-moved"); attempt += 1) await Bun.sleep(1);
+    expect(page.entry("twin").textContent).toContain("/src/twin-moved");
+    expect(page.entry("twin") === twin).toBe(false);
+    expect(page.entry("cold") === cold).toBe(true);
+    expect(page.menu.children.length).toBe(shown.length);
+  });
 
   test("an ordinary click on the current running workspace closes the menu without navigating; siblings and other gestures keep the link", async () => {
     const page = await mountSwitcher(true);

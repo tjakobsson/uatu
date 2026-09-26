@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import { openTerminal, paneHost, typeInTerminal, waitForShell } from "./terminal-helpers";
 
 // Coverage for persist-detached-pty-sessions: a disconnect (reload, tab
 // close, sleep) detaches the PTY but leaves it running for a later
@@ -44,60 +45,15 @@ async function bootWithTerminalCookie(
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 }
 
-// Open the panel (if hidden), wait for xterm, and focus its hidden textarea
-// so keyboard.type() reaches the PTY.
-async function openAndFocusTerminal(page: import("@playwright/test").Page): Promise<void> {
-  const panel = page.locator("#terminal-panel");
-  if (await panel.isHidden()) {
-    await page.locator("#terminal-toggle").click();
-  }
-  await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-    timeout: 5000,
-  });
-  await page.evaluate(() => {
-    const host = document.querySelector(".terminal-pane-host") as HTMLElement | null;
-    const helper = host?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
-    helper?.focus();
-  });
-}
-
-// Type a probe that expands a shell variable and assert on the expansion.
 // `echo got_${NAME}_end` prints `got_<value>_end` in the same shell and
 // `got__end` in a fresh one — no knowledge of the prompt required.
-async function typeLine(page: import("@playwright/test").Page, line: string): Promise<void> {
-  await page.keyboard.type(line);
-  await page.keyboard.press("Enter");
-}
-
-// Wait for the shell to draw its prompt before typing. Keystrokes sent while
-// the shell is still initializing (e.g. zsh instant-prompt) can be consumed
-// or echoed garbled, so a freshly-spawned pane isn't type-safe until some
-// non-whitespace content has rendered.
-async function waitForPrompt(page: import("@playwright/test").Page): Promise<void> {
-  const rows = page.locator(".terminal-pane-host .xterm-rows > div");
-  await expect
-    .poll(
-      async () => {
-        const texts = await rows.allTextContents();
-        return texts.some(text => text.trim().length > 0);
-      },
-      { timeout: 5000, message: "shell prompt must render before typing" },
-    )
-    .toBe(true);
-}
 
 test.describe("terminal persistence: detached PTYs survive, confirmed close kills", () => {
   test("reload reattaches to the same still-running shell", async ({ page, request }) => {
     await bootWithTerminalCookie(page, request);
-    await openAndFocusTerminal(page);
-    await waitForPrompt(page);
-
-    // Prove the round-trip works, then stash state in the shell process.
-    await typeLine(page, "echo pre_reload_marker");
-    await expect(page.locator(".terminal-pane-host")).toContainText("pre_reload_marker", {
-      timeout: 5000,
-    });
-    await typeLine(page, "UATU_PERSIST=alive_across_reload");
+    // Proves the round trip works, then stash state in the shell process.
+    await openTerminal(page);
+    await typeInTerminal(page, "UATU_PERSIST=alive_across_reload");
 
     // Auto-restore the panel on reload (production storage + value).
     await page.evaluate(() => {
@@ -105,15 +61,14 @@ test.describe("terminal persistence: detached PTYs survive, confirmed close kill
     });
     await page.reload();
 
-    await expect(page.locator("#terminal-panel")).toBeVisible({ timeout: 3000 });
-    await openAndFocusTerminal(page);
+    await expect(page.locator("#terminal-panel")).toBeVisible();
+    // The restored pane paints its old screen before the reattached socket
+    // is live; typing before then would be dropped.
+    await waitForShell(page);
 
     // Same shell process → the variable survives the reload.
-    await typeLine(page, "echo got_${UATU_PERSIST}_end");
-    await expect(page.locator(".terminal-pane-host")).toContainText(
-      "got_alive_across_reload_end",
-      { timeout: 5000 },
-    );
+    await typeInTerminal(page, "echo got_${UATU_PERSIST}_end");
+    await expect(paneHost(page)).toContainText("got_alive_across_reload_end");
   });
 
   test("confirmed close kills the shell; the next open gets a fresh one", async ({
@@ -121,14 +76,8 @@ test.describe("terminal persistence: detached PTYs survive, confirmed close kill
     request,
   }) => {
     await bootWithTerminalCookie(page, request);
-    await openAndFocusTerminal(page);
-    await waitForPrompt(page);
-
-    await typeLine(page, "echo pre_close_marker");
-    await expect(page.locator(".terminal-pane-host")).toContainText("pre_close_marker", {
-      timeout: 5000,
-    });
-    await typeLine(page, "UATU_PERSIST=should_not_survive");
+    await openTerminal(page);
+    await typeInTerminal(page, "UATU_PERSIST=should_not_survive");
 
     // Confirmed close: × → modal → accept. This is the ONLY user path that
     // terminates the PTY (close code 4001).
@@ -138,11 +87,8 @@ test.describe("terminal persistence: detached PTYs survive, confirmed close kill
     await expect(page.locator("#terminal-panel")).toBeHidden();
 
     // Reopen: a fresh pane, a fresh shell — the variable must be gone.
-    await openAndFocusTerminal(page);
-    await waitForPrompt(page);
-    await typeLine(page, "echo got_${UATU_PERSIST}_end");
-    await expect(page.locator(".terminal-pane-host")).toContainText("got__end", {
-      timeout: 5000,
-    });
+    await openTerminal(page);
+    await typeInTerminal(page, "echo got_${UATU_PERSIST}_end");
+    await expect(paneHost(page)).toContainText("got__end");
   });
 });

@@ -1,10 +1,13 @@
-import { chromium, webkit, type Page } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
+import { test as baseTest, expect } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 import { chatWorkload } from "../fixtures/chat-performance";
 import { armConversationCommit, conversationCommit, stopConversationCommit } from "./chat-shell-performance-helpers";
-import { bootShell, control, drag, expectBounded, expectReading, frames, log, openShellRow, position, settleScroll, shell } from "./chat-shell-helpers";
+import { bootShell, control, drag, expectBounded, expectLiveDelivered, expectReading, frames, log, openShellRow, position, recordLiveDelivery, settleScroll, shell } from "./chat-shell-helpers";
+
+const test = withEngineBrowsers(baseTest);
 
 const floating = (page: Page) => page.getByRole("region", { name: "Shell output window" });
 
@@ -38,14 +41,23 @@ async function instrumentShell(page: Page) {
 
 const work = (page: Page) => page.evaluate(() => {
   const probe = (window as any).__shellProbe;
-  const owner = probe.controllers.find((c: any) => c.itemId === "shell:a");
-  return { ...owner.buffer.stats, lineWrites: probe.lineWrites, paints: probe.paints, parseMs: probe.parseMs,
+  const owners = probe.controllers.filter((c: any) => c.itemId === "shell:a");
+  return { ...owners.at(-1).buffer.stats, owners: owners.length, lineWrites: probe.lineWrites, paints: probe.paints, parseMs: probe.parseMs,
     transcriptRenders: globalThis.__uatuChatPerformance?.counts["transcript-render"] ?? 0 };
 });
 
+// Interactions with a 5,000-line log are held to a 3 s budget. The
+// deterministic work counters are the pass criterion; the wall clock, which
+// a loaded runner inflates, is kept as evidence, annotated when over budget,
+// and fails only past a looser guard.
+const INTERACTION_BUDGET_MS = 3_000;
+const INTERACTION_GUARD_MS = 2 * INTERACTION_BUDGET_MS;
+
+attachPageDiagnosticsOnFailure(test);
+
 for (const engine of ["chromium", "webkit"] as const) {
-  for (const child of [false, true]) for (const collapsed of ["row", "group"] as const) test(`${engine} ${child ? "child" : "parent"} return focuses the visible collapsed ${collapsed} summary`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const child of [false, true]) for (const collapsed of ["row", "group"] as const) test(`${engine} ${child ? "child" : "parent"} return focuses the visible collapsed ${collapsed} summary`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { outputView, timeline } = await bootShell(page, request, { child, extra: [98, 99].map(createdAt => ({
@@ -73,8 +85,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} scrolling alone preserves inspection through completion and unchanged reconstruction`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} scrolling alone preserves inspection through completion and unchanged reconstruction`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const output = log(200);
@@ -106,8 +118,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} full-area output protects covered prompt navigation`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} full-area output protects covered prompt navigation`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -140,8 +152,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  test(`${engine} floating Find excludes hidden inline chrome and restores it on return`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  test(`${engine} floating Find excludes hidden inline chrome and restores it on return`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { outputView, update } = await bootShell(page, request, { output: "visible-output-needle" });
@@ -175,8 +187,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find reveals inline error matches on both axes`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find reveals inline error matches on both axes`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { update, outputView, timeline } = await bootShell(page, request, { shape: "bash", child });
@@ -209,8 +221,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  test(`${engine} covered Preview find cannot receive focus behind full-area shell output`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  test(`${engine} covered Preview find cannot receive focus behind full-area shell output`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: true, viewport: { width: 1440, height: 1000 } });
     const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
     try {
@@ -250,8 +262,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} normalized completion time reaches the floating header`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const shape of ["command", "bash"] as const) test(`${engine} ${shape} normalized completion time reaches the floating header`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const { update, outputView } = await bootShell(page, request, { shape });
@@ -275,8 +287,12 @@ for (const engine of ["chromium", "webkit"] as const) {
 
   for (const agent of ["opencode", "claude"] as const) {
     for (const shape of ["command", "bash"] as const) {
-      for (const child of [false, true]) test(`${engine} ${agent} ${shape} ${child ? "child" : "parent"} full running scrollback flow`, async ({ request, baseURL }, testInfo) => {
-        const browser = await ({ chromium, webkit })[engine].launch();
+      for (const child of [false, true]) test(`${engine} ${agent} ${shape} ${child ? "child" : "parent"} full running scrollback flow`, async ({ launchBrowser, request, baseURL }, testInfo) => {
+        // A long sequential flow, not a race: on CI the Chromium runs pass at
+        // a 22.7 s median (max 23.9 s) and the WebKit ones cross 30 s under
+        // four-worker contention while still progressing.
+        test.slow();
+        const browser = await launchBrowser(engine);
         const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
         const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
         try {
@@ -375,14 +391,16 @@ for (const engine of ["chromium", "webkit"] as const) {
     }
   }
 
-  for (const outcome of ["completed", "failed", "cancelled"] as const) for (const shape of ["command", "bash"] as const) for (const child of [false, true]) test(`${engine} ${shape} ${child ? "child" : "parent"} ${outcome} keeps selected identity through regrouping`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const outcome of ["completed", "failed", "cancelled"] as const) for (const shape of ["command", "bash"] as const) for (const child of [false, true]) test(`${engine} ${shape} ${child ? "child" : "parent"} ${outcome} keeps selected identity through regrouping`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
     try {
-      const { outputView, update, viewport } = await bootShell(page, request, { shape, child, agent: shape === "bash" ? "claude" : "opencode" });
+      const { outputView, update, viewport, timeline } = await bootShell(page, request, { shape, child, agent: shape === "bash" ? "claude" : "opencode" });
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       const window = floating(page);
       await viewport.hover(); await page.mouse.wheel(0, -1000); await frames(page);
+      // WebKit keeps wheel-scrolling past the paint frames; anchor on where the reader settled.
+      await settleScroll(viewport);
       const anchor = await position(viewport), geometry = await window.boundingBox();
       await update({ ...shell(shape, log(120, true) + "\nfinal", outcome), ...(outcome === "failed"
         ? shape === "bash" ? { error: "\x1b[31mseparate error output\x1b[0m" } : { exitCode: 7 } : {}) });
@@ -391,8 +409,10 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(window.locator(".chat-shell-window-metadata")).toContainText(outcome[0]!.toUpperCase() + outcome.slice(1));
       await expect(window.locator(".chat-shell-window-metadata")).not.toContainText(/\d{4}|Invalid Date/);
       await update(shell("bash", "new command", "running", "shell:b"));
+      // The regrouping has rendered before its effect on the selected window is judged.
+      await expect(timeline.locator('[data-chat-item-id="shell:b"]')).toBeAttached();
       await expect(window).toHaveAttribute("data-shell-item-id", "shell:a");
-      expect(await window.boundingBox()).toEqual(geometry); await expectReading(viewport, anchor);
+      await expect.poll(() => window.boundingBox()).toEqual(geometry); await expectReading(viewport, anchor);
       await window.getByRole("button", { name: "Maximize", exact: true }).click();
       await window.getByRole("button", { name: "Return to chat" }).focus();
       await page.keyboard.press("Escape");
@@ -401,13 +421,20 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const agent of ["opencode", "claude"] as const) test(`${engine} ${agent} long output parse and DOM work stays incremental`, async ({ request, baseURL }, testInfo) => {
+  for (const agent of ["opencode", "claude"] as const) test(`${engine} ${agent} long output parse and DOM work stays incremental`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
     test.setTimeout(60_000);
-    const browser = await ({ chromium, webkit })[engine].launch();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     const evidence: Record<string, unknown> = { engine, agent, initialLines: 5000, updates: 20, conversationWorkloadItems: 50 };
     const requests: Record<string, unknown>[] = [];
     evidence.controlRequests = requests;
+    const timed = (label: string, milliseconds: number) => {
+      evidence[`${label}Milliseconds`] = milliseconds;
+      if (milliseconds >= INTERACTION_BUDGET_MS) {
+        testInfo.annotations.push({ type: "over-budget", description: `${label}: ${Math.round(milliseconds)} ms (budget ${INTERACTION_BUDGET_MS} ms)` });
+      }
+      expect(milliseconds, `${label}: wall clock under the ${INTERACTION_GUARD_MS} ms guard`).toBeLessThan(INTERACTION_GUARD_MS);
+    };
     const boundedControl = async (data: Record<string, unknown>) => {
       const sample: Record<string, unknown> = { action: data.action, conversationId: data.conversationId,
         update: evidence.updateIndex, phase: evidence.phase, timeoutMilliseconds: 10_000 };
@@ -466,12 +493,23 @@ for (const engine of ["chromium", "webkit"] as const) {
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       const window = floating(page);
       evidence.phase = "move and resize";
+      const beforeInteraction = await work(page);
       const interactionStart = Date.now();
       await drag(page, window.getByRole("group", { name: /^Move output/ }), 50, 20);
       await drag(page, window.getByRole("group", { name: /^Resize output/ }), 100, 40);
       await expectBounded(page, window);
-      evidence.moveResizeMilliseconds = Date.now() - interactionStart;
-      expect(Date.now() - interactionStart).toBeLessThan(3000);
+      const interactionMilliseconds = Date.now() - interactionStart;
+      const afterInteraction = await work(page);
+      evidence.moveResize = { before: beforeInteraction, after: afterInteraction };
+      // Moving and resizing lays the retained lines out again; it never
+      // re-parses, resets, or rewrites them.
+      expect(afterInteraction.owners).toBe(beforeInteraction.owners);
+      expect(afterInteraction.resets).toBe(beforeInteraction.resets);
+      expect(afterInteraction.inputCodeUnits).toBe(beforeInteraction.inputCodeUnits);
+      expect(afterInteraction.lineWrites).toBe(beforeInteraction.lineWrites);
+      expect(afterInteraction.paints).toBe(beforeInteraction.paints);
+      expect(await viewport.locator(".chat-shell-line").first().evaluate((el, first) => el === first, firstNode)).toBe(true);
+      timed("moveResize", interactionMilliseconds);
       // Navigate through the real inventory selector with a long log retained.
       evidence.phase = "seed navigation target";
       const other = await boundedControl({ action: "seed", agent, title: "Other long-output view", items: [
@@ -486,8 +524,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         try {
           await test.step(label, () => page.locator("#chat-conversation-select").selectOption(conversationId));
           await expect.poll(async () => (await conversationCommit(page)).milliseconds, `${label}: target transcript committed`).toBeDefined();
-          const sample = await conversationCommit(page);
-          expect(sample.milliseconds, `${label}: selector change to target transcript DOM commit`).toBeLessThan(3000);
+          timed(itemId === "navigation-target" ? "navigateAwayCommit" : "navigateBackCommit", (await conversationCommit(page)).milliseconds!);
         } finally {
           evidence[itemId === "navigation-target" ? "navigateAway" : "navigateBack"] = {
             ...await conversationCommit(page), roundtripMilliseconds: Date.now() - start,
@@ -495,19 +532,38 @@ for (const engine of ["chromium", "webkit"] as const) {
           await stopConversationCommit(page);
         }
       };
+      const navigationWork: Record<string, unknown> = { before: await work(page) };
+      evidence.navigationWork = navigationWork;
       evidence.phase = "select navigation target";
       await navigate(other.conversation.id, "navigation-target", "Select the newly seeded conversation");
       evidence.phase = "release floating window";
       await expect(window).toHaveCount(0);
+      navigationWork.away = await work(page);
       evidence.phase = "select original conversation";
       await navigate(parentId, "shell:a", "Return to the long-output conversation");
+      navigationWork.back = await work(page);
       evidence.phase = "inspect retained shell row";
       await test.step("Inspect the retained shell row", () => openShellRow(page.locator("#chat-timeline"), "shell:a"));
       await expect(viewport.locator(".chat-shell-line")).toHaveCount(5020);
       expect((await viewport.locator(".chat-shell-line").allTextContents()).join("")).toBe(output + "\n");
+      const inspected = await work(page);
+      navigationWork.inspected = inspected;
+      const { before, away, back } = navigationWork as Record<"before" | "away" | "back", typeof inspected>;
+      // Leaving releases the row without touching its lines; returning builds
+      // one new owner that writes each of the 5,020 lines once and paints
+      // once, without re-parsing; expanding the retained row adds nothing.
+      expect(away.lineWrites).toBe(before.lineWrites);
+      expect(away.paints).toBe(before.paints);
+      expect(back.owners).toBe(before.owners + 1);
+      expect(back.lineWrites - away.lineWrites).toBe(5020);
+      expect(back.paints - away.paints).toBe(1);
+      expect(back.inputCodeUnits).toBe(output.length);
+      expect(inspected.lineWrites).toBe(back.lineWrites);
+      expect(inspected.paints).toBe(back.paints);
       evidence.navigationMilliseconds = Date.now() - navigationStart;
       // The whole roundtrip also includes two actions, row expansion and protocol
-      // waits. Each navigation's browser response has its own unchanged 3s budget.
+      // waits. Each navigation's selector-to-commit time is timed against the
+      // interaction budget above.
       evidence.phase = "complete";
     } finally {
       const report = JSON.stringify(evidence, null, 2);
@@ -517,12 +573,13 @@ for (const engine of ["chromium", "webkit"] as const) {
     }
   });
 
-  for (const child of [false, true]) for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} hidden popped output completes without painting`, async ({ request, baseURL }, testInfo) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const child of [false, true]) for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} hidden popped output completes without painting`, async ({ launchBrowser, request, baseURL }, testInfo) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
       const instrumented = await instrumentShell(page);
+      await recordLiveDelivery(page);
       const shape = child ? "bash" : "command";
       const { outputView, viewport, update } = await bootShell(page, request, { child, touch, shape, agent: child ? "claude" : "opencode" });
       instrumented();
@@ -541,8 +598,10 @@ for (const engine of ["chromium", "webkit"] as const) {
       let output = log(120, true);
       for (let i = 0; i < 8; i++) { output += `\nhidden-${i}`; await update(shell(shape, output)); }
       await update(shell(shape, output + "\nhidden-final", "completed"));
-      // Allow the existing streamed-event scheduler to process its hidden branch.
-      await page.waitForTimeout(200);
+      // The page has handled the final hidden update, and any paint it could
+      // have scheduled has had its frames, before the absence is asserted.
+      await expectLiveDelivered(page, "hidden-final");
+      await frames(page);
       const hidden = await work(page);
       expect(hidden).toEqual(before);
       if (touch) await page.locator("#touch-tab-chat").click();
@@ -563,8 +622,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const touch of [false, true]) for (const theme of ["light", "dark"] as const) test(`${engine} ${touch ? "touch" : "desktop"} ${theme} layout bounds and return controls`, async ({ request, baseURL }, testInfo) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const touch of [false, true]) for (const theme of ["light", "dark"] as const) test(`${engine} ${touch ? "touch" : "desktop"} ${theme} layout bounds and return controls`, async ({ launchBrowser, request, baseURL }, testInfo) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: true, isMobile: touch, colorScheme: theme,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -572,10 +631,12 @@ for (const engine of ["chromium", "webkit"] as const) {
       const output = "\x1b[32mgreen\x1b[0m\n" + log(150, true);
       const { outputView, viewport, update } = await bootShell(page, request, { touch, output });
       const height = outputView.getByRole("separator", { name: /Output height/ });
-      await height.focus(); await page.keyboard.press("End");
-      expect(await height.getAttribute("aria-valuenow")).toBe(await height.getAttribute("aria-valuemax"));
+      // Locator presses focus the separator themselves, so a late focus change
+      // elsewhere cannot take the key.
+      await height.press("End");
+      await expect(height).toHaveAttribute("aria-valuenow", (await height.getAttribute("aria-valuemax"))!);
       await height.press("Home");
-      expect(await height.getAttribute("aria-valuenow")).toBe(await height.getAttribute("aria-valuemin"));
+      await expect(height).toHaveAttribute("aria-valuenow", (await height.getAttribute("aria-valuemin"))!);
       await height.press("ArrowDown");
       if (touch && engine === "chromium") {
         const before = Number(await height.getAttribute("aria-valuenow"));
@@ -661,8 +722,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} find and native selection survive streaming and reparenting`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const touch of [false, true]) test(`${engine} ${touch ? "touch" : "desktop"} find and native selection survive streaming and reparenting`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
@@ -718,8 +779,11 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  test(`${engine} item A and B retain separate geometry through navigation and mode changes`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  test(`${engine} item A and B retain separate geometry through navigation and mode changes`, async ({ launchBrowser, request, baseURL }) => {
+    // Long flow: the WebKit run passes at a 29.7 s median on CI, Chromium at
+    // 21.5 s, against the 30 s default budget.
+    test.slow();
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: true, viewport: { width: 1440, height: 1000 } });
     try {
       await page.addInitScript(() => localStorage.setItem("uatu:presentation:v1:%2F:uatu:ui-mode", "desktop"));
@@ -738,7 +802,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       // A's explicit Pop out transfers sole ownership and restores A's bounds.
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       await expect(window).toHaveCount(1); await expect(window).toHaveAttribute("data-shell-item-id", "shell:a");
-      expect(await window.boundingBox()).toEqual(a);
+      await expect.poll(() => window.boundingBox()).toEqual(a);
       await expect(bView.locator(".chat-shell-viewport")).toBeVisible();
       const other = await control(request, { action: "seed", title: "Navigate away", items: [] });
       await page.locator("#chat-conversation-select").selectOption(other.conversation.id);
@@ -747,7 +811,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(window).toHaveCount(0);
       await openShellRow(timeline, "shell:a");
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
-      expect.soft(await window.boundingBox()).toEqual(a);
+      await expect.soft.poll(() => window.boundingBox()).toEqual(a);
       await drag(page, window.getByRole("group", { name: /^Move output/ }), 500, 0);
       const modeGeometry = await window.boundingBox();
       await viewport.focus(); await page.keyboard.press("Home"); await page.keyboard.press("PageDown"); await frames(page);
@@ -764,13 +828,13 @@ for (const engine of ["chromium", "webkit"] as const) {
       await page.locator("#ui-mode-toggle").click();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
-      expect(await window.boundingBox()).toEqual(modeGeometry);
+      await expect.poll(() => window.boundingBox()).toEqual(modeGeometry);
       await expectReading(viewport, anchor);
     } finally { await browser.close(); }
   });
 
-  for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} return preserves deliberate outer reading and releases ownership`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} return preserves deliberate outer reading and releases ownership`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const history = Array.from({ length: 30 }, (_, i) => ({ id: `history:${i}`, type: "assistant_message" as const,
@@ -818,14 +882,18 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  test(`${engine} disconnection does not invent completion`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  test(`${engine} disconnection does not invent completion`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
-      const { outputView } = await bootShell(page, request);
+      const { outputView, id } = await bootShell(page, request);
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       await control(request, { action: "disconnect" });
-      await page.waitForTimeout(250);
+      // A later item reaching the page shows the stream was dropped, resumed
+      // and replayed; only then is the absence of a completion meaningful.
+      await control(request, { action: "item", conversationId: id, item: {
+        id: "notice:after-disconnect", type: "notice", createdAt: 200, level: "info", message: "delivered after the disconnect" } });
+      await expect(page.locator("#chat-items")).toContainText("delivered after the disconnect");
       const window = floating(page);
       await expect(window).toHaveAttribute("data-status", "running");
       await expect(window.locator(".chat-shell-window-metadata")).not.toContainText(/Completed|Failed|Cancelled|\d{4}/);
@@ -834,8 +902,8 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find materializes completed-only shell output once`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[engine].launch();
+  for (const child of [false, true]) test(`${engine} ${child ? "child" : "parent"} find materializes completed-only shell output once`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
       const output = "lazy-earliest-needle\n" + log(200) + "\nlazy-latest-needle";

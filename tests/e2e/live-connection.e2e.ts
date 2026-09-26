@@ -118,7 +118,12 @@ test.describe("document channel recovery", () => {
     await hidePage(page);
 
     // The stream is released: the workspace changes, and nothing reaches
-    // the page.
+    // the page. A second, connected page is the proof that the change was
+    // delivered to live subscribers — only once it has the new file does the
+    // hidden page's lack of it mean anything.
+    const observer = await page.context().newPage();
+    await observer.goto("/");
+    await expect(observer.locator("#connection-state .connection-label")).toHaveText("Connected");
     await fs.writeFile(workspacePath("pocketed.md"), "# Pocketed\n\nWritten while backgrounded.\n", "utf8");
     await expect.poll(
       async () => {
@@ -127,8 +132,9 @@ test.describe("document channel recovery", () => {
       },
       { timeout: 15_000 },
     ).toBe(19);
-    await page.waitForTimeout(500);
+    await expect(observer.locator("#document-count")).toHaveText("19 files");
     await expect(treeRow(page, "pocketed.md")).toHaveCount(0);
+    await observer.close();
 
     // Reopened. iOS does not reliably fire `pageshow` here; the visibility
     // change is the only signal, and it has to be enough.

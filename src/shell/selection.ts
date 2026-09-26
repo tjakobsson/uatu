@@ -41,7 +41,8 @@ export function setSelectedId(next: string | null, origin: "reconcile" | "naviga
   // preference, but must not erase a browser marker written by another tab.
   // Only explicit navigation (including same-file activation) resumes it.
   if (origin === "navigation") resumeDocumentSelection();
-  if (next !== appState.selectedId) {
+  const changed = next !== appState.selectedId;
+  if (changed) {
     selectedDestination = null;
     ++selectionGeneration;
   }
@@ -51,7 +52,14 @@ export function setSelectedId(next: string | null, origin: "reconcile" | "naviga
       const document = root.docs.find(candidate => candidate.id === next);
       if (document) {
         selectedDestination = { id: document.id, name: document.name, relativePath: document.relativePath };
-        persistPersonalWorkspaceState({ documentPath: document.relativePath });
+        // Every watcher frame re-confirms the selection it already holds. That
+        // is not this client choosing a document: re-saving it would let an
+        // idle client overwrite the document the user last picked elsewhere,
+        // so a later browser resumes the wrong one. Save a move, or a user
+        // activating a document (even the one already shown).
+        if (changed || origin === "navigation") {
+          persistPersonalWorkspaceState({ documentPath: document.relativePath });
+        }
         break;
       }
     }

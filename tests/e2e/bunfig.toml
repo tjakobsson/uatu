@@ -1,0 +1,12 @@
+# Bun config for the e2e harness process (tests/e2e/server.ts), passed with
+# `bun --config=tests/e2e/bunfig.toml run tests/e2e/server.ts` by the worker
+# fixture (fixtures.ts) and the hub harness (hub-server.ts). Not picked up by
+# anything else: Bun only auto-loads the bunfig.toml of the working directory.
+#
+# The harness serves its HTMLBundle as a production bundle
+# (`development: false`), which Bun minifies by default. Several suites
+# instrument the served client source by matching readable text in it
+# (chat-follow-stability, chat-shell-scrollback), which identifier and
+# whitespace minification would erase — so the bundle stays unminified.
+[serve.static]
+minify = false

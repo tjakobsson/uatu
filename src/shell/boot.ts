@@ -18,7 +18,7 @@ import { setFollowEnabled, syncFollowToggle } from "./follow";
 import type { StatePayload } from "../shared/types";
 import { applyViewMode } from "../preview/view-mode";
 import { renderBuildBadge } from "./connection";
-import { applyServerSnapshot, connectEvents } from "./events";
+import { adoptBootSnapshot, connectEvents } from "./events";
 import { watchPageLifecycle } from "./live";
 import { recordEmptySelection, replaceSelection, scrollToFragment } from "./history";
 import {
@@ -67,7 +67,7 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
     if (contextualResponse.ok) payload = (await contextualResponse.json()) as StatePayload;
   }
 
-  applyServerSnapshot(payload);
+  adoptBootSnapshot(payload);
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
   setupTerminalPanel(payload.terminal === "enabled", personalState.lastPtyId);

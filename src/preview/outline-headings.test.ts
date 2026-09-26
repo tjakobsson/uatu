@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { cleanHeadingText, collectHeadings } from "./outline-headings";
+import { cleanHeadingText, collectHeadings, spyTriggerOffset } from "./outline-headings";
 
 // The full overlay (panel, scroll-spy, filter, side) installs against the live
 // preview DOM and is exercised end-to-end in tests/e2e/outline.e2e.ts. Here we
@@ -85,5 +85,23 @@ describe("cleanHeadingText", () => {
   test("strips a leading pilcrow or hash injected by anchor affordances", () => {
     const root = bodyOf(`<h2>¶ Footnotes</h2>`);
     expect(cleanHeadingText(root.querySelector("h2") as unknown as HTMLElement)).toBe("Footnotes");
+  });
+});
+
+describe("spyTriggerOffset", () => {
+  test("never sits above the scroll-padding line navigation lands headings on", () => {
+    // Desktop: a 111px header under a 144px scroll padding. An outline click
+    // lands the heading at 144px; a trigger at 119px left it short, and the
+    // highlight settled on the heading before the one clicked.
+    expect(spyTriggerOffset(110.47, 144)).toBe(144);
+  });
+
+  test("sits just under a header taller than the scroll padding", () => {
+    expect(spyTriggerOffset(150, 144)).toBe(158);
+  });
+
+  test("falls back to the header alone without scroll padding", () => {
+    expect(spyTriggerOffset(0, 0)).toBe(8);
+    expect(spyTriggerOffset(40, Number.NaN)).toBe(48);
   });
 });

@@ -72,8 +72,9 @@ function scopesEqual(left: StatePayload["scope"], right: StatePayload["scope"]):
 
 // Owner mutator for the server-snapshot triple (`roots`, `repositories`,
 // `scope`). The SSE reducer below is the ongoing writer; the boot path
-// (`shell/boot.ts`) applies its initial /api/state payload through this too.
-export function applyServerSnapshot(payload: StatePayload): void {
+// (`shell/boot.ts`) applies its initial /api/state payload through
+// `adoptBootSnapshot`, which also records its freshness.
+function applyServerSnapshot(payload: StatePayload): void {
   // Every payload carries the server's build identity — boot and SSE
   // reconnect both land here, so this is the one freshness chokepoint.
   checkBuildFreshness(payload.build);
@@ -90,6 +91,18 @@ export function applyServerSnapshot(payload: StatePayload): void {
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.
   applyProjectIdentity(payload.roots);
+}
+
+// Boot's initial /api/state payload. Applied like any snapshot, and recorded
+// with the reconciler as the state every later payload must be newer than.
+// Otherwise the first live frame is accepted whatever its age — and through
+// the hub it can be older: a page joining a document upstream that is
+// already open (another tab, or the one a reload leaves lingering) is handed
+// that upstream's latest snapshot, produced before this fetch was answered,
+// which would put the page back on the older roots.
+export function adoptBootSnapshot(payload: StatePayload): void {
+  stateReconciler.recordApplied(payload.generatedAt);
+  applyServerSnapshot(payload);
 }
 
 // Boot's entry point: subscribes the document topic for the current context

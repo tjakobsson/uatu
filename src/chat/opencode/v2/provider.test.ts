@@ -393,7 +393,9 @@ describe("OpenCode 2.x provider: prompting and events", () => {
   test("a late row goes to the oldest admission; a newer waiter takes the next one", async () => {
     const events = pushableEvents();
     const server = fakeOpenCode({ "GET /api/event": events.route, "POST /api/session/:id/command": () => undefined });
-    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 20 });
+    // B's window has to outlast the wait for A's late row below, which is real
+    // time a loaded machine can stretch; A's window simply passes first.
+    const provider = server.provider(WORKSPACE, { commandAdmissionMs: 500 });
     const controller = new AbortController();
     const seen: string[] = [];
     const pump = (async () => {

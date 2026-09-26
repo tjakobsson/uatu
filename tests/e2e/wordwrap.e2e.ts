@@ -2,8 +2,9 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { revealTreeRow, treeRow } from "./tree-helpers";
+import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { flushPageRequests } from "./sync-helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -52,7 +53,7 @@ test("single Wrap preference spans Source and Diff", async ({ page, request }) =
   });
   await page.reload();
   await revealTreeRow(page, "feature.md");
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
 
   // Enable wrap in Source view.
   await page.locator("#view-source").click();
@@ -72,7 +73,7 @@ test("Source wrap keeps line numbers truthful (one number per logical line)", as
   const longLine = "x".repeat(400);
   await fs.writeFile(workspacePath("wrap-fixture.txt"), `short one\n${longLine}\nshort three\n`, "utf8");
   await revealTreeRow(page, "wrap-fixture.txt");
-  await treeRow(page, "wrap-fixture.txt").click();
+  await openTreeFile(page, "wrap-fixture.txt");
 
   // Text files render as Source directly.
   const lines = page.locator("pre.uatu-source-pre .uatu-cl");
@@ -113,7 +114,7 @@ test("Diff wrap toggles in place with no new diff fetch", async ({ page, request
   });
   await page.reload();
   await revealTreeRow(page, "feature.md");
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await page.locator("#view-diff").click();
   await expect(page.locator(".uatu-diff-host")).toBeVisible();
 
@@ -123,11 +124,15 @@ test("Diff wrap toggles in place with no new diff fetch", async ({ page, request
     if (req.url().includes("/api/document/diff")) diffFetches += 1;
   });
 
+  // Mark the current host: the re-render replaces it, which is the event a
+  // refetch would have been part of.
+  await page.locator(".uatu-diff-host").evaluate(host => host.setAttribute("data-e2e-before-wrap", ""));
   await page.locator("#wrap-toggle").click();
   await expect(page.locator("#wrap-toggle")).toHaveAttribute("aria-pressed", "true");
   // The host is still mounted (re-rendered in place).
-  await expect(page.locator(".uatu-diff-host")).toBeVisible();
-  // Give any (unexpected) network a chance to fire before asserting none did.
-  await page.waitForTimeout(200);
+  await expect(page.locator(".uatu-diff-host:not([data-e2e-before-wrap])")).toBeVisible();
+  // Every request the page issued up to the re-render has been reported;
+  // none of them may be a diff fetch.
+  await flushPageRequests(page);
   expect(diffFetches).toBe(0);
 });

@@ -50,25 +50,34 @@ import { LiveBroker, type LiveSessionChange, type LiveUpstreamSource } from "../
 import { LiveEndpoint } from "../../src/hub/live-endpoint";
 import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
+import { e2eTerminalShell } from "./terminal-shell";
 import type { ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
 
-// One-shot artificial latency for GET /api/terminal/sessions, armed by tests
-// that need two inventory reads to complete out of order (the switcher's
-// stale-render guard). It has to live server-side: uatu registers a
-// pass-through service worker, and Playwright's page.route never sees fetches
-// a service worker mediates. The handler computes its response BEFORE the
-// delay so the held response reflects the state at request time — that
-// staleness is the point. `pending` stays true until the held response is
-// delivered, so a test can poll for delivery instead of sleeping.
-let terminalSessionsDelay: { ms: number; armed: boolean; pending: boolean } | null = null;
+// One-shot hold on GET /api/terminal/sessions, armed by tests that need an
+// inventory read to complete at a moment they choose (after a pagehide, or
+// out of order with a later read: the switcher's stale-render guard). It has
+// to live server-side: uatu registers a pass-through service worker, and
+// Playwright's page.route never sees fetches a service worker mediates. The
+// handler computes its response BEFORE the hold so the held response
+// reflects the state at request time — that staleness is the point. The test
+// releases it (`{ release: true }`); `pending` stays true until the held
+// response is delivered, so a test can poll for delivery instead of sleeping.
+let terminalSessionsDelay: { armed: boolean; pending: boolean; released: Promise<void>; release: () => void } | null = null;
 
 // Standing artificial latency for processing a terminal socket's CLOSE, armed
 // by tests that need a departing holder to release its PTY late — the
 // window a page navigating away leaves behind while its replacement is
 // already attaching. Every close is held by `ms` while armed; a reset
 // disarms it. Server-side for the same reason as the read delay above, and
-// because the departing socket belongs to a page that no longer runs.
+// because the departing socket belongs to a page that no longer runs. A GET
+// reports how many held closes the server has yet to process, so a test can
+// wait for the departing holder's release instead of sleeping past it.
+// `{ hold: true }` instead holds every close until the test posts
+// `{ release: true }`, for a test that must observe the window while it is
+// open rather than race a timer to it.
 let terminalCloseDelayMs = 0;
+let terminalCloseHold: { released: Promise<void>; release: () => void } | null = null;
+let terminalClosesHeld = 0;
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
@@ -230,8 +239,9 @@ const liveEndpoint = new LiveEndpoint({
   broker: liveBroker,
   resolveWorkspace: requested => requested ?? E2E_WORKSPACE_ID,
 });
+// A deterministic shell, never the developer's own (see terminal-shell.ts).
 const terminalServer = terminalEnabled
-  ? createTerminalServer({ cwd: activeWorkspaceRoot })
+  ? createTerminalServer({ cwd: activeWorkspaceRoot, ...e2eTerminalShell() })
   : null;
 
 async function handleE2EReset(request: Request): Promise<Response> {
@@ -259,8 +269,11 @@ async function handleE2EReset(request: Request): Promise<Response> {
   // or keeps listening to the previous agent router.
   const releaseLiveUpstreams = holdLiveUpstreams();
   setLiveSessionRunning(false);
+  terminalSessionsDelay?.release();
   terminalSessionsDelay = null;
   terminalCloseDelayMs = 0;
+  terminalCloseHold?.release();
+  terminalCloseHold = null;
   fakeChatAgent.reset();
   fakeSecondAgent.reset();
   activeChatRouter = singleAgentRouter;
@@ -532,6 +545,13 @@ server = Bun.serve({
   hostname: "127.0.0.1",
   port: E2E_PORT,
   idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
+  // Serve the HTMLBundle as a production bundle, as the compiled binary
+  // does. Bun's default (`NODE_ENV !== "production"`) is its dev server: an
+  // HMR websocket that reloads every open test page when src/ changes
+  // mid-run, and a <bun-hmr> error overlay that can cover the page (and
+  // swallow clicks) when the process behind it stops. The bundle stays
+  // unminified through tests/e2e/bunfig.toml, which the spawners pass.
+  development: false,
   routes: {
     // The HTMLBundle MUST be a literal at this call site (see the matching
     // comment in src/cli.ts) so Bun's bundler can wire up the chunk URLs.
@@ -588,18 +608,34 @@ server = Bun.serve({
     const pathname = stripBasePath(url.pathname, E2E_BASE_PATH);
     if (pathname === "/__e2e/terminal-sessions-delay") {
       if (request.method === "POST") {
-        const body = (await request.json()) as { ms?: number };
-        terminalSessionsDelay = {
-          ms: typeof body.ms === "number" ? body.ms : 0,
-          armed: true,
-          pending: false,
-        };
+        const body = (await request.json()) as { release?: boolean };
+        if (body.release === true) {
+          terminalSessionsDelay?.release();
+          return Response.json({ ok: true });
+        }
+        let release!: () => void;
+        const released = new Promise<void>(resolve => { release = resolve; });
+        terminalSessionsDelay = { armed: true, pending: false, released, release };
         return Response.json({ ok: true });
       }
       return Response.json({ pending: terminalSessionsDelay?.pending ?? false });
     }
+    if (pathname === "/__e2e/terminal-close-delay" && request.method === "GET") {
+      return Response.json({ pending: terminalClosesHeld });
+    }
     if (pathname === "/__e2e/terminal-close-delay" && request.method === "POST") {
-      const body = (await request.json()) as { ms?: number };
+      const body = (await request.json()) as { ms?: number; hold?: boolean; release?: boolean };
+      if (body.release === true) {
+        terminalCloseHold?.release();
+        terminalCloseHold = null;
+        return Response.json({ ok: true });
+      }
+      if (body.hold === true) {
+        let release!: () => void;
+        const released = new Promise<void>(resolve => { release = resolve; });
+        terminalCloseHold ??= { released, release };
+        return Response.json({ ok: true });
+      }
       terminalCloseDelayMs = typeof body.ms === "number" && body.ms > 0 ? body.ms : 0;
       return Response.json({ ok: true });
     }
@@ -615,7 +651,7 @@ server = Bun.serve({
       delay.armed = false;
       delay.pending = true;
       const response = await fetchFallback(request, srv);
-      await new Promise(resolve => setTimeout(resolve, delay.ms));
+      await delay.released;
       delay.pending = false;
       return response;
     }
@@ -633,8 +669,20 @@ server = Bun.serve({
           // A held close keeps the departing socket as the PTY's holder for
           // the armed window; an attach arriving meanwhile is refused as a
           // collision exactly as a late browser teardown would produce.
+          if (terminalCloseHold) {
+            terminalClosesHeld += 1;
+            void terminalCloseHold.released.then(() => {
+              terminalClosesHeld -= 1;
+              terminalServer.close(socket as never, code);
+            });
+            return;
+          }
           if (terminalCloseDelayMs > 0) {
-            setTimeout(() => terminalServer.close(socket as never, code), terminalCloseDelayMs);
+            terminalClosesHeld += 1;
+            setTimeout(() => {
+              terminalClosesHeld -= 1;
+              terminalServer.close(socket as never, code);
+            }, terminalCloseDelayMs);
             return;
           }
           terminalServer.close(socket as never, code);
@@ -662,7 +710,10 @@ const fetchFallback = buildFetchFallback({
 // its prefixed session URL, the shape the hub's backend contract expects.
 console.log(E2E_HUB_CHILD ? `http://127.0.0.1:${server.port}${E2E_BASE_PATH}` : `http://127.0.0.1:${server.port}`);
 
+let shuttingDown = false;
 const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   liveEndpoint.endAll();
   liveBroker.dispose();
   await singleAgentRouter.dispose();
@@ -678,6 +729,14 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   void shutdown();
 });
+// Set by the spawning fixture or hub (which hold our stdin pipe): EOF means
+// the parent is gone, so exit rather than hold the port its replacement is
+// given. Bun reports one EOF as both `end` and `close`.
+if (process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1") {
+  process.stdin.resume();
+  process.stdin.on("end", () => void shutdown());
+  process.stdin.on("close", () => void shutdown());
+}
 
 async function createSession(options: { resetWorkspace: boolean }) {
   if (options.resetWorkspace) {

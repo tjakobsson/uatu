@@ -27,7 +27,7 @@ import {
 import { coarsePointer, onUiModeChange } from "../shell/ui-mode";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { copySourceButton, outlineToggleButton } from "./header";
-import { collectHeadings, type OutlineHeading } from "./outline-headings";
+import { collectHeadings, spyTriggerOffset, type OutlineHeading } from "./outline-headings";
 import {
   maxRailWidth,
   pickPresentation,
@@ -600,12 +600,13 @@ function updateActiveHeading(): void {
   // The sticky preview-header overlaps the top of the scroll viewport in single
   // layout (the shell scrolls beneath it); in split layout the rendered pane
   // starts below the header so there is no overlap. Measure it either way so
-  // the trigger line sits just under whatever covers the top.
+  // the trigger line sits just under whatever covers the top — and never above
+  // the scroll-padding line navigation lands headings on (see spyTriggerOffset).
   const header = document.querySelector<HTMLElement>(".preview-header");
   const overlap = header
     ? Math.max(0, header.getBoundingClientRect().bottom - rootRect.top)
     : 0;
-  const triggerOffset = overlap + 8;
+  const triggerOffset = spyTriggerOffset(overlap, Number.parseFloat(getComputedStyle(scrollRoot).scrollPaddingTop));
   const scrollTop = scrollRoot.scrollTop;
   const maxScroll = Math.max(0, scrollRoot.scrollHeight - scrollRoot.clientHeight);
 

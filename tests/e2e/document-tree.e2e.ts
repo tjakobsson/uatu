@@ -4,13 +4,15 @@
 // (role="treeitem", aria-expanded, aria-selected, data-item-path) which
 // Playwright reaches through the shadow DOM via standard CSS selectors.
 
-import { chromium, webkit } from "@playwright/test";
-import { expect, test, type Page } from "./fixtures";
+import { expect, test as baseTest, type Page } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
 import { revealTreeRow, treeRow } from "./tree-helpers";
 import { DOCUMENT_SELECTION_CLEARED_KEY } from "../../src/shell/selection-storage";
+
+const test = withEngineBrowsers(baseTest);
 
 // The E2E session is served at /. Match presentationStorage's workspace
 // namespace; deliberate emptiness is not a Hub personal-state field.
@@ -107,15 +109,17 @@ test("starting with follow on and a nested file as default reveals its ancestors
   const fresh = new Date(Date.now() + 30_000);
 
   // Reset first (this also bumps README's mtime by 10s), then make setup.md
-  // strictly newer. Wait for the indexed mtime, not a watcher-sized sleep,
-  // before the SPA asks for initial state.
+  // strictly newer. The SPA takes its default from the server at boot, so
+  // wait until the server itself names setup.md the default document — not
+  // a watcher-sized sleep, which loses to a slow refresh under load and
+  // leaves the page booting onto README.
   await request.post("/__e2e/reset", { data: { follow: true } });
   await fs.utimes(workspacePath("guides", "setup.md"), fresh, fresh);
   await expect.poll(async () => {
     const state = await request.get("/api/state").then(response => response.json());
-    const setup = state.roots.flatMap((root: any) => root.docs).find((doc: any) => doc.relativePath === "guides/setup.md");
-    return setup && Math.abs(setup.mtimeMs - fresh.getTime()) < 2;
-  }).toBe(true);
+    const docs = state.roots.flatMap((root: any) => root.docs);
+    return docs.find((doc: any) => doc.id === state.defaultDocumentId)?.relativePath;
+  }).toBe("guides/setup.md");
 
   await page.goto("/");
   await page.evaluate(() => {
@@ -128,10 +132,9 @@ test("starting with follow on and a nested file as default reveals its ancestors
   await page.reload();
 
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  // Allow up to 15s for the watcher to observe the utimes change and the SSE
-  // refresh to land on the SPA. The default expect timeout (10s) is enough
-  // most of the time but can race under load.
-  await expect(page.locator("#preview-path")).toHaveText("guides/setup.md", { timeout: 15_000 });
+  // The server already reported setup.md as the default before the page
+  // loaded, so this is the boot selection, not a watcher refresh landing.
+  await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
 
   // The tree should have revealed `guides/` on first paint and marked
   // `guides/setup.md` as selected.
@@ -810,9 +813,11 @@ test("folder clicks only toggle: no folder looks selected, and the focus ring is
   await expect(page.locator('[role="treeitem"][aria-selected="true"]')).toHaveCount(0);
 });
 
+attachPageDiagnosticsOnFailure(test);
+
 for (const browserName of ["chromium", "webkit"] as const) {
-  test(`${browserName} touch: a tapped folder keeps the plain row background even while :hover sticks`, async ({ request, baseURL }) => {
-    const browser = await ({ chromium, webkit })[browserName].launch();
+  test(`${browserName} touch: a tapped folder keeps the plain row background even while :hover sticks`, async ({ launchBrowser, request, baseURL }) => {
+    const browser = await launchBrowser(browserName);
     try {
       const page = await browser.newPage({ baseURL, hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
       await bootSession(page, request);

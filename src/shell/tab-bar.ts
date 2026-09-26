@@ -14,7 +14,17 @@ import { ACTIVE_TAB_KEY, appState, safeLocalStorage, type TouchTab } from "./sta
 import { onUiModeChange, setUiMode, uiMode } from "./ui-mode";
 import { isChatPanelOpen } from "../chat/surface";
 
-export type TabChangeListener = (tab: TouchTab, previous: TouchTab) => void;
+/** How a tab change wants keyboard focus treated. `holdFocus` marks the ARIA
+ *  tabs pattern's roving navigation — ArrowLeft/Right/Up/Down, Home and End
+ *  on a focused tab move focus to the target tab and select it as they go —
+ *  so keyboard focus belongs on the tab button, and a surface coming forward
+ *  MUST NOT pull it into itself (the terminal otherwise focuses its pane the
+ *  moment one attaches, and the next arrow key types into the shell). A tap,
+ *  a click, Enter/Space on a tab, and shortcuts are activations and leave it
+ *  unset: surfaces keep their usual focus behavior. */
+export type TabChangeOptions = { holdFocus?: boolean };
+
+export type TabChangeListener = (tab: TouchTab, previous: TouchTab, options: TabChangeOptions) => void;
 
 const listeners = new Set<TabChangeListener>();
 
@@ -51,14 +61,14 @@ function applyActiveTabToDom(): void {
   }
 }
 
-export function setActiveTab(tab: TouchTab): void {
+export function setActiveTab(tab: TouchTab, options: TabChangeOptions = {}): void {
   const previous = appState.activeTab;
   if (previous === tab) return;
   appState.activeTab = tab;
   writeActiveTabPreference(tab);
   applyActiveTabToDom();
   for (const listener of listeners) {
-    listener(tab, previous);
+    listener(tab, previous, options);
   }
 }
 
@@ -142,8 +152,13 @@ export function initTabBar(): void {
       else if (event.key === "End") target = enabled.at(-1);
       if (!target) return;
       event.preventDefault();
+      // Roving navigation, not a click: focus moves to the target tab and
+      // stays there even when the surface it selects would focus itself.
       target.focus();
-      target.click();
+      const tab = target.dataset.tab;
+      if (tab === "files" || tab === "preview" || tab === "chat" || tab === "terminal") {
+        setActiveTab(tab, { holdFocus: true });
+      }
     });
   }
 

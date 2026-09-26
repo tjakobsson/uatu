@@ -128,10 +128,25 @@ test.describe("desktop chat panel layout", () => {
       return { rail: rect(".chat-composer-actions"), trigger: rect("#chat-configuration-trigger"), status: rect("#chat-composer-status"), send: rect("#chat-send") };
     });
 
+    // The rail has settled at a width once two consecutive measurements
+    // agree (anything reacting to the resize has run and been laid out).
+    type Geometry = Awaited<ReturnType<typeof measure>>;
+    const settled = async (): Promise<Geometry> => {
+      let previous = "";
+      let latest!: Geometry;
+      await expect.poll(async () => {
+        latest = await measure();
+        const current = JSON.stringify(latest);
+        const stable = current === previous;
+        previous = current;
+        return stable;
+      }).toBe(true);
+      return latest;
+    };
+
     for (const fraction of [0.28, 0.42, 0.6]) {
       await page.evaluate(value => document.documentElement.style.setProperty("--chat-fraction", String(value)), fraction);
-      await page.waitForTimeout(350);
-      const ready = await measure();
+      const ready = await settled();
       expect(ready.trigger.top + ready.trigger.height / 2).toBeCloseTo(ready.status.top + ready.status.height / 2, 0);
       expect(ready.status.top + ready.status.height / 2).toBeCloseTo(ready.send.top + ready.send.height / 2, 0);
       expect(ready.send.right).toBeLessThanOrEqual(ready.rail.right + 1);
@@ -169,10 +184,8 @@ test.describe("desktop chat panel layout", () => {
     await expect(page.locator("#chat-configuration-variant-value")).toHaveText("High");
     await expect(page.locator("#chat-configuration-variant-summary svg")).toBeVisible();
     await page.evaluate(() => document.documentElement.style.setProperty("--chat-fraction", "0.28"));
-    await page.waitForTimeout(350);
     await expect(page.locator("#chat-configuration-details")).toBeHidden();
     await page.evaluate(() => document.documentElement.style.setProperty("--chat-fraction", "0.45"));
-    await page.waitForTimeout(350);
     await expect(page.locator("#chat-configuration-details")).toBeVisible();
     await openChatConfiguration(page);
     await expect(page.locator("#chat-configuration-search")).toBeFocused();

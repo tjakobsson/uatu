@@ -2,8 +2,8 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { revealTreeRow, treeRow } from "./tree-helpers";
-import { standardBeforeEach } from "./fixtures";
+import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
+import { standardBeforeEach, waitForPreviewToSettle } from "./fixtures";
 
 // ⇧⌘F: content search across the watched roots. The matching and summary
 // wording are unit-tested in `src/server/search.test.ts` and
@@ -55,6 +55,12 @@ test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
   await request.post("/__e2e/reset", { data: { extras: FIXTURES } });
   await page.goto("/");
+  // Let the fresh page finish booting before a test drives it: "Connected"
+  // means its live state has been applied, and the preview has caught up
+  // with the selection. Keys pressed while the first frame is still landing
+  // can go to an element that boot is about to re-render.
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await waitForPreviewToSettle(page);
 });
 
 test.afterEach(async ({ request }) => {
@@ -204,7 +210,7 @@ test("a widened result outside the scope still opens", async ({ page, request })
   // resolves against the scoped roots — the escape hatch showed results it
   // could not open.
   await revealTreeRow(page, "alpha.md");
-  await treeRow(page, "alpha.md").click();
+  await openTreeFile(page, "alpha.md");
   await expect(page.locator("#preview-path")).toHaveText("alpha.md");
 
   await bootWithFileContext(page, request);
@@ -231,8 +237,11 @@ test("arrow keys walk results and Enter opens the focused one", async ({ page })
   await page.locator("#search-query").fill("compare-target");
   await expect(page.locator(".search-hit")).toHaveCount(3, { timeout: 10_000 });
 
+  // Focus must survive the results' re-render when the stream completes.
   await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".search-hit").nth(0)).toBeFocused();
   await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".search-hit").nth(1)).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator("#preview-path")).not.toHaveText("README.md");
 });
@@ -306,7 +315,10 @@ test.describe("global routing", () => {
   });
 
   test("⌘F and ⇧⌘F are different features", async ({ page }) => {
-    await treeRow(page, "alpha.md").click();
+    // alpha.md must be on screen before clicking into the preview, so the
+    // click and ⌘F act on the document the test opened — not on the previous
+    // one while alpha.md's mount replaces it underneath them.
+    await openTreeFile(page, "alpha.md");
     await page.locator("#preview").click({ position: { x: 10, y: 10 } });
 
     await page.keyboard.press("ControlOrMeta+f");
@@ -321,7 +333,7 @@ test.describe("global routing", () => {
 
 test("a scoped session searches only the scope until widened", async ({ page, request }) => {
   await revealTreeRow(page, "alpha.md");
-  await treeRow(page, "alpha.md").click();
+  await openTreeFile(page, "alpha.md");
   await expect(page.locator("#preview-path")).toHaveText("alpha.md");
 
   // Recreate the harness in the CLI's single-file shape. Scope is immutable
