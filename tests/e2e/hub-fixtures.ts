@@ -125,7 +125,9 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
       await hubProcess.reset();
       await use();
     },
-    { auto: true },
+    // Its own budget, outside the test's: restarting the children is setup,
+    // and on a loaded machine it would otherwise eat the test's 30 s.
+    { auto: true, timeout: HUB_RESET_TIMEOUT_MS + 5_000 },
   ],
 
   baseURL: async ({ hub }, use) => {
