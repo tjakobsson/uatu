@@ -255,6 +255,9 @@ describe("OpenCode-native tool payloads", () => {
     expect(taskResultText('<subagent sessionID="ses_a" state="completed">\nIt printed <subagent>x</subagent> verbatim.\n</subagent>'))
       .toBe("It printed <subagent>x</subagent> verbatim.");
     expect(taskResultText('<subagent sessionID="ses_a" state="completed">\n\n</subagent>')).toBeUndefined();
+    // Quoting 1.x's envelope must not cut the report down to the quoted part.
+    expect(taskResultText('<subagent sessionID="ses_a" state="completed">\n1.x wrapped it as <task_result>x</task_result>, 2.x does not.\n</subagent>'))
+      .toBe("1.x wrapped it as <task_result>x</task_result>, 2.x does not.");
   });
 
   test("an unwrapped task output passes through and empty output stays absent", () => {

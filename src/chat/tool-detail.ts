@@ -222,12 +222,14 @@ function parseToolDetail(item: DetailInput): ToolDetail {
  * envelope, which reads as debug output when shown verbatim. OpenCode 1.x
  * wraps it as <task id=…><task_result>…</task_result></task>; 2.x as
  * <subagent sessionID=… state="completed">…</subagent>, the report being
- * everything between the envelope's first and last line.
+ * everything between the envelope's first and last line. The 2.x envelope is
+ * anchored to the whole output and tried first, so a 2.x report that quotes
+ * a 1.x `<task_result>` pair keeps all of its text.
  */
 export function taskResultText(output: string | undefined): string | undefined {
   if (!output) return undefined;
-  const match = /<task_result>([\s\S]*?)<\/task_result>/.exec(output)
-    ?? /^\s*<subagent\b[^>]*>([\s\S]*)<\/subagent>\s*$/.exec(output);
+  const match = /^\s*<subagent\b[^>]*>([\s\S]*)<\/subagent>\s*$/.exec(output)
+    ?? /<task_result>([\s\S]*?)<\/task_result>/.exec(output);
   const body = (match ? match[1]! : output).trim();
   return body || undefined;
 }
