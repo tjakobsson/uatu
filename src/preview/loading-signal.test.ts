@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import { createLoadingSignal } from "./loading-signal";
@@ -8,6 +8,7 @@ let segment: HTMLElement;
 let cleanup: () => void;
 
 beforeEach(() => {
+  jest.useFakeTimers();
   const { document, window } = parseHTML(
     "<!doctype html><html><body><main id='shell'><header>h</header><article>old content</article></main><button id='seg'></button></body></html>",
   );
@@ -25,16 +26,21 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  jest.useRealTimers();
 });
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+// The signal's delays run on fake timers (and a fake clock for its minimum
+// window), so a loaded machine cannot stretch one step past the next deadline.
+const elapse = (ms: number) => {
+  jest.advanceTimersByTime(ms);
+};
 const barVisible = () => host.querySelector(".uatu-loading-bar") !== null;
 
 describe("createLoadingSignal", () => {
   test("only the current operation can settle or dismiss labelled feedback", async () => {
     const signal = createLoadingSignal({ segment, barHost: host, busyHost: host, visibleLabel: true, showDelayMs: 10, minVisibleMs: 20 });
     const first = signal.start("Loading conversation...");
-    await sleep(15);
+    elapse(15);
     const second = signal.start("Updating conversation...");
     signal.settle(first);
     signal.cancel(first);
@@ -60,9 +66,9 @@ describe("createLoadingSignal", () => {
     const signal = createLoadingSignal({ segment, barHost: host, showDelayMs: 40, minVisibleMs: 40 });
 
     signal.start();
-    await sleep(10);
+    elapse(10);
     signal.settle();
-    await sleep(60);
+    elapse(60);
 
     expect(barVisible()).toBe(false);
   });
@@ -72,14 +78,14 @@ describe("createLoadingSignal", () => {
 
     signal.start();
     expect(barVisible()).toBe(false);
-    await sleep(40);
+    elapse(40);
 
     expect(barVisible()).toBe(true);
     // The previous content is untouched — the bar is an overlay sibling.
     expect(host.querySelector("article")?.textContent).toBe("old content");
 
     signal.settle();
-    await sleep(40);
+    elapse(40);
     expect(barVisible()).toBe(false);
   });
 
@@ -87,13 +93,13 @@ describe("createLoadingSignal", () => {
     const signal = createLoadingSignal({ segment, barHost: host, showDelayMs: 10, minVisibleMs: 80 });
 
     signal.start();
-    await sleep(30);
+    elapse(30);
     expect(barVisible()).toBe(true);
 
     signal.settle();
     // Still inside the minimum window: bar must remain.
     expect(barVisible()).toBe(true);
-    await sleep(120);
+    elapse(120);
     expect(barVisible()).toBe(false);
   });
 
@@ -101,17 +107,17 @@ describe("createLoadingSignal", () => {
     const signal = createLoadingSignal({ segment, barHost: host, showDelayMs: 10, minVisibleMs: 50 });
 
     signal.start();
-    await sleep(30);
+    elapse(30);
     signal.settle();
     signal.start();
-    await sleep(80);
+    elapse(80);
 
     // Second run is still active — the bar stayed up through the restart.
     expect(barVisible()).toBe(true);
     expect(host.querySelectorAll(".uatu-loading-bar").length).toBe(1);
 
     signal.settle();
-    await sleep(80);
+    elapse(80);
     expect(barVisible()).toBe(false);
   });
 });

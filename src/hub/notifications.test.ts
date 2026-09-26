@@ -46,7 +46,10 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
   // A hung feed answers only when released, or rejects when the hub gives up on it.
   let stalled: Array<{ resolve: () => void; signal?: AbortSignal }> | null = null;
   let failOpens = 0;
-  const hub = new HubNotifications({ store, sender, now: () => now, settleTimeoutMs: options.settleTimeoutMs ?? 50, workspaceName: ws => ws === "workspace" ? "Project" : "Other",
+  // The settle bound is real time. A feed that answers gets a bound no loaded machine outlasts; a stalled feed (stall(),
+  // until release()) gets a short one, so the refusal a test expects arrives quickly. The hub reads the bound per settle.
+  const answeringBound = options.settleTimeoutMs ?? 2_000;
+  const hubOptions = { store, sender, now: () => now, settleTimeoutMs: answeringBound, workspaceName: ws => ws === "workspace" ? "Project" : "Other",
     authorized: (user, ws) => authorized && (user.user === "one" || user.user === "two") && sessions.has(user.sessionId) && (ws === undefined || registered.has(ws)),
     presence: {
       presence: user => presence.get(user) ?? "away",
@@ -72,11 +75,12 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
         }));
       },
     },
-  });
+  } satisfies ConstructorParameters<typeof HubNotifications>[0];
+  const hub = new HubNotifications(hubOptions);
   cleanup.push(() => hub.dispose());
   return { store, hub, file, sends, feed, opens: () => opens, run: (ws = "workspace") => { running.add(ws); }, tick: (ms: number) => { now += ms; }, now: () => now,
     register: (ws: string) => { registered.add(ws); }, unregister: (ws: string) => { registered.delete(ws); running.delete(ws); },
-    failNextOpen: () => { failOpens += 1; }, stall: () => { stalled = []; }, release: () => { const waiting = stalled ?? []; stalled = null; for (const entry of waiting) entry.resolve(); },
+    failNextOpen: () => { failOpens += 1; }, stall: () => { stalled = []; hubOptions.settleTimeoutMs = 50; }, release: () => { const waiting = stalled ?? []; stalled = null; hubOptions.settleTimeoutMs = answeringBound; for (const entry of waiting) entry.resolve(); },
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
     batch: (frames: NotificationFrame[]) => { batch = frames; }, onOpen: (hook: () => void) => { onOpen = hook; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
     hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },

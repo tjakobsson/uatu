@@ -319,11 +319,19 @@ describe("CredentialMetadataStore", () => {
       { ...SSH_CREDENTIAL, id: "ssh-2", name: "Second key" },
     ));
     let rejectCleanup!: (error: Error) => void;
+    // The store reaches the cleanup only after its own persistence work, so
+    // wait for the call itself rather than for a fixed delay that a loaded
+    // machine can outlast.
+    let cleanupStarted!: () => void;
+    const cleanupCalled = new Promise<void>(resolve => {
+      cleanupStarted = resolve;
+    });
     const blocked = store.deleteCredentialWithCleanup("ssh-1", true, () => new Promise((_, reject) => {
       rejectCleanup = reject;
+      cleanupStarted();
     }));
     const later = store.setEnabled("ssh-2", false);
-    await Bun.sleep(1);
+    await cleanupCalled;
     rejectCleanup(new Error("cleanup failed"));
 
     await expect(blocked).rejects.toThrow("cleanup failed");

@@ -4625,8 +4625,10 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
   });
 
   test("of two pending one-shots sharing a prompt, the fire goes to the one due first", async () => {
-    // Created first but due later (a fixed time) vs. due within the minute.
-    const later = { id: "wa", schedule: "3 20 * * *", recurring: false, prompt: "WAKEUP same words" };
+    // Created first but due later (a fixed time half a day away, so it can never
+    // share the coming minute with the every-minute one) vs. due within the minute.
+    const laterHour = (new Date().getHours() + 12) % 24;
+    const later = { id: "wa", schedule: `3 ${laterHour} * * *`, recurring: false, prompt: "WAKEUP same words" };
     const sooner = { id: "wb", schedule: "* * * * *", recurring: false, prompt: "WAKEUP same words" };
     const { provider, events, stop, query } = await scheduled([later, sooner]);
     await promptHook(query, { prompt: later.prompt, prompt_id: "fired-1" });
