@@ -40,7 +40,10 @@ test.beforeAll(async () => {
   child = spawn(
     "bun",
     ["run", "src/cli.ts", "serve", workspace, "--no-open", "--no-watchdog", "--port", "0", "--base-path", BASE_PATH],
-    { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
+    // NODE_ENV=production: with no `development` key at its Bun.serve call,
+    // a source run of the CLI otherwise serves Bun's dev bundle (HMR socket,
+    // /_bun/ asset refs) rather than the chunked bundle the binary ships.
+    { cwd: process.cwd(), env: { ...process.env, NODE_ENV: "production" }, stdio: ["ignore", "pipe", "pipe"] },
   );
 
   sessionUrl = await new Promise<string>((resolve, reject) => {

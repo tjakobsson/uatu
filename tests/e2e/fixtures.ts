@@ -54,7 +54,10 @@ export const test = base.extend<{}, WorkerFixtures>({
       process.env.UATU_E2E_WORKSPACE = workspace;
 
       const binary = process.env.UATU_E2E_BINARY;
-      const child = spawn(binary ?? "bun", binary ? [] : ["run", "tests/e2e/server.ts"], {
+      // The harness reads tests/e2e/bunfig.toml (see there for why); keep
+      // this command in step with HarnessBackend in hub-server.ts.
+      const harness = ["--config=tests/e2e/bunfig.toml", "run", "tests/e2e/server.ts"];
+      const child = spawn(binary ?? "bun", binary ? [] : harness, {
         env: {
           ...process.env,
           UATU_E2E_PORT: String(port),

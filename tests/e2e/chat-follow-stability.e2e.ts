@@ -262,8 +262,6 @@ for (const browserName of ["chromium", "webkit"] as const) {
       const errors: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
       try {
-        // Concurrent development must not reload a page in the middle of its trace.
-        await page.routeWebSocket(/_bun/, socket => socket.close());
         let instrumented = false;
         await page.route("**/*.js", async route => {
           const response = await route.fetch();

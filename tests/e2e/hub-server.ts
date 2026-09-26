@@ -102,6 +102,9 @@ const WORKSPACE_NAMES = (process.env.UATU_E2E_HUB_WORKSPACES ?? "alpha")
   .map(name => name.trim())
   .filter(name => name.length > 0);
 const HARNESS_PATH = path.resolve(import.meta.dir, "server.ts");
+// The harness reads tests/e2e/bunfig.toml (see there for why); keep this in
+// step with the worker fixture's command in fixtures.ts.
+const HARNESS_BUNFIG = path.resolve(import.meta.dir, "bunfig.toml");
 const CHILD_START_TIMEOUT_MS = 30_000;
 const WORKTREES = process.env.UATU_E2E_HUB_WORKTREES === "1";
 const CREDENTIALS = process.env.UATU_E2E_HUB_CREDENTIALS === "1";
@@ -127,7 +130,7 @@ class HarnessBackend implements SessionBackend {
   async start(workspace: WorkspaceEntry, basePath: string): Promise<RunningSession> {
     const port = this.ports.get(workspace.id) ?? this.nextPort++;
     this.ports.set(workspace.id, port);
-    const child = spawn("bun", ["run", HARNESS_PATH], {
+    const child = spawn("bun", [`--config=${HARNESS_BUNFIG}`, "run", HARNESS_PATH], {
       cwd: path.resolve(import.meta.dir, "..", ".."),
       env: {
         ...process.env,

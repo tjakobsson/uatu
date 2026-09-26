@@ -25,7 +25,6 @@ export async function bootShell(page: Page, request: APIRequestContext, options:
   extra?: ConversationItem[];
 } = {}) {
   const { agent = "opencode", shape = "command", child = false, touch = false, output = log(120, true), status = "running" } = options;
-  await page.routeWebSocket(/_bun/, socket => socket.close());
   await request.post("/__e2e/reset");
   await control(request, { action: "agents", count: 2 });
   const item = shell(shape, output, status);

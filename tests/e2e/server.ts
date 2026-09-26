@@ -539,6 +539,13 @@ server = Bun.serve({
   hostname: "127.0.0.1",
   port: E2E_PORT,
   idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
+  // Serve the HTMLBundle as a production bundle, as the compiled binary
+  // does. Bun's default (`NODE_ENV !== "production"`) is its dev server: an
+  // HMR websocket that reloads every open test page when src/ changes
+  // mid-run, and a <bun-hmr> error overlay that can cover the page (and
+  // swallow clicks) when the process behind it stops. The bundle stays
+  // unminified through tests/e2e/bunfig.toml, which the spawners pass.
+  development: false,
   routes: {
     // The HTMLBundle MUST be a literal at this call site (see the matching
     // comment in src/cli.ts) so Bun's bundler can wire up the chunk URLs.
