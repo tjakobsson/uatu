@@ -153,6 +153,33 @@ test("Switching to single layout preserves the Source / Rendered preference", as
   await expect(page.locator("#preview > pre.uatu-source-pre")).toBeVisible();
 });
 
+test("A document load the server fails transiently recovers without another click", async ({ page }) => {
+  // The first read of diagram.md fails the way an overloaded server does; the
+  // file itself is fine. A 5xx is not "file removed", so the preview must
+  // retry on its own instead of staying on the unavailable notice.
+  let reads = 0;
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  await page.route("**/api/document?*", async route => {
+    const id = new URL(route.request().url()).searchParams.get("id") ?? "";
+    if (!id.endsWith("/diagram.md")) return route.continue();
+    reads += 1;
+    if (reads === 1) return route.fulfill({ status: 500, json: { error: "document render failed" } });
+    // Hold the retry until the interim notice has been observed.
+    await retryGate;
+    return route.continue();
+  });
+
+  await treeRow(page, "diagram.md").click();
+  await expect(page.locator("#preview")).toContainText("This file couldn't be loaded. Retrying");
+  await expect(page.locator("#preview-path")).toHaveText("diagram.md");
+  await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
+  releaseRetry();
+
+  await expect(page.locator("#preview-title")).toHaveText("Diagram Fixture");
+  await expect(page.locator("#preview")).not.toContainText("couldn't be loaded");
+});
+
 test("A layout click survives a render that lands between mousedown and mouseup", async ({ page }) => {
   await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
   // Hold the Source fetch that entering side-by-side needs, so the render it
