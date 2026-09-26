@@ -396,7 +396,10 @@ describe("Hub runtime shutdown", () => {
     let output = "";
     child.stdout.on("data", chunk => { output += chunk.toString(); });
     const waitForOutput = async (text: string) => {
-      const deadline = Date.now() + 5_000;
+      // The fixture is a separate Bun process; its start alone can take
+      // seconds when test files share the cores, so this waits well past
+      // the old five seconds and the test's budget below matches.
+      const deadline = Date.now() + 20_000;
       while (!output.includes(text) && Date.now() < deadline) await Bun.sleep(10);
       if (!output.includes(text)) throw new Error(`fixture did not print ${text}: ${output}`);
     };
@@ -419,5 +422,8 @@ describe("Hub runtime shutdown", () => {
       }
       await rm(directory, { recursive: true, force: true });
     }
-  });
+    // Spawns a real child process: under `bun test --parallel` its start can
+    // exceed the default five seconds, and a timeout here reports as the
+    // wrong failure.
+  }, 30_000);
 });
