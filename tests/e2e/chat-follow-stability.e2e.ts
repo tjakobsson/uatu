@@ -1,7 +1,9 @@
-import { test, expect } from "./fixtures";
-import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
+import { test as baseTest, expect } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
 import { bootShell, frames as settleFrames, log, shell, position, drag } from "./chat-shell-helpers";
+
+const test = withEngineBrowsers(baseTest);
 
 type Frame = { frame: number; phase: string; top: number; extent: number; height: number; following: boolean };
 type Write = Omit<Frame, "following"> & { before: number; source: string; reader: boolean; behavior?: string };
@@ -27,8 +29,8 @@ attachPageDiagnosticsOnFailure(test);
 // perf project, apart from the parallel functional suite.
 
 for (const browserName of ["chromium", "webkit"] as const) for (const touch of [false, true]) for (const child of [false, true]) {
-  test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} integrated shell frame budget`, { tag: "@perf" }, async ({ request, baseURL }, testInfo) => {
-    // A long scenario (its own browser launch, then ~25 update/settle cycles
+  test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} integrated shell frame budget`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
+    // A long scenario (a fresh page boot, then ~25 update/settle cycles
     // across inline, floating, and maximized phases). On a loaded CI runner
     // WebKit spends ~13s booting alone and was timing out at 30s while still
     // progressing; the budget is time, not a frame assertion.
@@ -255,7 +257,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
 
 for (const browserName of ["chromium", "webkit"] as const) {
   for (const touch of [false, true]) {
-    for (const child of [false, true]) test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} coordinated following`, { tag: "@perf" }, async ({ request, baseURL }, testInfo) => {
+    for (const child of [false, true]) test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} coordinated following`, { tag: "@perf" }, async ({ launchBrowser, request, baseURL }, testInfo) => {
       const browser = await launchBrowser(browserName);
       const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
         viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });

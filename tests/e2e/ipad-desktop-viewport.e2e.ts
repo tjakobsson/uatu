@@ -1,8 +1,10 @@
 import type { APIRequestContext, Page } from "@playwright/test";
-import { expect, test } from "./fixtures";
-import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
+import { expect, test as baseTest } from "./fixtures";
+import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
+
+const test = withEngineBrowsers(baseTest);
 
 const LANDSCAPE = { width: 1194, height: 834 };
 type Viewport = { width: number; height: number; offsetTop: number; offsetLeft: number; scale: number };
@@ -78,7 +80,7 @@ async function expectChromeFits(page: Page) {
 attachPageDiagnosticsOnFailure(test);
 
 for (const engine of ["chromium", "webkit"] as const) {
-  test(`${engine} iPad desktop headers and composer fit accessory-bar and software-keyboard viewports`, async ({ request, baseURL }, testInfo) => {
+  test(`${engine} iPad desktop headers and composer fit accessory-bar and software-keyboard viewports`, async ({ launchBrowser, request, baseURL }, testInfo) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: true, isMobile: true });
     try {
@@ -111,7 +113,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  test(`${engine} iPad rotation and mode switches clear desktop geometry without losing drafts`, async ({ request, baseURL }) => {
+  test(`${engine} iPad rotation and mode switches clear desktop geometry without losing drafts`, async ({ launchBrowser, request, baseURL }) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: true, isMobile: true });
     try {
@@ -147,7 +149,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  test(`${engine} docked and fullscreen terminals inherit the desktop viewport once`, async ({ request, baseURL }) => {
+  test(`${engine} docked and fullscreen terminals inherit the desktop viewport once`, async ({ launchBrowser, request, baseURL }) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: true, isMobile: true });
     try {
@@ -181,7 +183,7 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  test(`${engine} safe areas work with fine pointers, zoom stays browser-owned, and native titlebar remains separate`, async ({ request, baseURL }) => {
+  test(`${engine} safe areas work with fine pointers, zoom stays browser-owned, and native titlebar remains separate`, async ({ launchBrowser, request, baseURL }) => {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: LANDSCAPE, hasTouch: false });
     try {

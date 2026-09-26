@@ -1,7 +1,9 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "./hub-fixtures";
-import { attachPageDiagnosticsOnFailure, launchBrowser } from "./page-diagnostics";
+import { expect, test as baseTest } from "./hub-fixtures";
+import { attachPageDiagnosticsOnFailure, withEngineBrowsers } from "./page-diagnostics";
 import { captureScreenshot } from "./evidence";
+
+const test = withEngineBrowsers(baseTest);
 
 async function expectSidebarControlsFit(page: Page) {
   await expect.poll(() => page.evaluate(() => {
@@ -23,7 +25,7 @@ async function expectSidebarControlsFit(page: Page) {
 attachPageDiagnosticsOnFailure(test);
 
 for (const engine of ["chromium", "webkit"] as const) {
-  test(`${engine} hub notification controls clear the brand at iPad sidebar widths and in touch mode`, async ({ hub, hubContext }, testInfo) => {
+  test(`${engine} hub notification controls clear the brand at iPad sidebar widths and in touch mode`, async ({ launchBrowser, hub, hubContext }, testInfo) => {
     const workspace = hub.workspaces[0]!;
     const browser = await launchBrowser(engine);
     const context = await browser.newContext({ storageState: await hubContext.storageState(),
