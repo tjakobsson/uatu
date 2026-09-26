@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import { openTerminal } from "./terminal-helpers";
 
 // Coverage for fix-pane-fit-padding-clip: the rendered character grid
 // (`.xterm-screen`) must fit entirely inside its pane host's clip box at any
@@ -32,13 +33,6 @@ async function bootWithTerminalCookie(
     }
   });
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-}
-
-async function openTerminal(page: import("@playwright/test").Page): Promise<void> {
-  await page.locator("#terminal-toggle").click();
-  await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-    timeout: 5000,
-  });
 }
 
 type FitReport = {
@@ -106,7 +100,7 @@ async function expectGridFitsHosts(page: import("@playwright/test").Page): Promi
         }
         return "fits";
       },
-      { timeout: 5000, message: "xterm screen must fit inside its pane host clip box" },
+      { message: "xterm screen must fit inside its pane host clip box" },
     )
     .toBe("fits");
 }
@@ -136,7 +130,7 @@ test.describe("terminal fit: grid never clips at pane edges", () => {
     request,
   }) => {
     await bootWithTerminalCookie(page, request);
-    await openTerminal(page);
+    await openTerminal(page, { shell: false });
     for (const px of HEIGHT_SWEEP) {
       await setPanelSize(page, "height", px);
       await expectGridFitsHosts(page);
@@ -148,7 +142,7 @@ test.describe("terminal fit: grid never clips at pane edges", () => {
     request,
   }) => {
     await bootWithTerminalCookie(page, request);
-    await openTerminal(page);
+    await openTerminal(page, { shell: false });
     await page.locator("#terminal-split").click();
     await expect(page.locator(".terminal-pane-host")).toHaveCount(2);
     for (const px of HEIGHT_SWEEP) {
@@ -162,7 +156,7 @@ test.describe("terminal fit: grid never clips at pane edges", () => {
     request,
   }) => {
     await bootWithTerminalCookie(page, request);
-    await openTerminal(page);
+    await openTerminal(page, { shell: false });
     await page.locator("#terminal-dock-toggle").click();
     await expect(page.locator("#terminal-panel")).toHaveAttribute("data-dock", "right");
     await page.locator("#terminal-split").click();
@@ -176,7 +170,7 @@ test.describe("terminal fit: grid never clips at pane edges", () => {
 
 test("opening the terminal via the sidebar control focuses the shell", async ({ page, request }) => {
   await bootWithTerminalCookie(page, request);
-  await openTerminal(page);
+  await openTerminal(page, { shell: false });
 
   // Focus must land in xterm's hidden input textarea — the element that
   // receives keystrokes — without any further click. The focus request is

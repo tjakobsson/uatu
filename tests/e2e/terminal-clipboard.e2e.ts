@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import { openTerminal, paneHost, typeInTerminal } from "./terminal-helpers";
 
 // Real-browser coverage for the OSC 52 clipboard bridge: a program running
 // in the PTY copies by emitting `ESC ] 52 ; c ; <base64> BEL`, and the
@@ -38,34 +39,6 @@ test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
 });
 
-// Open the panel, wait for the prompt, and focus xterm's hidden textarea so
-// page.keyboard events reach the PTY. Typing before the shell has printed a
-// prompt races its init (zsh line-editor setup eats or garbles input), so
-// poll the rows DOM for rendered content first.
-async function openTerminal(page: Ctx["page"]): Promise<void> {
-  await page.locator("#terminal-toggle").click();
-  await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
-  const rows = page.locator(".terminal-pane-host .xterm-rows > div");
-  await expect
-    .poll(
-      async () => {
-        const texts = await rows.allTextContents();
-        return texts.some(text => text.trim().length > 0);
-      },
-      { timeout: 10_000 },
-    )
-    .toBe(true);
-  // A settled prompt can still be mid-redraw (multi-line prompts); give the
-  // shell a beat after first paint before sending keystrokes.
-  await page.waitForTimeout(400);
-  await page.evaluate(() => {
-    const helper = document.querySelector<HTMLTextAreaElement>(
-      ".terminal-pane-host .xterm-helper-textarea",
-    );
-    helper?.focus();
-  });
-}
-
 async function seedClipboard(page: Ctx["page"], value: string): Promise<void> {
   await page.evaluate(text => navigator.clipboard.writeText(text), value);
 }
@@ -78,8 +51,7 @@ function readClipboard(page: Ctx["page"]): Promise<string> {
 // so the escape bytes are produced by the PTY-side program — exactly the path
 // a TUI's copy takes.
 async function emitOsc52(page: Ctx["page"], data: string): Promise<void> {
-  await page.keyboard.type(`printf '\\033]52;c;%s\\007' '${data}'`);
-  await page.keyboard.press("Enter");
+  await typeInTerminal(page, `printf '\\033]52;c;%s\\007' '${data}'`);
 }
 
 test("an OSC 52 copy lands on the browser clipboard and shows the toast", async ({ page, request, context }) => {
@@ -92,7 +64,7 @@ test("an OSC 52 copy lands on the browser clipboard and shows the toast", async 
   await emitOsc52(page, encoded);
 
   const toast = page.locator(".terminal-copy-toast");
-  await expect(toast).toBeVisible({ timeout: 5000 });
+  await expect(toast).toBeVisible();
   await expect(toast).toContainText(`Copied ${payload.length} characters from terminal`);
   expect(await readClipboard(page)).toBe(payload);
 });
@@ -107,10 +79,9 @@ test("read query: never answered, never touches the clipboard", async ({ page, r
   // Round-trip marker: the shell is healthy and — critically — its input
   // line was NOT polluted by an injected OSC 52 response (a terminal that
   // answered would have typed base64 garbage at the prompt).
-  const marker = "after_osc52_query";
-  await page.keyboard.type(`echo ${marker}`);
-  await page.keyboard.press("Enter");
-  await expect(page.locator(".terminal-pane-host")).toContainText(marker, { timeout: 5000 });
+  // printf assembles the marker, so the echoed command line cannot match.
+  await typeInTerminal(page, "printf 'after_%s\\n' osc52_query");
+  await expect(paneHost(page)).toContainText("after_osc52_query");
 
   await expect(page.locator(".terminal-copy-toast")).toHaveCount(0);
   expect(await readClipboard(page)).toBe("sentinel-query");

@@ -12,6 +12,7 @@ import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 import { bootShell, log, openSeeded, seed, shell } from "./chat-shell-helpers";
+import { focusTerminal, openTerminal } from "./terminal-helpers";
 
 const PREFIX = process.env.UATU_SHOT_PREFIX ?? "after";
 const BASELINE = PREFIX === "before";
@@ -173,12 +174,9 @@ test.describe("shell output reads as the terminal renders it", () => {
     const row = page.locator('[data-chat-item-id="tool:sh"]');
     await row.locator("> summary").click();
     await expect(row.locator(shellOutput).first()).toBeVisible();
-    await page.locator("#terminal-toggle").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    await openTerminal(page);
     const rows = page.locator(".terminal-pane-host .xterm-rows > div");
-    await expect.poll(async () => (await rows.allTextContents()).some(line => line.trim().length > 0), { timeout: 10_000 }).toBe(true);
-    await page.waitForTimeout(400);
-    await page.evaluate(() => document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus());
+    await focusTerminal(page);
     // printf the same bytes the fixture seeded, escapes as octal.
     const script = TEST_OUTPUT.replaceAll("%", "%%").replaceAll("\x1b", "\\033").replaceAll("\r", "\\r").replaceAll("\n", "\\n").replaceAll("'", "'\\''");
     await page.keyboard.type(`printf '${script}\\n'`, { delay: 2 });

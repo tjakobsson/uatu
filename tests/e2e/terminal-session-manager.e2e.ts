@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import { openTerminal, paneHost, typeInTerminal, waitForShell, waitForTerminalReady } from "./terminal-helpers";
 
 // Coverage for add-terminal-session-manager and add-terminal-auto-attach-
 // switcher: the session inventory, auto-attach of detached PTYs, the chooser
@@ -28,39 +29,6 @@ async function bootWithTerminalCookie(
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 }
 
-async function openTerminal(page: import("@playwright/test").Page): Promise<void> {
-  const panel = page.locator("#terminal-panel");
-  if (await panel.isHidden()) {
-    await page.locator("#terminal-toggle").click();
-  }
-  await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-    timeout: 5000,
-  });
-}
-
-async function waitForPrompt(page: import("@playwright/test").Page): Promise<void> {
-  const rows = page.locator(".terminal-pane-host .xterm-rows > div");
-  await expect
-    .poll(
-      async () => {
-        const texts = await rows.allTextContents();
-        return texts.some(text => text.trim().length > 0);
-      },
-      { timeout: 5000, message: "shell prompt must render before typing" },
-    )
-    .toBe(true);
-}
-
-async function typeLine(page: import("@playwright/test").Page, line: string): Promise<void> {
-  await page.evaluate(() => {
-    const host = document.querySelector(".terminal-pane-host") as HTMLElement | null;
-    const helper = host?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
-    helper?.focus();
-  });
-  await page.keyboard.type(line);
-  await page.keyboard.press("Enter");
-}
-
 test.describe("terminal session manager", () => {
   test("an orphaned session is auto-attached on split, with its shell state intact", async ({
     page,
@@ -69,64 +37,31 @@ test.describe("terminal session manager", () => {
   }) => {
     await bootWithTerminalCookie(page, request);
     // First open with a clean server: no picker, straight to a shell.
-    await openTerminal(page);
+    await openTerminal(page, { shell: false });
     await expect(page.locator(".terminal-picker")).toHaveCount(0);
-    await waitForPrompt(page);
 
     // Window 2 sees window 1 in inventory and explicitly chooses a new shell,
     // then closes for good — orphaning that new session.
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
-    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await expect(page2.locator(".terminal-picker")).toBeVisible();
     await page2.locator(".terminal-picker-fresh").click();
-    await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
-    await expect
-      .poll(
-        async () => {
-          const texts = await page2
-            .locator(".terminal-pane-host .xterm-rows > div")
-            .allTextContents();
-          return texts.some(text => text.trim().length > 0);
-        },
-        { timeout: 5000 },
-      )
-      .toBe(true);
-    await page2.evaluate(() => {
-      const host = document.querySelector(".terminal-pane-host") as HTMLElement | null;
-      const helper = host?.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
-      helper?.focus();
-    });
-    await page2.keyboard.type("UATU_ORPHAN=survivor");
-    await page2.keyboard.press("Enter");
+    await waitForShell(page2);
+    await typeInTerminal(page2, "UATU_ORPHAN=survivor");
     // Ensure the variable landed before the abrupt close.
-    await page2.keyboard.type("echo staged_${UATU_ORPHAN}_ok");
-    await page2.keyboard.press("Enter");
-    await expect(page2.locator(".terminal-pane-host")).toContainText("staged_survivor_ok", {
-      timeout: 5000,
-    });
+    await typeInTerminal(page2, "echo staged_${UATU_ORPHAN}_ok");
+    await expect(paneHost(page2)).toContainText("staged_survivor_ok");
     await page2.close();
 
     // Window 1 splits: the orphan belongs to nobody, so it attaches straight
     // into the new pane — no chooser, because there is nothing to choose.
     await page.locator("#terminal-split").click();
-    await expect(page.locator(".terminal-pane-host")).toHaveCount(2, { timeout: 5000 });
+    await expect(page.locator(".terminal-pane-host")).toHaveCount(2);
     await expect(page.locator(".terminal-picker")).toHaveCount(0);
-    const secondPane = page.locator(".terminal-pane-host").nth(1);
-    await expect(secondPane.locator(".xterm")).toBeVisible({ timeout: 5000 });
-    await expect(secondPane).toHaveAttribute("data-terminal-ready", "true", { timeout: 5000 });
-    await page.evaluate(() => {
-      const hosts = document.querySelectorAll(".terminal-pane-host");
-      const helper = hosts[1]?.querySelector(".xterm-helper-textarea") as
-        | HTMLTextAreaElement
-        | null;
-      helper?.focus();
-    });
-    await page.keyboard.type("echo got_${UATU_ORPHAN}_end");
-    await page.keyboard.press("Enter");
-    await expect(secondPane).toContainText("got_survivor_end", { timeout: 5000 });
+    const secondPane = await waitForTerminalReady(page, 1);
+    await typeInTerminal(page, "echo got_${UATU_ORPHAN}_end", 1);
+    await expect(secondPane).toContainText("got_survivor_end");
   });
 
   test("takeover parks the losing pane; take-back reverses it", async ({
@@ -136,58 +71,44 @@ test.describe("terminal session manager", () => {
   }) => {
     await bootWithTerminalCookie(page, request);
     await openTerminal(page);
-    await waitForPrompt(page);
-    await typeLine(page, "UATU_OWNER=window1");
-    await typeLine(page, "echo staged_${UATU_OWNER}_ok");
-    await expect(page.locator(".terminal-pane-host")).toContainText("staged_window1_ok", {
-      timeout: 5000,
-    });
+    await typeInTerminal(page, "UATU_OWNER=window1");
+    await typeInTerminal(page, "echo staged_${UATU_OWNER}_ok");
+    await expect(paneHost(page)).toContainText("staged_window1_ok");
 
     // Window 2 starts at the inventory and explicitly takes over window 1.
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
-    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await expect(page2.locator(".terminal-picker")).toBeVisible();
     await expect(page2.locator(".terminal-picker-meta").first()).toContainText(
       "attached elsewhere",
     );
     await page2.locator(".terminal-picker-attach").first().click();
 
     // Window 2 now owns the session — the marker variable proves identity.
-    const takenPane = page2.locator(".terminal-pane-host").first();
-    await expect(takenPane.locator(".xterm")).toBeVisible({ timeout: 5000 });
+    const takenPane = await waitForTerminalReady(page2);
     // A picker choice is a user action: focus lands in the chosen pane (a
     // boot restore is the one addition that must not take it).
     await expect
       .poll(() => page2.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea") ?? false))
       .toBe(true);
-    await page2.evaluate(() => {
-      const host = document.querySelector(".terminal-pane-host");
-      const helper = host?.querySelector(".xterm-helper-textarea") as
-        | HTMLTextAreaElement
-        | null;
-      helper?.focus();
-    });
-    await page2.keyboard.type("echo taken_${UATU_OWNER}_ok");
-    await page2.keyboard.press("Enter");
-    await expect(takenPane).toContainText("taken_window1_ok", { timeout: 5000 });
+    await typeInTerminal(page2, "echo taken_${UATU_OWNER}_ok");
+    await expect(takenPane).toContainText("taken_window1_ok");
 
     // Window 1's pane parked with the notice and take-back action.
-    await expect(page.locator(".terminal-taken")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".terminal-taken")).toBeVisible();
     await expect(page.locator(".terminal-taken-heading")).toHaveText(
       "Attached in another window",
     );
 
     // Take back: window 1 reattaches, window 2's pane parks.
     await page.locator(".terminal-taken-takeback").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
-    await typeLine(page, "echo back_${UATU_OWNER}_ok");
-    await expect(page.locator(".terminal-pane-host")).toContainText("back_window1_ok", {
-      timeout: 5000,
-    });
-    await expect(page2.locator(".terminal-taken")).toBeVisible({ timeout: 5000 });
+    // The pane shows its xterm before the reattached socket is live, and
+    // keys typed in between are dropped.
+    await waitForTerminalReady(page);
+    await typeInTerminal(page, "echo back_${UATU_OWNER}_ok");
+    await expect(paneHost(page)).toContainText("back_window1_ok");
+    await expect(page2.locator(".terminal-taken")).toBeVisible();
 
     await page2.close();
   });
@@ -198,8 +119,7 @@ test.describe("terminal session manager", () => {
     request,
   }) => {
     await bootWithTerminalCookie(page, request);
-    await openTerminal(page);
-    await waitForPrompt(page);
+    await openTerminal(page, { shell: false });
 
     // A second window holds its own session. Left OPEN, so that session stays
     // attached — which is what keeps the chooser in play: auto-attach only
@@ -207,32 +127,19 @@ test.describe("terminal session manager", () => {
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
-    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await expect(page2.locator(".terminal-picker")).toBeVisible();
     await page2.locator(".terminal-picker-fresh").click();
-    await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
-    await expect
-      .poll(
-        async () => {
-          const texts = await page2
-            .locator(".terminal-pane-host .xterm-rows > div")
-            .allTextContents();
-          return texts.some(text => text.trim().length > 0);
-        },
-        { timeout: 5000 },
-      )
-      .toBe(true);
+    await waitForTerminalReady(page2);
 
     // Split → the only candidate is window 2's session, which needs a
     // decision → kill it → nothing left to decide, so the chooser falls
     // through to a fresh shell automatically.
     await page.locator("#terminal-split").click();
-    await expect(page.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(".terminal-picker")).toBeVisible();
     await expect(page.locator(".terminal-picker-row")).toHaveCount(1);
     await expect(page.locator(".terminal-picker-meta")).toContainText("attached elsewhere");
     await page.locator(".terminal-picker-kill").click();
-    await expect(page.locator(".terminal-picker")).toHaveCount(0, { timeout: 5000 });
+    await expect(page.locator(".terminal-picker")).toHaveCount(0);
     await expect(page.locator(".terminal-pane-host")).toHaveCount(2);
 
     // The inventory no longer contains the killed session: only this
@@ -245,7 +152,6 @@ test.describe("terminal session manager", () => {
           const body = await inventory.json();
           return body.sessions.length;
         },
-        { timeout: 5000 },
       )
       .toBe(2);
 
@@ -316,8 +222,7 @@ test.describe("terminal session manager", () => {
 
     // Window opens a shell: that session becomes the saved last-active PTY in
     // personal state, which is server-side and survives the reload below.
-    await openTerminal(page);
-    await waitForPrompt(page);
+    await openTerminal(page, { shell: false });
     const firstSessionId = await page.evaluate(
       () => (document.querySelector(".terminal-pane") as HTMLElement).dataset.sessionId!,
     );
@@ -353,7 +258,7 @@ test.describe("terminal session manager", () => {
             };
             return body.sessions.filter(session => !session.attached).length;
           }),
-        { timeout: 5000, message: "all three sessions must be detached first" },
+        { message: "all three sessions must be detached first" },
       )
       .toBe(3);
 
@@ -386,15 +291,14 @@ test.describe("terminal session manager", () => {
     request,
   }) => {
     await bootWithTerminalCookie(page, request);
-    await openTerminal(page);
-    await waitForPrompt(page);
+    await openTerminal(page, { shell: false });
 
     // Window 1 holds one session. Window 2 opens with nothing to restore:
     // there is no detached PTY to claim, so it must ask rather than take.
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
-    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await expect(page2.locator(".terminal-picker")).toBeVisible();
     await expect(page2.locator(".terminal-picker-meta")).toContainText("attached elsewhere");
     await expect(page2.locator(".terminal-pane-host")).toHaveCount(0);
 

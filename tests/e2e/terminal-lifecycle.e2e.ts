@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import { openTerminal } from "./terminal-helpers";
 
 // Regression coverage for fix-terminal-lifecycle-resilience. Each test
 // exercises one of the three bugs the change addresses:
@@ -64,20 +65,11 @@ test.describe("terminal lifecycle: SPA-level navigation survives", () => {
     // Wait for the seeded file to appear in the tree. The tree renders
     // inside a shadow DOM; Playwright's CSS locator pierces it but raw
     // document.querySelector does not — use the locator API.
-    await expect(page.locator('[data-item-path="linker.md"]')).toBeVisible({
-      timeout: 5000,
-    });
+    await expect(page.locator('[data-item-path="linker.md"]')).toBeVisible();
 
     // Show the terminal and capture the host element so we can verify it
     // survives the click without being torn down.
-    await page.locator("#terminal-toggle").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
-    await expect.poll(async () => {
-      const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
-      return rows.some(text => text.trim().length > 0);
-    }, { timeout: 5000 }).toBe(true);
+    await openTerminal(page, { shell: false });
     const xtermHandle = await page
       .locator(".terminal-pane-host .xterm")
       .first()
@@ -119,10 +111,7 @@ test.describe("terminal lifecycle: SPA-level navigation survives", () => {
     // Open the terminal so visibility is genuinely persisted by the
     // production write path (setVisible → writeTerminalVisiblePreference).
     // We then reload to exercise the auto-attach path.
-    await page.locator("#terminal-toggle").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
+    await openTerminal(page, { shell: false });
 
     // Get the URL into the deep-link shape (path + fragment) WITHOUT a
     // full page navigation. replaceState updates the URL bar; page.reload()
@@ -159,10 +148,8 @@ test.describe("terminal lifecycle: SPA-level navigation survives", () => {
     // fix this never happened because the WebSocket constructor threw
     // SyntaxError on the fragment-bearing URL, which surfaced as an
     // unhandled promise rejection during boot.
-    await expect(page.locator("#terminal-panel")).toBeVisible({ timeout: 5000 });
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
+    await expect(page.locator("#terminal-panel")).toBeVisible();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible();
 
     const offendingConsole = consoleErrors.filter(message =>
       /WebSocket|Fragment identifier|fragment/i.test(message),
@@ -180,29 +167,9 @@ test.describe("terminal lifecycle: SPA-level navigation survives", () => {
   }) => {
     await bootWithTerminalCookie(page, request);
 
-    // Open the terminal and type a marker so we know the PTY round-trip
-    // is working before the reload.
-    await page.locator("#terminal-toggle").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
-    await expect.poll(async () => {
-      const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
-      return rows.some(text => text.trim().length > 0);
-    }, { timeout: 5000 }).toBe(true);
-    await page.evaluate(() => {
-      const host = document.querySelector(".terminal-pane-host") as HTMLElement | null;
-      const xtermHelper = host?.querySelector(".xterm-helper-textarea") as
-        | HTMLTextAreaElement
-        | null;
-      xtermHelper?.focus();
-    });
-    const marker = "echoed_marker_uatu_terminal_lifecycle";
-    await page.keyboard.type(`echo ${marker}`);
-    await page.keyboard.press("Enter");
-    await expect(page.locator(".terminal-pane-host")).toContainText(marker, {
-      timeout: 5000,
-    });
+    // Open the terminal; its readiness round trip proves the PTY answers
+    // before the reload.
+    await openTerminal(page);
 
     // Seed visibility so the panel auto-restores on reload. Use the
     // production storage and value (sessionStorage, "1").
@@ -239,7 +206,7 @@ test.describe("terminal lifecycle: SPA-level navigation survives", () => {
           // without requiring the test to know what the prompt looks like.
           return texts.some(text => text.trim().length > 0);
         },
-        { timeout: 5000, message: "xterm rows must contain rendered content after refresh" },
+        { message: "xterm rows must contain rendered content after refresh" },
       )
       .toBe(true);
 

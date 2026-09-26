@@ -7,12 +7,12 @@
 // deterministic viewport shim; final behavior remains gated on real iOS.
 
 import fs from "node:fs/promises";
-import path from "node:path";
 
 import { expect, test } from "./fixtures";
 import { waitForPreviewToSettle } from "./fixtures";
 import { treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
+import { removeTerminalGates, terminalGate, waitForTerminalReady } from "./terminal-helpers";
 import {
   expectStageTransform,
   expectStageTransformDiffers,
@@ -33,33 +33,6 @@ function readStoredValue(page: import("@playwright/test").Page, suffix: string):
     }
     return null;
   }, suffix);
-}
-
-// Terminal input typed before the pane's attach is ready is dropped (the
-// client forwards keystrokes only once the reconstruction has arrived), so
-// every test that types waits on the readiness marker first — the xterm
-// element is visible well before that.
-async function waitForTerminalReady(page: import("@playwright/test").Page) {
-  const host = page.locator(".terminal-pane-host").first();
-  await expect(host.locator(".xterm")).toBeVisible({ timeout: 5000 });
-  await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10_000 });
-  return host;
-}
-
-// A file the shell polls for, so a test decides when delayed PTY output is
-// printed instead of racing a `sleep` against the page. It lives in a fresh
-// directory under /tmp (the PTY backend is POSIX-only): outside the watched
-// workspace, and a short path, since the command carrying it is typed key by
-// key (macOS's per-user os.tmpdir() alone is ~50 characters).
-const gateDirectories: string[] = [];
-async function terminalGate(): Promise<{ shellWait: string; open: () => Promise<void> }> {
-  const directory = await fs.mkdtemp("/tmp/uatu-gate-");
-  gateDirectories.push(directory);
-  const gatePath = path.join(directory, "open");
-  return {
-    shellWait: `while [ ! -e '${gatePath}' ]; do sleep 0.1; done`,
-    open: () => fs.writeFile(gatePath, "", "utf8"),
-  };
 }
 
 // Resolves once the page has rendered a frame after everything already
@@ -143,9 +116,7 @@ async function terminalBeforeEach(
 
 test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
-  for (const directory of gateDirectories.splice(0)) {
-    await fs.rm(directory, { recursive: true, force: true });
-  }
+  await removeTerminalGates();
 });
 
 test.describe("touch tab navigation", () => {
