@@ -4,6 +4,45 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.8.0](https://github.com/tjakobsson/uatu/compare/v0.7.0...v0.8.0) (2026-09-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **chat:** workspace API revision 21. ConversationStatus gains `scheduled`, a `scheduled_wakeup` item joins the ConversationItem union, and `user_message` gains optional `origin` and `wakeupId`.
+* **chat:** itemize an OpenCode conversation's cost as a receipt by agent, type, or model
+* **chat:** workspace API revision 20. A task `tool` item's `usage` is now that task's own spend rather than the child session's aggregate with its descendants; `tool` items gain `descendants` and `assistant_message` usage carriers gain `agent`. Both objects are closed; see `api/CHANGELOG.md` for migration.
+* **chat:** Workspace API revision 19 adds optional provider-reported completedAt fields to closed tool and command item schemas. Strict workspace consumers must regenerate; Hub API revision remains 5.
+* **chat:** TokenUsage is a closed wire object; the optional costUsd bumps the workspace API revision 17 -> 18 (contract, OpenAPI, runtime constant, changelog with migration).
+
+### Features
+
+* **chat:** add shell scrollback and a floating output window ([#372](https://github.com/tjakobsson/uatu/issues/372)) ([b206104](https://github.com/tjakobsson/uatu/commit/b20610428552de3a0b848908e3dd5e391b8b5e25))
+* **chat:** itemize an OpenCode conversation's cost as a receipt by agent, type, or model ([29e347f](https://github.com/tjakobsson/uatu/commit/29e347fd85a185c612d1ad1b81fd2131cabfc02c))
+* **chat:** keep Claude Code scheduled wakeups alive, shown, and cancellable ([#449](https://github.com/tjakobsson/uatu/issues/449)) ([cb56708](https://github.com/tjakobsson/uatu/commit/cb56708590fb48bb913204700bd0080de3252e01))
+* **chat:** report OpenCode conversation cost per agent; render shell output as terminal text ([#368](https://github.com/tjakobsson/uatu/issues/368)) ([aba2428](https://github.com/tjakobsson/uatu/commit/aba24282879d1771101575a5a8df70be1c3ce235))
+* **chat:** serve OpenCode 1.x and 2.x servers ([#430](https://github.com/tjakobsson/uatu/issues/430)) ([156ccb2](https://github.com/tjakobsson/uatu/commit/156ccb224b0bad6441fbc1cd85bbe44fb6806fdd))
+* **chat:** surface working, finished, and inspectable background work across workspaces ([#425](https://github.com/tjakobsson/uatu/issues/425)) ([dec65af](https://github.com/tjakobsson/uatu/commit/dec65afa014ee55f8c555029cae14fa9c30f68b8))
+* **hub:** name the session cookie for the request's port ([#375](https://github.com/tjakobsson/uatu/issues/375)) ([56e05cf](https://github.com/tjakobsson/uatu/commit/56e05cf598c255bd63652a40e449c02f06cf6591))
+* **notifications:** cover all workspaces as a standing per-device rule ([bdf9f97](https://github.com/tjakobsson/uatu/commit/bdf9f9734841d1698872b8fdc8a0e7adad3c38a1)), closes [#407](https://github.com/tjakobsson/uatu/issues/407)
+* **notifications:** hold pushes while you're looking at Uatu ([#455](https://github.com/tjakobsson/uatu/issues/455)) ([b087f07](https://github.com/tjakobsson/uatu/commit/b087f073efc46cfd7684a36f784e09ac94707cf2))
+* **pwa:** add Web Push notifications for agent questions and turn completion ([#400](https://github.com/tjakobsson/uatu/issues/400)) ([bd40e43](https://github.com/tjakobsson/uatu/commit/bd40e43c059a44bfe4d5559c73a23e19ec7f25ff))
+* **worktrees:** provider-neutral Git worktree workspaces ([#395](https://github.com/tjakobsson/uatu/issues/395)) ([89ddbec](https://github.com/tjakobsson/uatu/commit/89ddbecca61c8a86e1585aacbfdac6bfb9883966))
+
+
+### Bug Fixes
+
+* **chat:** date the timeline, picker, and reset warnings; wrap slash descriptions ([#454](https://github.com/tjakobsson/uatu/issues/454)) ([53faffb](https://github.com/tjakobsson/uatu/commit/53faffbe4a7b6e27159073e3a5b54f9c5d9e13fb)), closes [#429](https://github.com/tjakobsson/uatu/issues/429) [#427](https://github.com/tjakobsson/uatu/issues/427) [#424](https://github.com/tjakobsson/uatu/issues/424)
+* **chat:** keep mobile answers visible across keyboard and lifecycle changes ([#415](https://github.com/tjakobsson/uatu/issues/415)) ([7287ac0](https://github.com/tjakobsson/uatu/commit/7287ac0443429eb8977c97ea4debd03e2826edb4))
+* **chat:** read Claude Code plan usage on demand and keep the last-known report ([#397](https://github.com/tjakobsson/uatu/issues/397)) ([8606b45](https://github.com/tjakobsson/uatu/commit/8606b4506bd9165e570ad4a727d4679c677715de)), closes [#387](https://github.com/tjakobsson/uatu/issues/387) [#389](https://github.com/tjakobsson/uatu/issues/389)
+* **chat:** restore saved chats correctly after workspace startup ([#378](https://github.com/tjakobsson/uatu/issues/378)) ([1501888](https://github.com/tjakobsson/uatu/commit/15018888a6dad4fa7de50af45941b96e8b6129e1))
+* **chat:** state each task's own tokens on a subagent's rows when the subagent is given several tasks ([29e347f](https://github.com/tjakobsson/uatu/commit/29e347fd85a185c612d1ad1b81fd2131cabfc02c))
+* **hub:** read Stopped and start in place when the viewed workspace is stopped ([#412](https://github.com/tjakobsson/uatu/issues/412)) ([8e046f6](https://github.com/tjakobsson/uatu/commit/8e046f6424e575abd9f0066290e188a4975fff7a))
+* **pwa:** give Home Screen icons opaque backgrounds and maskable-safe padding ([#400](https://github.com/tjakobsson/uatu/issues/400)) ([bd40e43](https://github.com/tjakobsson/uatu/commit/bd40e43c059a44bfe4d5559c73a23e19ec7f25ff))
+* **pwa:** keep iPad desktop mode inside the safe area and visible viewport ([#400](https://github.com/tjakobsson/uatu/issues/400)) ([bd40e43](https://github.com/tjakobsson/uatu/commit/bd40e43c059a44bfe4d5559c73a23e19ec7f25ff))
+* **sidebar:** preserve folder state across refreshes and close the document on ancestor collapse ([04b69d1](https://github.com/tjakobsson/uatu/commit/04b69d1c891b6353552b1e79a40f00594fff74e0))
+* **terminal:** keep terminals through workspace navigation via the hub ([#420](https://github.com/tjakobsson/uatu/issues/420)) ([94a7d0e](https://github.com/tjakobsson/uatu/commit/94a7d0ed465eef5ed0c18c2b1690ddd84390f517))
+
 ## [0.7.0](https://github.com/tjakobsson/uatu/compare/v0.6.2...v0.7.0) (2026-09-13)
 
 
