@@ -195,10 +195,19 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
 
 - `bun run dev` — dev hub at `http://127.0.0.1:4702/` (`dev/hub.json`, user
   `dev` / password `dev`) with `testdata/watch-docs` registered and opened
-- `bun test` — unit suite (~18s)
+- `bun test` — unit suite (about 2 min on a CI runner)
 - When developing Uatu inside a Hub-managed workspace, credential tests may
   discover Uatu's projected Git/SSH wrappers. Use a clean tool environment for
   those tests; do not change product behavior to accommodate nested projection.
-- `bun test:e2e` — Playwright suite (~5min, `workers: 1` serial)
+- `bun run test:e2e` — the whole Playwright suite, both projects (848 tests,
+  4 workers, `fullyParallel`, retries only on CI; about 15–20 min on a
+  4-core runner). CI runs the `e2e` project in two shards and `perf` in its
+  own job, then merges their blob reports into one HTML report.
+- `bun run test:e2e:perf` — only the `perf` project: tests tagged `@perf`
+  that hold a frame, interaction, or load budget (chat-follow-stability,
+  the long-output shell test, hub-live-stream), at most 2 workers.
+  `bun run test:e2e:no-perf` (the `e2e` project) skips them. Tag a new
+  budget test `@perf`; make deterministic work counters its pass criterion
+  and keep wall-clock time as evidence or a loose guard.
 - `bun run build` — compile the single-file `dist/uatu` binary
 - `bun run check:licenses` — license audit
