@@ -8,13 +8,8 @@ import { test as base, expect, type APIRequestContext, type Page } from "@playwr
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 
+import { waitForPortsFree, workerServerPort } from "./ports";
 import { treeRow } from "./tree-helpers";
-
-// Workers index 0..N-1; we offset off a base port so concurrent runs in the
-// same shell don't fight each other. Use a high range: starting at 4173 put
-// worker 17 on 4190, which WebKit blocks as an unsafe port. Retries and
-// repeated runs allocate new worker indices even with only four workers.
-const BASE_PORT = Number.parseInt(process.env.UATU_E2E_BASE_PORT ?? "20000", 10);
 
 // The worker workspaces live in `.e2e/`, a git-ignored directory INSIDE the
 // uatu checkout. Left alone, git discovery from a workspace without its own
@@ -38,7 +33,10 @@ type WorkerFixtures = {
 export const test = base.extend<{}, WorkerFixtures>({
   serverPort: [
     async ({}, use, workerInfo) => {
-      const port = BASE_PORT + workerInfo.workerIndex;
+      // The port follows the worker's parallel slot (see ports.ts for why
+      // not workerIndex). The workspace keeps workerIndex: a replacement
+      // worker must not inherit a predecessor's leftover files.
+      const port = workerServerPort(workerInfo.parallelIndex);
       const workspace = path.resolve(
         process.cwd(),
         ".e2e",
@@ -53,6 +51,8 @@ export const test = base.extend<{}, WorkerFixtures>({
       process.env.UATU_E2E_PORT = String(port);
       process.env.UATU_E2E_WORKSPACE = workspace;
 
+      await waitForPortsFree([port]);
+
       const binary = process.env.UATU_E2E_BINARY;
       // The harness reads tests/e2e/bunfig.toml (see there for why); keep
       // this command in step with HarnessBackend in hub-server.ts.
@@ -63,14 +63,17 @@ export const test = base.extend<{}, WorkerFixtures>({
           UATU_E2E_PORT: String(port),
           UATU_E2E_WORKSPACE: workspace,
           GIT_CEILING_DIRECTORIES: gitCeilingFor(workspace),
+          // The harness exits when this worker's stdin pipe closes, so a
+          // worker that dies without its teardown frees the port anyway.
+          UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
         },
-        stdio: ["ignore", "pipe", "inherit"],
+        stdio: ["pipe", "pipe", "inherit"],
       });
 
       // Wait for the "http://127.0.0.1:<port>" announce line on stdout.
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
-          reject(new Error(`e2e server (worker ${workerInfo.workerIndex}) did not start within 30s`));
+          reject(new Error(`e2e server (worker ${workerInfo.workerIndex}, port ${port}) did not start within 30s`));
         }, 30_000);
         child.stdout?.on("data", (chunk: Buffer) => {
           if (chunk.toString().includes(`127.0.0.1:${port}`)) {
@@ -81,7 +84,7 @@ export const test = base.extend<{}, WorkerFixtures>({
         child.on("error", reject);
         child.on("exit", code => {
           clearTimeout(timeout);
-          reject(new Error(`e2e server exited early (code ${code}) before announcing readiness`));
+          reject(new Error(`e2e server (port ${port}) exited early (code ${code}) before announcing readiness`));
         });
       });
 

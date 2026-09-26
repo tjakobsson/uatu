@@ -685,7 +685,10 @@ const fetchFallback = buildFetchFallback({
 // its prefixed session URL, the shape the hub's backend contract expects.
 console.log(E2E_HUB_CHILD ? `http://127.0.0.1:${server.port}${E2E_BASE_PATH}` : `http://127.0.0.1:${server.port}`);
 
+let shuttingDown = false;
 const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   liveEndpoint.endAll();
   liveBroker.dispose();
   await singleAgentRouter.dispose();
@@ -701,6 +704,14 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   void shutdown();
 });
+// Set by the spawning fixture or hub (which hold our stdin pipe): EOF means
+// the parent is gone, so exit rather than hold the port its replacement is
+// given. Bun reports one EOF as both `end` and `close`.
+if (process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1") {
+  process.stdin.resume();
+  process.stdin.on("end", () => void shutdown());
+  process.stdin.on("close", () => void shutdown());
+}
 
 async function createSession(options: { resetWorkspace: boolean }) {
   if (options.resetWorkspace) {

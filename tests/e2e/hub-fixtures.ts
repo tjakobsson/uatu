@@ -5,17 +5,17 @@
 // through a hub import `{ test, expect }` from THIS file; everything else
 // keeps using ./fixtures.
 //
-// Ports: the worker harness fixture takes 20000+workerIndex. Hubs start at
-// 4300 and each worker gets a block of ten (hub + up to nine children), so
-// the two families can never meet however many workers run.
+// Ports: each worker's parallel slot gets a block of ports (the hub, then
+// its children) from a range clear of the worker harness's and of real
+// services; ports.ts has the allocation and why it follows the slot rather
+// than workerIndex.
 
 import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 
 import type { HubE2EInfo, HubE2EWorkspace } from "./hub-server";
+import { HUB_PORTS_PER_WORKER, hubPortBlock, waitForPortsFree } from "./ports";
 
-const HUB_BASE_PORT = Number.parseInt(process.env.UATU_E2E_HUB_BASE_PORT ?? "4300", 10);
-const PORTS_PER_WORKER = 10;
 const READY_PREFIX = "uatu-e2e-hub ";
 const RESET_PREFIX = "uatu-e2e-hub-reset ";
 const HUB_RESET_TIMEOUT_MS = 20_000;
@@ -63,28 +63,32 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
 
   hubProcess: [
     async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush }, use, workerInfo) => {
-      const hubPort = HUB_BASE_PORT + workerInfo.workerIndex * PORTS_PER_WORKER;
-      if (hubWorkspaces.length >= PORTS_PER_WORKER) {
-        throw new Error(`a hub worker serves at most ${PORTS_PER_WORKER - 1} workspaces`);
+      const { hubPort, end } = hubPortBlock(workerInfo.parallelIndex);
+      if (hubWorkspaces.length >= HUB_PORTS_PER_WORKER) {
+        throw new Error(`a hub worker serves at most ${HUB_PORTS_PER_WORKER - 1} workspaces`);
       }
+      await waitForPortsFree(Array.from({ length: end - hubPort }, (_, offset) => hubPort + offset));
       const child = spawn("bun", ["run", "tests/e2e/hub-server.ts"], {
         env: {
           ...process.env,
           UATU_E2E_HUB_PORT: String(hubPort),
           UATU_E2E_HUB_CHILD_BASE_PORT: String(hubPort + 1),
+          UATU_E2E_HUB_CHILD_PORT_END: String(end),
           UATU_E2E_HUB_WORKSPACES: hubWorkspaces.join(","),
           UATU_E2E_HUB_WORKTREES: hubWorktrees ? "1" : "0",
           UATU_E2E_HUB_CREDENTIALS: hubCredentials ? "1" : "0",
           UATU_E2E_HUB_PUSH: hubPush ? "1" : "0",
+          UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
         },
-        // stdin carries the per-test reset command.
+        // stdin carries the per-test reset command; its close (this worker
+        // gone, teardown or not) shuts the hub and its children down.
         stdio: ["pipe", "pipe", "inherit"],
       });
 
       const lines = new StdoutLines(child);
       const info = await new Promise<HubE2EInfo>((resolve, reject) => {
         const timeout = setTimeout(() => {
-          reject(new Error(`hub e2e server (worker ${workerInfo.workerIndex}) did not start within 60s`));
+          reject(new Error(`hub e2e server (worker ${workerInfo.workerIndex}, port ${hubPort}) did not start within 60s`));
         }, 60_000);
         void lines.waitFor(line => line.startsWith(READY_PREFIX)).then(line => {
           clearTimeout(timeout);
@@ -93,7 +97,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
         child.on("error", reject);
         child.on("exit", code => {
           clearTimeout(timeout);
-          reject(new Error(`hub e2e server exited early (code ${code}) before announcing readiness`));
+          reject(new Error(`hub e2e server (port ${hubPort}) exited early (code ${code}) before announcing readiness`));
         });
       });
 
