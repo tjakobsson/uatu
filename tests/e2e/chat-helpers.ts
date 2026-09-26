@@ -8,11 +8,14 @@ import { expect, type Page } from "@playwright/test";
 /** Expand the desktop chat panel if it is collapsed (the fresh-context
  *  default) and wait for its content to present. */
 export async function openChatPanel(page: Page): Promise<void> {
-  const strip = page.locator("#chat-expand");
-  if (await strip.isVisible()) {
-    await strip.click();
+  // Decide from the panel's own state once the boot script has stamped it,
+  // never from a one-shot visibility read that can run before layout.
+  const html = page.locator("html");
+  await expect(html).toHaveAttribute("data-chat-panel", /^(open|collapsed)$/);
+  if (await html.getAttribute("data-chat-panel") === "collapsed") {
+    await page.locator("#chat-expand").click();
   }
-  await expect(page.locator("html")).toHaveAttribute("data-chat-panel", "open");
+  await expect(html).toHaveAttribute("data-chat-panel", "open");
   await expect(page.locator("#chat-timeline")).toBeVisible();
 }
 
