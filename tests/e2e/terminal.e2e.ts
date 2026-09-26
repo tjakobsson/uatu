@@ -186,33 +186,36 @@ test.describe("terminal page lifecycle", () => {
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
     await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1);
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible();
-    // Focus is deferred until xterm opens, so give it every chance to land
-    // before asserting it did not.
-    await page.waitForTimeout(500);
+    // A focus request made before xterm opened is honoured when it opens,
+    // and the pane only reads ready after that (its reconstruction is
+    // written into the opened terminal). Past ready, and a rendered frame,
+    // any focus the restore took would have landed.
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     expect(await page.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea") ?? false)).toBe(false);
   });
 
   // A pane whose create resolves after pagehide must not attach: the
   // departing document may live on in the history cache while its
   // replacement is already attaching to the same shells. The first opening's
-  // inventory read is held server-side so the departure lands mid-request;
-  // the pane is then added suspended and resumes with the return.
+  // inventory read is held server-side until the departure has landed; the
+  // pane is then added suspended and resumes with the return.
   test("a pane whose creation resolves after pagehide is added suspended, and attaches on pageshow", async ({ page, request }) => {
-    await request.post("/__e2e/terminal-sessions-delay", { data: { ms: 1500 } });
+    const heldRead = async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending as boolean;
+    await request.post("/__e2e/terminal-sessions-delay", { data: {} });
     await page.locator("#terminal-toggle").click();
-    await expect
-      .poll(async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending)
-      .toBe(true);
+    await expect.poll(heldRead, { message: "the opening's inventory read must be the held one" }).toBe(true);
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await request.post("/__e2e/terminal-sessions-delay", { data: { release: true } });
+    await expect.poll(heldRead, { message: "the held inventory read must be delivered" }).toBe(false);
 
-    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1, { timeout: 10000 });
+    // The pane decides between attaching and staying released as it is
+    // added, so once it reads suspended with its session created, nothing
+    // may be attached while the document stays suspended.
+    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
     const attached = () => page.evaluate(() =>
       fetch("/api/terminal/sessions").then(r => r.json()).then((b: { sessions: { attached: boolean }[] }) => b.sessions.map(s => s.attached)));
     await expect.poll(attached).toEqual([false]);
-    // Nothing attaches while the document stays suspended.
-    await page.waitForTimeout(1000);
     await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
-    await expect.poll(attached).toEqual([false]);
 
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
     await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1);
@@ -271,10 +274,11 @@ test.describe("terminal reauthentication across a page suspend", () => {
     await expect(page.locator(".terminal-auth")).toBeVisible();
     await page.locator(".terminal-auth-input").fill(token);
     await page.locator(".terminal-auth-submit").click();
-    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
-    await page.waitForTimeout(750);
+    // The accepted token moves the pane from the form to suspended: the
+    // point at which an attach on the suspended document would have begun.
     await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
     await expect.poll(attached).toEqual([false]);
+    await expect(page.locator(".terminal-pane[data-state=\"suspended\"]")).toHaveCount(1);
 
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
     await expect(page.locator(".terminal-pane[data-state=\"ready\"]")).toHaveCount(1);

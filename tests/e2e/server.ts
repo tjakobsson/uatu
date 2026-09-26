@@ -53,23 +53,27 @@ import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome }
 import { e2eTerminalShell } from "./terminal-shell";
 import type { ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
 
-// One-shot artificial latency for GET /api/terminal/sessions, armed by tests
-// that need two inventory reads to complete out of order (the switcher's
-// stale-render guard). It has to live server-side: uatu registers a
-// pass-through service worker, and Playwright's page.route never sees fetches
-// a service worker mediates. The handler computes its response BEFORE the
-// delay so the held response reflects the state at request time — that
-// staleness is the point. `pending` stays true until the held response is
-// delivered, so a test can poll for delivery instead of sleeping.
-let terminalSessionsDelay: { ms: number; armed: boolean; pending: boolean } | null = null;
+// One-shot hold on GET /api/terminal/sessions, armed by tests that need an
+// inventory read to complete at a moment they choose (after a pagehide, or
+// out of order with a later read: the switcher's stale-render guard). It has
+// to live server-side: uatu registers a pass-through service worker, and
+// Playwright's page.route never sees fetches a service worker mediates. The
+// handler computes its response BEFORE the hold so the held response
+// reflects the state at request time — that staleness is the point. The test
+// releases it (`{ release: true }`); `pending` stays true until the held
+// response is delivered, so a test can poll for delivery instead of sleeping.
+let terminalSessionsDelay: { armed: boolean; pending: boolean; released: Promise<void>; release: () => void } | null = null;
 
 // Standing artificial latency for processing a terminal socket's CLOSE, armed
 // by tests that need a departing holder to release its PTY late — the
 // window a page navigating away leaves behind while its replacement is
 // already attaching. Every close is held by `ms` while armed; a reset
 // disarms it. Server-side for the same reason as the read delay above, and
-// because the departing socket belongs to a page that no longer runs.
+// because the departing socket belongs to a page that no longer runs. A GET
+// reports how many held closes the server has yet to process, so a test can
+// wait for the departing holder's release instead of sleeping past it.
 let terminalCloseDelayMs = 0;
+let terminalClosesHeld = 0;
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
@@ -261,6 +265,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   // or keeps listening to the previous agent router.
   const releaseLiveUpstreams = holdLiveUpstreams();
   setLiveSessionRunning(false);
+  terminalSessionsDelay?.release();
   terminalSessionsDelay = null;
   terminalCloseDelayMs = 0;
   fakeChatAgent.reset();
@@ -590,15 +595,20 @@ server = Bun.serve({
     const pathname = stripBasePath(url.pathname, E2E_BASE_PATH);
     if (pathname === "/__e2e/terminal-sessions-delay") {
       if (request.method === "POST") {
-        const body = (await request.json()) as { ms?: number };
-        terminalSessionsDelay = {
-          ms: typeof body.ms === "number" ? body.ms : 0,
-          armed: true,
-          pending: false,
-        };
+        const body = (await request.json()) as { release?: boolean };
+        if (body.release === true) {
+          terminalSessionsDelay?.release();
+          return Response.json({ ok: true });
+        }
+        let release!: () => void;
+        const released = new Promise<void>(resolve => { release = resolve; });
+        terminalSessionsDelay = { armed: true, pending: false, released, release };
         return Response.json({ ok: true });
       }
       return Response.json({ pending: terminalSessionsDelay?.pending ?? false });
+    }
+    if (pathname === "/__e2e/terminal-close-delay" && request.method === "GET") {
+      return Response.json({ pending: terminalClosesHeld });
     }
     if (pathname === "/__e2e/terminal-close-delay" && request.method === "POST") {
       const body = (await request.json()) as { ms?: number };
@@ -617,7 +627,7 @@ server = Bun.serve({
       delay.armed = false;
       delay.pending = true;
       const response = await fetchFallback(request, srv);
-      await new Promise(resolve => setTimeout(resolve, delay.ms));
+      await delay.released;
       delay.pending = false;
       return response;
     }
@@ -636,7 +646,11 @@ server = Bun.serve({
           // the armed window; an attach arriving meanwhile is refused as a
           // collision exactly as a late browser teardown would produce.
           if (terminalCloseDelayMs > 0) {
-            setTimeout(() => terminalServer.close(socket as never, code), terminalCloseDelayMs);
+            terminalClosesHeld += 1;
+            setTimeout(() => {
+              terminalClosesHeld -= 1;
+              terminalServer.close(socket as never, code);
+            }, terminalCloseDelayMs);
             return;
           }
           terminalServer.close(socket as never, code);

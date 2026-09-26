@@ -325,20 +325,18 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
 
     // Hold the NEXT inventory read server-side (the pass-through service
-    // worker hides fetches from page.route, so the latency hook lives in the
-    // e2e server). The held response is computed at request time — it will
-    // never know about the session staged below.
-    await request.post("/__e2e/terminal-sessions-delay", { data: { ms: 1500 } });
+    // worker hides fetches from page.route, so the hold lives in the e2e
+    // server) until the test releases it. The held response is computed at
+    // request time — it will never know about the session staged below.
+    const heldRead = async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending as boolean;
+    await request.post("/__e2e/terminal-sessions-delay", { data: {} });
 
     // First opening: its read is now in flight, held. Close it again before
     // anything renders, stage a new session, and reopen: the second opening's
     // read is fast and paints both rows.
     await page.locator(switchKey).click();
     await expect
-      .poll(async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending, {
-        timeout: 5000,
-        message: "the first opening's inventory read must be the held one",
-      })
+      .poll(heldRead, { message: "the first opening's inventory read must be the held one" })
       .toBe(true);
     await page.locator(switchKey).click();
     const [fresh] = await stageSessions(page, 1);
@@ -346,18 +344,20 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator("#terminal-switcher")).toBeVisible();
     await expect(page.locator(".terminal-switcher-row")).toHaveCount(2);
 
-    // Wait until the held response has actually been delivered — the moment
-    // the un-guarded code repaints the reopened sheet with the older
-    // inventory, dropping the freshly staged session's row.
+    // Release the held response and wait until the page has received it —
+    // the moment the un-guarded code repaints the reopened sheet with the
+    // older inventory, dropping the freshly staged session's row. Every
+    // other read has finished by now (the sheet shows both rows), so the
+    // next finished inventory read is the held one; the stale repaint, if
+    // any, runs as its body is parsed, before the next rendered frame.
+    const delivered = page.context().waitForEvent("requestfinished", finished =>
+      finished.method() === "GET" && new URL(finished.url()).pathname === "/api/terminal/sessions");
+    await request.post("/__e2e/terminal-sessions-delay", { data: { release: true } });
     await expect
-      .poll(async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending, {
-        timeout: 10000,
-        message: "the delayed inventory response must be delivered",
-      })
+      .poll(heldRead, { message: "the held inventory response must be delivered" })
       .toBe(false);
-    // The stale repaint, if it happens, lands one client hop after delivery;
-    // a short settle bounds that window before asserting nothing changed.
-    await page.waitForTimeout(300);
+    await delivered;
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await expect(page.locator(".terminal-switcher-row")).toHaveCount(2);
     await expect(
       page.locator(`.terminal-switcher-row[data-session-id="${fresh!}"]`),
