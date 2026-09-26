@@ -39,7 +39,7 @@ import { joinBasePath, stripBasePath } from "../shared/base-path";
 import { CHILD_CONVERSATION_OPEN_EVENT, CHILD_ACTIVITY_EVENT, CHILD_ACTIVITY_PATH } from "../shared/live-protocol";
 import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
-import { renderDocument } from "./render-dispatch";
+import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
 import type { WatchSession } from "./watch-session";
 
@@ -267,11 +267,14 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
           const document = await renderDocument(getSession().getRoots(context), documentId, { view });
           return Response.json(document);
         } catch (error) {
-          const message = error instanceof Error ? error.message : "";
-          if (message === "document is binary") {
-            return Response.json({ error: "document is not viewable" }, { status: 415 });
+          const status = documentErrorStatus(error);
+          if (status === 415) {
+            return Response.json({ error: "document is not viewable" }, { status });
           }
-          return Response.json({ error: "document not found" }, { status: 404 });
+          if (status === 404) {
+            return Response.json({ error: "document not found" }, { status });
+          }
+          return Response.json({ error: "document render failed" }, { status });
         }
       },
     },

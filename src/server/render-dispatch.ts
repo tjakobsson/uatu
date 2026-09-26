@@ -38,6 +38,22 @@ export type RenderDocumentOptions = {
   view?: ViewMode;
 };
 
+// The HTTP status `/api/document` answers a `renderDocument` failure with.
+// Only an honest "not found" is a 404: an id the index doesn't hold, or a
+// file that vanished from disk after it was indexed (the watcher reports
+// that change). A binary document is 415. Anything else (a read failure
+// such as EMFILE or EACCES, a renderer that throws) is the server failing,
+// not the document being absent; a 500 lets the client retry instead of
+// declaring the file gone.
+export function documentErrorStatus(error: unknown): 404 | 415 | 500 {
+  const message = error instanceof Error ? error.message : "";
+  if (message === "document not found") return 404;
+  if (message === "document is binary") return 415;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === "ENOENT" || code === "ENOTDIR") return 404;
+  return 500;
+}
+
 export async function renderDocument(
   roots: RootGroup[],
   documentId: string,

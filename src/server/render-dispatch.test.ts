@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { renderDocument } from "./render-dispatch";
+import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { scanRoots } from "./roots";
 
 const tempDirectories: string[] = [];
@@ -205,5 +205,60 @@ describe("renderDocument", () => {
       expect(payload.fileFacts?.bytes).toBeGreaterThan(0);
       expect(Date.parse(payload.fileFacts?.mtime ?? "")).not.toBeNaN();
     }
+  });
+});
+
+describe("documentErrorStatus", () => {
+  async function scannedMarkdown(prefix: string) {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), prefix));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "notes.md");
+    await writeFile(filePath, "# Notes\n");
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    return { filePath, roots };
+  }
+
+  async function statusOf(promise: Promise<unknown>): Promise<number> {
+    try {
+      await promise;
+    } catch (error) {
+      return documentErrorStatus(error);
+    }
+    throw new Error("expected renderDocument to reject");
+  }
+
+  test("an id the index does not hold is not found", async () => {
+    expect(await statusOf(renderDocument([], "/nope"))).toBe(404);
+  });
+
+  test("a file that vanished from disk after indexing is not found", async () => {
+    const { filePath, roots } = await scannedMarkdown("uatu-render-vanished-");
+    await rm(filePath);
+    expect(await statusOf(renderDocument(roots, filePath))).toBe(404);
+  });
+
+  test("a binary document is not viewable", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-binary-status-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "logo.png");
+    await writeFile(filePath, "not really png");
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    expect(await statusOf(renderDocument(roots, filePath))).toBe(415);
+  });
+
+  test("a file that exists but cannot be read is a server failure, not a missing file", async () => {
+    const { filePath, roots } = await scannedMarkdown("uatu-render-unreadable-");
+    await chmod(filePath, 0o000);
+    try {
+      expect(await statusOf(renderDocument(roots, filePath))).toBe(500);
+    } finally {
+      await chmod(filePath, 0o644);
+    }
+  });
+
+  test("errors that say nothing about the document's absence are server failures", () => {
+    expect(documentErrorStatus(Object.assign(new Error("too many open files"), { code: "EMFILE" }))).toBe(500);
+    expect(documentErrorStatus(new Error("asciidoctor exploded"))).toBe(500);
+    expect(documentErrorStatus("not an error")).toBe(500);
   });
 });
