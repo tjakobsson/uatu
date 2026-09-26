@@ -709,7 +709,17 @@ export class LiveBroker implements PresenceSource {
         // A cursor that is not the head — from an earlier epoch or behind
         // this one — means an invalidation may have been missed: one tick
         // stands for every tick it would have replayed.
-        if (subscriber.cursor !== undefined && subscriber.cursor !== upstream.head) {
+        //
+        // A first attach (no cursor) is owed the tick the child's own route
+        // opens every subscription with: the client read its baseline
+        // inventory before subscribing, so a change between that read and
+        // this attach is only announced by that opening tick. A fresh upstream
+        // still carries it (seq 0: the child's first frame is on its way and
+        // fans out to this subscriber); a shared or lingering one delivered
+        // it already, to someone else, so the joiner gets one of its own.
+        const joinerOwedOpeningTick = subscriber.cursor === undefined && upstream.seq > 0;
+        const behindHead = subscriber.cursor !== undefined && subscriber.cursor !== upstream.head;
+        if (joinerOwedOpeningTick || behindHead) {
           this.emitData(subscriber, { type: "conversation.inventory" }, upstream.head);
         }
         this.emitSignal(subscriber, { kind: "ready" }, upstream);

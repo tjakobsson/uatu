@@ -471,10 +471,17 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
 
     const behind = sink();
     live.subscribe(behind, "ws", { topic: "inventory", cursor: inventoryTicks[0]!.cursor });
-    live.subscribe(behind, "ws", { topic: "inventory" });
-    await waitFor(() => behind.envelopes.length === 3, "one tick + two ready");
-    expect(behind.envelopes.filter(e => e.event.kind === "data")).toHaveLength(1);
-    expect(behind.envelopes.find(e => e.event.kind === "data")!.cursor).toBe(inventoryHead);
+    await waitFor(() => behind.envelopes.length === 2, "one tick + ready");
+    expect(kinds(behind.envelopes)).toEqual(["data", "ready"]);
+    expect(behind.envelopes[0]!.cursor).toBe(inventoryHead);
+
+    // A first attach presents no cursor: it is owed the opening tick the
+    // child gave this upstream's first subscriber long ago.
+    const joiner = sink();
+    live.subscribe(joiner, "ws", { topic: "inventory" });
+    await waitFor(() => joiner.envelopes.length === 2, "opening tick + ready");
+    expect(kinds(joiner.envelopes)).toEqual(["data", "ready"]);
+    expect(joiner.envelopes[0]!.cursor).toBe(inventoryHead);
 
     const unplaceable = sink();
     live.subscribe(unplaceable, "ws", { topic: "document", key: "", cursor: "from-another-hub-life.9" });
@@ -482,6 +489,34 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     await waitFor(() => unplaceable.envelopes.length === 4, "snapshot, tick, ready ×2");
     expect(unplaceable.envelopes.find(e => e.topic === "document")!.event).toEqual({ kind: "data", data: { generatedAt: 1 } });
     expect(unplaceable.envelopes.find(e => e.topic === "inventory")!.event).toEqual({ kind: "data", data: { type: "conversation.inventory" } });
+  });
+
+  test("inventory: a page attaching to a lingering upstream gets its own opening tick, a fresh upstream's first page only the child's", async () => {
+    const child = fakeSource();
+    const live = broker(child.source, { lingerMs: 500 });
+    const before = sink();
+    const first = live.subscribe(before, "ws", { topic: "inventory" });
+    await waitFor(() => child.opened.length === 1, "one upstream");
+    child.opened[0]!.push(": open\n\n");
+    // The child's route opens every subscription with a reconcile tick.
+    child.opened[0]!.push('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+    await waitFor(() => before.envelopes.length === 2, "ready + the child's opening tick");
+    // Fresh upstream: the child's own tick is the only one — no duplicate.
+    expect(kinds(before.envelopes)).toEqual(["ready", "data"]);
+
+    // A reload: the page leaves, the upstream lingers, the reloaded page
+    // read its baseline inventory and now attaches without a cursor. A
+    // conversation created between that read and this attach is announced
+    // by nothing else.
+    first.detach();
+    const reloaded = sink();
+    live.subscribe(reloaded, "ws", { topic: "inventory" });
+    await waitFor(() => reloaded.envelopes.length === 2, "opening tick + ready");
+    expect(reloaded.envelopes.map(envelope => envelope.event)).toEqual([
+      { kind: "data", data: { type: "conversation.inventory" } },
+      { kind: "ready" },
+    ]);
+    expect(child.opened).toHaveLength(1);
   });
 
   test("the conversation buffer is byte-bounded", async () => {
