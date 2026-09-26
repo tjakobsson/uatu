@@ -447,8 +447,10 @@ test.describe("desktop OpenCode chat", () => {
     await installClipboardMock(page);
     const beforeCopy = await assistantNode.boundingBox();
     await assistantNode.locator("[data-chat-copy='code']").click();
-    await expect.poll(() => readClipboardMock(page)).toBe("const value = 1;\n");
+    // The copied state is set once the clipboard write has resolved, and it
+    // clears again after a moment: assert it first, then read the clipboard.
     await expect(assistantNode.locator("[data-chat-copy='code']")).toHaveAttribute("data-state", "copied");
+    expect(await readClipboardMock(page)).toBe("const value = 1;\n");
     const afterCopy = await assistantNode.boundingBox();
     expect(afterCopy?.width).toBeCloseTo(beforeCopy?.width ?? 0, 1);
     expect(afterCopy?.height).toBeCloseTo(beforeCopy?.height ?? 0, 1);
