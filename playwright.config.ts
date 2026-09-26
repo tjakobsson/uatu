@@ -13,6 +13,33 @@ import { defineConfig, devices } from "@playwright/test";
 // `playwright test` still runs the whole suite.
 const PERF = /@perf\b/;
 
+// CI runs the `e2e` project in two legs. `--shard` split it by test count in
+// file order, which put the heavy chat-shell suites in one shard and left it
+// minutes behind the other. Instead, `UATU_E2E_LEG=1` runs the files below
+// and `UATU_E2E_LEG=2` runs every other file, so each test is in exactly one
+// leg and a new file lands in leg 2. The list balances the legs' worker time
+// as measured on CI; rebalance it when one leg's job runs clearly longer.
+// Unset, the project runs the whole suite.
+const LEG_ONE_FILES = [
+  "asciidoc", "chat-agents", "chat-cost-receipt", "chat-inventory-presentation",
+  "chat-panel", "chat-queue", "chat-reversible-history", "chat-shell-output",
+  "chat-shell-scrollback", "chat-touch", "chat-unavailable", "code-blocks",
+  "diff-view", "git-log", "identity", "ipad-desktop-viewport", "ipad",
+  "metadata-card", "mobile", "notification-layout", "notification-presence",
+  "notifications", "outline-presentation", "preview-renderers",
+  "project-search", "pwa", "terminal-clipboard", "terminal-font",
+  "terminal-session-manager", "terminal-switcher", "terminal", "theme",
+  "touch-scroll", "view-and-layout",
+].map(name => `**/${name}.e2e.ts`);
+
+function legFiles(): { testMatch?: string[]; testIgnore?: string[] } {
+  const leg = process.env.UATU_E2E_LEG;
+  if (leg === undefined || leg === "") return {};
+  if (leg === "1") return { testMatch: LEG_ONE_FILES };
+  if (leg === "2") return { testIgnore: LEG_ONE_FILES };
+  throw new Error(`UATU_E2E_LEG must be 1 or 2, not ${JSON.stringify(leg)}`);
+}
+
 export default defineConfig({
   testDir: "./tests/e2e",
   testMatch: "**/*.e2e.ts",
@@ -41,6 +68,7 @@ export default defineConfig({
     {
       name: "e2e",
       grepInvert: PERF,
+      ...legFiles(),
       use: {
         // On CI, keep the trace of a test's first failing attempt; retries
         // run untraced, so the attempt most likely to pass does not pay

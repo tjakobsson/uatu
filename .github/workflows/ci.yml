@@ -223,14 +223,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `--shard` splits the functional project by test count in file
-          # order; each shard runs the config's 4 workers.
-          - name: shard 1 of 2
-            id: shard-1
-            args: --project=e2e --shard=1/2
-          - name: shard 2 of 2
-            id: shard-2
-            args: --project=e2e --shard=2/2
+          # The functional project runs in two legs split by file list
+          # (UATU_E2E_LEG, see playwright.config.ts), balanced by measured
+          # worker time; each leg runs the config's 4 workers.
+          - name: leg 1 of 2
+            id: leg-1
+            leg: "1"
+            args: --project=e2e
+          - name: leg 2 of 2
+            id: leg-2
+            leg: "2"
+            args: --project=e2e
           # The timing-budget suites (tagged @perf) run apart, with the perf
           # project's own lower worker limit, so neighbouring workers cannot
           # eat into their frame and interaction budgets.
@@ -284,6 +287,7 @@ jobs:
           # CI reports as a blob per leg; e2e-report merges them into the
           # HTML report when a leg fails.
           PLAYWRIGHT_BLOB_OUTPUT_NAME: report-${{ matrix.id }}.zip
+          UATU_E2E_LEG: ${{ matrix.leg }}
         run: bun run test:e2e ${{ matrix.args }}
 
       - name: Upload blob report
