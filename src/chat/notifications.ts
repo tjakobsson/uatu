@@ -28,6 +28,9 @@ export const NOTIFICATION_LIFETIME_MS = 5 * 60_000;
 // it while they are looking at Uatu), and so how long the workspace keeps an
 // unanswered request reconcilable: its resolution must still reach the hub.
 export const NOTIFICATION_HOLD_LIMIT_MS = 60 * 60_000;
+// A question released just before the hold limit still has a full delivery
+// lifetime of retries ahead; its answer must reach the hub until that ends.
+export const NOTIFICATION_PENDING_RETENTION_MS = NOTIFICATION_HOLD_LIMIT_MS + NOTIFICATION_LIFETIME_MS;
 const RETENTION_MS = 24 * 60 * 60_000;
 const DEFAULT_RETAINED_LIMIT = 8192;
 
@@ -134,7 +137,7 @@ export class AgentNotificationTracker {
     // the chat request itself. Until then its answer must still be announced,
     // or the hub would release a push for a question already answered.
     for (const [id, notification] of this.pending) {
-      if (now - notification.createdAt <= NOTIFICATION_HOLD_LIMIT_MS) continue;
+      if (now - notification.createdAt <= NOTIFICATION_PENDING_RETENTION_MS) continue;
       this.pending.delete(id);
       this.remember(id);
     }

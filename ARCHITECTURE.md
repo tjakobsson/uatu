@@ -99,7 +99,8 @@ A held question can be released up to `NOTIFICATION_HOLD_LIMIT_MS` (60 min)
 after the event, and its five-minute lifetime counts from the release. A held
 delivery stays `pending`, so resolution, gap reconciliation, access loss, and
 device or workspace removal discard it as they discard any unsent one. The
-child keeps unanswered requests for the same hour, in both
+child keeps unanswered requests for that hour plus one delivery lifetime (a
+question released at the limit still retries for five minutes), in both
 `AgentNotificationTracker` and `NotificationFeed`'s pending snapshot, so a late
 answer still announces its resolution and a gap snapshot still lists a held
 question. The replay ring keeps its five-minute window.

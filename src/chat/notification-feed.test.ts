@@ -59,13 +59,13 @@ test("aborted, disposed, and slow subscriptions release their queues", async () 
   expect((await last.next()).done).toBe(true);
 });
 
-test("unanswered requests stay in recovery snapshots for the hold limit, then leave", () => {
+test("unanswered requests stay in recovery snapshots through the hold limit and a released push's lifetime, then leave", () => {
   let now = 1000;
   const feed = new NotificationFeed(() => now);
   feed.publish(pending("q"));
-  now += 30 * 60_000;
+  now += 64 * 60_000;
   expect(feed.snapshot().map(item => item.id)).toEqual(["q"]);
-  now += 31 * 60_000;
+  now += 2 * 60_000;
   expect(feed.snapshot()).toEqual([]);
 });
 
