@@ -3151,8 +3151,10 @@ function readChildTranscript(items: readonly ConversationItem[], ancestry: Reado
  * NEXT task — a compaction during task one billed to task two.
  *
  * So a prompt opens the next task row only when it IS that task's prompt: its
- * text is the prompt the row gave. Any other prompt belongs to the task
- * before it. A prompt whose text was never seen is taken to be a task's — the
+ * text is the prompt the row gave, or ends with it on lines of its own (an
+ * agent may deliver a task behind a preamble — OpenCode 2.x opens a new
+ * child's first prompt with "You are a subagent spawned by another
+ * session."). Any other prompt belongs to the task before it. A prompt whose text was never seen is taken to be a task's — the
  * position it would have had. Where nothing can be compared (an agent that
  * reports no texts, rows that have lost their input) or nothing matched at
  * all, pairing falls back to position, which is right whenever the counts agree.
@@ -3164,11 +3166,18 @@ function pairPrompts(rows: readonly TaskRow[], prompts: readonly Prompt[]): numb
   const paired = prompts.map(prompt => {
     const next = rows[row + 1];
     const opens = next !== undefined && (prompt.text === undefined
-      || (next.prompt === undefined ? prompt.text !== "" : prompt.text.trim() === next.prompt.trim()));
+      || (next.prompt === undefined ? prompt.text !== "" : deliversPrompt(prompt.text, next.prompt)));
     if (opens) row += 1;
     return Math.max(row, 0);
   });
   return row < 0 ? positional : paired;
+}
+
+/** Whether a child's prompt is the task prompt a row gave, alone or after a preamble. */
+function deliversPrompt(delivered: string, given: string): boolean {
+  const text = delivered.trim();
+  const prompt = given.trim();
+  return prompt !== "" && (text === prompt || text.endsWith(`\n${prompt}`));
 }
 
 /**

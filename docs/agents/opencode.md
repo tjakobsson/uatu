@@ -6,7 +6,7 @@ uatu treats OpenCode as a first-class agent. The aim is to use what its SDK offe
 
 Generated against 1.x through `@opencode-ai/sdk` 1.18.30 · 2.x through `@opencode/client` 2.0.13 (vocabulary from `@opencode/schema` 2.0.13).
 
-**Gaps: 30** (unhandled or behavior-missing) · dedicated 116 · generic 0 · ignored 85 · unhandled 30 · behavior-missing 0
+**Gaps: 30** (unhandled or behavior-missing) · dedicated 117 · generic 0 · ignored 85 · unhandled 30 · behavior-missing 0
 
 Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the page cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet.
 
@@ -286,6 +286,7 @@ Neither OpenCode SDK enumerates tool names: a tool is typed as a plain string. T
 | `schedulewakeup` | dedicated | schedule row |  |
 | `shell` | dedicated | command row |  |
 | `skill` | dedicated | skill row |  |
+| `subagent` | dedicated | agent row |  |
 | `task` | dedicated | agent row |  |
 | `terminal` | dedicated | command row |  |
 | `todowrite` | dedicated | todo row |  |

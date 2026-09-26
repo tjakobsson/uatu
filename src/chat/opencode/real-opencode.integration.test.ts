@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { OpenCodeService, type OpenCodeGeneration } from "./opencode-service";
 import { LazyChatService } from "../service";
+import { describeToolDetail } from "../tool-detail";
 
 /**
  * Runs the same assertions against a real OpenCode of each generation.
@@ -207,5 +208,51 @@ for (const generation of generations()) {
         await service.dispose();
       }
     }, 120_000);
+
+    /**
+     * Each generation launches subagents with its own tool — 1.x `task`, 2.x
+     * `subagent` — with its own input and report envelope. The row has to
+     * read as an agent launch that names its child, and the child has to open
+     * as a transcript of its own, or the subagents view has nothing to show.
+     *
+     * Runs a real turn that spawns a subagent, so it costs model calls, and a
+     * model that declines to delegate fails it.
+     */
+    test("a subagent launch reads as an agent row whose child opens as a transcript", async () => {
+      const { workspace, runtime } = await isolated("uatu-real-opencode-subagent-", generation, "# Isolated OpenCode subagent smoke\n");
+      const service = new LazyChatService({ workspacePath: workspace, runtime });
+      try {
+        await service.listConversations();
+        await expectReady(service, runtime, generation);
+        const created = await service.createConversation();
+        await service.prompt(
+          created.conversation.id,
+          crypto.randomUUID(),
+          "Delegate this to the `general` subagent with your subagent/task tool, with the prompt: 'List the files in the current directory and report their names.' Then reply with one sentence.",
+        );
+
+        const launched = (items: Awaited<ReturnType<typeof service.history>>["items"]) =>
+          items.find(item => item.type === "tool" && item.status === "completed" && item.childConversationId !== undefined);
+        const deadline = Date.now() + 150_000;
+        let row = launched((await service.history(created.conversation.id)).items);
+        while (Date.now() < deadline && row === undefined) {
+          await Bun.sleep(1_000);
+          row = launched((await service.history(created.conversation.id)).items);
+        }
+
+        expect(row).toBeDefined();
+        if (row?.type !== "tool") throw new Error("no completed subagent launch");
+        const detail = describeToolDetail(row);
+        expect(detail).toMatchObject({ kind: "agent", subagent: "general", conversationId: row.childConversationId });
+        if (detail.kind === "agent") expect(detail.result ?? "").toContain("README.md");
+        const child = await service.history(row.childConversationId!);
+        expect(child.items.some(item => item.type === "user_message")).toBe(true);
+        // A subagent's transcript is reachable from its row, never listed as
+        // a conversation of its own.
+        expect((await service.listConversations()).map(item => item.id)).not.toContain(row.childConversationId);
+      } finally {
+        await service.dispose();
+      }
+    }, 180_000);
   });
 }

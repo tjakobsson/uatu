@@ -139,18 +139,21 @@ function parseToolDetail(item: DetailInput): ToolDetail {
       return { kind: "fetch", label, url };
     }
     // A subagent row said only "Agent task running" — the one thing worth
-    // knowing is which agent, doing what. Both are in the input. OpenCode
-    // names this tool `task`; Claude Code names it `Agent` — same shape.
+    // knowing is which agent, doing what. Both are in the input. OpenCode 1.x
+    // names this tool `task`, OpenCode 2.x `subagent`, Claude Code `Agent` —
+    // same shape, except that 2.x names the agent `agent`, not `subagent_type`.
     case "task":
+    case "subagent":
     case "agent": {
       const description = optionalText(input.description);
       if (description === undefined) break;
       const result = taskResultText(item.output);
+      const subagent = optionalText(input.subagent_type) ?? optionalText(input.agent);
       return {
         kind: "agent",
         label: "Agent",
         description,
-        ...(optionalText(input.subagent_type) === undefined ? {} : { subagent: text(input.subagent_type) }),
+        ...(subagent === undefined ? {} : { subagent }),
         prompt: text(input.prompt),
         ...(item.childConversationId === undefined ? {} : { conversationId: item.childConversationId }),
         ...(result === undefined ? {} : { result }),
@@ -216,12 +219,15 @@ function parseToolDetail(item: DetailInput): ToolDetail {
 
 /**
  * The subagent's report from a task tool's output, without the machine
- * envelope: OpenCode wraps it as <task id=…><task_result>…</task_result></task>,
- * which reads as debug output when shown verbatim.
+ * envelope, which reads as debug output when shown verbatim. OpenCode 1.x
+ * wraps it as <task id=…><task_result>…</task_result></task>; 2.x as
+ * <subagent sessionID=… state="completed">…</subagent>, the report being
+ * everything between the envelope's first and last line.
  */
 export function taskResultText(output: string | undefined): string | undefined {
   if (!output) return undefined;
-  const match = /<task_result>([\s\S]*?)<\/task_result>/.exec(output);
+  const match = /<task_result>([\s\S]*?)<\/task_result>/.exec(output)
+    ?? /^\s*<subagent\b[^>]*>([\s\S]*)<\/subagent>\s*$/.exec(output);
   const body = (match ? match[1]! : output).trim();
   return body || undefined;
 }

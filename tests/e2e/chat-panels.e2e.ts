@@ -362,6 +362,47 @@ test.describe("chat panels and navigation", () => {
     await expect.poll(() => page.evaluate(() => (history.state as { laterDocument?: boolean } | null)?.laterDocument)).toBe(true);
   });
 
+  // OpenCode 2.x launches subagents with a `subagent` tool naming the agent
+  // `agent`, and wraps the report in `<subagent …>`. The row as a 2.0.18
+  // server delivers it read as a generic tool: no track entry, no Agent card,
+  // no way into the child's transcript (issue #453).
+  test("an OpenCode 2.x subagent is tracked, carded, and opens its transcript", async ({ page, request }, testInfo) => {
+    const child = await control(request, { action: "seed", title: "List files in current directory", child: true, items: [
+      { id: "message:child-prompt", type: "user_message", createdAt: 1, text: "You are a subagent spawned by another session.\nList the files in the current directory." },
+      { id: "part:child", type: "assistant_message", createdAt: 2, markdown: "The directory holds **README.md** and **notes.txt**." },
+    ] }) as { conversation: { id: string } };
+    await seedAndOpen(page, request, "Fan-out 2.x", [
+      { id: "message:ask", type: "user_message", createdAt: 1, text: "Have a subagent list the files." },
+      {
+        id: "tool:sub1", type: "tool", createdAt: 2, name: "subagent", status: "completed", completedAt: 3,
+        input: JSON.stringify({ agent: "general", description: "List files in current directory", prompt: "List the files in the current directory." }),
+        output: `<subagent sessionID="${child.conversation.id}" state="completed">\nThe directory holds **README.md** and **notes.txt**.\n</subagent>`,
+        childConversationId: child.conversation.id,
+      },
+      { id: "part:parent", type: "assistant_message", createdAt: 4, markdown: "The subagent found README.md and notes.txt." },
+    ]);
+
+    const track = page.locator("#chat-subagents");
+    await expect(track).toBeVisible();
+    await track.locator("summary").click();
+    await expect(track.getByRole("button", { name: "general · List files in current directory" })).toBeVisible();
+
+    // The row itself is an Agent card: the agent, its assignment, and the
+    // report without the machine envelope.
+    const row = page.locator('[data-chat-item-id="tool:sub1"]');
+    await expect(row).toContainText("List files in current directory");
+    await row.locator("summary").first().click();
+    await expect(row.locator(".chat-subagent-result")).toContainText("The directory holds README.md and notes.txt.");
+    await expect(row).not.toContainText("<subagent");
+    await captureScreenshot(page, testInfo, "opencode-2x-subagent-card");
+
+    await row.getByRole("button", { name: "Open transcript" }).click();
+    await expect(page.locator("#chat-drilldown")).toBeVisible();
+    await expect(page.locator("#chat-drilldown-title")).toHaveText("general · List files in current directory");
+    await expect(page.locator("#chat-drilldown-items")).toContainText("The directory holds README.md and notes.txt.");
+    await captureScreenshot(page, testInfo, "opencode-2x-subagent-transcript");
+  });
+
   test("an incomplete question in a drill-down announces inside that layer", async ({ page, request }) => {
     const child = await control(request, { action: "seed", title: "Question child", child: true, items: [{
       id: "question:q1", type: "question", createdAt: 1, requestId: "q1", status: "pending",

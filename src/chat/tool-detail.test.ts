@@ -228,6 +228,35 @@ describe("OpenCode-native tool payloads", () => {
     expect(detail).toMatchObject({ kind: "agent", result: "**Paper Moon**\n\nNight folds its map." });
   });
 
+  // OpenCode 2.x renamed the tool `subagent` and the agent field `agent`, and
+  // wraps the report in its own envelope. Payloads as a 2.0.18 server
+  // recorded them; before this case the row fell to the generic tool view,
+  // with no Agent card and no way into the child's transcript.
+  test("an OpenCode 2.x subagent call reads as the same agent row as a 1.x task", () => {
+    const detail = describeToolDetail({
+      name: "subagent",
+      input: JSON.stringify({ agent: "general", description: "List files in current directory", prompt: "List the files in the current directory." }),
+      output: '<subagent sessionID="ses_child" state="completed">\nThe current directory contains the following files:\n\n1. **README.md**\n2. **notes.txt**\n</subagent>',
+      childConversationId: "ses_child",
+    });
+    expect(detail).toEqual({
+      kind: "agent",
+      label: "Agent",
+      description: "List files in current directory",
+      subagent: "general",
+      prompt: "List the files in the current directory.",
+      conversationId: "ses_child",
+      result: "The current directory contains the following files:\n\n1. **README.md**\n2. **notes.txt**",
+    });
+    expect(toolSubject(detail)).toBe("general · List files in current directory");
+  });
+
+  test("a 2.x report that quotes the envelope keeps everything inside the outer one", () => {
+    expect(taskResultText('<subagent sessionID="ses_a" state="completed">\nIt printed <subagent>x</subagent> verbatim.\n</subagent>'))
+      .toBe("It printed <subagent>x</subagent> verbatim.");
+    expect(taskResultText('<subagent sessionID="ses_a" state="completed">\n\n</subagent>')).toBeUndefined();
+  });
+
   test("an unwrapped task output passes through and empty output stays absent", () => {
     expect(taskResultText("plain report")).toBe("plain report");
     expect(taskResultText("")).toBeUndefined();
