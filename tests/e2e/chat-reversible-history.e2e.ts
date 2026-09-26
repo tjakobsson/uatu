@@ -28,15 +28,22 @@ async function openClient(page: Page, credential: string, conversationId: string
   await expect(page.locator("#chat-conversation-select")).toHaveValue(conversationId);
 }
 
-async function historyCommand(page: Page, operation: "undo" | "redo") {
-  const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith(`/${operation}`));
+// `running`: a turn is in flight, so the send control reads "Cancel response"
+// and the command goes through the form's own submit path instead.
+async function historyCommand(page: Page, operation: "undo" | "redo", { running = false }: { running?: boolean } = {}) {
+  const response = page.waitForResponse(
+    candidate => new URL(candidate.url()).pathname.endsWith(`/${operation}`),
+    { timeout: 10_000 },
+  );
+  const sendButton = page.locator("#chat-send");
   await page.locator("#chat-input").fill(`/${operation}`);
-  if (await page.locator("#chat-send").getAttribute("aria-label") === "Cancel response") {
+  await expect(sendButton).toHaveAttribute("aria-label", running ? "Cancel response" : "Send message");
+  if (running) {
     await page.locator("#chat-composer").evaluate((form: HTMLFormElement) => form.requestSubmit());
-  } else if (await page.locator("html").getAttribute("data-ui-mode") === "touch") {
-    await page.locator("#chat-send").tap();
   } else {
-    await page.locator("#chat-send").click();
+    await expect(sendButton).toBeEnabled();
+    if (await page.locator("html").getAttribute("data-ui-mode") === "touch") await sendButton.tap();
+    else await sendButton.click();
   }
   return response;
 }
@@ -56,14 +63,17 @@ async function send(page: Page, text: string) {
   return response;
 }
 
-async function uploadFixtureAttachment(page: Page): Promise<{ id: string; mimeType: string }> {
-  return page.evaluate(async bytes => {
+// Runs straight after the page loads, while the page's own promotion of the
+// URL credential into the workspace cookie may still be in flight — so the
+// upload presents the credential itself rather than racing that promotion.
+async function uploadFixtureAttachment(page: Page, credential: string): Promise<{ id: string; mimeType: string }> {
+  return page.evaluate(async ({ bytes, credential }) => {
     const form = new FormData();
     form.append("file", new File([new Uint8Array(bytes)], "restored.png", { type: "image/png" }));
-    const response = await fetch("/api/chat/conversations/fixture/attachments", { method: "POST", body: form });
+    const response = await fetch(`/api/chat/conversations/fixture/attachments?t=${encodeURIComponent(credential)}`, { method: "POST", body: form });
     if (!response.ok) throw new Error(`attachment upload failed: ${response.status}`);
     return response.json() as Promise<{ id: string; mimeType: string }>;
-  }, PNG);
+  }, { bytes: PNG, credential });
 }
 
 async function postHistory(page: Page, conversationId: string, operation: "undo" | "redo", requestId: string) {
@@ -105,7 +115,7 @@ test.describe("reversible Chat history", () => {
     await control(request, { action: "declareOnly", capabilities: CAPABILITIES });
     const credential = await token(request);
     await page.goto(`/?t=${encodeURIComponent(credential)}`);
-    const attachment = await uploadFixtureAttachment(page);
+    const attachment = await uploadFixtureAttachment(page, credential);
     const seeded = await control<ConversationSnapshot>(request, { action: "seed", title: "Reversible history", items: historyItems(attachment) });
     const conversationId = seeded.conversation.id;
     await control(request, {
@@ -213,7 +223,7 @@ test.describe("reversible Chat history", () => {
     await send(page, "remove this queued turn");
     await expect(page.locator("#chat-queue .is-held")).toHaveCount(2);
 
-    expect((await historyCommand(page, "undo")).status()).toBe(200);
+    expect((await historyCommand(page, "undo", { running: true })).status()).toBe(200);
     await expect(page.locator("#chat-input")).toHaveValue("discarded active turn");
     await expect(page.locator("#chat-items")).not.toContainText("discarded active turn");
     await expect(page.locator("#chat-queue .is-held")).toHaveCount(2);
@@ -258,7 +268,7 @@ test.describe("reversible Chat history", () => {
 
     await send(page, "active turn");
     await send(page, "queued after active turn");
-    expect((await historyCommand(page, "undo")).status()).toBe(200);
+    expect((await historyCommand(page, "undo", { running: true })).status()).toBe(200);
     await control(request, { action: "status", conversationId, status: "idle" });
     await expect(page.locator("#chat-queue .is-held")).toContainText("queued after active turn");
     await expect(page.locator("#chat-items")).not.toContainText("queued after active turn");
