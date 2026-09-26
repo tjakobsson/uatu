@@ -504,7 +504,7 @@ Every `appState` field has exactly one owning module: direct assignment (`appSta
 |---|---|
 | `selectedId`, `previewMode` | `shell/selection.ts` |
 | `followEnabled` | `shell/follow.ts` (the four follow-mode rules) |
-| `roots`, `repositories`, `scope`, `unscopedFingerprint` | `shell/events.ts` (`applyServerSnapshot`) |
+| `roots`, `repositories`, `scope`, `unscopedFingerprint` | `shell/events.ts` (`applyServerSnapshot`, module-private; boot enters through `adoptBootSnapshot`, which also records the snapshot's freshness so an older live frame is refused) |
 | `viewMode`, `wrap` | `preview/view-mode.ts` |
 | `viewLayout`, `splitRatio` | `preview/layout.ts` |
 | `diffStyle` | `preview/diff.ts` |
