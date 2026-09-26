@@ -67,7 +67,15 @@ export async function waitForTreeIdle(page: Page): Promise<void> {
         mutated = true;
       });
       observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
+      // A sample that sees no frames (the document is being replaced, or not
+      // rendering yet) proves nothing: count it as not idle so the poll takes
+      // another, instead of hanging on callbacks that will never run.
+      const noFrames = setTimeout(() => {
+        observer.disconnect();
+        resolve(false);
+      }, 1_000);
       requestAnimationFrame(() => requestAnimationFrame(() => {
+        clearTimeout(noFrames);
         observer.disconnect();
         resolve(!mutated);
       }));
