@@ -481,6 +481,46 @@ async function fetchHubState(): Promise<HubStateSummary | null> {
   }
 }
 
+// What a menu entry was rendered as, plus the data its listeners captured:
+// two entries with equal signatures behave identically, so the one already
+// on screen can stay.
+function menuEntrySignature(node: Element, source: unknown): string {
+  return `${node.outerHTML}\u0000${JSON.stringify(source ?? null)}`;
+}
+
+// Brings `container`'s children to `next`, position by position, keeping
+// every existing child whose signature matches the entry built for its
+// place. The switcher re-renders on every list answer and activity report
+// while it is open, including the refresh its own opening starts; replacing
+// every node each time would drop a click, hover, or keyboard focus that
+// landed on an entry meanwhile.
+function reconcileMenuEntries(container: Element, next: Element[], signatures: WeakMap<Element, string>): void {
+  next.forEach((node, index) => {
+    const existing = container.children[index];
+    if (existing === undefined) {
+      container.appendChild(node);
+      return;
+    }
+    const signature = signatures.get(node);
+    if (signature !== undefined && signatures.get(existing) === signature) return;
+    existing.replaceWith(node);
+  });
+  while (container.children.length > next.length) container.lastElementChild!.remove();
+}
+
+// What a focusable menu entry stands for, independent of its node: a
+// workspace row by its stable id, a fork control by its name, the dashboard
+// and sign-out links by their target.
+function menuFocusKey(element: Element | null): string | null {
+  if (!element) return null;
+  const workspaceId = element.getAttribute("data-workspace-id");
+  if (workspaceId !== null) return `workspace:${workspaceId}`;
+  const label = element.getAttribute("aria-label");
+  if (label !== null) return `label:${label}`;
+  const href = element.getAttribute("href");
+  return href === null ? null : `href:${href}`;
+}
+
 export function initHubNav(): void {
   const control = document.querySelector<HTMLDivElement>("#hub-control");
   const toggle = document.querySelector<HTMLButtonElement>("#hub-toggle");
@@ -554,13 +594,21 @@ export function initHubNav(): void {
   // node cannot carry it. Cleared once the workspace runs.
   const rowStart = new Map<string, "starting" | "unlock" | "failed">();
   const rowStartWords = { starting: "starting…", unlock: "unlock in Hub…", failed: "start failed" } as const;
+  const menuEntrySignatures = new WeakMap<Element, string>();
 
   const renderMenu = () => {
     // Background inventory/activity refresh must not discard keyboard focus or
     // the anchor of an open fork menu.
     if (document.querySelector('[role="menu"][aria-label="Create worktree"]')) return;
-    const focusedLabel = menu.contains(document.activeElement) ? document.activeElement?.getAttribute("aria-label") : null;
-    menu.replaceChildren();
+    const focusedKey = menu.contains(document.activeElement) ? menuFocusKey(document.activeElement) : null;
+    // The entries are built detached and reconciled into the menu below, so
+    // an entry whose rendering did not change stays the same node: a click,
+    // hover or keyboard focus on it survives a background refresh.
+    const next: Element[] = [];
+    const add = (node: Element, source: unknown = null) => {
+      next.push(node);
+      menuEntrySignatures.set(node, menuEntrySignature(node, source));
+    };
 
     const dashboard = document.createElement("a");
     dashboard.className = "hub-menu-item";
@@ -569,10 +617,10 @@ export function initHubNav(): void {
     dashboardLabel.className = "hub-menu-label";
     dashboardLabel.textContent = "Hub dashboard";
     dashboard.appendChild(dashboardLabel);
-    menu.appendChild(dashboard);
+    add(dashboard);
 
     if (latest.length > 0) {
-      menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
+      add(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
     }
 
     // The fork control of ONE main checkout, which is what a repository's
@@ -711,7 +759,9 @@ export function initHubNav(): void {
           });
         });
       }
-      menu.appendChild(item);
+      // Listeners read the workspace they were built for, so an entry is only
+      // kept while that is unchanged too.
+      add(item, workspace);
     };
 
     groupHubWorkspaces(latest, currentId).forEach((entry, index) => {
@@ -727,7 +777,7 @@ export function initHubNav(): void {
       // divider, so the eye lands on the repository boundary before the
       // rows; the menu's first entry needs none, because the divider under
       // Hub dashboard is already there.
-      if (index > 0) menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider is-group" }));
+      if (index > 0) add(Object.assign(document.createElement("hr"), { className: "hub-menu-divider is-group" }));
       const header = document.createElement("div");
       header.className = "hub-menu-group";
       header.dataset.repository = entry.main.id;
@@ -736,12 +786,12 @@ export function initHubNav(): void {
       name.textContent = entry.main.displayName || entry.main.id;
       header.appendChild(name);
       if (worktreeApi && entry.main.createWorktree) header.appendChild(forkButton(entry.main));
-      menu.appendChild(header);
+      add(header, entry.main);
       appendWorkspace(entry.main, { label: "main checkout" });
       for (const child of entry.children) appendWorkspace(child);
     });
 
-    menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
+    add(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
     const signOut = document.createElement("a");
     signOut.className = "hub-menu-item";
     signOut.href = "/login";
@@ -753,8 +803,13 @@ export function initHubNav(): void {
       event.preventDefault();
       submitHubSignOut(document);
     });
-    menu.appendChild(signOut);
-    if (focusedLabel) [...menu.querySelectorAll<HTMLElement>("[aria-label]")].find(item => item.getAttribute("aria-label") === focusedLabel)?.focus();
+    add(signOut);
+    reconcileMenuEntries(menu, next, menuEntrySignatures);
+    // An entry that did change was replaced, and focus on it went with the
+    // old node: put it back on the entry that stands for the same thing.
+    if (focusedKey !== null && !menu.contains(document.activeElement)) {
+      [...menu.querySelectorAll<HTMLElement>("a, button")].find(item => menuFocusKey(item) === focusedKey)?.focus();
+    }
   };
 
   // The menu grows with the number of checkouts, and in touch mode it lives
