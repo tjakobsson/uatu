@@ -14,6 +14,16 @@ import { hashPassword } from "./auth";
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.ts");
 
+// An OS-assigned port, released for the hub to bind. Fixed ports collide with
+// anything else on the machine (another checkout's suite, a real hub) and
+// with other test files running at the same time under `bun test --parallel`.
+async function ephemeralPort(): Promise<number> {
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+  const port = probe.port!;
+  await probe.stop(true);
+  return port;
+}
+
 let tempRoot = "";
 let child: ChildProcess | null = null;
 
@@ -31,11 +41,12 @@ describe("uatu hub process", () => {
     "boots from a config file, prints its URL, and exits cleanly on SIGTERM",
     async () => {
       tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-main-"));
+      const port = await ephemeralPort();
       const configPath = path.join(tempRoot, "hub.json");
       await writeFile(
         configPath,
         JSON.stringify({
-          port: 4799,
+          port,
           host: "127.0.0.1",
           users: [{ name: "t", passwordHash: "$argon2id$placeholder" }],
           stateDir: path.join(tempRoot, "state"),
@@ -62,10 +73,10 @@ describe("uatu hub process", () => {
           reject(new Error(`hub exited early (code ${code})`));
         });
       });
-      expect(url).toBe("http://127.0.0.1:4799/");
+      expect(url).toBe(`http://127.0.0.1:${port}/`);
 
       // Reachable, and the un-authed dashboard redirects to login.
-      const response = await fetch("http://127.0.0.1:4799/", {
+      const response = await fetch(`http://127.0.0.1:${port}/`, {
         headers: { accept: "text/html" },
         redirect: "manual",
       });
@@ -85,11 +96,12 @@ describe("uatu hub process", () => {
     "a config carrying the removed workspacesDir key fails startup by name",
     async () => {
       tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-main-removedkey-"));
+      const port = await ephemeralPort();
       const configPath = path.join(tempRoot, "hub.json");
       await writeFile(
         configPath,
         JSON.stringify({
-          port: 4797,
+          port,
           users: [{ name: "t", passwordHash: "x" }],
           stateDir: path.join(tempRoot, "state"),
           workspacesDir: path.join(tempRoot, "workspaces"),
@@ -132,9 +144,10 @@ describe("uatu hub process", () => {
         "wait",
       ].join("\n"));
       await chmod(fakeGit, 0o755);
+      const port = await ephemeralPort();
       const configPath = path.join(tempRoot, "hub.json");
       await writeFile(configPath, JSON.stringify({
-        port: 4795,
+        port,
         host: "127.0.0.1",
         users: [{ name: "t", passwordHash: await hashPassword("secret") }],
         stateDir: path.join(tempRoot, "state"),
@@ -145,15 +158,15 @@ describe("uatu hub process", () => {
         stdio: ["ignore", "pipe", "pipe"],
       });
       await waitForUrl(child);
-      const login = await fetch("http://127.0.0.1:4795/login", {
+      const login = await fetch(`http://127.0.0.1:${port}/login`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: "t", password: "secret" }),
       });
       const cookie = login.headers.get("set-cookie")!.split(";", 1)[0]!;
-      const created = await fetch("http://127.0.0.1:4795/api/hub/clone-jobs", {
+      const created = await fetch(`http://127.0.0.1:${port}/api/hub/clone-jobs`, {
         method: "POST",
-        headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:4795" },
+        headers: { "content-type": "application/json", cookie, origin: `http://127.0.0.1:${port}` },
         body: JSON.stringify({ url: "fake:repo.git", dest: path.join(tempRoot, "checkouts") }),
       });
       expect(created.status).toBe(202);
@@ -178,7 +191,7 @@ describe("uatu hub process", () => {
     async () => {
       tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-main-nousers-"));
       const configPath = path.join(tempRoot, "hub.json");
-      await writeFile(configPath, JSON.stringify({ port: 4796, users: [] }));
+      await writeFile(configPath, JSON.stringify({ port: await ephemeralPort(), users: [] }));
 
       child = spawn("bun", ["run", CLI_PATH, "hub", "--config", configPath], {
         stdio: ["ignore", "pipe", "pipe"],
