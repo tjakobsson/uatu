@@ -9,6 +9,7 @@
 import { expect, test } from "./fixtures";
 import { openTreeFile, treeRow } from "./tree-helpers";
 import { expectStageTransform, readStageTransform } from "./transform-helpers";
+import { afterAnimationFrames } from "./sync-helpers";
 
 function readStoredValue(page: import("@playwright/test").Page, suffix: string): Promise<string | null> {
   return page.evaluate(s => {
@@ -188,7 +189,8 @@ test.describe("iPad mermaid viewer", () => {
     await expect(trigger).toBeVisible();
     await trigger.tap();
     await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
-    await page.waitForTimeout(120);
+    // The viewer fits on the frame after it opens; let that frame run.
+    await afterAnimationFrames(page);
   }
 
   async function toolbarGeometry(page: import("@playwright/test").Page) {

@@ -6,6 +6,7 @@ import { workspacePath } from "./config";
 import { openTreeFile, treeRow } from "./tree-helpers";
 import { expectStageTransform, readStageTransform } from "./transform-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { afterAnimationFrames } from "./sync-helpers";
 
 
 test.afterEach(async ({ request }) => {
@@ -48,23 +49,57 @@ function manyDiagramsDoc(count: number): string {
   return parts.join("\n");
 }
 
-// Sweep the PAGE (not the shell) one screen at a time, wrapping at the bottom,
-// until every diagram has rendered or the budget runs out. Returns the final
-// rendered count. Placeholders are shorter than rendered diagrams, so the
-// document grows as it renders and a single top-to-bottom pass is not enough.
-async function sweepPageAndCountRendered(page: Page, expected: number): Promise<number> {
-  let rendered = 0;
-  for (let pass = 0; pass < 60; pass += 1) {
-    rendered = await page.evaluate(() => {
-      const atBottom =
-        window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4;
-      window.scrollTo(0, atBottom ? 0 : window.scrollY + window.innerHeight * 0.6);
-      return document.querySelectorAll("#preview .mermaid svg").length;
+// Sweep the PAGE (not the shell) one screen per poll pass, wrapping at the
+// bottom, until every diagram has rendered. Placeholders are shorter than
+// rendered diagrams, so the document grows as it renders and a single
+// top-to-bottom pass is not enough.
+async function expectPageSweepRendersAll(page: Page, expected: number): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const atBottom =
+            window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4;
+          window.scrollTo(0, atBottom ? 0 : window.scrollY + window.innerHeight * 0.6);
+          return document.querySelectorAll("#preview .mermaid svg").length;
+        }),
+      { intervals: [100] },
+    )
+    .toBe(expected);
+}
+
+// A lazy-rendering observer rebuilt for a new scroller has had its turn, and
+// what it asked for has rendered. Waits two frames — a UI-mode switch defers
+// the rebuild by one, a resize rebuilds in its handler — then lets a probe
+// observer with the same (viewport) root and margin report which diagrams
+// intersect. The probe's first report is delivered in the same rendering step
+// as, or after, every earlier observer's, so a stale observer bound to the old
+// scroller has fired by then too. The intersecting diagrams must then render.
+async function awaitLazyObservation(page: Page): Promise<void> {
+  const intersecting = await page.evaluate(async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>("#preview .mermaid"));
+    return new Promise<number[]>(resolve => {
+      const probe = new IntersectionObserver(
+        entries => {
+          probe.disconnect();
+          resolve(
+            entries.filter(entry => entry.isIntersecting).map(entry => nodes.indexOf(entry.target as HTMLElement)),
+          );
+        },
+        { root: null, rootMargin: "50% 0px" },
+      );
+      for (const node of nodes) probe.observe(node);
     });
-    if (rendered >= expected) break;
-    await page.waitForTimeout(100);
-  }
-  return await page.evaluate(() => document.querySelectorAll("#preview .mermaid svg").length);
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(indices => {
+        const nodes = document.querySelectorAll<HTMLElement>("#preview .mermaid");
+        return indices.filter(index => nodes[index]?.classList.contains("mermaid-pending")).length;
+      }, intersecting),
+    )
+    .toBe(0);
 }
 
 test.describe("lazy rendering where the page scrolls", () => {
@@ -107,7 +142,7 @@ test.describe("lazy rendering where the page scrolls", () => {
 
       // …and every deferred diagram is reachable. This is the assertion the
       // bug failed: before the fix the count stuck at 2 forever.
-      expect(await sweepPageAndCountRendered(page, DIAGRAMS)).toBe(DIAGRAMS);
+      await expectPageSweepRendersAll(page, DIAGRAMS);
       await expect(page.locator("#preview .mermaid.mermaid-pending")).toHaveCount(0);
     });
   });
@@ -133,7 +168,7 @@ test.describe("lazy rendering where the page scrolls", () => {
         .poll(async () => page.locator("#preview .mermaid.mermaid-pending").count())
         .toBeGreaterThan(0);
 
-      expect(await sweepPageAndCountRendered(page, DIAGRAMS)).toBe(DIAGRAMS);
+      await expectPageSweepRendersAll(page, DIAGRAMS);
     });
   });
 
@@ -175,14 +210,15 @@ test.describe("lazy rendering where the page scrolls", () => {
           ),
         )
         .toBe("visible");
-      // Give a stale observer every chance to fire its batch.
-      await page.waitForTimeout(1500);
+      // The rebuilt observer has fired and rendered what it should; a stale
+      // observer would have fired its batch in the same step.
+      await awaitLazyObservation(page);
 
       expect(await page.locator("#preview .mermaid.mermaid-pending").count()).toBeGreaterThan(0);
 
       // Still lazy AND still reachable: the rebuilt root is the viewport, so
       // scrolling the page renders the rest.
-      expect(await sweepPageAndCountRendered(page, DIAGRAMS)).toBe(DIAGRAMS);
+      await expectPageSweepRendersAll(page, DIAGRAMS);
     });
   });
 
@@ -240,8 +276,9 @@ test.describe("lazy rendering where the page scrolls", () => {
       await page.locator("#ui-mode-toggle").click();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
       await page.locator("#touch-tab-preview").click();
-      // Give a stale observer every chance to fire its batch.
-      await page.waitForTimeout(1500);
+      // The rebuilt observer has fired and rendered what it should; a stale
+      // observer would have fired its batch in the same step.
+      await awaitLazyObservation(page);
 
       // Still deferred — the rebuilt observer measures against the viewport,
       // not against a shell whose box now spans the document.
@@ -260,7 +297,7 @@ test.describe("lazy rendering where the page scrolls", () => {
 
       // And the pending ones still render when scrolled to, through the new
       // root. Without re-observation they would be bound to the old shell.
-      expect(await sweepPageAndCountRendered(page, DIAGRAMS)).toBe(DIAGRAMS);
+      await expectPageSweepRendersAll(page, DIAGRAMS);
     });
   });
 });
@@ -420,8 +457,8 @@ test.describe("desktop layout", () => {
     await page.locator("#preview .mermaid-trigger").click();
     await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
 
-    // Allow the initial fit-to-screen RAF to run and settle.
-    await page.waitForTimeout(50);
+    // The viewer fits on the frame after it opens; let that frame run.
+    await afterAnimationFrames(page);
     const stage = page.locator(".mermaid-viewer-stage");
     const before = await stage.evaluate(el => (el as HTMLElement).style.transform);
 
@@ -620,8 +657,8 @@ test.describe("desktop layout", () => {
     for (let i = 0; i < 5; i += 1) {
       await triggers.nth(i).click();
       await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
-      // Allow the deferred fit to settle.
-      await page.waitForTimeout(80);
+      // The viewer fits on the frame after it opens; let that frame run.
+      await afterAnimationFrames(page);
 
       const offset = await page.evaluate(() => {
         const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
@@ -662,7 +699,8 @@ test.describe("desktop layout", () => {
     await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
     await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
-    await page.waitForTimeout(120);
+    // The viewer fits on the frame after it opens; let that frame run.
+    await afterAnimationFrames(page);
 
     const stage = page.locator(".mermaid-viewer-stage");
     const transform = () => stage.evaluate(el => (el as HTMLElement).style.transform);
@@ -702,8 +740,8 @@ test.describe("desktop layout", () => {
     );
     await page.mouse.move(centreX, centreY);
     await page.mouse.wheel(0, -240);
-    await page.waitForTimeout(60);
-    expect(await scale()).toBeGreaterThan(fittedScale);
+    // One wheel event, one zoom step: once it has landed the anchor can be read.
+    await expect.poll(scale).toBeGreaterThan(fittedScale);
     const anchorAfter = await page.evaluate(
       ({ x, y }) => {
         const stageEl = document.querySelector<HTMLElement>(".mermaid-viewer-stage")!;
@@ -758,8 +796,8 @@ test.describe("desktop layout", () => {
     await page.locator("#preview .mermaid-trigger").first().click();
     await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
 
-    // Allow the deferred fit-to-viewport (RAF) to settle.
-    await page.waitForTimeout(100);
+    // The viewer fits on the frame after it opens; let that frame run.
+    await afterAnimationFrames(page);
 
     const ratios = await page.evaluate(() => {
       const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");

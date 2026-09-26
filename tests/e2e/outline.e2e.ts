@@ -141,7 +141,7 @@ test("filter narrows the visible entries without losing tracking", async ({ page
 
   // Clearing the filter restores every entry.
   await page.locator(".uatu-outline-filter").fill("");
-  expect(await page.locator(".uatu-outline-link:not([hidden])").count()).toBeGreaterThan(5);
+  await expect.poll(() => page.locator(".uatu-outline-link:not([hidden])").count()).toBeGreaterThan(5);
 });
 
 async function panelSize(page: import("@playwright/test").Page): Promise<{ w: number; h: number }> {
@@ -203,6 +203,7 @@ test("left-edge resizer changes the width (docked edge fixed); width persists", 
   await expect(treeRow(page, "README.md")).toBeVisible();
   await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
+  await expect(page.locator(".uatu-outline")).toBeVisible();
   const reloaded = await panelSize(page);
   expect(Math.abs(reloaded.w - after.w)).toBeLessThan(6);
 });

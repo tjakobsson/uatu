@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { afterAnimationFrames } from "./sync-helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -270,7 +271,8 @@ test("preview header stays visible while scrolling and the sidebar scroll is ind
   await page.locator(".preview-shell").evaluate(element => {
     element.scrollTop = 600;
   });
-  await page.waitForTimeout(100);
+  await expect.poll(() => page.locator(".preview-shell").evaluate(el => el.scrollTop)).toBeGreaterThan(500);
+  await afterAnimationFrames(page);
   const headerAfter = await page.locator(".preview-header").boundingBox();
 
   expect(headerBefore?.y ?? 0).toBeCloseTo(headerAfter?.y ?? 0, 0);

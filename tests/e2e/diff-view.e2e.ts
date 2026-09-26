@@ -67,10 +67,15 @@ test.describe("slow diff fetch", () => {
     const previousContent = page.locator("#preview");
     await expect(previousContent).not.toBeEmpty();
 
-    // Throttle the diff endpoint well past the ~200 ms show delay so the
-    // delay-gated indicator is guaranteed to appear.
+    // Hold the diff response until the delay-gated indicator has been seen,
+    // so it is guaranteed to appear however slow the machine is — rather
+    // than racing a fixed throttle against the ~200 ms show delay.
+    let releaseDiff!: () => void;
+    const diffHeld = new Promise<void>(resolve => {
+      releaseDiff = resolve;
+    });
     await page.route("**/api/document/diff*", async route => {
-      await new Promise(resolve => setTimeout(resolve, 800));
+      await diffHeld;
       await route.continue();
     });
 
@@ -86,6 +91,7 @@ test.describe("slow diff fetch", () => {
     await expect(previousContent).not.toBeEmpty();
 
     // Once the delayed payload lands and renders, both layers clear.
+    releaseDiff();
     await expect(page.locator(".uatu-diff-host")).toBeVisible();
     await expect(page.locator("#view-diff")).not.toHaveAttribute("aria-busy", "true");
     await expect(page.locator(".uatu-loading-bar")).toHaveCount(0);

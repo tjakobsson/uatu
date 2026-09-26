@@ -4,8 +4,10 @@ import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { recordDocumentFrames, waitForAppliedDocumentFrame } from "./sync-helpers";
 
 test.beforeEach(async ({ page, request }) => {
+  await recordDocumentFrames(page);
   await standardBeforeEach(page, request);
 });
 
@@ -64,7 +66,11 @@ test("browser back disables follow mode so the next file change does not undo th
 
   // A file change must NOT switch the preview now that follow is off.
   await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nNo auto-switch please.\n", "utf8");
-  await page.waitForTimeout(500);
+  // Wait for the change to reach the page, then check it moved nothing. The
+  // selection (and the URL with it) would move synchronously with the frame;
+  // the preview path only after a document load.
+  await waitForAppliedDocumentFrame(page, { changed: "guides/setup.md" });
+  expect(await page.evaluate(() => window.location.pathname)).toBe("/links-demo.md");
   await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
 });
 
@@ -235,23 +241,25 @@ test("URL pathname percent-encodes path segments with spaces", async ({ page, re
   await expect(page.locator("#preview-path")).toHaveText("hello world.md");
 });
 
-test("user can re-enable follow after a direct-link arrival and catch up to the latest file", async ({ page }) => {
+test("user can re-enable follow after a direct-link arrival and catch up to the latest file", async ({ page, request }) => {
   // Make setup.md strictly newer than every other file so the follow catch-up
   // has an unambiguous target.
   await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nFreshly touched.\n", "utf8");
   const fresher = new Date(Date.now() + 30_000);
   await fs.utimes(workspacePath("guides", "setup.md"), fresher, fresher);
+  // The catch-up reads the page's own index, so the bumped mtime must be in
+  // it: wait for the server to report setup.md as the newest document, so the
+  // page below boots from that state.
+  await expect.poll(async () => {
+    const state = await request.get("/api/state").then(response => response.json());
+    const docs = state.roots.flatMap((root: { docs: { id: string; relativePath: string }[] }) => root.docs);
+    return docs.find((doc: { id: string }) => doc.id === state.defaultDocumentId)?.relativePath;
+  }).toBe("guides/setup.md");
 
   // Arrive via a direct link to a different doc; follow must be off (per D3).
   await page.goto("/links-demo.md");
   await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-
-  // Wait for the polling watcher + SSE refresh to deliver the bumped mtime
-  // to the SPA's local index. The previous `.tree-mtime[data-mtime]` data
-  // attributes were retired with the live-mtime ticker, so this is a bounded
-  // delay rather than a deterministic readiness probe.
-  await page.waitForTimeout(800);
 
   // Re-enable follow — must catch up to setup.md immediately.
   await page.locator("#follow-toggle").click();

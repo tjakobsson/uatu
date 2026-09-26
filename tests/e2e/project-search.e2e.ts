@@ -306,7 +306,10 @@ test.describe("global routing", () => {
   });
 
   test("⌘F and ⇧⌘F are different features", async ({ page }) => {
-    await treeRow(page, "alpha.md").click();
+    // alpha.md must be on screen before clicking into the preview, so the
+    // click and ⌘F act on the document the test opened — not on the previous
+    // one while alpha.md's mount replaces it underneath them.
+    await openTreeFile(page, "alpha.md");
     await page.locator("#preview").click({ position: { x: 10, y: 10 } });
 
     await page.keyboard.press("ControlOrMeta+f");

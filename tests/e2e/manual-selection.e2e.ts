@@ -38,6 +38,14 @@ async function deliver(page: Page, state: StatePayload) {
   }, state);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
+// The late response is not merely fulfilled but in the page: the browser has
+// its whole body. What the page does with it runs in the tasks right after,
+// which the two frames the callers then wait out cover.
+function responseDelivered(page: Page, urlPart: string, idSuffix?: string) {
+  return page.waitForEvent("requestfinished", request =>
+    request.url().includes(urlPart)
+    && (idSuffix === undefined || new URL(request.url()).searchParams.get("id")?.endsWith(idSuffix) === true));
+}
 async function files(page: Page, touch: boolean) {
   if (touch) await page.locator("#touch-tab-files").click();
 }
@@ -331,8 +339,10 @@ for (const touch of [false, true]) {
             }
             const before = await page.locator("#preview").innerHTML();
             const title = await page.locator("#preview-title").textContent();
+            const delivered = responseDelivered(page, mode === "diff" ? "/api/document/diff?" : "/api/document?", "guides/setup.md");
             release();
             await completed;
+            await delivered;
             await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
             expect(await page.locator("#preview").innerHTML()).toBe(before);
             await expect(page.locator("#preview-title")).toHaveText(title!);
@@ -388,8 +398,10 @@ for (const touch of [false, true]) {
       state.changedId = state.roots.flatMap(r => r.docs).find(d => d.relativePath === "a-selected.txt")!.id;
       await deliver(page, state);
       await expect(page.locator("#preview")).toContainText("No changes against NEW.");
+      const delivered = responseDelivered(page, "/api/document/diff?");
       release();
       await completed;
+      await delivered;
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       await expect(page.locator("#preview")).toContainText("No changes against NEW.");
       await expect(page.locator("#preview")).not.toContainText("OLD");

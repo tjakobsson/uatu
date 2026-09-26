@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { flushPageRequests } from "./sync-helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -123,11 +124,15 @@ test("Diff wrap toggles in place with no new diff fetch", async ({ page, request
     if (req.url().includes("/api/document/diff")) diffFetches += 1;
   });
 
+  // Mark the current host: the re-render replaces it, which is the event a
+  // refetch would have been part of.
+  await page.locator(".uatu-diff-host").evaluate(host => host.setAttribute("data-e2e-before-wrap", ""));
   await page.locator("#wrap-toggle").click();
   await expect(page.locator("#wrap-toggle")).toHaveAttribute("aria-pressed", "true");
   // The host is still mounted (re-rendered in place).
-  await expect(page.locator(".uatu-diff-host")).toBeVisible();
-  // Give any (unexpected) network a chance to fire before asserting none did.
-  await page.waitForTimeout(200);
+  await expect(page.locator(".uatu-diff-host:not([data-e2e-before-wrap])")).toBeVisible();
+  // Every request the page issued up to the re-render has been reported;
+  // none of them may be a diff fetch.
+  await flushPageRequests(page);
   expect(diffFetches).toBe(0);
 });
