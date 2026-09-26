@@ -288,6 +288,10 @@ for (const engine of ["chromium", "webkit"] as const) {
   for (const agent of ["opencode", "claude"] as const) {
     for (const shape of ["command", "bash"] as const) {
       for (const child of [false, true]) test(`${engine} ${agent} ${shape} ${child ? "child" : "parent"} full running scrollback flow`, async ({ launchBrowser, request, baseURL }, testInfo) => {
+        // A long sequential flow, not a race: on CI the Chromium runs pass at
+        // a 22.7 s median (max 23.9 s) and the WebKit ones cross 30 s under
+        // four-worker contention while still progressing.
+        test.slow();
         const browser = await launchBrowser(engine);
         const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
         const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
@@ -776,6 +780,9 @@ for (const engine of ["chromium", "webkit"] as const) {
   });
 
   test(`${engine} item A and B retain separate geometry through navigation and mode changes`, async ({ launchBrowser, request, baseURL }) => {
+    // Long flow: the WebKit run passes at a 29.7 s median on CI, Chromium at
+    // 21.5 s, against the 30 s default budget.
+    test.slow();
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, hasTouch: true, viewport: { width: 1440, height: 1000 } });
     try {

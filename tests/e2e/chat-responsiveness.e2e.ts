@@ -145,6 +145,9 @@ for (const agent of ["claude", "opencode"]) test.describe(`${agent} presentation
   });
 
   test("long loaded history preserves find, copy, links, prompt jumps and active selections", async ({ page, request }) => {
+    // Long flow: passes at a 23 s median on CI against the 30 s default
+    // budget, and timed out under four-worker contention while progressing.
+    test.slow();
     await request.post("/__e2e/reset");
     await request.post("/__e2e/chat", { data: { action: "agents", count: 2 } });
     const items = chatWorkload(500);
