@@ -7,8 +7,10 @@ import {
   describeSearchSummary,
   displayLine,
   mergeResult,
+  replaceResultsMarkup,
   shouldDispatch,
 } from "./search-model";
+import { parseHTML } from "linkedom";
 import type { SearchFileResult } from "../server/search";
 
 function summary(overrides: Partial<Parameters<typeof describeSearchSummary>[0]> = {}) {
@@ -160,5 +162,53 @@ describe("request failure", () => {
 
   test("a healthy request is unaffected", () => {
     expect(summary({ files: 1, matches: 1, failed: false }).state).toBe("results");
+  });
+});
+
+describe("replaceResultsMarkup", () => {
+  const hit = (doc: string, line: number, start: number) =>
+    `<button class="search-hit" data-document-id="${doc}" data-line="${line}" data-start="${start}">${doc}:${line}</button>`;
+
+  function container(): Element {
+    const { document } = parseHTML("<!doctype html><html><body><div id='results'></div></body></html>");
+    return document.querySelector("#results")!;
+  }
+
+  test("leaves the rendered hits in place when the markup has not changed", () => {
+    // The final render after the stream ends repeats the last chunk's markup;
+    // rebuilding it destroyed the keyboard-focused hit.
+    const results = container();
+    const html = hit("/w/alpha.md", 3, 4) + hit("/w/beta.md", 3, 0);
+    replaceResultsMarkup(results, html, null);
+    const second = results.querySelectorAll(".search-hit")[1]!;
+    expect(replaceResultsMarkup(results, html, second)).toBeNull();
+    expect(results.querySelectorAll(".search-hit")[1]).toBe(second);
+  });
+
+  test("hands back the same hit in changed markup so focus can follow it", () => {
+    const results = container();
+    replaceResultsMarkup(results, hit("/w/alpha.md", 3, 4) + hit("/w/beta.md", 3, 0), null);
+    const focused = results.querySelectorAll(".search-hit")[1]!;
+    const next = replaceResultsMarkup(
+      results,
+      hit("/w/alpha.md", 3, 4) + hit("/w/beta.md", 3, 0) + hit("/w/beta.md", 3, 20),
+      focused,
+    );
+    expect(next).not.toBeNull();
+    expect(next).not.toBe(focused);
+    expect(next!.getAttribute("data-document-id")).toBe("/w/beta.md");
+    expect(next!.getAttribute("data-start")).toBe("0");
+    expect(results.querySelectorAll(".search-hit")).toHaveLength(3);
+  });
+
+  test("hands back nothing when focus was outside the results or the hit is gone", () => {
+    const results = container();
+    replaceResultsMarkup(results, hit("/w/alpha.md", 3, 4), null);
+    const outside = results.ownerDocument.body;
+    expect(replaceResultsMarkup(results, hit("/w/beta.md", 1, 0), outside)).toBeNull();
+    const focused = results.querySelector(".search-hit")!;
+    expect(replaceResultsMarkup(results, hit("/w/gamma.md", 1, 0), focused)).toBeNull();
+    expect(replaceResultsMarkup(results, "", null)).toBeNull();
+    expect(results.querySelectorAll(".search-hit")).toHaveLength(0);
   });
 });

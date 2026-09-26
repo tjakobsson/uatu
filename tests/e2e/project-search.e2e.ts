@@ -231,8 +231,11 @@ test("arrow keys walk results and Enter opens the focused one", async ({ page })
   await page.locator("#search-query").fill("compare-target");
   await expect(page.locator(".search-hit")).toHaveCount(3, { timeout: 10_000 });
 
+  // Focus must survive the results' re-render when the stream completes.
   await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".search-hit").nth(0)).toBeFocused();
   await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".search-hit").nth(1)).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator("#preview-path")).not.toHaveText("README.md");
 });
