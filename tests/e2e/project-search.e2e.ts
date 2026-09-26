@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
 import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
-import { standardBeforeEach } from "./fixtures";
+import { standardBeforeEach, waitForPreviewToSettle } from "./fixtures";
 
 // ⇧⌘F: content search across the watched roots. The matching and summary
 // wording are unit-tested in `src/server/search.test.ts` and
@@ -55,6 +55,12 @@ test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
   await request.post("/__e2e/reset", { data: { extras: FIXTURES } });
   await page.goto("/");
+  // Let the fresh page finish booting before a test drives it: "Connected"
+  // means its live state has been applied, and the preview has caught up
+  // with the selection. Keys pressed while the first frame is still landing
+  // can go to an element that boot is about to re-render.
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await waitForPreviewToSettle(page);
 });
 
 test.afterEach(async ({ request }) => {
