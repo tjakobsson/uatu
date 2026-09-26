@@ -43,6 +43,13 @@ test.describe("multi-agent chat", () => {
     await control(request, { action: "agents", count: 2 });
     await page.reload();
     await openChatPanel(page);
+    // The replacement upstream reaches the newly enabled agent. (A seed that
+    // lands before the page's own inventory attach is still announced: every
+    // first attach gets an opening tick, lingering upstream or not.)
+    await expect.poll(async () => {
+      const stats = await control(request, { action: "stats", agent: "claude" }) as { inventorySubscribers: number };
+      return stats.inventorySubscribers;
+    }).toBeGreaterThan(0);
     const seeded = await control(request, {
       action: "seed", agent: "claude", title: "Newly enabled agent", items: [],
     }) as { conversation: { id: string } };
