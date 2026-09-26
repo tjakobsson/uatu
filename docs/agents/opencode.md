@@ -4,9 +4,9 @@
 
 uatu treats OpenCode as a first-class agent. The aim is to use what its SDK offers, not the subset every agent has in common. This page lists every message type, content block or part, and tool the installed SDK declares, and what uatu does with each today. The gaps are the work still to do. None of them means a feature is unwanted.
 
-Generated against 1.x through `@opencode-ai/sdk` 1.18.30 · 2.x through `@opencode/client` 2.0.13 (vocabulary from `@opencode/schema` 2.0.13).
+Generated against 1.x through `@opencode-ai/sdk` 1.18.30 · 2.x through `@opencode/client` 2.0.18 (vocabulary from `@opencode/schema` 2.0.18).
 
-**Gaps: 30** (unhandled or behavior-missing) · dedicated 117 · generic 0 · ignored 85 · unhandled 30 · behavior-missing 0
+**Gaps: 31** (unhandled or behavior-missing) · dedicated 117 · generic 0 · ignored 85 · unhandled 31 · behavior-missing 0
 
 Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the page cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet.
 
@@ -18,10 +18,10 @@ Each entry is classified by running uatu's own normalizers and renderers on a st
 | unhandled | not used yet, and no decision made: a gap |
 | behavior-missing | shown, but uatu does not yet deliver what it does: a gap; the reason says what fails |
 
-<!-- agent-coverage:since:start seal=44c9210c134ccd90 -->
-## Since the previous generation
+<!-- agent-coverage:since:start seal=a63ea26af24e42a1 -->
+## Since 1.x through `@opencode-ai/sdk` 1.18.30 · 2.x through `@opencode/client` 2.0.13 (vocabulary from `@opencode/schema` 2.0.13)
 
-First generation: there is no previous matrix to compare against.
+- **2.x events** — added `session.metadata.updated`
 <!-- agent-coverage:since:end -->
 
 ## 1.x events <a id="axis-1.x-events"></a>
@@ -200,6 +200,7 @@ Source: `@opencode/schema` `event-manifest.d.ts` and `session-event.d.ts`.
 | `session.inbox.enqueued` | dedicated |  |
 | `session.instructions.updated` | ignored | Which instruction files the session loaded; uatu does not present the agent's system context. |
 | `session.message.content.updated` | dedicated |  |
+| `session.metadata.updated` | unhandled |  |
 | `session.model.selected` | dedicated |  |
 | `session.moved` | unhandled |  |
 | `session.permissions` | ignored | The session's standing permission rules; each request arrives as permission.asked. |

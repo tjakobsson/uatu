@@ -55,7 +55,7 @@ Claude Code and OpenCode are first-class agents in uatu: the aim is to use what 
 
 <p>
   <a href="./docs/agents/claude-code.md"><img src="./docs/agents/claude-code.svg" alt="Claude Code SDK coverage: SDK 0.3.283, 27 gaps" /></a>
-  <a href="./docs/agents/opencode.md"><img src="./docs/agents/opencode.svg" alt="OpenCode SDK coverage: 1.18.30 · 2.0.13, 30 gaps" /></a>
+  <a href="./docs/agents/opencode.md"><img src="./docs/agents/opencode.svg" alt="OpenCode SDK coverage: 1.18.30 · 2.0.18, 31 gaps" /></a>
 </p>
 <!-- agent-coverage:end -->
 
