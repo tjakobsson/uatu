@@ -24,7 +24,7 @@ const LEG_ONE_FILES = [
   "asciidoc", "chat-agents", "chat-cost-receipt", "chat-inventory-presentation",
   "chat-panel", "chat-queue", "chat-reversible-history", "chat-shell-output",
   "chat-shell-scrollback", "chat-touch", "chat-unavailable", "code-blocks",
-  "diff-view", "git-log", "identity", "ipad-desktop-viewport", "ipad",
+  "diff-view", "document-tree", "git-log", "identity", "ipad-desktop-viewport", "ipad",
   "metadata-card", "mobile", "notification-layout", "notification-presence",
   "notifications", "outline-presentation", "preview-renderers",
   "project-search", "pwa", "terminal-clipboard", "terminal-font",
