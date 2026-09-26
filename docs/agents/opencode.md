@@ -4,7 +4,7 @@
 
 uatu treats OpenCode as a first-class agent. The aim is to use what its SDK offers, not the subset every agent has in common. This page lists every message type, content block or part, and tool the installed SDK declares, and what uatu does with each today. The gaps are the work still to do. None of them means a feature is unwanted.
 
-Generated against 1.x through `@opencode-ai/sdk` 1.18.30 · 2.x through `@opencode/client` 2.0.18 (vocabulary from `@opencode/schema` 2.0.18).
+Generated against 1.x through `@opencode-ai/sdk` 1.18.32 · 2.x through `@opencode/client` 2.0.18 (vocabulary from `@opencode/schema` 2.0.18).
 
 **Gaps: 31** (unhandled or behavior-missing) · dedicated 117 · generic 0 · ignored 85 · unhandled 31 · behavior-missing 0
 
@@ -18,10 +18,10 @@ Each entry is classified by running uatu's own normalizers and renderers on a st
 | unhandled | not used yet, and no decision made: a gap |
 | behavior-missing | shown, but uatu does not yet deliver what it does: a gap; the reason says what fails |
 
-<!-- agent-coverage:since:start seal=a63ea26af24e42a1 -->
-## Since 1.x through `@opencode-ai/sdk` 1.18.30 · 2.x through `@opencode/client` 2.0.13 (vocabulary from `@opencode/schema` 2.0.13)
+<!-- agent-coverage:since:start seal=7635b2f845d31069 -->
+## Since 1.x through `@opencode-ai/sdk` 1.18.30 · 2.x through `@opencode/client` 2.0.18 (vocabulary from `@opencode/schema` 2.0.18)
 
-- **2.x events** — added `session.metadata.updated`
+No vocabulary was added or removed.
 <!-- agent-coverage:since:end -->
 
 ## 1.x events <a id="axis-1.x-events"></a>
