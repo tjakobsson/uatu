@@ -105,6 +105,27 @@ async function armCloseDelay(workspace: HubE2EWorkspace, ms: number): Promise<vo
   expect(response.ok).toBe(true);
 }
 
+// Hold every terminal socket close in the child until `releaseCloses`: the
+// departing holder keeps the PTY for exactly as long as the test decides,
+// not for a timer that a slow reload can outlast.
+async function holdCloses(workspace: HubE2EWorkspace): Promise<void> {
+  const response = await fetch(`${workspace.childOrigin}/s/${workspace.id}/__e2e/terminal-close-delay`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ hold: true }),
+  });
+  expect(response.ok).toBe(true);
+}
+
+async function releaseCloses(workspace: HubE2EWorkspace): Promise<void> {
+  const response = await fetch(`${workspace.childOrigin}/s/${workspace.id}/__e2e/terminal-close-delay`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ release: true }),
+  });
+  expect(response.ok).toBe(true);
+}
+
 // Held socket closes the child has yet to process.
 async function heldCloses(workspace: HubE2EWorkspace): Promise<number> {
   const response = await fetch(`${workspace.childOrigin}/s/${workspace.id}/__e2e/terminal-close-delay`);
@@ -348,22 +369,43 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     await typeLine(page, 0, "UATU_LATE=released_late");
     const paneIds = await paneSessionIds(page);
 
-    // The child processes the departing socket's close 1.5 s late: the
-    // replacement page attaches into a PTY still held by its predecessor.
-    await armCloseDelay(alpha, 1_500);
-    await page.reload();
+    // The child holds the departing socket's close until the test releases
+    // it: the replacement page attaches into a PTY still held by its
+    // predecessor, however long the reload takes.
+    //
+    // What is measured is the product's recovery window: a release within
+    // RECOVERY_BUDGET_MS of the refused attach must end in a reattach. So the
+    // release comes as soon as the pane is seen reconciling against a close
+    // still held; only the evidence screenshot sits inside the window, and
+    // every other wait comes after it.
+    await holdCloses(alpha);
+    try {
+      await page.reload();
+      // While the departing holder is still being processed the pane stays
+      // visible, reconciling, and says so.
+      await expect(page.locator(".terminal-pane[data-state=\"recovering\"] .terminal-pane-status")).toBeVisible();
+      expect(await heldCloses(alpha)).toBeGreaterThan(0);
+      await captureScreenshot(page, testInfo, "terminal-reconnecting");
+    } finally {
+      // The late release: the departing holder lets go now.
+      await releaseCloses(alpha);
+    }
+    await expect.poll(() => heldCloses(alpha)).toBe(0);
+    // The run's verdict rather than a moment before it: reattached, not
+    // settled as occupied or unreachable.
+    await expect(page.locator(".terminal-pane")).toHaveAttribute("data-state", "ready");
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-    // While the departing holder is still being processed the pane stays
-    // visible, reconciling, and says so.
-    await expect(page.locator(".terminal-pane[data-state=\"recovering\"] .terminal-pane-status")).toBeVisible();
-    await captureScreenshot(page, testInfo, "terminal-reconnecting");
     await expectTerminalRestored(page, 1);
     expect(await paneSessionIds(page)).toEqual(paneIds);
+    // The same shell (its variable survives) through ordinary attaches only:
+    // no socket of this page ever asked to take the shell over.
     await expectShellValue(page, 0, "UATU_LATE", "released_late");
+    const takeovers = (await readTrace(page)).filter(entry => (entry as { event?: string; takeover?: boolean }).event === "ws-new"
+      && (entry as { takeover?: boolean }).takeover === true);
+    expect(takeovers).toEqual([]);
     const sessions = await inventory(hubContext, alpha);
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.attached).toBe(true);
-    await armCloseDelay(alpha, 0);
   });
 
   test("a shell another window holds is offered for explicit takeover after the recovery window", async ({ hub, hubContext }, testInfo) => {

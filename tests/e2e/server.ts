@@ -72,7 +72,11 @@ let terminalSessionsDelay: { armed: boolean; pending: boolean; released: Promise
 // because the departing socket belongs to a page that no longer runs. A GET
 // reports how many held closes the server has yet to process, so a test can
 // wait for the departing holder's release instead of sleeping past it.
+// `{ hold: true }` instead holds every close until the test posts
+// `{ release: true }`, for a test that must observe the window while it is
+// open rather than race a timer to it.
 let terminalCloseDelayMs = 0;
+let terminalCloseHold: { released: Promise<void>; release: () => void } | null = null;
 let terminalClosesHeld = 0;
 
 let activeFilePath: string | null = null;
@@ -268,6 +272,8 @@ async function handleE2EReset(request: Request): Promise<Response> {
   terminalSessionsDelay?.release();
   terminalSessionsDelay = null;
   terminalCloseDelayMs = 0;
+  terminalCloseHold?.release();
+  terminalCloseHold = null;
   fakeChatAgent.reset();
   fakeSecondAgent.reset();
   activeChatRouter = singleAgentRouter;
@@ -618,7 +624,18 @@ server = Bun.serve({
       return Response.json({ pending: terminalClosesHeld });
     }
     if (pathname === "/__e2e/terminal-close-delay" && request.method === "POST") {
-      const body = (await request.json()) as { ms?: number };
+      const body = (await request.json()) as { ms?: number; hold?: boolean; release?: boolean };
+      if (body.release === true) {
+        terminalCloseHold?.release();
+        terminalCloseHold = null;
+        return Response.json({ ok: true });
+      }
+      if (body.hold === true) {
+        let release!: () => void;
+        const released = new Promise<void>(resolve => { release = resolve; });
+        terminalCloseHold ??= { released, release };
+        return Response.json({ ok: true });
+      }
       terminalCloseDelayMs = typeof body.ms === "number" && body.ms > 0 ? body.ms : 0;
       return Response.json({ ok: true });
     }
@@ -652,6 +669,14 @@ server = Bun.serve({
           // A held close keeps the departing socket as the PTY's holder for
           // the armed window; an attach arriving meanwhile is refused as a
           // collision exactly as a late browser teardown would produce.
+          if (terminalCloseHold) {
+            terminalClosesHeld += 1;
+            void terminalCloseHold.released.then(() => {
+              terminalClosesHeld -= 1;
+              terminalServer.close(socket as never, code);
+            });
+            return;
+          }
           if (terminalCloseDelayMs > 0) {
             terminalClosesHeld += 1;
             setTimeout(() => {
