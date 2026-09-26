@@ -4,9 +4,9 @@
 
 uatu treats Claude Code as a first-class agent. The aim is to use what its SDK offers, not the subset every agent has in common. This page lists every message type, content block or part, and tool the installed SDK declares, and what uatu does with each today. The gaps are the work still to do. None of them means a feature is unwanted.
 
-Generated against `@anthropic-ai/claude-agent-sdk` 0.3.261 (bundled Claude Code CLI 2.1.261) · content blocks from `@anthropic-ai/sdk` 0.124.0.
+Generated against `@anthropic-ai/claude-agent-sdk` 0.3.261 (bundled Claude Code CLI 2.1.261) · content blocks from `@anthropic-ai/sdk` 0.128.0.
 
-**Gaps: 26** (unhandled or behavior-missing) · dedicated 40 · generic 30 · ignored 13 · unhandled 26 · behavior-missing 0
+**Gaps: 27** (unhandled or behavior-missing) · dedicated 40 · generic 30 · ignored 13 · unhandled 27 · behavior-missing 0
 
 Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the page cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet.
 
@@ -18,10 +18,10 @@ Each entry is classified by running uatu's own normalizers and renderers on a st
 | unhandled | not used yet, and no decision made: a gap |
 | behavior-missing | shown, but uatu does not yet deliver what it does: a gap; the reason says what fails |
 
-<!-- agent-coverage:since:start seal=61870a5fdba603b8 -->
-## Since the previous generation
+<!-- agent-coverage:since:start seal=f4d83226e0372f05 -->
+## Since `@anthropic-ai/claude-agent-sdk` 0.3.261 (bundled Claude Code CLI 2.1.261) · content blocks from `@anthropic-ai/sdk` 0.124.0
 
-First generation: there is no previous matrix to compare against.
+- **Assistant content blocks** — added `mcp_tool_listing`
 <!-- agent-coverage:since:end -->
 
 ## Message types <a id="axis-messages"></a>
@@ -86,6 +86,7 @@ Source: `@anthropic-ai/sdk` `BetaContentBlock`.
 | `compaction` | unhandled |  |
 | `container_upload` | unhandled |  |
 | `fallback` | unhandled |  |
+| `mcp_tool_listing` | unhandled |  |
 | `mcp_tool_result` | unhandled |  |
 | `mcp_tool_use` | unhandled |  |
 | `redacted_thinking` | unhandled |  |
