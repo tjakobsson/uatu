@@ -10,7 +10,7 @@
         "@asciidoctor/core": "^4.0.7",
         "@block65/webcrypto-web-push": "2.0.0",
         "@opencode-ai/sdk": "1.18.30",
-        "@opencode/client": "2.0.13",
+        "@opencode/client": "2.0.18",
         "@pierre/diffs": "1.5.1",
         "@pierre/trees": "1.0.0-beta.6",
         "@xterm/addon-fit": "^0.11.0",
@@ -341,11 +341,11 @@
 
     "@opencode-ai/sdk": ["@opencode-ai/sdk@1.18.30", "", { "dependencies": { "cross-spawn": "7.0.6" } }, "sha512-uviJ+PZLc/D1szt33WGzzt/rqJ+IaNmRGBb+UcOXrcQANl8XXKJrp4CNQQ2UAnUJ3Ek+VqcamIwjtKHUW/OjOQ=="],
 
-    "@opencode/client": ["@opencode/client@2.0.13", "", { "dependencies": { "@opencode/protocol": "2.0.13", "@opencode/schema": "2.0.13" }, "peerDependencies": { "effect": "4.0.0-rc.112", "solid-js": ">=1.9.0" }, "optionalPeers": ["effect", "solid-js"] }, "sha512-eNUH3BB0sy/BBz26B7cqbpGPsMnjYQbx+LIYjjEgmq1aDosntbaUhju8cTD0GGwftD7e+R++XKDOwCnkXkNGJg=="],
+    "@opencode/client": ["@opencode/client@2.0.18", "", { "dependencies": { "@opencode/protocol": "2.0.18", "@opencode/schema": "2.0.18" }, "peerDependencies": { "effect": "4.0.0-rc.112", "solid-js": ">=1.9.0" }, "optionalPeers": ["effect", "solid-js"] }, "sha512-N74FNdXkTTC1Re5T+PNxH6fsVf1tZiV3kESu3UWL/545oAkBRXoiikMmDszuuHZ4AxGwtr9NiQjKrHiMdnLVYQ=="],
 
-    "@opencode/protocol": ["@opencode/protocol@2.0.13", "", { "dependencies": { "@opencode/schema": "2.0.13", "effect": "4.0.0-rc.112" } }, "sha512-Qzh/cuMF0hBKWz+XKUoh+FgyU/p9MK84SKAoqmAKRWrDKC+1+zNoHOB9urZ+TBDerw2Nrl8id8UBMWuTmGhrCQ=="],
+    "@opencode/protocol": ["@opencode/protocol@2.0.18", "", { "dependencies": { "@opencode/schema": "2.0.18", "effect": "4.0.0-rc.112" } }, "sha512-IhzzlCz/hAlFvBLWQ+kDceX0/CkYOrjVyTPwYJYvWwKze5AHzVxxDYxkhCqLJj0hn/wtdNL10nhjVothuHcaBQ=="],
 
-    "@opencode/schema": ["@opencode/schema@2.0.13", "", { "dependencies": { "@standard-schema/spec": "1.1.0", "effect": "4.0.0-rc.112" } }, "sha512-jdfjPMnu9uFRKQ6Sx92nu1CQ/FkqbOLhh3CG6VPlKUzyvOoUB0N2jJ8NOePlbmkaudkY8jNtwekhWzZSRql63Q=="],
+    "@opencode/schema": ["@opencode/schema@2.0.18", "", { "dependencies": { "@standard-schema/spec": "1.1.0", "effect": "4.0.0-rc.112" } }, "sha512-f+lp6f+kxhygdeSxjqkiu6vk9t0onH/6OVBghSNyo9ZUUFP9BU/2JKthMgy9kHGyFu2vp0lg01H9umXn76u52A=="],
 
     "@oslojs/encoding": ["@oslojs/encoding@1.1.0", "", {}, "sha512-70wQhgYmndg4GCPxPPxPGevRKqTIJ2Nh4OkiMWmDAVYsTQ+Ta7Sq+rPevXyXGdzr30/qZBnyOalCszoMxlyldQ=="],
 
