@@ -58,6 +58,24 @@ describe("buildRoutes — bundled font asset routes", () => {
     await reader.cancel();
     feed.dispose();
   });
+  test("the awaiting lookup names the newest unanswered request's conversation, or none", async () => {
+    const feed = new NotificationFeed();
+    const routes = buildFontTestRoutes("/s/test/", stubSession, "origin", feed);
+    const handler = (routes["/s/test/api/chat/awaiting"] as { GET: (request: Request) => Response | Promise<Response> }).GET;
+    const read = async () => (await handler(new Request("http://localhost/s/test/api/chat/awaiting?t=test-credential"))).json();
+    expect((await handler(new Request("http://localhost/s/test/api/chat/awaiting"))).status).toBe(401);
+    expect(await read()).toEqual({ conversationId: null });
+    const ask = (id: string, conversationId: string, createdAt: number) =>
+      feed.publish({ type: "notification", notification: { id, sourceId: id, conversationId, kind: "question-pending", createdAt } });
+    ask("a", "opencode:one", Date.now() - 2_000);
+    expect(await read()).toEqual({ conversationId: "opencode:one" });
+    ask("b", "claude:two", Date.now() - 1_000);
+    ask("c", "opencode:three", Date.now() - 3_000);
+    expect(await read()).toEqual({ conversationId: "claude:two" });
+    feed.publish({ type: "resolved", id: "b", conversationId: "claude:two" });
+    expect(await read()).toEqual({ conversationId: "opencode:one" });
+    feed.dispose();
+  });
   test("serves the Hack WOFF2 with the right content-type and an immutable cache", async () => {
     const routes = buildFontTestRoutes();
     const response = routes["/assets/fonts/HackNerdFontMono-Regular.woff2"] as Response;

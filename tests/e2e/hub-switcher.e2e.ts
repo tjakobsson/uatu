@@ -11,6 +11,7 @@
 // is touch mode, where the switcher lives in the Files tab.
 
 
+import { QUIET_BEFORE_NOTICE_MS } from "../../src/shell/attention-notice";
 import { openChatPanel } from "./chat-helpers";
 import { evidencePath, recordEvidence } from "./evidence";
 import { childChatControl, expect, openSessionTab, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
@@ -322,5 +323,175 @@ test.describe("phone", () => {
     await expectMenuState(page, "gamma", "finished", "finished");
     await shot(page, testInfo, "after-switcher-phone-menu-finished");
     await closeMenu(page);
+  });
+});
+
+// Session pages announce questions waiting in other workspaces
+// (quiet-notifications-while-present). While a page is visible the hub holds
+// the user's pushes, so a question elsewhere raises an in-app notice naming
+// the workspace; Open lands on that workspace's waiting conversation. Every
+// test answers what it staged, so the next test's page starts from a quiet
+// baseline.
+test.describe("in-app notice for questions elsewhere", () => {
+  type Question = { workspace: HubE2EWorkspace; conversationId: string; itemId: string };
+
+  const permission = (itemId: string, status: "pending" | "resolved") => ({
+    id: itemId, type: "permission", createdAt: 10, requestId: itemId, action: "bash", resources: ["rm -rf build"], status,
+    ...(status === "resolved" ? { outcome: "approved-once" } : {}),
+  });
+
+  async function ask(hub: HubE2EInfo, id: string, title: string, itemId: string): Promise<Question> {
+    const workspace = hub.workspaces.find(entry => entry.id === id)!;
+    const seeded = (await childChatControl(workspace, { action: "seed", title, items: [] })) as { conversation: { id: string } };
+    await childChatControl(workspace, { action: "item", conversationId: seeded.conversation.id, item: permission(itemId, "pending") });
+    return { workspace, conversationId: seeded.conversation.id, itemId };
+  }
+
+  async function answer(question: Question): Promise<void> {
+    await childChatControl(question.workspace, { action: "item", conversationId: question.conversationId, item: permission(question.itemId, "resolved") });
+  }
+
+  const notice = (page: Page, id: string) => page.locator(`.attention-notice[data-workspace-id="${id}"]`);
+
+  // The page's first activity report is its baseline, and a question counts
+  // as new only after the workspace has read quiet for a moment
+  // (QUIET_BEFORE_NOTICE_MS): wait for both before staging.
+  async function settled(page: Page): Promise<void> {
+    await expect(page.locator("#hub-control")).toBeVisible();
+    await expect(page.locator("#hub-toggle")).not.toHaveAttribute("title", /awaiting/);
+    await page.waitForTimeout(QUIET_BEFORE_NOTICE_MS + 100);
+  }
+
+  test("a question elsewhere raises a notice whose Open lands on the waiting conversation", async ({ hub, hubContext }, testInfo) => {
+    const page = await openSessionTab(hubContext, hub.workspaces[0]!);
+    await settled(page);
+    const question = await ask(hub, "beta", "Needs an answer", "permission:notice-open");
+    try {
+      await expect(notice(page, "beta")).toBeVisible();
+      await expect(notice(page, "beta")).toContainText("beta");
+      await expect(notice(page, "beta")).toContainText("An agent needs your answer");
+      await expect(notice(page, "beta")).not.toContainText("rm -rf");
+      await expect(page.locator("#hub-activity-badge")).toHaveClass(/is-awaiting/);
+      await expect(page.locator(".attention-notice")).toHaveCount(1);
+      await shot(page, testInfo, "after-notice-desktop");
+      await shot(page, testInfo, "after-notice-desktop-closeup", (await notice(page, "beta").boundingBox().then(box => ({ x: Math.max(0, box!.x - 16), y: Math.max(0, box!.y - 16), width: box!.width + 32, height: box!.height + 32 }))));
+
+      await notice(page, "beta").getByRole("link", { name: "Open" }).click();
+      await expect(page).toHaveURL(new RegExp(`/s/beta/.*conversation=${encodeURIComponent(question.conversationId)}`));
+      await expect(page.locator("#chat-conversation-select")).toHaveValue(question.conversationId);
+      await expect(page.locator("#chat-items")).toContainText("rm -rf build");
+      await expect(page).not.toHaveURL(/awaiting=1/);
+      await shot(page, testInfo, "after-notice-desktop-opened");
+    } finally { await answer(question); }
+  });
+
+  test("the notice clears when the question is answered elsewhere, and Dismiss removes it", async ({ hub, hubContext }) => {
+    const page = await openSessionTab(hubContext, hub.workspaces[0]!);
+    await settled(page);
+    const first = await ask(hub, "beta", "Answered elsewhere", "permission:notice-answered");
+    await expect(notice(page, "beta")).toBeVisible();
+    await answer(first);
+    await expect(notice(page, "beta")).toHaveCount(0);
+    await settled(page);
+
+    const second = await ask(hub, "beta", "Dismissed", "permission:notice-dismissed");
+    try {
+      await expect(notice(page, "beta")).toBeVisible();
+      await notice(page, "beta").getByRole("button", { name: /Dismiss/ }).click();
+      await expect(notice(page, "beta")).toHaveCount(0);
+      // Still awaiting: the badge carries it, the notice stays gone.
+      await expect(page.locator("#hub-activity-badge")).toHaveClass(/is-awaiting/);
+    } finally { await answer(second); }
+  });
+
+  test("a workspace already waiting on load, the served workspace, and a finished turn raise nothing", async ({ hub, hubContext }) => {
+    const waiting = await ask(hub, "beta", "Already waiting", "permission:notice-baseline");
+    const own = hub.workspaces[0]!;
+    try {
+      const page = await openSessionTab(hubContext, own);
+      await expect(page.locator("#hub-activity-badge")).toHaveClass(/is-awaiting/);
+      const mine = await ask(hub, own.id, "Mine", "permission:notice-own");
+      const busy = (await childChatControl(hub.workspaces.find(entry => entry.id === "gamma")!, { action: "seed", title: "Finishing", items: [] })) as { conversation: { id: string } };
+      const gamma = hub.workspaces.find(entry => entry.id === "gamma")!;
+      await childChatControl(gamma, { action: "status", conversationId: busy.conversation.id, status: "running" });
+      await openMenu(page);
+      await expectMenuState(page, "gamma", "working", "working");
+      await childChatControl(gamma, { action: "status", conversationId: busy.conversation.id, status: "completed" });
+      await expectMenuState(page, "gamma", "finished", "finished");
+      await closeMenu(page);
+      await expect(page.locator(".attention-notice")).toHaveCount(0);
+      await answer(mine);
+    } finally { await answer(waiting); }
+  });
+
+  test("a question raised while the page was hidden is announced when it comes back", async ({ hub, hubContext }) => {
+    const page = await openSessionTab(hubContext, hub.workspaces[0]!);
+    await settled(page);
+    const setVisibility = (state: "hidden" | "visible") => page.evaluate(value => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => value });
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => value === "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, state);
+    await setVisibility("hidden");
+    const question = await ask(hub, "beta", "Asked while hidden", "permission:notice-hidden");
+    try {
+      await page.waitForTimeout(500);
+      await expect(page.locator(".attention-notice")).toHaveCount(0);
+      await setVisibility("visible");
+      await expect(notice(page, "beta")).toBeVisible();
+    } finally { await answer(question); }
+  });
+
+  test("Open after the answer shows the list with a note instead of another conversation", async ({ hub, hubContext }) => {
+    const beta = hub.workspaces.find(entry => entry.id === "beta")!;
+    await childChatControl(beta, { action: "seed", title: "Unrelated", items: [] });
+    const page = await hubContext.newPage();
+    await page.goto(`${hub.origin}/s/beta/?awaiting=1`);
+    await expect(page.locator("#chat-state")).toHaveText("That request was already answered.");
+    await expect(page.locator("#chat-conversation-select")).toHaveValue("");
+    await expect(page).not.toHaveURL(/awaiting=1/);
+  });
+
+  test.describe("touch mode", () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+    test("the notice sits above the tab bar and Open lands in Chat on the waiting conversation", async ({ hub, hubContext }, testInfo) => {
+      // A conversation of its own, so the Chat tab shows its composer.
+      await childChatControl(hub.workspaces[0]!, { action: "seed", title: "Working here", items: [{ id: "u1", type: "user_message", createdAt: 1, text: "Refactor the parser." }] });
+      const page = await openSessionTab(hubContext, hub.workspaces[0]!);
+      await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+      await page.locator("#touch-tab-files").click();
+      await settled(page);
+      const question = await ask(hub, "beta", "Needs an answer on the phone", "permission:notice-touch");
+      try {
+        await expect(notice(page, "beta")).toBeVisible();
+        const box = (await notice(page, "beta").boundingBox())!;
+        const bar = (await page.locator("#touch-tab-bar").boundingBox())!;
+        expect(box.y + box.height).toBeLessThanOrEqual(bar.y);
+        await shot(page, testInfo, "after-notice-phone-files");
+        // Every tab stays reachable with the notice up.
+        await page.locator("#touch-tab-chat").click();
+        await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-selected", "true");
+        await expect(page.locator("#chat-input")).toBeVisible();
+        const top = (await notice(page, "beta").boundingBox())!;
+        const composer = (await page.locator("#chat-input").boundingBox())!;
+        expect(top.y + top.height).toBeLessThanOrEqual(composer.y);
+        await shot(page, testInfo, "after-notice-phone-chat");
+        await notice(page, "beta").getByRole("link", { name: "Open" }).click();
+        await expect(page).toHaveURL(/\/s\/beta\//);
+        await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-selected", "true");
+        await expect(page.locator("#chat-conversation-select")).toHaveValue(question.conversationId);
+        await shot(page, testInfo, "after-notice-phone-opened");
+      } finally { await answer(question); }
+    });
+
+    test("Open after the answer lands in Chat with the note", async ({ hub, hubContext }, testInfo) => {
+      const page = await hubContext.newPage();
+      await page.goto(`${hub.origin}/s/beta/?awaiting=1`);
+      await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-selected", "true");
+      await expect(page.locator("#chat-state")).toHaveText("That request was already answered.");
+      await expect(page.locator("#chat-conversation-select")).toHaveValue("");
+      await shot(page, testInfo, "after-notice-phone-already-answered");
+    });
   });
 });

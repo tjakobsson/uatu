@@ -330,6 +330,9 @@ describe("safeReturnPath", () => {
       "/s/uatu/?scope=file&documentId=%2FREADME.md",
     );
     expect(safeReturnPath("/")).toBe("/");
+    // A notification's chat destination survives the login bounce.
+    expect(safeReturnPath("/s/uatu/?conversation=claude%3Aone")).toBe("/s/uatu/?conversation=claude%3Aone");
+    expect(safeReturnPath("/s/uatu/?awaiting=1")).toBe("/s/uatu/?awaiting=1");
   });
 
   test("rejects everything that could leave the origin", () => {

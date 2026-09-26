@@ -11,7 +11,7 @@ import { ChatApiClient, ChatConnectionInterruptedError, ChatTransportError, type
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
 import { CoordinatedScrollOwner, type RevealOptions } from "./coordinated-scroll";
 import { ChatViewportController } from "./viewport";
-import { notificationConversation } from "./notification-navigation";
+import { notificationAwaiting, notificationConversation } from "./notification-navigation";
 import { setActiveTab } from "../shell/tab-bar";
 import { expandChatPanel, isChatPanelOpen } from "./surface";
 import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "./surface-visibility";
@@ -87,6 +87,30 @@ const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}
 
 export function initChat(api = new ChatApiClient()): void {
   let notificationTarget = notificationConversation(window.location?.search ?? "");
+  // Opened from another workspace's "needs your answer" notice (?awaiting=1):
+  // this workspace names the conversation that waits, asked at once so the
+  // answer is usually in before the inventory. `undefined` is a failed read —
+  // startup then proceeds as if no destination was named, since saying the
+  // request was answered would be a guess.
+  let awaitingLookup: Promise<string | null | undefined> | null = !notificationTarget && notificationAwaiting(window.location?.search ?? "")
+    ? api.awaiting().catch(() => undefined) : null;
+  let awaitingAnswered = false;
+  const resolveAwaiting = async () => {
+    if (!awaitingLookup) return;
+    const found = await awaitingLookup;
+    awaitingLookup = null;
+    const id = typeof found === "string" ? notificationConversation(`conversation=${encodeURIComponent(found)}`) : null;
+    if (id) notificationTarget = id;
+    else awaitingAnswered = found === null;
+    // The destination is settled: the URL now names what was chosen, as a
+    // push notification's would, and a reload does not ask again.
+    if (window.location) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("awaiting");
+      if (id) url.searchParams.set("conversation", id);
+      window.history.replaceState(window.history.state, "", url);
+    }
+  };
   const surface = document.querySelector<HTMLElement>("#chat-surface");
   const timeline = document.querySelector<HTMLElement>("#chat-timeline");
   const items = document.querySelector<HTMLElement>("#chat-items");
@@ -2858,6 +2882,16 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   const installInitialChooser = () => {
+    if (awaitingAnswered) {
+      // Nothing waits any more: show the list, not some other conversation
+      // dressed up as the one the notice pointed at.
+      awaitingAnswered = false;
+      patchChooser(null);
+      form.hidden = true;
+      if (chatTitle) chatTitle.textContent = chatHeading();
+      announce("That request was already answered.");
+      return;
+    }
     if (notificationTarget) {
       const target = notificationTarget;
       notificationTarget = null;
@@ -4684,6 +4718,7 @@ export function initChat(api = new ChatApiClient()): void {
       select.disabled = false;
       newButton.disabled = false;
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
+      await resolveAwaiting();
       // A selection made mid-bootstrap is the user's; the initial chooser
       // pass must not replace it with this snapshot's newest entry.
       if (startupOwnsSelection && selectionGeneration === selectionAtStart) installInitialChooser();
@@ -4830,7 +4865,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (bootstrapped) void selectConversation(id);
     else notificationTarget = id;
   });
-  if (notificationTarget) revealNotificationChat();
+  if (notificationTarget || awaitingLookup) revealNotificationChat();
   handleChatSurfaceState();
 }
 

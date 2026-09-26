@@ -107,6 +107,14 @@ export class ChatApiClient {
     });
   }
 
+  /** The conversation whose question or permission request is newest in this workspace, or null when nothing waits. */
+  async awaiting(signal?: AbortSignal): Promise<string | null> {
+    const value = await this.get(appUrl("/api/chat/awaiting"), value => value as { conversationId?: unknown }, signal);
+    if (value.conversationId === null) return null;
+    if (typeof value.conversationId !== "string") throw new ChatTransportError("Chat returned an invalid awaiting conversation");
+    return value.conversationId;
+  }
+
   async conversations(signal?: AbortSignal): Promise<ConversationSummary[]> {
     const value = await this.get(appUrl("/api/chat/conversations"), value => value as { conversations?: unknown }, signal);
     if (!Array.isArray(value.conversations)) throw new ChatTransportError("Chat returned an invalid conversation list");

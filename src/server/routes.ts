@@ -565,6 +565,18 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         }, { highWaterMark: 0 }), { headers: { "content-type": "text/event-stream", "cache-control": "no-store, no-transform", "x-accel-buffering": "no" } });
       },
     },
+    // The conversation whose question or permission request has waited the
+    // shortest time: what a page opened from an in-app "needs your answer"
+    // notice selects (`?awaiting=1`). Workspace-local on purpose — the hub's
+    // activity summary says only that something awaits, never which
+    // conversation — and bounded to the id: no question, title, or count.
+    [p("/api/chat/awaiting")]: {
+      GET: (request: Request) => authenticated(request) ?? run(async () => {
+        const pending = deps.chatService.notificationFeed?.snapshot() ?? [];
+        const newest = pending.reduce<(typeof pending)[number] | null>((best, item) => !best || item.createdAt >= best.createdAt ? item : best, null);
+        return { conversationId: newest?.conversationId ?? null };
+      }),
+    },
     [p("/api/chat/status")]: {
       GET: async (request: Request) => authenticated(request) ?? run(async () => ({
         agents: await deps.chatService.status(),

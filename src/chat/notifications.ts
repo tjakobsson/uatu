@@ -24,6 +24,10 @@ export type NotificationSourceEvent = {
 );
 
 export const NOTIFICATION_LIFETIME_MS = 5 * 60_000;
+// How long a needs-answer push may wait for its user to leave (the hub holds
+// it while they are looking at Uatu), and so how long the workspace keeps an
+// unanswered request reconcilable: its resolution must still reach the hub.
+export const NOTIFICATION_HOLD_LIMIT_MS = 60 * 60_000;
 const RETENTION_MS = 24 * 60 * 60_000;
 const DEFAULT_RETAINED_LIMIT = 8192;
 
@@ -125,10 +129,12 @@ export class AgentNotificationTracker {
       if (now - at < RETENTION_MS) break;
       this.settled.delete(id);
     }
-    // Pending alerts older than the send lifetime cannot be recovered into a
-    // deliverable push. Forget them without changing the chat request itself.
+    // A pending request older than the hold limit can no longer become a
+    // push: the hub drops a held one at that age. Forget it without changing
+    // the chat request itself. Until then its answer must still be announced,
+    // or the hub would release a push for a question already answered.
     for (const [id, notification] of this.pending) {
-      if (now - notification.createdAt <= NOTIFICATION_LIFETIME_MS) continue;
+      if (now - notification.createdAt <= NOTIFICATION_HOLD_LIMIT_MS) continue;
       this.pending.delete(id);
       this.remember(id);
     }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { NotificationFeed } from "./notification-feed";
+import { NotificationFeed, type NotificationFrame } from "./notification-feed";
 import type { AgentNotificationEvent } from "./notifications";
 
 const pending = (id: string, createdAt = 1000): AgentNotificationEvent => ({ type: "notification", notification: { id, sourceId: id, conversationId: "opencode:one", kind: "question-pending", createdAt } });
@@ -59,10 +59,24 @@ test("aborted, disposed, and slow subscriptions release their queues", async () 
   expect((await last.next()).done).toBe(true);
 });
 
-test("expired requests leave recovery snapshots", () => {
+test("unanswered requests stay in recovery snapshots for the hold limit, then leave", () => {
   let now = 1000;
   const feed = new NotificationFeed(() => now);
   feed.publish(pending("q"));
-  now += 300_001;
+  now += 30 * 60_000;
+  expect(feed.snapshot().map(item => item.id)).toEqual(["q"]);
+  now += 31 * 60_000;
   expect(feed.snapshot()).toEqual([]);
+});
+
+test("a stale cursor gets a gap snapshot listing a 30-minute-old question, while replay keeps five minutes", async () => {
+  let now = 1000;
+  const feed = new NotificationFeed(() => now);
+  const cursor = (await feed.subscribe().next()).value!.cursor;
+  feed.publish(pending("q"));
+  now += 30 * 60_000;
+  feed.publish(pending("later"));
+  const recovered = await feed.subscribe(cursor).next();
+  expect(recovered.value).toMatchObject({ type: "snapshot", reason: "gap" });
+  expect((recovered.value as Extract<NotificationFrame, { type: "snapshot" }>).pending.map(item => item.id).sort()).toEqual(["later", "q"]);
 });

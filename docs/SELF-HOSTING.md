@@ -179,10 +179,15 @@ VAPID identity, enrollment endpoints/keys, login ownership, preferences, deliver
 journal, and source cursors. Back it up with the rest of that state directory and
 preserve its owner-only permissions. Do not publish it. Restart reuses the keys;
 deleting the file loses the sender identity and requires device re-enrollment.
-Unsent events expire after five minutes. Deduplication records have a bounded
+Unsent events expire after five minutes. Pushes wait while the user has a
+visible Uatu workspace page on any device. A question held that way can still
+be sent up to an hour after it was asked, once the user has been away for
+30 seconds, and it then gets its own five minutes. Deduplication records have a bounded
 24-hour retention window. Browser acceptance is not proof that the OS displayed
 an alert immediately, and delivery is not exactly once.
 
+If alerts seem missing while you work, that is expected: a visible Uatu page on
+any of your devices, including a window left open on another screen, holds them.
 If alerts stop, check the browser/OS permission and Focus settings, hub sender
 configuration, the enrolled workspaces/categories, and whether the enrollment's
 login expired or was revoked. The form reports a missing subscription when the

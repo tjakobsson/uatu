@@ -222,6 +222,15 @@ without installation. Plain HTTP to a remote LAN address does not support push.
 The hub needs outbound access to the browser's push service; no Apple developer
 account or Uatu-hosted relay is needed.
 
+Notifications are for when you are not looking at Uatu. While a workspace page
+is visible on any of your devices, the hub holds your pushes. A finished turn is
+not pushed; the workspace switcher shows it. A question waits, and if it is
+still unanswered 30 seconds after you hide or close your last Uatu page, it is
+pushed then. While you work in one workspace, a question in another shows a
+notice in the page with an **Open** button that takes you to it. With no Uatu
+page visible, alerts go out immediately. The hub dashboard does not count as
+looking, and neither does a page left open in a background tab.
+
 The hub and agent must stay running, but the page can be closed or the phone
 locked. Tapping an alert opens its conversation. Notifications contain generic
 event text and the workspace name, not question text or tool output. Delivery

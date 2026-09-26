@@ -120,10 +120,10 @@ Uatu SHALL produce needs-answer notifications for newly pending questions and pe
 - **AND** an unsent delivery for that request is discarded
 
 ### Requirement: Delivery continues without an open page
-For running workspaces a device covers — its selected workspaces, or every accessible workspace under All workspaces — the hub SHALL observe eligible events and submit Web Push notifications without requiring a browser live stream, an open conversation, or any visible page. Observation SHALL be shared across enrolled devices and SHALL NOT start an unused agent runtime or stopped workspace merely to watch it. A workspace registered after an All workspaces enrollment SHALL be observed once it runs, without any client action; events that occurred before the hub first saw the workspace registered SHALL be treated as history for that device. Device enrollments, server push identity, and pending delivery state SHALL survive hub restart. A reconnect SHALL resume retained events where possible; a replay gap SHALL reconcile still-pending interactions without announcing historical completions. Uatu SHALL document that the hub and agent must be running and that platform delivery timing is controlled by the browser/OS.
+For running workspaces a device covers — its selected workspaces, or every accessible workspace under All workspaces — the hub SHALL observe eligible events and submit Web Push notifications without requiring a browser live stream, an open conversation, or any visible page. Whether an event is sent at once, held, or discarded SHALL follow the presence rule of this capability; an absent page SHALL never prevent a send. Observation SHALL be shared across enrolled devices and SHALL NOT start an unused agent runtime or stopped workspace merely to watch it. A workspace registered after an All workspaces enrollment SHALL be observed once it runs, without any client action; events that occurred before the hub first saw the workspace registered SHALL be treated as history for that device. Device enrollments, server push identity, and pending delivery state SHALL survive hub restart. A reconnect SHALL resume retained events where possible; a replay gap SHALL reconcile still-pending interactions without announcing historical completions. Uatu SHALL document that the hub and agent must be running, that pushes are withheld while the user has a visible session page, and that platform delivery timing is controlled by the browser/OS.
 
 #### Scenario: The phone is locked
-- **WHEN** an enrolled phone is locked, its page has released its live connection, and an observed agent asks a question
+- **WHEN** an enrolled phone is locked, its page has released its live connection, the user has no other visible session page, and an observed agent asks a question
 - **THEN** the hub submits the matching notification to the phone's push service
 - **AND** delivery does not depend on waking the page or opening a browser stream
 
@@ -152,7 +152,7 @@ For running workspaces a device covers — its selected workspaces, or every acc
 - **AND** it does not infer old successful completions from conversation history
 
 ### Requirement: Delivery is bounded and suppresses duplicate events
-Each event/enrollment pair SHALL have one logical delivery identity. Repeated source frames and replay within the supported retention window SHALL NOT enqueue a new notification for an already recorded occurrence. Temporary push failures SHALL use bounded retry and a five-minute delivery lifetime measured from the source event; expired events SHALL be discarded. Permanently invalid subscriptions SHALL be removed from sending. Platform-accepted pushes SHALL NOT be deliberately resubmitted as new events. Duplicate deliveries caused by an ambiguous transport outcome SHALL use the same notification identity so they replace rather than multiply visible entries. Uatu SHALL NOT claim exactly-once OS delivery.
+Each event/enrollment pair SHALL have one logical delivery identity. Repeated source frames and replay within the supported retention window SHALL NOT enqueue a new notification for an already recorded occurrence. Temporary push failures SHALL use bounded retry and a five-minute delivery lifetime. The lifetime SHALL be measured from the source event, except for a needs-answer event held under the presence rule, whose lifetime SHALL be measured from its release; expired events SHALL be discarded. Permanently invalid subscriptions SHALL be removed from sending. Platform-accepted pushes SHALL NOT be deliberately resubmitted as new events. Duplicate deliveries caused by an ambiguous transport outcome SHALL use the same notification identity so they replace rather than multiply visible entries. Uatu SHALL NOT claim exactly-once OS delivery.
 
 #### Scenario: Source replay repeats completion
 - **WHEN** a recorded completion event is replayed after reconnect or hub restart within retention
@@ -168,8 +168,13 @@ Each event/enrollment pair SHALL have one logical delivery identity. Repeated so
 - **THEN** the hub removes it from active delivery and the client reports that enrollment needs renewal on its next visit
 
 #### Scenario: An old event expires
-- **WHEN** five minutes have passed since the source event before a send or retry can occur
+- **WHEN** five minutes have passed since the source event before a send or retry can occur, and the event was not held under the presence rule
 - **THEN** Uatu drops that delivery rather than sending a stale alert
+
+#### Scenario: A released question gets a fresh lifetime
+- **WHEN** a question held for 20 minutes is released because its user became away
+- **THEN** the hub may send and retry it for five minutes from the release
+- **AND** drops it if it has not been accepted by then
 
 ### Requirement: Notifications open the relevant conversation
 Notifications SHALL display a concise needs-answer or turn-completed message and workspace identity without including transcript text, question answers, permission details, or tool output. Each notification SHALL carry a same-origin destination for the corresponding workspace and agent-qualified conversation. Tapping it SHALL reuse a suitable Uatu window or open one, activate Chat in the current UI mode, and select that conversation. If login is required, the intended destination SHALL survive login. Missing or inaccessible destinations SHALL produce an understandable unavailable state rather than opening a different conversation as though it were the target. Each delivered push SHALL request a visible notification; foreground pages SHALL NOT also display a duplicate local notification.
@@ -190,3 +195,67 @@ Notifications SHALL display a concise needs-answer or turn-completed message and
 #### Scenario: Foreground delivery has one notification path
 - **WHEN** the same eligible event reaches an open page and the push worker
 - **THEN** only the push path requests an OS notification
+
+### Requirement: Delivery stays quiet while the user is present
+The hub SHALL treat a hub user as *present* while at least one hub-served session page authenticated as that user is visible on any device, and as *recently present* for 30 seconds after the last such page stops being visible or loses its connection. A user who is neither SHALL be *away*. The hub dashboard, the login page, and pages hidden in the background SHALL NOT make a user present. Presence SHALL be evaluated per hub user across all of that user's devices and SHALL govern every enrolled device of that user regardless of each device's workspace and category preferences. When the hub starts, every user SHALL begin as recently present so that pages reconnecting after a restart are counted before any delivery is decided.
+
+Presence SHALL affect sending as follows:
+- A successful-turn-completion event that becomes sendable while its user is present SHALL be discarded. One that becomes sendable while its user is recently present SHALL be held; it SHALL be sent if the user becomes away and discarded if the user becomes present first.
+- A needs-answer event that becomes sendable while its user is present or recently present SHALL be held. A held needs-answer event SHALL be released for sending when its user becomes away, provided its interaction is still pending and no more than 60 minutes have passed since the source event; otherwise it SHALL be discarded.
+- An event that becomes sendable while its user is away SHALL be sent without delay, as before.
+
+Holding SHALL NOT create additional logical deliveries: a held event keeps its one delivery identity per enrollment and is sent at most once. A resolution of a held interaction, loss of workspace access, device removal, and every other rule that discards an unsent delivery SHALL discard a held one alike. Held deliveries and their release state SHALL survive a hub restart. The workspace SHALL keep an unanswered interaction reconcilable for at least the 60-minute hold limit so that a replay gap does not misreport a held interaction as answered or as still pending.
+
+#### Scenario: A question arrives in the conversation on screen
+- **WHEN** a user is viewing a workspace's chat on their desktop and the agent there asks a question
+- **THEN** no push is sent to any of that user's enrolled devices while the page stays visible
+- **AND** the question is presented in the chat as usual
+
+#### Scenario: A turn finishes in another workspace while the user works
+- **WHEN** a user has a visible session page for workspace alpha and an agent in workspace beta successfully completes a turn
+- **THEN** no completion push is sent for that turn to any of the user's devices
+- **AND** the switcher reports beta as finished
+
+#### Scenario: Presence on one device quiets the others
+- **WHEN** a user has a visible session page on their desktop, their phone is enrolled with All workspaces, and an agent asks a question
+- **THEN** the phone receives no push while the desktop page stays visible
+
+#### Scenario: A question left unanswered follows the user out
+- **WHEN** a question arrived while the user was present, remains unanswered, and the user hides or closes their last visible session page
+- **THEN** after 30 seconds away the hub sends that question's needs-answer push to the user's devices that cover it
+- **AND** the push expires five minutes after it was released if it cannot be delivered
+
+#### Scenario: A brief tab switch sends nothing
+- **WHEN** a user with a held question switches away from the Uatu tab and returns within 30 seconds without answering
+- **THEN** no push is sent for that question
+- **AND** the question remains held
+
+#### Scenario: A turn finishes just after the user looks away
+- **WHEN** a user hides their last visible session page and an agent successfully completes a turn 10 seconds later
+- **THEN** the completion is held
+- **AND** it is sent if the user is still away 30 seconds after hiding the page
+- **AND** it is discarded if the user returns before then
+
+#### Scenario: A held question is answered from another device
+- **WHEN** a question is held for a present user and is answered from any device
+- **THEN** the held delivery is discarded and no push is sent when the user later leaves
+
+#### Scenario: A held question outlives the hold limit
+- **WHEN** a question is held for a present user and the user first becomes away more than 60 minutes after it was asked
+- **THEN** the held delivery is discarded and no push is sent
+
+#### Scenario: The user is away
+- **WHEN** no session page of the user has been visible for more than 30 seconds and an eligible event occurs
+- **THEN** the hub sends it without waiting, subject to each device's preferences
+
+#### Scenario: The dashboard does not count as presence
+- **WHEN** a user's only open Uatu page is the hub dashboard and an agent asks a question
+- **THEN** the hub treats the user as away and sends the needs-answer push
+
+#### Scenario: Another user's presence does not quiet mine
+- **WHEN** user A has a visible session page and user B, who has no visible page, has a device covering the same workspace
+- **THEN** B's device receives the workspace's eligible pushes without delay
+
+#### Scenario: The hub restarts while the user is looking
+- **WHEN** the hub restarts and the user's visible session page reconnects within 30 seconds
+- **THEN** events that arrive in that window are held or discarded as for a present user rather than pushed

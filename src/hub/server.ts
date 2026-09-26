@@ -116,6 +116,9 @@ export type HubDeps = {
   worktreeReconcilerOptions?: Pick<ConstructorParameters<typeof WorktreeReconciler>[0], "minIntervalMs" | "periodMs" | "now" | "timers">;
   metrics?: MetricsRegistry;
   notifications?: HubNotifications;
+  // Test seam: how long a user stays `recent` after their last visible
+  // session page goes (src/hub/presence.ts). Production uses the default.
+  presenceGraceMs?: number;
 };
 
 // The Hub-side worktree invalidation loop (tasks 5.1–5.2): the reconciler
@@ -2081,7 +2084,8 @@ function assembleLive(deps: HubDeps): { live: LiveEndpoint; liveBroker: LiveBrok
   const metrics = deps.metrics ?? new MetricsRegistry();
   const liveBroker = deps.liveBroker ?? new LiveBroker(
     createHubUpstreamSource({ sessions: deps.sessions, registry: deps.registry }),
-    { metrics, marks: deps.activityMarks, watchActivityFromStart: deps.watchActivityFromStart ?? false },
+    { metrics, marks: deps.activityMarks, watchActivityFromStart: deps.watchActivityFromStart ?? false,
+      ...(deps.presenceGraceMs !== undefined ? { presenceGraceMs: deps.presenceGraceMs } : {}) },
   );
   const live = deps.live ?? new LiveEndpoint({
     broker: liveBroker,
@@ -2106,6 +2110,8 @@ export function startHubServer(deps: HubDeps) {
     reservations: deps.reservations,
   });
   const { live, liveBroker } = assembleLive(deps);
+  // Pushes wait while the user has a visible session page (src/hub/presence.ts).
+  deps.notifications?.usePresence(liveBroker);
   const worktreeReconciler = assembleWorktreeReconciler(deps, liveBroker);
   const handler = createHubFetchHandler({ ...deps, cloneJobs, live, liveBroker, ...(worktreeReconciler ? { worktreeReconciler } : {}) });
   const server = Bun.serve<BridgeData>({

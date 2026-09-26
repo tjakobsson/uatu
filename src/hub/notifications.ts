@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CHILD_NOTIFICATIONS_PATH, type NotificationFrame } from "../chat/notification-feed";
-import { NOTIFICATION_LIFETIME_MS, type AgentNotification } from "../chat/notifications";
+import { NOTIFICATION_HOLD_LIMIT_MS, NOTIFICATION_LIFETIME_MS, type AgentNotification } from "../chat/notifications";
 import type { LiveUpstreamSource } from "./live-broker";
 import { SseFrameParser } from "./live-sse";
-import { NOTIFICATION_CATEGORIES, NotificationStore, type NotificationData, type NotificationDevice, type NotificationPreferences } from "./notification-store";
+import { NOTIFICATION_CATEGORIES, NotificationStore, type NotificationData, type NotificationDelivery, type NotificationDevice, type NotificationPreferences } from "./notification-store";
+import type { Presence, PresenceSource } from "./presence";
 import { createPushSender, parsePushSubscription, validPushContact, type PushSender } from "./push-sender";
 
 export class NotificationRequestError extends Error {
@@ -23,6 +24,8 @@ export class HubNotifications {
   private readonly now: () => number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubscribe: (() => void) | undefined;
+  private presenceSource: PresenceSource | null = null;
+  private unsubscribePresence: (() => void) | undefined;
   private draining: Promise<void> | null = null;
   private reconciling: Promise<void> | null = null;
   private drainAgain = false;
@@ -36,12 +39,26 @@ export class HubNotifications {
     authorized: (principal: Principal, workspaceId?: string) => boolean;
     workspaceName: (id: string) => string;
     sender?: PushSender;
+    /** Whether each user is looking at Uatu. Absent, every user reads as away and pushes go out at once. */
+    presence?: PresenceSource;
     now?: () => number;
     settleTimeoutMs?: number;
   }) {
     this.now = options.now ?? Date.now;
     this.sender = options.sender ?? (options.contact && validPushContact(options.contact)
       ? createPushSender({ keys: options.store.snapshot().keys, contact: options.contact }) : null);
+    if (options.presence) this.usePresence(options.presence);
+  }
+
+  /** Reads presence from `source` from now on; a change re-runs the delivery pass, so a release goes out promptly. */
+  usePresence(source: PresenceSource): void {
+    this.unsubscribePresence?.();
+    this.presenceSource = source;
+    this.unsubscribePresence = source.onPresenceChange(() => { if (!this.closed) void this.drain(); });
+  }
+
+  private presence(user: string): Presence {
+    return this.presenceSource?.presence(user) ?? "away";
   }
 
   start(): void {
@@ -333,7 +350,12 @@ export class HubNotifications {
 
   private async deliver(): Promise<void> {
     if (!this.sender || this.closed) return;
-    const queue = this.options.store.snapshot().deliveries.filter(delivery => delivery.status === "pending" && delivery.nextAttemptAt <= this.now()).map(delivery => delivery.key);
+    const data = this.options.store.snapshot();
+    const users = new Map(data.devices.map(device => [device.id, device.user]));
+    // A delivery already held for a user who is still here has nothing to decide this pass; leaving it out keeps
+    // a page left open on a question from re-reading the journal every second.
+    const queue = data.deliveries.filter(delivery => delivery.status === "pending" && delivery.nextAttemptAt <= this.now()
+      && !(this.waiting(delivery, users.get(delivery.deviceId)) && this.now() < deadline(delivery))).map(delivery => delivery.key);
     // A hung endpoint holds only its own worker; a failed journal write ends this pass and the next drain resumes from durable state.
     let stopped = false;
     await Promise.all(Array.from({ length: Math.min(SEND_CONCURRENCY, queue.length) }, async () => {
@@ -349,10 +371,25 @@ export class HubNotifications {
     const delivery = latest.deliveries.find(entry => entry.key === key);
     if (!delivery || delivery.status !== "pending" || !delivery.notification) return;
     const device = latest.devices.find(device => device.id === delivery.deviceId);
-    const expires = delivery.createdAt + NOTIFICATION_LIFETIME_MS;
-    if (!device || this.now() >= expires || !this.eligible(device, delivery.workspaceId, delivery.notification)) return this.finish(key, "discarded");
+    if (!device || this.now() >= deadline(delivery) || !this.eligible(device, delivery.workspaceId, delivery.notification)) return this.finish(key, "discarded");
     if (delivery.nextAttemptAt > this.now()) return;
     const notification = delivery.notification;
+    // Presence decides once, before the first send (src/hub/presence.ts); a send already under way finishes by the retry rules.
+    if (delivery.attempts === 0 && delivery.releasedAt === undefined) {
+      const presence = this.presence(device.user);
+      const needsAnswer = notification.kind !== "turn-completed";
+      if (!needsAnswer && presence === "present") return this.finish(key, "discarded");
+      if (presence !== "away") {
+        if (needsAnswer && delivery.heldAt === undefined) await this.mark(key, entry => { entry.heldAt = this.now(); });
+        return;
+      }
+      if (delivery.heldAt !== undefined) {
+        const releasedAt = this.now();
+        if (!await this.mark(key, entry => { entry.releasedAt = releasedAt; })) return;
+        delivery.releasedAt = releasedAt;
+      }
+    }
+    const expires = deadline(delivery);
     const payload = JSON.stringify({ version: 1, id: createHash("sha256").update(key).digest("hex"), kind: notification.kind,
       title: this.options.workspaceName(delivery.workspaceId).slice(0, 120),
       body: notification.kind === "turn-completed" ? "Agent turn finished" : "An agent needs your answer",
@@ -377,6 +414,23 @@ export class HubNotifications {
     });
   }
 
+  /** Whether a pending, unsent delivery stays put for now because its user is looking (or just looked) at Uatu. */
+  private waiting(delivery: NotificationDelivery, user: string | undefined): boolean {
+    if (user === undefined || delivery.attempts > 0 || delivery.releasedAt !== undefined) return false;
+    const presence = this.presence(user);
+    return delivery.heldAt !== undefined ? presence !== "away" : delivery.notification?.kind === "turn-completed" && presence === "recent";
+  }
+
+  /** Updates a still-pending delivery; false when it has meanwhile been settled or dropped. */
+  private mark(key: string, change: (delivery: NotificationDelivery) => void): Promise<boolean> {
+    return this.options.store.mutate(data => {
+      const entry = data.deliveries.find(entry => entry.key === key);
+      if (!entry || entry.status !== "pending") return false;
+      change(entry);
+      return true;
+    });
+  }
+
   private finish(key: string, status: "accepted" | "discarded"): Promise<void> {
     return this.options.store.mutate(data => {
       const delivery = data.deliveries.find(entry => entry.key === key);
@@ -386,7 +440,7 @@ export class HubNotifications {
 
   private prune(data: NotificationData): void {
     data.deliveries = data.deliveries.filter(delivery => this.now() - delivery.createdAt < 24 * 60 * 60_000);
-    for (const delivery of data.deliveries) if (delivery.status === "pending" && this.now() - delivery.createdAt >= NOTIFICATION_LIFETIME_MS) {
+    for (const delivery of data.deliveries) if (delivery.status === "pending" && this.now() >= deadline(delivery)) {
       delivery.status = "discarded"; delete delivery.notification;
     }
   }
@@ -395,12 +449,23 @@ export class HubNotifications {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     this.unsubscribe?.();
+    this.unsubscribePresence?.();
     for (const observer of this.observers.values()) observer.abort.abort();
     await Promise.all([...this.observers.values()].map(observer => observer.done));
     await this.draining;
     await this.reconciling;
     await this.options.store.settled();
   }
+}
+
+/**
+ * When an unsent delivery stops being worth sending: five minutes after the source event, or — for a needs-answer push
+ * held while its user was looking at Uatu — up to the hold limit while held and five minutes from its release.
+ */
+function deadline(delivery: NotificationDelivery): number {
+  if (delivery.releasedAt !== undefined) return delivery.releasedAt + NOTIFICATION_LIFETIME_MS;
+  if (delivery.heldAt !== undefined) return delivery.createdAt + NOTIFICATION_HOLD_LIMIT_MS;
+  return delivery.createdAt + NOTIFICATION_LIFETIME_MS;
 }
 
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }

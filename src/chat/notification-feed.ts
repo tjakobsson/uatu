@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { NOTIFICATION_LIFETIME_MS, type AgentNotification, type AgentNotificationEvent } from "./notifications";
+import { NOTIFICATION_HOLD_LIMIT_MS, NOTIFICATION_LIFETIME_MS, type AgentNotification, type AgentNotificationEvent } from "./notifications";
 
 export { CHILD_NOTIFICATIONS_PATH } from "../shared/live-protocol";
 export type NotificationFrame =
@@ -76,8 +76,10 @@ export class NotificationFeed {
     while (this.ring.length && (this.bytes > this.limitBytes || this.now() - this.ring[0]!.at > NOTIFICATION_LIFETIME_MS)) {
       this.bytes -= this.ring.shift()!.bytes;
     }
+    // Replay needs only the push lifetime; an unanswered request stays listed for as long as the hub may hold its push
+    // (src/hub/presence.ts), so a gap snapshot does not report a still-open question as answered.
     for (const [id, notification] of this.pending) {
-      if (this.now() - notification.createdAt > NOTIFICATION_LIFETIME_MS) this.pending.delete(id);
+      if (this.now() - notification.createdAt > NOTIFICATION_HOLD_LIMIT_MS) this.pending.delete(id);
     }
   }
 }

@@ -8,6 +8,7 @@ import { qualifyNotificationEvent } from "../src/chat/notifications";
 import type { ChatProvider } from "../src/chat/provider";
 import { NotificationStore } from "../src/hub/notification-store";
 import { HubNotifications } from "../src/hub/notifications";
+import type { Presence } from "../src/hub/presence";
 
 // Actual adapter -> child SSE bytes -> hub journal -> fake push transport.
 // Both provider suites drive this without constructing any browser page.
@@ -18,9 +19,16 @@ export async function notificationPipeline(provider: ChatProvider, workspacePath
   const feed = new NotificationFeed();
   const sent: Array<{ endpoint: string; payload: { kind: string; url: string; id: string } }> = [];
   let opens = 0;
+  // The user's presence as the hub's live broker would report it; it outlives a hub restart like the pages do.
+  let presence: Presence = "away";
+  const presenceListeners = new Set<(user: string) => void>();
   const options: ConstructorParameters<typeof HubNotifications>[0] = { store,
     sender: async (subscription, payload) => { sent.push({ endpoint: subscription.endpoint, payload: JSON.parse(payload) }); return { kind: "accepted" }; },
     authorized: () => true, workspaceName: () => "Project",
+    presence: {
+      presence: () => presence,
+      onPresenceChange: listener => { presenceListeners.add(listener); return () => { presenceListeners.delete(listener); }; },
+    },
     source: {
       isRunning: () => true, workspaceIds: () => ["project"],
       open: async request => {
@@ -51,6 +59,14 @@ export async function notificationPipeline(provider: ChatProvider, workspacePath
   void adapter.startEventPump().catch(() => {});
   return {
     sent, opens: () => opens,
+    setPresence(value: Presence) { presence = value; for (const listener of [...presenceListeners]) listener("person"); },
+    /** Waits until the journal has recorded `count` deliveries (sent or not). */
+    async waitForDeliveries(count: number) {
+      for (let i = 0; i < 500 && options.store.snapshot().deliveries.length < count; i++) await Bun.sleep(2);
+      await hub.drain();
+      if (options.store.snapshot().deliveries.length < count) throw new Error(`expected ${count} recorded deliveries`);
+    },
+    heldCount: () => options.store.snapshot().deliveries.filter(delivery => delivery.status === "pending" && delivery.heldAt !== undefined).length,
     async restartHub() {
       await hub.dispose();
       const restored = new NotificationStore(path.join(root, "notifications.json"));

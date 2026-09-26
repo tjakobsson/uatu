@@ -15,6 +15,10 @@ export type NotificationDevice = NotificationPreferences & {
 export type NotificationDelivery = {
   key: string; deviceId: string; workspaceId: string; notification?: AgentNotification;
   status: "pending" | "accepted" | "discarded"; createdAt: number; attempts: number; nextAttemptAt: number;
+  /** A needs-answer push withheld because its user was looking at Uatu (src/hub/presence.ts); absent on older records. */
+  heldAt?: number;
+  /** When a held push was let go because its user left; its delivery lifetime counts from here. */
+  releasedAt?: number;
 };
 export type NotificationData = {
   version: 1; keys: VapidKeys; devices: NotificationDevice[];

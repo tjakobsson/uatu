@@ -29,6 +29,7 @@
 import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "../chat/surface-visibility";
 import { appBasePath, appUrl, workspaceIdFromBasePath } from "../shared/app-url";
 import type { WorkspaceActivity } from "../shared/live-protocol";
+import { AttentionNotices, attentionNoticeHref, renderAttentionNotices } from "./attention-notice";
 import { awaitConfirmedLive, holdManualReload, liveChannel } from "./live";
 import { setCurrentSessionRunning } from "./session-running";
 import { openWorktreeFork, worktreeForkIcon, worktreeProvenanceLabel } from "./worktree-dialog";
@@ -505,6 +506,20 @@ export function initHubNav(): void {
   // reported at: what tells a list answer from a report newer than it.
   let reports = 0;
   const reportedAt = new Map<string, number>();
+  // Questions raised in other workspaces while this page is open
+  // (src/shell/attention-notice.ts). Named as the switcher names them.
+  const renderNotices = () => renderAttentionNotices(document, attention.notices(), {
+    label: ws => {
+      const workspace = latest.find(entry => entry.id === ws);
+      return workspace ? workspaceMenuLabel(workspace) : ws;
+    },
+    open: ws => {
+      attention.dismiss(ws);
+      hubNavigation(attentionNoticeHref(ws));
+    },
+    dismiss: ws => attention.dismiss(ws),
+  });
+  const attention = new AttentionNotices(currentId, renderNotices);
 
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
   const chipBadge = toggle.querySelector<HTMLSpanElement>("#hub-activity-badge");
@@ -847,8 +862,11 @@ export function initHubNav(): void {
       if (!isListed(ws) && (reportedAt.get(ws) ?? 0) <= reportsBefore) {
         activity.delete(ws);
         reportedAt.delete(ws);
+        attention.forget(ws);
       }
     }
+    // A rename reaches the notices' labels too.
+    if (attention.notices().length) renderNotices();
     applyListedRunning(fresh.workspaces, reportsBefore);
     updateChip();
     if (!menu.hidden) {
@@ -986,6 +1004,7 @@ export function initHubNav(): void {
       reportedAt.set(ws, reports);
       activity.set(ws, facts);
       latest = applyWorkspaceActivity(latest, ws, facts);
+      attention.report(ws, facts);
       // Before the chip and menu render: the current row reads the fact.
       if (ws === currentId) {
         // A running report is the hub's own: the feed only says so for a

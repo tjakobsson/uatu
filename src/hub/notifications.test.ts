@@ -6,6 +6,7 @@ import { createECDH, randomBytes } from "node:crypto";
 import { NotificationStore } from "./notification-store";
 import { HubNotifications } from "./notifications";
 import type { PushSender, PushSendResult } from "./push-sender";
+import type { Presence } from "./presence";
 import { NotificationFeed, type NotificationFrame } from "../chat/notification-feed";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -25,7 +26,10 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
   const store = new NotificationStore(file); await store.load();
   let now = 1000;
   let authorized = true;
-  const sessions = new Set(["session-one"]);
+  const sessions = new Set(["session-one", "session-two"]);
+  // Everyone is away unless a test says otherwise, which is how a hub without a presence source behaves.
+  const presence = new Map<string, Presence>();
+  const presenceListeners = new Set<(user: string) => void>();
   let result: PushSendResult = { kind: "accepted" };
   const results = new Map<string, PushSendResult>();
   const sends: Array<{ endpoint: string; payload: string; ttl: number }> = [];
@@ -43,7 +47,11 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
   let stalled: Array<{ resolve: () => void; signal?: AbortSignal }> | null = null;
   let failOpens = 0;
   const hub = new HubNotifications({ store, sender, now: () => now, settleTimeoutMs: options.settleTimeoutMs ?? 50, workspaceName: ws => ws === "workspace" ? "Project" : "Other",
-    authorized: (user, ws) => authorized && user.user === "one" && sessions.has(user.sessionId) && (ws === undefined || registered.has(ws)),
+    authorized: (user, ws) => authorized && (user.user === "one" || user.user === "two") && sessions.has(user.sessionId) && (ws === undefined || registered.has(ws)),
+    presence: {
+      presence: user => presence.get(user) ?? "away",
+      onPresenceChange: listener => { presenceListeners.add(listener); return () => { presenceListeners.delete(listener); }; },
+    },
     source: {
       isRunning: ws => running.has(ws), workspaceIds: () => [...registered],
       open: async request => {
@@ -72,6 +80,7 @@ async function fixture(options: { settleTimeoutMs?: number } = {}) {
     revoke: () => { authorized = false; }, result: (value: PushSendResult) => { result = value; },
     batch: (frames: NotificationFrame[]) => { batch = frames; }, onOpen: (hook: () => void) => { onOpen = hook; }, sessions, resultFor: (id: string, value: PushSendResult) => { results.set(`https://web.push.apple.com/${id}`, value); },
     hold: (id: string) => { let release!: () => void; gates.set(`https://web.push.apple.com/${id}`, new Promise<void>(resolve => { release = resolve; })); return release; },
+    setPresence: (value: Presence, user = "one") => { presence.set(user, value); for (const listener of presenceListeners) listener(user); },
     enroll: (id = "phone", preferences = {}, as = principal) => hub.enroll(as, { subscription: subscription(id), workspaceIds: ["workspace"], needsAnswer: true, completed: true, ...preferences }),
   };
 }
@@ -460,4 +469,222 @@ test("unregistering a covered workspace discards its unsent deliveries and leave
   await f.hub.receive("workspace", occurrence("kept", f.now())); await f.hub.drain();
   expect(f.sends.filter(send => JSON.parse(send.payload).title === "Project")).toHaveLength(1);
   expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["gone", "discarded"], ["kept", "accepted"]]);
+});
+
+// Presence (src/hub/presence.ts): pushes wait while the user is looking at Uatu.
+const statuses = (f: Awaited<ReturnType<typeof fixture>>) => f.store.snapshot().deliveries.map(delivery => delivery.status);
+
+test("a question on screen is held, not sent, while the user is present", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.tick(10 * 60_000); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(f.store.snapshot().deliveries).toMatchObject([{ status: "pending", heldAt: 1000 }]);
+});
+
+test("a completion while the user is present is discarded, on every device", async () => {
+  const f = await fixture(); await f.enroll("phone"); await f.enroll("desktop", { allWorkspaces: true, workspaceIds: [] });
+  f.setPresence("present");
+  await f.hub.receive("other", occurrence("turn", f.now(), "turn-completed"));
+  await f.hub.receive("workspace", occurrence("turn2", f.now(), "turn-completed")); await f.hub.drain();
+  f.setPresence("away"); f.tick(1000); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f).every(status => status === "discarded")).toBe(true);
+});
+
+test("presence on one device quiets every device of that user", async () => {
+  const f = await fixture(); await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] }); await f.enroll("desktop");
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["pending", "pending"]);
+});
+
+test("a question left unanswered follows the user out with a fresh lifetime", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.tick(20 * 60_000); f.setPresence("recent"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  f.tick(30_000); f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+  expect(JSON.parse(f.sends[0]!.payload).body).toBe("An agent needs your answer");
+  expect(f.sends[0]!.ttl).toBe(300);
+  expect(f.store.snapshot().deliveries).toMatchObject([{ status: "accepted" }]);
+});
+
+test("a released question that cannot be delivered expires five minutes after its release", async () => {
+  const f = await fixture(); await f.enroll(); f.result({ kind: "retry" });
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.tick(20 * 60_000); f.setPresence("away"); await f.hub.drain();
+  const releasedAt = f.now();
+  expect(f.store.snapshot().deliveries).toMatchObject([{ status: "pending", releasedAt }]);
+  // Coming back does not re-hold a push the hub has already started sending.
+  f.setPresence("present"); f.tick(60_000); await f.hub.drain();
+  expect(f.sends).toHaveLength(2);
+  f.tick(4 * 60_000); await f.hub.drain();
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("a brief tab switch sends nothing and the question stays held", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.setPresence("recent"); f.tick(10_000); await f.hub.drain();
+  f.setPresence("present"); f.tick(10_000); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(f.store.snapshot().deliveries).toMatchObject([{ status: "pending", heldAt: 1000 }]);
+});
+
+test("a completion just after looking away is sent if the user stays away", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("recent");
+  await f.hub.receive("workspace", occurrence("turn", f.now(), "turn-completed")); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  f.tick(20_000); f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+  expect(JSON.parse(f.sends[0]!.payload).body).toBe("Agent turn finished");
+});
+
+test("a completion just after looking away is dropped if the user comes back", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("recent");
+  await f.hub.receive("workspace", occurrence("turn", f.now(), "turn-completed")); await f.hub.drain();
+  f.tick(10_000); f.setPresence("present"); await f.hub.drain();
+  f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("a held question answered from any device is never sent", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.tick(15 * 60_000);
+  await f.hub.receive("workspace", { type: "event", cursor: "epoch:r", event: { type: "resolved", id: "q", conversationId: "opencode:conversation" } });
+  f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("a held question outliving the hold limit is dropped, not sent", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.tick(60 * 60_000); f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("an unheld delivery still expires five minutes after the event", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("recent");
+  await f.hub.receive("workspace", occurrence("turn", f.now(), "turn-completed")); await f.hub.drain();
+  f.tick(300_000); f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("an away user is notified at once", async () => {
+  const f = await fixture(); await f.enroll();
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+});
+
+test("another user's presence does not quiet mine", async () => {
+  const f = await fixture();
+  await f.enroll("mine");
+  await f.enroll("theirs", {}, { user: "two", sessionId: "session-two" });
+  f.setPresence("present", "one");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  expect(f.sends.map(send => send.endpoint)).toEqual(["https://web.push.apple.com/theirs"]);
+});
+
+test("while the hub starts, deliveries wait for reconnecting pages", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("recent");
+  await f.hub.receive("workspace", occurrence("q", f.now()));
+  await f.hub.receive("workspace", occurrence("turn", f.now(), "turn-completed")); await f.hub.drain();
+  f.tick(5_000); f.setPresence("present"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(f.store.snapshot().deliveries.map(delivery => [JSON.parse(delivery.key)[2], delivery.status])).toEqual([["q", "pending"], ["turn", "discarded"]]);
+});
+
+test("a presence change runs the delivery pass on its own", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.setPresence("away");
+  for (let i = 0; i < 200 && f.sends.length === 0; i++) await Bun.sleep(2);
+  expect(f.sends).toHaveLength(1);
+});
+
+// Every rule that discards an unsent delivery discards a held one alike.
+test("held deliveries are discarded by a gap snapshot that no longer lists them", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.tick(20 * 60_000);
+  await f.hub.receive("workspace", { type: "snapshot", reason: "gap", cursor: "e:9", pending: [] });
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("held deliveries survive a gap snapshot that still lists them", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  const frame = occurrence("q", f.now()) as Extract<NotificationFrame, { type: "event" }>;
+  await f.hub.receive("workspace", frame); await f.hub.drain();
+  f.tick(20 * 60_000);
+  if (frame.event.type !== "notification") throw new Error("expected notification");
+  await f.hub.receive("workspace", { type: "snapshot", reason: "gap", cursor: "e:9", pending: [frame.event.notification] });
+  f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(1);
+});
+
+test("held deliveries are discarded when access is lost", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  f.revoke(); f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("held deliveries are discarded when the device is removed", async () => {
+  const f = await fixture(); const enrolled = await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  await f.hub.remove(principal, enrolled.device!.id);
+  f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("held deliveries are discarded when their workspace is unregistered", async () => {
+  const f = await fixture(); await f.enroll("phone", { allWorkspaces: true, workspaceIds: [] });
+  f.setPresence("present");
+  await f.hub.receive("other", occurrence("q", f.now())); await f.hub.drain();
+  f.unregister("other"); f.hub.refresh();
+  for (let i = 0; i < 200 && statuses(f)[0] !== "discarded"; i++) await Bun.sleep(2);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("held deliveries are discarded when re-enrollment drops their category", async () => {
+  const f = await fixture(); await f.enroll();
+  f.setPresence("present");
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  await f.enroll("phone", { needsAnswer: false });
+  f.setPresence("away"); await f.hub.drain();
+  expect(f.sends).toHaveLength(0);
+  expect(statuses(f)).toEqual(["discarded"]);
+});
+
+test("records written before holding existed load and send as before", async () => {
+  const f = await fixture(); await f.enroll(); f.result({ kind: "retry" });
+  await f.hub.receive("workspace", occurrence("q", f.now())); await f.hub.drain();
+  const restored = new NotificationStore(f.file); await restored.load();
+  expect(restored.snapshot().deliveries[0]).not.toHaveProperty("heldAt");
+  expect(restored.snapshot().deliveries[0]).not.toHaveProperty("releasedAt");
 });

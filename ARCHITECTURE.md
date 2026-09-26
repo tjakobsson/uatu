@@ -78,6 +78,44 @@ and workspace access before sending. Expiry, bounded retry, known interaction
 resolution, and subscription removal are delivery concerns. `push-sender.ts`
 uses the MIT-licensed Web Crypto implementation for encryption and VAPID signing.
 
+Pushes wait while the user is looking at Uatu. `hub/presence.ts` defines the
+signal and `LiveBroker` owns it: a hub user is *present* while at least one of
+their `activity` feed sinks exists. Only a visible session page holds a live
+stream subscribed to `activity`; hidden pages release theirs, and the dashboard
+never asks for the topic. When the last sink goes, the user is *recent* for 30 s
+(`PRESENCE_GRACE_MS`), then *away*. A new broker treats every user as recent for
+its first 30 s, so pages reconnecting after a restart are counted first.
+Presence is per user across devices. `startHubServer` hands the broker to
+`HubNotifications.usePresence`, and a presence change runs a delivery pass.
+
+`attempt()` decides once, before the first send:
+
+| Category | present | recent | away |
+|---|---|---|---|
+| turn completed | discarded | waits | sent |
+| needs answer | held (`heldAt`) | held | sent; a held one is released (`releasedAt`) first |
+
+A held question can be released up to `NOTIFICATION_HOLD_LIMIT_MS` (60 min)
+after the event, and its five-minute lifetime counts from the release. A held
+delivery stays `pending`, so resolution, gap reconciliation, access loss, and
+device or workspace removal discard it as they discard any unsent one. The
+child keeps unanswered requests for the same hour, in both
+`AgentNotificationTracker` and `NotificationFeed`'s pending snapshot, so a late
+answer still announces its resolution and a gap snapshot still lists a held
+question. The replay ring keeps its five-minute window.
+
+While a page is open, `shell/attention-notice.ts` stands in for pushes about
+other workspaces. It reads hub-nav's `activity` reports and raises a notice when
+another workspace goes from not awaiting (held for at least 1.5 s, which rules
+out the broker's placeholder for a workspace it has not read yet) to awaiting.
+The page's first report per workspace is its baseline, and reconnects keep what
+the page knew. Open goes to `/s/<ws>/?awaiting=1`. Chat asks its own workspace
+through the internal `GET /api/chat/awaiting`, which returns the newest
+unanswered request's conversation id or null, then continues as for
+`?conversation=`, with the URL rewritten to that id. On null it shows the list
+with an "already answered" note. The `activity` summary itself stays four
+booleans.
+
 The hub serves `pwa/push-worker.js` at origin scope. It handles push and clicks,
 with no fetch handler or offline content cache. `notification-client.js` is a
 shared browser module, bundled into the SPA and served directly to hub pages;
@@ -91,8 +129,9 @@ canonical SVG with `bun run generate:pwa-icons`; use `--check` to validate the
 checked-in pixels. `pwa/icons.ts` versions manifest and Apple touch-icon URLs,
 and the static session manifest carries the same revision.
 
-Notification URLs carry an agent-qualified `conversation` parameter through
-login and document history changes. Chat opens that exact target or shows its
+Notification URLs carry an agent-qualified `conversation` parameter (or the
+notice's `awaiting=1`) through login and document history changes
+(`carryNotificationTarget`). Chat opens that exact target or shows its
 read error. A matching window is focused without navigating another workspace's
 draft. A desktop window too narrow for the split uses a temporary Chat view
 that the existing collapse control dismisses; it does not change the stored UI

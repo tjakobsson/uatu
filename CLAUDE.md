@@ -66,8 +66,10 @@ src/
 │                   bottom Files/Preview/Terminal tabs), worktree-dialog
 │                   (the one client worktree dialog, embedded in both
 │                   hub-nav's picker and the Hub dashboard) + worktree-live
-│                   (its `worktrees` live-invalidation subscription) — the
-│                   app-wide chrome and the appState singleton
+│                   (its `worktrees` live-invalidation subscription),
+│                   attention-notice (the in-page "needs your answer"
+│                   notice for other workspaces) — the app-wide chrome and
+│                   the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
 │                   chooser, layout (split/stacked), diff view,
 │                   mermaid trigger, anchors, image/binary fallbacks,
@@ -100,7 +102,9 @@ src/
 │                   (HTTP/WS + token brokering), live-broker (refcounted
 │                   child-topic subscriptions fanned out to every page's
 │                   one `/api/hub/live` stream, plus one hub-lifetime
-│                   activity watch per running workspace) + activity-marks
+│                   activity watch per running workspace; it also owns
+│                   per-user presence, see presence.ts, which holds pushes
+│                   while a session page is visible) + activity-marks
 │                   (its finished/viewed marks, persisted in the state dir),
 │                   auth (users + the server-side session store, one id over
 │                   cookie/bearer transports + rate limit + CSRF),

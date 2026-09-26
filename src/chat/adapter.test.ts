@@ -207,6 +207,28 @@ describe("live notification confinement", () => {
       expect(pipeline.sent.every(send => send.payload.url.includes("opencode%3Aone"))).toBe(true);
     } finally { await pipeline.dispose(); }
   });
+  test("a question held while the user looks survives a hub restart and is sent once when they leave", async () => {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, id: "opencode" };
+    provider.sessions = [fixtureSession("one")];
+    const pipeline = await notificationPipeline(provider, process.cwd());
+    try {
+      pipeline.setPresence("present");
+      provider.eventQueue.push({ type: "question.asked", data: { sessionID: "one", id: "q", timestamp: Date.now(), questions: [{ question: "Choose?", options: [{ label: "A" }] }] } });
+      await pipeline.waitForDeliveries(2);
+      for (let i = 0; i < 500 && pipeline.heldCount() < 2; i++) await Bun.sleep(2);
+      expect(pipeline.heldCount()).toBe(2);
+      expect(pipeline.sent).toHaveLength(0);
+      await pipeline.restartHub();
+      expect(pipeline.heldCount()).toBe(2);
+      pipeline.setPresence("away");
+      await pipeline.waitForSends(2);
+      await pipeline.restartHub();
+      await Bun.sleep(20);
+      await pipeline.waitForSends(2);
+      expect(pipeline.sent.map(send => send.endpoint).sort()).toEqual(["https://web.push.apple.com/desktop", "https://web.push.apple.com/phone"]);
+    } finally { await pipeline.dispose(); }
+  });
   test("unselected conversations notify, while child completions and outside workspaces do not", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("one"), fixtureSession("two"), { ...fixtureSession("child"), parentId: "one" }, fixtureSession("outside", "/tmp/uatu-outside")];

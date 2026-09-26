@@ -8,7 +8,7 @@
 // must not, by itself, install a global event listener.
 
 import { appDocumentRelativePath, appUrl } from "../shared/app-url";
-import { carryNotificationConversation } from "../chat/notification-navigation";
+import { carryNotificationTarget } from "../chat/notification-navigation";
 import { findDocumentById, findDocumentByRelativePath } from "./storage";
 import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
@@ -47,19 +47,19 @@ export function pushSelection(documentId: string, relativePath: string) {
   if (window.location.pathname === url) {
     return;
   }
-  window.history.pushState({ documentId }, "", carryNotificationConversation(url, window.location.search));
+  window.history.pushState({ documentId }, "", carryNotificationTarget(url, window.location.search));
 }
 
 export function recordEmptySelection(replace = false): void {
   const method = replace ? "replaceState" : "pushState";
-  window.history[method]({ selectionCleared: true }, "", carryNotificationConversation(appUrl("/"), window.location.search));
+  window.history[method]({ selectionCleared: true }, "", carryNotificationTarget(appUrl("/"), window.location.search));
 }
 
 export function buildCommitPreviewPath(repositoryId: string, sha: string): string {
   const url = new URL(appUrl("/"), window.location.origin);
   url.searchParams.set("repository", repositoryId);
   url.searchParams.set("commit", sha);
-  return carryNotificationConversation(`${url.pathname}${url.search}`, window.location.search);
+  return carryNotificationTarget(`${url.pathname}${url.search}`, window.location.search);
 }
 
 export function pushCommitPreview(repositoryId: string, sha: string) {
@@ -78,7 +78,7 @@ export function pushCommitPreview(repositoryId: string, sha: string) {
 // until we set it). The hash is preserved on the boot path so a deep link
 // like `/guides/setup.md#installation` still scrolls to the named heading.
 export function replaceSelection(documentId: string, relativePath: string) {
-  const url = carryNotificationConversation(buildDocumentPath(relativePath) + window.location.hash, window.location.search);
+  const url = carryNotificationTarget(buildDocumentPath(relativePath) + window.location.hash, window.location.search);
   window.history.replaceState({ documentId }, "", url);
 }
 

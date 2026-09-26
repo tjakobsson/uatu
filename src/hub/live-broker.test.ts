@@ -1337,3 +1337,79 @@ describe("worktrees topic (worktree 5.2)", () => {
     await waitFor(() => events.includes("activity:ws:true"), "activity observed");
   });
 });
+
+describe("presence", () => {
+  function clocked(options: ConstructorParameters<typeof LiveBroker>[1] = {}) {
+    const clock = { now: 1_000_000 };
+    const child = fakeSource({ workspaces: [] });
+    const live = broker(child.source, { presenceGraceMs: 30_000, now: () => clock.now, ...options });
+    return { clock, live };
+  }
+
+  test("a never-seen user is recent for one grace period after the broker starts, then away", () => {
+    const { clock, live } = clocked();
+    expect(live.presence("u")).toBe("recent");
+    clock.now += 29_999;
+    expect(live.presence("u")).toBe("recent");
+    clock.now += 1;
+    expect(live.presence("u")).toBe("away");
+  });
+
+  test("one visible page makes the user present; its departure is recent, then away after the grace", () => {
+    const { clock, live } = clocked();
+    clock.now += 60_000;
+    const page = live.subscribeActivity(sink(), "u");
+    expect(live.presence("u")).toBe("present");
+    page.detach();
+    expect(live.presence("u")).toBe("recent");
+    clock.now += 29_999;
+    expect(live.presence("u")).toBe("recent");
+    clock.now += 1;
+    expect(live.presence("u")).toBe("away");
+  });
+
+  test("a second page keeps the user present until both go", () => {
+    const { clock, live } = clocked();
+    clock.now += 60_000;
+    const desktop = live.subscribeActivity(sink(), "u");
+    const phone = live.subscribeActivity(sink(), "u");
+    desktop.detach();
+    expect(live.presence("u")).toBe("present");
+    phone.detach();
+    expect(live.presence("u")).toBe("recent");
+    // A repeated detach is not a second departure.
+    clock.now += 20_000;
+    phone.detach();
+    clock.now += 10_000;
+    expect(live.presence("u")).toBe("away");
+  });
+
+  test("one user's presence does not affect another's", () => {
+    const { clock, live } = clocked();
+    clock.now += 60_000;
+    live.subscribeActivity(sink(), "a");
+    expect(live.presence("a")).toBe("present");
+    expect(live.presence("b")).toBe("away");
+  });
+
+  test("listeners hear arrival, departure, and the end of the grace period", async () => {
+    const live = broker(fakeSource({ workspaces: [] }).source, { presenceGraceMs: 40 });
+    const heard: Array<[string, string]> = [];
+    live.onPresenceChange(user => heard.push([user, live.presence(user)]));
+    await Bun.sleep(45);
+    const page = live.subscribeActivity(sink(), "u");
+    page.detach();
+    await waitFor(() => heard.length === 3, "grace end announced");
+    expect(heard).toEqual([["u", "present"], ["u", "recent"], ["u", "away"]]);
+  });
+
+  test("returning inside the grace cancels the pending away announcement", async () => {
+    const live = broker(fakeSource({ workspaces: [] }).source, { presenceGraceMs: 40 });
+    const heard: string[] = [];
+    live.onPresenceChange(user => heard.push(live.presence(user)));
+    live.subscribeActivity(sink(), "u").detach();
+    live.subscribeActivity(sink(), "u");
+    await Bun.sleep(80);
+    expect(heard).toEqual(["present", "recent", "present"]);
+  });
+});

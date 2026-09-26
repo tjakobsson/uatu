@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AgentNotificationTracker, NOTIFICATION_LIFETIME_MS, notificationIdentity, qualifyNotificationEvent, type AgentNotificationEvent, type NotificationSourceEvent } from "./notifications";
+import { AgentNotificationTracker, NOTIFICATION_HOLD_LIMIT_MS, NOTIFICATION_LIFETIME_MS, notificationIdentity, qualifyNotificationEvent, type AgentNotificationEvent, type NotificationSourceEvent } from "./notifications";
 
 function fixture() {
   const events: AgentNotificationEvent[] = [];
@@ -104,10 +104,19 @@ describe("agent notification occurrences", () => {
     expect(events[0]?.type).toBe("resolved");
   });
 
+  test("a request answered after the push lifetime but within the hold limit still announces its resolution", () => {
+    const { tracker, advance, events } = fixture();
+    tracker.observe(question("slow"));
+    advance(NOTIFICATION_LIFETIME_MS * 4);
+    expect(tracker.pendingSnapshot().map(item => item.sourceId)).toEqual(["slow"]);
+    tracker.observe(question("slow", false));
+    expect(events.map(event => event.type)).toEqual(["notification", "resolved"]);
+  });
+
   test("expired pending snapshots do not reset request timestamps", () => {
     const { tracker, advance, events } = fixture();
     tracker.observe(question("old"));
-    advance(NOTIFICATION_LIFETIME_MS + 1);
+    advance(NOTIFICATION_HOLD_LIMIT_MS + 1);
     expect(tracker.pendingSnapshot()).toEqual([]);
     tracker.observe(question("old"));
     expect(events).toHaveLength(1);

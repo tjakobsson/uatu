@@ -20,6 +20,14 @@
 //                                workspace with that id (default "alpha")
 //   UATU_E2E_HUB_WORKTREES       "1" makes every workspace a committed Git
 //                                repository and serves the worktree API
+//   UATU_E2E_HUB_PUSH            "1" observes the children's notification
+//                                feeds as the real hub does and records every
+//                                push it would send, one JSON line each, in
+//                                the file named by the readiness line's
+//                                `pushLog`; presence holds pushes while a
+//                                session page is visible, with the grace
+//                                period shortened to
+//                                UATU_E2E_HUB_PRESENCE_GRACE_MS (default 1500)
 //   UATU_E2E_HUB_CREDENTIALS     "1" serves the credential API (token
 //                                credentials only — no ssh/gpg tooling) with
 //                                a resolver that reads a linked worktree's
@@ -51,6 +59,7 @@ import { startHubServer } from "../../src/hub/server";
 import { SessionManager } from "../../src/hub/sessions";
 import { NotificationStore } from "../../src/hub/notification-store";
 import { HubNotifications } from "../../src/hub/notifications";
+import { createHubUpstreamSource } from "../../src/hub/live-source";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "../../src/hub/credential-store";
 import { CredentialToolManager } from "../../src/hub/credential-tools";
 import { OpenPgpCredentialManager } from "../../src/hub/openpgp-credentials";
@@ -79,6 +88,8 @@ export type HubE2EInfo = {
   origin: string;
   user: { name: string; password: string };
   workspaces: HubE2EWorkspace[];
+  // With UATU_E2E_HUB_PUSH: the file each recorded push is appended to.
+  pushLog?: string;
 };
 
 const HUB_PORT = Number.parseInt(process.env.UATU_E2E_HUB_PORT ?? "4300", 10);
@@ -91,6 +102,8 @@ const HARNESS_PATH = path.resolve(import.meta.dir, "server.ts");
 const CHILD_START_TIMEOUT_MS = 30_000;
 const WORKTREES = process.env.UATU_E2E_HUB_WORKTREES === "1";
 const CREDENTIALS = process.env.UATU_E2E_HUB_CREDENTIALS === "1";
+const PUSH = process.env.UATU_E2E_HUB_PUSH === "1";
+const PRESENCE_GRACE_MS = Number.parseInt(process.env.UATU_E2E_HUB_PRESENCE_GRACE_MS ?? "1500", 10);
 
 const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-hub-e2e-")));
 
@@ -296,12 +309,19 @@ for (const workspace of workspaces) {
 
 const notificationStore = new NotificationStore(path.join(tempRoot, "notifications.json"));
 await notificationStore.load();
-const notifications = new HubNotifications({ store: notificationStore, sender: async () => ({ kind: "accepted" }),
-  source: { isRunning: () => false, workspaceIds: () => registry.list().map(entry => entry.id), open: async () => { throw new Error("browser suite does not open push upstreams"); } },
+const pushLog = path.join(tempRoot, "push-sends.jsonl");
+const notifications = new HubNotifications({ store: notificationStore,
+  sender: async (subscription, payload) => {
+    if (PUSH) await fs.appendFile(pushLog, `${JSON.stringify({ endpoint: subscription.endpoint, payload: JSON.parse(payload) })}\n`);
+    return { kind: "accepted" };
+  },
+  source: PUSH ? createHubUpstreamSource({ sessions, registry })
+    : { isRunning: () => false, workspaceIds: () => registry.list().map(entry => entry.id), open: async () => { throw new Error("browser suite does not open push upstreams"); } },
   authorized: (principal, id) => sessionStore.resolve(principal.sessionId)?.user === principal.user && (id === undefined || Boolean(registry.byId(id))),
   workspaceName: id => registry.byId(id)?.displayName ?? id,
 });
 const server = startHubServer({ config, registry, sessions, sessionStore, personalState, notifications,
+  ...(PUSH ? { presenceGraceMs: PRESENCE_GRACE_MS } : {}),
   ...(WORKTREES ? { onboarding, worktrees: worktreesService,
     worktreeReconcilerOptions: { minIntervalMs: 100, periodMs: 500 } } : {}),
   ...(credentialApi ? { credentialApi } : {}),
@@ -311,7 +331,8 @@ for (const workspace of workspaces) {
   workspace.sessionUrl = `${origin}/s/${encodeURIComponent(workspace.id)}/`;
 }
 
-const info: HubE2EInfo = { origin, user: HUB_E2E_USER, workspaces };
+if (PUSH) notifications.start();
+const info: HubE2EInfo = { origin, user: HUB_E2E_USER, workspaces, ...(PUSH ? { pushLog } : {}) };
 console.log(`${HUB_E2E_READY_PREFIX}${JSON.stringify(info)}`);
 
 let shuttingDown = false;

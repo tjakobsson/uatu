@@ -68,6 +68,7 @@ import {
 } from "../shared/live-protocol";
 import { SseFrameParser, type SseFrame } from "./live-sse";
 import { statusCategoryOf, type ProxyStatusCategory } from "./proxy";
+import { PRESENCE_GRACE_MS, type Presence, type PresenceSource } from "./presence";
 
 // Where upstream bytes come from. The hub implements it over the session
 // manager and the brokered child token; unit tests and the e2e harness
@@ -129,6 +130,10 @@ export type LiveBrokerOptions = {
   // built for tests leave it off, so fixtures for other topics and the e2e
   // harness open no activity upstream nobody asked for.
   watchActivityFromStart?: boolean;
+  // How long a user stays `recent` after their last visible session page
+  // goes, and after the broker starts (src/hub/presence.ts). Tests shorten it.
+  presenceGraceMs?: number;
+  now?: () => number;
 };
 
 // What the worktree reconciler learns from the broker: a page attached to a
@@ -278,7 +283,7 @@ class ActivityFeed {
   seq = 0;
 }
 
-export class LiveBroker {
+export class LiveBroker implements PresenceSource {
   private readonly upstreams = new Map<string, Upstream>();
   private readonly feeds = new Map<string, ActivityFeed>();
   // The `finished` fact's ingredients, held at the broker rather than in a
@@ -317,6 +322,16 @@ export class LiveBroker {
   private readonly unsubscribeRemovals: (() => void) | null;
   private disposed = false;
   private worktreeObserver: WorktreeTopicObserver | null = null;
+  // Presence (src/hub/presence.ts). A user is present while their activity
+  // feed has a sink: only visible session pages hold a stream that asked for
+  // the topic. `lastSeenAt` is stamped when the last sink goes; a timer per
+  // user announces the end of the grace period so readers need not poll.
+  private readonly presenceGraceMs: number;
+  private readonly now: () => number;
+  private readonly startedAt: number;
+  private readonly lastSeenAt = new Map<string, number>();
+  private readonly presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly presenceListeners = new Set<(user: string) => void>();
 
   constructor(private readonly source: LiveUpstreamSource, options: LiveBrokerOptions = {}) {
     this.lingerMs = options.lingerMs ?? LIVE_LINGER_MS;
@@ -326,6 +341,9 @@ export class LiveBroker {
     this.inventoryOpenGraceMs = options.inventoryOpenGraceMs ?? INVENTORY_OPEN_GRACE_MS;
     this.metrics = new UpstreamSubscriptionMetrics(options.metrics);
     this.marks = options.marks ?? null;
+    this.presenceGraceMs = options.presenceGraceMs ?? PRESENCE_GRACE_MS;
+    this.now = options.now ?? Date.now;
+    this.startedAt = this.now();
     this.restoreMarks();
     this.unsubscribeSessions = source.onSessionChange?.(change => this.onSessionChange(change)) ?? null;
     this.unsubscribeRemovals = source.onWorkspaceRemoved?.(workspaceId => this.forgetWorkspace(workspaceId)) ?? null;
@@ -425,18 +443,55 @@ export class LiveBroker {
     // sinks, and the new one gets the whole picture below.
     this.refreshFeed(user, feed);
     feed.sinks.add(sink);
+    if (feed.sinks.size === 1) this.presenceChanged(user, false);
     for (const [workspaceId, activity] of feed.last) {
       sink.write(this.activityEnvelope(feed, workspaceId, activity));
     }
     return {
       detach: () => {
-        feed.sinks.delete(sink);
+        if (!feed.sinks.delete(sink)) return;
+        if (feed.sinks.size === 0) this.presenceChanged(user, true);
         if (feed.sinks.size > 0 || this.feeds.get(user) !== feed) return;
         // The feed goes; the watches stay. What finishes now is still
         // recorded, and the next feed this user opens reads it.
         this.feeds.delete(user);
       },
     };
+  }
+
+  presence(user: string): Presence {
+    if ((this.feeds.get(user)?.sinks.size ?? 0) > 0) return "present";
+    const since = this.lastSeenAt.get(user) ?? this.startedAt;
+    return this.now() - since < this.presenceGraceMs ? "recent" : "away";
+  }
+
+  onPresenceChange(listener: (user: string) => void): () => void {
+    this.presenceListeners.add(listener);
+    return () => { this.presenceListeners.delete(listener); };
+  }
+
+  // A user's first visible page arrived, or their last one went. Leaving
+  // stamps the grace period and arms the timer that reports its end.
+  private presenceChanged(user: string, left: boolean): void {
+    const timer = this.presenceTimers.get(user);
+    if (timer) clearTimeout(timer);
+    this.presenceTimers.delete(user);
+    if (left && !this.disposed) {
+      this.lastSeenAt.set(user, this.now());
+      const next = setTimeout(() => {
+        this.presenceTimers.delete(user);
+        this.emitPresence(user);
+      }, this.presenceGraceMs);
+      (next as { unref?: () => void }).unref?.();
+      this.presenceTimers.set(user, next);
+    }
+    this.emitPresence(user);
+  }
+
+  private emitPresence(user: string): void {
+    for (const listener of [...this.presenceListeners]) {
+      try { listener(user); } catch { /* a reader's failure is its own */ }
+    }
   }
 
   // The user has the workspace's chat in view: whatever finished there is
@@ -530,6 +585,9 @@ export class LiveBroker {
     for (const workspaceId of [...this.activityWatches.keys()]) this.unwatchActivity(workspaceId);
     for (const upstream of [...this.upstreams.values()]) this.drop(upstream, false);
     this.feeds.clear();
+    for (const timer of this.presenceTimers.values()) clearTimeout(timer);
+    this.presenceTimers.clear();
+    this.presenceListeners.clear();
   }
 
   // ---------------------------------------------------------------------

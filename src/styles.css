@@ -9924,3 +9924,127 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
   font-size: 1.4rem;
   cursor: pointer;
 }
+
+/* In-app "an agent needs your answer" notices for other workspaces
+   (shell/attention-notice.ts). While the user is looking at Uatu the hub
+   holds their push notifications; a question elsewhere is announced here
+   instead, in the switcher's awaiting tone. A small stack, newest first,
+   clear of the chat composer, the hub navigation, and the touch tab bar. */
+.attention-notices {
+  position: fixed;
+  z-index: 95;
+  left: calc(1rem + env(safe-area-inset-left));
+  bottom: calc(1rem + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(20rem, calc(100vw - 2rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  pointer-events: none;
+}
+
+.attention-notices[hidden] {
+  display: none;
+}
+
+.attention-notice {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.5rem 0.55rem 0.8rem;
+  border: 1px solid var(--notice-warn-border);
+  border-left: 3px solid var(--attention);
+  border-radius: 0.5rem;
+  background: var(--surface-raised);
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.16);
+  font-size: 0.82rem;
+}
+
+.attention-notice-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.attention-notice-workspace {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attention-notice-detail {
+  color: var(--attention);
+  font-weight: 500;
+}
+
+.attention-notice-open {
+  flex-shrink: 0;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--notice-warn-border);
+  border-radius: 999px;
+  background: var(--notice-warn-bg);
+  color: var(--attention);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.attention-notice-open:hover {
+  border-color: var(--attention);
+}
+
+.attention-notice-dismiss {
+  flex-shrink: 0;
+  display: inline-grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.attention-notice-dismiss:hover {
+  background: light-dark(rgba(36, 41, 47, 0.06), rgba(230, 237, 243, 0.08));
+  color: var(--text-strong);
+}
+
+.attention-notice-open:focus-visible,
+.attention-notice-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Touch mode: full width above the tab bar, 44px targets. */
+html[data-ui-mode="touch"] .attention-notices {
+  left: calc(0.75rem + env(safe-area-inset-left));
+  right: calc(0.75rem + env(safe-area-inset-right));
+  bottom: calc(var(--tab-bar-total) + 0.75rem);
+  width: auto;
+}
+
+html[data-ui-mode="touch"] .attention-notice-open {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+
+html[data-ui-mode="touch"] .attention-notice-dismiss {
+  width: 44px;
+  height: 44px;
+}
+
+/* On the Chat and Terminal tabs the bottom belongs to the composer and the
+   prompt line; the notice moves to the top there. Files keeps it at the
+   bottom: its top is the hub switcher. */
+html[data-ui-mode="touch"][data-active-tab="chat"] .attention-notices,
+html[data-ui-mode="touch"][data-active-tab="terminal"] .attention-notices {
+  top: calc(env(safe-area-inset-top) + 0.5rem);
+  bottom: auto;
+}

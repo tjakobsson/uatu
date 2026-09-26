@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { ConversationReplay } from "../../src/chat/replay";
+import { NotificationFeed } from "../../src/chat/notification-feed";
 import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../../src/chat/adapter";
 import { createAttachmentStore } from "../../src/chat/attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "../../src/chat/inventory-broadcaster";
@@ -84,6 +85,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly subscriptions = new Set<{ cancel(): void }>();
   private inventory = new ConversationInventoryBroadcaster();
   private activityChanges = new ConversationInventoryBroadcaster();
+  // The workspace's unanswered requests, as the real adapter reports them:
+  // a pending permission or question announces, anything else resolves. The
+  // router qualifies and merges it; `/api/chat/awaiting` reads it.
+  readonly notificationFeed = new NotificationFeed();
   private readonly inventorySubscriptions = new Set<ConversationInventorySubscription>();
   private readonly pendingInventorySubscriptions = new Set<() => void>();
   private inventoryTransportInterrupted = false;
@@ -711,6 +716,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
     // makes the next test on this worker boot against an unavailable agent.
     this.unavailable = null;
     this.generation = `e2e-chat-${this.nextId++}`;
+    for (const notification of this.notificationFeed.snapshot()) {
+      this.notificationFeed.publish({ type: "resolved", id: notification.id, conversationId: notification.conversationId });
+    }
     this.conversations.clear();
     this.items.clear();
     this.authoritativeItems.clear();
@@ -745,6 +753,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     if (child) this.children.add(id);
     this.items.set(id, new Map(items.map(item => [item.id, item])));
     this.activityChanges.invalidate();
+    for (const item of items) this.announceInteraction(id, item);
     this.authoritativeItems.set(id, structuredClone(items));
     this.configurations.set(id, configuration);
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
@@ -854,8 +863,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const authoritative = this.authoritativeItems.get(id)!;
     const existing = authoritative.findIndex(candidate => candidate.id === itemId);
     if (existing >= 0) authoritative.splice(existing, 1);
+    const removed = this.items.get(id)!.get(itemId);
     this.items.get(id)!.delete(itemId);
     this.activityChanges.invalidate();
+    if (removed) this.announceInteraction(id, { ...removed, status: "resolved" } as ConversationItem);
     return this.replay.get(id)!.publish({ type: "item.remove", itemId });
   }
 
@@ -872,7 +883,21 @@ export class FakeE2EChatService implements WorkspaceChatService {
     }
     this.items.get(id)!.set(item.id, item);
     this.activityChanges.invalidate();
+    this.announceInteraction(id, item);
     return this.replay.get(id)!.publish({ type: "item.upsert", item });
+  }
+
+  private announceInteraction(conversationId: string, item: ConversationItem): void {
+    if (item.type !== "permission" && item.type !== "question") return;
+    const id = JSON.stringify([conversationId, item.id]);
+    const pending = this.notificationFeed.snapshot().some(notification => notification.id === id);
+    if (item.status === "pending" && !pending) {
+      this.notificationFeed.publish({ type: "notification", notification: {
+        id, conversationId, sourceId: item.id, kind: item.type === "question" ? "question-pending" : "permission-pending", createdAt: Date.now(),
+      } });
+    } else if (item.status !== "pending" && pending) {
+      this.notificationFeed.publish({ type: "resolved", id, conversationId });
+    }
   }
 
   publishDelta(id: string, itemId: string, delta: string): ChatEvent {
@@ -1107,6 +1132,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   private setStatus(id: string, status: ConversationSummary["status"], message?: string): void {
     const conversation = this.require(id);
+    // A top-level turn that goes from live to completed is what the real
+    // tracker announces as a finished turn.
+    if (status === "completed" && isLiveConversationStatus(conversation.status) && !this.children.has(id)) {
+      const sourceId = `turn-${this.nextId}`;
+      this.notificationFeed.publish({ type: "notification", notification: {
+        id: JSON.stringify([id, "turn-completed", sourceId]), conversationId: id, sourceId, kind: "turn-completed", createdAt: Date.now(),
+      } });
+    }
     this.conversations.set(id, { ...conversation, status, updatedAt: this.nextId });
     this.replay.get(id)!.publish({ type: "conversation.status", status, ...(message ? { message } : {}) });
     this.activityChanges.invalidate();
