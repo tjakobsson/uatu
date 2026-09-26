@@ -38,7 +38,9 @@
 // Readiness is one stdout line, `uatu-e2e-hub <json>`, describing the hub
 // origin, the user, and every workspace with its id, folder, session URL,
 // and the child's direct origin (for the fake chat controls, which need no
-// hub credential).
+// hub credential). After that, stdin takes one command, `reset <serial>`,
+// which puts the hub back to its booted state between tests (see
+// resetForTest below).
 
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -73,6 +75,7 @@ import { WorktreeService } from "../../src/hub/worktree-service";
 
 export const HUB_E2E_USER = { name: "e2e", password: "e2e-hub-password" };
 export const HUB_E2E_READY_PREFIX = "uatu-e2e-hub ";
+export const HUB_E2E_RESET_PREFIX = "uatu-e2e-hub-reset ";
 
 export type HubE2EWorkspace = {
   id: string;
@@ -114,11 +117,16 @@ const tempRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu
 // harness, told its port, folder, and hub-shaped base path through env.
 class HarnessBackend implements SessionBackend {
   private nextPort = CHILD_BASE_PORT;
+  // A workspace keeps its port across restarts, so the `childOrigin` the
+  // readiness line published stays true after a test (or the per-test
+  // reset) stops and starts it, and restarts do not walk the port counter
+  // out of this worker's block.
+  private readonly ports = new Map<string, number>();
   readonly children = new Map<string, ChildProcess>();
 
   async start(workspace: WorkspaceEntry, basePath: string): Promise<RunningSession> {
-    const port = this.nextPort;
-    this.nextPort += 1;
+    const port = this.ports.get(workspace.id) ?? this.nextPort++;
+    this.ports.set(workspace.id, port);
     const child = spawn("bun", ["run", HARNESS_PATH], {
       cwd: path.resolve(import.meta.dir, "..", ".."),
       env: {
@@ -334,6 +342,47 @@ for (const workspace of workspaces) {
 if (PUSH) notifications.start();
 const info: HubE2EInfo = { origin, user: HUB_E2E_USER, workspaces, ...(PUSH ? { pushLog } : {}) };
 console.log(`${HUB_E2E_READY_PREFIX}${JSON.stringify(info)}`);
+
+// The per-test reset: hub-fixtures.ts writes `reset <serial>` to stdin and
+// waits for `uatu-e2e-hub-reset <serial> ok`. The hub is worker-scoped, so
+// without it a test inherits whatever the previous one left: a stopped
+// session, a child's staged chat, live PTYs or armed terminal delays, the
+// broker's finished/viewed marks, and the personal state. Every workspace
+// the hub started with is restarted (a stop the hub observes is what
+// forgets the marks, and a fresh child has no conversations and no shells),
+// and the personal state of every registered workspace is dropped.
+// Workspaces a test registered (linked worktrees) are left to the suites
+// that create them.
+// The first test of a worker gets the hub exactly as it booted.
+let pristine = true;
+async function resetForTest(): Promise<void> {
+  if (pristine) {
+    pristine = false;
+    return;
+  }
+  await Promise.all(workspaces.map(async workspace => {
+    await sessions.stop(workspace.id);
+    await sessions.start(workspace.id);
+  }));
+  for (const entry of registry.list()) await personalState.removeWorkspace(entry.id);
+}
+
+let controlBuffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk: string) => {
+  controlBuffer += chunk;
+  let newline = controlBuffer.indexOf("\n");
+  while (newline >= 0) {
+    const [command, serial] = controlBuffer.slice(0, newline).trim().split(" ");
+    controlBuffer = controlBuffer.slice(newline + 1);
+    newline = controlBuffer.indexOf("\n");
+    if (command !== "reset") continue;
+    void resetForTest().then(
+      () => console.log(`${HUB_E2E_RESET_PREFIX}${serial} ok`),
+      error => console.log(`${HUB_E2E_RESET_PREFIX}${serial} error ${JSON.stringify(String(error))}`),
+    );
+  }
+});
 
 let shuttingDown = false;
 const shutdown = async () => {

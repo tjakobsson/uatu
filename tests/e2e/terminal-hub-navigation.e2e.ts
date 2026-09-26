@@ -190,24 +190,10 @@ function byId(hub: HubE2EInfo, id: string): HubE2EWorkspace {
   return hub.workspaces.find(workspace => workspace.id === id)!;
 }
 
-// The hub and its children are worker-scoped, so PTYs a test leaves behind
-// (detached, alive) would be auto-attached by the next test's first open.
-// Every test starts with no shells in either workspace, and no held close.
-async function clearShells(workspace: HubE2EWorkspace): Promise<void> {
-  const base = `${workspace.childOrigin}/s/${workspace.id}`;
-  const { token } = (await (await fetch(`${base}/__e2e/terminal-token`)).json()) as { token: string };
-  const listed = (await (await fetch(`${base}/api/terminal/sessions?t=${encodeURIComponent(token)}`)).json()) as { sessions: Inventory };
-  for (const session of listed.sessions) {
-    await fetch(`${base}/api/terminal/sessions/${encodeURIComponent(session.id)}?t=${encodeURIComponent(token)}`, {
-      method: "DELETE",
-      headers: { origin: workspace.childOrigin },
-    });
-  }
-  await armCloseDelay(workspace, 0);
-}
-
-test.beforeEach(async ({ hub, hubContext }) => {
-  for (const workspace of hub.workspaces) await clearShells(workspace);
+// The hub and its children are worker-scoped; hub-fixtures' per-test reset
+// restarts every child, so each test starts with no shells in either
+// workspace and no held close.
+test.beforeEach(async ({ hubContext }) => {
   await installTrace(hubContext);
 });
 

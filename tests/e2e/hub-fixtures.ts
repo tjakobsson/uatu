@@ -17,16 +17,30 @@ import type { HubE2EInfo, HubE2EWorkspace } from "./hub-server";
 const HUB_BASE_PORT = Number.parseInt(process.env.UATU_E2E_HUB_BASE_PORT ?? "4300", 10);
 const PORTS_PER_WORKER = 10;
 const READY_PREFIX = "uatu-e2e-hub ";
+const RESET_PREFIX = "uatu-e2e-hub-reset ";
+const HUB_RESET_TIMEOUT_MS = 20_000;
 
 export type { HubE2EInfo, HubE2EWorkspace };
 
+type HubProcess = {
+  info: HubE2EInfo;
+  // Puts the worker's hub back to its booted state (hub-server.ts
+  // resetForTest) and resolves once it is.
+  reset: () => Promise<void>;
+};
+
 type WorkerFixtures = {
+  hubProcess: HubProcess;
   hub: HubE2EInfo;
 };
 
 type TestFixtures = {
   // A context whose cookie jar holds a hub session for `hub.user`.
   hubContext: BrowserContext;
+  // Runs before every test: the hub is worker-scoped, and fullyParallel
+  // orders a worker's tests differently from run to run, so nothing one
+  // test leaves in it may reach the next.
+  hubReset: void;
 };
 
 // Which workspaces the hub registers and starts, per spec file, through
@@ -47,7 +61,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
   hubCredentials: [false, { option: true, scope: "worker" }],
   hubPush: [false, { option: true, scope: "worker" }],
 
-  hub: [
+  hubProcess: [
     async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush }, use, workerInfo) => {
       const hubPort = HUB_BASE_PORT + workerInfo.workerIndex * PORTS_PER_WORKER;
       if (hubWorkspaces.length >= PORTS_PER_WORKER) {
@@ -63,21 +77,18 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
           UATU_E2E_HUB_CREDENTIALS: hubCredentials ? "1" : "0",
           UATU_E2E_HUB_PUSH: hubPush ? "1" : "0",
         },
-        stdio: ["ignore", "pipe", "inherit"],
+        // stdin carries the per-test reset command.
+        stdio: ["pipe", "pipe", "inherit"],
       });
 
+      const lines = new StdoutLines(child);
       const info = await new Promise<HubE2EInfo>((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error(`hub e2e server (worker ${workerInfo.workerIndex}) did not start within 60s`));
         }, 60_000);
-        let buffered = "";
-        child.stdout!.on("data", (chunk: Buffer) => {
-          buffered += chunk.toString();
-          const line = buffered.split("\n").find(candidate => candidate.startsWith(READY_PREFIX));
-          if (line) {
-            clearTimeout(timeout);
-            resolve(JSON.parse(line.slice(READY_PREFIX.length)) as HubE2EInfo);
-          }
+        void lines.waitFor(line => line.startsWith(READY_PREFIX)).then(line => {
+          clearTimeout(timeout);
+          resolve(JSON.parse(line.slice(READY_PREFIX.length)) as HubE2EInfo);
         });
         child.on("error", reject);
         child.on("exit", code => {
@@ -86,11 +97,35 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
         });
       });
 
-      await use(info);
+      let serial = 0;
+      const reset = async () => {
+        const id = ++serial;
+        const answered = lines.waitFor(line => line.startsWith(`${RESET_PREFIX}${id} `));
+        child.stdin!.write(`reset ${id}\n`);
+        const line = await withTimeout(answered, HUB_RESET_TIMEOUT_MS, `hub e2e server did not reset within ${HUB_RESET_TIMEOUT_MS / 1000}s`);
+        if (!line.endsWith(" ok")) throw new Error(`hub e2e reset failed: ${line}`);
+      };
+
+      await use({ info, reset });
 
       await stopChild(child);
     },
     { scope: "worker" },
+  ],
+
+  hub: [
+    async ({ hubProcess }, use) => {
+      await use(hubProcess.info);
+    },
+    { scope: "worker" },
+  ],
+
+  hubReset: [
+    async ({ hubProcess }, use) => {
+      await hubProcess.reset();
+      await use();
+    },
+    { auto: true },
   ],
 
   baseURL: async ({ hub }, use) => {
@@ -171,6 +206,43 @@ export async function openSessionTab(context: BrowserContext, workspace: HubE2EW
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   return page;
+}
+
+// The hub's stdout, split into lines, each delivered to the first waiter
+// whose predicate it satisfies.
+class StdoutLines {
+  private buffered = "";
+  private readonly waiters: { match: (line: string) => boolean; resolve: (line: string) => void }[] = [];
+
+  constructor(child: ChildProcess) {
+    child.stdout!.on("data", (chunk: Buffer) => {
+      this.buffered += chunk.toString();
+      let newline = this.buffered.indexOf("\n");
+      while (newline >= 0) {
+        const line = this.buffered.slice(0, newline);
+        this.buffered = this.buffered.slice(newline + 1);
+        newline = this.buffered.indexOf("\n");
+        const index = this.waiters.findIndex(waiter => waiter.match(line));
+        if (index >= 0) this.waiters.splice(index, 1)[0]!.resolve(line);
+      }
+    });
+  }
+
+  waitFor(match: (line: string) => boolean): Promise<string> {
+    return new Promise(resolve => this.waiters.push({ match, resolve }));
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
