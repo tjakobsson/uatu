@@ -37,3 +37,15 @@ export function cleanHeadingText(element: HTMLElement): string {
     .replace(/^[#¶]\s*/, "")
     .trim();
 }
+
+// Where the scroll-spy's trigger line sits, in px below the top of the
+// scrollport: a heading counts as reached once its top crosses it. It sits
+// just under whatever covers the top of the scrollport (the sticky header),
+// and never above the scroller's `scroll-padding-top` — the line every
+// navigation (outline click, anchor, cross-reference) lands its target on.
+// A trigger above that line would leave a just-navigated heading short of
+// it, and the highlight would settle on the heading before the one chosen.
+export function spyTriggerOffset(headerOverlap: number, scrollPaddingTop: number): number {
+  const padding = Number.isFinite(scrollPaddingTop) ? scrollPaddingTop : 0;
+  return Math.max(headerOverlap + 8, padding);
+}

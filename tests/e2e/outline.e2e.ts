@@ -84,6 +84,10 @@ test("clicking an entry scrolls to the heading and marks it active", async ({ pa
       }),
     )
     .toBeLessThan(150);
+  // …and once it has landed, the scroll-spy agrees: the clicked entry stays
+  // active instead of settling on the heading before it.
+  await expect(tablesLink).toHaveClass(/is-active/);
+  await expect(page.locator(".uatu-outline-link.is-active")).toHaveCount(1);
 });
 
 test("scroll-spy highlights the heading scrolled into view", async ({ page }) => {
