@@ -258,7 +258,12 @@ for (const engine of ["chromium", "webkit"] as const) {
       const completedAt = Date.UTC(2026, 8, 15, 10, 30);
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       await update({ ...shell(shape, "finished output", "completed"), completedAt });
-      const formatted = await page.evaluate(time => new Date(time).toLocaleString(), completedAt);
+      // Short weekday, local ISO date, and 24-hour clock, in the page's zone.
+      const formatted = await page.evaluate(time => {
+        const at = new Date(time);
+        const pad = (value: number) => String(value).padStart(2, "0");
+        return `${at.toLocaleDateString([], { weekday: "short" })} ${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+      }, completedAt);
       await expect(floating(page).locator(".chat-shell-window-metadata")).toContainText(formatted);
       await page.reload();
       await openChatPanel(page);

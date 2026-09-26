@@ -1164,3 +1164,123 @@ test.describe("rate-limit standing in touch mode", () => {
     await captureScreenshot(page, testInfo, "touch-rate-limit-rejected");
   });
 });
+
+test("the touch chooser files both agents' conversations under their days", async ({ page, request }) => {
+  await request.post("/__e2e/reset");
+  await control(request, { action: "agents", count: 2 });
+  const now = new Date();
+  const at = (daysAgo: number, hour: number, minute = 0) => new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo, hour, minute).getTime();
+  await control(request, { action: "seed", agent: "opencode", title: "OpenCode yesterday", items: [], updatedAt: at(1, 9, 30) });
+  const today = await control(request, { action: "seed", agent: "claude", title: "Claude today", items: [], updatedAt: at(0, 0, 1) });
+  const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+  await page.locator("#touch-tab-chat").click();
+  const select = page.locator("#chat-conversation-select");
+  await expect(select).toHaveValue(today.conversation.id);
+  await expect(select.locator("optgroup")).toHaveCount(2);
+  const groups = await select.locator("optgroup").evaluateAll(nodes => nodes.map(node => [
+    (node as HTMLOptGroupElement).label,
+    Array.from(node.querySelectorAll("option")).map(option => option.textContent),
+  ]));
+  expect(groups.map(([label]) => label)).toEqual(["Today", "Yesterday"]);
+  expect(groups[0]![1]).toEqual([expect.stringMatching(/^Claude today · Claude Code · 00:01$/)]);
+  expect(groups[1]![1]).toEqual([expect.stringMatching(/^OpenCode yesterday · OpenCode · 09:30$/)]);
+});
+
+test("day separators and wrapped slash-command descriptions fit the touch layout", async ({ page, request }, testInfo) => {
+  // Seeded before the page exists, so the days are local to the test runner,
+  // which shares the browser's zone.
+  const now = new Date();
+  const at = (offset: number, hour: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset, hour, 0).getTime();
+  // Each prompt gets a full-width reply, so there is transcript text beside
+  // the pinned label.
+  const withReplies = (prompts: ConversationItem[]): ConversationItem[] => prompts.flatMap(prompt => [prompt, {
+    id: `${prompt.id}-reply`, type: "assistant_message" as const, createdAt: prompt.createdAt, markdown: `Reply ${"to the prompt above, at full width ".repeat(3)}`,
+  }]);
+  const items: ConversationItem[] = [
+    ...withReplies(messages("yesterday", 6, at(1, 12))),
+    ...withReplies(messages("today", 2, at(0, 0) + 60_000)),
+  ];
+  await boot(page, request, { items });
+  const separators = page.locator("#chat-items > .chat-day-separator");
+  await expect(separators).toHaveText(["Yesterday", "Today"]);
+  // Yesterday pinned over one of its replies: only the label covers it; the
+  // reply shows and takes taps on either side of the label.
+  await page.locator('[data-chat-item-id="message:yesterday-3-reply"]').evaluate(element => {
+    const timeline = element.closest<HTMLElement>(".chat-timeline")!;
+    timeline.scrollTop += element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - 2;
+  });
+  const pinned = () => separators.first().evaluate(element => {
+    const timeline = element.closest(".chat-timeline")!.getBoundingClientRect();
+    const row = element.getBoundingClientRect();
+    const label = element.querySelector("time")!.getBoundingClientRect();
+    const y = label.top + label.height / 2;
+    const hit = (x: number) => document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId ?? null;
+    return {
+      withinWidth: row.left >= timeline.left - 1 && row.right <= timeline.right + 1,
+      stuck: Math.abs(row.top - timeline.top) <= 1,
+      left: hit(label.left - 16),
+      right: hit(label.right + 16),
+    };
+  });
+  await expect.poll(pinned).toEqual({ withinWidth: true, stuck: true, left: "message:yesterday-3-reply", right: "message:yesterday-3-reply" });
+  await captureScreenshot(page, testInfo, "touch-day-separators");
+
+  const hintText = "[path/to/a/long/argument] [--comment] [--effort=low|medium|high] [--base=origin/main]";
+  const overlong = `[--${"a-single-token-wider-than-the-menu-".repeat(3)}]`;
+  await control(request, { action: "commands", commands: [{
+    name: "code-review-with-a-rather-long-command-name", kind: "skill", argumentHint: hintText,
+    description: `${"Review the diff for correctness bugs, reuse, simplification, and efficiency cleanups at the chosen effort level. ".repeat(2)}End of review.`,
+  }, { name: "overlong-hint", kind: "skill", argumentHint: overlong, description: "One token wider than the menu." }] });
+  await page.reload();
+  await page.locator("#touch-tab-chat").click();
+  const input = page.locator("#chat-input");
+  await input.fill("/code-review-with");
+  const menu = page.locator("#chat-command-menu");
+  await expect(menu.getByRole("option")).toHaveCount(1);
+  const measured = await menu.evaluate(element => {
+    const description = element.querySelector<HTMLElement>(".chat-command-description")!;
+    const hint = element.querySelector<HTMLElement>(".chat-command-hint")!;
+    const tokens = [...hint.querySelectorAll<HTMLElement>(".chat-command-hint-token")].map(token => ({ text: token.textContent, bounds: token.getBoundingClientRect() }));
+    const lineHeight = Math.min(...tokens.map(token => token.bounds.height));
+    return {
+      // Beside a name too long to leave it room, the hint drops to its own
+      // line rather than wrapping a character per line in a sliver.
+      hintWidth: hint.getBoundingClientRect().width,
+      hintLines: new Set(tokens.map(token => Math.round(token.bounds.top))).size,
+      hintText: hint.textContent,
+      // Each token stays whole on one line: "[--comment]" is not split after
+      // "--", and no "]" is left on a line of its own.
+      brokenTokens: tokens.filter(token => token.bounds.height > lineHeight * 1.5).map(token => token.text),
+      horizontal: element.scrollWidth - element.clientWidth,
+      text: description.textContent,
+      clipped: description.scrollHeight > description.clientHeight + 1 || description.scrollWidth > description.clientWidth + 1,
+    };
+  });
+  expect(measured.horizontal).toBeLessThanOrEqual(1);
+  expect(measured.text).toContain("End of review.");
+  expect(measured.clipped).toBe(false);
+  expect(measured.hintWidth).toBeGreaterThanOrEqual(120);
+  expect(measured.hintText).toBe(hintText);
+  expect(measured.brokenTokens).toEqual([]);
+  // It wraps, but only between its four tokens.
+  expect(measured.hintLines).toBeGreaterThanOrEqual(2);
+  expect(measured.hintLines).toBeLessThanOrEqual(4);
+  await captureScreenshot(page, testInfo, "touch-slash-command-descriptions-wrap");
+
+  // Only a token wider than the whole menu is broken, and then within it.
+  await input.fill("/overlong-hint");
+  const option = menu.getByRole("option").filter({ hasText: "/overlong-hint" });
+  await expect(option).toHaveCount(1);
+  const overflowing = await option.evaluate(element => {
+    const menu = element.closest<HTMLElement>("#chat-command-menu")!;
+    const token = element.querySelector<HTMLElement>(".chat-command-hint-token")!;
+    // The one-line name gives the height of a line.
+    const lineHeight = element.querySelector<HTMLElement>(".chat-command-name")!.getBoundingClientRect().height;
+    return { horizontal: menu.scrollWidth - menu.clientWidth, lines: Math.round(token.getBoundingClientRect().height / lineHeight), text: token.textContent };
+  });
+  expect(overflowing.horizontal).toBeLessThanOrEqual(1);
+  expect(overflowing.lines).toBeGreaterThanOrEqual(2);
+  expect(overflowing.text).toBe(overlong);
+});

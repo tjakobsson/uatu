@@ -1,5 +1,6 @@
 import type { ShellOutputController } from "./shell-output";
 import { setChatInert } from "./inert";
+import { dateTime } from "./dates";
 
 // These controls remain above or outside full-area output. Both coverage paths
 // share the exemption so recovery stays available alongside app navigation.
@@ -265,7 +266,7 @@ export class ShellOutputWindow {
     this.title.textContent = owner.metadata.command;
     const data = owner.metadata;
     const outcome = data.status[0]!.toUpperCase() + data.status.slice(1);
-    const time = data.completedAt !== undefined && Number.isFinite(data.completedAt) && data.status !== "running" && data.status !== "pending" ? ` · ${new Date(data.completedAt).toLocaleString()}` : "";
+    const time = data.completedAt !== undefined && Number.isFinite(data.completedAt) && data.status !== "running" && data.status !== "pending" ? ` · ${dateTime(data.completedAt)}` : "";
     this.metadata!.textContent = `${data.conversation} · ${outcome}${data.exitCode === undefined ? "" : ` · exit ${data.exitCode}`}${time}`;
     this.host!.dataset.status = data.status;
     this.host!.dataset.shellConversationId = owner.conversationId;

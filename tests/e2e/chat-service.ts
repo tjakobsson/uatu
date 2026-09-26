@@ -14,6 +14,7 @@ import { isLiveConversationStatus, type AgentUsageReport, type BackgroundTaskOut
 import type {
   ChatActivity,
   ChatCapability,
+  ChatCommand,
   ChatModel,
   ChatEvent,
   ChatAvailability,
@@ -171,6 +172,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.modelInventory = structuredClone(models);
   }
 
+  // Commands a test adds on top of the fixture's own (long descriptions for
+  // the wrapping check); cleared by reset.
+  private extraCommands: ChatCommand[] = [];
+
+  setExtraCommands(commands: ChatCommand[]): void {
+    this.extraCommands = structuredClone(commands);
+  }
+
   configureNextConversation(configuration: ConversationConfiguration): void {
     this.nextCreatedConfiguration = structuredClone(configuration);
   }
@@ -234,6 +243,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       { name: "openspec-archive-change", description: "Archive a completed OpenSpec change", argumentHint: "[change]", kind: "skill" as const },
       { name: "compact", description: "Compact the conversation context", argumentHint: "", kind: "command" as const },
       { name: "summarize", description: "Summarize and compact the conversation context", argumentHint: "", kind: "command" as const },
+      ...this.extraCommands,
     ];
     return this.capabilities.includes("reversible-history")
       ? [
@@ -738,15 +748,18 @@ export class FakeE2EChatService implements WorkspaceChatService {
     // left in place it reaches whichever test boots against this worker next.
     this.capabilities = this.defaultCapabilities();
     this.modelInventory = FakeE2EChatService.defaultModels();
+    this.extraCommands = [];
   }
 
-  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false, configuration: ConversationConfiguration = {}): ConversationSnapshot {
+  // `updatedAt` stamps a real last-activity time (epoch ms); without it the
+  // fixture's counter stands in, which the chooser treats as undated.
+  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false, configuration: ConversationConfiguration = {}, updatedAt?: number): ConversationSnapshot {
     const id = `conversation-${this.nextId++}`;
     const conversation: ConversationSummary = {
       id,
       title,
-      createdAt: this.nextId,
-      updatedAt: this.nextId,
+      createdAt: updatedAt ?? this.nextId,
+      updatedAt: updatedAt ?? this.nextId,
       status: "idle",
     };
     this.conversations.set(id, conversation);

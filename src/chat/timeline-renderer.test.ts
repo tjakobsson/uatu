@@ -8,6 +8,10 @@ beforeAll(() => {
   (globalThis as Record<string, unknown>).document = dom.document;
 });
 
+// An accepted draft is being sent now, so it opens today's separator; the
+// ordering tests around drafts look past it.
+const withoutDays = (host: Element) => Array.from(host.children).filter(child => !child.classList.contains("chat-day-separator"));
+
 const { QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, materializeChatActivity, awaitingFirstResponse, formatElapsed, subagentEntries, subagentLabel, workingLabel } = await import("./timeline-renderer");
 // The track's one-line summary reads the same entries, so what the entries
 // say about a running run is checked where the entries are built.
@@ -602,7 +606,7 @@ describe("activity grouping", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     renderer.render(host, projectionWith([], { status: "sending", acceptedDrafts: [{ requestId: "r1", messageId: "pending:r1", text: "go" }] }), new Set());
-    expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id") ?? child.className)).toEqual(["draft-r1", "chat-item chat-activity-group is-awaiting"]);
+    expect(withoutDays(host).map(child => child.getAttribute("data-chat-item-id") ?? child.className)).toEqual(["draft-r1", "chat-item chat-activity-group is-awaiting"]);
   });
 
   test("a previous turn's trailing run is not the live tail while the new prompt is only a draft", () => {
@@ -614,7 +618,7 @@ describe("activity grouping", () => {
     // gets the one working line, in its awaiting form.
     const draft = { requestId: "r2", messageId: "pending:r2", text: "again" };
     renderer.render(host, projectionWith([user, tool("a"), tool("b"), tool("c")], { status: "sending", acceptedDrafts: [draft] }), new Set(), true, false, Date.now() - 1_000);
-    expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id") ?? child.className))
+    expect(withoutDays(host).map(child => child.getAttribute("data-chat-item-id") ?? child.className))
       .toEqual(["message:u1", "group:tool:a", "draft-r2", "chat-item chat-activity-group is-awaiting"]);
     const working = host.querySelectorAll("[data-working-since]");
     expect(working).toHaveLength(1);
@@ -630,7 +634,7 @@ describe("activity grouping", () => {
     const host = target();
     const draft = { requestId: "r2", messageId: "pending:r2", text: "again" };
     renderer.render(host, projectionWith([user, tool("a"), tool("b")], { status: "sending", acceptedDrafts: [draft] }), new Set());
-    expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id") ?? child.className))
+    expect(withoutDays(host).map(child => child.getAttribute("data-chat-item-id") ?? child.className))
       .toEqual(["message:u1", "tool:a", "tool:b", "draft-r2", "chat-item chat-activity-group is-awaiting"]);
   });
 
@@ -1509,7 +1513,7 @@ describe("scheduled wakeup rows and wakeup turns", () => {
   test("a pending wakeup is a timeline row with its prompt and fire time", () => {
     const host = render([row("pending")], "scheduled");
     const node = host.querySelector('[data-chat-item-id="wakeup:w1"]')!;
-    const time = new Date(fireAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const time = "20:03";
     expect(node.className).toContain("chat-wakeup is-pending");
     expect(node.querySelector(".chat-wakeup-label")?.textContent).toContain(`Wakeup scheduled · about ${time}`);
     expect(node.querySelector(".chat-wakeup-subject")?.textContent).toBe("check the build");
@@ -2280,5 +2284,173 @@ describe("tool output is streamed live and bounded when finished", () => {
     expect(host.querySelector(".chat-output-more")).toBeNull();
     expect(host.querySelectorAll(".chat-shell-viewport")).toHaveLength(1);
     expect(host.querySelector(".chat-shell-viewport")!.textContent).toContain("line 30");
+  });
+});
+
+describe("day separators", () => {
+  // Local wall-clock instants, so every case holds in whatever zone runs it.
+  const local = (day: number, hour = 12, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+  const now = local(25, 10);
+  const user = (id: string, createdAt: number): ConversationItem => ({ id: `message:${id}`, type: "user_message", createdAt, text: id });
+  const answer = (id: string, createdAt: number): ConversationItem => ({ id: `part:${id}`, type: "assistant_message", createdAt, markdown: id });
+  const read = (id: string, createdAt: number): ConversationItem => ({ id: `tool:${id}`, type: "tool", createdAt, name: "read", status: "completed", input: JSON.stringify({ filePath: `${id}.ts` }) });
+  const host = () => dom.document.createElement("div") as unknown as HTMLElement;
+  const renderer = () => { const value = new TimelineRenderer(); value.now = () => now; return value; };
+  const outline = (element: HTMLElement) => Array.from(element.children).map(child => child.classList.contains("chat-day-separator") ? `day:${child.textContent}` : child.getAttribute("data-chat-item-id"));
+  const longDate = (at: number) => new Date(at).toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
+  // The visible label beyond yesterday: short weekday and ISO date.
+  const isoLabel = (at: number) => `${new Date(at).toLocaleDateString([], { weekday: "short" })} 2026-09-${String(new Date(at).getDate()).padStart(2, "0")}`;
+
+  test("each local day's run starts with its separator, the first day included", () => {
+    const element = host();
+    const older = local(23, 9);
+    renderer().render(element, projectionWith([user("a", older), answer("a", older + 60_000), user("b", local(24, 18)), user("c", local(25, 8)), answer("c", local(25, 8, 1))], { status: "idle" }), new Set());
+    expect(outline(element)).toEqual([`day:${isoLabel(older)}`, "message:a", "part:a", "day:Yesterday", "message:b", "day:Today", "message:c", "part:c"]);
+    const separator = element.querySelector<HTMLElement>(".chat-day-separator")!;
+    expect(separator.getAttribute("role")).toBe("separator");
+    expect(separator.hasAttribute("data-chat-item-id")).toBe(false);
+    expect(separator.getAttribute("data-chat-day")).toBe("2026-09-23");
+    expect(separator.querySelector("time")!.getAttribute("datetime")).toBe("2026-09-23");
+    expect(element.querySelectorAll(".chat-day-separator")[2]!.getAttribute("aria-label")).toBe(`Today, ${longDate(local(25))}`);
+    // An older day is read aloud in the locale's long form rather than as ISO.
+    expect(separator.getAttribute("aria-label")).toBe(longDate(older));
+    expect(separator.textContent).toBe(`${new Date(older).toLocaleDateString([], { weekday: "short" })} 2026-09-23`);
+  });
+
+  test("an item's hover time is weekday, ISO date, and 24-hour clock", () => {
+    const element = host();
+    renderer().render(element, projectionWith([user("a", local(20, 19, 43))], { status: "idle" }), new Set());
+    expect(element.querySelector('[data-chat-item-id="message:a"]')!.getAttribute("title")).toBe(`${new Date(local(20)).toLocaleDateString([], { weekday: "short" })} 2026-09-20 19:43`);
+  });
+
+  test("a single past day is still dated", () => {
+    const element = host();
+    renderer().render(element, projectionWith([user("a", local(18)), answer("a", local(18, 13))], { status: "idle" }), new Set());
+    expect(outline(element)).toEqual([`day:${isoLabel(local(18))}`, "message:a", "part:a"]);
+  });
+
+  test("23:50 and 00:10 are separated", () => {
+    const element = host();
+    renderer().render(element, projectionWith([user("a", local(24, 23, 50)), answer("a", local(25, 0, 10))], { status: "idle" }), new Set());
+    expect(outline(element)).toEqual(["day:Yesterday", "message:a", "day:Today", "part:a"]);
+  });
+
+  test("a group takes the day of its first member", () => {
+    const element = host();
+    renderer().render(element, projectionWith([user("a", local(24, 23)), read("x", local(24, 23, 59)), read("y", local(25, 0, 1)), read("z", local(25, 0, 2)), answer("a", local(25, 0, 3))], { status: "idle" }), new Set());
+    expect(outline(element)).toEqual(["day:Yesterday", "message:a", "group:tool:x", "day:Today", "part:a"]);
+  });
+
+  test("unknown times stay in the day before them and a recurring day is not labelled twice", () => {
+    const element = host();
+    renderer().render(element, projectionWith([user("a", local(24)), answer("a", 0), answer("placeholder", 7), user("b", local(25)), answer("skewed", local(24, 13)), user("c", local(25, 11))], { status: "idle" }), new Set());
+    expect(outline(element)).toEqual(["day:Yesterday", "message:a", "part:a", "part:placeholder", "day:Today", "message:b", "part:skewed", "message:c"]);
+  });
+
+  test("an accepted draft belongs to today", () => {
+    const element = host();
+    renderer().render(element, projectionWith([user("a", local(24))], { status: "idle", acceptedDrafts: [{ requestId: "r1", messageId: "m1", text: "now" }] as ChatProjection["acceptedDrafts"] }), new Set());
+    expect(outline(element)[2]).toBe("day:Today");
+  });
+
+  test("separators are reused across renders and removed with their days", () => {
+    const element = host();
+    const view = renderer();
+    const first = [user("a", local(24)), user("b", local(25))];
+    view.render(element, projectionWith(first, { status: "idle" }), new Set());
+    const today = element.querySelector('[data-chat-day="2026-09-25"]');
+    view.render(element, projectionWith([...first, answer("b", local(25, 11))], { status: "idle" }), new Set());
+    expect(element.querySelector('[data-chat-day="2026-09-25"]')).toBe(today);
+    view.render(element, projectionWith([user("b", local(25))], { status: "idle" }), new Set());
+    expect(outline(element)).toEqual(["day:Today", "message:b"]);
+  });
+
+  test("labels roll over at local midnight without a render", () => {
+    const timers: Array<{ callback: () => void; delay: number }> = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    Reflect.set(globalThis, "setTimeout", (callback: () => void, delay: number) => { timers.push({ callback, delay }); return timers.length as unknown as ReturnType<typeof setTimeout>; });
+    Reflect.set(globalThis, "clearTimeout", () => {});
+    try {
+      const element = host();
+      const view = renderer();
+      let clock = local(25, 23, 30);
+      view.now = () => clock;
+      view.render(element, projectionWith([user("a", local(24)), user("b", local(25))], { status: "idle" }), new Set());
+      expect(outline(element)).toEqual(["day:Yesterday", "message:a", "day:Today", "message:b"]);
+      const armed = timers.at(-1)!;
+      expect(armed.delay).toBe(30 * 60_000 + 1_000);
+      clock = local(26, 0, 0) + 1_000;
+      armed.callback();
+      expect(outline(element)).toEqual([`day:${isoLabel(local(24))}`, "message:a", "day:Yesterday", "message:b"]);
+      expect(element.querySelectorAll(".chat-day-separator")[1]!.getAttribute("aria-label")).toBe(`Yesterday, ${longDate(local(25))}`);
+    } finally {
+      Reflect.set(globalThis, "setTimeout", realSetTimeout);
+      Reflect.set(globalThis, "clearTimeout", realClearTimeout);
+    }
+  });
+
+  test("a notice's reset is stated by weekday and clock, so it is still true when replayed later", () => {
+    const element = host();
+    // Rendered long after the reset: nothing relative ("now", "in 2h", a bare
+    // "today" clock) may be baked into the durable notice.
+    const reset = local(21, 14);
+    renderer().render(element, projectionWith([{ id: "notice:x", type: "notice", createdAt: local(21, 9), level: "warning", message: "Heads up.", resetsAt: reset }], { status: "idle" }), new Set());
+    const weekday = new Date(reset).toLocaleDateString([], { weekday: "short" });
+    expect(element.querySelector(".chat-notice")!.textContent).toBe(`Heads up. Resets ${weekday} 14:00.`);
+  });
+
+  test("separators are skipped by find", () => {
+    const element = host();
+    renderer().render(element, projectionWith([user("a", local(25, 9))], { status: "idle" }), new Set());
+    expect(element.querySelector(".chat-day-separator")!.hasAttribute("data-find-skip")).toBe(true);
+  });
+
+  test("a time ahead of the reader's clock is read as now, never as a later day", () => {
+    const element = host();
+    const view = renderer();
+    const late = local(25, 23, 59);
+    view.now = () => late;
+    // The agent's clock runs a few minutes ahead, past the reader's midnight.
+    view.render(element, projectionWith([user("a", local(25, 20)), answer("a", local(26, 0, 3)), user("b", local(26, 0, 4))], { status: "idle" }), new Set());
+    expect(outline(element)).toEqual(["day:Today", "message:a", "part:a", "message:b"]);
+  });
+
+  test("streaming renders neither rewrite labels nor re-aim the midnight timer; a new day does", () => {
+    const timers: Array<{ callback: () => void; delay: number }> = [];
+    let cleared = 0;
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    Reflect.set(globalThis, "setTimeout", (callback: () => void, delay: number) => { timers.push({ callback, delay }); return timers.length as unknown as ReturnType<typeof setTimeout>; });
+    Reflect.set(globalThis, "clearTimeout", () => { cleared += 1; });
+    try {
+      const element = host();
+      const view = renderer();
+      let clock = local(25, 10);
+      view.now = () => clock;
+      const items = [user("a", local(24)), user("b", local(25))];
+      view.render(element, projectionWith(items, { status: "idle" }), new Set());
+      expect(timers).toHaveLength(1);
+      const today = element.querySelector<HTMLElement>('[data-chat-day="2026-09-25"] time')!;
+      // A marker text: any relabel on the next renders would overwrite it.
+      today.textContent = "untouched";
+      for (let tick = 1; tick <= 5; tick++) {
+        clock = local(25, 10) + tick * 50;
+        view.render(element, projectionWith([...items, answer("b", local(25, 10))], { status: "running" }), new Set());
+      }
+      expect(timers).toHaveLength(1);
+      expect(cleared).toBe(0);
+      expect(today.textContent).toBe("untouched");
+      // The tab slept past midnight and its timer has not run yet: the next
+      // render relabels and aims at the following midnight.
+      clock = local(26, 8);
+      view.render(element, projectionWith([...items, answer("b", local(25, 10))], { status: "idle" }), new Set());
+      expect(outline(element)).toEqual([`day:${isoLabel(local(24))}`, "message:a", "day:Yesterday", "message:b", "part:b"]);
+      expect(timers).toHaveLength(2);
+      expect(timers.at(-1)!.delay).toBe(16 * 3_600_000 + 1_000);
+    } finally {
+      Reflect.set(globalThis, "setTimeout", realSetTimeout);
+      Reflect.set(globalThis, "clearTimeout", realClearTimeout);
+    }
   });
 });

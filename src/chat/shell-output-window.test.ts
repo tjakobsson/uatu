@@ -178,7 +178,9 @@ test("provider outcomes stay on selected item, time is supplied only, hidden own
   a.update("finished while hidden", { ...data, status: "cancelled", completedAt: 1000 });
   window.setOwnerHidden(a, false);
   expect(window.element!.textContent).toContain("Child review · Cancelled");
-  expect(window.element!.textContent).toContain(new Date(1000).toLocaleString());
+  const at = new Date(1000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  expect(window.element!.textContent).toContain(`${at.toLocaleDateString([], { weekday: "short" })} ${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`);
   expect(window.owner).toBe(a);
   window.close(false); a.dispose(); b.dispose();
 });

@@ -15,6 +15,9 @@
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
 
+// Marks an element whose text is never a find target (see isSkippedElement).
+export const FIND_SKIP_ATTRIBUTE = "data-find-skip";
+
 // Element names whose text is never reader-visible content.
 const SKIPPED_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
 
@@ -67,6 +70,13 @@ function isSkippedElement(element: Element): boolean {
     return true;
   }
   if (element.hasAttribute("hidden")) {
+    return true;
+  }
+  // Chrome that sits among the searched content without being part of it —
+  // the chat timeline's day separators ("Today", "Friday") — opts out by
+  // marker. Find is for what was written, and a label that relabels itself
+  // at midnight must not shift the match count under an open bar.
+  if (element.hasAttribute(FIND_SKIP_ATTRIBUTE)) {
     return true;
   }
   // SVG subtrees are excluded on purpose. The CSS Custom Highlight API paints

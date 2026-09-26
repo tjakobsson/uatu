@@ -2,6 +2,7 @@ import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
 import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
+import { captureScreenshot } from "./evidence";
 import { expect, test } from "./fixtures";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
@@ -197,6 +198,202 @@ test.describe("desktop OpenCode chat", () => {
     await page.locator("#chat-send").click();
     expect((await response).request().postDataJSON()).toMatchObject({ text: "/review API routes" });
     await expect(page.locator("#chat-items")).toContainText("/review API routes");
+  });
+
+  test("wraps long slash-command descriptions in full and keeps the highlight in view", async ({ page, request }, testInfo) => {
+    const long = (topic: string) => `${topic}: ${"Review the diff for correctness bugs, reuse, simplification, and efficiency cleanups at the chosen effort level, then report ranked findings. ".repeat(3)}End of ${topic}.`;
+    await control(request, { action: "commands", commands: Array.from({ length: 6 }, (_, index) => ({
+      name: `code-lint-${index}`, description: long(`lint ${index}`), argumentHint: "[path/to/a/rather/long/argument/hint/that/also/wraps]", kind: "skill",
+    })) });
+    await page.reload();
+    await openChatPanel(page);
+    await page.getByRole("button", { name: "New conversation" }).click();
+    const input = page.locator("#chat-input");
+    await input.fill("/code-lint");
+    const menu = page.locator("#chat-command-menu");
+    await expect(menu.getByRole("option")).toHaveCount(6);
+    const measured = await menu.evaluate(element => ({
+      horizontal: element.scrollWidth - element.clientWidth,
+      descriptions: [...element.querySelectorAll<HTMLElement>(".chat-command-description")].map(description => ({
+        text: description.textContent,
+        // Line height is "normal" here; two font sizes is well past one line.
+        multiline: description.getBoundingClientRect().height > 2 * parseFloat(getComputedStyle(description).fontSize),
+        clipped: description.scrollHeight > description.clientHeight + 1 || description.scrollWidth > description.clientWidth + 1,
+        ellipsis: getComputedStyle(description).textOverflow,
+        whiteSpace: getComputedStyle(description).whiteSpace,
+      })),
+    }));
+    expect(measured.horizontal).toBeLessThanOrEqual(1);
+    for (const [index, description] of measured.descriptions.entries()) {
+      // Every suggestion, highlighted or not, shows its whole description.
+      expect(description.text).toContain(`End of lint ${index}.`);
+      expect(description.multiline).toBe(true);
+      expect(description.clipped).toBe(false);
+      expect(description.ellipsis).not.toBe("ellipsis");
+      expect(description.whiteSpace).not.toBe("nowrap");
+    }
+    await captureScreenshot(page, testInfo, "slash-command-descriptions-wrap");
+
+    // The highlight walks down through tall options and stays inside the menu.
+    const inView = () => menu.evaluate(element => {
+      const active = element.querySelector<HTMLElement>(".chat-command-option.is-active")!;
+      const bounds = element.getBoundingClientRect();
+      const option = active.getBoundingClientRect();
+      return { name: active.querySelector(".chat-command-name")!.textContent, visible: option.top >= bounds.top - 1 && option.bottom <= bounds.bottom + 1 };
+    });
+    for (let step = 1; step < 6; step++) {
+      await page.keyboard.press("ArrowDown");
+      await expect.poll(inView).toEqual({ name: `/code-lint-${step}`, visible: true });
+    }
+    for (let step = 4; step >= 0; step--) {
+      await page.keyboard.press("ArrowUp");
+      await expect.poll(inView).toEqual({ name: `/code-lint-${step}`, visible: true });
+    }
+  });
+
+  test("dates the conversation with sticky day separators", async ({ page, request }, testInfo) => {
+    // Local instants in the page's zone: two days ago, yesterday, and today.
+    const days = await page.evaluate(() => {
+      const today = new Date();
+      const at = (offset: number, hour: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate() - offset, hour, 0).getTime();
+      const older = new Date(at(2, 9));
+      const iso = `${older.getFullYear()}-${String(older.getMonth() + 1).padStart(2, "0")}-${String(older.getDate()).padStart(2, "0")}`;
+      return { older: at(2, 9), yesterday: at(1, 9), today: at(0, 0) + 60_000, olderLabel: `${older.toLocaleDateString([], { weekday: "short" })} ${iso}` };
+    });
+    // Prompts alternate with full-width replies, so there is transcript text
+    // beside a pinned label as well as under it.
+    const run = (prefix: string, start: number, count: number): ConversationItem[] => Array.from({ length: count }, (_, index) => {
+      const text = `${prefix} message ${index} ${"content ".repeat(14)}`;
+      return index % 2
+        ? { id: `message:${prefix}-${index}`, type: "assistant_message", createdAt: start + index * 60_000, markdown: text }
+        : { id: `message:${prefix}-${index}`, type: "user_message", createdAt: start + index * 60_000, text };
+    });
+    const seeded = await control(request, { action: "seed", title: "Dated", items: [...run("older", days.older, 3), ...run("yesterday", days.yesterday, 24), ...run("today", days.today, 3)] }) as { conversation: { id: string } };
+    await page.reload();
+    await openChatPanel(page);
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(seeded.conversation.id);
+    const separators = page.locator("#chat-items > .chat-day-separator");
+    await expect(separators).toHaveText([days.olderLabel, "Yesterday", "Today"]);
+    const order = await page.locator("#chat-items > *").evaluateAll(nodes => nodes.map(node => node.classList.contains("chat-day-separator") ? `day:${node.textContent}` : node.getAttribute("data-chat-item-id")));
+    expect(order.indexOf("day:Yesterday")).toBe(order.indexOf("message:yesterday-0") - 1);
+    expect(order.indexOf("day:Today")).toBe(order.indexOf("message:today-0") - 1);
+    await expect(separators.nth(1)).toHaveAttribute("role", "separator");
+    await expect(separators.nth(1)).not.toHaveAttribute("data-chat-item-id", /.*/);
+
+    // Scroll back into the middle of yesterday: its separator stays pinned at the top.
+    const timeline = page.locator("#chat-timeline");
+    await page.locator('[data-chat-item-id="message:yesterday-14"]').evaluate(element => element.scrollIntoView({ block: "center" }));
+    // The labels a reader sees at the top of the transcript. Every day already
+    // passed is pinned there too, but only the latest one's label is shown.
+    const pinnedLabels = async () => timeline.evaluate(element => {
+      const top = element.getBoundingClientRect().top;
+      return [...element.querySelectorAll<HTMLElement>(".chat-day-separator time")].filter(label => {
+        const bounds = label.getBoundingClientRect();
+        return bounds.top >= top - 1 && bounds.top <= top + 60 && getComputedStyle(label).visibility === "visible";
+      }).map(label => label.textContent);
+    });
+    await expect.poll(pinnedLabels).toEqual(["Yesterday"]);
+    await expect(separators.first()).toHaveAttribute("data-superseded", "");
+
+    // Only the label covers the transcript: beside it, the text scrolled under
+    // the pinned row is what a tap or a selection reaches.
+    // Scrolled and measured in one task, and retried, so a settling scroll
+    // cannot move the reply between the two.
+    const beside = () => separators.nth(1).evaluate(separator => {
+      const timeline = separator.closest<HTMLElement>("#chat-timeline")!;
+      const replyNode = document.querySelector<HTMLElement>('[data-chat-item-id="message:yesterday-15"]')!;
+      timeline.scrollTop += replyNode.getBoundingClientRect().top - timeline.getBoundingClientRect().top - 4;
+      const label = separator.querySelector("time")!.getBoundingClientRect();
+      const row = separator.getBoundingClientRect();
+      const reply = replyNode.getBoundingClientRect();
+      const y = label.top + label.height / 2;
+      const hit = (x: number) => {
+        const element = document.elementFromPoint(x, y);
+        return { separator: !!element?.closest(".chat-day-separator"), item: element?.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId ?? null };
+      };
+      return {
+        background: getComputedStyle(separator).backgroundColor,
+        pointerEvents: getComputedStyle(separator).pointerEvents,
+        underRow: reply.top < y && reply.bottom > y && row.top <= y && row.bottom >= y,
+        left: hit(Math.max(row.left, reply.left) + 12),
+        right: hit(Math.min(row.right, reply.right) - 12),
+        label: hit(label.left + label.width / 2).separator,
+      };
+    });
+    await expect.poll(beside).toEqual({
+      background: "rgba(0, 0, 0, 0)",
+      pointerEvents: "none",
+      underRow: true,
+      left: { separator: false, item: "message:yesterday-15" },
+      right: { separator: false, item: "message:yesterday-15" },
+      label: true,
+    });
+    await captureScreenshot(page, testInfo, "chat-day-separator-sticky");
+
+    // Two days' separators near the top at once: yesterday's arriving under the
+    // older day's pinned label. Only one label shows, never one behind another.
+    await timeline.evaluate(element => {
+      element.scrollTop = 0;
+      const arriving = element.querySelectorAll<HTMLElement>(".chat-day-separator")[1]!;
+      element.scrollTop += arriving.getBoundingClientRect().top - element.getBoundingClientRect().top - 8;
+    });
+    const nearTop = () => timeline.evaluate(element => {
+      const top = element.getBoundingClientRect().top;
+      const labels = [...element.querySelectorAll<HTMLElement>(".chat-day-separator time")].map(label => ({ label, bounds: label.getBoundingClientRect() }));
+      return {
+        near: labels.filter(({ bounds }) => bounds.top <= top + 60).length,
+        visible: labels.filter(({ label, bounds }) => bounds.top <= top + 60 && getComputedStyle(label).visibility === "visible").map(({ label }) => label.textContent),
+      };
+    });
+    await expect.poll(nearTop).toEqual({ near: 2, visible: ["Yesterday"] });
+    // Past yesterday's first message, the older day's separator takes over.
+    await timeline.evaluate(element => { element.scrollTop = 0; });
+    await expect.poll(pinnedLabels).toEqual([days.olderLabel]);
+    await expect(separators.first()).not.toHaveAttribute("data-superseded", /.*/);
+
+    // An unstuck separator paints only its own box: it never reaches over
+    // the end of the previous day's last row.
+    await timeline.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    const unstuck = await page.locator('#chat-items > .chat-day-separator[data-chat-day]').evaluateAll(nodes => nodes.map(node => {
+      const previous = node.previousElementSibling?.getBoundingClientRect();
+      return { gap: previous ? node.getBoundingClientRect().top - previous.bottom : 0, shadow: getComputedStyle(node).boxShadow };
+    }));
+    for (const separator of unstuck) {
+      expect(separator.gap).toBeGreaterThanOrEqual(0);
+      expect(separator.shadow).toBe("none");
+    }
+
+    // Whatever is scrolled to lands below the pinned row, not under its label.
+    const clearOfBand = (id: string) => page.evaluate(target => {
+      const timeline = document.querySelector<HTMLElement>("#chat-timeline")!;
+      const top = timeline.getBoundingClientRect().top;
+      const bands = [...timeline.querySelectorAll<HTMLElement>(".chat-day-separator")].map(node => node.getBoundingClientRect()).filter(bounds => bounds.top <= top + 1 && bounds.bottom > top);
+      const bandBottom = Math.max(top, ...bands.map(bounds => bounds.bottom));
+      return document.querySelector(`[data-chat-item-id="${target}"]`)!.getBoundingClientRect().top - bandBottom;
+    }, id);
+    // A prompt jump from the rail.
+    await timeline.evaluate(element => { element.scrollTop = 0; });
+    await page.locator('#chat-prompt-rail [data-prompt-target="message:yesterday-16"]').click();
+    await expect.poll(() => clearOfBand("message:yesterday-16")).toBeGreaterThanOrEqual(0);
+    await expect.poll(() => clearOfBand("message:yesterday-16")).toBeLessThan(40);
+
+    // ⌘F: a match whose line sits under the pinned row is revealed below it,
+    // and the separators' own labels are not matches.
+    await page.locator('[data-chat-item-id="message:yesterday-20"]').evaluate(element => {
+      const timeline = element.closest<HTMLElement>("#chat-timeline")!;
+      timeline.scrollTop += element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - 4;
+    });
+    expect(await clearOfBand("message:yesterday-20")).toBeLessThan(0);
+    await timeline.click({ position: { x: 5, y: 200 } });
+    await page.keyboard.press("ControlOrMeta+f");
+    await page.locator("#find-query").fill("yesterday message 20 ");
+    await expect(page.locator("#find-status")).toHaveText("1 of 1");
+    await expect.poll(() => clearOfBand("message:yesterday-20")).toBeGreaterThanOrEqual(-1);
+    await page.locator("#find-query").fill("Yesterday");
+    // 24 message texts say "yesterday"; the separator does not add a 25th.
+    await expect(page.locator("#find-status")).toHaveText(/ of 24$/);
+    await page.locator("#find-query").fill("Today");
+    await expect(page.locator("#find-status")).toHaveText(/ of 3$/);
   });
 
   test("keeps an active turn timer across conversation navigation", async ({ page }) => {

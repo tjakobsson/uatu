@@ -1,3 +1,4 @@
+import { clockTime, dayLabel, knownTime, localDayKey } from "./dates";
 import type { ConversationSummary } from "./types";
 
 export function dedupeConversationInventory(conversations: ConversationSummary[]): ConversationSummary[] {
@@ -110,11 +111,39 @@ export function retainedPresentationConversationIds(
   return retained;
 }
 
+// The chooser's day heading for a conversation: the reader-local day of its
+// last activity (`updatedAt`), the rule OpenCode's own session list uses,
+// worded like the timeline's day separators. A time ahead of the reader's
+// clock is read as now; a conversation with no usable time is undated.
+export type ConversationDayGroup = { key: string; label: string };
+export const UNDATED_GROUP: ConversationDayGroup = { key: "undated", label: "Undated" };
+
+export function conversationDayGroup(conversation: ConversationSummary, now = Date.now()): ConversationDayGroup {
+  if (!knownTime(conversation.updatedAt)) return UNDATED_GROUP;
+  const at = Math.min(conversation.updatedAt, now);
+  return { key: localDayKey(at), label: dayLabel(at, now) };
+}
+
+/** " · 14:32": the last activity's clock time for a chooser label, or nothing when undated. */
+export function conversationActivitySuffix(conversation: ConversationSummary, now = Date.now()): string {
+  return knownTime(conversation.updatedAt) ? ` · ${clockTime(Math.min(conversation.updatedAt, now))}` : "";
+}
+
+const DAY_GROUP_ATTRIBUTE = "data-chat-day";
+
+// Patches the chooser's conversation options in place (keyed by id, so the
+// selected option element survives) and, given `group`, files them under one
+// <optgroup> per day, in first-appearance order of the (newest-first) list.
+// Undated conversations follow the dated days; they get their own heading
+// only when some conversation is dated — a list of nothing but undated
+// conversations stays flat, as it was before days were shown.
 export function patchConversationOptions(
   select: HTMLSelectElement,
   conversations: ConversationSummary[],
   label: (conversation: ConversationSummary) => string,
+  group?: (conversation: ConversationSummary) => ConversationDayGroup,
 ): void {
+  const selectedValue = select.value;
   const desired = new Set(conversations.map(conversation => conversation.id));
   const options = new Map<string, HTMLOptionElement>();
   for (const option of Array.from(select.options)) {
@@ -123,20 +152,67 @@ export function patchConversationOptions(
     else options.set(option.value, option);
   }
   for (const [id, option] of options) if (!desired.has(id)) option.remove();
-  const desiredOptions = conversations.map(conversation => {
+  const days = new Map<string, { group: ConversationDayGroup; options: HTMLOptionElement[] }>();
+  const undated: HTMLOptionElement[] = [];
+  for (const conversation of conversations) {
     let option = options.get(conversation.id);
     if (!option) {
       option = select.ownerDocument.createElement("option");
       option.value = conversation.id;
-      select.append(option);
     }
     const nextLabel = label(conversation);
     if (option.text !== nextLabel) option.text = nextLabel;
-    return option;
-  });
-  const currentOrder = Array.from(select.options).filter(option => option.value && !option.hasAttribute("data-chat-deleted-conversation"));
-  if (currentOrder.some((option, index) => option !== desiredOptions[index])) {
-    for (const option of desiredOptions) select.append(option);
+    const day = group?.(conversation);
+    if (!day || day.key === UNDATED_GROUP.key) {
+      undated.push(option);
+      continue;
+    }
+    const entry = days.get(day.key) ?? { group: day, options: [] };
+    entry.options.push(option);
+    days.set(day.key, entry);
+  }
+  if (undated.length && days.size) days.set(UNDATED_GROUP.key, { group: UNDATED_GROUP, options: undated.splice(0) });
+
+  const existingGroups = new Map<string, HTMLOptGroupElement>();
+  for (const element of Array.from(select.querySelectorAll<HTMLOptGroupElement>(`optgroup[${DAY_GROUP_ATTRIBUTE}]`))) {
+    const key = element.getAttribute(DAY_GROUP_ATTRIBUTE)!;
+    if (days.has(key) && !existingGroups.has(key)) existingGroups.set(key, element);
+  }
+  // The desired layout: each day's heading holding its options, then any
+  // ungrouped options.
+  const layout: Array<{ node: HTMLOptGroupElement | HTMLOptionElement; children?: HTMLOptionElement[] }> = [];
+  for (const [key, { group: day, options: members }] of days) {
+    let heading = existingGroups.get(key);
+    if (!heading) {
+      heading = select.ownerDocument.createElement("optgroup");
+      heading.setAttribute(DAY_GROUP_ATTRIBUTE, key);
+    }
+    if (heading.label !== day.label) heading.label = day.label;
+    layout.push({ node: heading, children: members });
+  }
+  for (const option of undated) layout.push({ node: option });
+
+  const wanted = new Set<Element>(layout.map(entry => entry.node));
+  const current = Array.from(select.children).filter(child =>
+    child.matches(`optgroup[${DAY_GROUP_ATTRIBUTE}]`) || (child.tagName === "OPTION" && desired.has((child as HTMLOptionElement).value)));
+  const inPlace = current.length === layout.length
+    && current.every((child, index) => child === layout[index]!.node)
+    && layout.every(entry => !entry.children
+      || (entry.node.children.length === entry.children.length && entry.children.every((option, index) => entry.node.children[index] === option)));
+  if (!inPlace) {
+    for (const entry of layout) {
+      select.append(entry.node);
+      for (const option of entry.children ?? []) entry.node.append(option);
+    }
+  }
+  for (const element of Array.from(select.querySelectorAll(`optgroup[${DAY_GROUP_ATTRIBUTE}]`))) {
+    if (!wanted.has(element)) element.remove();
+  }
+  // Moving the selected option between headings can hand the selection to
+  // another option; the chooser's selection is not the patch's to change.
+  if (!inPlace && selectedValue && select.value !== selectedValue
+    && Array.from(select.options).some(option => option.value === selectedValue)) {
+    select.value = selectedValue;
   }
 }
 

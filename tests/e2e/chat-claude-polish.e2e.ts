@@ -867,7 +867,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(page.locator("#chat-plan-readout-standing")).toHaveText(/^Approaching your 5-hour rate limit \(91% used\)\. Resets /);
     await expect(page.locator("#chat-plan-readout-head")).toBeVisible();
     await expect(page.locator("#chat-plan-readout-name")).toHaveText("Pro plan");
-    await expect(page.locator("#chat-plan-readout-age")).toHaveText(/^as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
+    await expect(page.locator("#chat-plan-readout-age")).toHaveText(/^as of \d{2}:\d{2} · 12 min ago$/);
     await expect(page.locator("#chat-plan-readout-rows .plan-row-label")).toHaveText(["Session", "Week"]);
     await capture(page, testInfo, "standing-beside-last-known-plan");
     // No session was live: the stale figures stand, nothing was started, nothing is called a failure.
@@ -994,12 +994,37 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     const summary = page.locator("#chat-plan-usage-summary");
     await summary.click();
     const standing = page.locator("#chat-plan-readout-standing");
-    await expect(standing).toContainText("Resets 06:00 PM.");
+    // The day is named whenever the reset is not today, so the fixed date
+    // may carry one: only the clock is asserted here.
+    await expect(standing).toContainText(/Resets (?:[^·]+ )?18:00 · /);
 
     // Same message, same level, later reset.
     await control(request, rejection(at(19)));
-    await expect(summary).toHaveText(/resets 07:00 PM$/);
-    await expect(standing).toContainText("Resets 07:00 PM.");
+    await expect(summary).toHaveText(/resets (?:.+ )?19:00$/);
+    await expect(standing).toContainText(/Resets (?:[^·]+ )?19:00 · /);
+  });
+
+  test("a reset on a later day names its weekday and the time remaining", async ({ page, request }, testInfo) => {
+    const id = await bootClaude(page, request, "Weekly reset", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Keep going" },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    // Three local days out, at 23:00, computed in the page's own zone; the
+    // weekday name is the locale's, the clock always 24-hour.
+    const expected = await page.evaluate(() => {
+      const today = new Date();
+      const reset = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 3, 23, 0);
+      return {
+        resetsAt: reset.getTime(),
+        clock: `${reset.toLocaleDateString([], { weekday: "short" })} 23:00`,
+      };
+    });
+    await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 2, level: "warning", message: "Approaching your 7-day (overage included) rate limit (81% used).", code: "rate-limit-warning", resetsAt: expected.resetsAt } });
+    const summary = page.locator("#chat-plan-usage-summary");
+    await expect(summary).toHaveText(`Near rate limit · resets ${expected.clock}`);
+    await expect(page.locator("#chat-rate-limit-live")).toHaveText(new RegExp(`Resets ${expected.clock} · in [23]d \\d+h\\.$`));
+    await summary.click();
+    await expect(page.locator("#chat-plan-readout-standing")).toHaveText(new RegExp(`^Approaching your 7-day \\(overage included\\) rate limit \\(81% used\\)\\. Resets ${expected.clock} · in [23]d \\d+h\\.$`));
+    await capture(page, testInfo, "rate-limit-reset-names-its-day");
   });
 
   test("a rate limit on a login with no plan still has a chip to live in", async ({ page, request }, testInfo) => {
@@ -1084,8 +1109,8 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     const rows = readout.locator(".plan-row");
     await expect(rows.locator(".plan-row-label")).toHaveText(["Session", "Week", "Week · Opus", "Week · Sonnet", "Week · Fable", "Extra usage"]);
     await expect(rows.locator(".plan-row-figure")).toHaveText(["9%", "25%", "61%", "4%", "47%", "13%"]);
-    await expect(rows.nth(0).locator(".plan-row-reset")).toHaveText(/^resets \d{1,2}:\d{2}( [AP]M)? · in 35m$/);
-    await expect(rows.nth(1).locator(".plan-row-reset")).toHaveText(/^resets \w{3} \d{1,2}:\d{2}( [AP]M)? · in 4d 11h$/);
+    await expect(rows.nth(0).locator(".plan-row-reset")).toHaveText(/^resets \d{2}:\d{2} · in 35m$/);
+    await expect(rows.nth(1).locator(".plan-row-reset")).toHaveText(/^resets \w{3} \d{2}:\d{2} · in 4d 11h$/);
     await expect(rows.nth(5).locator(".plan-row-reset")).toHaveText("$12.50 of $100.00");
     // This conversation: the total, then each model with its own cost, the
     // catalog's name where the wire id resolves to one.
@@ -1254,7 +1279,8 @@ test.describe("Claude Code plan readout at phone width", () => {
 test.describe("Claude Code scheduled wakeups (fixture-driven)", () => {
   test.use({ viewport: { width: 1400, height: 1000 } });
 
-  const clock = (time: number) => new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // 24-hour and zero-padded in every locale.
+  const clock = (time: number) => `${String(new Date(time).getHours()).padStart(2, "0")}:${String(new Date(time).getMinutes()).padStart(2, "0")}`;
 
   test("schedule → scheduled state → fire → wakeup turn → release", async ({ page, request }, testInfo) => {
     const id = await bootClaude(page, request, "Scheduled wakeups", [

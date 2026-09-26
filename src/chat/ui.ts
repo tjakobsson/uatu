@@ -23,7 +23,7 @@ import { backgroundStatusLabel, runningBackgroundTasks } from "./background-task
 import { pausedStatusLabel, pausedWakeups, pendingWakeups, scheduledStatusLabel, wakeupFireTime } from "./scheduled-wakeups";
 import { RunningWorkDisclosure } from "./running-work-disclosure";
 import { SilentRunFollower, TaskInspectionPanel, formatTaskElapsed, runningTaskForChild, taskById, taskInspection, type OpenTaskInspection } from "./task-inspection";
-import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
+import { composerRoutineState, formatUsd, latestPlanReport, latestRateLimit, planChip, planHasRows, planName, planReadoutRows, sessionTotalsTitle, standingSentence, usageAsOf, usageStale, type RateLimitStanding } from "./composer-status";
 import { buildPlanRowNodes, currentUsageReport, initUsagePaneControls, noteUsageReport, onUsageChange, onUsageRead, readStatusText, readUsageNow, refreshUsageIfStale, revealUsagePane, usageReadState, usageReadable } from "./usage-pane";
 import { isLiveConversationStatus } from "./types";
 import { contextReadout } from "./context-readout";
@@ -48,7 +48,9 @@ import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQue
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
 import { copyChatText } from "./copy-actions";
 import { announceConversationInventory, renderConversationInventoryAwareness, renderSelectedConversationDeleted } from "./inventory-presentation";
-import { ConversationInventoryTracker, SerializedInventoryReconciler, dedupeConversationInventory, isConversationChooserActivationKey, patchConversationOptions, retainedPresentationConversationIds } from "./inventory-reconciler";
+import { ConversationInventoryTracker, SerializedInventoryReconciler, conversationActivitySuffix, conversationDayGroup, dedupeConversationInventory, isConversationChooserActivationKey, patchConversationOptions, retainedPresentationConversationIds } from "./inventory-reconciler";
+import { dateTime, nextLocalMidnight } from "./dates";
+import { watchPinnedDayLabels } from "./pinned-day";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
 const SAVE_DEBOUNCE_MS = 400;
@@ -1107,7 +1109,7 @@ export function initChat(api = new ChatApiClient()): void {
       } else {
         // An expression the workspace cannot read is still stated, as written.
         when.textContent = wakeupFireTime(entry.nextFireAt) ?? entry.schedule;
-        if (entry.nextFireAt !== undefined) when.title = new Date(entry.nextFireAt).toLocaleString();
+        if (entry.nextFireAt !== undefined) when.title = dateTime(entry.nextFireAt);
       }
       row.append(when);
       const cancel = document.createElement("button");
@@ -1571,8 +1573,11 @@ export function initChat(api = new ChatApiClient()): void {
     if (!node) return null;
     parentScroll.pause();
     const bounds = timeline.getBoundingClientRect();
+    // Land below the scroller's reserved top band — the pinned day separator
+    // when there is one — rather than under it.
+    const reserved = items.querySelector(".chat-day-separator") ? Number.parseFloat(getComputedStyle(timeline).scrollPaddingTop) || 8 : 8;
     timeline.scrollTo({
-      top: timeline.scrollTop + node.getBoundingClientRect().top - bounds.top - 8,
+      top: timeline.scrollTop + node.getBoundingClientRect().top - bounds.top - reserved,
       behavior: smooth && !reducedMotion() ? "smooth" : "auto",
     });
     return node;
@@ -2225,6 +2230,8 @@ export function initChat(api = new ChatApiClient()): void {
   let planTick: ReturnType<typeof setInterval> | undefined;
   const paintPlanRows = () => {
     if (planReadoutRowsElement && paintedPlanReport?.plan) planReadoutRowsElement.replaceChildren(...buildPlanRowNodes(document, planReadoutRows(paintedPlanReport.plan)));
+    // The standing's reset reads relative to now, like the rows: ticked with them.
+    if (planReadoutStanding && paintedStanding) planReadoutStanding.textContent = standingSentence(paintedStanding);
     paintPlanAge();
     paintPlanReadControls();
   };
@@ -2377,9 +2384,8 @@ export function initChat(api = new ChatApiClient()): void {
     paintedTotalsKey = totalsKey;
     paintedStanding = standing;
     if (planReadoutStanding) {
-      const resets = standing?.resetsAt === undefined ? "" : ` Resets ${new Date(standing.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`;
       planReadoutStanding.hidden = !standing;
-      planReadoutStanding.textContent = standing ? `${standing.message}${resets}` : "";
+      planReadoutStanding.textContent = standing ? standingSentence(standing) : "";
     }
     const name = plan ? planName(plan) : undefined;
     if (planReadoutHead) planReadoutHead.hidden = !hasWindows;
@@ -2502,7 +2508,7 @@ export function initChat(api = new ChatApiClient()): void {
         // request. A standing that ended is worth saying too: the reader
         // was told it began, and the chip is about to go quiet.
         rateLimitLive.textContent = limit
-          ? `${limit.message}${limit.resetsAt === undefined ? "" : ` Resets ${new Date(limit.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`}`
+          ? standingSentence(limit)
           : previous ? "Rate limit cleared; requests are allowed again." : "";
         boundedSet(announcedStandings, projection.conversationId, limit?.level, ANNOUNCED_STANDING_LIMIT);
       }
@@ -2725,8 +2731,7 @@ export function initChat(api = new ChatApiClient()): void {
         }
         if (event.type === "conversation.updated") {
           conversations = conversations.map(conversation => conversation.id === event.conversation.id ? event.conversation : conversation);
-          const option = Array.from(select.options).find(candidate => candidate.value === event.conversation.id);
-          if (option) option.text = displayConversationTitle(event.conversation);
+          relabelConversationOption(event.conversation);
           if (chatTitle) chatTitle.textContent = displayConversationTitle(event.conversation);
           if (renameInput && renameForm && !renameForm.hidden && document.activeElement !== renameInput) renameInput.value = event.conversation.title;
         }
@@ -2848,6 +2853,32 @@ export function initChat(api = new ChatApiClient()): void {
     }
   };
 
+  // One chooser label for every path that writes it: the title, the owning
+  // agent when there is a choice of agents, and the last activity's clock
+  // time (its day is the option's heading).
+  const conversationOptionLabel = (conversation: ConversationSummary) => {
+    const title = agentStatuses.length > 1 && conversation.agent
+      ? `${displayConversationTitle(conversation)} · ${conversation.agent.name}`
+      : displayConversationTitle(conversation);
+    return `${title}${conversationActivitySuffix(conversation)}`;
+  };
+  const relabelConversationOption = (conversation: ConversationSummary) => {
+    const option = Array.from(select.options).find(candidate => candidate.value === conversation.id);
+    if (option) option.text = conversationOptionLabel(conversation);
+  };
+  // "Today" becomes "Yesterday" at the reader's midnight without any
+  // inventory change, so the headings are refiled then.
+  let chooserDayTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleChooserDayRollover = () => {
+    if (chooserDayTimer !== undefined) clearTimeout(chooserDayTimer);
+    const now = Date.now();
+    chooserDayTimer = setTimeout(() => {
+      chooserDayTimer = undefined;
+      patchConversationOptions(select, conversations, conversationOptionLabel, conversationDayGroup);
+      scheduleChooserDayRollover();
+    }, nextLocalMidnight(now) - now + 1_000);
+  };
+
   const patchChooser = (selectedId: string | null, deleted = false) => {
     renderSelectedConversationDeleted(document, deleted);
     // Keep only the unresolved startup selection across a transient omission;
@@ -2856,10 +2887,8 @@ export function initChat(api = new ChatApiClient()): void {
       && selectedId && !conversations.some(conversation => conversation.id === selectedId)
       ? Array.from(select.options).find(option => option.value === selectedId)
       : undefined;
-    patchConversationOptions(select, conversations, conversation =>
-      agentStatuses.length > 1 && conversation.agent
-        ? `${displayConversationTitle(conversation)} · ${conversation.agent.name}`
-        : displayConversationTitle(conversation));
+    patchConversationOptions(select, conversations, conversationOptionLabel, conversationDayGroup);
+    scheduleChooserDayRollover();
     if (retainedStartupOption) select.append(retainedStartupOption);
     const genericPlaceholder = select.querySelector<HTMLOptionElement>("option[data-chat-inventory-placeholder]");
     if (deleted || selectedId) {
@@ -3195,8 +3224,7 @@ export function initChat(api = new ChatApiClient()): void {
       const { conversation } = await api.renameConversation(conversationId, newRequestId(), title);
       void inventoryReconciler.supersede();
       conversations = conversations.map(item => item.id === conversation.id ? conversation : item);
-      const option = Array.from(select.options).find(candidate => candidate.value === conversation.id);
-      if (option) option.text = displayConversationTitle(conversation);
+      relabelConversationOption(conversation);
       if (projection?.conversationId === conversation.id) {
         projection = { ...projection, conversation };
         if (chatTitle) chatTitle.textContent = displayConversationTitle(conversation);
@@ -3842,6 +3870,12 @@ export function initChat(api = new ChatApiClient()): void {
     input.focus();
   };
 
+  // Each space-separated token of an argument hint is one unit, so the hint
+  // wraps only between tokens: "[--comment]" never splits after "--", and a
+  // lone "]" never lands on a line of its own (styles.css).
+  const hintTokens = (hint: string) => hint.split(/\s+/).filter(Boolean)
+    .map(token => `<span class="chat-command-hint-token">${escapeHtml(token)}</span>`).join(" ");
+
   const renderCommandMenu = () => {
     const next = matchingCommands(input.value, input.selectionStart ?? input.value.length, commands);
     if (!next) { closeCommandMenu(); return; }
@@ -3854,7 +3888,7 @@ export function initChat(api = new ChatApiClient()): void {
       option.className = `chat-command-option${index === commandIndex ? " is-active" : ""}`;
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", String(index === commandIndex));
-      option.innerHTML = `<span class="chat-command-name">/${escapeHtml(command.name)}</span><span class="chat-command-hint">${escapeHtml(command.argumentHint)}</span><span class="chat-command-description">${escapeHtml(command.description)}</span>`;
+      option.innerHTML = `<span class="chat-command-name">/${escapeHtml(command.name)}</span><span class="chat-command-hint">${hintTokens(command.argumentHint)}</span><span class="chat-command-description">${escapeHtml(command.description)}</span>`;
       option.addEventListener("pointerdown", event => event.preventDefault());
       option.addEventListener("click", () => chooseCommand(index));
       return option;
@@ -4295,8 +4329,7 @@ export function initChat(api = new ChatApiClient()): void {
       stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
-        const option = Array.from(select.options).find(candidate => candidate.value === accepted.conversation!.id);
-        if (option) option.text = displayConversationTitle(accepted.conversation);
+        relabelConversationOption(accepted.conversation);
         if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
       }
       if (projection?.conversationId === conversationId) {
@@ -4382,6 +4415,9 @@ export function initChat(api = new ChatApiClient()): void {
   observer?.observe(timeline);
   if (drilldownItems) observer?.observe(drilldownItems);
   if (drilldownTimeline) observer?.observe(drilldownTimeline);
+  // Only the day being read keeps its pinned label; see pinned-day.ts.
+  watchPinnedDayLabels(timeline, items);
+  if (drilldownItems && drilldownTimeline) watchPinnedDayLabels(drilldownTimeline, drilldownItems);
   viewport.start();
   // The draft is saved on every hide, persisted or not: a frozen page can be
   // discarded later without ever running code again. Nothing else happens

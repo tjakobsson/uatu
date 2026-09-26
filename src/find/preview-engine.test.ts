@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
-import { createPreviewEngine } from "./preview-engine";
+import { createPreviewEngine, insideSkipped } from "./preview-engine";
 import { DEFAULT_MATCH_OPTIONS } from "./matcher";
 import type { FindOutcome } from "./engine";
 
@@ -61,4 +61,12 @@ test("dynamic targets reset match position and own bar, focus, and range reveal"
   engine.focusSurface();
   expect(focused).toBe(second);
   expect(revealed).toBe(4);
+});
+
+test("a mutation inside skipped chrome is recognised as not changing the matches", () => {
+  const { document } = parseHTML('<html><body><div data-find-skip><time>Today</time></div><p>Today</p></body></html>');
+  const time = document.querySelector("time")!;
+  expect(insideSkipped(time as unknown as Node)).toBe(true);
+  expect(insideSkipped(time.firstChild as unknown as Node)).toBe(true);
+  expect(insideSkipped(document.querySelector("p")!.firstChild as unknown as Node)).toBe(false);
 });

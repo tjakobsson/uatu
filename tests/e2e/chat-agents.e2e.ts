@@ -51,6 +51,52 @@ test.describe("multi-agent chat", () => {
     await expect(page.locator("#chat-context")).toContainText("Claude Code");
   });
 
+  test("the chooser files both agents' conversations under the day of their last activity", async ({ page, request }, testInfo) => {
+    await bootDualAgentChat(page, request);
+    // Local wall-clock instants in the runner's zone, which the browser shares;
+    // all in the past, so no clamping to "now" is involved.
+    const now = new Date();
+    const at = (daysAgo: number, hour: number, minute = 0) => new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo, hour, minute).getTime();
+    const olderDay = at(3, 12);
+    await control(request, { action: "seed", agent: "opencode", title: "OpenCode earlier", items: [], updatedAt: olderDay });
+    await control(request, { action: "seed", agent: "claude", title: "Claude yesterday", items: [], updatedAt: at(1, 18, 5) });
+    await control(request, { action: "seed", agent: "opencode", title: "OpenCode yesterday", items: [], updatedAt: at(1, 9, 30) });
+    await control(request, { action: "seed", agent: "claude", title: "Claude today", items: [], updatedAt: at(0, 0, 1) });
+    const select = page.locator("#chat-conversation-select");
+    await expect(select.locator("option", { hasText: "OpenCode earlier" })).toHaveCount(1);
+
+    const expected = await page.evaluate(([older, yesterdayClaude, yesterdayOpen, today]) => {
+      // 24-hour clock and ISO date whatever the locale; only the weekday is the locale's.
+      const pad = (value: number) => String(value).padStart(2, "0");
+      const clock = (value: number) => `${pad(new Date(value).getHours())}:${pad(new Date(value).getMinutes())}`;
+      const day = new Date(older);
+      return {
+        older: `${day.toLocaleDateString([], { weekday: "short" })} ${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`,
+        times: [clock(today), clock(yesterdayClaude), clock(yesterdayOpen), clock(older)],
+      };
+    }, [olderDay, at(1, 18, 5), at(1, 9, 30), at(0, 0, 1)]);
+    const groups = await select.locator("optgroup").evaluateAll(nodes => nodes.map(node => [
+      (node as HTMLOptGroupElement).label,
+      Array.from(node.querySelectorAll("option")).map(option => option.textContent),
+    ]));
+    expect(groups).toEqual([
+      ["Today", [`Claude today · Claude Code · ${expected.times[0]}`]],
+      ["Yesterday", [`Claude yesterday · Claude Code · ${expected.times[1]}`, `OpenCode yesterday · OpenCode · ${expected.times[2]}`]],
+      [expected.older, [`OpenCode earlier · OpenCode · ${expected.times[3]}`]],
+    ]);
+
+    // The native popup is drawn by the platform and cannot be captured, so
+    // the evidence shows the same options as an in-page list box.
+    await select.evaluate(element => {
+      const list = element as HTMLSelectElement;
+      list.size = list.options.length + list.querySelectorAll("optgroup").length;
+      list.style.flex = "0 0 auto";
+      list.style.width = "20rem";
+      list.style.maxWidth = "none";
+    });
+    await captureScreenshot(page, testInfo, "conversation-picker-days");
+  });
+
   test("creation offers the agents, the chooser attributes them, and the header follows the selection", async ({ page, request }) => {
     await bootDualAgentChat(page, request);
 

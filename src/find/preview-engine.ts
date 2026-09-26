@@ -15,7 +15,13 @@ import type { FindEngine, FindOutcome } from "./engine";
 import { previewScrollRoot } from "../shell/preview-scroll-root";
 import { revealPreviewSurface } from "../shell/tab-bar";
 import { findMatches, nearestSpan, stepIndex, type MatchOptions } from "./matcher";
-import { buildTextIndex, locateSpan, toRange, type TextSpan } from "./text-index";
+import { buildTextIndex, FIND_SKIP_ATTRIBUTE, locateSpan, toRange, type TextSpan } from "./text-index";
+
+// Whether a mutated node sits inside chrome the index skips.
+export function insideSkipped(node: Node): boolean {
+  const element = node.nodeType === 1 ? node as Element : node.parentElement;
+  return !!element?.closest(`[${FIND_SKIP_ATTRIBUTE}]`);
+}
 
 export function createPreviewEngine(
   previewElement: HTMLElement,
@@ -170,7 +176,9 @@ export function createPreviewEngine(
       }
       observer = new MutationObserver(records => {
         const target = config.target?.() ?? previewElement;
-        if (target === indexedTarget && !records.some(record => target.contains(record.target))) return;
+        // A change confined to skipped chrome (a day separator relabelling
+        // at midnight) cannot change the matches: no re-run.
+        if (target === indexedTarget && !records.some(record => target.contains(record.target) && !insideSkipped(record.target))) return;
         // `diff.ts` clears then appends: two records, one logical swap.
         queueMicrotask(onChanged);
       });

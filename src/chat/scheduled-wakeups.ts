@@ -4,6 +4,7 @@
 // reading (spec: the composer names the state and lists each pending wakeup
 // with its prompt, whether it recurs, and when it next fires).
 
+import { clockTime, dateTime, weekdayClock } from "./dates";
 import type { ConversationItem, ScheduledWakeupItem } from "./types";
 
 /** Crons the agent rebuilds when the conversation runs again, oldest first. */
@@ -26,19 +27,17 @@ export function pendingWakeups(items: readonly ConversationItem[]): ScheduledWak
 }
 
 /**
- * "about 20:03", "about Fri 09:00", "about 1 Oct 09:00". Always "about": the
+ * "about 20:03", "about Fri 09:00", "about Thu 2026-10-01 09:00" — 24-hour
+ * in every locale. Always "about": the
  * time is the workspace's reading of the agent's cron, and the agent fires on
  * its own clock. Absent when the expression could not be read.
  */
 export function wakeupFireTime(nextFireAt: number | undefined, now = Date.now()): string | undefined {
   if (nextFireAt === undefined) return undefined;
-  const at = new Date(nextFireAt);
-  const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const today = new Date(now);
-  const days = Math.round((startOfDay(at) - startOfDay(today)) / 86_400_000);
-  if (days <= 0) return `about ${time}`;
-  if (days < 7) return `about ${at.toLocaleDateString([], { weekday: "short" })} ${time}`;
-  return `about ${at.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
+  const days = Math.round((startOfDay(new Date(nextFireAt)) - startOfDay(new Date(now))) / 86_400_000);
+  if (days <= 0) return `about ${clockTime(nextFireAt)}`;
+  if (days < 7) return `about ${weekdayClock(nextFireAt)}`;
+  return `about ${dateTime(nextFireAt)}`;
 }
 
 function startOfDay(date: Date): number {

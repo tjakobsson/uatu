@@ -53,6 +53,14 @@ describe("buildTextIndex", () => {
     expect(index.text).toBe("abcdef");
   });
 
+  test("chrome marked data-find-skip is not a find target", () => {
+    const index = buildTextIndex(
+      rootOf(`<div class="chat-day-separator" data-find-skip><time>Today</time></div><p>today we shipped</p>`),
+    );
+    expect(index.text.trim()).toBe("today we shipped");
+    expect(index.entries.every(entry => entry.node.data !== "Today")).toBe(true);
+  });
+
   test("script, style, and template text is not reader-visible content", () => {
     const index = buildTextIndex(
       rootOf(`<p>before</p><script>secret</script><style>.x{}</style><p>after</p>`),

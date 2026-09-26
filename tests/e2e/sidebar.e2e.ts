@@ -228,7 +228,7 @@ test("Usage pane: shows the workspace's last-known report on load with its age, 
   await page.locator('#panels-menu label:has-text("Usage") input').check();
   await page.locator("#panels-toggle").click();
   await expect(usagePane).toBeVisible();
-  await expect(body.locator(".usage-pane-head")).toHaveText(/^Pro plan · as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
+  await expect(body.locator(".usage-pane-head")).toHaveText(/^Pro plan · as of \d{2}:\d{2} · 12 min ago$/);
   await expect(body.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
   await expect(body).toHaveAttribute("data-stale", "true");
   await captureScreenshot(page, testInfo, "usage-pane-stale-on-load");
@@ -239,7 +239,7 @@ test("Usage pane: shows the workspace's last-known report on load with its age, 
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await expect(usagePane).toBeVisible();
   await expect(body.locator(".plan-row-label")).toHaveText(["Session", "Week"]);
-  await expect(body.locator(".usage-pane-head")).toHaveText(/^Pro plan · as of \d{1,2}:\d{2}(?: [AP]M)? · 12 min ago$/);
+  await expect(body.locator(".usage-pane-head")).toHaveText(/^Pro plan · as of \d{2}:\d{2} · 12 min ago$/);
   await expect(body).toHaveAttribute("data-stale", "true");
 
   // A slow read shows itself; when it lands the head is fresh and the figures moved.

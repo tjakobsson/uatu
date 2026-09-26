@@ -4,6 +4,9 @@ import { parseHTML } from "linkedom";
 import {
   ConversationInventoryTracker,
   SerializedInventoryReconciler,
+  UNDATED_GROUP,
+  conversationActivitySuffix,
+  conversationDayGroup,
   dedupeConversationInventory,
   isConversationChooserActivationKey,
   patchConversationOptions,
@@ -11,9 +14,15 @@ import {
 } from "./inventory-reconciler";
 import type { ConversationSummary } from "./types";
 
-function conversation(id: string, title = id): ConversationSummary {
-  return { id, title, createdAt: 1, updatedAt: 1, status: "idle" };
+function conversation(id: string, title = id, updatedAt = 1): ConversationSummary {
+  return { id, title, createdAt: 1, updatedAt, status: "idle" };
 }
+
+// Local wall-clock instants, so every case holds in whatever zone runs it.
+const at = (month: number, day: number, hour = 12, minute = 0, year = 2026) => new Date(year, month - 1, day, hour, minute).getTime();
+const layout = (select: HTMLSelectElement) => Array.from(select.children).map(child => child.tagName === "OPTGROUP"
+  ? [(child as HTMLOptGroupElement).label, Array.from(child.children).map(option => (option as HTMLOptionElement).value)]
+  : (child as HTMLOptionElement).value);
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void } {
   let resolve!: (value: T) => void;
@@ -201,5 +210,61 @@ describe("conversation inventory reconciliation", () => {
     expect(key("Tab")).toBe(false);
     expect(key("Escape")).toBe(false);
     expect(key("a", { metaKey: true })).toBe(false);
+  });
+
+  test("a conversation is filed under the local day of its last activity", () => {
+    const now = at(9, 25, 15);
+    expect(conversationDayGroup(conversation("a", "a", at(9, 25, 0, 5)), now)).toEqual({ key: "2026-09-25", label: "Today" });
+    expect(conversationDayGroup(conversation("b", "b", at(9, 24, 23, 55)), now)).toEqual({ key: "2026-09-24", label: "Yesterday" });
+    const older = conversationDayGroup(conversation("c", "c", at(9, 20)), now);
+    expect(older.key).toBe("2026-09-20");
+    expect(older.label).toBe(`${new Date(at(9, 20)).toLocaleDateString([], { weekday: "short" })} 2026-09-20`);
+    expect(conversationDayGroup(conversation("d", "d", at(12, 30, 12, 0, 2025)), now).label).toEndWith(" 2025-12-30");
+  });
+
+  test("an agent clock ahead of the reader is today, and a missing time is undated", () => {
+    const now = at(9, 25, 23, 59);
+    expect(conversationDayGroup(conversation("ahead", "ahead", at(9, 26, 0, 1)), now)).toEqual({ key: "2026-09-25", label: "Today" });
+    expect(conversationActivitySuffix(conversation("ahead", "ahead", at(9, 26, 0, 1)), now)).toBe(" · 23:59");
+    expect(conversationDayGroup(conversation("zero", "zero", 0), now)).toBe(UNDATED_GROUP);
+    expect(conversationActivitySuffix(conversation("zero", "zero", 0), now)).toBe("");
+    expect(conversationActivitySuffix(conversation("t", "t", at(9, 24, 14, 32)), now)).toBe(" · 14:32");
+  });
+
+  test("groups options under one heading per day, newest first, and keeps option elements", () => {
+    const now = at(9, 25, 15);
+    const { document } = parseHTML("<select><option value='' data-chat-inventory-placeholder>Select</option><option value='old'>Old</option></select>");
+    const select = document.querySelector<HTMLSelectElement>("select")!;
+    const oldOption = select.options[1]!;
+    const group = (item: ConversationSummary) => conversationDayGroup(item, now);
+    const list = [
+      conversation("new", "New", at(9, 25, 14)),
+      conversation("earlier-today", "Earlier today", at(9, 25, 9)),
+      conversation("old", "Old", at(9, 24, 20)),
+      conversation("undated", "Undated one", 0),
+    ];
+    patchConversationOptions(select, list, item => item.title, group);
+    expect(layout(select)).toEqual(["", ["Today", ["new", "earlier-today"]], ["Yesterday", ["old"]], ["Undated", ["undated"]]]);
+    expect(select.querySelector("option[value='old']")).toBe(oldOption);
+
+    // Activity moves a conversation to today; the emptied day's heading goes.
+    const today = select.querySelector("optgroup")!;
+    patchConversationOptions(select, [conversation("old", "Old", at(9, 25, 14, 30)), ...list.slice(0, 2)], item => item.title, group);
+    expect(layout(select)).toEqual(["", ["Today", ["old", "new", "earlier-today"]]]);
+    expect(select.querySelector("optgroup")).toBe(today);
+    expect(select.querySelector("option[value='old']")).toBe(oldOption);
+  });
+
+  test("a list with no dated conversation stays flat, and midnight relabels the headings", () => {
+    const { document } = parseHTML("<select></select>");
+    const select = document.querySelector<HTMLSelectElement>("select")!;
+    patchConversationOptions(select, [conversation("a"), conversation("b")], item => item.title, item => conversationDayGroup(item, at(9, 25)));
+    expect(layout(select)).toEqual(["a", "b"]);
+
+    const list = [conversation("a", "a", at(9, 25, 10))];
+    patchConversationOptions(select, list, item => item.title, item => conversationDayGroup(item, at(9, 25, 23)));
+    expect(layout(select)).toEqual([["Today", ["a"]]]);
+    patchConversationOptions(select, list, item => item.title, item => conversationDayGroup(item, at(9, 26, 0, 1)));
+    expect(layout(select)).toEqual([["Yesterday", ["a"]]]);
   });
 });

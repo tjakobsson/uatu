@@ -479,7 +479,7 @@ describe("chat scheduled wakeups", () => {
       const panel = () => document.querySelector<HTMLElement>("#chat-scheduled-wakeups")!;
       const button = () => document.querySelector<HTMLButtonElement>("#chat-wakeups-release")!;
       await waitUntil(() => !panel().hidden, () => document.querySelector("#chat-state")?.textContent ?? "no panel");
-      const time = new Date(fireAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const time = "20:03";
       expect(document.querySelector("#chat-scheduled-wakeups-label")?.textContent).toBe(`2 wakeups scheduled · next about ${time}`);
       const rows = [...document.querySelectorAll("#chat-scheduled-wakeups-items li")];
       expect(rows.map(row => row.querySelector(".chat-wakeup-prompt")?.textContent)).toEqual(["check the build", "poll the queue"]);
