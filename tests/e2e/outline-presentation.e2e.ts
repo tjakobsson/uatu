@@ -16,7 +16,7 @@ import fs from "node:fs/promises";
 
 import { expect, test } from "./fixtures";
 import { waitForPreviewToSettle } from "./fixtures";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
 
 type Page = import("@playwright/test").Page;
@@ -71,7 +71,7 @@ async function boot(page: Page, request: Request): Promise<void> {
 
 async function openFixtureDoc(page: Page): Promise<void> {
   await page.locator("#touch-tab-files").click();
-  await treeRow(page, "outline-doc.md").click();
+  await openTreeFile(page, "outline-doc.md");
   await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
   await expect(page.locator("#preview-title")).toHaveText("Outline Fixture");
   await waitForPreviewToSettle(page);
@@ -228,7 +228,7 @@ test.describe("phone width resolves to the sheet", () => {
     // hide the panel, but it cannot touch this attribute — so a pass here means
     // the dismissal ran, not that something merely became invisible.
     await page.locator("#touch-tab-files").click();
-    await treeRow(page, "outline-two.md").click();
+    await openTreeFile(page, "outline-two.md");
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
     await expect(page.locator("#preview-title")).toHaveText("Second Fixture");
 
@@ -496,7 +496,7 @@ test.describe("desktop stacking against the sheet", () => {
 
   test("a fullscreen terminal comes up over the sheet", async ({ page, request }) => {
     await boot(page, request);
-    await treeRow(page, "outline-doc.md").click();
+    await openTreeFile(page, "outline-doc.md");
     await expect(page.locator("#preview-title")).toHaveText("Outline Fixture");
 
     await page.locator("#terminal-toggle").click();

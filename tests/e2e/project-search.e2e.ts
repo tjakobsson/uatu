@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { revealTreeRow, treeRow } from "./tree-helpers";
+import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 // ⇧⌘F: content search across the watched roots. The matching and summary
@@ -204,7 +204,7 @@ test("a widened result outside the scope still opens", async ({ page, request })
   // resolves against the scoped roots — the escape hatch showed results it
   // could not open.
   await revealTreeRow(page, "alpha.md");
-  await treeRow(page, "alpha.md").click();
+  await openTreeFile(page, "alpha.md");
   await expect(page.locator("#preview-path")).toHaveText("alpha.md");
 
   await bootWithFileContext(page, request);
@@ -321,7 +321,7 @@ test.describe("global routing", () => {
 
 test("a scoped session searches only the scope until widened", async ({ page, request }) => {
   await revealTreeRow(page, "alpha.md");
-  await treeRow(page, "alpha.md").click();
+  await openTreeFile(page, "alpha.md");
   await expect(page.locator("#preview-path")).toHaveText("alpha.md");
 
   // Recreate the harness in the CLI's single-file shape. Scope is immutable

@@ -13,7 +13,7 @@
 
 import { expect, test } from "./fixtures";
 import { waitForPreviewToSettle } from "./fixtures";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 
 // iPhone 13 Pro portrait, same emulation as mobile.e2e.ts: hasTouch + isMobile
 // make Chromium report a coarse pointer, which defaults the UI mode to touch.
@@ -81,7 +81,7 @@ async function bootTouch(
 // Open the tall document from the Files tab and land back on Preview.
 async function openTallDoc(page: import("@playwright/test").Page): Promise<void> {
   await page.locator("#touch-tab-files").click();
-  await treeRow(page, "tall-doc.md").click();
+  await openTreeFile(page, "tall-doc.md");
   await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
   await expect(page.locator("#preview-title")).toHaveText("Tall Document");
   await waitForPreviewToSettle(page);

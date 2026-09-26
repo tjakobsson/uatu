@@ -7,7 +7,7 @@
 // see any of this chrome.
 
 import { expect, test } from "./fixtures";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { expectStageTransform, readStageTransform } from "./transform-helpers";
 
 function readStoredValue(page: import("@playwright/test").Page, suffix: string): Promise<string | null> {
@@ -217,7 +217,7 @@ test.describe("iPad mermaid viewer", () => {
     await bootClean(page, request);
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
     await page.locator("#touch-tab-files").click();
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     await page.locator("#touch-tab-preview").click();
     await openDiagramViewer(page);
 
@@ -244,7 +244,7 @@ test.describe("iPad mermaid viewer", () => {
     await page.locator("#ui-mode-toggle").click();
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
 
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     await openDiagramViewer(page);
 
     const geometry = await toolbarGeometry(page);
@@ -258,7 +258,7 @@ test.describe("iPad mermaid viewer", () => {
   test("pinch zoom and double-tap fit work on iPad", async ({ page, request }) => {
     await bootClean(page, request);
     await page.locator("#touch-tab-files").click();
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     await page.locator("#touch-tab-preview").click();
     await openDiagramViewer(page);
 

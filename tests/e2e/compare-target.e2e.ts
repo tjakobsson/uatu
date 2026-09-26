@@ -1,6 +1,6 @@
 import { expect, test } from "./fixtures";
 
-import { revealTreeRow, treeRow } from "./tree-helpers";
+import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -62,7 +62,7 @@ test("Diff view follows the compare target coherently with the overview", async 
 
   // feature.md is committed on the feature branch but has no uncommitted edit.
   await revealTreeRow(page, "feature.md");
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await expect(page.locator("#preview-path")).toHaveText("feature.md");
 
   await page.locator("#view-diff").click();
@@ -86,7 +86,7 @@ test("reloading with last-commit + Diff view persisted shows the last-commit dif
   await page.goto("/");
 
   await revealTreeRow(page, "feature.md");
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await expect(page.locator("#preview-path")).toHaveText("feature.md");
   await page.locator("#view-diff").click();
   await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");

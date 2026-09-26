@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -47,9 +47,9 @@ test("follow mode switches the preview when a non-Markdown text file changes", a
   // is a no-op for the library's selection state, so the boot-time
   // follow=true wouldn't be disabled and the next follow-toggle click
   // would flip true→false instead of false→true.
-  await treeRow(page, "diagram.md").click();
+  await openTreeFile(page, "diagram.md");
   await expect(page.locator("#preview-path")).toHaveText("diagram.md");
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
 
@@ -80,7 +80,7 @@ test("enabling follow jumps to the most recently modified file", async ({ page }
   await page.waitForTimeout(800);
 
   // Manually re-select README to ensure follow is OFF and selection is README.
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
 

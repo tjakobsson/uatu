@@ -1,6 +1,6 @@
 import { expect, test } from "./fixtures";
 
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 import { installClipboardMock, readClipboardMock } from "./chat-helpers";
 
@@ -13,7 +13,7 @@ test.afterEach(async ({ request }) => {
 });
 
 test("outline toggle opens a panel listing the AsciiDoc headings", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
 
   const toggle = page.locator("#outline-toggle");
@@ -38,7 +38,7 @@ test("outline toggle opens a panel listing the AsciiDoc headings", async ({ page
 });
 
 test("outline works for Markdown documents too", async ({ page }) => {
-  await treeRow(page, "links-demo.md").click();
+  await openTreeFile(page, "links-demo.md");
   await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
 
   await page.locator("#outline-toggle").click();
@@ -49,7 +49,7 @@ test("outline works for Markdown documents too", async ({ page }) => {
 });
 
 test("Escape closes the open outline", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   await expect(page.locator(".uatu-outline")).toBeVisible();
 
@@ -59,7 +59,7 @@ test("Escape closes the open outline", async ({ page }) => {
 });
 
 test("clicking an entry scrolls to the heading and marks it active", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   await expect(page.locator(".uatu-outline")).toBeVisible();
 
@@ -91,7 +91,7 @@ test("clicking an entry scrolls to the heading and marks it active", async ({ pa
 });
 
 test("scroll-spy highlights the heading scrolled into view", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   await expect(page.locator(".uatu-outline")).toBeVisible();
 
@@ -130,7 +130,7 @@ test("scroll-spy highlights the heading scrolled into view", async ({ page }) =>
 });
 
 test("filter narrows the visible entries without losing tracking", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   await expect(page.locator(".uatu-outline")).toBeVisible();
 
@@ -151,7 +151,7 @@ async function panelSize(page: import("@playwright/test").Page): Promise<{ w: nu
 }
 
 test("outline docks: reflows the document and fills the preview height", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   await expect(page.locator(".uatu-outline")).toBeVisible();
 
@@ -175,7 +175,7 @@ test("outline docks: reflows the document and fills the preview height", async (
 });
 
 test("left-edge resizer changes the width (docked edge fixed); width persists", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   await expect(page.locator(".uatu-outline")).toBeVisible();
   const before = await panelSize(page);
@@ -201,14 +201,14 @@ test("left-edge resizer changes the width (docked edge fixed); width persists", 
   // Width persists across reload.
   await page.reload();
   await expect(treeRow(page, "README.md")).toBeVisible();
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   const reloaded = await panelSize(page);
   expect(Math.abs(reloaded.w - after.w)).toBeLessThan(6);
 });
 
 test("closing the outline releases the document gutter", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await page.locator("#outline-toggle").click();
   await expect(page.locator(".preview-shell")).toHaveClass(/is-outline-docked/);
 
@@ -218,7 +218,7 @@ test("closing the outline releases the document gutter", async ({ page }) => {
 });
 
 test("outline stays over the preview when the terminal is right-docked", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
 
   // Right-dock the terminal first — this turns .main-stack into a row with the
   // terminal occupying the right side, where the overlay used to wrongly anchor.
@@ -249,7 +249,7 @@ test("outline stays over the preview when the terminal is right-docked", async (
 });
 
 test("action bar is gated to Rendered view", async ({ page }) => {
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   await expect(page.locator("#outline-toggle")).toBeVisible();
   await expect(page.locator("#copy-source-action")).toBeVisible();
 
@@ -267,7 +267,7 @@ test("action bar is gated to Rendered view", async ({ page }) => {
 
 test("copy-source copies the raw document text to the clipboard", async ({ page }) => {
   await installClipboardMock(page);
-  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await openTreeFile(page, "asciidoc-cheatsheet.adoc");
   // Wait for the document SWITCH, not just the button: #copy-source-action
   // is already visible for the initially-loaded README, and copying before
   // the switch lands grabs the wrong document (recurring CI flake).

@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { revealTreeRow, treeRow } from "./tree-helpers";
+import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -58,7 +58,7 @@ test("Diff view strip shows the compare base and addition/deletion counts", asyn
   });
   await page.reload();
   await revealTreeRow(page, "feature.md");
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await expect(page.locator("#preview-path")).toHaveText("feature.md");
 
   await page.locator("#view-diff").click();
@@ -103,7 +103,7 @@ test("source-forced text files pulse the strip, not the Rendered chip, on file e
   // the server forces Source rendering, so the strip is the visible signal
   // surface even though appState.viewMode never changed.
   await revealTreeRow(page, "config.yaml");
-  await treeRow(page, "config.yaml").click();
+  await openTreeFile(page, "config.yaml");
   await expect(page.locator("#preview-path")).toHaveText("config.yaml");
   await expect(strip(page)).toBeVisible();
 

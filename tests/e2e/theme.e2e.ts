@@ -7,7 +7,7 @@
 import { expect, test } from "./fixtures";
 import type { Page } from "@playwright/test";
 
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -45,7 +45,7 @@ test("dark scheme renders dark chrome, dark markdown, dark code palette", async 
   });
   await page.emulateMedia({ colorScheme: "dark" });
   await page.reload();
-  await treeRow(page, "dark-doc.md").click();
+  await openTreeFile(page, "dark-doc.md");
   await expect(page.locator("#preview-title")).toHaveText("Dark Doc");
 
   const styles = await rootStyles(page);
@@ -98,7 +98,7 @@ test("an OS scheme flip restyles live, re-renders mermaid, updates theme-color",
   });
   await page.emulateMedia({ colorScheme: "light" });
   await page.reload();
-  await treeRow(page, "flip-doc.md").click();
+  await openTreeFile(page, "flip-doc.md");
   await expect(page.locator("#preview-title")).toHaveText("Flip Doc");
   await expect(page.locator("#preview .mermaid svg")).toBeVisible();
   const lightSvg = await page.locator("#preview .mermaid").innerHTML();

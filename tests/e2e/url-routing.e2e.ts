@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -31,7 +31,7 @@ test("typing a doc URL boots the SPA on that document with follow off", async ({
 
 test("in-app cross-doc clicks push history; back restores the previous document", async ({ page }) => {
   // Start on the markdown links demo and click into another doc.
-  await treeRow(page, "links-demo.md").click();
+  await openTreeFile(page, "links-demo.md");
   await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
 
   await page.locator('#preview a[href="guides/setup.md"]').click();
@@ -50,7 +50,7 @@ test("browser back disables follow mode so the next file change does not undo th
   // Build a back stack: README → links-demo → README (the second README entry
   // comes from clicking Follow, which catches up to the most recently
   // modified file — README.md — and pushes its URL).
-  await treeRow(page, "links-demo.md").click();
+  await openTreeFile(page, "links-demo.md");
   await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
   await page.locator("#follow-toggle").click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
@@ -204,7 +204,7 @@ test("direct link to an unknown path with Accept: */* still returns 404", async 
 
 test("popstate to a deleted document renders the document-not-found empty preview", async ({ page }) => {
   // Build a back stack: /README.md (boot) → /links-demo.md (sidebar click).
-  await treeRow(page, "links-demo.md").click();
+  await openTreeFile(page, "links-demo.md");
   await expect(page.locator("#preview-path")).toHaveText("links-demo.md");
 
   // Delete README.md from disk; wait for the SSE-driven sidebar refresh.
@@ -225,7 +225,7 @@ test("URL pathname percent-encodes path segments with spaces", async ({ page, re
   });
   await page.goto("/");
 
-  await treeRow(page, "hello world.md").click();
+  await openTreeFile(page, "hello world.md");
   await expect(page.locator("#preview-path")).toHaveText("hello world.md");
   expect(new URL(page.url()).pathname).toBe("/hello%20world.md");
 

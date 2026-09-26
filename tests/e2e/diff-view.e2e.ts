@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { revealTreeRow, treeRow } from "./tree-helpers";
+import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -28,7 +28,7 @@ test("Diff view renders the active file's git diff against the review base", asy
   await page.reload();
   await revealTreeRow(page, "feature.md");
   await expect(treeRow(page, "feature.md")).toBeVisible();
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await expect(page.locator("#preview-path")).toHaveText("feature.md");
 
   // Activate Diff view.
@@ -62,7 +62,7 @@ test.describe("slow diff fetch", () => {
     });
     await page.reload();
     await revealTreeRow(page, "feature.md");
-    await treeRow(page, "feature.md").click();
+    await openTreeFile(page, "feature.md");
     await expect(page.locator("#preview-path")).toHaveText("feature.md");
     const previousContent = page.locator("#preview");
     await expect(previousContent).not.toBeEmpty();
@@ -108,7 +108,7 @@ test("A large diff renders via Pierre's plaintext tier with the size notice", as
   });
   await page.reload();
   await revealTreeRow(page, "feature.md");
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await expect(page.locator("#preview-path")).toHaveText("feature.md");
 
   await page.locator("#view-diff").click();
@@ -132,7 +132,7 @@ test("A fast diff render leaves no loading bar behind", async ({ page, request }
   });
   await page.reload();
   await revealTreeRow(page, "feature.md");
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await expect(page.locator("#preview-path")).toHaveText("feature.md");
 
   await page.locator("#view-diff").click();
@@ -146,7 +146,7 @@ test("Diff view shows the 'no git history' card in a non-git workspace", async (
   await request.post("/__e2e/reset", { data: { nonGit: true } });
   await page.reload();
   await expect(treeRow(page, "README.md")).toBeVisible();
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 
   await page.locator("#view-diff").click();
@@ -183,7 +183,7 @@ test("Diff view exposes a Unified / Split layout toggle that persists across rel
   await page.reload();
   await revealTreeRow(page, "feature.md");
   await expect(treeRow(page, "feature.md")).toBeVisible();
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await page.locator("#view-diff").click();
   await expect(page.locator(".uatu-diff-host")).toBeVisible();
 
@@ -202,7 +202,7 @@ test("Diff view exposes a Unified / Split layout toggle that persists across rel
 
   await page.reload();
   await expect(treeRow(page, "feature.md")).toBeVisible();
-  await treeRow(page, "feature.md").click();
+  await openTreeFile(page, "feature.md");
   await page.locator("#view-diff").click();
   await expect(page.locator('.uatu-diff-toolbar [data-style-value="split"]'))
     .toHaveAttribute("aria-checked", "true");
@@ -239,7 +239,7 @@ test("Source file under a stored split-layout preference still shows the view ch
 
   await fs.writeFile(workspacePath("split-source.ts"), "export const value = 1;\n", "utf8");
   await expect(treeRow(page, "split-source.ts")).toBeVisible();
-  await treeRow(page, "split-source.ts").click();
+  await openTreeFile(page, "split-source.ts");
 
   // Layout chooser correctly hides for source files; view chooser stays
   // visible with the Source + Diff segments.
@@ -255,7 +255,7 @@ test("Diff view keeps the view chooser visible when switching documents", async 
   // dropped the view chooser because `currentRenderedPayload()` returned
   // null (the documentViewCache had been cleared by loadDocument and the
   // diff path never populates it).
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await page.locator("#view-diff").click();
   await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");
@@ -263,7 +263,7 @@ test("Diff view keeps the view chooser visible when switching documents", async 
 
   // Switch to a different markdown file. The chooser must stay visible and
   // continue to highlight Diff.
-  await treeRow(page, "diagram.md").click();
+  await openTreeFile(page, "diagram.md");
   await expect(page.locator("#preview-path")).toHaveText("diagram.md");
   await expect(page.locator("#view-control")).toBeVisible();
   await expect(page.locator("#view-rendered")).toBeVisible();
@@ -275,7 +275,7 @@ test("Diff view keeps the view chooser visible when switching documents", async 
   // (Source + Diff), Diff still active.
   await fs.writeFile(workspacePath("nav-source.ts"), "export const x = 1;\n", "utf8");
   await expect(treeRow(page, "nav-source.ts")).toBeVisible();
-  await treeRow(page, "nav-source.ts").click();
+  await openTreeFile(page, "nav-source.ts");
   await expect(page.locator("#view-control")).toBeVisible();
   await expect(page.locator("#view-rendered")).toBeHidden();
   await expect(page.locator("#view-source")).toBeVisible();
@@ -285,7 +285,7 @@ test("Diff view keeps the view chooser visible when switching documents", async 
 
 test("Diff segment appears alongside Source / Rendered for Markdown and AsciiDoc", async ({ page }) => {
   // README.md is markdown — all three segments visible.
-  await treeRow(page, "README.md").click();
+  await openTreeFile(page, "README.md");
   await expect(page.locator("#view-control")).toBeVisible();
   await expect(page.locator("#view-rendered")).toBeVisible();
   await expect(page.locator("#view-source")).toBeVisible();
@@ -294,7 +294,7 @@ test("Diff segment appears alongside Source / Rendered for Markdown and AsciiDoc
   // An AsciiDoc file (the workspace fixture has at least one .adoc) — also three.
   await fs.writeFile(workspacePath("guide.adoc"), "= Guide\n\nBody.\n", "utf8");
   await expect(treeRow(page, "guide.adoc")).toBeVisible();
-  await treeRow(page, "guide.adoc").click();
+  await openTreeFile(page, "guide.adoc");
   await expect(page.locator("#view-rendered")).toBeVisible();
   await expect(page.locator("#view-source")).toBeVisible();
   await expect(page.locator("#view-diff")).toBeVisible();
@@ -302,7 +302,7 @@ test("Diff segment appears alongside Source / Rendered for Markdown and AsciiDoc
   // A `.ts` source file — two segments (Source + Diff), Rendered hidden.
   await fs.writeFile(workspacePath("module.ts"), "export const value = 1;\n", "utf8");
   await expect(treeRow(page, "module.ts")).toBeVisible();
-  await treeRow(page, "module.ts").click();
+  await openTreeFile(page, "module.ts");
   await expect(page.locator("#view-rendered")).toBeHidden();
   await expect(page.locator("#view-source")).toBeVisible();
   await expect(page.locator("#view-diff")).toBeVisible();
@@ -310,7 +310,7 @@ test("Diff segment appears alongside Source / Rendered for Markdown and AsciiDoc
   // A `.json` source file — also Source + Diff only.
   await fs.writeFile(workspacePath("settings.json"), "{\"key\": \"value\"}\n", "utf8");
   await expect(treeRow(page, "settings.json")).toBeVisible();
-  await treeRow(page, "settings.json").click();
+  await openTreeFile(page, "settings.json");
   await expect(page.locator("#view-rendered")).toBeHidden();
   await expect(page.locator("#view-source")).toBeVisible();
   await expect(page.locator("#view-diff")).toBeVisible();

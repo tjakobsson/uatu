@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import type { StatePayload } from "../../src/shared/types";
 import { expect, test, showGitLogPane } from "./fixtures";
-import { clickTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
+import { clickTreeFile, openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 
 // Drive real shell/tree reducers with complete, ordered snapshots. File reads
 // still use the server; only delivery timing and index membership are controlled.
@@ -96,13 +96,13 @@ for (const touch of [false, true]) {
         if (path === "hero.svg") await expect(page.locator("#preview img")).toHaveAttribute("alt", "hero.svg");
         await expect(treeRow(page, path)).toHaveAttribute("aria-selected", "true");
         await expect(page.locator("#follow-toggle")).toBeFocused();
-        await treeRow(page, "README.md").click();
+        await openTreeFile(page, "README.md");
         await expect(page.locator("#preview-path")).toHaveText("README.md");
       });
     }
     test("empty and excluded indexes never read retained content or revive an abandoned destination", async ({ page, request }) => {
       await files(page, touch);
-      await treeRow(page, "a-selected.txt").click();
+      await openTreeFile(page, "a-selected.txt");
       await expect(page.locator("#preview")).toContainText("Selected text contents");
       const url = page.url();
       const state: StatePayload = await request.get("/api/state").then(r => r.json());
@@ -118,7 +118,7 @@ for (const touch of [false, true]) {
       await deliver(page, excluded);
       await identity(page, "a-selected.txt", url);
       expect(reads).toBe(0);
-      await treeRow(page, "diagram.md").click();
+      await openTreeFile(page, "diagram.md");
       await expect(page.locator("#preview-path")).toHaveText("diagram.md");
       const newerUrl = page.url();
       await deliver(page, state);
@@ -132,7 +132,7 @@ for (const touch of [false, true]) {
         await files(page, touch);
         await treeRow(page, "metadata/").click();
         await revealTreeRow(page, "metadata/markdown-yaml.md");
-        await treeRow(page, "metadata/markdown-yaml.md").click();
+        await openTreeFile(page, "metadata/markdown-yaml.md");
         await expect(page.locator("#preview-path")).toHaveText("metadata/markdown-yaml.md");
         const state: StatePayload = await request.get("/api/state").then(r => r.json());
         const missing = structuredClone(state);
@@ -163,7 +163,7 @@ for (const touch of [false, true]) {
     }
     test("tree refresh and filter keep selection, then keyboard and pointer activation work", async ({ page, request }) => {
       await files(page, touch);
-      await treeRow(page, "a-selected.txt").click();
+      await openTreeFile(page, "a-selected.txt");
       await expect(page.locator("#preview-path")).toHaveText("a-selected.txt");
       const url = page.url();
       const state: StatePayload = await request.get("/api/state").then(r => r.json());
@@ -182,7 +182,7 @@ for (const touch of [false, true]) {
     });
     test("resume via HTTP preserves an unavailable selection and restores it without changedId", async ({ page, request }) => {
       await files(page, touch);
-      await treeRow(page, "a-selected.txt").click();
+      await openTreeFile(page, "a-selected.txt");
       await expect(page.locator("#preview")).toContainText("Selected text contents");
       const url = page.url();
       const original: StatePayload = await request.get("/api/state").then(r => r.json());
@@ -208,8 +208,7 @@ for (const touch of [false, true]) {
     for (const recovery of ["stream", "resume", "reconnect"] as const) {
       test(`ancestor-close intentional emptiness survives ${recovery} reconciliation`, async ({ page, request }) => {
         await files(page, touch);
-        await treeRow(page, "guides/").click();
-        await treeRow(page, "guides/setup.md").click();
+        await openTreeFile(page, "guides/setup.md");
         await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
         await files(page, touch);
         await treeRow(page, "guides/").click();
@@ -239,7 +238,7 @@ for (const touch of [false, true]) {
         if (touch) await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
         await treeRow(page, "guides/").click();
         await closedDocument(page);
-        await treeRow(page, "guides/setup.md").click();
+        await openTreeFile(page, "guides/setup.md");
         await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
       });
     }
@@ -297,8 +296,7 @@ for (const touch of [false, true]) {
       for (const reselect of [false, true]) {
         test(`late ${mode} response cannot undo ancestor close${reselect ? " and reselect" : ""}`, async ({ page, request }) => {
           await files(page, touch);
-          await treeRow(page, "guides/").click();
-          await treeRow(page, "guides/setup.md").click();
+          await openTreeFile(page, "guides/setup.md");
           await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
           if (mode === "source") await page.locator("#view-source").click();
           const state: StatePayload = await request.get("/api/state").then(r => r.json());
@@ -327,7 +325,7 @@ for (const touch of [false, true]) {
             await treeRow(page, "guides/").click();
             await closedDocument(page);
             if (reselect) {
-              await treeRow(page, "README.md").click();
+              await openTreeFile(page, "README.md");
               await expect(page.locator("#preview-path")).toHaveText("README.md");
               await expect(page.locator("#preview")).not.toHaveClass(/\bempty\b/);
             }
@@ -354,7 +352,7 @@ for (const touch of [false, true]) {
         await files(other, touch);
         await treeRow(other, "diagram.md").click();
         await files(page, touch);
-        await treeRow(page, "a-selected.txt").click();
+        await openTreeFile(page, "a-selected.txt");
         await expect(page.locator("#preview-path")).toHaveText("a-selected.txt");
         const urls = [page.url(), other.url()];
         const missing = structuredClone(state);
@@ -369,7 +367,7 @@ for (const touch of [false, true]) {
     });
     test("older diff response cannot replace a newer refresh of the same file", async ({ page, request }) => {
       await files(page, touch);
-      await treeRow(page, "a-selected.txt").click();
+      await openTreeFile(page, "a-selected.txt");
       await expect(page.locator("#preview-path")).toHaveText("a-selected.txt");
       const state: StatePayload = await request.get("/api/state").then(r => r.json());
       let release!: () => void;
@@ -421,7 +419,7 @@ for (const touch of [false, true]) {
       await waiting;
       await files(page, touch);
       if (destination === "document") {
-        await treeRow(page, "diagram.md").click();
+        await openTreeFile(page, "diagram.md");
         await expect(page.locator("#preview-path")).toHaveText("diagram.md");
       } else {
         await showGitLogPane(page);

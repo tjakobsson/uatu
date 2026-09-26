@@ -3,7 +3,7 @@ import type { Page } from "@playwright/test";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { openTreeFile, treeRow } from "./tree-helpers";
 import { expectStageTransform, readStageTransform } from "./transform-helpers";
 import { standardBeforeEach } from "./fixtures";
 
@@ -93,7 +93,7 @@ test.describe("lazy rendering where the page scrolls", () => {
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
 
       await page.locator("#touch-tab-files").click();
-      await treeRow(page, "many-diagrams.md").click();
+      await openTreeFile(page, "many-diagrams.md");
       await page.locator("#touch-tab-preview").click();
       await expect(page.locator("#preview-title")).toHaveText("Many Diagrams");
       await expect(page.locator("#preview .mermaid")).toHaveCount(DIAGRAMS);
@@ -126,7 +126,7 @@ test.describe("lazy rendering where the page scrolls", () => {
       await page.reload();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
 
-      await treeRow(page, "many-diagrams.md").click();
+      await openTreeFile(page, "many-diagrams.md");
       await expect(page.locator("#preview-title")).toHaveText("Many Diagrams");
       await expect(page.locator("#preview .mermaid")).toHaveCount(DIAGRAMS);
       await expect
@@ -158,7 +158,7 @@ test.describe("lazy rendering where the page scrolls", () => {
       await page.reload();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
 
-      await treeRow(page, "many-diagrams.md").click();
+      await openTreeFile(page, "many-diagrams.md");
       await expect(page.locator("#preview-title")).toHaveText("Many Diagrams");
       await expect(page.locator("#preview .mermaid")).toHaveCount(DIAGRAMS);
       await expect(page.locator("#preview .mermaid svg").first()).toBeVisible();
@@ -214,7 +214,7 @@ test.describe("lazy rendering where the page scrolls", () => {
       await page.locator("#ui-mode-toggle").click();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
 
-      await treeRow(page, "many-diagrams.md").click();
+      await openTreeFile(page, "many-diagrams.md");
       await expect(page.locator("#preview-title")).toHaveText("Many Diagrams");
       await expect(page.locator("#preview .mermaid")).toHaveCount(DIAGRAMS);
       await expect(page.locator("#preview .mermaid svg").first()).toBeVisible();
@@ -296,7 +296,7 @@ test.describe("desktop layout", () => {
       },
     });
     await page.reload();
-    await treeRow(page, "lazy-diagrams.md").click();
+    await openTreeFile(page, "lazy-diagrams.md");
     await expect(page.locator("#preview-title")).toHaveText("Lazy Diagrams");
 
     // The top diagram renders; the bottom one stays a pending placeholder.
@@ -313,7 +313,7 @@ test.describe("desktop layout", () => {
   });
 
   test("renders GFM content and Mermaid diagrams", async ({ page }) => {
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
 
     await expect(page.locator("#preview-title")).toHaveText("Diagram Fixture");
     await expect(page.locator("#preview table")).toBeVisible();
@@ -329,7 +329,7 @@ test.describe("desktop layout", () => {
     // the library chose, capped to the preview content width if larger. This
     // test guards two invariants: (a) no horizontal overflow, (b) the trigger
     // is horizontally centered within the preview column.
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     const trigger = page.locator("#preview .mermaid-trigger");
     await expect(trigger).toBeVisible();
 
@@ -361,7 +361,7 @@ test.describe("desktop layout", () => {
   });
 
   test("clicking a Mermaid diagram opens the fullscreen viewer with a cloned svg", async ({ page }) => {
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     const trigger = page.locator("#preview .mermaid-trigger");
     await expect(trigger).toBeVisible();
 
@@ -376,7 +376,7 @@ test.describe("desktop layout", () => {
   });
 
   test("Escape closes the diagram viewer and returns focus to the trigger", async ({ page }) => {
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     const trigger = page.locator("#preview .mermaid-trigger");
     await trigger.click();
     const dialog = page.locator("dialog.mermaid-viewer");
@@ -392,7 +392,7 @@ test.describe("desktop layout", () => {
   });
 
   test("the diagram viewer fills the entire browser canvas", async ({ page }) => {
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
     const dialog = page.locator("dialog.mermaid-viewer");
     await expect(dialog).toHaveAttribute("open", "");
@@ -416,7 +416,7 @@ test.describe("desktop layout", () => {
   });
 
   test("wheel scrolling inside the diagram viewer changes the stage transform", async ({ page }) => {
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
     await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
 
@@ -437,7 +437,7 @@ test.describe("desktop layout", () => {
   });
 
   test("editing the watched file while the diagram viewer is open closes the viewer", async ({ page }) => {
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
     const dialog = page.locator("dialog.mermaid-viewer");
     await expect(dialog).toHaveAttribute("open", "");
@@ -452,7 +452,7 @@ test.describe("desktop layout", () => {
   });
 
   test("each Mermaid shape (flowchart, sequence, C4, wide, component-interaction) renders an inline SVG", async ({ page }) => {
-    await treeRow(page, "mermaid-shapes.md").click();
+    await openTreeFile(page, "mermaid-shapes.md");
     await expect(page.locator("#preview-title")).toHaveText("Mermaid Shapes");
 
     // Wait until all five diagrams have rendered (Mermaid hydration is async).
@@ -477,7 +477,7 @@ test.describe("desktop layout", () => {
     // microscopic. The earlier "no overflow + centered" assertions passed
     // happily at any non-zero width — this one fails fast if rendered width
     // doesn't match the library's intent.
-    await treeRow(page, "mermaid-shapes.md").click();
+    await openTreeFile(page, "mermaid-shapes.md");
     await expectAllDiagramsRendered(page, 5);
 
     const sizes = await page.evaluate(() => {
@@ -524,7 +524,7 @@ test.describe("desktop layout", () => {
     // stripped every id, which broke `url(#someGradient)`, `<use href="#x">`,
     // arrowhead markers, and clipPaths. The clone must keep references intact
     // by remapping ids, not removing them.
-    await treeRow(page, "mermaid-shapes.md").click();
+    await openTreeFile(page, "mermaid-shapes.md");
     await expectAllDiagramsRendered(page, 5);
 
     // Use the C4 diagram (third) since it relies most heavily on internal
@@ -570,7 +570,7 @@ test.describe("desktop layout", () => {
     // renders with default fills (the boxes look solid black). This test
     // exercises every shape in the fixture so flowchart, sequence, C4, wide,
     // and component-interaction are all covered.
-    await treeRow(page, "mermaid-shapes.md").click();
+    await openTreeFile(page, "mermaid-shapes.md");
     await expectAllDiagramsRendered(page, 5);
 
     const triggers = page.locator("#preview .mermaid-trigger");
@@ -613,7 +613,7 @@ test.describe("desktop layout", () => {
     // the stage, and `fit()` then *also* added a center-offset translate.
     // The two composed and pushed non-square shapes off-screen. Exercises every
     // shape in the fixture (flowchart, sequence, C4, wide, component-interaction).
-    await treeRow(page, "mermaid-shapes.md").click();
+    await openTreeFile(page, "mermaid-shapes.md");
     await expectAllDiagramsRendered(page, 5);
 
     const triggers = page.locator("#preview .mermaid-trigger");
@@ -659,7 +659,7 @@ test.describe("desktop layout", () => {
     // None of it may alter what a mouse and keyboard already do — this pins
     // drag-pan, cursor-anchored wheel zoom, dblclick fit, the toolbar, and
     // every keyboard shortcut in one place.
-    await treeRow(page, "diagram.md").click();
+    await openTreeFile(page, "diagram.md");
     await page.locator("#preview .mermaid-trigger").click();
     await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
     await page.waitForTimeout(120);
@@ -752,7 +752,7 @@ test.describe("desktop layout", () => {
     // the inline-block stage shrank with it. Restoring viewBox-based dimensions
     // and centering after fit() must produce a stage box that fills most of
     // the modal viewport.
-    await treeRow(page, "mermaid-shapes.md").click();
+    await openTreeFile(page, "mermaid-shapes.md");
     await expectAllDiagramsRendered(page, 5);
 
     await page.locator("#preview .mermaid-trigger").first().click();
