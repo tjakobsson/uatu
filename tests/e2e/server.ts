@@ -50,6 +50,7 @@ import { LiveBroker, type LiveSessionChange, type LiveUpstreamSource } from "../
 import { LiveEndpoint } from "../../src/hub/live-endpoint";
 import { LIVE_STREAM_PATH } from "../../src/shared/live-protocol";
 import { FakeE2EChatService, type ReversibleFileFixture, type UsageReadOutcome } from "./chat-service";
+import { e2eTerminalShell } from "./terminal-shell";
 import type { ChatCapability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, AgentUsageReport } from "../../src/chat/types";
 
 // One-shot artificial latency for GET /api/terminal/sessions, armed by tests
@@ -230,8 +231,9 @@ const liveEndpoint = new LiveEndpoint({
   broker: liveBroker,
   resolveWorkspace: requested => requested ?? E2E_WORKSPACE_ID,
 });
+// A deterministic shell, never the developer's own (see terminal-shell.ts).
 const terminalServer = terminalEnabled
-  ? createTerminalServer({ cwd: activeWorkspaceRoot })
+  ? createTerminalServer({ cwd: activeWorkspaceRoot, ...e2eTerminalShell() })
   : null;
 
 async function handleE2EReset(request: Request): Promise<Response> {
