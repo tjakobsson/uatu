@@ -23,6 +23,10 @@ export type StateReconciler<T> = {
   // already been applied, in which case the caller must ignore the frame;
   // returns `true` and records it otherwise.
   acceptFrame(freshness: number): boolean;
+  // Records state the caller applied by a route of its own — boot's initial
+  // fetch — as the freshness every later payload must beat. Never lowers the
+  // watermark.
+  recordApplied(freshness: number): void;
 };
 
 export function createStateReconciler<T>(options: {
@@ -75,6 +79,9 @@ export function createStateReconciler<T>(options: {
       if (freshness <= appliedFreshness) return false;
       appliedFreshness = freshness;
       return true;
+    },
+    recordApplied(freshness: number) {
+      if (freshness > appliedFreshness) appliedFreshness = freshness;
     },
   };
 }

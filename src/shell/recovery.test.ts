@@ -144,6 +144,25 @@ describe("createStateReconciler", () => {
     });
   });
 
+  test("state applied by another route bars older frames and fetches, never lowering the watermark", async () => {
+    const applied: string[] = [];
+    const reconciler = createStateReconciler<Payload>({
+      fetchState: async () => payload("fetched", 4),
+      applyState: value => applied.push(value.body),
+      freshnessOf: value => value.generatedAt,
+    });
+
+    // Boot applied state the server produced at 5.
+    reconciler.recordApplied(5);
+    expect(reconciler.acceptFrame(3)).toBe(false);
+    expect(reconciler.acceptFrame(5)).toBe(false);
+    expect(await reconciler.reconcile()).toBe(false);
+    expect(applied).toEqual([]);
+    expect(reconciler.acceptFrame(8)).toBe(true);
+    reconciler.recordApplied(6);
+    expect(reconciler.acceptFrame(7)).toBe(false);
+  });
+
   test("a stream frame the server produced later invalidates the fetch in flight", async () => {
     const applied: string[] = [];
     const slow = defer<Payload>();
