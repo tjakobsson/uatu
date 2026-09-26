@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./hub-fixtures";
+import { test, expect, openHubMenu } from "./hub-fixtures";
 import { captureScreenshot, saveEvidence } from "./evidence";
 
 const exec = promisify(execFile);
@@ -45,7 +45,7 @@ async function files(page: Page): Promise<void> {
 
 async function picker(page: Page): Promise<void> {
   await files(page);
-  if (!await page.locator("#hub-menu").isVisible()) await page.locator("#hub-toggle").click();
+  await openHubMenu(page);
 }
 
 async function fork(

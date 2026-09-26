@@ -16,7 +16,9 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureScreenshot, saveEvidence } from "./evidence";
-import { expect, openSessionTab, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
+import { expect, openHubMenu, openSessionTab, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
+import { openTerminal, paneHost, typeInTerminal, waitForShell } from "./terminal-helpers";
+import { RECOVERY_BUDGET_MS, RECOVERY_MAX_DELAY_MS } from "../../src/terminal/recovery";
 import type { BrowserContext, Page, TestInfo } from "@playwright/test";
 
 const appVersion = (JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")) as { version: string }).version;
@@ -103,6 +105,13 @@ async function armCloseDelay(workspace: HubE2EWorkspace, ms: number): Promise<vo
   expect(response.ok).toBe(true);
 }
 
+// Held socket closes the child has yet to process.
+async function heldCloses(workspace: HubE2EWorkspace): Promise<number> {
+  const response = await fetch(`${workspace.childOrigin}/s/${workspace.id}/__e2e/terminal-close-delay`);
+  expect(response.ok).toBe(true);
+  return ((await response.json()) as { pending: number }).pending;
+}
+
 async function saveTrace(page: Page, context: BrowserContext, workspace: HubE2EWorkspace, testInfo: TestInfo, name: string): Promise<void> {
   const report = {
     test: testInfo.title,
@@ -126,51 +135,28 @@ function paneSessionIds(page: Page): Promise<string[]> {
   );
 }
 
-async function waitForPrompt(page: Page, paneIndex = 0): Promise<void> {
-  const rows = page.locator(".terminal-pane-host").nth(paneIndex).locator(".xterm-rows > div");
-  await expect
-    .poll(async () => (await rows.allTextContents()).some(text => text.trim().length > 0), {
-      timeout: 10_000,
-      message: "shell prompt must render before typing",
-    })
-    .toBe(true);
-}
-
-async function focusPane(page: Page, paneIndex: number): Promise<void> {
-  await page.evaluate(index => {
-    const host = document.querySelectorAll<HTMLElement>(".terminal-pane-host")[index];
-    host?.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea")?.focus();
-  }, paneIndex);
-}
-
 async function typeLine(page: Page, paneIndex: number, line: string): Promise<void> {
-  await focusPane(page, paneIndex);
-  await page.keyboard.type(line);
-  await page.keyboard.press("Enter");
+  await typeInTerminal(page, line, paneIndex);
 }
 
 async function expectShellValue(page: Page, paneIndex: number, name: string, value: string): Promise<void> {
   await typeLine(page, paneIndex, `echo got_\${${name}}_end`);
-  await expect(page.locator(".terminal-pane-host").nth(paneIndex)).toContainText(`got_${value}_end`, { timeout: 10_000 });
+  await expect(paneHost(page, paneIndex)).toContainText(`got_${value}_end`);
 }
 
-async function openTerminal(page: Page): Promise<void> {
-  await page.locator("#terminal-toggle").click();
-  await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 10_000 });
-  await waitForPrompt(page, 0);
-}
-
+// A restored pane paints its previous screen before the reattached socket
+// is live, so a non-empty screen proves nothing: each pane waits for its
+// shell to answer.
 async function expectTerminalRestored(page: Page, paneCount: number): Promise<void> {
-  await expect(page.locator("#terminal-panel")).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator(".terminal-pane-host .xterm")).toHaveCount(paneCount, { timeout: 10_000 });
+  await expect(page.locator("#terminal-panel")).toBeVisible();
+  await expect(page.locator(".terminal-pane-host .xterm")).toHaveCount(paneCount);
   await expect(page.locator(".terminal-taken, .terminal-occupied, .terminal-picker, .terminal-auth")).toHaveCount(0);
-  for (let index = 0; index < paneCount; index += 1) await waitForPrompt(page, index);
+  for (let index = 0; index < paneCount; index += 1) await waitForShell(page, index);
 }
 
 async function openSwitcher(page: Page): Promise<void> {
   await expect(page.locator("#hub-control")).toBeVisible();
-  await page.locator("#hub-toggle").click();
-  await expect(page.locator("#hub-menu")).toBeVisible();
+  await openHubMenu(page);
 }
 
 function menuEntry(page: Page, workspaceId: string) {
@@ -182,8 +168,12 @@ async function switchTo(page: Page, workspace: HubE2EWorkspace): Promise<void> {
   await menuEntry(page, workspace.id).click();
   // The SPA rewrites the entry to the document it opened, so the session
   // URL is a prefix of what the page ends on.
-  await expect(page).toHaveURL(new RegExp(`^${workspace.sessionUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  await expect(page).toHaveURL(sessionUrlPattern(workspace));
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+}
+
+function sessionUrlPattern(workspace: HubE2EWorkspace): RegExp {
+  return new RegExp(`^${workspace.sessionUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
 }
 
 function byId(hub: HubE2EInfo, id: string): HubE2EWorkspace {
@@ -240,8 +230,7 @@ test.describe("terminal survives workspace navigation through the hub", () => {
 
     // Keyboard activation follows the same path.
     await openSwitcher(page);
-    await current.focus();
-    await page.keyboard.press("Enter");
+    await current.press("Enter");
     await expect(page.locator("#hub-menu")).toBeHidden();
     expect(await page.evaluate(() => (window as unknown as { __uatuMarker?: string }).__uatuMarker)).toBe("original document");
   });
@@ -254,10 +243,13 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     const paneIds = await paneSessionIds(page);
 
     await openSwitcher(page);
-    const opened = hubContext.waitForEvent("page");
+    // Short and explicit: the gesture opens the tab at once or not at all.
+    const opened = hubContext.waitForEvent("page", { timeout: 5_000 });
     await menuEntry(page, "alpha").click({ modifiers: ["ControlOrMeta"] });
     const other = await opened;
-    await expect(other).toHaveURL(alpha.sessionUrl);
+    // The SPA rewrites the entry to the document it opened, so the session
+    // URL is a prefix of what the tab ends on.
+    await expect(other).toHaveURL(sessionUrlPattern(alpha));
     // The new tab is its own document with no pane references: it must not
     // claim this tab's shell.
     await expect(other.locator("#connection-state .connection-label")).toHaveText("Connected");
@@ -274,8 +266,8 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     const page = await openSessionTab(hubContext, alpha);
     await openTerminal(page);
     await page.locator("#terminal-split").click();
-    await expect(page.locator(".terminal-pane-host .xterm")).toHaveCount(2, { timeout: 10_000 });
-    await waitForPrompt(page, 1);
+    await expect(page.locator(".terminal-pane-host .xterm")).toHaveCount(2);
+    await waitForShell(page, 1);
     await typeLine(page, 0, "UATU_PANE=first");
     await typeLine(page, 1, "UATU_PANE=second");
     // A layout preference that must still be in effect afterwards.
@@ -363,7 +355,7 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
     // While the departing holder is still being processed the pane stays
     // visible, reconciling, and says so.
-    await expect(page.locator(".terminal-pane[data-state=\"recovering\"] .terminal-pane-status")).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator(".terminal-pane[data-state=\"recovering\"] .terminal-pane-status")).toBeVisible();
     await captureScreenshot(page, testInfo, "terminal-reconnecting");
     await expectTerminalRestored(page, 1);
     expect(await paneSessionIds(page)).toEqual(paneIds);
@@ -384,10 +376,10 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     // A second window takes the shell over explicitly.
     const other = await openSessionTab(hubContext, alpha);
     await other.locator("#terminal-toggle").click();
-    await expect(other.locator(".terminal-picker")).toBeVisible({ timeout: 10_000 });
+    await expect(other.locator(".terminal-picker")).toBeVisible();
     await other.locator(".terminal-picker-attach").first().click();
-    await expect(other.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator(".terminal-taken")).toBeVisible({ timeout: 10_000 });
+    await expect(other.locator(".terminal-pane-host .xterm").first()).toBeVisible();
+    await expect(page.locator(".terminal-taken")).toBeVisible();
 
     // The first window reloads onto its saved reference. The holder is real,
     // so recovery ends in an explicit choice — never a silent reclaim.
@@ -403,11 +395,11 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     // Explicit takeover moves it back; the other window parks with Take back.
     // The card goes with the attach: the terminal is the pane's whole surface.
     await page.locator(".terminal-occupied-takeover").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible();
     await expect(page.locator(".terminal-occupied")).toHaveCount(0);
-    await waitForPrompt(page, 0);
+    await waitForShell(page, 0);
     await expectShellValue(page, 0, "UATU_OWNER", "first_window");
-    await expect(other.locator(".terminal-taken")).toBeVisible({ timeout: 10_000 });
+    await expect(other.locator(".terminal-taken")).toBeVisible();
     await other.close();
   });
 
@@ -416,15 +408,14 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     const page = await openSessionTab(hubContext, alpha);
     await openTerminal(page);
     await typeLine(page, 0, "exit");
-    await expect(page.locator(".terminal-ended")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".terminal-ended")).toBeVisible();
     await captureScreenshot(page, testInfo, "terminal-ended");
     await expect(page.locator("#terminal-panel")).toBeVisible();
     await expect(page.locator(".terminal-taken, .terminal-occupied")).toHaveCount(0);
     expect(await inventory(hubContext, alpha)).toHaveLength(0);
 
     await page.locator(".terminal-ended-new").click();
-    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 10_000 });
-    await waitForPrompt(page, 0);
+    await waitForShell(page, 0);
     expect(await inventory(hubContext, alpha)).toHaveLength(1);
   });
 
@@ -475,9 +466,10 @@ test.describe("terminal survives workspace navigation through the hub", () => {
 
     // A long-held departing holder keeps the restored pane reconciling.
     await armCloseDelay(alpha, 4_000);
+    const reloadedAt = Date.now();
     await page.reload();
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-    await expect(page.locator(".terminal-pane[data-state=\"recovering\"]")).toHaveCount(1, { timeout: 5_000 });
+    await expect(page.locator(".terminal-pane[data-state=\"recovering\"]")).toHaveCount(1);
 
     // Closing it is a real loss (the shell is alive somewhere), so it is
     // confirmed — and the confirmation kills the PTY even though this pane
@@ -488,9 +480,14 @@ test.describe("terminal survives workspace navigation through the hub", () => {
     await expect(page.locator(".terminal-pane")).toHaveCount(0);
     await expect(page.locator("#terminal-panel")).toBeHidden();
 
-    // The abandoned recovery must not come back: after the old holder's
-    // release would have let it attach, nothing reappears.
-    await page.waitForTimeout(5_000);
+    // The abandoned recovery must not come back. Wait for the two events
+    // after which it would already have acted: the child processing the old
+    // holder's release (what it was waiting for), and the end of the
+    // bounded budget the recovery started with at reload, plus its longest
+    // retry delay. Then nothing may have reappeared.
+    await expect.poll(() => heldCloses(alpha)).toBe(0);
+    const budgetLeft = reloadedAt + RECOVERY_BUDGET_MS + RECOVERY_MAX_DELAY_MS - Date.now();
+    if (budgetLeft > 0) await page.waitForTimeout(budgetLeft);
     await expect(page.locator(".terminal-pane")).toHaveCount(0);
     await expect(page.locator("#terminal-panel")).toBeHidden();
     await expect.poll(async () => (await inventory(hubContext, alpha)).map(session => session.id), { timeout: 10_000 })

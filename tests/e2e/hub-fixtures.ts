@@ -208,6 +208,22 @@ export async function openSessionTab(context: BrowserContext, workspace: HubE2EW
   return page;
 }
 
+// Opens the workspace switcher and waits until it has settled. Opening
+// renders the menu at once and refreshes the hub list in the background,
+// re-rendering on the answer; acting on an entry before that answer races
+// the re-render. `tap` opens it the way a touch user does.
+export async function openHubMenu(page: Page, options: { tap?: boolean } = {}): Promise<void> {
+  const menu = page.locator("#hub-menu");
+  if (await menu.isVisible()) return;
+  const toggle = page.locator("#hub-toggle");
+  await expect(toggle).toBeVisible();
+  const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === "/api/hub/state");
+  if (options.tap) await toggle.tap();
+  else await toggle.click();
+  await refreshed;
+  await expect(menu).toBeVisible();
+}
+
 // The hub's stdout, split into lines, each delivered to the first waiter
 // whose predicate it satisfies.
 class StdoutLines {

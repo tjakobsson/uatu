@@ -15,7 +15,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Page } from "@playwright/test";
 
-import { test, expect } from "./hub-fixtures";
+import { test, expect, openHubMenu } from "./hub-fixtures";
 import { captureScreenshot } from "./evidence";
 
 const exec = promisify(execFile);
@@ -39,7 +39,7 @@ async function fork(page: Page, parentId: string, mode: string): Promise<void> {
   if (await page.locator("html").getAttribute("data-ui-mode") === "touch") {
     await page.getByRole("tab", { name: "Files", exact: true }).click();
   }
-  if (!await page.locator("#hub-menu").isVisible()) await page.locator("#hub-toggle").click();
+  await openHubMenu(page);
   await page.getByRole("button", { name: `Add worktree to ${parentId}`, exact: true }).click();
   await page.getByRole("menuitem", { name: mode, exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
@@ -112,9 +112,8 @@ test.describe("worktree dialog on an iOS-shaped WebKit", () => {
     await page.reload();
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
     await page.getByRole("tab", { name: "Files", exact: true }).tap();
-    await page.locator("#hub-toggle").tap();
+    await openHubMenu(page, { tap: true });
     const menu = page.locator("#hub-menu");
-    await expect(menu).toBeVisible();
     const viewport = page.viewportSize()!;
     const metrics = await menu.evaluate(node => ({
       scrollHeight: node.scrollHeight,

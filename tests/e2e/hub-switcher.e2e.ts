@@ -14,7 +14,7 @@
 import { QUIET_BEFORE_NOTICE_MS } from "../../src/shell/attention-notice";
 import { openChatPanel } from "./chat-helpers";
 import { evidencePath, recordEvidence } from "./evidence";
-import { childChatControl, expect, openSessionTab, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
+import { childChatControl, expect, openHubMenu, openSessionTab, test, type HubE2EInfo, type HubE2EWorkspace } from "./hub-fixtures";
 import type { BrowserContext, Page, TestInfo } from "@playwright/test";
 
 
@@ -104,8 +104,7 @@ async function chipHeight(page: Page): Promise<number> {
 }
 
 async function openMenu(page: Page): Promise<void> {
-  await page.locator("#hub-toggle").click();
-  await expect(page.locator("#hub-menu")).toBeVisible();
+  await openHubMenu(page);
 }
 
 async function closeMenu(page: Page): Promise<void> {
@@ -270,11 +269,21 @@ test.describe("desktop", () => {
     // The user opens gamma on another device — here, another page of the
     // same session — and its chat is in view. That page posts the viewed
     // acknowledgement; the hub clears the mark for this user everywhere.
+    const acknowledgements: string[] = [];
+    hubContext.on("request", request => {
+      if (request.url().includes("/s/gamma/api/activity-viewed")) acknowledgements.push(request.url());
+    });
     const gammaPage = await openSessionTab(hubContext, staged.gamma);
     // A fresh context boots with the chat panel collapsed: the page is on
     // gamma, but its chat is not in view, so nothing is acknowledged yet.
     await expect(gammaPage.locator("html")).toHaveAttribute("data-chat-panel", "collapsed");
-    await gammaPage.waitForTimeout(500);
+    // The page has heard that gamma finished (its own row says so), which is
+    // the moment it would acknowledge if it were going to: it posts in the
+    // same activity update that renders the row.
+    await openMenu(gammaPage);
+    await expectMenuState(gammaPage, "gamma", "finished", "finished");
+    await closeMenu(gammaPage);
+    expect(acknowledgements).toEqual([]);
     await expect(page.locator("#hub-activity-badge")).toHaveClass(/is-finished/);
 
     await openChatPanel(gammaPage);
