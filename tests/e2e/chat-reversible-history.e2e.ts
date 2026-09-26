@@ -246,11 +246,15 @@ test.describe("reversible Chat history", () => {
 
     await control(request, { action: "status", conversationId, status: "completed" });
     await expect(page.locator("#chat-queue .is-held")).toHaveCount(0);
+    await expect(page.locator("#chat-items .chat-user-message", { hasText: "older queued turn" })).toHaveCount(1);
     const userTurns = await page.locator("#chat-items .chat-user-message").allTextContents();
     expect(userTurns).toEqual(expect.arrayContaining([expect.stringContaining("replacement turn"), expect.stringContaining("older queued turn")]));
     expect(userTurns.findIndex(text => text.includes("replacement turn"))).toBeLessThan(userTurns.findIndex(text => text.includes("older queued turn")));
 
-    expect((await historyCommand(page, "redo")).status()).toBe(200);
+    // Completion delivered the held turn, which is now the running one: the
+    // send control flips to cancel as its status lands. Clicking it on a
+    // stale "Send message" read would cancel that turn instead of redoing.
+    expect((await historyCommand(page, "redo", { running: true })).status()).toBe(200);
     await expect(page.locator("#chat-composer-status-live")).toHaveText("Nothing to redo");
     await expect(page.locator("#chat-items")).not.toContainText("discarded active turn");
   });
