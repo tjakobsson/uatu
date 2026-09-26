@@ -1,5 +1,6 @@
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import type { ActivityStatus, ConversationItem } from "../../src/chat/types";
+import { LIVE_ENVELOPE_EVENT } from "../../src/shared/live-protocol";
 import { expect } from "./fixtures";
 import { openChatPanel } from "./chat-helpers";
 
@@ -60,14 +61,44 @@ export async function openShellRow(timeline: Locator, id: string) {
   const row = timeline.locator(`[data-chat-item-id="${id}"]`);
   await expect(row).toBeAttached();
   const group = row.locator("xpath=ancestor::details[contains(@class,'chat-activity-group')]");
-  if (await group.count() && await group.getAttribute("open") === null) {
-    // A pending request's sticky banner can cover the last working line.
-    // Native keyboard activation opens it without a forced pointer click.
-    await group.locator("> summary").focus();
-    await group.locator("> summary").press("Enter");
-  }
-  if (await row.getAttribute("open") === null) await row.locator("> summary").click();
+  // A render can group the row or open it between a read and the toggle,
+  // and a toggle on a row that just opened closes it again. Re-read and
+  // retry until the row is seen open.
+  await expect(async () => {
+    if (await group.count() && await group.getAttribute("open") === null) {
+      // A pending request's sticky banner can cover the last working line.
+      // Native keyboard activation opens it without a forced pointer click.
+      await group.locator("> summary").focus();
+      await group.locator("> summary").press("Enter");
+    }
+    if (await row.getAttribute("open") === null) await row.locator("> summary").click();
+    await expect(row).toHaveAttribute("open", "", { timeout: 1_000 });
+  }).toPass();
+  await expect(row).toHaveAttribute("open", "");
 }
+
+/** Records every live-stream envelope once the page's own listeners have
+ *  handled it. A test that asserts nothing happened after an event first
+ *  awaits that event's delivery with `expectLiveDelivered`. */
+export async function recordLiveDelivery(page: Page) {
+  await page.addInitScript(eventName => {
+    const delivered: string[] = (window as any).__liveDelivered = [];
+    const add = EventSource.prototype.addEventListener;
+    EventSource.prototype.addEventListener = function (this: EventSource, type: string, listener: any, options?: any) {
+      if (type !== eventName || typeof listener !== "function") return add.call(this, type, listener, options);
+      return add.call(this, type, function (this: EventSource, event: Event) {
+        try { return listener.call(this, event); } finally {
+          delivered.push(String((event as MessageEvent).data));
+          if (delivered.length > 16) delivered.shift();
+        }
+      }, options);
+    } as typeof EventSource.prototype.addEventListener;
+  }, LIVE_ENVELOPE_EVENT);
+}
+
+export const expectLiveDelivered = (page: Page, needle: string) => expect.poll(() => page.evaluate(
+  text => ((window as any).__liveDelivered as string[]).some(data => data.includes(text)), needle),
+  `live envelope carrying ${needle} handled by the page`).toBe(true);
 
 export const frames = (page: Page) => page.evaluate(() => new Promise<void>(resolve => {
   let left = 4;

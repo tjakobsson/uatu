@@ -5,7 +5,7 @@ import { openChatPanel } from "./chat-helpers";
 import { captureScreenshot, saveEvidence } from "./evidence";
 import { chatWorkload } from "../fixtures/chat-performance";
 import { armConversationCommit, conversationCommit, stopConversationCommit } from "./chat-shell-performance-helpers";
-import { bootShell, control, drag, expectBounded, expectReading, frames, log, openShellRow, position, settleScroll, shell } from "./chat-shell-helpers";
+import { bootShell, control, drag, expectBounded, expectLiveDelivered, expectReading, frames, log, openShellRow, position, recordLiveDelivery, settleScroll, shell } from "./chat-shell-helpers";
 
 const floating = (page: Page) => page.getByRole("region", { name: "Shell output window" });
 
@@ -382,10 +382,12 @@ for (const engine of ["chromium", "webkit"] as const) {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } });
     try {
-      const { outputView, update, viewport } = await bootShell(page, request, { shape, child, agent: shape === "bash" ? "claude" : "opencode" });
+      const { outputView, update, viewport, timeline } = await bootShell(page, request, { shape, child, agent: shape === "bash" ? "claude" : "opencode" });
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       const window = floating(page);
       await viewport.hover(); await page.mouse.wheel(0, -1000); await frames(page);
+      // WebKit keeps wheel-scrolling past the paint frames; anchor on where the reader settled.
+      await settleScroll(viewport);
       const anchor = await position(viewport), geometry = await window.boundingBox();
       await update({ ...shell(shape, log(120, true) + "\nfinal", outcome), ...(outcome === "failed"
         ? shape === "bash" ? { error: "\x1b[31mseparate error output\x1b[0m" } : { exitCode: 7 } : {}) });
@@ -394,8 +396,10 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(window.locator(".chat-shell-window-metadata")).toContainText(outcome[0]!.toUpperCase() + outcome.slice(1));
       await expect(window.locator(".chat-shell-window-metadata")).not.toContainText(/\d{4}|Invalid Date/);
       await update(shell("bash", "new command", "running", "shell:b"));
+      // The regrouping has rendered before its effect on the selected window is judged.
+      await expect(timeline.locator('[data-chat-item-id="shell:b"]')).toBeAttached();
       await expect(window).toHaveAttribute("data-shell-item-id", "shell:a");
-      expect(await window.boundingBox()).toEqual(geometry); await expectReading(viewport, anchor);
+      await expect.poll(() => window.boundingBox()).toEqual(geometry); await expectReading(viewport, anchor);
       await window.getByRole("button", { name: "Maximize", exact: true }).click();
       await window.getByRole("button", { name: "Return to chat" }).focus();
       await page.keyboard.press("Escape");
@@ -526,6 +530,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 1000 } });
     try {
       const instrumented = await instrumentShell(page);
+      await recordLiveDelivery(page);
       const shape = child ? "bash" : "command";
       const { outputView, viewport, update } = await bootShell(page, request, { child, touch, shape, agent: child ? "claude" : "opencode" });
       instrumented();
@@ -544,8 +549,10 @@ for (const engine of ["chromium", "webkit"] as const) {
       let output = log(120, true);
       for (let i = 0; i < 8; i++) { output += `\nhidden-${i}`; await update(shell(shape, output)); }
       await update(shell(shape, output + "\nhidden-final", "completed"));
-      // Allow the existing streamed-event scheduler to process its hidden branch.
-      await page.waitForTimeout(200);
+      // The page has handled the final hidden update, and any paint it could
+      // have scheduled has had its frames, before the absence is asserted.
+      await expectLiveDelivered(page, "hidden-final");
+      await frames(page);
       const hidden = await work(page);
       expect(hidden).toEqual(before);
       if (touch) await page.locator("#touch-tab-chat").click();
@@ -575,10 +582,12 @@ for (const engine of ["chromium", "webkit"] as const) {
       const output = "\x1b[32mgreen\x1b[0m\n" + log(150, true);
       const { outputView, viewport, update } = await bootShell(page, request, { touch, output });
       const height = outputView.getByRole("separator", { name: /Output height/ });
-      await height.focus(); await page.keyboard.press("End");
-      expect(await height.getAttribute("aria-valuenow")).toBe(await height.getAttribute("aria-valuemax"));
+      // Locator presses focus the separator themselves, so a late focus change
+      // elsewhere cannot take the key.
+      await height.press("End");
+      await expect(height).toHaveAttribute("aria-valuenow", (await height.getAttribute("aria-valuemax"))!);
       await height.press("Home");
-      expect(await height.getAttribute("aria-valuenow")).toBe(await height.getAttribute("aria-valuemin"));
+      await expect(height).toHaveAttribute("aria-valuenow", (await height.getAttribute("aria-valuemin"))!);
       await height.press("ArrowDown");
       if (touch && engine === "chromium") {
         const before = Number(await height.getAttribute("aria-valuenow"));
@@ -741,7 +750,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       // A's explicit Pop out transfers sole ownership and restores A's bounds.
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       await expect(window).toHaveCount(1); await expect(window).toHaveAttribute("data-shell-item-id", "shell:a");
-      expect(await window.boundingBox()).toEqual(a);
+      await expect.poll(() => window.boundingBox()).toEqual(a);
       await expect(bView.locator(".chat-shell-viewport")).toBeVisible();
       const other = await control(request, { action: "seed", title: "Navigate away", items: [] });
       await page.locator("#chat-conversation-select").selectOption(other.conversation.id);
@@ -750,7 +759,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(window).toHaveCount(0);
       await openShellRow(timeline, "shell:a");
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
-      expect.soft(await window.boundingBox()).toEqual(a);
+      await expect.soft.poll(() => window.boundingBox()).toEqual(a);
       await drag(page, window.getByRole("group", { name: /^Move output/ }), 500, 0);
       const modeGeometry = await window.boundingBox();
       await viewport.focus(); await page.keyboard.press("Home"); await page.keyboard.press("PageDown"); await frames(page);
@@ -767,7 +776,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       await page.locator("#ui-mode-toggle").click();
       await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
-      expect(await window.boundingBox()).toEqual(modeGeometry);
+      await expect.poll(() => window.boundingBox()).toEqual(modeGeometry);
       await expectReading(viewport, anchor);
     } finally { await browser.close(); }
   });
@@ -825,10 +834,14 @@ for (const engine of ["chromium", "webkit"] as const) {
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     try {
-      const { outputView } = await bootShell(page, request);
+      const { outputView, id } = await bootShell(page, request);
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       await control(request, { action: "disconnect" });
-      await page.waitForTimeout(250);
+      // A later item reaching the page shows the stream was dropped, resumed
+      // and replayed; only then is the absence of a completion meaningful.
+      await control(request, { action: "item", conversationId: id, item: {
+        id: "notice:after-disconnect", type: "notice", createdAt: 200, level: "info", message: "delivered after the disconnect" } });
+      await expect(page.locator("#chat-items")).toContainText("delivered after the disconnect");
       const window = floating(page);
       await expect(window).toHaveAttribute("data-status", "running");
       await expect(window.locator(".chat-shell-window-metadata")).not.toContainText(/Completed|Failed|Cancelled|\d{4}/);
