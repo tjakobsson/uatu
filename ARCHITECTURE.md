@@ -477,6 +477,7 @@ Failure paths:
 
 - File no longer exists → Session throws → Routes returns 404 → `preview/mount.ts` shows the "no longer exists" empty state.
 - File is binary → Session throws `"document is binary"` → Routes returns 415 → `preview/binary.ts` or `preview/image.ts` renders the appropriate fallback (image for `.png` / `.jpg` / etc., a "not viewable" notice otherwise).
+- Anything else (a read error such as `EMFILE` or `EACCES`, a renderer that throws) → Routes returns 500 (`documentErrorStatus` in `server/render-dispatch.ts`) → `preview/mount.ts` says the file couldn't be loaded and retries with backoff (`preview/load-retry.ts`), as it does when the request gets no answer. A 404 is not retried: the `document` topic re-fetches when the file comes back.
 
 Pushed updates take a different path. The child emits state events on its internal `/api/events` route, and the hub fans them out to every subscribed page over `/api/hub/live` (see [Live delivery](#live-delivery)).
 
