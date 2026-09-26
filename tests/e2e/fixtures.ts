@@ -16,6 +16,20 @@ import { treeRow } from "./tree-helpers";
 // repeated runs allocate new worker indices even with only four workers.
 const BASE_PORT = Number.parseInt(process.env.UATU_E2E_BASE_PORT ?? "20000", 10);
 
+// The worker workspaces live in `.e2e/`, a git-ignored directory INSIDE the
+// uatu checkout. Left alone, git discovery from a workspace without its own
+// `.git` walks up to the checkout, so every watcher refresh diffs the whole
+// developer tree (seconds under load, and `maxBuffer` overflows on a large
+// diff) and the tests see whatever the developer has uncommitted. Stopping
+// discovery at the workspace's parent makes those workspaces what they look
+// like — plain folders — while a `git: true` reset still finds the repository
+// it initializes at the workspace root.
+function gitCeilingFor(workspace: string): string {
+  const inherited = process.env.GIT_CEILING_DIRECTORIES;
+  const ceiling = path.dirname(workspace);
+  return inherited ? `${ceiling}${path.delimiter}${inherited}` : ceiling;
+}
+
 type WorkerFixtures = {
   /** The port the worker's dedicated server is listening on. */
   serverPort: number;
@@ -45,6 +59,7 @@ export const test = base.extend<{}, WorkerFixtures>({
           ...process.env,
           UATU_E2E_PORT: String(port),
           UATU_E2E_WORKSPACE: workspace,
+          GIT_CEILING_DIRECTORIES: gitCeilingFor(workspace),
         },
         stdio: ["ignore", "pipe", "inherit"],
       });
