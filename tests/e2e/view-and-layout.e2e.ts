@@ -153,6 +153,40 @@ test("Switching to single layout preserves the Source / Rendered preference", as
   await expect(page.locator("#preview > pre.uatu-source-pre")).toBeVisible();
 });
 
+test("A layout click survives a render that lands between mousedown and mouseup", async ({ page }) => {
+  await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
+  // Hold the Source fetch that entering side-by-side needs, so the render it
+  // triggers can be released at a chosen moment inside the next click.
+  let releaseSource: () => void = () => {};
+  const sourceHeld = new Promise<void>(resolve => {
+    void page.route("**/api/document?*", async route => {
+      if (new URL(route.request().url()).searchParams.get("view") !== "source") return route.continue();
+      releaseSource = () => void route.continue();
+      resolve();
+    });
+  });
+
+  await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  await sourceHeld;
+
+  // Press on Single, let the split render land, then release. The render
+  // must not replace the button under the pointer, or the browser fires no
+  // click and the switch back to single is lost.
+  const single = page.locator(".uatu-layout-toolbar [data-layout-value='single']");
+  const box = await single.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) return;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  releaseSource();
+  await expect(page.locator("#preview.is-split-h")).toBeVisible();
+  await expect(page.locator(".uatu-layout-toolbar [data-layout-value='split-h']")).toHaveAttribute("aria-checked", "true");
+  await page.mouse.up();
+
+  await expect(single).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#preview")).not.toHaveClass(/is-split/);
+});
+
 test("Dragging the split resizer reallocates space between panes", async ({ page }) => {
   await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
   await expect(page.locator("#preview.is-split-h")).toBeVisible();
