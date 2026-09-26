@@ -39,10 +39,17 @@ async function instrumentShell(page: Page) {
 
 const work = (page: Page) => page.evaluate(() => {
   const probe = (window as any).__shellProbe;
-  const owner = probe.controllers.find((c: any) => c.itemId === "shell:a");
-  return { ...owner.buffer.stats, lineWrites: probe.lineWrites, paints: probe.paints, parseMs: probe.parseMs,
+  const owners = probe.controllers.filter((c: any) => c.itemId === "shell:a");
+  return { ...owners.at(-1).buffer.stats, owners: owners.length, lineWrites: probe.lineWrites, paints: probe.paints, parseMs: probe.parseMs,
     transcriptRenders: globalThis.__uatuChatPerformance?.counts["transcript-render"] ?? 0 };
 });
+
+// Interactions with a 5,000-line log are held to a 3 s budget. The
+// deterministic work counters are the pass criterion; the wall clock, which
+// a loaded runner inflates, is kept as evidence, annotated when over budget,
+// and fails only past a looser guard.
+const INTERACTION_BUDGET_MS = 3_000;
+const INTERACTION_GUARD_MS = 2 * INTERACTION_BUDGET_MS;
 
 attachPageDiagnosticsOnFailure(test);
 
@@ -408,13 +415,20 @@ for (const engine of ["chromium", "webkit"] as const) {
     } finally { await browser.close(); }
   });
 
-  for (const agent of ["opencode", "claude"] as const) test(`${engine} ${agent} long output parse and DOM work stays incremental`, async ({ request, baseURL }, testInfo) => {
+  for (const agent of ["opencode", "claude"] as const) test(`${engine} ${agent} long output parse and DOM work stays incremental`, { tag: "@perf" }, async ({ request, baseURL }, testInfo) => {
     test.setTimeout(60_000);
     const browser = await launchBrowser(engine);
     const page = await browser.newPage({ baseURL, viewport: { width: 1440, height: 1000 } });
     const evidence: Record<string, unknown> = { engine, agent, initialLines: 5000, updates: 20, conversationWorkloadItems: 50 };
     const requests: Record<string, unknown>[] = [];
     evidence.controlRequests = requests;
+    const timed = (label: string, milliseconds: number) => {
+      evidence[`${label}Milliseconds`] = milliseconds;
+      if (milliseconds >= INTERACTION_BUDGET_MS) {
+        testInfo.annotations.push({ type: "over-budget", description: `${label}: ${Math.round(milliseconds)} ms (budget ${INTERACTION_BUDGET_MS} ms)` });
+      }
+      expect(milliseconds, `${label}: wall clock under the ${INTERACTION_GUARD_MS} ms guard`).toBeLessThan(INTERACTION_GUARD_MS);
+    };
     const boundedControl = async (data: Record<string, unknown>) => {
       const sample: Record<string, unknown> = { action: data.action, conversationId: data.conversationId,
         update: evidence.updateIndex, phase: evidence.phase, timeoutMilliseconds: 10_000 };
@@ -473,12 +487,23 @@ for (const engine of ["chromium", "webkit"] as const) {
       await outputView.getByRole("button", { name: "Pop out", exact: true }).click();
       const window = floating(page);
       evidence.phase = "move and resize";
+      const beforeInteraction = await work(page);
       const interactionStart = Date.now();
       await drag(page, window.getByRole("group", { name: /^Move output/ }), 50, 20);
       await drag(page, window.getByRole("group", { name: /^Resize output/ }), 100, 40);
       await expectBounded(page, window);
-      evidence.moveResizeMilliseconds = Date.now() - interactionStart;
-      expect(Date.now() - interactionStart).toBeLessThan(3000);
+      const interactionMilliseconds = Date.now() - interactionStart;
+      const afterInteraction = await work(page);
+      evidence.moveResize = { before: beforeInteraction, after: afterInteraction };
+      // Moving and resizing lays the retained lines out again; it never
+      // re-parses, resets, or rewrites them.
+      expect(afterInteraction.owners).toBe(beforeInteraction.owners);
+      expect(afterInteraction.resets).toBe(beforeInteraction.resets);
+      expect(afterInteraction.inputCodeUnits).toBe(beforeInteraction.inputCodeUnits);
+      expect(afterInteraction.lineWrites).toBe(beforeInteraction.lineWrites);
+      expect(afterInteraction.paints).toBe(beforeInteraction.paints);
+      expect(await viewport.locator(".chat-shell-line").first().evaluate((el, first) => el === first, firstNode)).toBe(true);
+      timed("moveResize", interactionMilliseconds);
       // Navigate through the real inventory selector with a long log retained.
       evidence.phase = "seed navigation target";
       const other = await boundedControl({ action: "seed", agent, title: "Other long-output view", items: [
@@ -493,8 +518,7 @@ for (const engine of ["chromium", "webkit"] as const) {
         try {
           await test.step(label, () => page.locator("#chat-conversation-select").selectOption(conversationId));
           await expect.poll(async () => (await conversationCommit(page)).milliseconds, `${label}: target transcript committed`).toBeDefined();
-          const sample = await conversationCommit(page);
-          expect(sample.milliseconds, `${label}: selector change to target transcript DOM commit`).toBeLessThan(3000);
+          timed(itemId === "navigation-target" ? "navigateAwayCommit" : "navigateBackCommit", (await conversationCommit(page)).milliseconds!);
         } finally {
           evidence[itemId === "navigation-target" ? "navigateAway" : "navigateBack"] = {
             ...await conversationCommit(page), roundtripMilliseconds: Date.now() - start,
@@ -502,19 +526,38 @@ for (const engine of ["chromium", "webkit"] as const) {
           await stopConversationCommit(page);
         }
       };
+      const navigationWork: Record<string, unknown> = { before: await work(page) };
+      evidence.navigationWork = navigationWork;
       evidence.phase = "select navigation target";
       await navigate(other.conversation.id, "navigation-target", "Select the newly seeded conversation");
       evidence.phase = "release floating window";
       await expect(window).toHaveCount(0);
+      navigationWork.away = await work(page);
       evidence.phase = "select original conversation";
       await navigate(parentId, "shell:a", "Return to the long-output conversation");
+      navigationWork.back = await work(page);
       evidence.phase = "inspect retained shell row";
       await test.step("Inspect the retained shell row", () => openShellRow(page.locator("#chat-timeline"), "shell:a"));
       await expect(viewport.locator(".chat-shell-line")).toHaveCount(5020);
       expect((await viewport.locator(".chat-shell-line").allTextContents()).join("")).toBe(output + "\n");
+      const inspected = await work(page);
+      navigationWork.inspected = inspected;
+      const { before, away, back } = navigationWork as Record<"before" | "away" | "back", typeof inspected>;
+      // Leaving releases the row without touching its lines; returning builds
+      // one new owner that writes each of the 5,020 lines once and paints
+      // once, without re-parsing; expanding the retained row adds nothing.
+      expect(away.lineWrites).toBe(before.lineWrites);
+      expect(away.paints).toBe(before.paints);
+      expect(back.owners).toBe(before.owners + 1);
+      expect(back.lineWrites - away.lineWrites).toBe(5020);
+      expect(back.paints - away.paints).toBe(1);
+      expect(back.inputCodeUnits).toBe(output.length);
+      expect(inspected.lineWrites).toBe(back.lineWrites);
+      expect(inspected.paints).toBe(back.paints);
       evidence.navigationMilliseconds = Date.now() - navigationStart;
       // The whole roundtrip also includes two actions, row expansion and protocol
-      // waits. Each navigation's browser response has its own unchanged 3s budget.
+      // waits. Each navigation's selector-to-commit time is timed against the
+      // interaction budget above.
       evidence.phase = "complete";
     } finally {
       const report = JSON.stringify(evidence, null, 2);

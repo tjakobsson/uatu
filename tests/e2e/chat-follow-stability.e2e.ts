@@ -21,8 +21,13 @@ declare global {
 
 attachPageDiagnosticsOnFailure(test);
 
+// Every test here samples scroll writes per animation frame and holds each
+// scroller to at most one automatic correction per frame. A loaded runner
+// stretches and merges frames, so both groups are tagged @perf and run in the
+// perf project, apart from the parallel functional suite.
+
 for (const browserName of ["chromium", "webkit"] as const) for (const touch of [false, true]) for (const child of [false, true]) {
-  test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} integrated shell frame budget`, async ({ request, baseURL }, testInfo) => {
+  test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} integrated shell frame budget`, { tag: "@perf" }, async ({ request, baseURL }, testInfo) => {
     // A long scenario (its own browser launch, then ~25 update/settle cycles
     // across inline, floating, and maximized phases). On a loaded CI runner
     // WebKit spends ~13s booting alone and was timing out at 30s while still
@@ -250,7 +255,7 @@ for (const browserName of ["chromium", "webkit"] as const) for (const touch of [
 
 for (const browserName of ["chromium", "webkit"] as const) {
   for (const touch of [false, true]) {
-    for (const child of [false, true]) test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} coordinated following`, async ({ request, baseURL }, testInfo) => {
+    for (const child of [false, true]) test(`${browserName} ${touch ? "touch" : "desktop"} ${child ? "child" : "parent"} coordinated following`, { tag: "@perf" }, async ({ request, baseURL }, testInfo) => {
       const browser = await launchBrowser(browserName);
       const page = await browser.newPage({ baseURL, hasTouch: touch, isMobile: touch,
         viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
