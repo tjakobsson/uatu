@@ -119,6 +119,15 @@ export { expect };
 // Rather than assert a specific boot state, normalize to follow=false by
 // clicking the chip if and only if it's currently `aria-pressed="true"`.
 // Either way the assertion below locks the deterministic post-state in.
+//
+// Two waits end the baseline, both on real conditions:
+//  - Follow is normalized before the path is asserted, so no watcher frame
+//    that lands after this function returns can move the selection.
+//  - The client's semantic persistence coalesces writes for 50ms. Many tests
+//    reset the harness again straight after this baseline; the follow=false
+//    PATCH must have landed first, or it would repopulate the personal state
+//    that later reset cleared. Every path to follow=false persists it, so the
+//    server holding follow=false is the proof.
 export async function standardBeforeEach(page: Page, request: APIRequestContext): Promise<void> {
   await request.post("/__e2e/reset");
   await page.goto("/");
@@ -141,16 +150,28 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
   await expect(page.locator("#document-count")).toHaveText("18 files");
   await waitForPreviewToSettle(page);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
-  // Normalize follow to off — click the chip iff it's currently on.
-  const pressed = await page.locator("#follow-toggle").getAttribute("aria-pressed");
-  if (pressed === "true") {
-    await page.locator("#follow-toggle").click();
-  }
-  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-  // Semantic persistence coalesces writes for 50ms. Many tests reset the
-  // harness again immediately after this baseline; let the baseline PATCH
-  // settle first so it cannot repopulate state after that later reset.
-  await page.waitForTimeout(75);
+  await normalizeFollowOff(page);
+  // Follow is off, so the selection can no longer be moved by a file event.
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  await expect.poll(
+    async () => (await request.get("/api/personal-state").then(response => response.json())).follow,
+    { message: "follow=false persisted to the personal state" },
+  ).toBe(false);
+}
+
+// Turn Follow off by clicking the chip iff it is on. Reading the chip and
+// clicking it are two steps, and the boot-time Rule A flip (above) can land
+// between them — the click would then turn Follow back ON. Re-check after the
+// click and repeat until the chip rests at off; the flip only ever turns
+// Follow off, so this converges.
+export async function normalizeFollowOff(page: Page): Promise<void> {
+  const chip = page.locator("#follow-toggle");
+  await expect(async () => {
+    if ((await chip.getAttribute("aria-pressed")) === "true") {
+      await chip.click();
+    }
+    await expect(chip).toHaveAttribute("aria-pressed", "false", { timeout: 1_000 });
+  }, "follow normalized to off").toPass({ timeout: 10_000 });
 }
 
 // Git Log defaults to hidden (declutter-sidebar-defaults change); tests
@@ -164,23 +185,23 @@ export async function showGitLogPane(page: Page): Promise<void> {
   await expect(pane).toBeVisible();
 }
 
+// The preview has caught up with the selection: the document the URL names
+// is the one on screen. Selecting a document rewrites the URL at once
+// (push/replaceSelection), while `#preview-path` is written only when that
+// document's payload has been applied — so the two agree exactly when no
+// selection is still loading. Fails, rather than falling through, when they
+// never agree. For the e2e harness's root-mounted session.
 export async function waitForPreviewToSettle(page: Page): Promise<void> {
-  let previousPath = "";
-
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const currentPath = (await page.locator("#preview-path").textContent())?.trim() ?? "";
-    if (currentPath.length > 0 && currentPath === previousPath) {
-      await page.waitForTimeout(300);
-
-      const settledPath = (await page.locator("#preview-path").textContent())?.trim() ?? "";
-      if (settledPath === currentPath) {
-        return;
-      }
-    }
-
-    previousPath = currentPath;
-    await page.waitForTimeout(150);
-  }
+  await expect.poll(
+    () => page.evaluate(() => {
+      const shown = document.querySelector("#preview-path")?.textContent?.trim() ?? "";
+      const selected = decodeURIComponent(window.location.pathname).replace(/^\//, "");
+      return shown.length > 0 && shown === selected
+        ? "settled"
+        : `preview shows "${shown}" while the selection is "${selected}"`;
+    }),
+    { message: "preview settled on the selected document" },
+  ).toBe("settled");
 }
 
 export function sidebarPanesFitVisibleHeight(page: Page): () => Promise<boolean> {
