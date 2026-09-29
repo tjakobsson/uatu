@@ -185,7 +185,8 @@ export function initChat(api = new ChatApiClient()): void {
   // One arriving before the acceptance names the message cannot be told
   // apart: it re-reads (harmlessly) and keeps the mark for the real one.
   // A failed or interrupted reload changed nothing to re-read.
-  const pendingReloads = new Map<string, { agentId: string; messageId?: string }>();
+  // Several can wait in one conversation's queue, oldest first.
+  const pendingReloads = new Map<string, Array<{ agentId: string; messageId?: string }>>();
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
   // Attachment surfaces. Guarded at use rather than joining the required
@@ -2735,12 +2736,17 @@ export function initChat(api = new ChatApiClient()): void {
         projection = result.projection;
         if (event.type === "conversation.configuration") renderConfiguration();
         if (event.type === "conversation.status") {
-          const reload = pendingReloads.get(conversationId);
-          if (reload && (event.status === "completed" || event.status === "failed" || event.status === "interrupted")) {
-            const known = reload.messageId !== undefined;
-            const stillQueued = known && (projection?.queued ?? []).some(entry => entry.id === reload.messageId);
-            if (!stillQueued) {
-              if (known) pendingReloads.delete(conversationId);
+          const reloads = pendingReloads.get(conversationId);
+          if (reloads && (event.status === "completed" || event.status === "failed" || event.status === "interrupted")) {
+            // The turn that ended is the oldest tracked reload no longer
+            // waiting in the queue; one not yet named by its acceptance
+            // cannot be told apart, so it re-reads and stays tracked.
+            const queued = new Set((projection?.queued ?? []).map(entry => entry.id));
+            const index = reloads.findIndex(entry => entry.messageId === undefined || !queued.has(entry.messageId));
+            const reload = index < 0 ? undefined : reloads[index];
+            if (reload) {
+              if (reload.messageId !== undefined) reloads.splice(index, 1);
+              if (reloads.length === 0) pendingReloads.delete(conversationId);
               if (event.status === "completed") void refreshBankedCommands(reload.agentId);
             }
           }
@@ -4357,13 +4363,17 @@ export function initChat(api = new ChatApiClient()): void {
       // Marked before the send: the reload's outcome can reach the stream
       // before the acceptance does.
       const reloading = Boolean(contextAgentId) && /^\/reload(?:\s|$)/.test(text.trim()) && commands.some(command => command.name === "reload" && command.kind === "command");
-      if (reloading) pendingReloads.set(conversationId, { agentId: contextAgentId! });
+      const reloadEntry = reloading ? { agentId: contextAgentId! } as { agentId: string; messageId?: string } : undefined;
+      if (reloadEntry) pendingReloads.set(conversationId, [...(pendingReloads.get(conversationId) ?? []), reloadEntry]);
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined).catch((error: unknown) => {
-        if (reloading) pendingReloads.delete(conversationId);
+        if (reloadEntry) {
+          const rest = (pendingReloads.get(conversationId) ?? []).filter(entry => entry !== reloadEntry);
+          if (rest.length) pendingReloads.set(conversationId, rest);
+          else pendingReloads.delete(conversationId);
+        }
         throw error;
       });
-      const reload = reloading ? pendingReloads.get(conversationId) : undefined;
-      if (reload) reload.messageId = accepted.messageId;
+      if (reloadEntry) reloadEntry.messageId = accepted.messageId;
       retryRequests.delete(conversationId);
       stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatEvent, ConversationSnapshot } from "./types";
 import { ConversationProjection } from "./adapter";
-import { addAcceptedDraft, applyChatEvent, dropQueuedMessage, noteQueuedMessage, prependSnapshot, projectionFromSnapshot, refreshFromSnapshot } from "./projection";
+import { addAcceptedDraft, applyChatEvent, confirmAcceptedDraft, dropQueuedMessage, noteQueuedMessage, prependSnapshot, projectionFromSnapshot, refreshFromSnapshot } from "./projection";
 import { ConversationReplay } from "./replay";
 
 const snapshot = (items: ConversationSnapshot["items"] = []): ConversationSnapshot => ({
@@ -31,6 +31,19 @@ describe("chat projection", () => {
     expect(state.acceptedDrafts).toHaveLength(1);
     const result = applyChatEvent(state, { generation: "g1", sequence: 5, conversationId: "c1", type: "item.upsert", item: { id: "message", type: "user_message", createdAt: 2, text: "hello", requestId: "request" } });
     expect(result.projection.acceptedDrafts).toEqual([]);
+  });
+
+  test("confirming a draft keeps the text of a row the stream already delivered", () => {
+    // A 2.x skill: typed `/skill args`, sent and streamed as `@skill args`.
+    const streamed = projectionFromSnapshot(snapshot([
+      { id: "message:msg_skill", type: "user_message", createdAt: 2, text: "@openspec-apply-change my-change", requestId: "request" },
+    ]));
+    const confirmed = confirmAcceptedDraft(streamed, { requestId: "request", messageId: "msg_skill", text: "/openspec-apply-change my-change" });
+    expect(confirmed.items).toHaveLength(1);
+    expect(confirmed.items[0]).toMatchObject({ id: "message:msg_skill", text: "@openspec-apply-change my-change", requestId: "request" });
+    // A sparse streamed row (no text yet) takes the draft's.
+    const sparse = projectionFromSnapshot(snapshot([{ id: "message:msg_s", type: "user_message", createdAt: 2, text: "" }]));
+    expect(confirmAcceptedDraft(sparse, { requestId: "r", messageId: "msg_s", text: "hello" }).items[0]).toMatchObject({ text: "hello", requestId: "r" });
   });
 
   test("does not add an accepted marker after the matching message arrived first", () => {

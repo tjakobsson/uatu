@@ -267,6 +267,36 @@ test.describe("desktop OpenCode chat", () => {
     await reread;
   });
 
+  test("two /reloads queued in one conversation each count their own completion", async ({ page, request }) => {
+    const reload = { name: "reload", description: "Reload OpenCode's configuration for this workspace", argumentHint: "", kind: "command" };
+    await control(request, { action: "commands", commands: [reload] });
+    await page.reload();
+    await openChatPanel(page);
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
+    const conversationId = await page.locator("#chat-conversation-select").inputValue();
+    const input = page.locator("#chat-input");
+    const send = async (text: string) => {
+      await input.fill(text);
+      if (await page.locator("#chat-command-menu").isVisible()) await page.keyboard.press("Escape");
+      const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+      await input.press("Enter");
+      await accepted;
+    };
+    await send("Start the work");
+    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+    await send("/reload");
+    await send("/reload");
+    await expect(page.locator("#chat-queue .is-held")).toHaveCount(2);
+    // The running turn ends; the first reload is delivered, the second waits.
+    await control(request, { action: "status", conversationId, status: "completed" });
+    await expect(page.locator("#chat-queue .is-held")).toHaveCount(1);
+    // The first reload's own completion re-reads, though the second is still queued.
+    const reread = page.waitForResponse(response => response.url().includes("/chat/commands"), { timeout: 5_000 });
+    await control(request, { action: "status", conversationId, status: "completed" });
+    await reread;
+  });
+
   test("a page left open picks up catalogs changed elsewhere when the palette or picker opens", async ({ page, request }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
     const input = page.locator("#chat-input");

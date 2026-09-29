@@ -166,8 +166,15 @@ export function dropQueuedMessage(current: ChatProjection, messageId: string): C
 
 export function confirmAcceptedDraft(current: ChatProjection, draft: AcceptedDraft): ChatProjection {
   const id = `message:${draft.messageId}`;
-  const item: ConversationItem = { id, type: "user_message", createdAt: Date.now(), text: draft.text, requestId: draft.requestId, ...(draft.attachments?.length ? { attachments: draft.attachments } : {}) };
   const existing = current.items.findIndex(candidate => candidate.id === id);
+  // A row the stream already delivered is the server's statement of the
+  // turn, and it can differ from what was typed (a 2.x skill runs as
+  // `@<skill> <args>`): it keeps its text, gaining only what the local draft
+  // knows and it lacks. A sparse streamed row (no text yet) takes the draft.
+  const streamed = existing < 0 ? undefined : current.items[existing];
+  const item: ConversationItem = streamed?.type === "user_message" && streamed.text
+    ? { ...streamed, requestId: streamed.requestId ?? draft.requestId, ...(!streamed.attachments?.length && draft.attachments?.length ? { attachments: draft.attachments } : {}) }
+    : { id, type: "user_message", createdAt: Date.now(), text: draft.text, requestId: draft.requestId, ...(draft.attachments?.length ? { attachments: draft.attachments } : {}) };
   return {
     ...current,
     items: existing < 0 ? [...current.items, item] : current.items.map((candidate, index) => index === existing ? item : candidate),
