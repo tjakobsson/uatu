@@ -20,13 +20,17 @@ final class BrowserTab: NSObject, Identifiable {
     let webView: WKWebView
     private weak var split: BrowserSplit?
     private var observations: [NSKeyValueObservation] = []
+    /// Dialogs the page raised while this tab was off screen, oldest first.
+    private var pendingDialogs: [DeferredWebDialog] = []
 
     init(split: BrowserSplit) {
         self.split = split
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = BrowserSplit.dataStore
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        let tabWebView = BrowserTabWKWebView(frame: .zero, configuration: configuration)
+        webView = tabWebView
         super.init()
+        tabWebView.onMovedToWindow = { [weak self] in self?.presentPendingDialogs() }
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -123,6 +127,43 @@ final class BrowserTab: NSObject, Identifiable {
         webView.goForward()
     }
 
+    /// Show a dialog the page raised: now, as a sheet, when the tab is on
+    /// screen; otherwise when it next is. Only the selected tab is in the
+    /// window (the split mounts one tab's web view at a time), so a nil
+    /// window means a background tab — and its dialog must neither cover the
+    /// tab the user is looking at nor run app-modal for a page they cannot
+    /// see. The page waits, as it would in Safari.
+    private func presentDialog(show: @escaping (NSWindow) -> Void, answerDefault: @escaping () -> Void) {
+        let dialog = DeferredWebDialog(show: show, dismiss: answerDefault)
+        if let window = webView.window {
+            dialog.present(in: window)
+        } else {
+            pendingDialogs.append(dialog)
+        }
+    }
+
+    /// The tab's web view entered a window: show what it raised meanwhile.
+    /// Deferred a turn so the sheet begins after SwiftUI finishes mounting.
+    private func presentPendingDialogs() {
+        guard !pendingDialogs.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.webView.window else { return }
+            let dialogs = self.pendingDialogs
+            self.pendingDialogs.removeAll()
+            // WebKit raises one dialog at a time per page; should more wait,
+            // AppKit queues each sheet behind the one before.
+            for dialog in dialogs { dialog.present(in: window) }
+        }
+    }
+
+    /// The tab is closing: answer anything still waiting with the page's
+    /// default, so WebKit is never left holding an unanswered dialog.
+    func answerPendingDialogsWithDefault() {
+        let dialogs = pendingDialogs
+        pendingDialogs.removeAll()
+        for dialog in dialogs { dialog.answerDefault() }
+    }
+
     /// D3 routing for URLs leaving this page: http(s) stays in the split,
     /// anything else goes to its system handler (a tab.load of e.g.
     /// mailto: would leave a permanently blank tab).
@@ -147,6 +188,69 @@ extension BrowserTab: WKUIDelegate {
         // target="_blank" / window.open inside a browser page: another tab.
         routeIncoming(navigationAction.request.url)
         return nil
+    }
+
+    // Without these WKWebView mutes the page's dialogs: alert() vanishes,
+    // confirm() answers false, prompt() answers null, and a file input never
+    // opens. The defaults below are the answers WebKit itself would give.
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        presentDialog(
+            show: { WebDialogs.alert(message, in: $0, completion: completionHandler) },
+            answerDefault: completionHandler
+        )
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        presentDialog(
+            show: { WebDialogs.confirm(message, in: $0, completion: completionHandler) },
+            answerDefault: { completionHandler(false) }
+        )
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptTextInputPanelWithPrompt prompt: String,
+        defaultText: String?,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (String?) -> Void
+    ) {
+        presentDialog(
+            show: { WebDialogs.prompt(prompt, defaultText: defaultText, in: $0, completion: completionHandler) },
+            answerDefault: { completionHandler(nil) }
+        )
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        presentDialog(
+            show: { WebDialogs.openPanel(parameters, in: $0, completion: completionHandler) },
+            answerDefault: { completionHandler(nil) }
+        )
+    }
+}
+
+/// A browser tab's web view, reporting when it is mounted into a window —
+/// which is when a dialog its page raised in the background can be shown.
+final class BrowserTabWKWebView: WKWebView {
+    var onMovedToWindow: (() -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { onMovedToWindow?() }
     }
 }
 
@@ -343,6 +447,7 @@ final class BrowserSplit {
             selectedID = tabs.indices.contains(index) ? tabs[index].id : tabs.last?.id
         }
         tab.resetFind()
+        tab.answerPendingDialogsWithDefault()
         if tabs.isEmpty {
             isOpen = false
             findOpen = false

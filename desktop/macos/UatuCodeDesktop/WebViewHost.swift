@@ -152,24 +152,20 @@ extension WebViewHost: WKUIDelegate {
         return nil
     }
 
-    // WKWebView shows NO JavaScript dialogs unless the app provides them —
-    // confirm() silently answers false, which turned the hub dashboard's
-    // confirmation-gated actions (Stop, init-and-serve) into dead buttons.
+    // WKWebView shows NO JavaScript dialogs or file chooser unless the app
+    // provides them — confirm() silently answers false, which turned the hub
+    // dashboard's confirmation-gated actions (Stop, init-and-serve) into dead
+    // buttons, and its private-key file input could not open a picker. The
+    // presenters are shared with the split browser's tabs (WebDialogs.swift).
+    // This view is always in the window once shown, so a missing window only
+    // happens before then, and the presenter runs app-modal for that case.
     func webView(
         _ webView: WKWebView,
         runJavaScriptAlertPanelWithMessage message: String,
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping () -> Void
     ) {
-        let alert = NSAlert()
-        alert.messageText = message
-        alert.addButton(withTitle: "OK")
-        if let window = webView.window {
-            alert.beginSheetModal(for: window) { _ in completionHandler() }
-        } else {
-            alert.runModal()
-            completionHandler()
-        }
+        WebDialogs.alert(message, in: webView.window, completion: completionHandler)
     }
 
     func webView(
@@ -178,17 +174,26 @@ extension WebViewHost: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (Bool) -> Void
     ) {
-        let alert = NSAlert()
-        alert.messageText = message
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-        if let window = webView.window {
-            alert.beginSheetModal(for: window) { response in
-                completionHandler(response == .alertFirstButtonReturn)
-            }
-        } else {
-            completionHandler(alert.runModal() == .alertFirstButtonReturn)
-        }
+        WebDialogs.confirm(message, in: webView.window, completion: completionHandler)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptTextInputPanelWithPrompt prompt: String,
+        defaultText: String?,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (String?) -> Void
+    ) {
+        WebDialogs.prompt(prompt, defaultText: defaultText, in: webView.window, completion: completionHandler)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        WebDialogs.openPanel(parameters, in: webView.window, completion: completionHandler)
     }
 }
 
