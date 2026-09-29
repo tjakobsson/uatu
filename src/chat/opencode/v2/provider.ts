@@ -388,12 +388,14 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   /** What a slash name runs, with `listCommands()`'s precedence. */
-  private async commandTarget(name: string): Promise<{ kind: "command" } | { kind: "reload" } | { kind: "skill"; skill: { id: string } }> {
+  private async commandTarget(name: string): Promise<{ kind: "command" } | { kind: "compact" } | { kind: "reload" } | { kind: "skill"; skill: { id: string } }> {
     const [commands, skills] = await Promise.all([this.client.command.list(this.scope), this.client.skill.list(this.scope)]);
     if (commands.data.some(command => command.name === name)) return { kind: "command" };
     const skill = skills.data.find(candidate => candidate.id === name);
     if (skill) return { kind: "skill", skill: { id: skill.id } };
-    return name === "reload" ? { kind: "reload" } : { kind: "command" };
+    if (name === "reload") return { kind: "reload" };
+    if (name === "compact" || name === "summarize") return { kind: "compact" };
+    return { kind: "command" };
   }
 
   /**
@@ -610,11 +612,13 @@ export class OpenCodeV2Provider implements ChatProvider {
    */
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }> {
     const messageId = stableProviderId("msg", input.id);
-    const compacts = input.name === "compact" || input.name === "summarize";
-    // Decided from the live catalogs, not the palette the user chose from:
-    // a skill dropped since then falls through to `session.command`, whose
-    // refusal reaches the conversation like any invalid command's.
-    const target = compacts ? { kind: "command" as const } : await this.commandTarget(input.name);
+    // Decided from the live catalogs, not the palette the user chose from,
+    // and before any built-in: a config command or skill named `compact`
+    // runs as what the palette listed. A skill dropped since then falls
+    // through to `session.command`, whose refusal reaches the conversation
+    // like any invalid command's.
+    const target = await this.commandTarget(input.name);
+    const compacts = target.kind === "compact";
     // A reload touches the server's configuration, not this conversation.
     if (target.kind === "reload") return this.reload(sessionId, messageId);
     this.historyReuse.invalidate(sessionId);

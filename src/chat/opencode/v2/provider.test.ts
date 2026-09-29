@@ -456,6 +456,21 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await harness.stop();
   });
 
+  test("a skill or config command named compact runs as listed, not as compaction", async () => {
+    const skillServer = fakeOpenCode({
+      "GET /api/skill": () => scoped([skillInfo("compact")]),
+      "POST /api/session/:id/prompt": ({ body }) => ({ id: (body as { id: string }).id, sessionID: "ses_1", time: { created: 1 }, type: "user", payload: {}, delivery: "queue" }),
+    });
+    const accepted = await skillServer.provider().command("ses_1", { id: "req-cs", name: "compact", arguments: "" });
+    expect(accepted.text).toBe("@compact");
+    expect(skillServer.requests("POST", "/api/session/ses_1/compact")).toHaveLength(0);
+
+    const commandServer = fakeOpenCode({ "GET /api/command": () => scoped([{ name: "compact" }]), "POST /api/session/:id/command": () => undefined });
+    await commandServer.provider().command("ses_1", { id: "req-cc", name: "compact", arguments: "" });
+    expect(commandServer.requests("POST", "/api/session/ses_1/command")[0]?.body).toEqual({ name: "compact", text: "", delivery: "queue" });
+    expect(commandServer.requests("POST", "/api/session/ses_1/compact")).toHaveLength(0);
+  });
+
   test("a config command named reload shadows the built-in", async () => {
     const server = fakeOpenCode({ "GET /api/command": () => scoped([{ name: "reload" }]), "POST /api/session/:id/command": () => undefined });
     await server.provider().command("ses_1", { id: "req-cr", name: "reload", arguments: "" });
