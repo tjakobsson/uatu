@@ -14,6 +14,11 @@ export type ChatProjection = {
   status: ConversationStatus;
   olderCursor?: string;
   acceptedDrafts: AcceptedDraft[];
+  // Items the stream removed, most recent last and bounded: an acceptance
+  // answering after the stream already retired its row (a `/reload`, a 2.x
+  // placeholder the server's own row replaced) must not bring it back.
+  // A later upsert of the same id takes it off the list.
+  removedIds?: string[];
   // Server-held messages awaiting delivery, in submission order. Sourced from
   // the snapshot and restated whole by every queue event, so this is state,
   // not an accumulation.
@@ -164,8 +169,15 @@ export function dropQueuedMessage(current: ChatProjection, messageId: string): C
   return { ...current, queued: current.queued.filter(entry => entry.id !== messageId) };
 }
 
+const REMOVED_ID_LIMIT = 64;
+
 export function confirmAcceptedDraft(current: ChatProjection, draft: AcceptedDraft): ChatProjection {
   const id = `message:${draft.messageId}`;
+  // The stream retired this row before the acceptance answered: the draft
+  // is settled, and nothing is recreated.
+  if (current.removedIds?.includes(id)) {
+    return { ...current, acceptedDrafts: current.acceptedDrafts.filter(candidate => candidate.requestId !== draft.requestId) };
+  }
   const existing = current.items.findIndex(candidate => candidate.id === id);
   // A row the stream already delivered is the server's statement of the
   // turn, and it can differ from what was typed (a 2.x skill runs as
@@ -196,13 +208,16 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   let queued = current.queued;
   let queueRevision = current.queueRevision;
   let configurationRevision = current.configurationRevision;
+  let removedIds = current.removedIds;
   if (event.type === "item.upsert") {
+    if (removedIds?.includes(event.item.id)) removedIds = removedIds.filter(id => id !== event.item.id);
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
     const incoming = mergeUpsert(existing, event.item);
     items = index < 0 ? insertInConversationOrder(items, incoming) : items.map((item, at) => at === index ? incoming : item);
   } else if (event.type === "item.remove") {
     items = items.filter(item => item.id !== event.itemId);
+    removedIds = [...(removedIds ?? []).filter(id => id !== event.itemId), event.itemId].slice(-REMOVED_ID_LIMIT);
   } else if (event.type === "item.text_delta") {
     items = items.map(item => item.id === event.itemId ? appendDelta(item, event.delta) : item);
   } else if (event.type === "conversation.status") {
@@ -230,6 +245,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
       queued,
       queueRevision,
       configurationRevision,
+      ...(removedIds ? { removedIds } : {}),
       acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items, queued),
     },
     outcome: "applied",
