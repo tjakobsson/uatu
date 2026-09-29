@@ -237,6 +237,36 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-configuration-mode")).toContainText(/audit/i);
   });
 
+  test("a /reload queued behind a running turn re-reads the catalogs when it completes, not when that turn does", async ({ page, request }) => {
+    const reload = { name: "reload", description: "Reload OpenCode's configuration for this workspace", argumentHint: "", kind: "command" };
+    await control(request, { action: "commands", commands: [reload] });
+    await page.reload();
+    await openChatPanel(page);
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
+    const conversationId = await page.locator("#chat-conversation-select").inputValue();
+    const input = page.locator("#chat-input");
+    const send = async (text: string) => {
+      await input.fill(text);
+      // A slash text opens the palette, whose Enter would choose rather than send.
+      if (await page.locator("#chat-command-menu").isVisible()) await page.keyboard.press("Escape");
+      const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+      await input.press("Enter");
+      await accepted;
+    };
+    await send("Start the work");
+    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+    await send("/reload");
+    await expect(page.locator("#chat-queue .is-held")).toHaveCount(1);
+    // The running turn ends; the held /reload is delivered and starts.
+    await control(request, { action: "status", conversationId, status: "completed" });
+    await expect(page.locator("#chat-queue .is-held")).toHaveCount(0);
+    // Only the reload's own completion re-reads the catalogs.
+    const reread = page.waitForResponse(response => response.url().includes("/chat/commands"), { timeout: 5_000 });
+    await control(request, { action: "status", conversationId, status: "completed" });
+    await reread;
+  });
+
   test("a page left open picks up catalogs changed elsewhere when the palette or picker opens", async ({ page, request }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
     const input = page.locator("#chat-input");

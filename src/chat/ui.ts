@@ -177,10 +177,14 @@ export function initChat(api = new ChatApiClient()): void {
   // to another retrying conversation never borrows this one's reason.
   const statusMessages = new Map<string, string | undefined>();
   // A `/reload` this client sent, by conversation, with the agent whose
-  // catalogs it changes: when that conversation's turn completes, the
-  // palette and pickers re-read them (other clients follow on the idle
-  // refresh). A failed or interrupted reload changed nothing to re-read.
-  const pendingReloads = new Map<string, string>();
+  // catalogs it changes and — once accepted — its message id: when its turn
+  // completes, the palette and pickers re-read them. A reload held behind a
+  // running turn is still in the conversation's queue when THAT turn
+  // completes, so a completion arriving while it is queued is not its own.
+  // One arriving before the acceptance names the message cannot be told
+  // apart: it re-reads (harmlessly) and keeps the mark for the real one.
+  // A failed or interrupted reload changed nothing to re-read.
+  const pendingReloads = new Map<string, { agentId: string; messageId?: string }>();
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
   // Attachment surfaces. Guarded at use rather than joining the required
@@ -2730,10 +2734,14 @@ export function initChat(api = new ChatApiClient()): void {
         projection = result.projection;
         if (event.type === "conversation.configuration") renderConfiguration();
         if (event.type === "conversation.status") {
-          const reloadedAgent = pendingReloads.get(conversationId);
-          if (reloadedAgent && (event.status === "completed" || event.status === "failed" || event.status === "interrupted")) {
-            pendingReloads.delete(conversationId);
-            if (event.status === "completed") refreshBankedCommands(reloadedAgent);
+          const reload = pendingReloads.get(conversationId);
+          if (reload && (event.status === "completed" || event.status === "failed" || event.status === "interrupted")) {
+            const known = reload.messageId !== undefined;
+            const stillQueued = known && (projection?.queued ?? []).some(entry => entry.id === reload.messageId);
+            if (!stillQueued) {
+              if (known) pendingReloads.delete(conversationId);
+              if (event.status === "completed") void refreshBankedCommands(reload.agentId);
+            }
           }
           if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
           else if (isLiveConversationStatus(event.status)) setComposerError(null);
@@ -4348,11 +4356,13 @@ export function initChat(api = new ChatApiClient()): void {
       // Marked before the send: the reload's outcome can reach the stream
       // before the acceptance does.
       const reloading = Boolean(contextAgentId) && /^\/reload(?:\s|$)/.test(text.trim()) && commands.some(command => command.name === "reload" && command.kind === "command");
-      if (reloading) pendingReloads.set(conversationId, contextAgentId!);
+      if (reloading) pendingReloads.set(conversationId, { agentId: contextAgentId! });
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined).catch((error: unknown) => {
         if (reloading) pendingReloads.delete(conversationId);
         throw error;
       });
+      const reload = reloading ? pendingReloads.get(conversationId) : undefined;
+      if (reload) reload.messageId = accepted.messageId;
       retryRequests.delete(conversationId);
       stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
