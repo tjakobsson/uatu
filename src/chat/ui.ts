@@ -4627,15 +4627,14 @@ export function initChat(api = new ChatApiClient()): void {
   // poll, so a page left open would otherwise keep the commands, models, and
   // modes it banked while another client's `/reload` changed them. Opening
   // a slash query or the configuration picker refreshes them in the
-  // background; the open surface re-renders when the lists land. One
-  // refresh per agent at a time: opens are user actions, and a time
-  // throttle would hide a change made moments before the next open.
-  const catalogUseRefreshes = new Set<string>();
+  // background; the open surface re-renders when the lists land. Every
+  // open reads — they are user actions — and overlapping reads are safe:
+  // only the latest one's answers are installed (LatestRefresh below), so
+  // a read begun before another client's reload cannot outlast the one this
+  // open started after it.
   const refreshCatalogsOnUse = () => {
     const agentId = contextAgentId;
-    if (!agentId || catalogUseRefreshes.has(agentId)) return;
-    catalogUseRefreshes.add(agentId);
-    void refreshBankedCommands(agentId).finally(() => catalogUseRefreshes.delete(agentId));
+    if (agentId) void refreshBankedCommands(agentId);
   };
 
   // Refreshes can overlap (a slash query's, then a reload's): only the
