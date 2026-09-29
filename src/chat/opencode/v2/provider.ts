@@ -92,6 +92,9 @@ export class OpenCodeV2Provider implements ChatProvider {
   private wake: (() => void) | undefined;
   // Reloads waiting for the workspace's rebuilt catalogs to be announced.
   private readonly reloadWaiters = new Set<ReloadWaiter>();
+  // Reloads run one at a time: a waiter armed while another reload is in
+  // flight would be satisfied by that reload's rebuild, not its own.
+  private reloadChain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly client: OpenCodeV2Client,
@@ -444,12 +447,17 @@ export class OpenCodeV2Provider implements ChatProvider {
     this.inject({ conversationId: sessionId, outcome: "handled", eventType: "location.reload.started", updates: [
       { kind: "upsert", item: { id: noticeId, type: "notice", createdAt: Date.now(), level: "info", message: "Reloading OpenCode configuration…" } },
     ] });
-    // Armed before the call: the rebuild can be announced before the reply.
-    const settled = this.awaitReloadSettled();
-    void this.client.location.reload().then(
-      async () => { await settled.promise; return undefined; },
-      (error: unknown) => { settled.cancel(); return error ?? new Error("The reload failed"); },
-    ).then(async error => {
+    // One at a time, each armed before its own call: the rebuild can be
+    // announced before the reply, and must be this reload's rebuild.
+    const outcome = this.reloadChain.then(() => {
+      const settled = this.awaitReloadSettled();
+      return this.client.location.reload().then(
+        async () => { await settled.promise; return undefined; },
+        (error: unknown) => { settled.cancel(); return error ?? new Error("The reload failed"); },
+      );
+    });
+    this.reloadChain = outcome;
+    void outcome.then(async error => {
       // The row goes in on the caller's continuation; a macrotask later it
       // is certainly there to retire.
       await new Promise(resolve => setTimeout(resolve, 0));

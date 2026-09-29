@@ -17,6 +17,7 @@ import { expandChatPanel, isChatPanelOpen } from "./surface";
 import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "./surface-visibility";
 import { newRequestId } from "./ids";
 import { insertCommand, localHistoryOperation, matchingCommands, slashCommandQuery, type LocalHistoryOperation } from "./slash-commands";
+import { LatestRefresh } from "./latest-refresh";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, statusLabel, subagentEntries, subagentLabel, workingLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
@@ -4613,15 +4614,21 @@ export function initChat(api = new ChatApiClient()): void {
     void refreshBankedCommands(agentId).finally(() => catalogUseRefreshes.delete(agentId));
   };
 
+  // Refreshes can overlap (a slash query's, then a reload's): only the
+  // latest one's answers are installed, or a pre-reload list landing late
+  // would overwrite the reloaded one.
+  const catalogRefreshes = new LatestRefresh();
   // Settles once every read it started has landed or failed.
   const refreshBankedCommands = (agentId: string | undefined): Promise<void> => {
     if (!agentId) return Promise.resolve();
     const banked = agentCatalogs.get(agentId);
     if (!banked) return Promise.resolve();
+    const latest = catalogRefreshes.begin(agentId);
+    const current = () => agentCatalogs.get(agentId) === banked && latest();
     const reads: Promise<unknown>[] = [];
     if (agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history")) {
       reads.push(api.commands(agentId).then(list => {
-        if (agentCatalogs.get(agentId) !== banked) return;
+        if (!current()) return;
         banked.commands = list;
         banked.commandInventoryAvailable = true;
         if (contextAgentId === agentId) {
@@ -4634,7 +4641,7 @@ export function initChat(api = new ChatApiClient()): void {
     // new entries — so the banked model list refreshes on the same cadence.
     if (agent?.capabilities.includes("models")) {
       reads.push(api.models(agentId).then(list => {
-        if (agentCatalogs.get(agentId) !== banked || list.length === 0) return;
+        if (!current() || list.length === 0) return;
         banked.models = list;
         if (contextAgentId === agentId) {
           models = list;
@@ -4646,7 +4653,7 @@ export function initChat(api = new ChatApiClient()): void {
     // (or an edit picked up on restart) changes under a running page.
     if (agent?.capabilities.includes("modes")) {
       reads.push(api.modes(agentId).then(list => {
-        if (agentCatalogs.get(agentId) !== banked || list.length === 0) return;
+        if (!current() || list.length === 0) return;
         banked.modes = list;
         if (contextAgentId === agentId) {
           modes = list;

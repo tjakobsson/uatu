@@ -433,6 +433,33 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await harness.stop();
   });
 
+  test("concurrent /reloads run one at a time, each settled by its own rebuild", async () => {
+    const harness = await reloadHarness(() => undefined);
+    await harness.provider.command("ses_1", { id: "req-first", name: "reload", arguments: "" });
+    await harness.provider.command("ses_2", { id: "req-second", name: "reload", arguments: "" });
+    await Bun.sleep(40);
+    // The second waits for the first: its waiter must not see the first rebuild.
+    expect(harness.server.requests("POST", "/api/location/reload")).toHaveLength(1);
+    const done = () => harness.seen.filter(line => line === "notice info Configuration reloaded").length;
+    harness.announce("location.shutdown");
+    harness.announce("command.updated");
+    harness.announce("skill.updated");
+    const deadline = Date.now() + 2_000;
+    while (done() < 1 && Date.now() < deadline) await Bun.sleep(5);
+    expect(done()).toBe(1);
+    while (harness.server.requests("POST", "/api/location/reload").length < 2 && Date.now() < deadline) await Bun.sleep(5);
+    expect(harness.server.requests("POST", "/api/location/reload")).toHaveLength(2);
+    await Bun.sleep(40);
+    // Its reply alone does not settle it.
+    expect(done()).toBe(1);
+    harness.announce("location.shutdown");
+    harness.announce("command.updated");
+    harness.announce("skill.updated");
+    while (done() < 2 && Date.now() < deadline + 2_000) await Bun.sleep(5);
+    expect(done()).toBe(2);
+    await harness.stop();
+  });
+
   test("/reload reports success after the settle window when no announcement comes", async () => {
     const harness = await reloadHarness(() => undefined, { reloadSettleMs: 60 });
     const started = Date.now();
