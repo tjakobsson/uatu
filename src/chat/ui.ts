@@ -16,7 +16,7 @@ import { setActiveTab } from "../shell/tab-bar";
 import { expandChatPanel, isChatPanelOpen } from "./surface";
 import { CHAT_SURFACE_ACTIVE_EVENT, chatSurfaceInView } from "./surface-visibility";
 import { newRequestId } from "./ids";
-import { insertCommand, localHistoryOperation, matchingCommands, type LocalHistoryOperation } from "./slash-commands";
+import { insertCommand, localHistoryOperation, matchingCommands, slashCommandQuery, type LocalHistoryOperation } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, formatElapsed, latestTodoEntries, statusLabel, subagentEntries, subagentLabel, workingLabel } from "./timeline-renderer";
 import { backgroundStatusLabel, runningBackgroundTasks } from "./background-tasks";
@@ -3102,7 +3102,10 @@ export function initChat(api = new ChatApiClient()): void {
     onMode: stageMode,
     onVariant: stageVariant,
   });
-  configurationTrigger.addEventListener("click", () => configurationPicker?.open());
+  configurationTrigger.addEventListener("click", () => {
+    refreshCatalogsOnUse();
+    configurationPicker?.open();
+  });
   renderConfiguration();
   // With one agent there is no choice to offer; with more, creation asks.
   // The menu shows every offered agent with its availability, so an
@@ -3886,8 +3889,16 @@ export function initChat(api = new ChatApiClient()): void {
   const hintTokens = (hint: string) => hint.split(/\s+/).filter(Boolean)
     .map(token => `<span class="chat-command-hint-token">${escapeHtml(token)}</span>`).join(" ");
 
+  // Whether the caret sits in a slash query, matches or not: starting one
+  // re-reads the catalogs, so a command added elsewhere — which the banked
+  // list cannot match yet — appears while the user is still typing it.
+  let slashQueryActive = false;
   const renderCommandMenu = () => {
-    const next = matchingCommands(input.value, input.selectionStart ?? input.value.length, commands);
+    const caret = input.selectionStart ?? input.value.length;
+    const querying = slashCommandQuery(input.value, caret) !== null;
+    if (querying && !slashQueryActive) refreshCatalogsOnUse();
+    slashQueryActive = querying;
+    const next = matchingCommands(input.value, caret, commands);
     if (!next) { closeCommandMenu(); return; }
     commandMatch = next;
     commandIndex = Math.min(commandIndex, next.commands.length - 1);
@@ -4336,7 +4347,7 @@ export function initChat(api = new ChatApiClient()): void {
     try {
       // Marked before the send: the reload's outcome can reach the stream
       // before the acceptance does.
-      const reloading = Boolean(contextAgentId) && text.trim() === "/reload" && commands.some(command => command.name === "reload" && command.kind === "command");
+      const reloading = Boolean(contextAgentId) && /^\/reload(?:\s|$)/.test(text.trim()) && commands.some(command => command.name === "reload" && command.kind === "command");
       if (reloading) pendingReloads.set(conversationId, contextAgentId!);
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined).catch((error: unknown) => {
         if (reloading) pendingReloads.delete(conversationId);
@@ -4577,42 +4588,63 @@ export function initChat(api = new ChatApiClient()): void {
   // Refreshed in the background from the idle poll and after a conversation
   // selection settles — never inside the selection or creation path itself,
   // where an in-flight read has raced the chooser before.
-  const refreshBankedCommands = (agentId: string | undefined) => {
-    if (!agentId) return;
+  // The catalogs are re-read where they are used: a ready agent has no idle
+  // poll, so a page left open would otherwise keep the commands, models, and
+  // modes it banked while another client's `/reload` changed them. Opening
+  // a slash query or the configuration picker refreshes them in the
+  // background; the open surface re-renders when the lists land. One
+  // refresh per agent at a time: opens are user actions, and a time
+  // throttle would hide a change made moments before the next open.
+  const catalogUseRefreshes = new Set<string>();
+  const refreshCatalogsOnUse = () => {
+    const agentId = contextAgentId;
+    if (!agentId || catalogUseRefreshes.has(agentId)) return;
+    catalogUseRefreshes.add(agentId);
+    void refreshBankedCommands(agentId).finally(() => catalogUseRefreshes.delete(agentId));
+  };
+
+  // Settles once every read it started has landed or failed.
+  const refreshBankedCommands = (agentId: string | undefined): Promise<void> => {
+    if (!agentId) return Promise.resolve();
     const banked = agentCatalogs.get(agentId);
-    if (!banked) return;
+    if (!banked) return Promise.resolve();
+    const reads: Promise<unknown>[] = [];
     if (agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history")) {
-      void api.commands(agentId).then(list => {
+      reads.push(api.commands(agentId).then(list => {
         if (agentCatalogs.get(agentId) !== banked) return;
         banked.commands = list;
         banked.commandInventoryAvailable = true;
-        if (contextAgentId === agentId) commands = list;
-      }).catch(() => undefined);
+        if (contextAgentId === agentId) {
+          commands = list;
+          if (slashQueryActive) renderCommandMenu();
+        }
+      }).catch(() => undefined));
     }
     // Models change under a running page too — a Claude Code update ships
     // new entries — so the banked model list refreshes on the same cadence.
     if (agent?.capabilities.includes("models")) {
-      void api.models(agentId).then(list => {
+      reads.push(api.models(agentId).then(list => {
         if (agentCatalogs.get(agentId) !== banked || list.length === 0) return;
         banked.models = list;
         if (contextAgentId === agentId) {
           models = list;
           renderConfiguration();
         }
-      }).catch(() => undefined);
+      }).catch(() => undefined));
     }
     // Modes too: OpenCode's agents are its configuration, which a reload
     // (or an edit picked up on restart) changes under a running page.
     if (agent?.capabilities.includes("modes")) {
-      void api.modes(agentId).then(list => {
+      reads.push(api.modes(agentId).then(list => {
         if (agentCatalogs.get(agentId) !== banked || list.length === 0) return;
         banked.modes = list;
         if (contextAgentId === agentId) {
           modes = list;
           renderConfiguration();
         }
-      }).catch(() => undefined);
+      }).catch(() => undefined));
     }
+    return Promise.all(reads).then(() => undefined);
   };
 
   const refreshIdleAgentContext = () => {

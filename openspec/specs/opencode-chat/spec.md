@@ -2352,7 +2352,7 @@ Submitting `/<skill> <arguments>` on 2.x SHALL invoke the skill the way OpenCode
 ### Requirement: Users can reload OpenCode's configuration on 2.x
 When the running OpenCode generation offers configuration reload (2.x), Chat SHALL offer a built-in `/reload` command that asks OpenCode to reload its configuration for the workspace. It MUST NOT be offered on a generation without that operation (1.x). Reload applies to every conversation served by that OpenCode server; it requires no confirmation and SHALL NOT interrupt a running turn, which OpenCode continues under the reloaded configuration.
 
-The conversation in which `/reload` was submitted SHALL show that the reload is in progress, then its outcome: success, or failure with the message OpenCode reported. The `/reload` turn SHALL NOT remain in the timeline as a user prompt and MUST NOT be sent to the model. After a successful reload, the client that invoked it SHALL re-read the agent's commands (including skills), models, and modes so the palette and pickers reflect the new configuration without a page reload; other connected clients SHALL pick up the same catalogs through their periodic background refresh, which covers commands, models, and modes.
+The conversation in which `/reload` was submitted SHALL show that the reload is in progress, then its outcome: success, or failure with the message OpenCode reported. The `/reload` turn SHALL NOT remain in the timeline as a user prompt and MUST NOT be sent to the model. Arguments after `/reload` are ignored: `/reload now` reloads the same way. After a successful reload, the client that invoked it SHALL re-read the agent's commands (including skills), models, and modes so the palette and pickers reflect the new configuration without a page reload. Any other open client SHALL show the reloaded catalogs no later than when it next starts a slash query, opens the configuration picker, or selects a conversation, without a page reload.
 
 #### Scenario: Reload succeeds
 - **WHEN** the user submits `/reload` on a 2.x conversation after adding a skill to the workspace's OpenCode configuration
@@ -2368,6 +2368,10 @@ The conversation in which `/reload` was submitted SHALL show that the reload is 
 - **WHEN** a turn is running in another conversation of the same workspace and the user submits `/reload`
 - **THEN** the reload proceeds without a confirmation prompt
 - **AND** the running conversation is not interrupted
+
+#### Scenario: Another open client sees the reloaded catalogs
+- **WHEN** a second client has the same workspace's Chat open and another client's `/reload` added a skill
+- **THEN** typing that skill's name after `/` in the second client lists it, without reloading the page
 
 #### Scenario: Reload is not offered on 1.x
 - **WHEN** the workspace's OpenCode is 1.x

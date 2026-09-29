@@ -219,14 +219,38 @@ test.describe("desktop OpenCode chat", () => {
     // without a page reload.
     await control(request, { action: "commands", commands: [reload, { name: "fresh-skill", description: "Added after the page loaded", argumentHint: "", kind: "skill" }] });
     await control(request, { action: "modes", modes: [{ name: "build", description: "Full read-write mode" }, { name: "plan", description: "Read-only planning mode" }, { name: "audit", description: "Added by the reload" }] });
-    await input.fill("/reload");
+    // Arguments do not stop it being a reload; the completed turn re-reads
+    // the catalogs before the palette is opened again.
+    await input.fill("/reload now");
     await page.keyboard.press("Escape");
     await page.locator("#chat-send").click();
-    await expect(page.locator("#chat-items")).toContainText("/reload");
+    await expect(page.locator("#chat-items")).toContainText("/reload now");
+    const reread = page.waitForResponse(response => response.url().includes("/chat/commands"));
     await control(request, { action: "status", conversationId: seeded.conversation.id, status: "completed" });
+    await reread;
     await input.fill("/fresh");
     await expect(menu.getByRole("option", { name: /fresh-skill/ })).toBeVisible();
     await expect(menu.getByRole("option", { name: /fresh-skill/ }).locator(".chat-command-kind")).toHaveText("skill");
+    await page.keyboard.press("Escape");
+    await input.fill("");
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-mode")).toContainText(/audit/i);
+  });
+
+  test("a page left open picks up catalogs changed elsewhere when the palette or picker opens", async ({ page, request }) => {
+    await page.getByRole("button", { name: "New conversation" }).click();
+    const input = page.locator("#chat-input");
+    const menu = page.locator("#chat-command-menu");
+    await input.fill("/");
+    await expect(menu.getByRole("option", { name: /openspec-archive-change/ })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await input.fill("");
+    // Another client's /reload changed the configuration; this page has no
+    // idle poll once the agent is ready.
+    await control(request, { action: "commands", commands: [{ name: "late-skill", description: "Loaded after this page", argumentHint: "", kind: "skill" }] });
+    await control(request, { action: "modes", modes: [{ name: "build", description: "Full read-write mode" }, { name: "plan", description: "Read-only planning mode" }, { name: "audit", description: "Loaded after this page" }] });
+    await input.fill("/late");
+    await expect(menu.getByRole("option", { name: /late-skill/ })).toBeVisible();
     await page.keyboard.press("Escape");
     await input.fill("");
     await openChatConfiguration(page);
