@@ -171,11 +171,14 @@ export function dropQueuedMessage(current: ChatProjection, messageId: string): C
 
 const REMOVED_ID_LIMIT = 64;
 
-export function confirmAcceptedDraft(current: ChatProjection, draft: AcceptedDraft): ChatProjection {
+export function confirmAcceptedDraft(current: ChatProjection, draft: AcceptedDraft, options: { insert?: boolean } = {}): ChatProjection {
   const id = `message:${draft.messageId}`;
-  // The stream retired this row before the acceptance answered: the draft
-  // is settled, and nothing is recreated.
-  if (current.removedIds?.includes(id)) {
+  // The stream retired this row before the acceptance answered, or the
+  // caller knows the row is the stream's alone to show (`insert: false`, a
+  // `/reload`, which the stream shows and retires): the draft is settled,
+  // and nothing is created.
+  const absent = current.items.findIndex(candidate => candidate.id === id) < 0;
+  if (current.removedIds?.includes(id) || (options.insert === false && absent)) {
     return { ...current, acceptedDrafts: current.acceptedDrafts.filter(candidate => candidate.requestId !== draft.requestId) };
   }
   const existing = current.items.findIndex(candidate => candidate.id === id);

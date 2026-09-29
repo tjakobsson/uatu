@@ -4421,7 +4421,11 @@ export function initChat(api = new ChatApiClient()): void {
           ? !retriedRequest && projectionEpoch === projectionEpochAtSubmit
             ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, queueRevisionAtSubmit)
             : removeAcceptedDraft(projection, requestId)
-          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
+          // A reload's row is published before its acceptance and retired
+          // with its outcome, which can precede the acceptance — even
+          // unobserved by this client, if it was away. It is the stream's
+          // to show, never recreated here.
+          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, { insert: !reloadEntry });
         renderConfiguration();
         scheduleRender(true);
       }

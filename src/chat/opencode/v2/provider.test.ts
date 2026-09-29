@@ -407,6 +407,24 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     return { server, provider, seen, announce, settle, stop };
   }
 
+  test("/reload applies staged model and mode before reloading, since the adapter commits them", async () => {
+    const server = fakeOpenCode({
+      "POST /api/session/:id/model": () => undefined,
+      "POST /api/session/:id/agent": () => undefined,
+      "POST /api/location/reload": () => undefined,
+    });
+    const provider = server.provider(WORKSPACE, { reloadSettleMs: 20 });
+    await provider.command("ses_1", { id: "req-reload-staged", name: "reload", arguments: "", model: { providerId: "berget", modelId: "think" }, mode: "plan", variant: "high" });
+    const deadline = Date.now() + 2_000;
+    while (server.requests("POST", "/api/location/reload").length === 0 && Date.now() < deadline) await Bun.sleep(5);
+    expect(server.calls.map(call => `${call.method} ${call.path}`).filter(call => call.startsWith("POST"))).toEqual([
+      "POST /api/session/ses_1/model",
+      "POST /api/session/ses_1/agent",
+      "POST /api/location/reload",
+    ]);
+    expect(server.requests("POST", "/api/session/ses_1/agent")[0]?.body).toEqual({ agent: "plan" });
+  });
+
   test("/reload reports success once the rebuilt location announces its catalogs", async () => {
     const harness = await reloadHarness(() => undefined);
     const accepted = await harness.provider.command("ses_1", { id: "req-reload", name: "reload", arguments: "" });

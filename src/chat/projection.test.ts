@@ -59,6 +59,17 @@ describe("chat projection", () => {
     expect(restored.removedIds ?? []).not.toContain("message:msg_reload");
   });
 
+  test("a reload's acceptance never creates its row, even if the removal was never observed", () => {
+    // Switched back after the outcome: the snapshot omits the row and no removal was seen.
+    const state = addAcceptedDraft(projectionFromSnapshot(snapshot()), { requestId: "request", messageId: "pending:request", text: "/reload" });
+    const confirmed = confirmAcceptedDraft(state, { requestId: "request", messageId: "msg_reload", text: "/reload" }, { insert: false });
+    expect(confirmed.items).toEqual([]);
+    expect(confirmed.acceptedDrafts).toEqual([]);
+    // A row the stream already shows is still confirmed in place.
+    const shown = projectionFromSnapshot(snapshot([{ id: "message:msg_reload", type: "user_message", createdAt: 2, text: "/reload" }]));
+    expect(confirmAcceptedDraft(shown, { requestId: "request", messageId: "msg_reload", text: "/reload" }, { insert: false }).items[0]).toMatchObject({ id: "message:msg_reload", requestId: "request" });
+  });
+
   test("does not add an accepted marker after the matching message arrived first", () => {
     const state = projectionFromSnapshot(snapshot([
       { id: "message:msg_provider", type: "user_message", createdAt: 2, text: "hello" },

@@ -650,11 +650,14 @@ export class OpenCodeV2Provider implements ChatProvider {
     // like any invalid command's.
     const target = await this.commandTarget(input.name, input.listed);
     const compacts = target.kind === "compact";
-    // A reload touches the server's configuration, not this conversation.
-    if (target.kind === "reload") return this.reload(sessionId, messageId);
     this.historyReuse.invalidate(sessionId);
+    // Staged selections are applied first, whatever the command: the adapter
+    // commits them as the conversation's configuration once this returns,
+    // so a `/reload` must not skip them either.
     if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     if (input.mode) await this.client.session.switchAgent({ sessionID: sessionId, agent: input.mode });
+    // A reload touches the server's configuration, not this conversation.
+    if (target.kind === "reload") return this.reload(sessionId, messageId);
     if (target.kind === "skill") return this.promptSkill(sessionId, messageId, target.skill, input.arguments);
     // A compaction's id is this process's own; its inbox item is a
     // `compaction`, which the stream never presents as a user row, but the
