@@ -58,6 +58,15 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     expect((item as { requestId?: string }).requestId).toBe(item!.id.slice("message:".length));
   });
 
+  test("a skill turn reads as its mention text, live and from history", () => {
+    const skills = [{ id: "openspec-apply-change", name: "openspec-apply-change", text: "# Apply", mention: { start: 0, end: 22, text: "@openspec-apply-change" } }];
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const live = normalize({ id: "evt_sk", created: 1_789_999_999_000, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_sk", inboxID: "msg_sk", item: { type: "user", payload: { text: "@openspec-apply-change my-change", skills }, delivery: "queue" } } });
+    expect(upserts(live!)[0]).toMatchObject({ id: "message:msg_sk", type: "user_message", text: "@openspec-apply-change my-change" });
+    const stored = normalizeStoredMessage({ id: "msg_sk", type: "user", time: { created: 1 }, text: "@openspec-apply-change my-change", skills });
+    expect(stored).toEqual([{ id: "message:msg_sk", type: "user_message", createdAt: 1, text: "@openspec-apply-change my-change" }]);
+  });
+
   test("execution lifecycle drives the conversation status", () => {
     expect(byType("session.execution.started")[0]?.updates).toEqual([{ kind: "status", status: "running" }]);
     expect(byType("session.execution.succeeded")[0]?.updates).toEqual([{ kind: "status", status: "completed" }]);

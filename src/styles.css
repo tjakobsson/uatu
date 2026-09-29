@@ -7274,6 +7274,18 @@ html[data-ui-mode="desktop"]:not(.uatu-desktop-host) .chat-composer {
   overflow-wrap: anywhere;
 }
 
+/* Tells a skill from a command of a similar name at a glance. */
+.chat-command-kind {
+  flex: 0 0 auto;
+  padding: 0 0.4em;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.35rem;
+  color: var(--text-subtle);
+  font-size: 0.72em;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
 /* The hint's basis is its whole width, so it stays beside the name only when
    it fits there entire and otherwise drops to its own line; there it wraps
    only between tokens. A token is an atomic inline box, broken inside only

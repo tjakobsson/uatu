@@ -57,7 +57,7 @@ export const openCodeCoverageAnnotations: CoverageAnnotations = {
     "2.x:model.*": "Server configuration changed; uatu reads models through the API.",
     "2.x:provider.*": "Server configuration changed; uatu reads models through the API.",
     "2.x:command.*": "Server configuration changed; uatu reads commands through the API.",
-    "2.x:skill.*": "Server configuration changed; not conversation activity.",
+    "2.x:skill.*": "Server configuration changed; uatu reads skills through the API.",
     "2.x:websearch.*": "Server configuration changed; not conversation activity.",
 
     // Project and filesystem state, which uatu watches itself.

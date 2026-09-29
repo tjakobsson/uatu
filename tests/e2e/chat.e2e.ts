@@ -200,6 +200,39 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-items")).toContainText("/review API routes");
   });
 
+  test("labels skills in the palette and follows /reload with fresh catalogs", async ({ page, request }, testInfo) => {
+    const reload = { name: "reload", description: "Reload OpenCode's configuration for this workspace", argumentHint: "", kind: "command" };
+    await control(request, { action: "commands", commands: [reload] });
+    const seeded = await control(request, { action: "seed", title: "Reload", items: [] }) as { conversation: { id: string } };
+    await page.reload();
+    await openChatPanel(page);
+    const input = page.locator("#chat-input");
+    const menu = page.locator("#chat-command-menu");
+    // A skill carries its label; a command does not.
+    await input.fill("/");
+    await expect(menu.getByRole("option", { name: /openspec-archive-change/ }).locator(".chat-command-kind")).toHaveText("skill");
+    await expect(menu.getByRole("option", { name: /\/review/ }).locator(".chat-command-kind")).toHaveCount(0);
+    await input.fill("/openspec");
+    await captureScreenshot(page, testInfo, "slash-command-skill-label");
+
+    // The configuration changes behind the page; /reload brings it in
+    // without a page reload.
+    await control(request, { action: "commands", commands: [reload, { name: "fresh-skill", description: "Added after the page loaded", argumentHint: "", kind: "skill" }] });
+    await control(request, { action: "modes", modes: [{ name: "build", description: "Full read-write mode" }, { name: "plan", description: "Read-only planning mode" }, { name: "audit", description: "Added by the reload" }] });
+    await input.fill("/reload");
+    await page.keyboard.press("Escape");
+    await page.locator("#chat-send").click();
+    await expect(page.locator("#chat-items")).toContainText("/reload");
+    await control(request, { action: "status", conversationId: seeded.conversation.id, status: "completed" });
+    await input.fill("/fresh");
+    await expect(menu.getByRole("option", { name: /fresh-skill/ })).toBeVisible();
+    await expect(menu.getByRole("option", { name: /fresh-skill/ }).locator(".chat-command-kind")).toHaveText("skill");
+    await page.keyboard.press("Escape");
+    await input.fill("");
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-mode")).toContainText(/audit/i);
+  });
+
   test("wraps long slash-command descriptions in full and keeps the highlight in view", async ({ page, request }, testInfo) => {
     const long = (topic: string) => `${topic}: ${"Review the diff for correctness bugs, reuse, simplification, and efficiency cleanups at the chosen effort level, then report ranked findings. ".repeat(3)}End of ${topic}.`;
     await control(request, { action: "commands", commands: Array.from({ length: 6 }, (_, index) => ({

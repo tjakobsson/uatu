@@ -1,0 +1,27 @@
+## 1. Skills in the 2.x command inventory
+
+- [x] 1.1 In `src/chat/opencode/v2/provider.ts`, make `listCommands()` read `skill.list` alongside `command.list` and return the merged inventory: config commands as `kind: "command"`, skills as `kind: "skill"` under their id (description = the skill's description, or its name when the two differ), then built-ins; a name already taken is skipped in that precedence order (D7). Verify with `src/chat/opencode/v2/provider.test.ts`: a fake `GET /api/skill` plus `GET /api/command` yields the merged list in order, a duplicate name appears once with the config command winning, both reads are workspace-scoped and authenticated, and a failing `skill.list` fails the read (no silent empty inventory).
+- [x] 1.2 In `command()`, resolve every non-compaction name against the live catalogs (D3): when it is a skill id and no config command, call `session.prompt` with `id: messageId`, `text: "@<id> <args>"` (`"@<id>"` when there are no arguments), `skills: [{ id, mention: { start: 0, end: 1 + id.length, text: "@<id>" } }]`, `delivery: "queue"`, `resume: true`, registering the prompt id as `prompt()` does; when it matches nothing, fall through to `session.command`, whose refusal takes the existing refusal path, and never send prose. Verify with provider tests asserting the exact prompt body for `/skill arg1 arg2` and for `/skill` alone, and the refusal path for an unknown name.
+- [x] 1.3 Confirm a 2.x user message carrying `skills` normalizes to a `user_message` whose text is the `@<id> …` text on both the live stream and history (`src/chat/opencode/v2/normalization.ts`). Verify with a `normalization.test.ts` case feeding a stored user message with a `skills` attachment and asserting the rendered text.
+- [x] 1.4 The coverage report classifies wire events, not API calls: reword the `2.x:skill.*` reason in `src/chat/opencode/sdk-coverage.ts` to say uatu reads skills through the API. Verify by running `bun run coverage:agents` (with `bun install` current) and checking the only `docs/agents/opencode.md` change is the `skill.updated` reason.
+
+## 2. Skill label in the palette
+
+- [x] 2.1 In `src/chat/ui.ts` `renderCommandMenu`, render a `chat-command-kind` label reading "skill" for entries of kind `skill` (nothing for other kinds), styled in `src/styles.css` beside the name at the palette's density. Verify with a screenshot of the palette on a 1.x workspace listing a skill and a command, saved under `openspec/changes/opencode-2x-skills-and-reload/screenshots/`.
+- [x] 2.2 Extend `tests/e2e/chat.e2e.ts` (or the existing palette test) so the fake agent offers a `kind: "skill"` command and the rendered row shows the label. Verify with `bun test:e2e -- --grep <that test>`.
+
+## 3. `/reload` on 2.x
+
+- [x] 3.1 Add `reload` to the v2 provider's `BUILTIN_COMMANDS` ("Reload OpenCode's configuration for this workspace"), absent from v1's. Verify with provider tests: v2 `listCommands()` includes `reload`; v1's does not.
+- [x] 3.2 In v2 `command()`, handle `reload` (D4): immediately inject a `notice` "Reloading OpenCode configuration…"; call `location.reload()` without racing the admission window; when it resolves, retire `message:<id>` (the caller inserts it only after `command()` returns), replace the notice with "Configuration reloaded" (level info) and status `completed`, or with an error notice carrying OpenCode's message and status `failed`. Return `{ messageId }` at once. Verify with provider tests using a fake `POST /api/location/reload` that (a) answers 204 and (b) answers a tagged error, asserting the injected event sequence and that no session route was called.
+- [x] 3.3 Confirm the coverage report needs no entry for `/reload`: `location.reload` is an operation, not a wire event, so nothing is classified. Verify with `bun run coverage:agents` producing no reload-related row.
+
+## 4. Catalogs follow the reload
+
+- [x] 4.1 In `src/chat/ui.ts`, mark a `/reload` this client sends (before the send: its outcome can reach the stream before the acceptance does) and, when that conversation's status turns `completed`, run the background catalog refresh (commands, models, modes); a failed or interrupted turn clears the mark (D5, D8). Verify with `tests/e2e/chat.e2e.ts` "labels skills in the palette and follows /reload with fresh catalogs": a skill and a mode added behind the page appear after `/reload` without a page reload.
+- [x] 4.2 Extend `refreshBankedCommands` to re-read modes as well as commands and models, keeping the same guards (only when the banked entry is still current; ignore an empty result). Verify with the existing UI/e2e coverage of the idle refresh plus a case where the fake agent's mode list changes between polls.
+
+## 5. Real-server check and docs
+
+- [x] 5.1 Against a real OpenCode 2.x: `src/chat/opencode/real-opencode.integration.test.ts` gains a 2.x-only case (a planted skill is listed as `kind: "skill"`; `/skill hello` stores and replays as `@skill hello`; a skill added before `/reload` is listed once the success notice lands), run with `UATU_REAL_OPENCODE=1 UATU_REAL_OPENCODE_V2=<2.x binary>`; and a dev-hub pass (`PATH=<2.x wrapper dir>:$PATH bun run dev`) capturing the palette, the reload notices, and a skill turn under `openspec/changes/opencode-2x-skills-and-reload/screenshots/`.
+- [x] 5.2 Note in `ARCHITECTURE.md`'s chat section that on 2.x skills come from `skill.list` and dispatch as skill-attached prompts, and that `/reload` is a v2 provider built-in. Verify by reading the section back.

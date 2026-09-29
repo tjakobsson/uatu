@@ -15,6 +15,7 @@ import type {
   ChatActivity,
   ChatCapability,
   ChatCommand,
+  ChatMode,
   ChatModel,
   ChatEvent,
   ChatAvailability,
@@ -126,6 +127,18 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments"];
   private capabilities: ChatCapability[];
   private modelInventory: ChatModel[] = FakeE2EChatService.defaultModels();
+  private modeInventory: ChatMode[] = FakeE2EChatService.defaultModes();
+
+  private static defaultModes(): ChatMode[] {
+    return [
+      { name: "build", description: "Full read-write mode" },
+      { name: "plan", description: "Read-only planning mode" },
+    ];
+  }
+
+  setModes(modes: ChatMode[]): void {
+    this.modeInventory = structuredClone(modes);
+  }
   // The real store against a throwaway root: e2e uploads exercise the real
   // sniffing, caps, and id policy rather than a parallel fake.
   private readonly attachmentStore = createAttachmentStore({
@@ -231,10 +244,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async modes() {
-    return [
-      { name: "build", description: "Full read-write mode" },
-      { name: "plan", description: "Read-only planning mode" },
-    ];
+    return structuredClone(this.modeInventory);
   }
 
   async commands() {
@@ -749,6 +759,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.capabilities = this.defaultCapabilities();
     this.modelInventory = FakeE2EChatService.defaultModels();
     this.extraCommands = [];
+    this.modeInventory = FakeE2EChatService.defaultModes();
   }
 
   // `updatedAt` stamps a real last-activity time (epoch ms); without it the

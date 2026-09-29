@@ -108,6 +108,53 @@ for (const generation of generations()) {
       if (endpoint) await expect(fetch(`${endpoint}/global/health`)).rejects.toThrow();
     }, 60_000);
 
+    test.skipIf(generation.expected !== 2)("2.x: skills are slash commands, run as skill-attached prompts, and /reload picks up new ones", async () => {
+      const { workspace, runtime } = await isolated("uatu-real-opencode-skills-", generation, "# Skills\n");
+      const skill = async (id: string, description: string) => {
+        const directory = path.join(workspace, ".opencode", "skills", id);
+        await mkdir(directory, { recursive: true });
+        await writeFile(path.join(directory, "SKILL.md"), `---\nname: ${id}\ndescription: ${description}\n---\n\nReply with the single word ${id}.\n`, "utf8");
+      };
+      await skill("uatu-probe", "A probe skill");
+      const service = new LazyChatService({ workspacePath: workspace, runtime });
+      try {
+        await service.listConversations();
+        await expectReady(service, runtime, generation);
+        expect(await service.commands()).toContainEqual({ name: "uatu-probe", description: "A probe skill", argumentHint: "", kind: "skill" });
+
+        const created = await service.createConversation();
+        const stream = await service.subscribe(created.conversation.id, { cursor: created.cursor });
+        const events = stream.events[Symbol.asyncIterator]();
+        const until = async (predicate: (event: unknown) => boolean, label: string) => {
+          const deadline = Date.now() + 30_000;
+          while (Date.now() < deadline) {
+            const next = await Promise.race([events.next(), Bun.sleep(deadline - Date.now()).then(() => undefined)]);
+            if (!next || next.done) break;
+            if (predicate(next.value)) return next.value;
+          }
+          throw new Error(`timed out waiting for ${label}`);
+        };
+        const upserted = (type: string, match: (item: Record<string, unknown>) => boolean) => (event: unknown) => {
+          const value = event as { type?: string; item?: Record<string, unknown> };
+          return value.type === "item.upsert" && value.item?.type === type && match(value.item);
+        };
+
+        await service.prompt(created.conversation.id, crypto.randomUUID(), "/uatu-probe hello");
+        await until(upserted("user_message", item => item.text === "@uatu-probe hello"), "the skill turn");
+        await service.cancel(created.conversation.id, crypto.randomUUID()).catch(() => undefined);
+        const history = await service.history(created.conversation.id);
+        expect(history.items.some(item => item.type === "user_message" && item.text === "@uatu-probe hello")).toBe(true);
+
+        await skill("uatu-late", "Added before the reload");
+        await service.prompt(created.conversation.id, crypto.randomUUID(), "/reload");
+        await until(upserted("notice", item => item.message === "Configuration reloaded"), "the reload outcome");
+        expect((await service.commands()).map(command => command.name)).toContain("uatu-late");
+        stream.events.cancel();
+      } finally {
+        await service.dispose();
+      }
+    }, 120_000);
+
     test("recovers persisted configuration through a fresh provider and adapter", async () => {
       const { workspace, runtime } = await isolated("uatu-real-opencode-configuration-", generation, "# Isolated OpenCode configuration smoke\n");
       const writer = new LazyChatService({ workspacePath: workspace, runtime });

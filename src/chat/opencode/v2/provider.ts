@@ -43,6 +43,7 @@ export function createOpenCodeV2Provider(options: {
   directory: string;
   fetch?: typeof globalThis.fetch;
   commandAdmissionMs?: number;
+  reloadSettleMs?: number;
 }): ChatProvider {
   const authorization = `Basic ${Buffer.from(`opencode:${options.password}`).toString("base64")}`;
   const client = OpenCode.make({
@@ -50,7 +51,7 @@ export function createOpenCodeV2Provider(options: {
     headers: { authorization },
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
-  return new OpenCodeV2Provider(client, options.directory, options.commandAdmissionMs);
+  return new OpenCodeV2Provider(client, options.directory, options.commandAdmissionMs, options.reloadSettleMs);
 }
 
 export class OpenCodeV2Provider implements ChatProvider {
@@ -89,11 +90,16 @@ export class OpenCodeV2Provider implements ChatProvider {
   private readonly injected: NormalizedProviderEvent[] = [];
   private static readonly INJECTED_LIMIT = 64;
   private wake: (() => void) | undefined;
+  // Reloads waiting for the workspace's rebuilt catalogs to be announced.
+  private readonly reloadWaiters = new Set<ReloadWaiter>();
 
   constructor(
     private readonly client: OpenCodeV2Client,
     private readonly directory: string,
     private readonly commandAdmissionMs = 1_000,
+    // How long a reload waits for OpenCode to announce its rebuilt catalogs
+    // before reporting success anyway (see `reload()`).
+    private readonly reloadSettleMs = 10_000,
   ) {
     this.workspace = path.resolve(directory);
     this.normalize = createOpenCodeV2Normalizer(directory);
@@ -115,16 +121,26 @@ export class OpenCodeV2Provider implements ChatProvider {
     };
   }
 
+  /**
+   * 2.x keeps skills in a catalog of their own: `command.list` answers only
+   * config commands. The inventory is their union, then the built-ins, and
+   * a name already taken is skipped in that order — config command, skill,
+   * built-in — the precedence 1.x's server applies when it folds skills
+   * into its command list. A skill is listed under its id, the token its
+   * `@` mention and its prompt attachment key on.
+   */
   async listCommands(): Promise<ChatCommand[]> {
-    const { data } = await this.client.command.list(this.scope);
+    const [commands, skills] = await Promise.all([this.client.command.list(this.scope), this.client.skill.list(this.scope)]);
     const result: ChatCommand[] = [];
     const names = new Set<string>();
-    for (const command of data) {
-      if (!/^[^\s/]+$/.test(command.name) || names.has(command.name)) continue;
+    const add = (command: ChatCommand) => {
+      if (!/^[^\s/]+$/.test(command.name) || names.has(command.name)) return;
       names.add(command.name);
-      result.push({ name: command.name, description: command.description ?? "", argumentHint: "", kind: "command" });
-    }
-    for (const builtin of BUILTIN_COMMANDS) if (!names.has(builtin.name)) result.push(builtin);
+      result.push(command);
+    };
+    for (const command of commands.data) add({ name: command.name, description: command.description ?? "", argumentHint: "", kind: "command" });
+    for (const skill of skills.data) add({ name: skill.id, description: skillDescription(skill), argumentHint: "", kind: "skill" });
+    for (const builtin of BUILTIN_COMMANDS) add(builtin);
     return result;
   }
 
@@ -332,6 +348,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         if (arrived.done) break;
         this.streaming = true;
         const event = arrived.value;
+        this.observeReload(event);
         // Normalization resolves every failure to an outcome, and anything
         // that still escapes must cost one event rather than ending the stream.
         let normalized: NormalizedProviderEvent;
@@ -367,6 +384,108 @@ export class OpenCodeV2Provider implements ChatProvider {
       // A frame still pending when the consumer stops would reject unheard.
       next?.catch(() => undefined);
       await source.return?.().catch(() => undefined);
+    }
+  }
+
+  /** What a slash name runs, with `listCommands()`'s precedence. */
+  private async commandTarget(name: string): Promise<{ kind: "command" } | { kind: "reload" } | { kind: "skill"; skill: { id: string } }> {
+    const [commands, skills] = await Promise.all([this.client.command.list(this.scope), this.client.skill.list(this.scope)]);
+    if (commands.data.some(command => command.name === name)) return { kind: "command" };
+    const skill = skills.data.find(candidate => candidate.id === name);
+    if (skill) return { kind: "skill", skill: { id: skill.id } };
+    return name === "reload" ? { kind: "reload" } : { kind: "command" };
+  }
+
+  /**
+   * A skill runs the way OpenCode's own 2.x clients run one: a prompt
+   * carrying the skill as an attachment, whose text opens with the skill's
+   * `@` mention. The server loads the skill into the turn by id; the text
+   * is what the timeline, and history, show.
+   */
+  private async promptSkill(sessionId: string, messageId: string, skill: { id: string }, args: string): Promise<{ messageId: string }> {
+    const mention = `@${skill.id}`;
+    this.rememberPromptId(messageId);
+    const admitted = await this.client.session.prompt({
+      sessionID: sessionId,
+      id: messageId,
+      text: args ? `${mention} ${args}` : mention,
+      skills: [{ id: skill.id, mention: { start: 0, end: mention.length, text: mention } }],
+      delivery: "queue",
+      resume: true,
+    });
+    if (admitted.id !== messageId) this.rememberPromptId(admitted.id);
+    return { messageId: admitted.id };
+  }
+
+  /**
+   * `/reload`: OpenCode rebuilds its configuration for every location it
+   * serves and continues any running turn under the new one. The call can
+   * take seconds, so it is not raced against the admission window: the
+   * caller hears "admitted" at once and the outcome arrives as events — a
+   * notice that says the reload is running, then what came of it. The
+   * `/reload` row is retired with the outcome, never before: the caller
+   * puts it in only once this returns.
+   *
+   * Success is not the `204`. OpenCode answers once the old location is
+   * shut down (`location.shutdown`) and rebuilds it after: until the burst
+   * of `*.updated` events that follows, even its built-in skills are
+   * missing, and a client that re-read its catalogs on the `204` would lose
+   * every skill from the palette. So success waits for the workspace's
+   * `command.updated` and `skill.updated` after its shutdown — bounded, so
+   * a stream that is down, or a server that announces differently, still
+   * gets an answer (the reload did happen; the idle refresh catches up).
+   */
+  private reload(sessionId: string, messageId: string): { messageId: string } {
+    const noticeId = `notice:${messageId}:reload`;
+    this.inject({ conversationId: sessionId, outcome: "handled", eventType: "location.reload.started", updates: [
+      { kind: "upsert", item: { id: noticeId, type: "notice", createdAt: Date.now(), level: "info", message: "Reloading OpenCode configuration…" } },
+    ] });
+    // Armed before the call: the rebuild can be announced before the reply.
+    const settled = this.awaitReloadSettled();
+    void this.client.location.reload().then(
+      async () => { await settled.promise; return undefined; },
+      (error: unknown) => { settled.cancel(); return error ?? new Error("The reload failed"); },
+    ).then(async error => {
+      // The row goes in on the caller's continuation; a macrotask later it
+      // is certainly there to retire.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const message = error === undefined
+        ? "Configuration reloaded"
+        : `Reloading the configuration failed: ${failureText(error)}`;
+      this.inject({ conversationId: sessionId, outcome: "handled", eventType: error === undefined ? "location.reload.completed" : "location.reload.failed", updates: [
+        { kind: "remove", itemId: `message:${messageId}` },
+        { kind: "upsert", item: { id: noticeId, type: "notice", createdAt: Date.now(), level: error === undefined ? "info" : "error", message } },
+        error === undefined ? { kind: "status", status: "completed" } : { kind: "status", status: "failed", message },
+      ] });
+    });
+    return { messageId };
+  }
+
+  private awaitReloadSettled(): { promise: Promise<void>; cancel: () => void } {
+    let waiter: ReloadWaiter | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = () => {
+      clearTimeout(timer);
+      if (waiter) this.reloadWaiters.delete(waiter);
+    };
+    const promise = new Promise<void>(resolve => {
+      waiter = { armed: false, pending: new Set(RELOAD_CATALOG_EVENTS), resolve: () => { done(); resolve(); } };
+      this.reloadWaiters.add(waiter);
+      timer = setTimeout(() => waiter!.resolve(), this.reloadSettleMs);
+    });
+    return { promise, cancel: done };
+  }
+
+  /** Feeds waiting reloads the workspace's shutdown and catalog announcements. */
+  private observeReload(event: unknown): void {
+    if (this.reloadWaiters.size === 0) return;
+    const { type, location } = (event ?? {}) as { type?: unknown; location?: { directory?: unknown } };
+    if (typeof type !== "string" || typeof location?.directory !== "string" || path.resolve(location.directory) !== this.workspace) return;
+    for (const waiter of [...this.reloadWaiters]) {
+      if (type === "location.shutdown") { waiter.armed = true; continue; }
+      if (!waiter.armed) continue;
+      waiter.pending.delete(type);
+      if (waiter.pending.size === 0) waiter.resolve();
     }
   }
 
@@ -488,11 +607,18 @@ export class OpenCodeV2Provider implements ChatProvider {
    * was lost can run twice on 2.x: the API carries no key to dedupe on.
    */
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
-    this.historyReuse.invalidate(sessionId);
     const messageId = stableProviderId("msg", input.id);
+    const compacts = input.name === "compact" || input.name === "summarize";
+    // Decided from the live catalogs, not the palette the user chose from:
+    // a skill dropped since then falls through to `session.command`, whose
+    // refusal reaches the conversation like any invalid command's.
+    const target = compacts ? { kind: "command" as const } : await this.commandTarget(input.name);
+    // A reload touches the server's configuration, not this conversation.
+    if (target.kind === "reload") return this.reload(sessionId, messageId);
+    this.historyReuse.invalidate(sessionId);
     if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     if (input.mode) await this.client.session.switchAgent({ sessionID: sessionId, agent: input.mode });
-    const compacts = input.name === "compact" || input.name === "summarize";
+    if (target.kind === "skill") return this.promptSkill(sessionId, messageId, target.skill, input.arguments);
     // A compaction's id is this process's own; its inbox item is a
     // `compaction`, which the stream never presents as a user row, but the
     // id is registered as minted all the same.
@@ -795,7 +921,21 @@ const CATALOG_RETRY_MS = 250;
 
 const BUILTIN_COMMANDS: ChatCommand[] = [
   { name: "compact", description: "Compact the conversation context", argumentHint: "", kind: "command" },
+  { name: "reload", description: "Reload OpenCode's configuration for this workspace", argumentHint: "", kind: "command" },
 ];
+
+type ReloadWaiter = { armed: boolean; pending: Set<string>; resolve: () => void };
+
+// The rebuilt location's announcements a reload waits for: the catalogs the
+// palette shows.
+const RELOAD_CATALOG_EVENTS = ["command.updated", "skill.updated"];
+
+/** Listed under its id; a display name that says something else leads the description. */
+function skillDescription(skill: { id: string; name: string; description?: string }): string {
+  const description = skill.description ?? "";
+  if (skill.name === skill.id) return description;
+  return description ? `${skill.name} — ${description}` : skill.name;
+}
 
 // The 2.x server answers a missing session with a tagged error (`_tag`
 // naming the not-found case, `message` "Session not found: …"); anything
@@ -816,6 +956,13 @@ function* causes(error: unknown): Generator<Record<string, unknown>> {
 // (`CommandNotFoundError`, `SessionNotFoundError`, …) is a decision the
 // server made. An untagged failure never reached one — the socket, a
 // timeout, an aborted fetch — and decides nothing.
+// The client rejects with the server's decoded tagged error — a plain
+// object carrying `message` — or with an Error for a transport failure.
+function failureText(error: unknown): string {
+  const message = typeof error === "object" && error !== null ? (error as { message?: unknown }).message : undefined;
+  return typeof message === "string" && message ? message : String(error);
+}
+
 function isServerRefusal(error: unknown): boolean {
   for (const record of causes(error)) if (stringValue(record._tag) !== undefined) return true;
   return false;

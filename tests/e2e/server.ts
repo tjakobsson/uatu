@@ -530,6 +530,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "commands":
       targetFake.setExtraCommands(body.commands ?? []);
       return Response.json({ ok: true });
+    case "modes":
+      targetFake.setModes(body.modes ?? []);
+      return Response.json({ ok: true });
     case "resync":
       fakeChatAgent.rotateGeneration();
       return Response.json({ ok: true });

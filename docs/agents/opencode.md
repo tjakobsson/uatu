@@ -237,7 +237,7 @@ Source: `@opencode/schema` `event-manifest.d.ts` and `session-event.d.ts`.
 | `shell.created` | ignored | Terminal sessions on the OpenCode server, not the conversation's; the agent's shell runs arrive as session.shell.* events. |
 | `shell.deleted` | ignored | Terminal sessions on the OpenCode server, not the conversation's; the agent's shell runs arrive as session.shell.* events. |
 | `shell.exited` | ignored | Terminal sessions on the OpenCode server, not the conversation's; the agent's shell runs arrive as session.shell.* events. |
-| `skill.updated` | ignored | Server configuration changed; not conversation activity. |
+| `skill.updated` | ignored | Server configuration changed; uatu reads skills through the API. |
 | `tui.command.execute` | ignored | Instructions for OpenCode's own terminal UI, which uatu is not. |
 | `tui.prompt.append` | ignored | Instructions for OpenCode's own terminal UI, which uatu is not. |
 | `tui.session.select` | ignored | Instructions for OpenCode's own terminal UI, which uatu is not. |

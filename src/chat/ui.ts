@@ -176,6 +176,11 @@ export function initChat(api = new ChatApiClient()): void {
   // status), shown with the named state — per conversation, so a switch
   // to another retrying conversation never borrows this one's reason.
   const statusMessages = new Map<string, string | undefined>();
+  // A `/reload` this client sent, by conversation, with the agent whose
+  // catalogs it changes: when that conversation's turn completes, the
+  // palette and pickers re-read them (other clients follow on the idle
+  // refresh). A failed or interrupted reload changed nothing to re-read.
+  const pendingReloads = new Map<string, string>();
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
   // Attachment surfaces. Guarded at use rather than joining the required
@@ -2725,6 +2730,11 @@ export function initChat(api = new ChatApiClient()): void {
         projection = result.projection;
         if (event.type === "conversation.configuration") renderConfiguration();
         if (event.type === "conversation.status") {
+          const reloadedAgent = pendingReloads.get(conversationId);
+          if (reloadedAgent && (event.status === "completed" || event.status === "failed" || event.status === "interrupted")) {
+            pendingReloads.delete(conversationId);
+            if (event.status === "completed") refreshBankedCommands(reloadedAgent);
+          }
           if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
           else if (isLiveConversationStatus(event.status)) setComposerError(null);
           statusMessages.set(conversationId, event.message);
@@ -3888,7 +3898,7 @@ export function initChat(api = new ChatApiClient()): void {
       option.className = `chat-command-option${index === commandIndex ? " is-active" : ""}`;
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", String(index === commandIndex));
-      option.innerHTML = `<span class="chat-command-name">/${escapeHtml(command.name)}</span><span class="chat-command-hint">${hintTokens(command.argumentHint)}</span><span class="chat-command-description">${escapeHtml(command.description)}</span>`;
+      option.innerHTML = `<span class="chat-command-name">/${escapeHtml(command.name)}</span>${command.kind === "skill" ? `<span class="chat-command-kind">skill</span>` : ""}<span class="chat-command-hint">${hintTokens(command.argumentHint)}</span><span class="chat-command-description">${escapeHtml(command.description)}</span>`;
       option.addEventListener("pointerdown", event => event.preventDefault());
       option.addEventListener("click", () => chooseCommand(index));
       return option;
@@ -4324,7 +4334,14 @@ export function initChat(api = new ChatApiClient()): void {
     latestButton.hidden = true;
     scheduleRender(true);
     try {
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined);
+      // Marked before the send: the reload's outcome can reach the stream
+      // before the acceptance does.
+      const reloading = Boolean(contextAgentId) && text.trim() === "/reload" && commands.some(command => command.name === "reload" && command.kind === "command");
+      if (reloading) pendingReloads.set(conversationId, contextAgentId!);
+      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined).catch((error: unknown) => {
+        if (reloading) pendingReloads.delete(conversationId);
+        throw error;
+      });
       retryRequests.delete(conversationId);
       stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
@@ -4580,6 +4597,18 @@ export function initChat(api = new ChatApiClient()): void {
         banked.models = list;
         if (contextAgentId === agentId) {
           models = list;
+          renderConfiguration();
+        }
+      }).catch(() => undefined);
+    }
+    // Modes too: OpenCode's agents are its configuration, which a reload
+    // (or an edit picked up on restart) changes under a running page.
+    if (agent?.capabilities.includes("modes")) {
+      void api.modes(agentId).then(list => {
+        if (agentCatalogs.get(agentId) !== banked || list.length === 0) return;
+        banked.modes = list;
+        if (contextAgentId === agentId) {
+          modes = list;
           renderConfiguration();
         }
       }).catch(() => undefined);
