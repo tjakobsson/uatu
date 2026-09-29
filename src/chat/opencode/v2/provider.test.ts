@@ -428,6 +428,8 @@ describe("OpenCode 2.x provider: prompting and events", () => {
   test("/reload reports success once the rebuilt location announces its catalogs", async () => {
     const harness = await reloadHarness(() => undefined);
     const accepted = await harness.provider.command("ses_1", { id: "req-reload", name: "reload", arguments: "" });
+    // The acceptance says what ran, so clients need not guess from their catalogs.
+    expect(accepted.operation).toBe("reload");
     await harness.settle(1);
     expect(harness.seen).toEqual(["notice info Reloading OpenCode configuration…"]);
     // Another directory's rebuild, and this one's announcements before its
@@ -558,7 +560,8 @@ describe("OpenCode 2.x provider: prompting and events", () => {
 
   test("a config command named reload shadows the built-in", async () => {
     const server = fakeOpenCode({ "GET /api/command": () => scoped([{ name: "reload" }]), "POST /api/session/:id/command": () => undefined });
-    await server.provider().command("ses_1", { id: "req-cr", name: "reload", arguments: "" });
+    const accepted = await server.provider().command("ses_1", { id: "req-cr", name: "reload", arguments: "" });
+    expect(accepted.operation).toBeUndefined();
     expect(server.requests("POST", "/api/session/ses_1/command")).toHaveLength(1);
     expect(server.requests("POST", "/api/location/reload")).toHaveLength(0);
   });

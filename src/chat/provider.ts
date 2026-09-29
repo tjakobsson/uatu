@@ -290,7 +290,12 @@ export interface ChatProvider {
   // provider's own `listCommands()` answer it matched: the provider
   // dispatches by it rather than re-reading its catalogs, so an entry that
   // changed in between still runs as what the user chose.
-  command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }>;
+  //
+  // `operation` names what actually ran when it was not an ordinary command
+  // turn: "reload" when the provider reloaded its server's configuration.
+  // Only the provider knows — a config command or skill named `reload`
+  // shadows the built-in — so clients key reload behavior off this answer.
+  command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string; operation?: "reload" }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void>;
   /**

@@ -4375,8 +4375,11 @@ export function initChat(api = new ChatApiClient()): void {
     scheduleRender(true);
     try {
       // Marked before the send: the reload's outcome can reach the stream
-      // before the acceptance does.
-      const reloading = Boolean(contextAgentId) && /^\/reload(?:\s|$)/.test(text.trim()) && commands.some(command => command.name === "reload" && command.kind === "command");
+      // before the acceptance does. Only a guess from the text — the server
+      // decides whether `/reload` is the built-in or a shadowing config
+      // command or skill — so the acceptance's `operation` settles it; an
+      // extra catalog read from a wrong guess is harmless.
+      const reloading = Boolean(contextAgentId) && /^\/reload(?:\s|$)/.test(text.trim());
       const reloadEntry = reloading ? { agentId: contextAgentId! } as { agentId: string; messageId?: string } : undefined;
       if (reloadEntry) pendingReloads.set(conversationId, [...(pendingReloads.get(conversationId) ?? []), reloadEntry]);
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined).catch((error: unknown) => {
@@ -4387,7 +4390,16 @@ export function initChat(api = new ChatApiClient()): void {
         }
         throw error;
       });
-      if (reloadEntry) reloadEntry.messageId = accepted.messageId;
+      if (reloadEntry) {
+        reloadEntry.messageId = accepted.messageId;
+        // Dispatched and not the built-in: nothing to track. A held one is
+        // classified only at delivery, so it stays tracked.
+        if (!accepted.held && accepted.operation !== "reload") {
+          const rest = (pendingReloads.get(conversationId) ?? []).filter(entry => entry !== reloadEntry);
+          if (rest.length) pendingReloads.set(conversationId, rest);
+          else pendingReloads.delete(conversationId);
+        }
+      }
       retryRequests.delete(conversationId);
       stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
@@ -4425,7 +4437,7 @@ export function initChat(api = new ChatApiClient()): void {
           // with its outcome, which can precede the acceptance — even
           // unobserved by this client, if it was away. It is the stream's
           // to show, never recreated here.
-          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, { insert: !reloadEntry });
+          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, { insert: accepted.operation !== "reload" });
         renderConfiguration();
         scheduleRender(true);
       }

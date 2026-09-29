@@ -456,7 +456,7 @@ export class OpenCodeV2Provider implements ChatProvider {
    * a stream that is down, or a server that announces differently, still
    * gets an answer (the reload did happen; the idle refresh catches up).
    */
-  private reload(sessionId: string, messageId: string): { messageId: string } {
+  private reload(sessionId: string, messageId: string): { messageId: string; operation: "reload" } {
     const noticeId = `notice:${messageId}:reload`;
     this.inject({ conversationId: sessionId, outcome: "handled", eventType: "location.reload.started", updates: [
       { kind: "upsert", item: { id: noticeId, type: "notice", createdAt: Date.now(), level: "info", message: "Reloading OpenCode configuration…" } },
@@ -492,7 +492,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         result.kind === "reloaded" ? { kind: "status", status: "completed" } : { kind: "status", status: "failed", message },
       ] });
     });
-    return { messageId };
+    return { messageId, operation: "reload" };
   }
 
   /** Resolves true once the rebuild is announced, false when the bound passes first. */
@@ -641,7 +641,7 @@ export class OpenCodeV2Provider implements ChatProvider {
    * stands. That is also why a retry of an accepted command whose response
    * was lost can run twice on 2.x: the API carries no key to dedupe on.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string; operation?: "reload" }> {
     const messageId = stableProviderId("msg", input.id);
     // Decided from the live catalogs, not the palette the user chose from,
     // and before any built-in: a config command or skill named `compact`

@@ -71,6 +71,7 @@ class FakeProvider implements ChatProvider {
   eventQueue = new EventQueue();
   notificationLifecycle = new OpenCodeNotificationLifecycle();
   prompts: Array<{ sessionId: string; id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }> = [];
+  commandOperation?: "reload";
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
@@ -137,7 +138,7 @@ class FakeProvider implements ChatProvider {
   commandText: string | undefined;
   async command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection }) {
     this.commandCalls.push({ sessionId, ...input });
-    return { messageId: input.id, ...(this.commandText ? { text: this.commandText } : {}) };
+    return { messageId: input.id, ...(this.commandText ? { text: this.commandText } : {}), ...(this.commandOperation ? { operation: this.commandOperation } : {}) };
   }
   async interrupt(sessionId: string) { this.interrupts.push(sessionId); }
   async replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply) {
@@ -1726,6 +1727,15 @@ describe("prompt, abort, permission, and question mutations", () => {
     for (const text of ["/unknown args", "/ review", "//review", "prefix /review"]) {
       expect(parseSlashCommand(text, commands)).toBeUndefined();
     }
+  });
+
+  test("the acceptance carries the operation the provider says it ran", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.commandOperation = "reload";
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const accepted = await adapter.prompt("session", "request", "/review");
+    expect(accepted).toMatchObject({ messageId: "message", held: false, operation: "reload" });
   });
 
   test("dispatches recognized slash commands without changing the prompt contract", async () => {

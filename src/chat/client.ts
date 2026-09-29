@@ -155,15 +155,17 @@ export class ChatApiClient {
     held: boolean;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
+    operation?: "reload";
   }> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
       { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}), ...(attachments?.length ? { attachments } : {}) },
       value => {
-        const result = value as { messageId: string; held: boolean; configuration?: unknown; conversation?: unknown };
+        const result = value as { messageId: string; held: boolean; configuration?: unknown; conversation?: unknown; operation?: unknown };
         return {
           messageId: result.messageId,
           held: result.held === true,
+          ...(result.operation === "reload" ? { operation: "reload" as const } : {}),
           configuration: parseConversationConfiguration(result.configuration),
           ...(result.conversation ? { conversation: parseConversationSummary(result.conversation) } : {}),
         };

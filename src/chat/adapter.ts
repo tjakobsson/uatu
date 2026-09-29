@@ -884,6 +884,8 @@ export class ChatAdapter {
     held: boolean;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
+    // What the provider actually ran, when it was not an ordinary turn.
+    operation?: "reload";
   }> {
     if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
     return this.receipts.run(`prompt:${conversationId}:${requestId}`, () =>
@@ -1087,7 +1089,7 @@ export class ChatAdapter {
     model?: ModelSelection;
     mode?: string;
     variant?: string;
-  }): Promise<{ messageId: string; configuration: ConversationConfiguration; conversation?: ConversationSummary }> {
+  }): Promise<{ messageId: string; configuration: ConversationConfiguration; conversation?: ConversationSummary; operation?: "reload" }> {
     let session = initialSession;
     const { text, mode, variant } = input;
     // Emptiness is checked before dispatch (afterwards the store already
@@ -1116,7 +1118,7 @@ export class ChatAdapter {
       // the queue holds references, and a reference that stopped resolving
       // while held fails the delivery like any provider refusal.
       const providerAttachments = await this.locateAttachments(input.attachments);
-      const accepted: { messageId: string; text?: string } = slash
+      const accepted: { messageId: string; text?: string; operation?: "reload" } = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, listed: slash.command, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", ...(providerAttachments.length ? { attachments: providerAttachments } : {}), model: input.model, mode, variant });
       // "sending" ends at acceptance, BEFORE the rename side-work below —
@@ -1149,7 +1151,7 @@ export class ChatAdapter {
         } catch { /* cosmetic — listConversations repairs default titles later */ }
       }
       const configuration = this.commitConfiguration(conversationId, this.configurations.get(conversationId) ?? {}, input.model, mode, variant);
-      return { messageId: accepted.messageId, configuration, ...(conversation ? { conversation } : {}) };
+      return { messageId: accepted.messageId, configuration, ...(conversation ? { conversation } : {}), ...(accepted.operation ? { operation: accepted.operation } : {}) };
     } catch (error) {
       const mapped = error instanceof UnsupportedVariantSelectionError
         ? new InvalidVariantSelectionError(error.message)
