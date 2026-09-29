@@ -95,11 +95,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   // Reloads run one at a time: a waiter armed while another reload is in
   // flight would be satisfied by that reload's rebuild, not its own.
   private reloadChain: Promise<unknown> = Promise.resolve();
-  // What each name meant in the latest inventory this provider answered.
-  // The adapter classifies a slash text against `listCommands()` just before
-  // calling `command()`, so dispatch follows that same listing rather than a
-  // second read, which a catalog changing in between would contradict.
-  private listing = new Map<string, "command" | "skill" | "builtin">();
+
 
   constructor(
     private readonly client: OpenCodeV2Client,
@@ -140,16 +136,17 @@ export class OpenCodeV2Provider implements ChatProvider {
   async listCommands(): Promise<ChatCommand[]> {
     const [commands, skills] = await Promise.all([this.client.command.list(this.scope), this.client.skill.list(this.scope)]);
     const result: ChatCommand[] = [];
-    const listing = new Map<string, "command" | "skill" | "builtin">();
-    const add = (command: ChatCommand, source: "command" | "skill" | "builtin") => {
-      if (!/^[^\s/]+$/.test(command.name) || listing.has(command.name)) return;
-      listing.set(command.name, source);
+    const names = new Set<string>();
+    const add = (command: ChatCommand) => {
+      if (!/^[^\s/]+$/.test(command.name) || names.has(command.name)) return;
+      names.add(command.name);
       result.push(command);
     };
-    for (const command of commands.data) add({ name: command.name, description: command.description ?? "", argumentHint: "", kind: "command" }, "command");
-    for (const skill of skills.data) add({ name: skill.id, description: skillDescription(skill), argumentHint: "", kind: "skill" }, "skill");
-    for (const builtin of BUILTIN_COMMANDS) add(builtin, "builtin");
-    this.listing = listing;
+    for (const command of commands.data) add({ name: command.name, description: command.description ?? "", argumentHint: "", kind: "command" });
+    for (const skill of skills.data) add({ name: skill.id, description: skillDescription(skill), argumentHint: "", kind: "skill" });
+    // The built-ins go in as the module's own objects: a caller handing one
+    // back to `command()` as `listed` is recognised by identity.
+    for (const builtin of BUILTIN_COMMANDS) add(builtin);
     return result;
   }
 
@@ -397,17 +394,18 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   /**
-   * What a slash name runs, with `listCommands()`'s precedence: as the
-   * latest listing classified it, so a catalog entry removed since then is
-   * still sent as what the user chose — and refused by OpenCode — rather
-   * than falling through to a built-in of the same name. A name this
-   * provider never listed is read fresh.
+   * What a slash name runs, with `listCommands()`'s precedence. With the
+   * entry the caller classified the text against, it runs as that entry —
+   * so a catalog entry removed or shadowed since is still sent as what the
+   * user chose (and refused by OpenCode if gone), never falling through to
+   * a built-in of the same name. Without one, the catalogs are read fresh.
    */
-  private async commandTarget(name: string): Promise<{ kind: "command" } | { kind: "compact" } | { kind: "reload" } | { kind: "skill"; skill: { id: string } }> {
-    const listed = this.listing.get(name);
-    if (listed === "command") return { kind: "command" };
-    if (listed === "skill") return { kind: "skill", skill: { id: name } };
-    if (listed === "builtin") return name === "reload" ? { kind: "reload" } : { kind: "compact" };
+  private async commandTarget(name: string, listed?: ChatCommand): Promise<{ kind: "command" } | { kind: "compact" } | { kind: "reload" } | { kind: "skill"; skill: { id: string } }> {
+    if (listed) {
+      if (BUILTIN_COMMANDS.includes(listed)) return name === "reload" ? { kind: "reload" } : { kind: "compact" };
+      if (listed.kind === "skill") return { kind: "skill", skill: { id: name } };
+      return { kind: "command" };
+    }
     const [commands, skills] = await Promise.all([this.client.command.list(this.scope), this.client.skill.list(this.scope)]);
     if (commands.data.some(command => command.name === name)) return { kind: "command" };
     const skill = skills.data.find(candidate => candidate.id === name);
@@ -634,14 +632,14 @@ export class OpenCodeV2Provider implements ChatProvider {
    * stands. That is also why a retry of an accepted command whose response
    * was lost can run twice on 2.x: the API carries no key to dedupe on.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }> {
     const messageId = stableProviderId("msg", input.id);
     // Decided from the live catalogs, not the palette the user chose from,
     // and before any built-in: a config command or skill named `compact`
     // runs as what the palette listed. A skill dropped since then falls
     // through to `session.command`, whose refusal reaches the conversation
     // like any invalid command's.
-    const target = await this.commandTarget(input.name);
+    const target = await this.commandTarget(input.name, input.listed);
     const compacts = target.kind === "compact";
     // A reload touches the server's configuration, not this conversation.
     if (target.kind === "reload") return this.reload(sessionId, messageId);

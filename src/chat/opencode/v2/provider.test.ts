@@ -498,7 +498,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     expect(commandServer.requests("POST", "/api/session/ses_1/compact")).toHaveLength(0);
   });
 
-  test("dispatch follows the listing the text was classified against, even if an entry has since gone", async () => {
+  test("dispatch runs the entry the text was classified against, whatever a later listing says", async () => {
     let skills = [skillInfo("compact")];
     let commands: Array<{ name: string }> = [{ name: "reload" }];
     const server = fakeOpenCode({
@@ -508,17 +508,31 @@ describe("OpenCode 2.x provider: prompting and events", () => {
       "POST /api/session/:id/command": () => Response.json({ _tag: "CommandNotFoundError", message: "Command not found: reload" }, { status: 404 }),
     });
     const provider = server.provider();
-    await provider.listCommands();
-    // Both entries vanish between the classification and the dispatch.
+    const classified = await provider.listCommands();
+    const compactSkill = classified.find(entry => entry.name === "compact")!;
+    const reloadCommand = classified.find(entry => entry.name === "reload")!;
+    expect(compactSkill.kind).toBe("skill");
+    // Both entries vanish, and another dispatch's listing now names the built-ins.
     skills = [];
     commands = [];
-    await expect(provider.command("ses_1", { id: "req-gone-skill", name: "compact", arguments: "" })).rejects.toThrow("Skill not found");
-    await expect(provider.command("ses_1", { id: "req-gone-command", name: "reload", arguments: "" })).rejects.toThrow("Command not found");
+    const later = await provider.listCommands();
+    expect(later.filter(entry => entry.name === "compact" || entry.name === "reload").map(entry => entry.kind)).toEqual(["command", "command"]);
+    await expect(provider.command("ses_1", { id: "req-gone-skill", name: "compact", arguments: "", listed: compactSkill })).rejects.toThrow("Skill not found");
+    await expect(provider.command("ses_1", { id: "req-gone-command", name: "reload", arguments: "", listed: reloadCommand })).rejects.toThrow("Command not found");
     // Sent as what the user chose, refused by OpenCode — never the built-ins.
     expect(server.requests("POST", "/api/session/ses_1/compact")).toHaveLength(0);
     expect(server.requests("POST", "/api/location/reload")).toHaveLength(0);
-    // No second catalog read at dispatch.
-    expect(server.requests("GET", "/api/skill")).toHaveLength(1);
+    // Dispatch reads no catalogs of its own when handed the entry.
+    expect(server.requests("GET", "/api/skill")).toHaveLength(2);
+  });
+
+  test("a built-in entry handed back dispatches as the built-in", async () => {
+    const server = fakeOpenCode({ "POST /api/location/reload": () => undefined });
+    const provider = server.provider();
+    const builtin = (await provider.listCommands()).find(entry => entry.name === "reload")!;
+    await provider.command("ses_1", { id: "req-builtin", name: "reload", arguments: "", listed: builtin });
+    await Bun.sleep(20);
+    expect(server.requests("POST", "/api/location/reload")).toHaveLength(1);
   });
 
   test("a config command named reload shadows the built-in", async () => {

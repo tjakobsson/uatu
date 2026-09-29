@@ -1117,7 +1117,7 @@ export class ChatAdapter {
       // while held fails the delivery like any provider refusal.
       const providerAttachments = await this.locateAttachments(input.attachments);
       const accepted: { messageId: string; text?: string } = slash
-        ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
+        ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, listed: slash.command, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", ...(providerAttachments.length ? { attachments: providerAttachments } : {}), model: input.model, mode, variant });
       // "sending" ends at acceptance, BEFORE the rename side-work below —
       // the dispatch is no longer in flight once the provider has accepted
@@ -2833,12 +2833,13 @@ function isQuestionToolUpdate(update: NormalizedProviderUpdate): boolean {
   return update.kind === "upsert" && update.item.type === "tool" && update.item.name.toLowerCase() === "question";
 }
 
-export function parseSlashCommand(text: string, commands: ChatCommand[]): { name: string; arguments: string } | undefined {
+export function parseSlashCommand(text: string, commands: ChatCommand[]): { name: string; arguments: string; command: ChatCommand } | undefined {
   if (!text.startsWith("/") || text.startsWith("//")) return undefined;
   const match = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(text);
   if (!match || REVERSIBLE_HISTORY_COMMANDS.some(command => command.name === match[1])) return undefined;
-  if (!commands.some(command => command.name === match[1] && command.kind !== "local-operation")) return undefined;
-  return { name: match[1]!, arguments: match[2]?.trim() ?? "" };
+  const command = commands.find(candidate => candidate.name === match[1] && candidate.kind !== "local-operation");
+  if (!command) return undefined;
+  return { name: match[1]!, arguments: match[2]?.trim() ?? "", command };
 }
 
 const REVERSIBLE_HISTORY_COMMANDS: ChatCommand[] = [

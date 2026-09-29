@@ -285,7 +285,12 @@ export interface ChatProvider {
    * so the row agrees with the provider's own restatement whichever lands
    * first.
    */
-  command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }>;
+  //
+  // `listed`, when the caller classified the text, is the entry of this
+  // provider's own `listCommands()` answer it matched: the provider
+  // dispatches by it rather than re-reading its catalogs, so an entry that
+  // changed in between still runs as what the user chose.
+  command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void>;
   /**
