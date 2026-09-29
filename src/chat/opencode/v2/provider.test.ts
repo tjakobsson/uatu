@@ -498,6 +498,29 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     expect(commandServer.requests("POST", "/api/session/ses_1/compact")).toHaveLength(0);
   });
 
+  test("dispatch follows the listing the text was classified against, even if an entry has since gone", async () => {
+    let skills = [skillInfo("compact")];
+    let commands: Array<{ name: string }> = [{ name: "reload" }];
+    const server = fakeOpenCode({
+      "GET /api/skill": () => scoped(skills),
+      "GET /api/command": () => scoped(commands),
+      "POST /api/session/:id/prompt": () => Response.json({ _tag: "SkillNotFoundError", skill: "compact", message: "Skill not found: compact" }, { status: 404 }),
+      "POST /api/session/:id/command": () => Response.json({ _tag: "CommandNotFoundError", message: "Command not found: reload" }, { status: 404 }),
+    });
+    const provider = server.provider();
+    await provider.listCommands();
+    // Both entries vanish between the classification and the dispatch.
+    skills = [];
+    commands = [];
+    await expect(provider.command("ses_1", { id: "req-gone-skill", name: "compact", arguments: "" })).rejects.toThrow("Skill not found");
+    await expect(provider.command("ses_1", { id: "req-gone-command", name: "reload", arguments: "" })).rejects.toThrow("Command not found");
+    // Sent as what the user chose, refused by OpenCode — never the built-ins.
+    expect(server.requests("POST", "/api/session/ses_1/compact")).toHaveLength(0);
+    expect(server.requests("POST", "/api/location/reload")).toHaveLength(0);
+    // No second catalog read at dispatch.
+    expect(server.requests("GET", "/api/skill")).toHaveLength(1);
+  });
+
   test("a config command named reload shadows the built-in", async () => {
     const server = fakeOpenCode({ "GET /api/command": () => scoped([{ name: "reload" }]), "POST /api/session/:id/command": () => undefined });
     await server.provider().command("ses_1", { id: "req-cr", name: "reload", arguments: "" });
