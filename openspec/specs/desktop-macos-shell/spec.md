@@ -70,12 +70,22 @@ The app SHALL provide a native "New Tab" command (Command-T) that opens a splash
 - **THEN** "Reload Page", "Open in Browser", and "Toggle Split Browser" are disabled
 
 ### Requirement: Web page JavaScript dialogs present natively
-JavaScript `alert()` and `confirm()` raised by pages in the embedded WebView SHALL present as native panels and return the user's choice to the page. WKWebView shows no JS dialogs without app-provided implementations — it silently answers false — which would turn the hub dashboard's confirmation-gated actions (stop, initialize-and-serve) into dead controls.
+JavaScript `alert()`, `confirm()`, and `prompt()` raised by pages in the embedded WebView SHALL present as native panels attached to the window and return the user's answer to the page: `alert()` returns after dismissal, `confirm()` returns true only when the user confirms, and `prompt()` returns the entered text on OK (with the page's default text prefilled) and null on Cancel. A page's file input (`<input type="file">`) SHALL open the system open panel, honouring the input's single-or-multiple setting, and return the chosen files to the page; cancelling returns no files. WKWebView shows no JS dialogs or file chooser without app-provided implementations — it silently answers false, null, or nothing — which would turn the hub dashboard's confirmation-gated actions (stop, initialize-and-serve) into dead controls and leave its private-key file input unable to pick a file.
 
 #### Scenario: Dashboard confirmations work in the desktop
 - **WHEN** a hub page calls `confirm()` (e.g. the dashboard's stop confirmation)
 - **THEN** a native dialog appears in the window
 - **AND** confirming returns true to the page so the action proceeds
+
+#### Scenario: A prompt returns the entered text
+- **WHEN** a page in the embedded WebView calls `prompt("Name?", "draft")`
+- **THEN** a native panel with a text field prefilled with `draft` appears
+- **AND** OK returns the field's text to the page and Cancel returns null
+
+#### Scenario: A file input opens the system picker
+- **WHEN** the user activates the hub dashboard's "Private key file" input
+- **THEN** the system open panel appears
+- **AND** choosing a file populates the input, and cancelling leaves it empty
 
 ### Requirement: External links open outside the embedded WebView
 The app SHALL route link activations that target a new browsing context (`target="_blank"` anchors, `window.open()` calls, terminal OSC 8 hyperlink activation) out of the embedded WebView. By default, `http(s)` URLs open in the window's split browser pane (per the `desktop-split-browser` capability); when the "Open external links in system browser" setting is enabled, or the user `⌘`-clicks, they open in the user's default browser instead. Other schemes are always handed to their registered system handler. The WebView MUST NOT silently drop such activations.
