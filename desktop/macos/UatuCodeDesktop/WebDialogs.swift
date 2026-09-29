@@ -56,13 +56,14 @@ enum WebDialogs {
         }
     }
 
-    /// `<input type="file">`: the system open panel, choosing several files or
-    /// directories only when the input asks for them. Cancel returns nil,
-    /// which WebKit reports to the page as no files chosen.
+    /// `<input type="file">`: the system open panel, choosing several items
+    /// only when the input asks for them, and directories instead of files for
+    /// a directory input (`webkitdirectory`), as Safari does. Cancel returns
+    /// nil, which WebKit reports to the page as no files chosen.
     static func openPanel(_ parameters: WKOpenPanelParameters, in window: NSWindow?, completion: @escaping ([URL]?) -> Void) {
         let answer = Once(completion)
         let panel = NSOpenPanel()
-        panel.canChooseFiles = true
+        panel.canChooseFiles = !parameters.allowsDirectories
         panel.canChooseDirectories = parameters.allowsDirectories
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.resolvesAliases = true

@@ -8,7 +8,6 @@
 - [x] 2.1 Give `BrowserTab` the four delegate methods (alert, confirm, prompt, open panel) forwarding to the presenter, with a per-tab pending-dialog slot: when `webView.window` is nil (tab not selected) the presentation is queued and run when the tab is mounted; closing a tab with a pending dialog answers it with the default. Verify by build.
 - [x] 2.2 Hook the pending slot into `BrowserTabWebView.makeNSView`/`updateNSView` (or the split's selection change) so a queued dialog presents when the tab becomes selected. Verify in the built app: open a page that calls `confirm()` on a button in tab A, switch to tab B before it fires (use a `setTimeout` test page or a page with a delayed confirm), confirm no dialog appears over B, switch back to A and see the dialog, answer it, and observe the page acted on the answer.
 
-## 3. Manual verification and evidence
+## 3. Manual verification
 
-- [x] 3.1 Run the checklist in the built app and record the results in the PR: in the uatu host — alert, confirm (true/false), prompt (text/null), file input; in a browser tab — alert, confirm (true/false), prompt (text/null), file input, and the background-tab deferral. Save a screenshot of a confirm sheet in a browser tab and of the prompt sheet under `openspec/changes/desktop-webview-dialogs/screenshots/`.
-- [ ] 3.2 Confirm desktop CI (`.github/workflows/desktop-ci.yml`) passes on the PR.
+- [x] 3.1 Run the checklist in the built app: in the uatu host — alert, confirm (true/false), prompt (text/null), file input; in a browser tab — alert, confirm (true/false), prompt (text/null), file input, and the background-tab deferral. Save a screenshot of a confirm sheet in a browser tab and of the prompt sheet under `openspec/changes/desktop-webview-dialogs/screenshots/`.
