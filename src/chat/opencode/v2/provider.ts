@@ -463,41 +463,50 @@ export class OpenCodeV2Provider implements ChatProvider {
     ] });
     // One at a time, each armed before its own call: the rebuild can be
     // announced before the reply, and must be this reload's rebuild.
-    const outcome = this.reloadChain.then(() => {
+    const outcome = this.reloadChain.then((): Promise<ReloadOutcome> => {
       const settled = this.awaitReloadSettled();
       return this.client.location.reload().then(
-        async () => { await settled.promise; return undefined; },
-        (error: unknown) => { settled.cancel(); return error ?? new Error("The reload failed"); },
+        async () => (await settled.promise) ? { kind: "reloaded" } : { kind: "unconfirmed" },
+        (error: unknown) => { settled.cancel(); return { kind: "failed", error: error ?? new Error("The reload failed") }; },
       );
     });
     this.reloadChain = outcome;
-    void outcome.then(async error => {
+    void outcome.then(async result => {
       // The row goes in on the caller's continuation; a macrotask later it
       // is certainly there to retire.
       await new Promise(resolve => setTimeout(resolve, 0));
-      const message = error === undefined
+      // Only a confirmed rebuild is success: an unconfirmed one may still be
+      // rebuilding, so it is not reported as reloaded, and the failed status
+      // keeps the invoking client from banking catalogs mid-rebuild (the
+      // palette and picker re-read when next opened).
+      const seconds = Math.round(this.reloadSettleMs / 1000);
+      const message = result.kind === "reloaded"
         ? "Configuration reloaded"
-        : `Reloading the configuration failed: ${failureText(error)}`;
-      this.inject({ conversationId: sessionId, outcome: "handled", eventType: error === undefined ? "location.reload.completed" : "location.reload.failed", updates: [
+        : result.kind === "unconfirmed"
+          ? `Reload sent, but OpenCode did not confirm its reloaded configuration within ${seconds} s. Run /reload again if commands, skills, models, or modes look out of date.`
+          : `Reloading the configuration failed: ${failureText(result.error)}`;
+      const level = result.kind === "reloaded" ? "info" : result.kind === "unconfirmed" ? "warning" : "error";
+      this.inject({ conversationId: sessionId, outcome: "handled", eventType: `location.reload.${result.kind}`, updates: [
         { kind: "remove", itemId: `message:${messageId}` },
-        { kind: "upsert", item: { id: noticeId, type: "notice", createdAt: Date.now(), level: error === undefined ? "info" : "error", message } },
-        error === undefined ? { kind: "status", status: "completed" } : { kind: "status", status: "failed", message },
+        { kind: "upsert", item: { id: noticeId, type: "notice", createdAt: Date.now(), level, message } },
+        result.kind === "reloaded" ? { kind: "status", status: "completed" } : { kind: "status", status: "failed", message },
       ] });
     });
     return { messageId };
   }
 
-  private awaitReloadSettled(): { promise: Promise<void>; cancel: () => void } {
+  /** Resolves true once the rebuild is announced, false when the bound passes first. */
+  private awaitReloadSettled(): { promise: Promise<boolean>; cancel: () => void } {
     let waiter: ReloadWaiter | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const done = () => {
       clearTimeout(timer);
       if (waiter) this.reloadWaiters.delete(waiter);
     };
-    const promise = new Promise<void>(resolve => {
-      waiter = { armed: false, pending: new Set(RELOAD_CATALOG_EVENTS), resolve: () => { done(); resolve(); } };
+    const promise = new Promise<boolean>(resolve => {
+      waiter = { armed: false, pending: new Set(RELOAD_CATALOG_EVENTS), resolve: () => { done(); resolve(true); } };
       this.reloadWaiters.add(waiter);
-      timer = setTimeout(() => waiter!.resolve(), this.reloadSettleMs);
+      timer = setTimeout(() => { done(); resolve(false); }, this.reloadSettleMs);
     });
     return { promise, cancel: done };
   }
@@ -953,10 +962,12 @@ const BUILTIN_COMMANDS: ChatCommand[] = [
 ];
 
 type ReloadWaiter = { armed: boolean; pending: Set<string>; resolve: () => void };
+type ReloadOutcome = { kind: "reloaded" } | { kind: "unconfirmed" } | { kind: "failed"; error: unknown };
 
-// The rebuilt location's announcements a reload waits for: the catalogs the
-// palette shows.
-const RELOAD_CATALOG_EVENTS = ["command.updated", "skill.updated"];
+// The rebuilt location's announcements a reload waits for: every catalog the
+// palette and pickers show (commands, skills, models, agents as modes). A
+// real 2.x server announces them in one burst after the rebuild.
+const RELOAD_CATALOG_EVENTS = ["command.updated", "skill.updated", "model.updated", "agent.updated"];
 
 /** Listed under its id; a display name that says something else leads the description. */
 function skillDescription(skill: { id: string; name: string; description?: string }): string {

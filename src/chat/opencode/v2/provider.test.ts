@@ -422,9 +422,12 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     expect(harness.seen).toHaveLength(1);
     harness.announce("location.shutdown");
     harness.announce("command.updated");
-    await Bun.sleep(40);
-    expect(harness.seen).toHaveLength(1);
     harness.announce("skill.updated");
+    await Bun.sleep(40);
+    // Commands and skills alone are not the whole rebuild: models and modes too.
+    expect(harness.seen).toHaveLength(1);
+    harness.announce("model.updated");
+    harness.announce("agent.updated");
     await harness.settle(4);
     expect(harness.seen.slice(1)).toEqual([`remove message:${accepted.messageId}`, "notice info Configuration reloaded", "status completed"]);
     expect(harness.server.requests("POST", "/api/location/reload")).toHaveLength(1);
@@ -441,9 +444,8 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     // The second waits for the first: its waiter must not see the first rebuild.
     expect(harness.server.requests("POST", "/api/location/reload")).toHaveLength(1);
     const done = () => harness.seen.filter(line => line === "notice info Configuration reloaded").length;
-    harness.announce("location.shutdown");
-    harness.announce("command.updated");
-    harness.announce("skill.updated");
+    const rebuild = () => ["location.shutdown", "command.updated", "skill.updated", "model.updated", "agent.updated"].forEach(type => harness.announce(type));
+    rebuild();
     const deadline = Date.now() + 2_000;
     while (done() < 1 && Date.now() < deadline) await Bun.sleep(5);
     expect(done()).toBe(1);
@@ -452,21 +454,22 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await Bun.sleep(40);
     // Its reply alone does not settle it.
     expect(done()).toBe(1);
-    harness.announce("location.shutdown");
-    harness.announce("command.updated");
-    harness.announce("skill.updated");
+    rebuild();
     while (done() < 2 && Date.now() < deadline + 2_000) await Bun.sleep(5);
     expect(done()).toBe(2);
     await harness.stop();
   });
 
-  test("/reload reports success after the settle window when no announcement comes", async () => {
+  test("/reload that OpenCode never confirms is reported as unconfirmed, not reloaded", async () => {
     const harness = await reloadHarness(() => undefined, { reloadSettleMs: 60 });
     const started = Date.now();
     await harness.provider.command("ses_1", { id: "req-quiet", name: "reload", arguments: "" });
     await harness.settle(4);
     expect(Date.now() - started).toBeGreaterThanOrEqual(55);
-    expect(harness.seen.slice(2)).toEqual(["notice info Configuration reloaded", "status completed"]);
+    expect(harness.seen[2]).toStartWith("notice warning Reload sent, but OpenCode did not confirm its reloaded configuration");
+    // Not the success path: the invoking client must not bank catalogs mid-rebuild.
+    expect(harness.seen[3]).toBe("status failed");
+    expect(harness.seen).not.toContain("notice info Configuration reloaded");
     await harness.stop();
   });
 
