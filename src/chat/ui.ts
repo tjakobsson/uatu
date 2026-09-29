@@ -177,6 +177,16 @@ export function initChat(api = new ChatApiClient()): void {
   // status), shown with the named state — per conversation, so a switch
   // to another retrying conversation never borrows this one's reason.
   const statusMessages = new Map<string, string | undefined>();
+  // Whether the caret sits in a slash query, matches or not: starting one
+  // re-reads the catalogs, so a command added elsewhere — which the banked
+  // list cannot match yet — appears while the user is still typing it. Any
+  // programmatic write to the composer ends the query it was tracking, so
+  // the next `/` typed counts as a new one.
+  let slashQueryActive = false;
+  // Rows the stream removed, per conversation, carried across snapshot
+  // rebuilds (a resync, a switch away and back) so a late acceptance never
+  // recreates a row the stream already retired.
+  const removedRows = new Map<string, string[]>();
   // A `/reload` this client sent, by conversation, with the agent whose
   // catalogs it changes and — once accepted — its message id: when its turn
   // completes, the palette and pickers re-read them. A reload held behind a
@@ -2703,6 +2713,8 @@ export function initChat(api = new ChatApiClient()): void {
 
   const installConversationSnapshot = (snapshot: ConversationSnapshot, acceptedDrafts: ChatProjection["acceptedDrafts"], token: number) => {
     projection = projectionFromSnapshot(snapshot, acceptedDrafts);
+    const carried = removedRows.get(snapshot.conversation.id);
+    if (carried) projection = { ...projection, removedIds: carried };
     historyRefreshRequired.delete(snapshot.conversation.id);
     projectionEpoch += 1;
     conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
@@ -2734,6 +2746,7 @@ export function initChat(api = new ChatApiClient()): void {
           return;
         }
         projection = result.projection;
+        if (projection.removedIds) removedRows.set(conversationId, projection.removedIds);
         if (event.type === "conversation.configuration") renderConfiguration();
         if (event.type === "conversation.status") {
           const reloads = pendingReloads.get(conversationId);
@@ -2857,6 +2870,7 @@ export function initChat(api = new ChatApiClient()): void {
     renderConfiguration();
     syncContextIndicator();
     input.value = presentation.drafts[id] ?? "";
+    slashQueryActive = false;
     autosize(input);
     renderAttachments();
     announce("");
@@ -3904,10 +3918,6 @@ export function initChat(api = new ChatApiClient()): void {
   const hintTokens = (hint: string) => hint.split(/\s+/).filter(Boolean)
     .map(token => `<span class="chat-command-hint-token">${escapeHtml(token)}</span>`).join(" ");
 
-  // Whether the caret sits in a slash query, matches or not: starting one
-  // re-reads the catalogs, so a command added elsewhere — which the banked
-  // list cannot match yet — appears while the user is still typing it.
-  let slashQueryActive = false;
   const renderCommandMenu = () => {
     const caret = input.selectionStart ?? input.value.length;
     const querying = slashCommandQuery(input.value, caret) !== null;
@@ -4042,6 +4052,7 @@ export function initChat(api = new ChatApiClient()): void {
     save();
     if (!updateVisible) return unavailable.length;
     input.value = restored.text;
+    slashQueryActive = false;
     autosize(input);
     renderAttachments();
     syncControls();
@@ -4222,6 +4233,7 @@ export function initChat(api = new ChatApiClient()): void {
     const restoreDraftText = () => {
       if (!text.trim()) return;
       input.value = input.value.trim() ? `${text}\n${input.value}` : text;
+      slashQueryActive = false;
       autosize(input);
     };
     // The same rule for a submission that ends while another conversation is
@@ -4241,6 +4253,8 @@ export function initChat(api = new ChatApiClient()): void {
     // while the drain below waits, and anything typed then belongs to the
     // next message — an after-the-wait clear would erase it.
     input.value = "";
+    slashQueryActive = false;
+    closeCommandMenu();
     presentation.drafts[conversationId] = "";
     save();
     autosize(input);
@@ -4290,7 +4304,7 @@ export function initChat(api = new ChatApiClient()): void {
     // explained why on the composer error line.
     if (!text.trim() && (pendingAttachments.get(conversationId) ?? []).length === 0) {
       // Restore the (empty) capture only if the user typed nothing meanwhile.
-      if (!input.value.trim() && text) { input.value = text; autosize(input); }
+      if (!input.value.trim() && text) { input.value = text; slashQueryActive = false; autosize(input); }
       submitting = false;
       syncControls();
       return;

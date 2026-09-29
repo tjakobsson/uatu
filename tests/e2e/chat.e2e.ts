@@ -297,6 +297,23 @@ test.describe("desktop OpenCode chat", () => {
     await reread;
   });
 
+  test("the first / after sending a slash command starts a fresh catalog read", async ({ page }) => {
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
+    const input = page.locator("#chat-input");
+    await input.fill("/review");
+    await expect(page.locator("#chat-command-menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await input.press("Enter");
+    await accepted;
+    await expect(input).toHaveValue("");
+    // Sending cleared the composer mid-query; the next / is a new query.
+    const read = page.waitForRequest(request => request.url().includes("/chat/commands"), { timeout: 5_000 });
+    await input.pressSequentially("/");
+    await read;
+  });
+
   test("a page left open picks up catalogs changed elsewhere when the palette or picker opens", async ({ page, request }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
     const input = page.locator("#chat-input");
