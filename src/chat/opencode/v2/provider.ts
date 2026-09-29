@@ -402,19 +402,21 @@ export class OpenCodeV2Provider implements ChatProvider {
    * `@` mention. The server loads the skill into the turn by id; the text
    * is what the timeline, and history, show.
    */
-  private async promptSkill(sessionId: string, messageId: string, skill: { id: string }, args: string): Promise<{ messageId: string }> {
+  private async promptSkill(sessionId: string, messageId: string, skill: { id: string }, args: string): Promise<{ messageId: string; text: string }> {
     const mention = `@${skill.id}`;
+    const text = args ? `${mention} ${args}` : mention;
     this.rememberPromptId(messageId);
     const admitted = await this.client.session.prompt({
       sessionID: sessionId,
       id: messageId,
-      text: args ? `${mention} ${args}` : mention,
+      text,
       skills: [{ id: skill.id, mention: { start: 0, end: mention.length, text: mention } }],
       delivery: "queue",
       resume: true,
     });
     if (admitted.id !== messageId) this.rememberPromptId(admitted.id);
-    return { messageId: admitted.id };
+    // The row reads as what was sent, not as the typed `/skill`.
+    return { messageId: admitted.id, text };
   }
 
   /**
@@ -606,7 +608,7 @@ export class OpenCodeV2Provider implements ChatProvider {
    * stands. That is also why a retry of an accepted command whose response
    * was lost can run twice on 2.x: the API carries no key to dedupe on.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }> {
     const messageId = stableProviderId("msg", input.id);
     const compacts = input.name === "compact" || input.name === "summarize";
     // Decided from the live catalogs, not the palette the user chose from:

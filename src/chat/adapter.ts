@@ -1116,7 +1116,7 @@ export class ChatAdapter {
       // the queue holds references, and a reference that stopped resolving
       // while held fails the delivery like any provider refusal.
       const providerAttachments = await this.locateAttachments(input.attachments);
-      const accepted = slash
+      const accepted: { messageId: string; text?: string } = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", ...(providerAttachments.length ? { attachments: providerAttachments } : {}), model: input.model, mode, variant });
       // "sending" ends at acceptance, BEFORE the rename side-work below —
@@ -1131,7 +1131,7 @@ export class ChatAdapter {
       // server-minted row arrived after its admission window) removes it by
       // id, and a removal that lands before the row exists is a no-op that
       // leaves the row beside the server's for good.
-      projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId, ...(input.attachments?.length ? { attachments: input.attachments } : {}) });
+      projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text: accepted.text ?? text, requestId: input.requestId, ...(input.attachments?.length ? { attachments: input.attachments } : {}) });
       if (renameToFirstPrompt) {
         try {
           // A manual rename can finish while prompt validation is still

@@ -278,7 +278,14 @@ export interface ChatProvider {
    */
   dispose?(): Promise<void>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
-  command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  /**
+   * `text`, when set, is what the user's row reads as because the provider
+   * sent something other than the typed command — a 2.x skill runs as a
+   * prompt reading `@<skill> <args>`. The adapter's acceptance row takes it,
+   * so the row agrees with the provider's own restatement whichever lands
+   * first.
+   */
+  command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void>;
   /**

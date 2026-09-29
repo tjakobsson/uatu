@@ -353,6 +353,9 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     const provider = server.provider();
     const withArguments = await provider.command("ses_1", { id: "req-s1", name: "openspec-apply-change", arguments: "my-change" });
     const bare = await provider.command("ses_1", { id: "req-s2", name: "openspec-apply-change", arguments: "" });
+    // The row reads as what was sent, so the adapter's acceptance agrees with the stream's.
+    expect(withArguments.text).toBe("@openspec-apply-change my-change");
+    expect(bare.text).toBe("@openspec-apply-change");
     const prompts = server.requests("POST", "/api/session/ses_1/prompt");
     const mention = { start: 0, end: 22, text: "@openspec-apply-change" };
     expect(prompts[0]?.body).toEqual({ id: withArguments.messageId, text: "@openspec-apply-change my-change", skills: [{ id: "openspec-apply-change", mention }], delivery: "queue", resume: true });

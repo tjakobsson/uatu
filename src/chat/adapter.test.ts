@@ -133,9 +133,11 @@ class FakeProvider implements ChatProvider {
     this.prompts.push({ sessionId, ...input });
     return { messageId: input.id };
   }
+  // What a command's row reads as when the provider sent something else.
+  commandText: string | undefined;
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection }) {
     this.commandCalls.push({ sessionId, ...input });
-    return { messageId: input.id };
+    return { messageId: input.id, ...(this.commandText ? { text: this.commandText } : {}) };
   }
   async interrupt(sessionId: string) { this.interrupts.push(sessionId); }
   async replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply) {
@@ -1740,6 +1742,19 @@ describe("prompt, abort, permission, and question mutations", () => {
     adapter.projectionForTests("session").statusUpdate("completed");
     await adapter.prompt("session", "ordinary", "/missing stays ordinary");
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ text: "/missing stays ordinary" }));
+  });
+
+  test("a command's row reads as the text the provider says it sent, whichever row lands first", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.commandText = "@review focus";
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    // The provider's own row can land before the acceptance does.
+    adapter.projectionForTests("session").upsert({ id: "message:message", type: "user_message", createdAt: 1, text: "@review focus", requestId: "message" });
+    await adapter.prompt("session", "request", "/review focus");
+    const rows = adapter.projectionForTests("session").items().filter(item => item.type === "user_message");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "message:message", text: "@review focus" });
   });
 
   test("derives concise titles without reducing numeric prompts to a generic label", () => {
