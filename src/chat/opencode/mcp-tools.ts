@@ -42,18 +42,19 @@ export function looksLikeMcpPermission(action: string, resources: readonly strin
 
 /**
  * The server and tool an action resolves to among `servers`, or undefined
- * when it matches none. The longest sanitized server prefix wins, so a
- * server named `github_enterprise` beats one named `github` for
- * `github_enterprise_create_issue`; the tool half must be non-empty.
+ * when it matches none, or more than one. With `github` and
+ * `github_enterprise` both registered, `github_enterprise_create_issue` is
+ * either server's; naming one would be a guess, and a wrong server on an
+ * approval is worse than the raw action. The tool half must be non-empty.
  */
 export function mcpToolFromAction(action: string, servers: Iterable<string>): McpToolReference | undefined {
-  let best: McpToolReference | undefined;
+  const matches: McpToolReference[] = [];
   for (const server of servers) {
     const prefix = `${sanitizeMcpName(server)}_`;
     if (!action.startsWith(prefix) || action.length === prefix.length) continue;
-    if (!best || prefix.length > sanitizeMcpName(best.server).length + 1) best = { server, tool: action.slice(prefix.length) };
+    if (!matches.some(match => match.server === server)) matches.push({ server, tool: action.slice(prefix.length) });
   }
-  return best;
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 /**

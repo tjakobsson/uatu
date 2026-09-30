@@ -13,9 +13,18 @@ describe("mcpToolFromAction", () => {
     expect(mcpToolFromAction("my-tools_search", ["my-tools"])).toEqual({ server: "my-tools", tool: "search" });
   });
 
-  test("the longest server prefix wins when one server's name is a prefix of another's", () => {
-    expect(mcpToolFromAction("github_enterprise_create_issue", ["github", "github_enterprise"])).toEqual({ server: "github_enterprise", tool: "create_issue" });
-    expect(mcpToolFromAction("github_enterprise_create_issue", ["github_enterprise", "github"])).toEqual({ server: "github_enterprise", tool: "create_issue" });
+  test("an action two registered servers could have produced is left unresolved", () => {
+    // `github` with tool `enterprise_create_issue`, or `github_enterprise`
+    // with `create_issue`: no way to know, so no label rather than a guess.
+    expect(mcpToolFromAction("github_enterprise_create_issue", ["github", "github_enterprise"])).toBeUndefined();
+    expect(mcpToolFromAction("github_enterprise_create_issue", ["github_enterprise", "github"])).toBeUndefined();
+    // Two names that sanitize to the same prefix are the same ambiguity.
+    expect(mcpToolFromAction("my_tools_search", ["my-tools", "my.tools"])).toBeUndefined();
+    // With one of them registered, either resolves.
+    expect(mcpToolFromAction("github_enterprise_create_issue", ["github_enterprise", "tracker"])).toEqual({ server: "github_enterprise", tool: "create_issue" });
+    expect(mcpToolFromAction("github_enterprise_create_issue", ["github", "tracker"])).toEqual({ server: "github", tool: "enterprise_create_issue" });
+    // The same server listed twice is one match.
+    expect(mcpToolFromAction("tracker_create_issue", ["tracker", "tracker"])).toEqual({ server: "tracker", tool: "create_issue" });
   });
 
   test("a built-in action, an unknown prefix, or a bare server name resolves to nothing", () => {
