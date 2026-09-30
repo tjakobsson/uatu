@@ -19,7 +19,7 @@ describe("mcpToolFromAction", () => {
     expect(mcpToolFromAction("github_enterprise_create_issue", ["github", "github_enterprise"])).toBeUndefined();
     expect(mcpToolFromAction("github_enterprise_create_issue", ["github_enterprise", "github"])).toBeUndefined();
     // Two names that sanitize to the same prefix are the same ambiguity.
-    expect(mcpToolFromAction("my_tools_search", ["my-tools", "my.tools"])).toBeUndefined();
+    expect(mcpToolFromAction("my_tools_search", ["my tools", "my.tools"])).toBeUndefined();
     // With one of them registered, either resolves.
     expect(mcpToolFromAction("github_enterprise_create_issue", ["github_enterprise", "tracker"])).toEqual({ server: "github_enterprise", tool: "create_issue" });
     expect(mcpToolFromAction("github_enterprise_create_issue", ["github", "tracker"])).toEqual({ server: "github", tool: "enterprise_create_issue" });
