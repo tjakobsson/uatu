@@ -2437,6 +2437,7 @@ export class ChatAdapter {
         ...(request.plan === undefined ? {} : { plan: request.plan }),
         ...(request.choices === undefined ? {} : { choices: request.choices }),
         ...(request.sourceToolId === undefined ? {} : { sourceToolId: request.sourceToolId }),
+        ...(request.mcp === undefined ? {} : { mcp: request.mcp }),
       });
     }
     return items;

@@ -2906,7 +2906,9 @@ describe("pending permission recovery", () => {
     // confirms with the same scope the live one would have shown.
     // And the tool row the request belongs to: a wildcard request shows
     // the call's arguments from that row, recovered or live.
-    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], alwaysPatterns: ["review-*"], diff: "@@ -1 +1 @@\n-a\n+b", sourceToolId: "tool:call_1" }];
+    // And the MCP server and tool the provider resolved, so the recovered
+    // card is titled as the live one would have been.
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], alwaysPatterns: ["review-*"], diff: "@@ -1 +1 @@\n-a\n+b", sourceToolId: "tool:call_1", mcp: { server: "tracker", tool: "review" } }];
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("local");
@@ -2919,6 +2921,7 @@ describe("pending permission recovery", () => {
       status: "pending",
       diff: "@@ -1 +1 @@\n-a\n+b",
       sourceToolId: "tool:call_1",
+      mcp: { server: "tracker", tool: "review" },
     })]);
 
     await adapter.respondPermission("local", "perm_1", "req-1", "approved-once");
