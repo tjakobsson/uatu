@@ -91,6 +91,24 @@ describe("chat domain validation", () => {
     expect(() => parseConversationItem({ ...permission, alwaysPatterns: "bun test *" })).toThrow(/always patterns/);
   });
 
+  test("a permission's source tool row is an optional identity", () => {
+    const permission = items[6];
+    // Present: the agent named the call the request belongs to.
+    expect(parseConversationItem({ ...permission, sourceToolId: "tool:call_ae43195d825941c99fb33dac" })).toBeDefined();
+    // Absent: the agent did not say; the client falls back on the action name.
+    expect(parseConversationItem(permission)).toBeDefined();
+    expect(() => parseConversationItem({ ...permission, sourceToolId: "" })).toThrow(/source tool id/);
+    expect(() => parseConversationItem({ ...permission, sourceToolId: 7 })).toThrow(/source tool id/);
+  });
+
+  test("a permission's MCP server and tool are an optional pair of names", () => {
+    const permission = items[6];
+    expect(parseConversationItem({ ...permission, action: "github_create_issue", mcp: { server: "github", tool: "create_issue" } })).toBeDefined();
+    expect(() => parseConversationItem({ ...permission, mcp: { server: "", tool: "create_issue" } })).toThrow(/mcp server/);
+    expect(() => parseConversationItem({ ...permission, mcp: { server: "github" } })).toThrow(/mcp tool/);
+    expect(() => parseConversationItem({ ...permission, mcp: "github" })).toThrow(/mcp tool/);
+  });
+
   test("accepts strict command metadata", () => {
     expect(parseChatCommand({ name: "review", description: "Review changes", argumentHint: "[focus]", kind: "skill" }))
       .toEqual(expect.objectContaining({ name: "review", kind: "skill" }));

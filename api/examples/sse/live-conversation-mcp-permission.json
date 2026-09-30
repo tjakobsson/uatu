@@ -1,0 +1,37 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "conversation",
+    "key": "opencode:conversation-1",
+    "cursor": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0xIiwicyI6NX0",
+    "event": {
+      "kind": "data",
+      "data": {
+        "generation": "generation-1",
+        "sequence": 5,
+        "conversationId": "opencode:conversation-1",
+        "type": "item.upsert",
+        "item": {
+          "id": "permission:per_02",
+          "type": "permission",
+          "createdAt": 1724100401000,
+          "requestId": "per_02",
+          "action": "tracker_create_issue",
+          "resources": [
+            "*"
+          ],
+          "alwaysPatterns": [
+            "*"
+          ],
+          "status": "pending",
+          "sourceToolId": "tool:call_ae43195d825941c99fb33dac",
+          "mcp": {
+            "server": "tracker",
+            "tool": "create_issue"
+          }
+        }
+      }
+    }
+  }
+}

@@ -639,6 +639,8 @@ The activity chrome — the working line while a turn runs, a finished group's s
 ### Requirement: Users can resolve agent interaction requests in context
 An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the approval and rejection choices OpenCode supports for it: approving the single occurrence, approving persistently, and rejecting. Where a permission would change a file, the request SHALL show what it would change — the pending diff — where the choice is made, so the user sees the change before allowing it. A permission with nothing to show a diff for is unaffected. A structured OpenCode question SHALL render its prompt, options, multi-selection behavior, and free-form response when supported. A resolved request SHALL become non-interactive and record its outcome. A resolved request SHALL also recede: its outcome stays legible where the request was raised, but it MUST NOT keep the footprint it held while it needed an answer, and what it named SHALL stay reachable from the receded form. Submitting a response more than once MUST NOT produce multiple provider replies.
 
+A permission that names no specific resource, whose request carries only a wildcard as OpenCode's request to call an MCP tool does, SHALL show the arguments of the tool call it would allow, where the choice is made, so the user sees what the call does before allowing it. The arguments SHALL be those of the tool call the permission belongs to, as the conversation already shows them; the surface MUST NOT invent, summarize, or reorder them. When that call cannot be found in the conversation, the request SHALL show what OpenCode sent, unchanged. A permission for an MCP tool SHALL name the MCP server and the tool as the user registered them with OpenCode, distinguished from the built-in tools, so the user can tell which server is being granted what; the action name OpenCode sent SHALL remain what the persistent-approval confirmation names, since it is the rule OpenCode installs. When the server cannot be identified among the servers OpenCode reports, the request SHALL show the action as sent. A permission naming a specific resource, carrying a diff, or carrying a plan is unaffected. Like the diff, the arguments are shown while the request is open; the resolved request recedes to its outcome and the resources OpenCode named, as any other permission does. The arguments SHALL be shown for a request recovered from OpenCode's pending set as for one announced live.
+
 A request raised by a subagent SHALL additionally appear in the conversation that launched that subagent, and SHALL be answerable there. The subagent's own conversation remains the single owner of the request: an answer given from the launching conversation SHALL be directed to the owning conversation, so exactly one response reaches OpenCode however many places the request was shown. Resolving it SHALL resolve it everywhere it appears.
 
 When a subagent-owned request appears outside its owning transcript, the request SHALL identify the specific launching subagent from the best available structured attribution and SHALL offer direct navigation to the owning transcript. If the specific attribution has not arrived or cannot be resolved, the request MUST use a truthful generic subagent label rather than inventing an identity, while retaining transcript navigation whenever the agent supports subagent transcripts. The origin and transcript control SHALL remain available after resolution so the decision can be audited. A conversation's own requests MUST NOT be labeled as coming from a subagent.
@@ -670,6 +672,34 @@ A pending request SHALL remain discoverable and answerable even when the server 
 #### Scenario: A non-edit permission shows no diff
 - **WHEN** a pending permission has no file change to show
 - **THEN** the card presents its choices without a diff
+
+#### Scenario: An MCP tool permission shows the call's arguments
+- **WHEN** OpenCode asks permission to call an MCP tool, naming only a wildcard resource, and the conversation holds that call with its arguments
+- **THEN** the card shows those arguments where the approve and reject choices are
+- **AND** the card names the MCP server and the tool, apart from the built-in tools
+- **AND** no bare wildcard stands in for the arguments
+
+#### Scenario: The persistent-approval confirmation keeps OpenCode's own action name
+- **WHEN** the user chooses the persistent approval on an MCP tool permission
+- **THEN** the confirmation names the action as OpenCode sent it, the rule it will install
+
+#### Scenario: An MCP permission whose server cannot be identified keeps the action as sent
+- **WHEN** a pending permission's action matches none of the MCP servers OpenCode reports
+- **THEN** the card shows the action as OpenCode sent it
+
+#### Scenario: A wildcard permission whose call is not in the conversation
+- **WHEN** a pending permission names only a wildcard resource and the conversation holds no tool call it belongs to
+- **THEN** the card shows the request as OpenCode sent it, with its choices
+
+#### Scenario: A permission naming a specific resource adds no arguments
+- **WHEN** a pending permission names a command, a file, or another specific resource
+- **THEN** the card shows that resource as before
+- **AND** it does not add the tool call's arguments beside it
+
+#### Scenario: A resolved MCP permission recedes like any other
+- **WHEN** a permission that showed a call's arguments has been answered
+- **THEN** its receded form records the outcome and the resources OpenCode named, without the arguments block
+- **AND** the arguments remain readable on the tool row the call ran as
 
 #### Scenario: An answered request recedes
 - **WHEN** a permission or question has been answered
@@ -777,6 +807,7 @@ A pending request SHALL remain discoverable and answerable even when the server 
 - **THEN** the pending request appears and can be answered
 - **AND** answering it resolves the request OpenCode is waiting on
 - **AND** its persistent approval confirms with the future-approval patterns OpenCode reports for it
+- **AND** a wildcard-only request shows the arguments of the call it belongs to, as the live announcement would have
 
 #### Scenario: Recovered and live announcements do not double up
 - **WHEN** a pending request is recovered on load and OpenCode also announces it over the event stream
@@ -2282,7 +2313,7 @@ While restoration is pending, repeated inventories that omit the remembered conv
 ### Requirement: Chat serves whichever OpenCode generation the workspace has installed
 UatuCode SHALL converse through an OpenCode 1.x server and through an OpenCode 2.x server with the same Chat surface, the same agent identity, and the same conversation operations. The generation is a property of the spawned server, decided by its readiness answer, and SHALL be fixed for that server's lifetime; a later start — a retry, a restart after an unexpected exit — SHALL decide again, so a binary replaced on disk is served by the matching generation without a workspace restart. Conversation identifiers, capability declarations, and the chat routes SHALL NOT change form between generations; a capability the running generation cannot back SHALL be left undeclared rather than declared and broken.
 
-Normalization SHALL recognize each generation's event vocabulary — 1.x's cumulative and incremental announcements and 2.x's typed session events — and produce the same ordered conversation events for the same activity: text and reasoning, tool lifecycle, shell commands, permission requests and replies, structured questions and their answers, compaction, staged and committed reverts, usage, turn status, cancellation, completion, and errors. A 2.x structured form SHALL be presented as a structured question: each field becomes one question, a field with options offers those options, a field allowing custom input offers a free-form answer, and answering or rejecting it sends exactly one reply to the form OpenCode is waiting on. Loading a conversation SHALL reconcile pending requests against the running generation's own pending sets — permission requests and forms on 2.x — so a request announced while the stream was interrupted is still answerable.
+Normalization SHALL recognize each generation's event vocabulary — 1.x's cumulative and incremental announcements and 2.x's typed session events — and produce the same ordered conversation events for the same activity: text and reasoning, tool lifecycle, shell commands, permission requests and replies, structured questions and their answers, compaction, staged and committed reverts, usage, turn status, cancellation, completion, and errors. A 2.x structured form SHALL be presented as a structured question: each field becomes one question, a field with options offers those options, a field allowing custom input offers a free-form answer, and answering or rejecting it sends exactly one reply to the form OpenCode is waiting on. Loading a conversation SHALL reconcile pending requests against the running generation's own pending sets — permission requests and forms on 2.x — so a request announced while the stream was interrupted is still answerable. A 2.x permission request names the tool call it belongs to; normalization SHALL carry that reference onto the request, from the live announcement and from the pending set alike, so the surface can show the call. A 1.x request that carries no such reference SHALL be unaffected by its absence. On either generation, a request whose action is an MCP tool's registered name SHALL carry the MCP server and tool it resolves to, resolved against the servers that generation reports, from the live announcement and from the pending set alike.
 
 Every call to a 2.x server SHALL be scoped to the workspace directory, and events for another directory served by the same server MUST NOT reach the workspace's conversations.
 
@@ -2313,9 +2344,16 @@ Every call to a 2.x server SHALL be scoped to the workspace directory, and event
 - **THEN** the confirmation lists the patterns OpenCode supplied for that request
 - **AND** confirming sends OpenCode's persistent reply once
 
+#### Scenario: A 2.x MCP permission is tied to its tool call
+- **WHEN** a 2.x agent asks permission to call an MCP tool and names the tool call the request belongs to
+- **THEN** the request carries that call's reference
+- **AND** the request carries the MCP server and tool the action resolves to
+- **AND** the card shows the call's arguments
+
 #### Scenario: A 2.x request missed by the stream is recovered on load
 - **WHEN** a 2.x server raised a permission request or a form while the event stream was interrupted, and the user then opens that conversation
 - **THEN** the pending request appears and can be answered
+- **AND** a recovered permission that names its tool call carries that reference
 
 #### Scenario: Another directory's activity on a 2.x server stays out
 - **WHEN** a 2.x server announces events for a session in a directory other than the workspace's

@@ -254,7 +254,7 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "alwaysPatterns", "status", "outcome", "diff", "plan", "choices", "choiceId"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "alwaysPatterns", "status", "outcome", "diff", "plan", "choices", "choiceId", "sourceToolId", "mcp"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
@@ -286,6 +286,14 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
     }
   }
   if (record.choiceId !== undefined) expectIdentity(record.choiceId, "permission choice id");
+  // The tool row the request belongs to, when the agent named the call.
+  expectOptionalIdentity(record.sourceToolId, "permission source tool id");
+  if (record.mcp !== undefined) {
+    const mcp = expectRecord(record.mcp, "permission mcp tool");
+    expectKeys(mcp, ["server", "tool"], "permission mcp tool");
+    expectNonEmptyString(mcp.server, "permission mcp server");
+    expectNonEmptyString(mcp.tool, "permission mcp tool name");
+  }
   return value as PermissionRequest;
 }
 

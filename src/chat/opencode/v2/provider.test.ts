@@ -1150,13 +1150,52 @@ describe("OpenCode 2.x provider: permissions and forms", () => {
       "GET /api/permission/request": () => scoped([
         { id: "per_1", sessionID: "ses_1", action: "external_directory", resources: ["/etc/*"], save: ["/etc/*"], source: { type: "tool", messageID: "msg_a", id: "call_1" } },
         { id: "per_2", sessionID: "ses_2", action: "edit", resources: ["src/a.ts"], metadata: { diff: "--- a\n+++ b\n" } },
+        { id: "per_3", sessionID: "ses_1", action: "tracker_create_issue", resources: ["*"], save: ["*"], metadata: {}, source: { type: "tool", messageID: "msg_b", id: "call_2" } },
       ]),
+      "GET /api/mcp": () => scoped([{ name: "tracker", status: { status: "connected" } }]),
     });
     expect(await server.provider().listPermissions()).toEqual([
-      { requestId: "per_1", conversationId: "ses_1", action: "external_directory", resources: ["/etc/*"], alwaysPatterns: ["/etc/*"] },
+      // `source` names the tool row the request belongs to; a card rebuilt
+      // from this list must be able to show the call it would allow.
+      { requestId: "per_1", conversationId: "ses_1", action: "external_directory", resources: ["/etc/*"], alwaysPatterns: ["/etc/*"], sourceToolId: "tool:call_1" },
       { requestId: "per_2", conversationId: "ses_2", action: "edit", resources: ["src/a.ts"], alwaysPatterns: [], diff: "--- a\n+++ b\n" },
+      // An MCP tool's action resolves against the reported servers, so the
+      // recovered card names the server as a live one would.
+      { requestId: "per_3", conversationId: "ses_1", action: "tracker_create_issue", resources: ["*"], alwaysPatterns: ["*"], sourceToolId: "tool:call_2", mcp: { server: "tracker", tool: "create_issue" } },
     ]);
     expect(server.calls[0]?.query.get("location[directory]")).toBe(WORKSPACE);
+  });
+
+  test("a live ask for an MCP tool carries its server and tool; a built-in ask carries none", async () => {
+    const encoder = new TextEncoder();
+    let push: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const events = {
+      frame: (event: Record<string, unknown>) => push?.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)),
+      route: () => new Response(new ReadableStream<Uint8Array>({ start(controller) { push = controller; controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "evt_0", type: "server.connected", data: {} })}\n\n`)); } }), { status: 200, headers: { "content-type": "text/event-stream" } }),
+    };
+    const server = fakeOpenCode({
+      "GET /api/event": events.route,
+      "GET /api/mcp": () => scoped([{ name: "tracker", status: { status: "connected" } }]),
+    });
+    const provider = server.provider();
+    const controller = new AbortController();
+    const seen: Array<Record<string, unknown>> = [];
+    const pump = (async () => {
+      for await (const event of provider.events(controller.signal)) for (const update of event.updates) if (update.kind === "upsert" && update.item.type === "permission") seen.push(update.item as unknown as Record<string, unknown>);
+    })();
+    await Bun.sleep(10); // the stream is live once its first frame has arrived
+    events.frame({ id: "evt_1", created: 1, type: "permission.asked", location: { directory: WORKSPACE }, data: { id: "per_1", sessionID: "ses_1", action: "tracker_create_issue", resources: ["*"], save: ["*"], metadata: {}, source: { type: "tool", messageID: "msg_a", id: "call_1" } } });
+    events.frame({ id: "evt_2", created: 2, type: "permission.asked", location: { directory: WORKSPACE }, data: { id: "per_2", sessionID: "ses_1", action: "bash", resources: ["git status"], save: ["git status *"], metadata: {} } });
+    for (let i = 0; i < 400 && seen.length < 2; i++) await Bun.sleep(5);
+    controller.abort();
+    await pump;
+    expect(seen.map(item => ({ action: item.action, mcp: item.mcp }))).toEqual([
+      { action: "tracker_create_issue", mcp: { server: "tracker", tool: "create_issue" } },
+      { action: "bash", mcp: undefined },
+    ]);
+    // One fetch for the hit, one refetch for the miss (a server may have
+    // been registered since); nothing per event otherwise.
+    expect(server.requests("GET", "/api/mcp")).toHaveLength(2);
   });
 
   test("a permission reply is one decision on the request's own route", async () => {

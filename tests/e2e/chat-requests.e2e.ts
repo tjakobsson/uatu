@@ -326,3 +326,114 @@ test.describe("Allow always asks for confirmation", () => {
     });
   });
 });
+
+// GitHub #476: OpenCode's ask for an MCP tool carries the tool's name and a
+// `*`, nothing about the call. The card reads the arguments from the tool
+// row the request belongs to (named by the request, as 2.x does, or the
+// open row under the action name), shows them while the request is open,
+// and recedes without them. A request with no row to read is today's card,
+// which is also the "before" picture of this change.
+test.describe("an MCP permission shows the call it would allow", () => {
+  const publish = (request: APIRequestContext, conversationId: string, item: ConversationItem) =>
+    request.post("/__e2e/chat", { data: { action: "item", conversationId, item } });
+  const codeRow: ConversationItem = {
+    id: "tool:call_function_dh8j80sy7yde_1", type: "tool", createdAt: 2, name: "execute", status: "running",
+    input: JSON.stringify({ code: 'const res = await tools.tracker.create_issue({\n  title: "Login fails on Safari",\n  body: "Steps: open /login in Safari 18, submit valid credentials, observe a blank page.",\n  labels: ["bug", "safari"],\n});\nreturn res;' }),
+  };
+  const mcp = (requestId: string, createdAt: number, overrides: Partial<Extract<ConversationItem, { type: "permission" }>> = {}): ConversationItem => ({
+    id: `permission:${requestId}`, type: "permission", createdAt, requestId,
+    action: "tracker_create_issue", resources: ["*"], alwaysPatterns: ["*"], status: "pending", ...overrides,
+  });
+
+  async function boot(page: Page, request: APIRequestContext, open: (page: Page, conversationId: string) => Promise<void> = openChatPanel): Promise<string> {
+    await request.post("/__e2e/reset");
+    const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
+    const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "File an issue", items: [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "File the Safari login bug in the tracker." },
+    ] } }).then(r => r.json()) as { conversation: { id: string } };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await open(page, seeded.conversation.id);
+    return seeded.conversation.id;
+  }
+  const openTouchChat = async (page: Page, conversationId: string) => {
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(conversationId);
+  };
+
+  test("the card shows the call's arguments while open and recedes without them", async ({ page, request }, testInfo) => {
+    await page.setViewportSize({ width: 1400, height: 1000 });
+    const id = await boot(page, request);
+
+    // Before: the request as OpenCode sends it, with no row to read, a name
+    // and a `*`. This is the card the issue is about.
+    await publish(request, id, mcp("bare", 20));
+    const bare = page.locator('[data-chat-item-id="permission:bare"]');
+    await expect(bare.locator("ul code")).toHaveText(["*"]);
+    await expect(bare.locator(".chat-request-arguments")).toHaveCount(0);
+    await captureScreenshot(page, testInfo, "before-mcp-permission-desktop");
+    await publish(request, id, mcp("bare", 20, { status: "resolved", outcome: "rejected" }));
+
+    // After: the row the request names is in the conversation, so the card
+    // shows what the call would run with, in place of the wildcard.
+    await publish(request, id, codeRow);
+    await publish(request, id, mcp("mcp", 21, { sourceToolId: codeRow.id, mcp: { server: "tracker", tool: "create_issue" } }));
+    const card = page.locator('[data-chat-item-id="permission:mcp"]');
+    await expect(card.locator("summary")).toContainText("Permission: MCP tracker › create_issue");
+    await expect(card.locator(".chat-request-arguments")).toContainText('title: "Login fails on Safari"');
+    await expect(card.locator(".chat-request-arguments")).toContainText("tools.tracker.create_issue");
+    await expect(card.locator("ul li")).toHaveCount(0);
+    await expect(card.locator('[data-permission-outcome="approved-once"]')).toBeVisible();
+    await captureScreenshot(page, testInfo, "after-mcp-permission-desktop");
+
+    // A command permission beside it is unchanged: its resource, no block.
+    await publish(request, id, { id: "tool:call_bash", type: "tool", createdAt: 22, name: "bash", status: "running", input: JSON.stringify({ command: "git status --short" }) });
+    await publish(request, id, mcp("cmd", 23, { action: "bash", resources: ["git status --short"], alwaysPatterns: ["git status *"], sourceToolId: "tool:call_bash" }));
+    const command = page.locator('[data-chat-item-id="permission:cmd"]');
+    await expect(command.locator("ul code")).toHaveText(["git status --short"]);
+    await expect(command.locator(".chat-request-arguments")).toHaveCount(0);
+
+    // Answered, the MCP card recedes as any other: outcome in the summary,
+    // the wildcard OpenCode sent back in the body, the arguments on the row.
+    await publish(request, id, mcp("mcp", 21, { sourceToolId: codeRow.id, mcp: { server: "tracker", tool: "create_issue" }, status: "resolved", outcome: "approved-once" }));
+    await expect(card.locator(".chat-request-trace")).toHaveText("Allowed once");
+    await expect(card.locator(".chat-request-arguments")).toHaveCount(0);
+    await expect(card).not.toHaveAttribute("open", /.*/);
+    await expect(card.locator("ul code")).toHaveText(["*"]);
+    await expect(card.locator("summary")).toContainText("Permission: MCP tracker › create_issue");
+    await publish(request, id, mcp("cmd", 23, { action: "bash", resources: ["git status --short"], alwaysPatterns: ["git status *"], sourceToolId: "tool:call_bash", status: "resolved", outcome: "approved-once" }));
+    await captureScreenshot(page, testInfo, "after-mcp-permission-resolved-desktop");
+  });
+
+  test("a request naming no row reads the open row under its action name", async ({ page, request }) => {
+    const id = await boot(page, request);
+    await publish(request, id, { id: "tool:call_direct", type: "tool", createdAt: 2, name: "tracker_create_issue", status: "running", input: JSON.stringify({ title: "Login fails on Safari", labels: ["bug"] }) });
+    await publish(request, id, mcp("direct", 20));
+    const card = page.locator('[data-chat-item-id="permission:direct"]');
+    await expect(card.locator(".chat-request-arguments")).toHaveText('title: Login fails on Safari\nlabels: ["bug"]');
+    await expect(card.locator("ul li")).toHaveCount(0);
+  });
+
+  test.describe("at phone width", () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+    test("the arguments fit the card in touch mode", async ({ page, request }, testInfo) => {
+      const id = await boot(page, request, openTouchChat);
+      await publish(request, id, mcp("bare", 20));
+      await expect(page.locator('[data-chat-item-id="permission:bare"] ul code')).toHaveText(["*"]);
+      await captureScreenshot(page, testInfo, "before-mcp-permission-phone");
+      await publish(request, id, mcp("bare", 20, { status: "resolved", outcome: "rejected" }));
+      await publish(request, id, codeRow);
+      await publish(request, id, mcp("mcp", 21, { sourceToolId: codeRow.id, mcp: { server: "tracker", tool: "create_issue" } }));
+      const card = page.locator('[data-chat-item-id="permission:mcp"]');
+      await expect(card.locator("summary")).toContainText("Permission: MCP tracker › create_issue");
+      await expect(card.locator(".chat-request-arguments")).toContainText("Login fails on Safari");
+      await expect(card.getByRole("button", { name: "Allow once" })).toBeVisible();
+      await captureScreenshot(page, testInfo, "after-mcp-permission-phone");
+      await publish(request, id, mcp("mcp", 21, { sourceToolId: codeRow.id, mcp: { server: "tracker", tool: "create_issue" }, status: "resolved", outcome: "approved-once" }));
+      await expect(card.locator(".chat-request-trace")).toHaveText("Allowed once");
+      await expect(card.locator(".chat-request-arguments")).toHaveCount(0);
+      await captureScreenshot(page, testInfo, "after-mcp-permission-resolved-phone");
+    });
+  });
+});

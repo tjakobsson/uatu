@@ -2,6 +2,19 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 10 / Workspace 22 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `PermissionItem` gains an optional `sourceToolId`: the `tool` item the permission belongs to (`tool:<call id>`), set when the agent names the call it is asking about. OpenCode 2.x names it on every tool permission through the request's `source`. An MCP tool's permission names no resource of its own; a `*` resource and a `*` save pattern are all the wire carries for such a call. With the reference, a client can show the arguments of the call the permission would allow, read from that tool row, which the conversation already holds before the request arrives.
+- `PermissionItem` gains an optional `mcp` (`PermissionMcpTool`: `server`, `tool`): the MCP server and tool an action names, resolved by the agent against the servers it reports. A client can then say `MCP github › create_issue` where the wire says `github_create_issue`; the `action` stays what a persistent approval installs.
+
+### Migration
+
+Strict workspace clients must regenerate against workspace revision 22: `PermissionItem` is closed, so a revision 21 validator rejects the new fields on every permission that carries them. A client that renders permission cards should, for a pending permission whose `resources` are empty or only `*`, look up the `tool` item named by `sourceToolId` in the same conversation and show its `input` where the choices are; when the field is absent, the newest not-yet-completed `tool` item whose `name` equals the permission's `action` is the call being asked about. The Hub revision remains 10.
+
 ## Hub 10 / Workspace 21 - Unreleased
 
 Compatibility: breaking (Hub)

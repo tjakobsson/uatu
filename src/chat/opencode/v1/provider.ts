@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../../../shared/bounded-map";
 import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
+import { McpServerNames, annotateMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { measureChatWork } from "../../performance";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../../history-reuse";
 import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../../provider";
@@ -92,6 +93,7 @@ export class OpenCodeV1Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
   private readonly historyReuse = new HistoryReuse<ProviderMessage[]>();
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
+  private readonly mcpServers = new McpServerNames(() => this.mcpServerNames());
 
   constructor(
     private readonly client: OpencodeClient,
@@ -542,6 +544,10 @@ export class OpenCodeV1Provider implements ChatProvider {
         const notificationTurns = this.notificationLifecycle.observe(event, normalized);
         if (notificationTurns.length > 0) { normalized.notificationTurns = notificationTurns; normalized.outcome = "handled"; }
         this.historyReuse.invalidate(normalized.conversationId);
+        // A permission for an MCP tool names its server and tool, resolved
+        // against the servers this OpenCode reports (mcp-tools.ts).
+        if (McpServerNames.changedBy(normalized.eventType)) this.mcpServers.invalidate();
+        normalized.updates = await Promise.all(normalized.updates.map(update => annotateMcpPermission(update, this.mcpServers)));
         yield normalized;
       } catch {
         yield { updates: [], outcome: "unparseable", eventType: "" };
@@ -685,7 +691,7 @@ export class OpenCodeV1Provider implements ChatProvider {
     // permission/patterns.
     const payload = unwrap(await this.client.permission.list({ directory: this.directory })) as unknown;
     const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
-    return response.flatMap(value => {
+    const pending: PendingPermission[] = response.flatMap(value => {
       const request = asRecord(value);
       const requestId = typeof request.id === "string" ? request.id : undefined;
       const owner = typeof request.sessionID === "string" ? request.sessionID : undefined;
@@ -696,6 +702,18 @@ export class OpenCodeV1Provider implements ChatProvider {
       const fields = pendingPermissionFields(request);
       return [{ requestId, conversationId: owner, ...fields, action: fields.action || "permission" }];
     });
+    // The recovered card names the server as a live one would.
+    const servers = pending.length ? await this.mcpServerNames().catch(() => []) : [];
+    return pending.map(entry => {
+      const mcp = mcpToolFromAction(entry.action, servers);
+      return mcp ? { ...entry, mcp } : entry;
+    });
+  }
+
+  // The reported MCP servers: `mcp.status` answers `{ <name>: { status } }`.
+  private async mcpServerNames(): Promise<string[]> {
+    const response = await this.client.mcp.status({ directory: this.directory });
+    return Object.keys(asRecord(response.data));
   }
 
   async listQuestions(): Promise<PendingQuestion[]> {

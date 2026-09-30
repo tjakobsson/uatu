@@ -10,6 +10,9 @@ import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../../pr
 // Captured from a real OpenCode 2.0.13 `/api/event` stream (sandboxed home,
 // the free public model), workspace directory `/tmp/oc-v2-ws`. The shapes
 // are the contract; the values are whatever the model said that day.
+const MCP_FIXTURES = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/real-2.0.18.json"), "utf8")) as {
+  mcpPermission: Array<Record<string, unknown>>;
+};
 const FIXTURES = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/real-2.0.13.json"), "utf8")) as {
   turnWithPermissionAndTool: Array<Record<string, unknown>>;
   formsShellRenameDelete: Array<Record<string, unknown>>;
@@ -125,6 +128,17 @@ describe("OpenCode 2.x normalization: a real turn", () => {
     const [replied] = byType("permission.replied");
     const [resolved] = upserts(replied!);
     expect(resolved).toMatchObject({ id: request!.id, type: "permission", status: "resolved", outcome: "approved-once" });
+  });
+
+  // A tool-raised request names the call it belongs to; the 2.0.13 capture
+  // asked for an external directory from a `read` call.
+  test("a permission names the tool row of the call it belongs to", () => {
+    const [asked] = byType("permission.asked");
+    const [called] = byType("session.tool.called");
+    const [request] = upserts(asked!);
+    const [row] = upserts(called!);
+    expect(row?.type).toBe("tool");
+    expect(request).toMatchObject({ sourceToolId: row!.id });
   });
 
   test("a step's end carries the message's own usage, model, agent, and prompt", () => {
@@ -436,5 +450,39 @@ describe("form fields as structured questions", () => {
     expect(formFieldToQuestion({ key: "n", type: "number", title: "Ratio", description: "Weight", minimum: 0 }).header).toBe("Weight. Number of at least 0");
     expect(formFieldToQuestion({ key: "n", type: "number", title: "Ratio", description: "Weight" }).header).toBe("Weight");
     expect(formFieldToQuestion({ key: "n", type: "integer", title: "Count", maximum: 5 }).header).toBe("Whole number of at most 5");
+  });
+});
+
+// Captured live from OpenCode 2.0.18 (2026-09-30): the model calls an MCP
+// tool (`tracker/create_issue`, a stdio server in opencode.json) through
+// code mode, and OpenCode asks permission for it. All the request carries
+// about the call is the tool's name, a wildcard resource and save pattern,
+// and `source`, the tool row the arguments live on (GitHub #476).
+describe("OpenCode 2.x normalization: a real MCP tool permission", () => {
+  const { normalized, byType } = run(MCP_FIXTURES.mcpPermission);
+
+  test("nothing in the capture is unrecognized", () => {
+    expect(normalized.filter(entry => entry.outcome === "unrecognized" || entry.outcome === "unparseable").map(entry => entry.eventType)).toEqual([]);
+  });
+
+  test("the request names the tool's name, a wildcard, and the code-mode row that carries the arguments", () => {
+    const [asked] = byType("permission.asked");
+    const [request] = upserts(asked!);
+    expect(request).toMatchObject({
+      type: "permission",
+      status: "pending",
+      action: "tracker_create_issue",
+      resources: ["*"],
+      alwaysPatterns: ["*"],
+      sourceToolId: "tool:call_function_dh8j80sy7yde_1",
+    });
+    expect(request).not.toHaveProperty("diff");
+    // The row it names is the `execute` call, whose input is the code that
+    // holds the arguments. The action name does not match it, so only the
+    // reference joins the two.
+    const [called] = byType("session.tool.called");
+    const [row] = upserts(called!);
+    expect(row).toMatchObject({ id: "tool:call_function_dh8j80sy7yde_1", type: "tool", name: "execute" });
+    expect(row && "input" in row ? row.input : "").toContain("tools.tracker.create_issue");
   });
 });

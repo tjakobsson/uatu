@@ -7159,6 +7159,21 @@ html[data-ui-mode="desktop"]:not(.uatu-desktop-host) .chat-composer {
   font-weight: 600;
 }
 
+/* The arguments of the call a wildcard permission (an MCP tool's) would
+   allow, read from its tool row: the same pre treatment as a tool row's
+   input, bounded like the diff so a long code-mode call scrolls. */
+.chat-request-arguments-lead {
+  margin: 0.45rem 0 0.25rem;
+}
+
+.chat-request-arguments {
+  margin: 0;
+  max-height: 20rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* The plan a Claude Code approval would put into effect. */
 .chat-request-plan {
   border: 1px solid var(--border-medium);

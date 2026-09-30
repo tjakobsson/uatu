@@ -2290,6 +2290,10 @@ export class ChatAdapter {
   private async pump(signal: AbortSignal): Promise<void> {
     const coalescer = new ProviderUpdateCoalescer({
       windowMs: this.coalesceWindowMs,
+      // The window folds repeated upserts the way the projection applies
+      // them, so a sparse frame landing right behind a full one cannot
+      // strip what the full one carried (a 2.x tool call's input).
+      mergeUpsert: mergeInteraction,
       onFlush: (conversationId, updates) => {
         // Not gated on the abort signal: a graceful stop still applies
         // whatever the coalescer buffered in its final window.
@@ -2432,6 +2436,7 @@ export class ChatAdapter {
         ...(request.diff === undefined ? {} : { diff: request.diff }),
         ...(request.plan === undefined ? {} : { plan: request.plan }),
         ...(request.choices === undefined ? {} : { choices: request.choices }),
+        ...(request.sourceToolId === undefined ? {} : { sourceToolId: request.sourceToolId }),
       });
     }
     return items;

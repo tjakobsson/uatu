@@ -1,0 +1,344 @@
+{
+  "_comment": "Captured live from OpenCode 2.0.18 on 2026-09-30: one assistant message calling an MCP tool (tracker/create_issue, a stdio server registered in opencode.json) through code mode, the permission OpenCode asks for it, the once-reply, and the result. The permission carries only the tool name, a wildcard resource and save pattern, empty metadata, and `source`, which names the tool call the arguments live on. Location rewritten to the test workspace.",
+  "mcpPermission": [
+    {
+      "id": "evt_0f1558a220016iAXCMta4ASYKv",
+      "created": 1790755310114,
+      "type": "session.step.started",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "agent": "build",
+        "model": {
+          "id": "big-pickle",
+          "providerID": "opencode",
+          "variant": "default"
+        },
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "started": 1790755308759
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 16,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558a230018OThHlQpXovVWh",
+      "created": 1790755310115,
+      "type": "session.reasoning.started",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "ordinal": 0,
+        "state": {
+          "reasoningField": "reasoning_content"
+        }
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 17,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558a8a001GALZ7kmKbjszMj",
+      "created": 1790755310218,
+      "type": "session.reasoning.delta",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "ordinal": 0,
+        "delta": "Now call"
+      }
+    },
+    {
+      "id": "evt_0f1558bae001s3zzkDGzTrhH1M",
+      "created": 1790755310510,
+      "type": "session.reasoning.delta",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "ordinal": 0,
+        "delta": " the tool."
+      }
+    },
+    {
+      "id": "evt_0f1558bae002rwWw46bus72XAV",
+      "created": 1790755310510,
+      "type": "session.tool.input.started",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "id": "call_function_dh8j80sy7yde_1",
+        "name": "execute"
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 18,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558bb9001OYS4lW0JamdgdF",
+      "created": 1790755310521,
+      "type": "session.tool.progress",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "id": "call_function_dh8j80sy7yde_1",
+        "metadata": {
+          "toolCalls": [
+            {
+              "tool": "tracker.create_issue",
+              "status": "running",
+              "input": {
+                "title": "Login fails on Safari",
+                "body": "Steps: open /login in Safari 18, submit valid credentials, observe a blank page.",
+                "labels": [
+                  "bug",
+                  "safari"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "evt_0f1558bb0001mW0jvToB6QDCQ9",
+      "created": 1790755310512,
+      "type": "session.reasoning.ended",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "ordinal": 0,
+        "text": "Now call the tool.",
+        "state": {
+          "reasoningField": "reasoning_content"
+        }
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 19,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558bb20017K2rqrwClnHJ72",
+      "created": 1790755310514,
+      "type": "session.tool.called",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "id": "call_function_dh8j80sy7yde_1",
+        "input": {
+          "code": "const res = await tools.tracker.create_issue({\n  title: \"Login fails on Safari\",\n  body: \"Steps: open /login in Safari 18, submit valid credentials, observe a blank page.\",\n  labels: [\"bug\", \"safari\"],\n});\nreturn res;"
+        },
+        "executed": false
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 21,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558bb1001547xu3iqRClJOR",
+      "created": 1790755310513,
+      "type": "session.tool.input.ended",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "id": "call_function_dh8j80sy7yde_1",
+        "text": "{\"code\": \"const res = await tools.tracker.create_issue({\\n  title: \\\"Login fails on Safari\\\",\\n  body: \\\"Steps: open /login in Safari 18, submit valid credentials, observe a blank page.\\\",\\n  labels: [\\\"bug\\\", \\\"safari\\\"],\\n});\\nreturn res;\"}"
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 20,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558bb20028tP7AgGuZ0FrQU",
+      "created": 1790755310514,
+      "type": "session.step.streamed",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2"
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 22,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558bbb002unfwzOhD9Lkpxc",
+      "created": 1790755310523,
+      "type": "permission.asked",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "id": "per_0f1558bbb001D88iNjSJaPyPrm",
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "action": "tracker_create_issue",
+        "resources": [
+          "*"
+        ],
+        "save": [
+          "*"
+        ],
+        "metadata": {},
+        "source": {
+          "type": "tool",
+          "messageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+          "id": "call_function_dh8j80sy7yde_1"
+        }
+      }
+    },
+    {
+      "id": "evt_0f1558c0c0017DRTKaePS5TW89",
+      "created": 1790755310604,
+      "type": "permission.replied",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "requestID": "per_0f1558bbb001D88iNjSJaPyPrm",
+        "reply": "once"
+      }
+    },
+    {
+      "id": "evt_0f1558c14001gQkIEhFeGXEN2d",
+      "created": 1790755310612,
+      "type": "session.step.ended",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "finish": "tool-calls",
+        "rawFinish": "tool_calls",
+        "cost": 0,
+        "tokens": {
+          "input": 113,
+          "output": 80,
+          "reasoning": 7,
+          "cache": {
+            "read": 6496,
+            "write": 0
+          }
+        }
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 24,
+        "version": 1
+      }
+    },
+    {
+      "id": "evt_0f1558c12001Lwb9ywXrJ21PYa",
+      "created": 1790755310610,
+      "type": "session.tool.progress",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "id": "call_function_dh8j80sy7yde_1",
+        "metadata": {
+          "toolCalls": [
+            {
+              "tool": "tracker.create_issue",
+              "status": "completed",
+              "input": {
+                "title": "Login fails on Safari",
+                "body": "Steps: open /login in Safari 18, submit valid credentials, observe a blank page.",
+                "labels": [
+                  "bug",
+                  "safari"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "evt_0f1558c13001ZgW1G7nKI6Jjn3",
+      "created": 1790755310611,
+      "type": "session.tool.success",
+      "location": {
+        "directory": "/tmp/oc-v2-ws"
+      },
+      "data": {
+        "sessionID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "assistantMessageID": "msg_0f15584d1001RGtDlucnI3wLX2",
+        "id": "call_function_dh8j80sy7yde_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "Filed #42: Login fails on Safari (80 chars, labels: bug, safari)"
+          }
+        ],
+        "metadata": {
+          "toolCalls": [
+            {
+              "tool": "tracker.create_issue",
+              "status": "completed",
+              "input": {
+                "title": "Login fails on Safari",
+                "body": "Steps: open /login in Safari 18, submit valid credentials, observe a blank page.",
+                "labels": [
+                  "bug",
+                  "safari"
+                ]
+              }
+            }
+          ],
+          "truncated": false
+        },
+        "executed": false
+      },
+      "durable": {
+        "aggregateID": "ses_f0eaa830bffeFwCNhjQDA7OsGC",
+        "seq": 23,
+        "version": 2
+      }
+    }
+  ]
+}

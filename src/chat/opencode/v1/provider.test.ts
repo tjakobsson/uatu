@@ -540,8 +540,10 @@ describe("OpenCode v2 identity policy", () => {
           { id: "perm_edit", sessionID: "ses_a", action: "edit", resources: ["src/app.ts"], save: ["src/app.ts"], metadata: { diff: "@@ -1 +1 @@\n-old\n+new" } },
           { id: "perm_cmd", sessionID: "ses_a", permission: "shell", patterns: ["bun test"], always: ["bun test *"] },
           { id: "perm_bare", sessionID: "ses_a", permission: "skill", patterns: ["review-code"] },
+          { id: "perm_mcp", sessionID: "ses_a", permission: "tracker_create_issue", patterns: ["*"], always: ["*"], metadata: {}, tool: { messageID: "msg_1", callID: "call_1" } },
         ] }),
       },
+      mcp: { status: async () => ({ data: { tracker: { status: "connected" } } }) },
     } as unknown as OpencodeClient;
     const pending = await new OpenCodeV1Provider(client, "/workspace").listPermissions();
     // The edit's diff rides along — a card rebuilt from this list is shown to
@@ -552,7 +554,37 @@ describe("OpenCode v2 identity policy", () => {
       { requestId: "perm_edit", conversationId: "ses_a", action: "edit", resources: ["src/app.ts"], alwaysPatterns: ["src/app.ts"], diff: "@@ -1 +1 @@\n-old\n+new" },
       { requestId: "perm_cmd", conversationId: "ses_a", action: "shell", resources: ["bun test"], alwaysPatterns: ["bun test *"] },
       { requestId: "perm_bare", conversationId: "ses_a", action: "skill", resources: ["review-code"], alwaysPatterns: [] },
+      // An MCP tool's request names nothing but the tool; the call it belongs
+      // to rides along so the card can show its arguments.
+      { requestId: "perm_mcp", conversationId: "ses_a", action: "tracker_create_issue", resources: ["*"], alwaysPatterns: ["*"], sourceToolId: "tool:call_1", mcp: { server: "tracker", tool: "create_issue" } },
     ]);
+  });
+
+  test("a live ask for an MCP tool names its server and tool, resolved against mcp.status", async () => {
+    const stream = (events: unknown[]) => ({
+      async *[Symbol.asyncIterator]() { for (const event of events) yield event; },
+    });
+    const asks = [
+      { id: "e1", type: "permission.v2.asked", data: { id: "p1", sessionID: "s", action: "tracker_create_issue", resources: ["*"], save: ["*"] } },
+      { id: "e2", type: "permission.v2.asked", data: { id: "p2", sessionID: "s", action: "bash", resources: ["ls"] } },
+    ];
+    let statusCalls = 0;
+    const client = {
+      event: { subscribe: async () => ({ stream: stream([]) }) },
+      v2: { event: { subscribe: async () => ({ stream: stream(asks) }) } },
+      mcp: { status: async () => { statusCalls += 1; return { data: { tracker: { status: "connected" } } }; } },
+    } as unknown as OpencodeClient;
+    const provider = new OpenCodeV1Provider(client, "/workspace");
+    const seen: Array<Record<string, unknown>> = [];
+    for await (const event of provider.events(new AbortController().signal)) {
+      for (const update of event.updates) if (update.kind === "upsert" && update.item.type === "permission") seen.push(update.item as unknown as Record<string, unknown>);
+    }
+    expect(seen.map(item => ({ action: item.action, mcp: item.mcp }))).toEqual([
+      { action: "tracker_create_issue", mcp: { server: "tracker", tool: "create_issue" } },
+      // A built-in action misses, refetches once, and stays bare.
+      { action: "bash", mcp: undefined },
+    ]);
+    expect(statusCalls).toBe(2);
   });
 
   test("pending questions enable custom answers unless explicitly disabled", async () => {

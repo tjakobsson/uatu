@@ -50,6 +50,27 @@ describe("ProviderUpdateCoalescer", () => {
     expect(sink.flushes[0]!.updates).toEqual([progressed]);
   });
 
+  // What the adapter's projection would have done had the two frames been
+  // applied one after the other: OpenCode 2.x follows a `session.tool.called`
+  // (input) with a `session.tool.progress` (no input) inside one window, and
+  // a plain replacement leaves the row without its input for good.
+  test("folds a sparse later upsert into the buffered one when given a merge", async () => {
+    const sink = collect();
+    const coalescer = new ProviderUpdateCoalescer({
+      windowMs: 5,
+      onFlush: sink.onFlush,
+      mergeUpsert: (current, incoming) => current.type === "tool" && incoming.type === "tool" ? { ...current, ...incoming, input: incoming.input ?? current.input } : incoming,
+    });
+    const called: NormalizedProviderUpdate = { kind: "upsert", item: { id: "tool:1", type: "tool", createdAt: 1, name: "execute", status: "running", input: "{\"code\":\"tools.tracker.create_issue()\"}" } };
+    const progressed: NormalizedProviderUpdate = { kind: "upsert", item: { id: "tool:1", type: "tool", createdAt: 1, name: "execute", status: "running", output: "…" } };
+    coalescer.push("c1", [called]);
+    coalescer.push("c1", [progressed]);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await coalescer.settled();
+    expect(sink.flushes).toHaveLength(1);
+    expect(sink.flushes[0]!.updates).toEqual([{ kind: "upsert", item: { id: "tool:1", type: "tool", createdAt: 1, name: "execute", status: "running", input: "{\"code\":\"tools.tracker.create_issue()\"}", output: "…" } }]);
+  });
+
   test("status updates and terminal tool states flush immediately", async () => {
     const sink = collect();
     const coalescer = new ProviderUpdateCoalescer({ windowMs: 5_000, onFlush: sink.onFlush });

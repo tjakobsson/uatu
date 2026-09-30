@@ -128,6 +128,7 @@ export class TimelineRenderer {
       }
     }
     const activeRequests = new Set<string>([...activeByOwner.values()].map(entry => entry.id));
+    const toolRows = toolRowIndex(projection.items);
 
     const todoLabels = todoActivityLabels(projection.items);
     const durations = turnDurations(projection.items);
@@ -182,7 +183,12 @@ export class TimelineRenderer {
       // else drops out so the set cannot hold a stale id.
       const confirming = this.confirming.has(item.id) && item.type === "permission" && item.status === "pending" && active;
       if (!confirming) this.confirming.delete(item.id);
-      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming)].join("\u0001");
+      // The tool row a pending permission belongs to, when the card would
+      // show its arguments. Part of the key: the row's input can land after
+      // the card first rendered (a recovered request, a 1.x part under
+      // load), and the card must fill in when it does.
+      const linkedTool = item.type === "permission" ? linkedToolRow(item, toolRows) : undefined;
+      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming), linkedTool?.id ?? "", linkedTool?.input ?? ""].join("\u0001");
       if (entry?.shellVariant !== undefined && entry.item === item && entry.active === active && entry.variant === variant
         && entry.shellVariant === this.shellVariant(entry.node, item.id)) {
         nodes.set(item.id, entry.node);
@@ -234,7 +240,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer, confirming);
+      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer, confirming, linkedTool);
       const node = buildNode(markup(this.deferClosedActivity));
       if (this.deferClosedActivity && node.matches("details.chat-activity:not([open])")) {
         node.setAttribute("data-chat-lazy", "");
@@ -1174,7 +1180,7 @@ export class RevertedMessagesDockRenderer {
 
 type RequestOrigin = { conversationId: string; label: string };
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false, linkedTool?: ToolItem): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A prompt a scheduled wakeup submitted opens that wakeup's turn. It is
@@ -1241,7 +1247,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
     }).join("");
     return `<section class="chat-item chat-task-progress" data-chat-item-id="${id}"${stamp} aria-label="Task progress"><header class="chat-task-progress-header">Tasks <span class="chat-task-progress-count">${done}/${item.entries.length}</span></header><ol class="chat-task-list">${rows}</ol></section>`;
   }
-  if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents, permissionScopeNote, confirming);
+  if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents, permissionScopeNote, confirming, linkedTool);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, origin, allowSubagents);
   if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents, deferClosed);
   // A command's text is the subject, not the label. As a label it lands in the
@@ -1518,7 +1524,7 @@ function requestOrigin(origin: RequestOrigin | undefined, allowSubagents: boolea
   return `<p class="chat-request-origin">Requested by ${escapeHtml(origin.label)}. <button type="button" data-open-conversation="${escapeHtmlAttribute(origin.conversationId)}">Open transcript</button></p>`;
 }
 
-function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true, permissionScopeNote?: string, confirming = false): string {
+function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, origin?: RequestOrigin, allowSubagents = true, permissionScopeNote?: string, confirming = false, linkedTool?: ToolItem): string {
   const pending = item.status === "pending";
   // `approved-session` is the transported value and stays; "Allow always" is
   // the human-facing text, because under every agent that offers it the
@@ -1551,7 +1557,89 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // The plan the approval would put into effect, rendered while the request
   // is open — the user approves what they can read, not a summary line.
   const planPreview = pending && item.plan ? `<div class="chat-request-plan">${renderChatMarkdown(item.plan)}</div>` : "";
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${planPreview}${changePreview}${body}</details>`;
+  // A request that names no resource of its own (OpenCode's ask for an MCP
+  // tool carries the tool's name and a `*`) shows the arguments of the call
+  // it would allow instead, read from the tool row it belongs to. Only while
+  // open, like the diff: once answered the call is on its own row. Without a
+  // row to read, the card is exactly what OpenCode sent.
+  const callArguments = pending && linkedTool ? permissionCallArguments(linkedTool.input) : undefined;
+  const argumentsPreview = callArguments
+    ? `<p class="chat-tool-meta chat-request-arguments-lead">Would run with these arguments</p><pre class="chat-request-arguments">${escapeHtml(callArguments)}</pre>`
+    : "";
+  const resources = callArguments ? [] : item.resources;
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(permissionTitle(item))}${summaryTrace}</summary>${requestOrigin(origin, allowSubagents)}<ul>${resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${argumentsPreview}${planPreview}${changePreview}${body}</details>`;
+}
+
+/**
+ * What the summary calls the request: an MCP tool by its server and tool,
+ * as the owning agent resolved them (`MCP github › create_issue`), else the
+ * action as sent. The Allow-always confirmation keeps the raw action in
+ * both cases, since that string is the rule the agent installs.
+ */
+export function permissionTitle(item: Pick<Extract<ConversationItem, { type: "permission" }>, "action" | "mcp">): string {
+  return item.mcp ? `MCP ${item.mcp.server} › ${item.mcp.tool}` : item.action;
+}
+
+/**
+ * Whether a permission says nothing specific about what it would allow: no
+ * resource, or only wildcards, and neither a diff nor a plan to show. Such
+ * a request is what OpenCode raises for an MCP tool call, and its card has
+ * nothing to show unless it reads the call itself.
+ */
+export function isWildcardPermission(item: Pick<Extract<ConversationItem, { type: "permission" }>, "resources" | "diff" | "plan">): boolean {
+  return item.diff === undefined && item.plan === undefined && item.resources.every(resource => resource.trim() === "*");
+}
+
+type ToolRowIndex = { byId: Map<string, ToolItem>; openByName: Map<string, ToolItem> };
+
+/**
+ * The conversation's tool rows, by id, and the newest row per tool name
+ * that has not yet finished, for the fallback when a request does not name
+ * its call. OpenCode asks at execution, so the row asking is the one still
+ * running under the request's action name.
+ */
+export function toolRowIndex(items: readonly ConversationItem[]): ToolRowIndex {
+  const byId = new Map<string, ToolItem>();
+  const openByName = new Map<string, ToolItem>();
+  for (const item of items) {
+    if (item.type !== "tool") continue;
+    byId.set(item.id, item);
+    if (item.status === "pending" || item.status === "running") openByName.set(item.name, item);
+  }
+  return { byId, openByName };
+}
+
+/**
+ * The tool row a wildcard permission would read its arguments from: the row
+ * the agent named (2.x `source`, the 1.x classic `tool.callID`), else the
+ * open row under the request's action name. A request that names specific
+ * resources, a diff, or a plan reads nothing; it already shows what it
+ * would allow. A named row that is not in the conversation yet yields
+ * nothing rather than a guess by name.
+ */
+export function linkedToolRow(item: Extract<ConversationItem, { type: "permission" }>, index: ToolRowIndex): ToolItem | undefined {
+  if (item.status !== "pending" || !isWildcardPermission(item)) return undefined;
+  if (item.sourceToolId !== undefined) return index.byId.get(item.sourceToolId);
+  return index.openByName.get(item.action);
+}
+
+/**
+ * A tool row's input as the lines a permission card shows: one `key: value`
+ * per argument, a multi-line string value (code-mode's `code`) on lines of
+ * its own so the call reads as it was written. Input that is not a JSON
+ * object is shown as it is. Nothing is summarized or reordered.
+ */
+export function permissionCallArguments(input: string | undefined): string | undefined {
+  if (input === undefined || input.trim() === "") return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(input); } catch { return input; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return input;
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length === 0) return "(no arguments)";
+  return entries.map(([key, value]) => {
+    if (typeof value === "string" && value.includes("\n")) return `${key}:\n${value}`;
+    return `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`;
+  }).join("\n");
 }
 
 // The three shapes a pending card's choices take. Agent intents replace the

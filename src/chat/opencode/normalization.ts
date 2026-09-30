@@ -844,13 +844,27 @@ export function permissionOutcome(value: unknown): "approved-once" | "approved-s
 // OpenCode installs nothing then and the card should say so rather than guess.
 // Empty strings are dropped: the client validator refuses them, and a
 // server item the client cannot parse would loop the stream through resync.
-export function pendingPermissionFields(data: RecordValue): { action: string; resources: string[]; alwaysPatterns: string[]; diff?: string } {
+export function pendingPermissionFields(data: RecordValue): { action: string; resources: string[]; alwaysPatterns: string[]; diff?: string; sourceToolId?: string } {
   return {
     action: text(data.action ?? data.permission),
     resources: stringArray(data.resources ?? data.patterns).filter(Boolean),
     alwaysPatterns: stringArray(data.always ?? data.save).filter(Boolean),
     ...permissionDiff(data),
+    ...permissionSourceTool(data),
   };
+}
+
+// The tool call a permission belongs to, as the timeline id of its row.
+// 2.x names it on every tool-raised request (`source: { type: "tool",
+// messageID, id }`, captured live from 2.0.18 for an MCP tool: the `id` is
+// the call id the tool row was minted from, `tool:<id>`). The classic 1.x
+// request records `tool: { messageID, callID }` server-side; read here too
+// in case the bridged event carries it. Nothing on either spelling yields
+// nothing to spread, and the client falls back on the action name.
+export function permissionSourceTool(data: RecordValue): { sourceToolId?: string } {
+  const source = record(data.source);
+  const id = source.type === "tool" ? optionalString(source.id) : optionalString(record(data.tool).callID);
+  return id ? { sourceToolId: `tool:${id}` } : {};
 }
 
 // The change a file-edit permission would apply, when the agent attaches one.

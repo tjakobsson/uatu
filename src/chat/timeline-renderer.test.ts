@@ -12,7 +12,7 @@ beforeAll(() => {
 // ordering tests around drafts look past it.
 const withoutDays = (host: Element) => Array.from(host.children).filter(child => !child.classList.contains("chat-day-separator"));
 
-const { QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, materializeChatActivity, awaitingFirstResponse, formatElapsed, subagentEntries, subagentLabel, workingLabel } = await import("./timeline-renderer");
+const { QueueDockRenderer, RevertedMessagesDockRenderer, TimelineRenderer, materializeChatActivity, awaitingFirstResponse, formatElapsed, permissionCallArguments, subagentEntries, subagentLabel, workingLabel } = await import("./timeline-renderer");
 // The track's one-line summary reads the same entries, so what the entries
 // say about a running run is checked where the entries are built.
 const { subagentTrackSummary } = await import("./receipt-view");
@@ -2452,5 +2452,124 @@ describe("day separators", () => {
       Reflect.set(globalThis, "setTimeout", realSetTimeout);
       Reflect.set(globalThis, "clearTimeout", realClearTimeout);
     }
+  });
+});
+
+// GitHub #476: OpenCode's ask for an MCP tool carries the tool's name and a
+// `*`, nothing about the call. The arguments live on the tool row the
+// request belongs to (2.x names it in `source`; 1.x's classic event in
+// `tool.callID`), and the card reads them from there while it is open.
+describe("a wildcard permission shows the call it would allow", () => {
+  const codeRow: ConversationItem = {
+    id: "tool:call_function_dh8j80sy7yde_1",
+    type: "tool",
+    createdAt: 2,
+    name: "execute",
+    status: "running",
+    input: JSON.stringify({ code: 'const res = await tools.tracker.create_issue({\n  title: "Login fails on Safari",\n  labels: ["bug", "safari"],\n});\nreturn res;' }),
+  };
+  const directRow: ConversationItem = {
+    id: "tool:call_direct",
+    type: "tool",
+    createdAt: 2,
+    name: "tracker_create_issue",
+    status: "running",
+    input: JSON.stringify({ title: "Login fails on Safari", body: "Steps: open /login.", labels: ["bug", "safari"] }),
+  };
+  const asked = (overrides: Partial<Extract<ConversationItem, { type: "permission" }>> = {}): ConversationItem => ({
+    id: "permission:per_mcp",
+    type: "permission",
+    createdAt: 3,
+    requestId: "per_mcp",
+    action: "tracker_create_issue",
+    resources: ["*"],
+    alwaysPatterns: ["*"],
+    status: "pending",
+    ...overrides,
+  });
+  function render(items: ConversationItem[]): HTMLElement {
+    const host = target();
+    new TimelineRenderer().render(host, projectionWith(items), new Set());
+    return host;
+  }
+  const card = (host: HTMLElement) => host.querySelector('[data-chat-item-id="permission:per_mcp"]') as HTMLElement;
+
+  test("the row the request names supplies the arguments, and the bare wildcard is not drawn", () => {
+    const host = render([codeRow, asked({ sourceToolId: codeRow.id })]);
+    const pre = card(host).querySelector(".chat-request-arguments") as HTMLElement;
+    expect(pre.textContent).toContain('title: "Login fails on Safari"');
+    expect(pre.textContent).toContain("tools.tracker.create_issue");
+    expect(card(host).querySelectorAll("li")).toHaveLength(0);
+    // The action stays the tool's name as OpenCode sent it.
+    expect(card(host).querySelector("summary")!.textContent).toContain("Permission: tracker_create_issue");
+    // The choices are still where they were.
+    expect([...card(host).querySelectorAll("[data-permission-outcome]")]).toHaveLength(3);
+  });
+
+  test("the summary names the MCP server and tool, and the confirmation keeps the raw action", () => {
+    const host = render([codeRow, asked({ sourceToolId: codeRow.id, mcp: { server: "github", tool: "create_issue" }, action: "github_create_issue" })]);
+    expect(card(host).querySelector("summary")!.textContent).toContain("Permission: MCP github › create_issue");
+    expect(card(host).querySelector("summary")!.textContent).not.toContain("github_create_issue");
+    // The stage names what OpenCode installs: the action as sent.
+    const confirming = new TimelineRenderer();
+    const staged = target();
+    const items = [codeRow, asked({ sourceToolId: codeRow.id, mcp: { server: "github", tool: "create_issue" }, action: "github_create_issue" })];
+    confirming.render(staged, projectionWith(items), new Set());
+    confirming.confirming.add("permission:per_mcp");
+    confirming.render(staged, projectionWith(items), new Set());
+    expect(staged.querySelector(".chat-request-confirm-action")!.textContent).toBe("github_create_issue");
+    // Unresolved: the action as sent.
+    const bare = render([asked()]);
+    expect(bare.querySelector("summary")!.textContent).toContain("Permission: tracker_create_issue");
+  });
+
+  test("a request that names no row falls back to the open row under its action name", () => {
+    const host = render([directRow, asked()]);
+    const pre = card(host).querySelector(".chat-request-arguments") as HTMLElement;
+    expect(pre.textContent).toBe('title: Login fails on Safari\nbody: Steps: open /login.\nlabels: ["bug","safari"]');
+  });
+
+  test("a named row that is not in the conversation yields today's card, not a guess by name", () => {
+    const host = render([directRow, asked({ sourceToolId: "tool:call_elsewhere" })]);
+    expect(card(host).querySelector(".chat-request-arguments")).toBeNull();
+    expect([...card(host).querySelectorAll("li code")].map(node => node.textContent)).toEqual(["*"]);
+  });
+
+  test("a finished row under the action name is not the call being asked about", () => {
+    const host = render([{ ...directRow, status: "completed" } as ConversationItem, asked()]);
+    expect(card(host).querySelector(".chat-request-arguments")).toBeNull();
+    expect([...card(host).querySelectorAll("li code")].map(node => node.textContent)).toEqual(["*"]);
+  });
+
+  test("a request naming a specific resource adds no arguments even with a row of the same name open", () => {
+    const bashRow: ConversationItem = { id: "tool:call_bash", type: "tool", createdAt: 2, name: "bash", status: "running", input: JSON.stringify({ command: "git status --short" }) };
+    const host = render([bashRow, asked({ action: "bash", resources: ["git status --short"], alwaysPatterns: ["git status *"], sourceToolId: bashRow.id })]);
+    expect(card(host).querySelector(".chat-request-arguments")).toBeNull();
+    expect([...card(host).querySelectorAll("li code")].map(node => node.textContent)).toEqual(["git status --short"]);
+  });
+
+  test("a resolved card recedes without the block", () => {
+    const host = render([codeRow, asked({ sourceToolId: codeRow.id, status: "resolved", outcome: "approved-once" })]);
+    expect(card(host).querySelector(".chat-request-arguments")).toBeNull();
+    expect([...card(host).querySelectorAll("li code")].map(node => node.textContent)).toEqual(["*"]);
+    expect(card(host).querySelector(".chat-request-trace")!.textContent).toContain("Allowed once");
+  });
+
+  test("the card fills in when the row's input lands after it", () => {
+    const host = target();
+    const renderer = new TimelineRenderer();
+    renderer.render(host, projectionWith([{ ...directRow, input: undefined } as ConversationItem, asked()]), new Set());
+    expect(card(host).querySelector(".chat-request-arguments")).toBeNull();
+    renderer.render(host, projectionWith([directRow, asked()]), new Set());
+    expect(card(host).querySelector(".chat-request-arguments")!.textContent).toContain("Login fails on Safari");
+  });
+
+  test("arguments read one per line, a multi-line value on its own lines, and non-JSON input as it is", () => {
+    expect(permissionCallArguments(JSON.stringify({ title: "A", count: 2, labels: ["x"] }))).toBe('title: A\ncount: 2\nlabels: ["x"]');
+    expect(permissionCallArguments(JSON.stringify({ code: "line 1\nline 2" }))).toBe("code:\nline 1\nline 2");
+    expect(permissionCallArguments("{}")).toBe("(no arguments)");
+    expect(permissionCallArguments("not json")).toBe("not json");
+    expect(permissionCallArguments(undefined)).toBeUndefined();
+    expect(permissionCallArguments("   ")).toBeUndefined();
   });
 });

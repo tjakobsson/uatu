@@ -813,6 +813,19 @@ describe("both OpenCode event naming generations", () => {
     expect(apply([v2Asked]).items()[0]).toEqual(expect.objectContaining({ alwaysPatterns: [] }));
   });
 
+  // The classic event names the tool call the request belongs to
+  // (`tool.callID`, the id the tool row was minted from); the 1.18.29 v2
+  // spelling carries no such reference. A card with the reference can show
+  // the call's arguments; one without falls back on the action name.
+  test("a request names the tool row it belongs to when the event carries the call", () => {
+    expect(apply([liveClassicAsked]).items()[0]).toEqual(expect.objectContaining({ sourceToolId: "tool:call_32030879c1ef480e9cf4a819" }));
+    expect(apply([liveV2Asked]).items()[0]).not.toHaveProperty("sourceToolId");
+    // Announced under both, the reference survives whichever arrives second.
+    for (const order of [[liveClassicAsked, liveV2Asked], [liveV2Asked, liveClassicAsked]]) {
+      expect(apply(order).items()[0]).toEqual(expect.objectContaining({ sourceToolId: "tool:call_32030879c1ef480e9cf4a819" }));
+    }
+  });
+
   test("a later announcement without patterns keeps the ones already known", () => {
     // The v2 schema's `save` is optional. A bridge that announces the same
     // request twice, the second time without it, must not blank the rule.

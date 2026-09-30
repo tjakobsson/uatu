@@ -1,8 +1,18 @@
 import type { NormalizedProviderUpdate } from "./provider";
+import type { ConversationItem } from "./types";
 
 export type CoalescerOptions = {
   windowMs?: number;
   onFlush: (conversationId: string, updates: NormalizedProviderUpdate[]) => void | Promise<void>;
+  // How a later upsert of an item folds into one already buffered for the
+  // same window. Without it the later one replaces the earlier, which loses
+  // whatever the later one omits: OpenCode 2.x announces a tool call's input
+  // on `session.tool.called` and follows it within milliseconds with a
+  // `session.tool.progress` that carries none, and a row the projection
+  // first meets through the sparse frame never learns its input. The
+  // adapter passes the projection's own merge, so the window folds exactly
+  // as the projection would have applied the two frames one after another.
+  mergeUpsert?: (current: ConversationItem, incoming: ConversationItem) => ConversationItem;
 };
 
 const DEFAULT_WINDOW_MS = 50;
@@ -16,6 +26,7 @@ const DEFAULT_WINDOW_MS = 50;
 export class ProviderUpdateCoalescer {
   private readonly windowMs: number;
   private readonly onFlush: CoalescerOptions["onFlush"];
+  private readonly mergeUpsert: CoalescerOptions["mergeUpsert"];
   private readonly buffers = new Map<string, NormalizedProviderUpdate[]>();
   private readonly tails = new Map<string, Promise<void>>();
   private readonly epochs = new Map<string, number>();
@@ -25,6 +36,7 @@ export class ProviderUpdateCoalescer {
   constructor(options: CoalescerOptions) {
     this.windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
     this.onFlush = options.onFlush;
+    this.mergeUpsert = options.mergeUpsert;
   }
 
   push(conversationId: string, updates: NormalizedProviderUpdate[]): void {
@@ -36,7 +48,7 @@ export class ProviderUpdateCoalescer {
     }
     let urgent = false;
     for (const update of updates) {
-      urgent = mergeUpdate(buffer, update) || urgent;
+      urgent = mergeUpdate(buffer, update, this.mergeUpsert) || urgent;
     }
     if (urgent) {
       this.flushConversation(conversationId);
@@ -98,7 +110,7 @@ export class ProviderUpdateCoalescer {
 }
 
 /** Returns true when the update must flush the buffer immediately. */
-function mergeUpdate(buffer: NormalizedProviderUpdate[], update: NormalizedProviderUpdate): boolean {
+function mergeUpdate(buffer: NormalizedProviderUpdate[], update: NormalizedProviderUpdate, mergeUpsert?: CoalescerOptions["mergeUpsert"]): boolean {
   if (update.kind === "status" || update.kind === "remove") {
     buffer.push(update);
     return true;
@@ -128,9 +140,11 @@ function mergeUpdate(buffer: NormalizedProviderUpdate[], update: NormalizedProvi
     return false;
   }
   const index = buffer.findIndex(candidate => candidate.kind === "upsert" && candidate.item.id === update.item.id);
-  if (index >= 0) buffer[index] = update;
-  else buffer.push(update);
-  const item = update.item;
+  const buffered = index >= 0 ? buffer[index] : undefined;
+  const merged: NormalizedProviderUpdate = buffered?.kind === "upsert" && mergeUpsert ? { kind: "upsert", item: mergeUpsert(buffered.item, update.item) } : update;
+  if (index >= 0) buffer[index] = merged;
+  else buffer.push(merged);
+  const item = merged.item;
   if (item.type === "user_message" || item.type === "permission" || item.type === "question" || item.type === "notice" || item.type === "turn_status") return true;
   if ("status" in item && (item.status === "completed" || item.status === "failed" || item.status === "cancelled")) return true;
   return false;

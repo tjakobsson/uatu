@@ -3,6 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
+import { McpServerNames, annotateMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
 import { stableProviderId } from "../message-id";
 import { measureChatWork } from "../../performance";
@@ -57,6 +58,7 @@ export function createOpenCodeV2Provider(options: {
 export class OpenCodeV2Provider implements ChatProvider {
   private readonly historyReuse = new HistoryReuse<StoredMessage[]>();
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
+  private readonly mcpServers = new McpServerNames(() => this.mcpServerNames());
   private readonly normalize: ReturnType<typeof createOpenCodeV2Normalizer>;
   private readonly workspace: string;
   // Slash-command admissions waiting for the stream to name their row: one
@@ -363,6 +365,10 @@ export class OpenCodeV2Provider implements ChatProvider {
           const notificationTurns = this.notificationLifecycle.observe(event, normalized);
           if (notificationTurns.length > 0) { normalized.notificationTurns = notificationTurns; normalized.outcome = "handled"; }
           this.historyReuse.invalidate(normalized.conversationId);
+          // A permission for an MCP tool names its server and tool, resolved
+          // against the servers this OpenCode reports (mcp-tools.ts).
+          if (McpServerNames.changedBy(normalized.eventType)) this.mcpServers.invalidate();
+          normalized.updates = await Promise.all(normalized.updates.map(update => annotateMcpPermission(update, this.mcpServers)));
         } catch {
           normalized = { updates: [], outcome: "unparseable", eventType: "" };
         }
@@ -741,11 +747,23 @@ export class OpenCodeV2Provider implements ChatProvider {
     // The workspace-scoped pending list, with the owning session on each row:
     // filtering is the adapter's job, so a parent can find its children's.
     const { data } = await this.client.permission.request.list(this.scope);
-    return data.flatMap(request => {
+    const pending: PendingPermission[] = data.flatMap(request => {
       if (!request.id || !request.sessionID) return [];
       const fields = pendingPermissionFields(request as Record<string, unknown>);
       return [{ requestId: request.id, conversationId: request.sessionID, ...fields, action: fields.action || "permission" }];
     });
+    // The recovered card names the server as a live one would.
+    const servers = pending.length ? await this.mcpServerNames().catch(() => []) : [];
+    return pending.map(entry => {
+      const mcp = mcpToolFromAction(entry.action, servers);
+      return mcp ? { ...entry, mcp } : entry;
+    });
+  }
+
+  // The reported MCP servers, by the names the user registered.
+  private async mcpServerNames(): Promise<string[]> {
+    const { data } = await this.client.mcp.list(this.scope);
+    return data.map(server => server.name);
   }
 
   async listQuestions(): Promise<PendingQuestion[]> {

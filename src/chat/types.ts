@@ -420,6 +420,19 @@ export type PermissionRequest = TimelineItemBase & {
   choices?: PermissionChoice[];
   // On resolution: which choice approved it, when choices were offered.
   choiceId?: string;
+  // The timeline id of the tool row this permission belongs to (`tool:<call
+  // id>`), when the agent names the call it is asking about (OpenCode 2.x's
+  // `source`). What lets a request that names no resource of its own (an
+  // MCP tool's `*`) show the arguments of the call it would allow. Absent
+  // when the agent did not say; the client then falls back to the running
+  // tool row bearing the request's action name.
+  sourceToolId?: string;
+  // The MCP server and tool the action names, when it is an MCP tool's
+  // registry name (`<server>_<tool>`) and the owning agent resolved it
+  // against the servers it reports. The card names them; the action stays
+  // what the persistent-approval confirmation shows, being the rule the
+  // agent installs. Absent for a built-in tool or an unresolved action.
+  mcp?: { server: string; tool: string };
 };
 
 export type QuestionOption = {

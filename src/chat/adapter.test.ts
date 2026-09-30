@@ -834,6 +834,35 @@ describe("filtered provider event pump", () => {
     events.cancel();
   });
 
+  // OpenCode 2.x announces a tool call's input on `session.tool.called` and
+  // follows it inside the same window with a `session.tool.progress` that
+  // carries none. Replacing the buffered frame with the sparse one left the
+  // row without its input for the rest of its life, and a wildcard
+  // permission pointing at that row had nothing to show (GitHub #476).
+  test("a sparse tool frame in the same window as the call keeps the call's input", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const windowMs = 100;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: windowMs });
+    const pump = adapter.startEventPump();
+    const { events } = await adapter.subscribe("local");
+    const received: ChatEvent[] = [];
+    void (async () => { for await (const event of events) received.push(event); })();
+
+    provider.eventQueue.push({ id: "e-called", type: "session.tool.called", data: { sessionID: "local", callID: "call_1", tool: "execute", input: { code: "await tools.tracker.create_issue({ title: \"Login fails\" })" }, timestamp: 1 } });
+    provider.eventQueue.push({ id: "e-progress", type: "session.tool.progress", data: { sessionID: "local", callID: "call_1", tool: "execute", timestamp: 2 } });
+    for (let i = 0; i < 200 && received.length === 0; i++) await Bun.sleep(10);
+    await Bun.sleep(windowMs * 2);
+    await adapter.stopEventPump();
+    await pump;
+
+    const row = adapter.projectionForTests("local").items().find(item => item.id === "tool:call_1");
+    expect(row).toEqual(expect.objectContaining({ type: "tool", name: "execute", status: "running", input: JSON.stringify({ code: "await tools.tracker.create_issue({ title: \"Login fails\" })" }) }));
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(expect.objectContaining({ type: "item.upsert", item: expect.objectContaining({ id: "tool:call_1", input: expect.stringContaining("create_issue") }) }));
+    events.cancel();
+  });
+
   test("evicts the least recently used idle conversation and keeps subscribed ones", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("a"), fixtureSession("b"), fixtureSession("c")];
@@ -2875,7 +2904,9 @@ describe("pending permission recovery", () => {
     // live announcement, who must not approve an edit without seeing it.
     // So does the rule an "always" reply would install: the recovered card
     // confirms with the same scope the live one would have shown.
-    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], alwaysPatterns: ["review-*"], diff: "@@ -1 +1 @@\n-a\n+b" }];
+    // And the tool row the request belongs to: a wildcard request shows
+    // the call's arguments from that row, recovered or live.
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], alwaysPatterns: ["review-*"], diff: "@@ -1 +1 @@\n-a\n+b", sourceToolId: "tool:call_1" }];
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("local");
@@ -2887,6 +2918,7 @@ describe("pending permission recovery", () => {
       alwaysPatterns: ["review-*"],
       status: "pending",
       diff: "@@ -1 +1 @@\n-a\n+b",
+      sourceToolId: "tool:call_1",
     })]);
 
     await adapter.respondPermission("local", "perm_1", "req-1", "approved-once");
@@ -4480,6 +4512,32 @@ describe("pending permission recovery", () => {
     provider.sessions = [fixtureSession("local")];
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     expect((await adapter.history("local")).items).toEqual([]);
+  });
+
+  test("a reply keeps the tool row the ask named", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // The ask names the call (2.x `source`); the reply names nothing but
+    // the request. The resolved card must still know which row it was about.
+    applyEvent(adapter, "local", {
+      id: "ask",
+      type: "permission.asked",
+      data: { id: "perm_mcp", sessionID: "local", action: "tracker_create_issue", resources: ["*"], save: ["*"], metadata: {}, source: { type: "tool", messageID: "msg_1", id: "call_1" }, timestamp: 10 },
+    } as never);
+    applyEvent(adapter, "local", {
+      id: "reply",
+      type: "permission.replied",
+      data: { sessionID: "local", requestID: "perm_mcp", reply: "once", timestamp: 11 },
+    } as never);
+    expect(adapter.projectionForTests("local").items()).toEqual([expect.objectContaining({
+      id: "permission:perm_mcp",
+      status: "resolved",
+      outcome: "approved-once",
+      action: "tracker_create_issue",
+      resources: ["*"],
+      sourceToolId: "tool:call_1",
+    })]);
   });
 
   test("a resolution whose ask was never projected is suppressed, not published invalid", async () => {
