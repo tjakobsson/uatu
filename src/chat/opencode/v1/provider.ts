@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../../../shared/bounded-map";
 import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
-import { McpServerNames, annotateMcpPermission, mcpToolFromAction } from "../mcp-tools";
+import { McpServerNames, annotateMcpPermission, looksLikeMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { measureChatWork } from "../../performance";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../../history-reuse";
 import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../../provider";
@@ -703,9 +703,10 @@ export class OpenCodeV1Provider implements ChatProvider {
       return [{ requestId, conversationId: owner, ...fields, action: fields.action || "permission" }];
     });
     // The recovered card names the server as a live one would.
-    const servers = pending.length ? await this.mcpServerNames().catch(() => []) : [];
+    const candidates = pending.filter(entry => looksLikeMcpPermission(entry.action, entry.resources));
+    const servers = candidates.length ? await this.mcpServerNames().catch(() => []) : [];
     return pending.map(entry => {
-      const mcp = mcpToolFromAction(entry.action, servers);
+      const mcp = candidates.includes(entry) ? mcpToolFromAction(entry.action, servers) : undefined;
       return mcp ? { ...entry, mcp } : entry;
     });
   }

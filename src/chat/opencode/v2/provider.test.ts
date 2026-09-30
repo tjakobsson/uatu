@@ -1152,7 +1152,9 @@ describe("OpenCode 2.x provider: permissions and forms", () => {
         { id: "per_2", sessionID: "ses_2", action: "edit", resources: ["src/a.ts"], metadata: { diff: "--- a\n+++ b\n" } },
         { id: "per_3", sessionID: "ses_1", action: "tracker_create_issue", resources: ["*"], save: ["*"], metadata: {}, source: { type: "tool", messageID: "msg_b", id: "call_2" } },
       ]),
-      "GET /api/mcp": () => scoped([{ name: "tracker", status: { status: "connected" } }]),
+      // A server named `external` must not claim the built-in
+      // external_directory ask above.
+      "GET /api/mcp": () => scoped([{ name: "tracker", status: { status: "connected" } }, { name: "external", status: { status: "connected" } }]),
     });
     expect(await server.provider().listPermissions()).toEqual([
       // `source` names the tool row the request belongs to; a card rebuilt
@@ -1186,16 +1188,18 @@ describe("OpenCode 2.x provider: permissions and forms", () => {
     await Bun.sleep(10); // the stream is live once its first frame has arrived
     events.frame({ id: "evt_1", created: 1, type: "permission.asked", location: { directory: WORKSPACE }, data: { id: "per_1", sessionID: "ses_1", action: "tracker_create_issue", resources: ["*"], save: ["*"], metadata: {}, source: { type: "tool", messageID: "msg_a", id: "call_1" } } });
     events.frame({ id: "evt_2", created: 2, type: "permission.asked", location: { directory: WORKSPACE }, data: { id: "per_2", sessionID: "ses_1", action: "bash", resources: ["git status"], save: ["git status *"], metadata: {} } });
-    for (let i = 0; i < 400 && seen.length < 2; i++) await Bun.sleep(5);
+    events.frame({ id: "evt_3", created: 3, type: "permission.asked", location: { directory: WORKSPACE }, data: { id: "per_3", sessionID: "ses_1", action: "tracker_directory", resources: ["/etc/*"], save: ["/etc/*"], metadata: {} } });
+    for (let i = 0; i < 400 && seen.length < 3; i++) await Bun.sleep(5);
     controller.abort();
     await pump;
     expect(seen.map(item => ({ action: item.action, mcp: item.mcp }))).toEqual([
       { action: "tracker_create_issue", mcp: { server: "tracker", tool: "create_issue" } },
+      // A built-in action, and an action over a path rather than a
+      // wildcard, are not MCP asks and cost no lookup.
       { action: "bash", mcp: undefined },
+      { action: "tracker_directory", mcp: undefined },
     ]);
-    // One fetch for the hit, one refetch for the miss (a server may have
-    // been registered since); nothing per event otherwise.
-    expect(server.requests("GET", "/api/mcp")).toHaveLength(2);
+    expect(server.requests("GET", "/api/mcp")).toHaveLength(1);
   });
 
   test("a permission reply is one decision on the request's own route", async () => {

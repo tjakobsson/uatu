@@ -3,7 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { OpenCodeNotificationLifecycle } from "../notification-lifecycle";
-import { McpServerNames, annotateMcpPermission, mcpToolFromAction } from "../mcp-tools";
+import { McpServerNames, annotateMcpPermission, looksLikeMcpPermission, mcpToolFromAction } from "../mcp-tools";
 import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
 import { stableProviderId } from "../message-id";
 import { measureChatWork } from "../../performance";
@@ -753,9 +753,10 @@ export class OpenCodeV2Provider implements ChatProvider {
       return [{ requestId: request.id, conversationId: request.sessionID, ...fields, action: fields.action || "permission" }];
     });
     // The recovered card names the server as a live one would.
-    const servers = pending.length ? await this.mcpServerNames().catch(() => []) : [];
+    const candidates = pending.filter(entry => looksLikeMcpPermission(entry.action, entry.resources));
+    const servers = candidates.length ? await this.mcpServerNames().catch(() => []) : [];
     return pending.map(entry => {
-      const mcp = mcpToolFromAction(entry.action, servers);
+      const mcp = candidates.includes(entry) ? mcpToolFromAction(entry.action, servers) : undefined;
       return mcp ? { ...entry, mcp } : entry;
     });
   }

@@ -581,10 +581,10 @@ describe("OpenCode v2 identity policy", () => {
     }
     expect(seen.map(item => ({ action: item.action, mcp: item.mcp }))).toEqual([
       { action: "tracker_create_issue", mcp: { server: "tracker", tool: "create_issue" } },
-      // A built-in action misses, refetches once, and stays bare.
+      // A built-in action is never an MCP ask and costs no lookup.
       { action: "bash", mcp: undefined },
     ]);
-    expect(statusCalls).toBe(2);
+    expect(statusCalls).toBe(1);
   });
 
   test("pending questions enable custom answers unless explicitly disabled", async () => {

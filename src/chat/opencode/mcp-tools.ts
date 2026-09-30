@@ -21,6 +21,25 @@ export function sanitizeMcpName(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
+// OpenCode's own permission actions, on either generation. None of them is
+// an MCP tool, whatever server names are registered.
+const BUILT_IN_ACTIONS: ReadonlySet<string> = new Set([
+  "bash", "shell", "edit", "write", "read", "list", "glob", "grep", "patch", "apply_patch", "webfetch", "websearch",
+  "external_directory", "doom_loop", "skill", "task", "subagent", "question", "todowrite", "todoread", "execute", "permission",
+]);
+
+/**
+ * Whether a permission looks like OpenCode's ask for an MCP tool call: a
+ * non-built-in action with nothing but wildcards for resources, which is
+ * all an MCP tool's ask carries on either generation (1.x `patterns:
+ * ["*"]`, 2.x `resources: ["*"]`). A built-in ask names a path, a command,
+ * or a tool, so a server registered as `external` cannot turn
+ * `external_directory` on `/etc/*` into an MCP call.
+ */
+export function looksLikeMcpPermission(action: string, resources: readonly string[]): boolean {
+  return !BUILT_IN_ACTIONS.has(action) && resources.every(resource => resource.trim() === "*");
+}
+
 /**
  * The server and tool an action resolves to among `servers`, or undefined
  * when it matches none. The longest sanitized server prefix wins, so a
@@ -79,6 +98,7 @@ export class McpServerNames {
  */
 export async function annotateMcpPermission(update: NormalizedProviderUpdate, names: McpServerNames): Promise<NormalizedProviderUpdate> {
   if (update.kind !== "upsert" || update.item.type !== "permission" || update.item.status !== "pending" || update.item.mcp !== undefined) return update;
+  if (!looksLikeMcpPermission(update.item.action, update.item.resources)) return update;
   const mcp = await names.resolve(update.item.action);
   return mcp ? { ...update, item: { ...update.item, mcp } } : update;
 }

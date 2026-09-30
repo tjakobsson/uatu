@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { McpServerNames, mcpToolFromAction, sanitizeMcpName } from "./mcp-tools";
+import { McpServerNames, looksLikeMcpPermission, mcpToolFromAction, sanitizeMcpName } from "./mcp-tools";
 
 describe("mcpToolFromAction", () => {
   test("splits a registered server's sanitized prefix off the action", () => {
@@ -24,6 +24,20 @@ describe("mcpToolFromAction", () => {
     expect(mcpToolFromAction("tracker", ["tracker"])).toBeUndefined();
     expect(mcpToolFromAction("tracker_", ["tracker"])).toBeUndefined();
     expect(mcpToolFromAction("tracker_create_issue", [])).toBeUndefined();
+  });
+});
+
+describe("looksLikeMcpPermission", () => {
+  test("an MCP tool's ask is a non-built-in action over wildcards only", () => {
+    expect(looksLikeMcpPermission("tracker_create_issue", ["*"])).toBe(true);
+    expect(looksLikeMcpPermission("github_create_issue", ["*", "*"])).toBe(true);
+    // A server registered as `external` must not claim the built-in
+    // external_directory ask, which names a path rather than a wildcard.
+    expect(looksLikeMcpPermission("external_directory", ["/etc/*"])).toBe(false);
+    expect(looksLikeMcpPermission("external_directory", ["*"])).toBe(false);
+    expect(looksLikeMcpPermission("bash", ["*"])).toBe(false);
+    expect(looksLikeMcpPermission("tracker_create_issue", ["src/app.ts"])).toBe(false);
+    expect(looksLikeMcpPermission("tracker_create_issue", [])).toBe(true);
   });
 });
 
