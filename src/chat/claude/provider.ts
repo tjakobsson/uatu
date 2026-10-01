@@ -701,13 +701,15 @@ export class ClaudeProvider implements ChatProvider {
     const bare = stripWindowMarker(runs.model);
     const candidates = rows.filter(model => !model.default && stripWindowMarker(resolvedId(model)) === bare);
     // Window variants ("fable" / "fable[1m]") can share one resolved id, so
-    // the window the default runs decides first, then the exact id.
+    // the window the default runs decides first: by a row's served window
+    // once stated, and by its window marker before the walk has landed (both
+    // variants then derive the same figure); the exact id breaks what's left.
     const windowMatches = (model: ChatModel) => runs.window !== undefined && model.contextLimit === runs.window;
+    const markerMatches = (model: ChatModel) => runs.window !== undefined
+      && [model.selection.modelId, model.resolvesTo?.modelId].some(id => id?.includes("[1m]")) === runs.window >= 1_000_000;
     const exact = (model: ChatModel) => resolvedId(model) === runs.model;
-    const match = candidates.find(model => exact(model) && windowMatches(model))
-      ?? candidates.find(windowMatches)
-      ?? candidates.find(exact)
-      ?? candidates[0];
+    const score = (model: ChatModel) => (windowMatches(model) ? 4 : 0) + (markerMatches(model) ? 2 : 0) + (exact(model) ? 1 : 0);
+    const match = candidates.reduce<ChatModel | undefined>((best, model) => (!best || score(model) > score(best) ? model : best), undefined);
     const contextLimit = runs.window ?? match?.contextLimit ?? claudeContextWindow(runs.model);
     let presented: ChatModel;
     if (!match) {

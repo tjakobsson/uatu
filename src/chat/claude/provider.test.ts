@@ -5201,6 +5201,32 @@ describe("windows and the default as Claude Code states them (claude-context-win
     }
   });
 
+  test("before the walk lands the default already picks its variant by window marker", async () => {
+    for (const [runsWindow, listedFirst, expected] of [[200_000, "fable[1m]", "fable"], [1_000_000, "fable", "fable[1m]"]] as const) {
+      const original = currentCatalog.slice();
+      const plain = { value: "fable", resolvedModel: "claude-fable-5-1", displayName: "Fable 5.1", description: "Fable at the standard window", supportedEffortLevels: ["low", "medium", "high"] } as typeof currentCatalog[number];
+      if (listedFirst === "fable") currentCatalog.splice(currentCatalog.findIndex(row => row.value === "fable[1m]"), 0, plain);
+      else currentCatalog.push(plain);
+      const { provider, queries } = windowFixture({ unpinned: { model: "claude-fable-5-1", maxTokens: runsWindow } });
+      try {
+        // Hold every model switch: the first answer is served before any window is stated.
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => (release = resolve));
+        const pending = provider.listModels();
+        await waitFor(() => queries.length === 1);
+        const original = queries[0]!.setModel!;
+        queries[0]!.setModel = async model => { await gate; return original(model); };
+        const first = await pending;
+        expect(find(first, "fable").contextLimit).toBe(find(first, "fable[1m]").contextLimit);
+        expect(find(first, "default").resolvesTo).toEqual({ providerId: "anthropic", modelId: expected });
+        release();
+      } finally {
+        currentCatalog.splice(0, currentCatalog.length, ...original);
+        await provider.dispose();
+      }
+    }
+  });
+
   test("an alias that moves to another model does not keep the old model's window", async () => {
     const original = currentCatalog.slice();
     const { provider } = windowFixture({ behave: model => (model === "haiku" ? { model: "claude-haiku-4-5-20251001", maxTokens: 640_000 } : undefined) });
