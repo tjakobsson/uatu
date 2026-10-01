@@ -540,6 +540,8 @@ export class ClaudeProvider implements ChatProvider {
   // last probe ran: a refresh's unseen rows are probed, throttled.
   private readonly probedRows = new Set<string>();
   private windowProbeAt: number | null = null;
+  // A CLI without the controls to state windows: nothing to re-probe for.
+  private windowControlsMissing = false;
   private readonly windowReprobeCooldownMs: number;
   private readonly windowWalkBudgetMs: number;
   private readonly historyReuse = new HistoryReuse<ReturnType<typeof normalizeTranscriptEntries>>();
@@ -684,6 +686,7 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   private hasUnprobedRows(): boolean {
+    if (this.windowControlsMissing) return false;
     return withMoreModels(this.liveModels ?? []).some(row => !row.default && !this.probedRows.has(probeKey(row)));
   }
 
@@ -851,6 +854,7 @@ export class ClaudeProvider implements ChatProvider {
       this.windowsRead = true;
       this.windowProbeAt = this.now();
       await this.readDefaultRuns(query).catch(() => undefined);
+      if (!query.setModel || !query.getContextUsage) this.windowControlsMissing = true;
       if (query.setModel && query.getContextUsage && !this.disposed) {
         const walked = query;
         handedOff = true;

@@ -5367,6 +5367,21 @@ describe("windows and the default as Claude Code states them (claude-context-win
     }
   });
 
+  test("a CLI without the window controls is not re-probed on later reads", async () => {
+    const { provider, queries } = windowFixture({ controls: false }, { windowReprobeCooldownMs: 0 });
+    try {
+      await provider.listModels();
+      await waitFor(() => queries[0]!.returned);
+      for (let read = 0; read < 3; read += 1) {
+        await provider.listModels();
+        await Bun.sleep(5);
+      }
+      expect(queries).toHaveLength(1);
+    } finally {
+      await provider.dispose();
+    }
+  });
+
   test("probes for new models are throttled", async () => {
     const original = currentCatalog.slice();
     const { provider, queries } = windowFixture({}, { windowReprobeCooldownMs: 60_000 });
