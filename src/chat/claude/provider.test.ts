@@ -5022,7 +5022,7 @@ describe("windows and the default as Claude Code states them (claude-context-win
     contextFails?: boolean;
   };
 
-  function windowFixture(cli: Cli = {}, options: { windowReadTimeoutMs?: number; windowWalkBudgetMs?: number } = {}) {
+  function windowFixture(cli: Cli = {}, options: { windowReadTimeoutMs?: number; windowWalkBudgetMs?: number; windowReprobeCooldownMs?: number } = {}) {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-windows-")));
     const workspace = path.join(root, "workspace");
     mkdirSync(workspace, { recursive: true });
@@ -5330,6 +5330,58 @@ describe("windows and the default as Claude Code states them (claude-context-win
       // The cached normalization is not reused across the default becoming known.
       expect(carrierModel((await provider.listMessages("early-reopen", { limit: 10 })).items as never)).toBe("default");
     } finally {
+      await provider.dispose();
+    }
+  });
+
+  test("a model a later refresh introduces is probed for its window, in the background and only once", async () => {
+    const original = currentCatalog.slice();
+    const { provider, queries } = windowFixture({
+      behave: model => (model === "claude-newer-7" ? { model: "claude-newer-7", maxTokens: 2_000_000 } : undefined),
+    }, { windowReprobeCooldownMs: 0 });
+    try {
+      await settled(provider, served => find(served, "claude-opus-4-7").detail?.includes("1M") === true);
+      await waitFor(() => queries[0]!.returned);
+      // Nothing new: no further probe.
+      await provider.listModels();
+      expect(queries).toHaveLength(1);
+      // A CLI update ships a model; a live session's refresh lists it.
+      currentCatalog.push({ value: "claude-newer-7", resolvedModel: "claude-newer-7", displayName: "Newer 7", description: "Newer 7 · Fresh" } as typeof currentCatalog[number]);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+      await settled(provider, served => served.some(model => model.selection.modelId === "claude-newer-7"));
+      // The read that sees it answers at once, then a probe asks only about it.
+      const stated = await settled(provider, served => find(served, "claude-newer-7").contextLimit === 2_000_000);
+      expect(find(stated, "sonnet").contextLimit).toBe(1_000_000);
+      const reprobe = queries[2]!;
+      expect(reprobe.modelCalls).toEqual(["claude-newer-7"]);
+      expect(queries[1]!.modelCalls).toEqual([]);
+      await waitFor(() => reprobe.returned);
+      // Asked once: no probe after that.
+      await provider.listModels();
+      await Bun.sleep(10);
+      expect(queries).toHaveLength(3);
+    } finally {
+      currentCatalog.splice(0, currentCatalog.length, ...original);
+      await provider.dispose();
+    }
+  });
+
+  test("probes for new models are throttled", async () => {
+    const original = currentCatalog.slice();
+    const { provider, queries } = windowFixture({}, { windowReprobeCooldownMs: 60_000 });
+    try {
+      await settled(provider, served => find(served, "claude-opus-4-7").detail?.includes("1M") === true);
+      currentCatalog.push({ value: "claude-newer-7", resolvedModel: "claude-newer-7", displayName: "Newer 7" } as typeof currentCatalog[number]);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+      await settled(provider, served => served.some(model => model.selection.modelId === "claude-newer-7"));
+      await provider.listModels();
+      await Bun.sleep(10);
+      // Within the cooldown of the first probe: the derived figure, no probe.
+      expect(queries).toHaveLength(2);
+    } finally {
+      currentCatalog.splice(0, currentCatalog.length, ...original);
       await provider.dispose();
     }
   });

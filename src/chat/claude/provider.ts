@@ -199,6 +199,8 @@ export type ClaudeProviderOptions = {
    */
   windowReadTimeoutMs?: number;
   windowWalkBudgetMs?: number;
+  /** Least time between probes for rows a catalog refresh introduced. Tests shorten it. */
+  windowReprobeCooldownMs?: number;
   // Re-read delays for a generated title that lands after the result.
   titleRefreshDelaysMs?: number[];
 };
@@ -534,6 +536,11 @@ export class ClaudeProvider implements ChatProvider {
   private windowWalk: Promise<void> | null = null;
   private readonly disposal = Promise.withResolvers<undefined>();
   private readonly windowReadTimeoutMs: number;
+  // Rows (selection + resolved id) the walk has asked about, and when the
+  // last probe ran: a refresh's unseen rows are probed, throttled.
+  private readonly probedRows = new Set<string>();
+  private windowProbeAt: number | null = null;
+  private readonly windowReprobeCooldownMs: number;
   private readonly windowWalkBudgetMs: number;
   private readonly historyReuse = new HistoryReuse<ReturnType<typeof normalizeTranscriptEntries>>();
   private readonly catalogProbe: boolean;
@@ -626,6 +633,7 @@ export class ClaudeProvider implements ChatProvider {
     this.catalogProbe = options.catalogProbe !== false;
     this.windowReadTimeoutMs = options.windowReadTimeoutMs ?? WINDOW_READ_TIMEOUT_MS;
     this.windowWalkBudgetMs = options.windowWalkBudgetMs ?? WINDOW_WALK_BUDGET_MS;
+    this.windowReprobeCooldownMs = options.windowReprobeCooldownMs ?? CATALOG_PROBE_COOLDOWN_MS;
     this.forkSession = options.forkSession ?? defaultForkSession;
     this.renameNativeSession = options.renameNativeSession ?? defaultRenameSession;
     this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
@@ -673,6 +681,10 @@ export class ClaudeProvider implements ChatProvider {
       };
     });
     return this.presentDefault(rows);
+  }
+
+  private hasUnprobedRows(): boolean {
+    return withMoreModels(this.liveModels ?? []).some(row => !row.default && !this.probedRows.has(probeKey(row)));
   }
 
   private statedWindowFor(model: ChatModel): number | undefined {
@@ -766,9 +778,24 @@ export class ClaudeProvider implements ChatProvider {
    * so a broken install cannot be re-probed on every read.
    */
   private async hydrateCatalog(): Promise<void> {
+    if (!this.catalogProbe || this.disposed) return;
+    if (this.liveModels !== null && this.windowsRead) {
+      // Claude Code updates itself under a running workspace and ships new
+      // models that way; a refreshed catalog with rows no probe has asked
+      // about gets one more probe — in the background, at most once per
+      // cooldown, and only for those rows.
+      if (this.windowWalk || this.hydration || !this.hasUnprobedRows()) return;
+      if (this.windowProbeAt !== null && this.now() - this.windowProbeAt < this.windowReprobeCooldownMs) return;
+      // Throttled from its start, so a probe that fails is not retried on
+      // every read; not awaited, so no read waits on it.
+      this.windowProbeAt = this.now();
+      this.hydration = this.runCatalogProbe()
+        .catch(() => undefined)
+        .finally(() => { this.hydration = null; });
+      return;
+    }
     // A live session can fill the catalog first; the windows and the
     // default's resolution only come from the probe, so it still runs once.
-    if ((this.liveModels !== null && this.windowsRead) || !this.catalogProbe || this.disposed) return;
     if (this.probeFailedAt !== null && this.now() - this.probeFailedAt < CATALOG_PROBE_COOLDOWN_MS) return;
     this.hydration ??= this.runCatalogProbe()
       .then(() => { this.probeFailedAt = null; })
@@ -822,6 +849,7 @@ export class ClaudeProvider implements ChatProvider {
       // the per-model windows cost a model switch each (up to ~2 s for a
       // full id) and fill in behind, served from the next catalog read.
       this.windowsRead = true;
+      this.windowProbeAt = this.now();
       await this.readDefaultRuns(query).catch(() => undefined);
       if (query.setModel && query.getContextUsage && !this.disposed) {
         const walked = query;
@@ -3552,8 +3580,11 @@ export class ClaudeProvider implements ChatProvider {
     if (!query.getContextUsage || !query.setModel || !this.liveModels) return;
     const started = performance.now();
     for (const row of withMoreModels(this.liveModels)) {
-      if (row.default) continue;
+      if (row.default || this.probedRows.has(probeKey(row))) continue;
       if (this.disposed || performance.now() - started > this.windowWalkBudgetMs) return;
+      // Asked once: a row the CLI cannot state (a model this login cannot
+      // use) is not re-asked on every refresh.
+      this.probedRows.add(probeKey(row));
       const set = await bounded(query.setModel(row.selection.modelId).then(() => true), this.windowReadTimeoutMs, this.disposal.promise);
       if (!set) continue;
       const answer = await this.readProbeContext(query);
@@ -4292,4 +4323,9 @@ async function bounded<T>(work: Promise<T>, limitMs: number, cutShort?: Promise<
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/** A row as the window walk knows it: the id it is chosen by and the model it resolves to. */
+function probeKey(model: ChatModel): string {
+  return `${model.selection.modelId}\u0000${model.resolvesTo?.modelId ?? model.selection.modelId}`;
 }
