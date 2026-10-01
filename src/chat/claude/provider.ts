@@ -23,7 +23,7 @@ import { ScheduledWakeupUnavailableError } from "../provider";
 import { TASK_OUTPUT_TAIL_MAX_BYTES, type AgentUsageReport, type BackgroundTaskOutput, type ChatAgent, type ChatCommand, type ChatMode, type ChatModel, type ConversationConfiguration, type ModelSelection, type PermissionRequest, type PlanExtraUsage, type PlanModelWindow, type PlanUtilization, type PlanUtilizationWindow, type QuestionRequest, type ReversibleHistoryResult, type ReversibleHistoryState, type SessionModelTotals, type SessionTotals, type StructuredQuestion, type UsageReadMode, type UsageReadResult } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { nextCronFire } from "./cron";
-import { CLAUDE_MODELS, claudeContextWindow, findClaudeModel, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
+import { CLAUDE_MODELS, MORE_MODELS_GROUP, claudeContextWindow, findClaudeModel, moreModelDetail, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
 import { claudeToolInteraction, createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, settleForegroundRuns, startsAgentRun, taskFacts, type BackgroundTaskFacts, type ClaudeEventMemory } from "./normalization";
 import { ClaudeNotificationLifecycle } from "./notification-lifecycle";
 import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir, transcriptCrons, type TranscriptCron } from "./transcript";
@@ -46,8 +46,11 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
   applyFlagSettings?(settings: Record<string, unknown>): Promise<void>;
   supportedModels?(): Promise<unknown>;
   supportedCommands?(): Promise<unknown>;
-  /** The CLI's own context breakdown (the `/context` data), structurally. */
-  getContextUsage?(): Promise<unknown>;
+  /**
+   * The CLI's own context breakdown (the `/context` data), structurally.
+   * `summary` answers from local estimates without token-count calls.
+   */
+  getContextUsage?(options?: { detail?: "summary" | "full" }): Promise<unknown>;
   /** Stop one background task; the CLI reports a stopped task_notification. */
   stopTask?(taskId: string): Promise<void>;
   /**
@@ -190,6 +193,12 @@ export type ClaudeProviderOptions = {
   backgroundGraceMs?: number;
   /** Bound on an on-demand usage read, cold start included. Tests shorten it. */
   usageReadTimeoutMs?: number;
+  /**
+   * Bounds on the catalog probe's window walk: one model's read, and the
+   * whole walk. Tests shorten them.
+   */
+  windowReadTimeoutMs?: number;
+  windowWalkBudgetMs?: number;
   // Re-read delays for a generated title that lands after the result.
   titleRefreshDelaysMs?: number[];
 };
@@ -207,6 +216,13 @@ const DEFAULT_TITLE = "New conversation";
 export const CLAUDE_PERMISSION_SCOPE_NOTE = "“Allow always” also covers similar requests for the rest of this turn. Nothing is saved to your settings.";
 const CATALOG_PROBE_TIMEOUT_MS = 20_000;
 const CATALOG_PROBE_COOLDOWN_MS = 60_000;
+// The window walk on the probe, run behind the catalog: a summary read
+// answers in milliseconds, but each model switch costs ~0.2 s for an alias
+// and up to ~2 s for a full id (CLI 2.1.281, 2026-10-01), so a full catalog
+// takes ~11 s. The per-step bound leaves room for a slow switch; the walk's
+// bound only stops a CLI that stalls on every row.
+const WINDOW_READ_TIMEOUT_MS = 8_000;
+const WINDOW_WALK_BUDGET_MS = 90_000;
 // One control round-trip after each turn; a CLI that never answers must not
 // hold the session open past this.
 const CONTEXT_REPORT_TIMEOUT_MS = 3_000;
@@ -494,6 +510,22 @@ export class ClaudeProvider implements ChatProvider {
   // before any session has run.
   private liveModels: ChatModel[] | null = null;
   private modelAliases = new Map<string, string>();
+  // What Claude Code itself states before any turn, read on the catalog
+  // probe: each offered row's window, keyed by its selection id, and the
+  // model an unpinned session actually runs in this workspace (settings
+  // applied). Held apart from `liveModels` so a live session's catalog
+  // refresh cannot erase them; applied whenever the catalog is served.
+  private readonly statedWindows = new Map<string, number>();
+  private defaultRuns: { model: string; window?: number } | null = null;
+  // Whether the probe's window walk has run (in full, in part, or not at
+  // all on a CLI without the controls). Only a failed catalog re-probes.
+  private windowsRead = false;
+  // The background walk, while it runs; disposal waits for it to stop, and
+  // `disposal` ends any read it is waiting on rather than its bound.
+  private windowWalk: Promise<void> | null = null;
+  private readonly disposal = Promise.withResolvers<undefined>();
+  private readonly windowReadTimeoutMs: number;
+  private readonly windowWalkBudgetMs: number;
   private readonly historyReuse = new HistoryReuse<ReturnType<typeof normalizeTranscriptEntries>>();
   private readonly catalogProbe: boolean;
   private hydration: Promise<void> | null = null;
@@ -583,6 +615,8 @@ export class ClaudeProvider implements ChatProvider {
     this.queryFactory = options.queryFactory ?? defaultQueryFactory;
     this.offerBypassPermissions = options.offerBypassPermissions === true;
     this.catalogProbe = options.catalogProbe !== false;
+    this.windowReadTimeoutMs = options.windowReadTimeoutMs ?? WINDOW_READ_TIMEOUT_MS;
+    this.windowWalkBudgetMs = options.windowWalkBudgetMs ?? WINDOW_WALK_BUDGET_MS;
     this.forkSession = options.forkSession ?? defaultForkSession;
     this.renameNativeSession = options.renameNativeSession ?? defaultRenameSession;
     this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
@@ -610,9 +644,67 @@ export class ClaudeProvider implements ChatProvider {
   }
   async listModels(): Promise<ChatModel[]> {
     await this.hydrateCatalog();
-    // The catalog's own rows first, then UatuCode's app-only set under its
-    // own group (D3) — never shadowing an id the catalog already offers.
-    return withMoreModels(this.liveModels ?? CLAUDE_MODELS);
+    return this.servedModels();
+  }
+
+  /**
+   * The catalog as every surface sees it: the catalog's own rows first, then
+   * UatuCode's app-only set under its own group (D3) — never shadowing an id
+   * the catalog already offers — with what Claude Code stated applied over
+   * both: each row's window, and the default presented as what it runs.
+   */
+  private servedModels(): ChatModel[] {
+    const rows = withMoreModels(this.liveModels ?? CLAUDE_MODELS).map(model => {
+      const stated = model.default ? undefined : this.statedWindows.get(model.selection.modelId);
+      if (stated === undefined) return model;
+      return {
+        ...model,
+        contextLimit: stated,
+        ...(model.provider === MORE_MODELS_GROUP ? { detail: moreModelDetail(model.selection.modelId, stated) } : {}),
+      };
+    });
+    return this.presentDefault(rows);
+  }
+
+  /**
+   * The recommended default as what it actually runs here: an unpinned
+   * session runs what Claude Code's settings select (user, project,
+   * environment, managed), which can differ from the catalog's account-level
+   * resolution. The row keeps its own name and selection — choosing it still
+   * leaves the resolution to Claude Code — but resolves to, describes,
+   * offers effort for, and measures against the model it runs. Unreported,
+   * the catalog's resolution stands.
+   */
+  private presentDefault(rows: ChatModel[]): ChatModel[] {
+    const runs = this.defaultRuns;
+    const index = rows.findIndex(model => model.default);
+    if (!runs || index < 0) return rows;
+    const entry = rows[index]!;
+    const resolvedId = (model: ChatModel) => model.resolvesTo?.modelId ?? model.selection.modelId;
+    const bare = stripWindowMarker(runs.model);
+    const candidates = rows.filter(model => !model.default && stripWindowMarker(resolvedId(model)) === bare);
+    // Exact id first; among window variants ("fable" / "fable[1m]") the one
+    // whose window is the window the default runs.
+    const match = candidates.find(model => resolvedId(model) === runs.model)
+      ?? candidates.find(model => runs.window !== undefined && model.contextLimit === runs.window)
+      ?? candidates[0];
+    const contextLimit = runs.window ?? match?.contextLimit ?? claudeContextWindow(runs.model);
+    let presented: ChatModel;
+    if (!match) {
+      presented = { ...entry, resolvesTo: { providerId: "anthropic", modelId: runs.model }, detail: `Runs ${runs.model} · Claude Code's own model choice`, contextLimit };
+    } else if (entry.resolvesTo && sameSelection(entry.resolvesTo, match.selection)) {
+      // The catalog already names what runs: its own description stands.
+      presented = { ...entry, contextLimit };
+    } else {
+      presented = { ...entry, resolvesTo: match.selection, contextLimit };
+      if (match.detail) presented.detail = match.detail;
+      else delete presented.detail;
+      if (match.variants) presented.variants = [...match.variants];
+      else delete presented.variants;
+    }
+    const served = [...rows];
+    served[index] = presented;
+    return served;
   }
 
   /**
@@ -623,7 +715,9 @@ export class ClaudeProvider implements ChatProvider {
    * so a broken install cannot be re-probed on every read.
    */
   private async hydrateCatalog(): Promise<void> {
-    if (this.liveModels !== null || !this.catalogProbe || this.disposed) return;
+    // A live session can fill the catalog first; the windows and the
+    // default's resolution only come from the probe, so it still runs once.
+    if ((this.liveModels !== null && this.windowsRead) || !this.catalogProbe || this.disposed) return;
     if (this.probeFailedAt !== null && this.now() - this.probeFailedAt < CATALOG_PROBE_COOLDOWN_MS) return;
     this.hydration ??= this.runCatalogProbe()
       .then(() => { this.probeFailedAt = null; })
@@ -634,11 +728,15 @@ export class ClaudeProvider implements ChatProvider {
 
   private async runCatalogProbe(): Promise<void> {
     const queue = new PushQueue<ClaudeUserEnvelope>();
+    // The query and the stream that keeps it open, handed to the background
+    // window walk once the catalog stands; whoever holds them last closes them.
+    let handedOff = false;
+    let query: ClaudeQueryHandle | undefined;
     try {
       // The workspace cwd on purpose: a promptless probe writes no
       // transcript (nothing to enumerate), and the command inventory must
       // include the workspace's own project commands.
-      const query = this.queryFactory({
+      query = this.queryFactory({
         prompt: queue,
         options: {
           cwd: this.workspacePath,
@@ -652,7 +750,8 @@ export class ClaudeProvider implements ChatProvider {
         // The control channel answers before any turn starts; a promptless
         // stream never emits init, so the catalog is requested immediately
         // while the message stream is merely drained to keep the pump alive.
-        const drain = (async () => { for await (const message of query) this.captureCommands(message); })();
+        const probe = query;
+        const drain = (async () => { for await (const message of probe) this.captureCommands(message); })();
         drain.catch(() => undefined);
         await Promise.race([
           new Promise<never>((_, reject) => {
@@ -665,12 +764,65 @@ export class ClaudeProvider implements ChatProvider {
         if (this.liveModels === null) throw new Error("catalog probe answered nothing");
       } finally {
         if (timer !== undefined) clearTimeout(timer);
-        await query.return?.().catch(() => undefined);
+      }
+      // The catalog stands from here; what follows only refines it, and a
+      // failure keeps the derived figures. What the default runs is one
+      // read of a few milliseconds, so the first picker read carries it;
+      // the per-model windows cost a model switch each (up to ~2 s for a
+      // full id) and fill in behind, served from the next catalog read.
+      this.windowsRead = true;
+      await this.readDefaultRuns(query).catch(() => undefined);
+      if (query.setModel && query.getContextUsage && !this.disposed) {
+        const walked = query;
+        handedOff = true;
+        this.windowWalk = this.readStatedWindows(walked)
+          .catch(() => undefined)
+          .finally(async () => {
+            this.windowWalk = null;
+            await this.closeProbe(walked, queue);
+          });
       }
     } finally {
-      this.probeQuery = null;
-      queue.close();
+      if (!handedOff) await this.closeProbe(query, queue);
     }
+  }
+
+  /**
+   * Settles once the background window walk has finished (or was never
+   * started): what Claude Code stated for every model is served from then.
+   * For callers that need the complete figures, such as the real-CLI test.
+   */
+  async windowsSettled(): Promise<void> {
+    await this.hydration?.catch(() => undefined);
+    await this.windowWalk?.catch(() => undefined);
+  }
+
+  private async closeProbe(query: ClaudeQueryHandle | undefined, queue: PushQueue<ClaudeUserEnvelope>): Promise<void> {
+    await query?.return?.().catch(() => undefined);
+    if (this.probeQuery === query) this.probeQuery = null;
+    queue.close();
+  }
+
+  /** One summary context read on the probe: the model in effect and its window. */
+  private async readProbeContext(query: ClaudeQueryHandle): Promise<{ model?: string; window?: number } | undefined> {
+    const raw = await bounded(query.getContextUsage!({ detail: "summary" }), this.windowReadTimeoutMs, this.disposal.promise);
+    if (!raw || typeof raw !== "object") return undefined;
+    const answer = raw as Record<string, unknown>;
+    const positive = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : undefined);
+    const model = typeof answer.model === "string" && answer.model ? answer.model : undefined;
+    const window = positive(answer.maxTokens) ?? positive(answer.rawMaxTokens);
+    return { ...(model ? { model } : {}), ...(window ? { window } : {}) };
+  }
+
+  /**
+   * What an unpinned session runs in this workspace — the default as Claude
+   * Code's settings resolve it (user, project, environment, managed): the
+   * probe's first read, before any `setModel`, names it and its window.
+   */
+  private async readDefaultRuns(query: ClaudeQueryHandle): Promise<void> {
+    if (!query.getContextUsage) return;
+    const unpinned = await this.readProbeContext(query);
+    if (unpinned?.model) this.defaultRuns = { model: unpinned.model, ...(unpinned.window ? { window: unpinned.window } : {}) };
   }
 
   /**
@@ -693,7 +845,7 @@ export class ClaudeProvider implements ChatProvider {
   async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
     await this.restoreDurableState();
     if (variant !== undefined) {
-      const model = withMoreModels(this.liveModels ?? CLAUDE_MODELS).find(candidate => candidate.selection.modelId === selection.modelId)
+      const model = this.servedModels().find(candidate => candidate.selection.modelId === selection.modelId)
         ?? findClaudeModel(selection.modelId);
       if (!model?.variants?.includes(variant)) {
         throw new UnsupportedVariantSelectionError(`model ${selection.modelId} does not offer effort level ${variant}`);
@@ -1180,11 +1332,13 @@ export class ClaudeProvider implements ChatProvider {
   async dispose(): Promise<void> {
     this.historyReuse.dispose();
     this.disposed = true;
+    this.disposal.resolve(undefined);
     for (const timer of this.titleRefreshTimers.values()) clearTimeout(timer);
     this.titleRefreshTimers.clear();
     // Nothing durable may still be in flight when the workspace stops.
     await this.persistChain.catch(() => undefined);
     await this.probeQuery?.return?.().catch(() => undefined);
+    await this.windowWalk?.catch(() => undefined);
     const usageProbe = this.usageProbe;
     if (usageProbe) {
       this.usageProbe = null;
@@ -3332,6 +3486,33 @@ export class ClaudeProvider implements ChatProvider {
     this.events_.push({ ...normalized, conversationId });
   }
 
+  /**
+   * Claude Code states each model's window before any turn: on the probe's
+   * promptless session, `setModel` and a summary context read answer it
+   * with no model call and no tokens. Runs behind the catalog — a model
+   * switch costs up to ~2 s for a full id — and each window is served from
+   * the first catalog read after it lands. A row's answer counts only when
+   * it names the row's own model: a `setModel` the CLI ignored (a model the
+   * login cannot use) must not lend the row another model's window. Only
+   * ever on the probe's own query — a live conversation's model is never
+   * touched.
+   */
+  private async readStatedWindows(query: ClaudeQueryHandle): Promise<void> {
+    if (!query.getContextUsage || !query.setModel || !this.liveModels) return;
+    const started = performance.now();
+    for (const row of withMoreModels(this.liveModels)) {
+      if (row.default) continue;
+      if (this.disposed || performance.now() - started > this.windowWalkBudgetMs) return;
+      const set = await bounded(query.setModel(row.selection.modelId).then(() => true), this.windowReadTimeoutMs, this.disposal.promise);
+      if (!set) continue;
+      const answer = await this.readProbeContext(query);
+      const expected = stripWindowMarker(row.resolvesTo?.modelId ?? row.selection.modelId);
+      if (answer?.window && answer.model && stripWindowMarker(answer.model) === expected) {
+        this.statedWindows.set(row.selection.modelId, answer.window);
+      }
+    }
+  }
+
   private async captureModels(query: ClaudeQueryHandle): Promise<void> {
     if (!query.supportedModels) return;
     try {
@@ -4040,4 +4221,20 @@ function defaultQueryFactory(input: ClaudeQueryInput): ClaudeQueryHandle {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { query } = require("@anthropic-ai/claude-agent-sdk") as typeof import("@anthropic-ai/claude-agent-sdk");
   return query(input as never) as unknown as ClaudeQueryHandle;
+}
+
+function sameSelection(left: ModelSelection, right: ModelSelection): boolean {
+  return left.providerId === right.providerId && left.modelId === right.modelId;
+}
+
+/** A control answer, or undefined when it fails, outlasts its bound, or is cut short. */
+async function bounded<T>(work: Promise<T>, limitMs: number, cutShort?: Promise<undefined>): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), limitMs); }), ...(cutShort ? [cutShort] : [])]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

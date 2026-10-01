@@ -21,12 +21,14 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
 }
 
 // The catalog as Claude Code 2.1.258 answered it on 2026-09-02, after the
-// provider's own naming and the app-only set (chat/claude/models).
+// provider's own naming and the app-only set (chat/claude/models) — with the
+// `sonnet` alias as it resolves since (Sonnet 5.5, 2026-10-01) and every
+// window as Claude Code states it on the probe.
 const claudeModels: ChatModel[] = withMoreModels([
   { selection: { providerId: "anthropic", modelId: "default" }, provider: "Anthropic", name: "Default (recommended)", default: true, detail: "Opus 5 with 1M context · Best for everyday, complex tasks", variants: ["low", "medium", "high", "xhigh", "max"], contextLimit: 1_000_000, imageInput: true, resolvesTo: { providerId: "anthropic", modelId: "opus[1m]" } },
   { selection: { providerId: "anthropic", modelId: "opus[1m]" }, provider: "Anthropic", name: "Opus 5 (1M context)", detail: "Opus 5 with 1M context · Best for everyday, complex tasks", variants: ["low", "medium", "high", "xhigh", "max"], contextLimit: 1_000_000, imageInput: true },
   { selection: { providerId: "anthropic", modelId: "fable[1m]" }, provider: "Anthropic", name: "Fable 5.1", detail: "Fable 5.1 · Most capable for your hardest and longest-running tasks", variants: ["low", "medium", "high", "xhigh", "max"], contextLimit: 1_000_000, imageInput: true },
-  { selection: { providerId: "anthropic", modelId: "sonnet" }, provider: "Anthropic", name: "Sonnet 5", detail: "Sonnet 5 · Efficient for routine tasks", variants: ["low", "medium", "high", "xhigh", "max"], contextLimit: 200_000, imageInput: true },
+  { selection: { providerId: "anthropic", modelId: "sonnet" }, provider: "Anthropic", name: "Sonnet 5.5", detail: "Most efficient for simpler tasks", variants: ["low", "medium", "high", "xhigh", "max"], contextLimit: 1_000_000, imageInput: true, resolvesTo: { providerId: "anthropic", modelId: "claude-sonnet-5-5" } },
   { selection: { providerId: "anthropic", modelId: "haiku" }, provider: "Anthropic", name: "Haiku 4.5", detail: "Haiku 4.5 · Fastest for quick answers", contextLimit: 200_000, imageInput: true },
 ]);
 
@@ -98,10 +100,10 @@ async function openTaskList(page: Page) {
 }
 
 /** Boots the dual-agent workspace and opens a seeded Claude conversation. */
-async function bootClaude(page: Page, request: APIRequestContext, title: string, items: ConversationItem[] = [], configuration: Record<string, unknown> = {}, touch = false): Promise<string> {
+async function bootClaude(page: Page, request: APIRequestContext, title: string, items: ConversationItem[] = [], configuration: Record<string, unknown> = {}, touch = false, models: ChatModel[] = claudeModels): Promise<string> {
   await request.post("/__e2e/reset");
   await control(request, { action: "agents", count: 2 });
-  await control(request, { action: "models", agent: "claude", models: claudeModels });
+  await control(request, { action: "models", agent: "claude", models });
   const seeded = await control(request, { action: "seed", agent: "claude", title, items, configuration }) as { conversation: { id: string } };
   const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
   await page.goto(`/?t=${encodeURIComponent(token.token)}`);
@@ -159,13 +161,13 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
   });
 
   test("the session's reported window beats the catalog's figure, and an occupancy beyond that figure is not a full window (#347)", async ({ page, request }, testInfo) => {
-    // The catalog guesses 200k for sonnet; the first call already occupies
-    // 212k, so the guess is wrong for this session and nothing is painted
-    // as full.
+    // The catalog's figure for Opus 4.6 is the 200k fallback (no window was
+    // stated for it); the first call already occupies 212k, so the figure is
+    // wrong for this session and nothing is painted as full.
     const id = await bootClaude(page, request, "Window from the session", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Read the whole tree" },
-      carrier("usage:a1", 2, "sonnet", 2, 212_895),
-    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+      carrier("usage:a1", 2, "claude-opus-4-6", 2, 212_895),
+    ], { model: { providerId: "anthropic", modelId: "claude-opus-4-6" } });
     const label = page.locator("#chat-context-usage-label");
     const meter = page.locator("#chat-context-usage");
     await expect(label).toHaveText("?");
@@ -173,9 +175,9 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(meter).toHaveAttribute("title", "212,897 tokens in the context window");
     // The session states its window: 1M. The report and every later call
     // measure against it, not the catalog.
-    await control(request, { action: "item", conversationId: id, item: { id: "context:report:1", type: "context_report", createdAt: 3, total: 213_000, max: 1_000_000, model: { providerId: "anthropic", modelId: "sonnet" } } });
+    await control(request, { action: "item", conversationId: id, item: { id: "context:report:1", type: "context_report", createdAt: 3, total: 213_000, max: 1_000_000, model: { providerId: "anthropic", modelId: "claude-opus-4-6" } } });
     await expect(label).toHaveText("21%");
-    await control(request, { action: "item", conversationId: id, item: carrier("usage:a2", 4, "sonnet", 2, 262_895) });
+    await control(request, { action: "item", conversationId: id, item: carrier("usage:a2", 4, "claude-opus-4-6", 2, 262_895) });
     await expect(label).toHaveText("26%");
     await expect(meter).toHaveAttribute("data-fill", "normal");
     await expect(meter).toHaveAttribute("data-source", "usage");
@@ -187,17 +189,17 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
   test("a compaction marker sits between two activity runs and the readout drops after it", async ({ page, request }, testInfo) => {
     const id = await bootClaude(page, request, "Compaction", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Audit the scripts" },
-    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    ], { model: { providerId: "anthropic", modelId: "haiku" } });
     await control(request, { action: "status", conversationId: id, status: "running" });
     for (const [index, command] of ["./hello.sh", "ls -la", "cat README.md"].entries()) {
       await control(request, { action: "item", conversationId: id, item: bash(`tool:a${index}`, 10 + index, command, "completed", "ok") });
     }
-    await control(request, { action: "item", conversationId: id, item: carrier("usage:a1", 20, "sonnet", 200, 179_800) });
+    await control(request, { action: "item", conversationId: id, item: carrier("usage:a1", 20, "haiku", 200, 179_800) });
     const label = page.locator("#chat-context-usage-label");
     await expect(label).toHaveText("90%");
 
     await control(request, { action: "item", conversationId: id, item: { id: "compaction:1", type: "compaction", createdAt: 21, trigger: "auto", preTokens: 180_000, postTokens: 40_000 } });
-    await control(request, { action: "item", conversationId: id, item: { id: "context:compaction:1", type: "context_report", createdAt: 22, total: 40_000, model: { providerId: "anthropic", modelId: "sonnet" } } });
+    await control(request, { action: "item", conversationId: id, item: { id: "context:compaction:1", type: "context_report", createdAt: 22, total: 40_000, model: { providerId: "anthropic", modelId: "haiku" } } });
     await expect(label).toHaveText("20%");
     for (const [index, command] of ["date", "whoami", "uname -a"].entries()) {
       await control(request, { action: "item", conversationId: id, item: bash(`tool:b${index}`, 30 + index, command, "completed", "ok") });
@@ -223,10 +225,56 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await capture(page, testInfo, "phase1-composer-model-button");
     await openChatConfiguration(page);
     const names = page.locator("#chat-configuration-models .chat-configuration-model-name");
-    await expect(names).toHaveText(["Default (recommended)", "Opus 5 (1M context)", "Fable 5.1", "Sonnet 5", "Haiku 4.5", "Fable 5", "Opus 4.8", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"]);
+    await expect(names).toHaveText(["Default (recommended)", "Opus 5 (1M context)", "Fable 5.1", "Sonnet 5.5", "Haiku 4.5", "Fable 5", "Opus 4.8", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"]);
     const groups = page.locator("#chat-configuration-models .chat-configuration-provider h3");
     await expect(groups).toHaveText(["Anthropic", "More models"]);
     await capture(page, testInfo, "phase1-picker-versioned-names");
+  });
+
+  test("a reopened conversation is measured against the window Claude Code stated for its model", async ({ page, request }, testInfo) => {
+    // Reopened from history: no session report, only the last call's usage.
+    // Sonnet 5.5 runs under an alias with no window marker; the window the
+    // catalog serves is the 1M Claude Code stated before any turn, so 250k
+    // reads as a quarter full, not as an over-full 200k guess.
+    await bootClaude(page, request, "Reopened on Sonnet 5.5", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "Summarise the repository" },
+      carrier("usage:a1", 2, "sonnet", 2, 249_998),
+      { id: "message:a1", type: "assistant_message", createdAt: 3, markdown: "Here is the summary.", completedAt: 3 },
+    ], { model: { providerId: "anthropic", modelId: "sonnet" } });
+    const label = page.locator("#chat-context-usage-label");
+    const meter = page.locator("#chat-context-usage");
+    await expect(label).toHaveText("25%");
+    await expect(meter).toHaveAttribute("data-fill", "normal");
+    await page.locator("#chat-context-usage > summary").click();
+    await expect(page.locator("#chat-context-usage-breakdown dd").nth(1)).toHaveText("1,000,000");
+    await capture(page, testInfo, "reopened-sonnet-5-5-stated-window");
+  });
+
+  test("a default the workspace's settings resolve to Fable 5.1 is presented as Fable 5.1", async ({ page, request }, testInfo) => {
+    // The catalog's own default resolves to Sonnet 5.5 (the account
+    // default); `"model": "fable[1m]"` in the settings makes an unpinned
+    // session run Fable 5.1, and the provider presents the default as that.
+    const settingsResolved = claudeModels.map(model => model.default
+      ? { ...model, detail: "Fable 5.1 · Most capable for your hardest and longest-running tasks", resolvesTo: { providerId: "anthropic", modelId: "fable[1m]" } }
+      : model);
+    await bootClaude(page, request, "Default from settings", [], {}, false, settingsResolved);
+    await expect(page.locator("#chat-configuration-summary")).toHaveText("Default · Fable 5.1");
+    await openChatConfiguration(page);
+    const defaultRow = page.locator('#chat-configuration-models button[data-model-value="anthropic/default"]');
+    await expect(defaultRow.locator(".chat-configuration-model-name")).toHaveText("Default (recommended)");
+    await expect(defaultRow.locator(".chat-configuration-model-identity")).toHaveText("Fable 5.1 · Most capable for your hardest and longest-running tasks");
+    await expect(defaultRow).toHaveAttribute("aria-pressed", "true");
+    // The catalog's Sonnet 5.5 entry is still offered on its own.
+    await expect(page.locator('#chat-configuration-models button[data-model-value="anthropic/sonnet"] .chat-configuration-model-name')).toHaveText("Sonnet 5.5");
+    await capture(page, testInfo, "default-resolved-from-settings");
+  });
+
+  test("a default running a model no entry offers is named by its id", async ({ page, request }) => {
+    const unlisted = claudeModels.map(model => model.default
+      ? { ...model, detail: "Runs claude-experimental-9 · Claude Code's own model choice", resolvesTo: { providerId: "anthropic", modelId: "claude-experimental-9" } }
+      : model);
+    await bootClaude(page, request, "Default unlisted", [], {}, false, unlisted);
+    await expect(page.locator("#chat-configuration-summary")).toHaveText("Default · claude-experimental-9");
   });
 
   test("a typed model id reaches the prompt verbatim and the readout shows an unknown window", async ({ page, request }, testInfo) => {

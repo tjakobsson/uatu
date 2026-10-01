@@ -57,14 +57,19 @@ describe("versioned model names (D2)", () => {
 });
 
 describe("catalog windows (#347)", () => {
-  test("a window marker means 1M; a plain id takes the manifest's window; the rest is the 200k standard", () => {
+  test("a window marker means 1M; a plain id takes the fallback figure; the rest is the 200k standard", () => {
     expect(claudeContextWindow("opus[1m]", "claude-opus-5[1m]")).toBe(1_000_000);
     expect(claudeContextWindow("claude-fable-5-1[1m]")).toBe(1_000_000);
     // Opus 5 runs the enlarged window on its plain id: the alias row the
     // CLI offers as "opus" must not be pinned to 200k.
     expect(claudeContextWindow("opus", "claude-opus-5")).toBe(1_000_000);
     expect(claudeContextWindow("claude-opus-4-8")).toBe(1_000_000);
-    expect(claudeContextWindow("sonnet", "claude-sonnet-5")).toBe(200_000);
+    expect(claudeContextWindow("sonnet", "claude-sonnet-5")).toBe(1_000_000);
+    expect(claudeContextWindow("claude-sonnet-5", "claude-sonnet-5")).toBe(1_000_000);
+    expect(claudeContextWindow("sonnet", "claude-sonnet-5-5")).toBe(1_000_000);
+    expect(claudeContextWindow("opus", "claude-opus-5-5")).toBe(1_000_000);
+    expect(claudeContextWindow("claude-opus-4-7")).toBe(1_000_000);
+    expect(claudeContextWindow("claude-sonnet-4-6")).toBe(200_000);
     expect(claudeContextWindow("haiku", "claude-haiku-4-5-20251001")).toBe(200_000);
     expect(claudeContextWindow("claude-opus-4-6")).toBe(200_000);
     expect(claudeContextWindow("claude-mystery-9")).toBe(200_000);
@@ -73,7 +78,8 @@ describe("catalog windows (#347)", () => {
   test("the default sentinel speaks only through what it resolves to", () => {
     expect(claudeContextWindow("default", "claude-opus-5[1m]")).toBe(1_000_000);
     expect(claudeContextWindow("default", "claude-opus-5")).toBe(1_000_000);
-    expect(claudeContextWindow("default", "claude-sonnet-5")).toBe(200_000);
+    expect(claudeContextWindow("default", "claude-sonnet-5-5")).toBe(1_000_000);
+    expect(claudeContextWindow("default", "claude-haiku-4-5-20251001")).toBe(200_000);
     expect(claudeContextWindow("default", undefined)).toBe(200_000);
   });
 });

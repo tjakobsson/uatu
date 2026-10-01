@@ -2603,11 +2603,12 @@ export function initChat(api = new ChatApiClient()): void {
   };
 
   // A default entry is named by what it runs: "Default · Opus (1M context)"
-  // rather than an opaque "Default (recommended)".
+  // rather than an opaque "Default (recommended)" — by its id when it runs a
+  // model no entry offers (a settings-selected id the catalog omits).
   const modelChipName = (model: ChatModel): string => {
     if (model.default && model.resolvesTo) {
       const resolved = models.find(candidate => sameModel(candidate.selection, model.resolvesTo!));
-      if (resolved) return `Default · ${resolved.name}`;
+      return `Default · ${resolved ? resolved.name : model.resolvesTo.modelId}`;
     }
     return model.name;
   };
