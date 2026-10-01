@@ -5181,6 +5181,45 @@ describe("windows and the default as Claude Code states them (claude-context-win
     }
   });
 
+  test("a default running the standard window resolves to the standard variant even when the 1M one is listed first", async () => {
+    const original = currentCatalog.slice();
+    // fable[1m] sits before fable in the catalog; both resolve to claude-fable-5-1.
+    currentCatalog.push({ value: "fable", resolvedModel: "claude-fable-5-1", displayName: "Fable 5.1", description: "Fable at the standard window", supportedEffortLevels: ["low", "medium", "high"] } as typeof currentCatalog[number]);
+    const { provider } = windowFixture({
+      unpinned: { model: "claude-fable-5-1", maxTokens: 200_000 },
+      behave: model => (model === "fable" ? { model: "claude-fable-5-1", maxTokens: 200_000 } : undefined),
+    });
+    try {
+      const served = await settled(provider, models => find(models, "fable").contextLimit === 200_000);
+      const entry = find(served, "default");
+      expect(entry.resolvesTo).toEqual({ providerId: "anthropic", modelId: "fable" });
+      expect(entry.detail).toBe("Fable at the standard window");
+      expect(entry.variants).toEqual(["low", "medium", "high"]);
+    } finally {
+      currentCatalog.splice(0, currentCatalog.length, ...original);
+      await provider.dispose();
+    }
+  });
+
+  test("an alias that moves to another model does not keep the old model's window", async () => {
+    const original = currentCatalog.slice();
+    const { provider } = windowFixture({ behave: model => (model === "haiku" ? { model: "claude-haiku-4-5-20251001", maxTokens: 640_000 } : undefined) });
+    try {
+      await settled(provider, served => find(served, "haiku").contextLimit === 640_000);
+      // A CLI update: "haiku" now resolves to a new generation nobody measured.
+      const index = currentCatalog.findIndex(row => row.value === "haiku");
+      currentCatalog[index] = { ...currentCatalog[index]!, resolvedModel: "claude-haiku-6", description: "Haiku 6 · Fastest" };
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+      const refreshed = await settled(provider, served => find(served, "haiku").resolvesTo?.modelId === "claude-haiku-6");
+      // The derived figure for the new model, not the 640k stated for the old one.
+      expect(find(refreshed, "haiku").contextLimit).toBe(200_000);
+    } finally {
+      currentCatalog.splice(0, currentCatalog.length, ...original);
+      await provider.dispose();
+    }
+  });
+
   test("a default running a model no entry offers is named by its id", async () => {
     const { provider } = windowFixture({ unpinned: { model: "claude-experimental-9", maxTokens: 400_000 } });
     const entry = find(await provider.listModels(), "default");

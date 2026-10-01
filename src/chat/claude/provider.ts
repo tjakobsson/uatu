@@ -515,7 +515,10 @@ export class ClaudeProvider implements ChatProvider {
   // model an unpinned session actually runs in this workspace (settings
   // applied). Held apart from `liveModels` so a live session's catalog
   // refresh cannot erase them; applied whenever the catalog is served.
-  private readonly statedWindows = new Map<string, number>();
+  // Keyed by selection id, with the id the row resolved to when measured: an
+  // alias can move to another model on a refresh ("sonnet" → a new
+  // generation), and a window is only reused while both still match.
+  private readonly statedWindows = new Map<string, { resolved: string; window: number }>();
   // The same windows by the exact id each row resolved to: a refresh can
   // offer a stated model under another selection id (an app-only full id
   // the catalog later lists under an alias), and the window follows the
@@ -673,9 +676,10 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   private statedWindowFor(model: ChatModel): number | undefined {
+    const resolved = model.resolvesTo?.modelId ?? model.selection.modelId;
     const bySelection = this.statedWindows.get(model.selection.modelId);
-    if (bySelection !== undefined) return bySelection;
-    const byResolved = this.statedByResolved.get(model.resolvesTo?.modelId ?? model.selection.modelId);
+    if (bySelection !== undefined && bySelection.resolved === resolved) return bySelection.window;
+    const byResolved = this.statedByResolved.get(resolved);
     return byResolved?.size === 1 ? [...byResolved][0] : undefined;
   }
 
@@ -696,10 +700,13 @@ export class ClaudeProvider implements ChatProvider {
     const resolvedId = (model: ChatModel) => model.resolvesTo?.modelId ?? model.selection.modelId;
     const bare = stripWindowMarker(runs.model);
     const candidates = rows.filter(model => !model.default && stripWindowMarker(resolvedId(model)) === bare);
-    // Exact id first; among window variants ("fable" / "fable[1m]") the one
-    // whose window is the window the default runs.
-    const match = candidates.find(model => resolvedId(model) === runs.model)
-      ?? candidates.find(model => runs.window !== undefined && model.contextLimit === runs.window)
+    // Window variants ("fable" / "fable[1m]") can share one resolved id, so
+    // the window the default runs decides first, then the exact id.
+    const windowMatches = (model: ChatModel) => runs.window !== undefined && model.contextLimit === runs.window;
+    const exact = (model: ChatModel) => resolvedId(model) === runs.model;
+    const match = candidates.find(model => exact(model) && windowMatches(model))
+      ?? candidates.find(windowMatches)
+      ?? candidates.find(exact)
       ?? candidates[0];
     const contextLimit = runs.window ?? match?.contextLimit ?? claudeContextWindow(runs.model);
     let presented: ChatModel;
@@ -3521,8 +3528,8 @@ export class ClaudeProvider implements ChatProvider {
       const answer = await this.readProbeContext(query);
       const expected = stripWindowMarker(row.resolvesTo?.modelId ?? row.selection.modelId);
       if (answer?.window && answer.model && stripWindowMarker(answer.model) === expected) {
-        this.statedWindows.set(row.selection.modelId, answer.window);
         const resolved = row.resolvesTo?.modelId ?? row.selection.modelId;
+        this.statedWindows.set(row.selection.modelId, { resolved, window: answer.window });
         const windows = this.statedByResolved.get(resolved) ?? new Set<number>();
         windows.add(answer.window);
         this.statedByResolved.set(resolved, windows);
