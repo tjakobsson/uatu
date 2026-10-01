@@ -1,6 +1,6 @@
 /**
  * The hand-kept half of the agent coverage report (`bun run coverage:agents`,
- * docs/agents/). Everything else in the report is observed by running the
+ * published to the dashboard issue). Everything else in the report is observed by running the
  * normalizers and renderers; these say only what code cannot: why a type is
  * deliberately dropped, and which entries render but do not work.
  *

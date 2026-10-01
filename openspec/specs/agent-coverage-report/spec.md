@@ -37,39 +37,73 @@ Every entry SHALL carry exactly one of five states: dedicated, generic, ignored,
 
 #### Scenario: A stale annotation fails
 - **WHEN** an annotation names an entry that the installed SDK no longer declares
-- **THEN** the generator and the freshness check fail naming that annotation
-
-### Requirement: The committed report matches the installed SDKs
-The repository SHALL commit, per agent, the generated coverage matrix and badge, and a marked README block linking each badge to its matrix. A test SHALL verify that the committed outputs equal what the generator produces for the SDK versions currently installed. That test MUST fail when a report, badge, or README block is stale, and MUST NOT fail because coverage is incomplete. The matrix and badge SHALL name the exact SDK version — and the agent CLI version the SDK bundles, where it declares one — they were generated against, and the output MUST be deterministic for a given SDK and codebase.
-
-#### Scenario: An SDK bump without regeneration is caught
-- **WHEN** an agent SDK version changes and the committed report is not regenerated
-- **THEN** the freshness test fails and names the stale output
-
-#### Scenario: Incomplete coverage does not fail
-- **WHEN** the report lists unhandled or behavior-missing entries and the committed outputs are current
-- **THEN** the freshness test passes
-
-#### Scenario: Regeneration is repeatable
-- **WHEN** the generator runs twice against the same SDK and codebase
-- **THEN** it produces byte-identical outputs
+- **THEN** the generator and the unit suite fail naming that annotation
 
 ### Requirement: New vocabulary is visible per SDK version
-Each matrix SHALL list the entries that are new or removed relative to the previously committed matrix and the SDK version that matrix named, so a dependency bump shows what arrived with it.
+When publication finds that the vocabulary differs from what the dashboard last published, it SHALL post a comment on the dashboard issue listing, per agent and per axis, the entries added and removed, together with the SDK versions before and after. The comment thread is the history of what each bump brought. A publication whose vocabulary is unchanged MUST NOT post a comment, even when versions changed. Several bumps that land before one publication SHALL be reported together, so no change is lost. When there is no previously published vocabulary to compare against, publication SHALL publish the dashboard as the new baseline and post no comment.
 
 #### Scenario: A bump shows its additions
-- **WHEN** the generator runs after an SDK update that adds a message type and a tool
-- **THEN** the regenerated matrix lists both under what changed since the previous version
-- **AND** each also appears in its axis with its observed state
+- **WHEN** publication runs after an SDK update that adds a message type and a tool
+- **THEN** a comment on the dashboard names both under their axes, with the previous and current SDK versions
+- **AND** each also appears in its axis on the dashboard with its observed state
 
-### Requirement: The badge and its link stay inside the repository
-The per-agent badge SHALL be an image file committed in the repository and referenced by a repository-relative path, linking to the matrix by a repository-relative path. The README block MUST NOT reference an external image or badge service, so rendering the README anywhere — on the forge, in a local previewer, or in uatu itself — sends no reader request outside the machine. The badge SHALL state the agent, the version, and the count of entries that are unhandled or behavior-missing.
+#### Scenario: A version-only bump posts nothing
+- **WHEN** publication runs after an SDK update that adds and removes nothing
+- **THEN** the dashboard shows the new version
+- **AND** no comment is posted
 
-#### Scenario: The README renders offline
-- **WHEN** the README is rendered from a checkout with no network access
-- **THEN** every agent badge renders from a file in the checkout
-- **AND** activating a badge opens that agent's matrix from the checkout
+#### Scenario: Bumps between publications are reported together
+- **WHEN** two SDK updates are merged and only the later one is followed by a completed publication
+- **THEN** the single comment lists the vocabulary changes of both, against the last published versions
 
-#### Scenario: The badge summarizes gaps, not a percentage
-- **WHEN** a reader looks at an agent's badge
-- **THEN** it shows the agent name, the SDK or CLI version, and how many entries are unhandled or behavior-missing
+#### Scenario: No baseline posts no comment
+- **WHEN** the dashboard has never been published, or its recorded vocabulary cannot be read
+- **THEN** publication writes the dashboard as the new baseline
+- **AND** no comment is posted
+
+### Requirement: The report is published to a dashboard issue
+The report SHALL be published as the body of one GitHub issue in the project's repository, the coverage dashboard, and not committed to the repository. After every change on the default branch that can change the report, and on manual request, the dashboard SHALL be regenerated against the SDK versions and code on that branch. For each agent it SHALL show the exact SDK versions it was generated against (and the agent CLI version the SDK bundles, where the SDK declares one), the number of unhandled or behavior-missing entries, and the full matrix of entries with their states and reasons. Output MUST be deterministic for a given set of SDKs and codebase. Publishing an unchanged report MUST leave the issue unedited. The README SHALL link to the dashboard. Publication MUST run only in the project's own repository, never in a fork. If the report outgrows what an issue body can hold, publication MUST fail, naming the size, and MUST NOT publish a truncated report.
+
+#### Scenario: A merge that changes coverage updates the dashboard
+- **WHEN** a change that alters how a normalizer treats a type is merged to the default branch
+- **THEN** the dashboard shows that entry in its new state
+- **AND** the gap count for that agent reflects it
+
+#### Scenario: Republishing an unchanged report is a no-op
+- **WHEN** publication runs twice against the same SDKs and codebase
+- **THEN** it produces byte-identical dashboard content both times
+- **AND** the second run does not edit the issue
+
+#### Scenario: The repository carries no generated report
+- **WHEN** a contributor bumps an agent SDK or changes a normalizer
+- **THEN** no file in the repository has to be regenerated or committed for the report
+- **AND** the README links to the dashboard issue
+
+#### Scenario: A fork does not publish
+- **WHEN** the publication workflow runs in a repository other than the project's own
+- **THEN** it does nothing
+
+#### Scenario: An oversized report fails instead of truncating
+- **WHEN** the rendered dashboard exceeds the size an issue body accepts
+- **THEN** publication fails, naming the rendered size and the limit
+- **AND** the previous dashboard is left as it was
+
+### Requirement: A dependency bump fails CI only when code must change
+The unit suite SHALL, on every pull request, run vocabulary extraction, classification and annotation validation against the installed SDKs. It MUST fail when uatu's code or annotations have to change: an axis can no longer be extracted, an annotation names an entry the installed SDK does not declare, or a deliberately ignored type has no stated reason. It MUST NOT fail because an SDK version changed, because entries were added or removed without making an annotation stale, or because coverage is incomplete.
+
+#### Scenario: A version-only bump passes
+- **WHEN** a pull request changes only an agent SDK version and the SDK's vocabulary is unchanged
+- **THEN** the unit suite passes
+
+#### Scenario: A bump that adds vocabulary passes
+- **WHEN** a pull request bumps an SDK that declares a new tool and a new message type
+- **THEN** the unit suite passes
+- **AND** after merge the dashboard lists both, in whatever state uatu's code puts them in
+
+#### Scenario: A bump that strands an annotation fails
+- **WHEN** a pull request bumps an SDK that no longer declares an entry an annotation names
+- **THEN** the unit suite fails, naming that annotation
+
+#### Scenario: A bump that breaks extraction fails
+- **WHEN** a pull request bumps an SDK whose declaration files changed shape so that an axis yields no entries
+- **THEN** the unit suite fails, naming the file it could not read

@@ -1,0 +1,84 @@
+name: Agent SDK coverage
+
+# Publishes the agent SDK coverage report to its dashboard issue after every
+# push to main. The report is not committed, so a dependency bump never has
+# to regenerate anything: the unit suite fails a bump only when uatu's code or
+# annotations must change (scripts/agent-coverage.test.ts), and this workflow
+# shows what the merged bump did to coverage.
+#
+# `bun run coverage:agents` decides everything; this file only moves bytes.
+# The generator writes the comment file only when the vocabulary gained or
+# lost entries since the published body (the baseline lives in a hidden
+# marker in that body), and the body file only when the body changed.
+#
+# The comment is posted before the body is edited: the body is the next run's
+# baseline, so a run that fails in between re-posts the comment rather than
+# losing it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# Never cancel a run that may have posted its comment but not yet moved the
+# baseline. Intermediate pushes collapse into the one pending run, whose diff
+# still covers them all.
+concurrency:
+  group: agent-coverage
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Only the project's own main is published: a fork has no dashboard, and a
+    # dispatch on another ref would publish code nobody merged.
+    if: github.repository == 'tjakobsson/uatu' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      # scripts/agent-coverage.ts DASHBOARD_ISSUE; a unit test keeps them equal.
+      DASHBOARD_ISSUE: "480"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Fetch the published dashboard
+        run: gh issue view "$DASHBOARD_ISSUE" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/previous.md"
+
+      - name: Render the dashboard
+        run: >-
+          bun run coverage:agents
+          --previous "$RUNNER_TEMP/previous.md"
+          --body-out "$RUNNER_TEMP/body.md"
+          --comment-out "$RUNNER_TEMP/comment.md"
+
+      - name: Post what the vocabulary gained or lost
+        run: |
+          if [ -s "$RUNNER_TEMP/comment.md" ]; then
+            gh issue comment "$DASHBOARD_ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
+          else
+            echo "No vocabulary was added or removed."
+          fi
+
+      - name: Update the dashboard
+        run: |
+          if [ -s "$RUNNER_TEMP/body.md" ]; then
+            gh issue edit "$DASHBOARD_ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/body.md"
+          else
+            echo "The dashboard is unchanged."
+          fi

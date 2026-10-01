@@ -51,7 +51,8 @@ src/
 │                   on the wire (`<agentId>:<providerId>`). Each agent's
 │                   `sdk-coverage.ts` holds the hand-kept annotations for
 │                   the SDK coverage report (`bun run coverage:agents`,
-│                   scripts/agent-coverage.ts → docs/agents/)
+│                   scripts/agent-coverage.ts → the dashboard issue
+│                   #480, published by the agent-coverage workflow)
 ├── find/           ⌘F — active-surface tracking (which surface the user is
 │                   working in, tracked from interaction, NOT from DOM focus),
 │                   the shared find bar and its pluggable engines (preview and

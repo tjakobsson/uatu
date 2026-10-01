@@ -8,17 +8,14 @@
  * only hand-kept input is the per-agent annotations module
  * (`src/chat/<agent>/sdk-coverage.ts`).
  *
- * Writes `docs/agents/<agent>.md` (the matrix), `docs/agents/<agent>.svg`
- * (the badge), and the README block between the `agent-coverage` markers.
- * Output is deterministic: no timestamps, sorted entries, versions only.
- * `scripts/agent-coverage.test.ts` regenerates in memory and fails when the
- * committed files differ.
+ * Renders the dashboard issue body (`DASHBOARD_ISSUE`), and, against the body
+ * published before, the comment naming what a bump added or removed. Nothing
+ * is written into the repository: `.github/workflows/agent-coverage.yml`
+ * publishes after every push to main. Output is deterministic: no
+ * timestamps, sorted entries, versions only.
  */
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-
-import { makeBadge } from "badge-maker";
 
 import { claudeCoverageAnnotations } from "../src/chat/claude/sdk-coverage";
 import { INTENTIONALLY_IGNORED, claudeToolInteraction, createClaudeEventMemory, normalizeClaudeMessage } from "../src/chat/claude/normalization";
@@ -379,9 +376,8 @@ function runControls(): void {
 export type AgentReport = {
   id: "claude-code" | "opencode";
   title: string;
-  // Every version that decides the vocabulary: the "since" baseline key.
+  // Every version that decides the vocabulary.
   versionLine: string;
-  badgeVersion: string;
   axes: Axis[];
 };
 
@@ -465,7 +461,6 @@ export function claudeReport(vocabulary: ClaudeVocabulary = extractClaude(), ann
     id: "claude-code",
     title: "Claude Code",
     versionLine: `\`@anthropic-ai/claude-agent-sdk\` ${vocabulary.sdkVersion} (bundled Claude Code CLI ${vocabulary.cliVersion}) · content blocks from \`@anthropic-ai/sdk\` ${vocabulary.apiSdkVersion}`,
-    badgeVersion: `SDK ${vocabulary.sdkVersion}`,
     axes,
   };
 }
@@ -482,7 +477,6 @@ export function openCodeReport(vocabulary: OpenCodeVocabulary = extractOpenCode(
     id: "opencode",
     title: "OpenCode",
     versionLine: `1.x through \`@opencode-ai/sdk\` ${vocabulary.v1Version} · 2.x through \`@opencode/client\` ${vocabulary.v2Version} (vocabulary from \`@opencode/schema\` ${vocabulary.v2SchemaVersion})`,
-    badgeVersion: `${vocabulary.v1Version} · ${vocabulary.v2Version}`,
     axes,
   };
 }
@@ -492,17 +486,15 @@ export function gapCount(report: AgentReport): number {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering
+// The dashboard
 
-export const MATRIX_DIR = "docs/agents";
-// The start marker carries a seal: a digest of the block's content and the
-// version line it was written under. A carried-forward block has no other
-// source to be checked against (its baseline is the previous SDK's
-// vocabulary, which only git remembers), so the seal is what makes a hand
-// edit to it detectable.
-const SINCE_START_PREFIX = "<!-- agent-coverage:since:start seal=";
-const SINCE_END = "<!-- agent-coverage:since:end -->";
-const VERSION_PREFIX = "Generated against ";
+/** The issue the report is published to; the README links to it and the publication workflow edits it. */
+export const DASHBOARD_ISSUE = 480;
+/** GitHub's limit on an issue body, in characters. */
+export const ISSUE_BODY_LIMIT = 65_536;
+
+const STATE_MARKER_PREFIX = "<!-- agent-coverage:state v1 ";
+const STATE_MARKER_SUFFIX = " -->";
 
 const STATE_MEANING: Record<CoverageState, string> = {
   dedicated: "used: uatu has purpose-built rendering or behavior for it",
@@ -512,116 +504,96 @@ const STATE_MEANING: Record<CoverageState, string> = {
   "behavior-missing": "shown, but uatu does not yet deliver what it does: a gap; the reason says what fails",
 };
 
-export type Since = { previous?: string; changes: Array<{ axis: string; added: string[]; removed: string[] }> };
-
-/** The previous matrix's version line, its entry names per axis, and its "since" record (when its seal holds), parsed from the committed file. */
-export function parseMatrix(markdown: string): { versionLine?: string; axes: Map<string, Set<string>>; since?: Since } {
-  const lines = markdown.split("\n");
-  const versionLine = lines.find(line => line.startsWith(VERSION_PREFIX))?.slice(VERSION_PREFIX.length).replace(/\.$/, "");
-  const axes = new Map<string, Set<string>>();
-  let axis: Set<string> | undefined;
-  for (const line of lines) {
-    const heading = /^## .+ <a id="axis-([^"]+)"><\/a>$/.exec(line);
-    if (heading) { axis = new Set(); axes.set(heading[1]!, axis); continue; }
-    if (line.startsWith("## ")) { axis = undefined; continue; }
-    const cell = /^\| `([^`]+)` \|/.exec(line);
-    if (axis && cell) axis.add(cell[1]!);
-  }
-  const since = versionLine === undefined ? undefined : parseSince(lines, versionLine);
-  return { versionLine, axes, ...(since === undefined ? {} : { since }) };
+/** Runs the probe controls, then builds every agent's report from the installed SDKs: the path publication takes. */
+export function buildReports(): AgentReport[] {
+  runControls();
+  return [claudeReport(), openCodeReport()];
 }
 
-// The "since" block back into data, or undefined when it is missing,
-// unparseable, or its content no longer matches its seal.
-function parseSince(lines: string[], versionLine: string): Since | undefined {
-  const start = lines.findIndex(line => line.startsWith(SINCE_START_PREFIX) && line.endsWith(" -->"));
-  const end = lines.indexOf(SINCE_END);
-  if (start < 0 || end < start) return undefined;
-  const seal = lines[start]!.slice(SINCE_START_PREFIX.length, -" -->".length);
-  const block = lines.slice(start + 1, end).filter(Boolean);
-  const heading = block.shift();
-  let since: Since;
-  if (heading === "## Since the previous generation") since = { changes: [] };
-  else if (heading?.startsWith("## Since ")) {
-    const names = (list: string | undefined): string[] => [...(list ?? "").matchAll(/`([^`]+)`/g)].map(match => match[1]!);
-    since = {
-      previous: heading.slice("## Since ".length),
-      changes: block.flatMap(line => {
-        const change = /^- \*\*(.+?)\*\*(?: — added (.+?))?(?:(?:;| —) removed (.+))?$/.exec(line);
-        return change ? [{ axis: change[1]!, added: names(change[2]), removed: names(change[3]) }] : [];
-      }),
-    };
-  } else return undefined;
-  return sealOf(versionLine, sinceBody(since)) === seal ? since : undefined;
-}
+/** What a dashboard published, per agent id: the versions it was generated against and its entry names per axis id. */
+export type PublishedVocabulary = Record<string, { versionLine: string; axes: Record<string, string[]> }>;
 
-function sinceBody(since: Since): string[] {
-  return since.previous === undefined
-    ? ["## Since the previous generation", "", "First generation: there is no previous matrix to compare against."]
-    : [
-      `## Since ${since.previous}`,
-      "",
-      ...(since.changes.length === 0 ? ["No vocabulary was added or removed."] : since.changes.map(({ axis, added, removed }) =>
-        `- **${axis}**${added.length ? ` — added ${added.map(code).join(", ")}` : ""}${removed.length ? `${added.length ? ";" : " —"} removed ${removed.map(code).join(", ")}` : ""}`)),
-    ];
-}
-
-function sealOf(versionLine: string, body: string[]): string {
-  return createHash("sha256").update(`${versionLine}\n${body.join("\n")}`).digest("hex").slice(0, 16);
-}
-
-function renderSince(since: Since, versionLine: string): string {
-  const body = sinceBody(since);
-  return [`${SINCE_START_PREFIX}${sealOf(versionLine, body)} -->`, ...body, SINCE_END].join("\n");
+export function vocabularyOf(reports: AgentReport[]): PublishedVocabulary {
+  return Object.fromEntries(reports.map(report => [report.id, {
+    versionLine: report.versionLine,
+    axes: Object.fromEntries(report.axes.map(axis => [axis.id, sortedUnique(axis.entries.map(entry => entry.name))])),
+  }]));
 }
 
 /**
- * What changed since the previous generation: computed against the committed
- * matrix when the versions moved, carried forward while they stand still (the
- * vocabulary is a function of the versions, so there is nothing new to say).
+ * The hidden marker that carries the published vocabulary. The JSON goes
+ * inside an HTML comment, so no `--` may survive in it: the second hyphen of
+ * each pair becomes a JSON escape, which parses back to the same string.
  */
-export function sinceSection(report: AgentReport, previous: string | undefined): string {
-  const parsed = previous === undefined ? undefined : parseMatrix(previous);
-  if (parsed?.versionLine === report.versionLine) {
-    // Nothing to recompute it from: the committed block must be the one the
-    // generator wrote, or the report would vouch for a hand edit.
-    if (!parsed.since) throw new Error(`agent coverage: the "since" section of ${MATRIX_DIR}/${report.id}.md does not match its seal, so it was edited by hand; restore it with \`git checkout -- ${MATRIX_DIR}/${report.id}.md\` and rerun \`bun run coverage:agents\``);
-    return renderSince(parsed.since, report.versionLine);
-  }
-  if (!parsed?.versionLine) return renderSince({ changes: [] }, report.versionLine);
-  const changes = report.axes.flatMap(axis => {
-    const before = parsed.axes.get(axis.id) ?? new Set<string>();
-    const now = new Set(axis.entries.map(entry => entry.name));
-    const added = [...now].filter(name => !before.has(name)).sort();
-    const removed = [...before].filter(name => !now.has(name)).sort();
-    return added.length || removed.length ? [{ axis: axis.title, added, removed }] : [];
-  });
-  return renderSince({ previous: parsed.versionLine, changes }, report.versionLine);
+export function renderStateMarker(vocabulary: PublishedVocabulary): string {
+  return `${STATE_MARKER_PREFIX}${JSON.stringify(vocabulary).replaceAll("--", "-\\u002d")}${STATE_MARKER_SUFFIX}`;
 }
 
-export function renderMatrix(report: AgentReport, previous: string | undefined): string {
-  const counts = STATES.map(state => `${state} ${report.axes.reduce((sum, axis) => sum + axis.entries.filter(entry => entry.state === state).length, 0)}`);
-  const out: string[] = [
-    `# ${report.title} SDK coverage`,
-    "",
-    "<!-- Generated by `bun run coverage:agents`. Do not edit: the freshness test in scripts/agent-coverage.test.ts rejects hand edits. -->",
-    "",
-    `uatu treats ${report.title} as a first-class agent. The aim is to use what its SDK offers, not the subset every agent has in common. This page lists every message type, content block or part, and tool the installed SDK declares, and what uatu does with each today. The gaps are the work still to do. None of them means a feature is unwanted.`,
-    "",
-    `${VERSION_PREFIX}${report.versionLine}.`,
-    "",
-    `**Gaps: ${gapCount(report)}** (unhandled or behavior-missing) · ${counts.join(" · ")}`,
-    "",
-    "Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the page cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet.",
-    "",
-    "| State | Meaning |",
-    "| --- | --- |",
-    ...STATES.map(state => `| ${state} | ${STATE_MEANING[state]} |`),
-    "",
-    sinceSection(report, previous),
-  ];
+/** The vocabulary a dashboard body published, or undefined when it has no marker this version can read. */
+export function parseStateMarker(body: string): PublishedVocabulary | undefined {
+  const line = normalizeBody(body).split("\n").findLast(candidate => candidate.startsWith(STATE_MARKER_PREFIX) && candidate.endsWith(STATE_MARKER_SUFFIX));
+  if (line === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line.slice(STATE_MARKER_PREFIX.length, -STATE_MARKER_SUFFIX.length));
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed)) return undefined;
+  for (const agent of Object.values(parsed)) {
+    if (!isRecord(agent) || typeof agent.versionLine !== "string" || !isRecord(agent.axes)) return undefined;
+    for (const names of Object.values(agent.axes)) {
+      if (!Array.isArray(names) || !names.every(name => typeof name === "string")) return undefined;
+    }
+  }
+  return parsed as PublishedVocabulary;
+}
+
+export type AgentChanges = { title: string; before: string; after: string; changes: Array<{ axis: string; added: string[]; removed: string[] }> };
+
+/**
+ * What each agent's vocabulary gained and lost since the published one. An
+ * agent or axis the published dashboard did not have has no baseline, so it
+ * reports nothing; only agents with an addition or removal are returned.
+ */
+export function vocabularyChanges(published: PublishedVocabulary | undefined, reports: AgentReport[]): AgentChanges[] {
+  if (!published) return [];
+  return reports.flatMap(report => {
+    const before = published[report.id];
+    if (!before) return [];
+    const changes = report.axes.flatMap(axis => {
+      const previous = before.axes[axis.id];
+      if (!previous) return [];
+      const was = new Set(previous);
+      const now = new Set(axis.entries.map(entry => entry.name));
+      const added = [...now].filter(name => !was.has(name)).sort();
+      const removed = [...was].filter(name => !now.has(name)).sort();
+      return added.length || removed.length ? [{ axis: axis.title, added, removed }] : [];
+    });
+    return changes.length ? [{ title: report.title, before: before.versionLine, after: report.versionLine, changes }] : [];
+  });
+}
+
+export function renderComment(changes: AgentChanges[]): string | undefined {
+  if (changes.length === 0) return undefined;
+  const out = ["New and removed SDK vocabulary since the dashboard was last published. The dashboard above shows each entry's state."];
+  for (const agent of changes) {
+    out.push("", `### ${agent.title}`, "", `From ${agent.before}`, `to ${agent.after}.`, "");
+    for (const { axis, added, removed } of agent.changes) {
+      out.push(`- **${axis}**${added.length ? ` — added ${added.map(code).join(", ")}` : ""}${removed.length ? `${added.length ? ";" : " —"} removed ${removed.map(code).join(", ")}` : ""}`);
+    }
+  }
+  return `${out.join("\n")}\n`;
+}
+
+function stateCounts(report: AgentReport): string {
+  return STATES.map(state => `${state} ${report.axes.reduce((sum, axis) => sum + axis.entries.filter(entry => entry.state === state).length, 0)}`).join(" · ");
+}
+
+function renderAgent(report: AgentReport): string[] {
+  const out = ["", `## ${report.title}`, "", `Generated against ${report.versionLine}.`, "", `**Gaps: ${gapCount(report)}** (unhandled or behavior-missing) · ${stateCounts(report)}`];
   for (const axis of report.axes) {
-    out.push("", `## ${axis.title} <a id="axis-${axis.id}"></a>`, "", `Source: ${axis.source}.`, "");
+    out.push("", `### ${report.title}: ${axis.title}`, "", `Source: ${axis.source}.`, "");
     if (axis.notEnumerated) out.push(axis.notEnumerated, "");
     const showRenders = axis.entries.some(entry => entry.renders);
     const showDeclared = axis.entries.some(entry => entry.declared);
@@ -633,75 +605,59 @@ export function renderMatrix(report: AgentReport, previous: string | undefined):
       out.push(`| ${code(entry.name)} |${showDeclared ? ` ${entry.declared ? code(entry.declared) : ""} |` : ""} ${entry.state} |${showRenders ? ` ${entry.renders ?? ""} |` : ""} ${cell(entry.reason ?? "")} |`);
     }
   }
-  return `${out.join("\n")}\n`;
+  return out;
 }
 
-export function renderBadge(report: AgentReport): string {
-  const gaps = gapCount(report);
-  return `${makeBadge({ label: report.title, message: `${report.badgeVersion} · ${gaps} ${gaps === 1 ? "gap" : "gaps"}`, color: gaps === 0 ? "brightgreen" : "yellow" })}\n`;
-}
-
-export const README_START = "<!-- agent-coverage:start -->";
-export const README_END = "<!-- agent-coverage:end -->";
-
-export function renderReadmeBlock(reports: AgentReport[]): string {
-  return [
-    README_START,
-    "<!-- Generated by `bun run coverage:agents`; edits between these markers are overwritten and fail the freshness test. -->",
-    `${reports.map(report => report.title).join(" and ")} are first-class agents in uatu: the aim is to use what each SDK offers, not the subset they share. Each badge opens a page listing everything the installed SDK declares and what uatu does with it; the gap count is the work still to do.`,
+/** The dashboard issue body. Deterministic: no timestamp, commit, or run link. Throws rather than truncate when it outgrows an issue. */
+export function renderDashboard(reports: AgentReport[]): string {
+  const out = [
+    "<!-- Generated by `bun run coverage:agents` and published by .github/workflows/agent-coverage.yml after every push to main. Hand edits are overwritten. -->",
     "",
-    "<p>",
-    ...reports.map(report => `  <a href="./${MATRIX_DIR}/${report.id}.md"><img src="./${MATRIX_DIR}/${report.id}.svg" alt="${report.title} SDK coverage: ${report.badgeVersion}, ${gapCount(report)} gaps" /></a>`),
-    "</p>",
-    README_END,
-  ].join("\n");
+    `${reports.map(report => report.title).join(" and ")} are first-class agents in uatu. The aim is to use what each SDK offers, not the subset they share. This dashboard lists every message type, content block or part, and tool each installed SDK declares, and what uatu does with each today. The gaps are the work still to do. None of them means a feature is unwanted. When a dependency bump adds or removes vocabulary, a comment on this issue names it.`,
+    "",
+    "| Agent | Generated against | Gaps |",
+    "| --- | --- | --- |",
+    ...reports.map(report => `| ${report.title} | ${cell(report.versionLine)} | ${gapCount(report)} |`),
+    "",
+    "Each entry is classified by running uatu's own normalizers and renderers on a stub of it, so the dashboard cannot drift from what the code does. The hand-written part is small: why a type is ignored, and which features show up but do not work yet (`src/chat/claude/sdk-coverage.ts`, `src/chat/opencode/sdk-coverage.ts`).",
+    "",
+    "| State | Meaning |",
+    "| --- | --- |",
+    ...STATES.map(state => `| ${state} | ${STATE_MEANING[state]} |`),
+    ...reports.flatMap(renderAgent),
+    "",
+    renderStateMarker(vocabularyOf(reports)),
+  ];
+  const body = `${out.join("\n")}\n`;
+  if (body.length > ISSUE_BODY_LIMIT) {
+    throw new Error(`agent coverage: the dashboard is ${body.length} characters, over the ${ISSUE_BODY_LIMIT}-character limit of an issue body; split it into one issue per agent rather than truncate it`);
+  }
+  return body;
 }
 
-export function replaceReadmeBlock(readme: string, block: string): string {
-  const start = readme.indexOf(README_START);
-  const end = readme.indexOf(README_END);
-  if (start < 0 || end < start) throw new Error(`agent coverage: README.md has no ${README_START} … ${README_END} block`);
-  return `${readme.slice(0, start)}${block}${readme.slice(end + README_END.length)}`;
+export type Publication = {
+  body: string;
+  // Whether `body` differs from the published one: when not, the issue is left unedited.
+  changed: boolean;
+  // Set only when the vocabulary gained or lost entries since the published body.
+  comment?: string;
+};
+
+/** What publishing against `previous` (the issue's current body, if known) would post and write. */
+export function publication(previous: string | undefined, reports: AgentReport[] = buildReports()): Publication {
+  const body = renderDashboard(reports);
+  const comment = previous === undefined ? undefined : renderComment(vocabularyChanges(parseStateMarker(previous), reports));
+  return { body, changed: previous === undefined || normalizeBody(previous) !== normalizeBody(body), ...(comment === undefined ? {} : { comment }) };
 }
 
-export type GeneratedFile = { path: string; content: string };
-
-/** Every output, in memory, against the committed files under `root`. */
-export function generate(root = REPO_ROOT): GeneratedFile[] {
-  runControls();
-  const reports = [claudeReport(), openCodeReport()];
-  const read = (file: string): string | undefined => existsSync(path.join(root, file)) ? readFileSync(path.join(root, file), "utf8") : undefined;
-  const files: GeneratedFile[] = reports.flatMap(report => {
-    const matrix = `${MATRIX_DIR}/${report.id}.md`;
-    return [
-      { path: matrix, content: renderMatrix(report, committedBaseline(root, matrix, read)) },
-      { path: `${MATRIX_DIR}/${report.id}.svg`, content: renderBadge(report) },
-    ];
-  });
-  files.push({ path: "README.md", content: replaceReadmeBlock(read("README.md") ?? "", renderReadmeBlock(reports)) });
-  return files;
+// GitHub may hand a body back with CRLF line endings or without the final
+// newline; neither is a change.
+function normalizeBody(body: string): string {
+  return body.replaceAll("\r\n", "\n").trimEnd();
 }
 
-/**
- * The matrix the "since" section compares against: the committed one
- * (`HEAD`), not the working-tree file the generator overwrites — two runs
- * across two candidate versions must still compare with what was committed.
- * Outside a repository (a copied tree) the file on disk is the baseline.
- */
-export function committedBaseline(root: string, file: string, read: (file: string) => string | undefined): string | undefined {
-  const inRepo = Bun.spawnSync(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], { stdout: "pipe", stderr: "pipe" });
-  if (inRepo.exitCode !== 0 || inRepo.stdout.toString().trim() !== "true") return read(file);
-  const committed = Bun.spawnSync(["git", "-C", root, "show", `HEAD:${file}`], { stdout: "pipe", stderr: "pipe" });
-  // Not in HEAD yet: nothing was committed, so this is the first generation.
-  return committed.exitCode === 0 ? committed.stdout.toString() : undefined;
-}
-
-/** The committed outputs under `root` that differ from what the generator produces now. */
-export function staleOutputs(root = REPO_ROOT, files: GeneratedFile[] = generate(root)): string[] {
-  return files.flatMap(file => {
-    const target = path.join(root, file.path);
-    return existsSync(target) && readFileSync(target, "utf8") === file.content ? [] : [file.path];
-  });
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -727,11 +683,38 @@ function relative(file: string): string {
   return path.relative(REPO_ROOT, file) || file;
 }
 
-if (import.meta.main) {
-  for (const file of generate()) {
-    const target = path.join(REPO_ROOT, file.path);
-    mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(target, file.content);
-    console.log(`wrote ${file.path}`);
+const USAGE = "usage: bun run coverage:agents [--previous <issue body file>] [--body-out <file>] [--comment-out <file>]";
+
+/**
+ * With no options, prints the dashboard body (a local preview). `--previous`
+ * compares against a published body; with it, the comment a bump would post
+ * goes to `--comment-out`, or to stderr. `--body-out` receives the body only
+ * when it differs from `--previous`. An output that has nothing to say is
+ * removed, so the workflow can test for the file.
+ */
+function main(argv: string[]): number {
+  const options = new Map<string, string>();
+  for (let index = 0; index < argv.length; index += 2) {
+    const [flag, value] = [argv[index]!, argv[index + 1]];
+    if (!["--previous", "--body-out", "--comment-out"].includes(flag) || value === undefined) {
+      console.error(USAGE);
+      return 2;
+    }
+    options.set(flag, value);
   }
+  const previousFile = options.get("--previous");
+  const result = publication(previousFile === undefined ? undefined : readFileSync(previousFile, "utf8"));
+  const write = (file: string | undefined, content: string | undefined, fallback: (content: string) => void): void => {
+    if (file === undefined) { if (content !== undefined) fallback(content); return; }
+    if (content === undefined) rmSync(file, { force: true });
+    else writeFileSync(file, content);
+  };
+  write(options.get("--body-out"), result.changed ? result.body : undefined, content => process.stdout.write(content));
+  write(options.get("--comment-out"), result.comment, content => process.stderr.write(`\nThe comment publication would post:\n\n${content}`));
+  if (previousFile !== undefined) {
+    console.error(`agent coverage: dashboard ${result.changed ? "changed" : "unchanged"}; ${result.comment ? "a vocabulary comment" : "no comment"}`);
+  }
+  return 0;
 }
+
+if (import.meta.main) process.exitCode = main(process.argv.slice(2));

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -7,22 +7,21 @@ import { claudeCoverageAnnotations } from "../src/chat/claude/sdk-coverage";
 import { openCodeCoverageAnnotations } from "../src/chat/opencode/sdk-coverage";
 import {
   CLAUDE_SOURCES,
+  DASHBOARD_ISSUE,
   ExtractionError,
   FLOORS,
-  MATRIX_DIR,
-  README_END,
-  README_START,
+  ISSUE_BODY_LIMIT,
   REPO_ROOT,
+  buildReports,
   claudeReport,
-  committedBaseline,
   extractClaude,
   extractOpenCode,
-  generate,
   openCodeReport,
-  renderBadge,
-  renderMatrix,
-  sinceSection,
-  staleOutputs,
+  parseStateMarker,
+  publication,
+  renderDashboard,
+  renderStateMarker,
+  vocabularyOf,
   type AgentReport,
   type Entry,
 } from "./agent-coverage";
@@ -158,113 +157,141 @@ describe("agent coverage: classification", () => {
     const tools = openCode.axes.find(axis => axis.id === "tools")!;
     expect(tools.entries.every(candidate => candidate.state === "dedicated")).toBe(true);
     expect(tools.entries.map(candidate => candidate.name)).toEqual(expect.arrayContaining(["bash", "apply_patch", "edit", "task"]));
-    const matrix = renderMatrix(openCode, undefined);
-    const section = matrix.slice(matrix.indexOf('<a id="axis-tools">'));
+    const dashboard = renderDashboard([claude, openCode]);
+    const section = dashboard.slice(dashboard.indexOf("### OpenCode: Tools"));
     expect(section).toContain("Neither OpenCode SDK enumerates tool names");
     expect(section).toContain("every other tool name renders through the generic tool row");
   });
 });
 
-describe("agent coverage: outputs", () => {
-  test("regeneration is byte-identical", () => {
-    const first = generate();
-    const root = mkdtempSync(path.join(tmpdir(), "uatu-coverage-root-"));
-    mkdirSync(path.join(root, MATRIX_DIR), { recursive: true });
-    for (const file of first) writeFileSync(path.join(root, file.path), file.content);
-    expect(generate(root)).toEqual(first);
+// A report as an older SDK would have produced it: the same entries, minus
+// `drop` (per axis id) and plus `add`, under another version line.
+function olderReport(report: AgentReport, versionLine: string, drop: Record<string, string[]>, add: Record<string, string[]> = {}): AgentReport {
+  return {
+    ...report,
+    versionLine,
+    axes: report.axes.map(axis => ({
+      ...axis,
+      entries: [
+        ...axis.entries.filter(candidate => !(drop[axis.id] ?? []).includes(candidate.name)),
+        ...(add[axis.id] ?? []).map(name => ({ name, state: "dedicated" as const })),
+      ],
+    })),
+  };
+}
+
+describe("agent coverage: dashboard", () => {
+  const reports = [claude, openCode];
+  const dashboard = renderDashboard(reports);
+
+  test("rendering is byte-identical and carries no run metadata", () => {
+    expect(renderDashboard([claudeReport(), openCodeReport()])).toBe(dashboard);
+    expect(dashboard).not.toMatch(/\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}|\b[0-9a-f]{40}\b|actions\/runs/);
   });
 
-  test("a version bump lists what arrived and what left, and keeps saying so on the next run", () => {
-    const current = renderMatrix(claude, undefined);
-    const previous = current
-      .replace(/^Generated against .*$/m, "Generated against `@anthropic-ai/claude-agent-sdk` 0.0.1 (bundled Claude Code CLI 0.0.1) · content blocks from `@anthropic-ai/sdk` 0.0.1.")
-      .replace(/^\| `active_goal` \|.*\n/m, "")
-      .replace(/^\| `Monitor` \|.*\n/m, "")
-      .replace(/^\| `assistant` \|/m, "| `retired_type` | dedicated |  |  |\n| `assistant` |");
-    const since = sinceSection(claude, previous);
-    expect(since).toContain("## Since `@anthropic-ai/claude-agent-sdk` 0.0.1 (bundled Claude Code CLI 0.0.1) · content blocks from `@anthropic-ai/sdk` 0.0.1");
-    expect(since).toContain("- **Message types** — added `active_goal`; removed `retired_type`");
-    expect(since).toContain("- **Tools** — added `Monitor`");
-    // The regenerated matrix, regenerated again, still names the bump.
-    const next = renderMatrix(claude, previous);
-    expect(renderMatrix(claude, next)).toBe(next);
+  test("the summary names each agent's versions and gap count, and each agent's tables follow", () => {
+    expect(dashboard).toContain(`| Claude Code | ${claude.versionLine} |`);
+    expect(dashboard).toContain(`| OpenCode | ${openCode.versionLine} |`);
+    expect(dashboard).toMatch(/^## Claude Code$/m);
+    expect(dashboard).toMatch(/^### Claude Code: Tools$/m);
+    expect(dashboard).toContain("| `Monitor` | `MonitorInput` | generic |");
+    expect(dashboard).toMatch(/^## OpenCode$/m);
+    expect(dashboard).toMatch(/^### OpenCode: 2\.x events$/m);
   });
 
-  test("the since baseline is the committed matrix, not an intermediate regeneration", () => {
-    const repo = mkdtempSync(path.join(tmpdir(), "uatu-coverage-git-"));
-    const git = (...args: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { stdout: "pipe", stderr: "pipe" });
-    git("init", "-q");
-    const file = `${MATRIX_DIR}/claude-code.md`;
-    mkdirSync(path.join(repo, MATRIX_DIR), { recursive: true });
-    const read = (name: string) => readFileSync(path.join(repo, name), "utf8");
-    // Nothing committed yet: first generation, whatever the working tree holds.
-    writeFileSync(path.join(repo, file), "intermediate\n");
-    expect(committedBaseline(repo, file, read)).toBeUndefined();
-    writeFileSync(path.join(repo, file), "committed\n");
-    git("add", ".");
-    expect(git("commit", "-q", "-m", "baseline").exitCode).toBe(0);
-    // A later run overwrote the working tree; the baseline stays what HEAD holds.
-    writeFileSync(path.join(repo, file), "intermediate\n");
-    expect(committedBaseline(repo, file, read)).toBe("committed\n");
-    // Outside a repository the file on disk is the baseline.
-    const loose = mkdtempSync(path.join(tmpdir(), "uatu-coverage-loose-"));
-    mkdirSync(path.join(loose, MATRIX_DIR), { recursive: true });
-    writeFileSync(path.join(loose, file), "on disk\n");
-    expect(committedBaseline(loose, file, name => readFileSync(path.join(loose, name), "utf8"))).toBe("on disk\n");
+  test("the hidden marker round-trips the vocabulary, a name containing -- included", () => {
+    expect(parseStateMarker(dashboard)).toEqual(vocabularyOf(reports));
+    const awkward = { "claude-code": { versionLine: "x --> y", axes: { tools: ["a--b", "c---", "-->"] } } };
+    const marker = renderStateMarker(awkward);
+    expect(marker.slice("<!-- ".length, -" -->".length)).not.toContain("--");
+    expect(parseStateMarker(`intro\n\n${marker}\n`)).toEqual(awkward);
+    // GitHub may hand the body back with CRLF line endings.
+    expect(parseStateMarker(dashboard.replaceAll("\n", "\r\n"))).toEqual(vocabularyOf(reports));
   });
 
-  test("a hand edit to a carried-forward since section is rejected, even one that still parses", () => {
-    const previous = renderMatrix(claude, undefined)
-      .replace(/^Generated against .*$/m, "Generated against `@anthropic-ai/claude-agent-sdk` 0.0.1.")
-      .replace(/^\| `active_goal` \|.*\n/m, "");
-    const next = renderMatrix(claude, previous);
-    expect(next).toContain("added `active_goal`");
-    for (const edited of [
-      next.replace("added `active_goal`", "added `something_else`"),
-      next.replace("## Since `@anthropic-ai/claude-agent-sdk` 0.0.1", "## Since `@anthropic-ai/claude-agent-sdk` 0.0.2"),
-      next.replace(/^<!-- agent-coverage:since:start seal=[0-9a-f]+ -->$/m, "<!-- agent-coverage:since:start -->"),
-    ]) {
-      expect(edited).not.toBe(next);
-      expect(() => renderMatrix(claude, edited)).toThrow(/does not match its seal, so it was edited by hand/);
+  test("an unreadable marker is no baseline", () => {
+    for (const body of [
+      "",
+      "a hand-written body",
+      dashboard.replace("agent-coverage:state v1 ", "agent-coverage:state v0 "),
+      dashboard.replace(/(<!-- agent-coverage:state v1 )\{/, "$1{garbled"),
+      dashboard.replace(/(<!-- agent-coverage:state v1 ).*( -->)$/m, '$1{"claude-code":{"versionLine":1,"axes":{}}}$2'),
+    ]) expect(parseStateMarker(body)).toBeUndefined();
+  });
+
+  test("a bump that adds and removes vocabulary posts both, with the versions before and after", () => {
+    const published = renderDashboard([olderReport(claude, "`@anthropic-ai/claude-agent-sdk` 0.0.1", { messages: ["active_goal"], tools: ["Monitor"] }, { messages: ["retired_type"] }), openCode]);
+    const result = publication(published, reports);
+    expect(result.changed).toBe(true);
+    expect(result.body).toBe(dashboard);
+    expect(result.comment).toContain("### Claude Code");
+    expect(result.comment).toContain("From `@anthropic-ai/claude-agent-sdk` 0.0.1");
+    expect(result.comment).toContain(`to ${claude.versionLine}.`);
+    expect(result.comment).toContain("- **Message types** — added `active_goal`; removed `retired_type`");
+    expect(result.comment).toContain("- **Tools** — added `Monitor`");
+    // The agent whose vocabulary did not move is not mentioned.
+    expect(result.comment).not.toContain("OpenCode");
+  });
+
+  test("a version-only bump changes the body and posts no comment", () => {
+    const result = publication(renderDashboard([olderReport(claude, "`@anthropic-ai/claude-agent-sdk` 0.0.1", {}), openCode]), reports);
+    expect(result.changed).toBe(true);
+    expect(result.comment).toBeUndefined();
+  });
+
+  test("republishing an unchanged report edits nothing and posts nothing", () => {
+    const result = publication(dashboard.replaceAll("\n", "\r\n").trimEnd(), reports);
+    expect(result.changed).toBe(false);
+    expect(result.comment).toBeUndefined();
+  });
+
+  test("without a readable baseline, the dashboard is the new baseline and no comment is posted", () => {
+    for (const previous of [undefined, "This issue is the agent SDK coverage dashboard.", dashboard.replace("agent-coverage:state v1 {", "agent-coverage:state v1 {{")]) {
+      const result = publication(previous, reports);
+      expect(result.changed).toBe(true);
+      expect(result.comment).toBeUndefined();
     }
   });
 
-  test("the badge carries agent, version, and gap count, is green only at zero gaps, and has no timestamp", () => {
-    const svg = renderBadge(claude);
-    expect(svg).toContain(`Claude Code: ${claude.badgeVersion} · `);
-    expect(svg).toMatch(/\d+ gaps?</);
-    expect(svg).not.toMatch(/\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}/);
-    const clean: AgentReport = { ...claude, axes: claude.axes.map(axis => ({ ...axis, entries: axis.entries.filter(candidate => candidate.state !== "unhandled" && candidate.state !== "behavior-missing") })) };
-    expect(renderBadge(clean)).toContain("0 gaps");
-    // badge-maker's brightgreen.
-    expect(renderBadge(clean)).toContain("#4b0");
-    expect(svg).not.toContain("#4b0");
+  test("bumps that land between publications are reported together, against the last published versions", () => {
+    // Published at 0.0.1; 0.0.2 (which brought active_goal) was never
+    // published; the current SDK also brought Monitor.
+    const published = renderDashboard([olderReport(claude, "`@anthropic-ai/claude-agent-sdk` 0.0.1", { messages: ["active_goal"], tools: ["Monitor"] }), openCode]);
+    const comment = publication(published, reports).comment!;
+    expect(comment).toContain("From `@anthropic-ai/claude-agent-sdk` 0.0.1");
+    expect(comment).toContain("added `active_goal`");
+    expect(comment).toContain("added `Monitor`");
   });
 
-  test("the README block references only files in the checkout", () => {
+  test("an axis or agent the published dashboard did not have reports no additions", () => {
+    const published = renderDashboard([claude]);
+    expect(publication(published, reports).comment).toBeUndefined();
+    const withoutTools = renderStateMarker({ ...vocabularyOf(reports), "claude-code": { ...vocabularyOf(reports)["claude-code"]!, axes: { messages: vocabularyOf(reports)["claude-code"]!.axes.messages! } } });
+    expect(publication(withoutTools, reports).comment).toBeUndefined();
+  });
+
+  test("a dashboard over the issue body limit fails naming its size instead of truncating", () => {
+    const padded: AgentReport = { ...claude, axes: [...claude.axes, { id: "padding", title: "Padding", source: "test", keyPrefix: "", entries: Array.from({ length: 2_000 }, (_, index) => ({ name: `padding_entry_${index}`, state: "unhandled" as const })) }] };
+    expect(() => renderDashboard([padded, openCode])).toThrow(new RegExp(`the dashboard is \\d+ characters, over the ${ISSUE_BODY_LIMIT}-character limit`));
+    expect(dashboard.length).toBeLessThanOrEqual(ISSUE_BODY_LIMIT);
+  });
+
+  test("the README and the publication workflow name the same dashboard issue", () => {
     const readme = readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
-    const block = readme.slice(readme.indexOf(README_START), readme.indexOf(README_END) + README_END.length);
-    expect(block).not.toMatch(/img\.shields\.io|https?:\/\//);
-    const targets = [...block.matchAll(/(?:href|src)="\.\/([^"]+)"/g)].map(match => match[1]!);
-    expect(targets).toEqual(["docs/agents/claude-code.md", "docs/agents/claude-code.svg", "docs/agents/opencode.md", "docs/agents/opencode.svg"]);
-    for (const target of targets) expect(() => readFileSync(path.join(REPO_ROOT, target))).not.toThrow();
+    expect(readme.includes(`https://github.com/tjakobsson/uatu/issues/${DASHBOARD_ISSUE}`), `README.md links issue #${DASHBOARD_ISSUE}`).toBe(true);
+    const workflow = readFileSync(path.join(REPO_ROOT, ".github/workflows/agent-coverage.yml"), "utf8");
+    expect(workflow.includes(`DASHBOARD_ISSUE: "${DASHBOARD_ISSUE}"`), `agent-coverage.yml publishes to issue #${DASHBOARD_ISSUE}`).toBe(true);
   });
 });
 
-describe("agent coverage: freshness", () => {
-  test("the committed report matches the installed SDKs (run `bun run coverage:agents` after an SDK bump)", () => {
-    expect(staleOutputs()).toEqual([]);
-  });
-
-  test("a one-character edit to a committed matrix is named as stale", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "uatu-coverage-fresh-"));
-    mkdirSync(path.join(root, MATRIX_DIR), { recursive: true });
-    for (const file of ["README.md", `${MATRIX_DIR}/claude-code.md`, `${MATRIX_DIR}/claude-code.svg`, `${MATRIX_DIR}/opencode.md`, `${MATRIX_DIR}/opencode.svg`]) {
-      copyFileSync(path.join(REPO_ROOT, file), path.join(root, file));
-    }
-    expect(staleOutputs(root)).toEqual([]);
-    const matrix = path.join(root, MATRIX_DIR, "claude-code.md");
-    writeFileSync(matrix, readFileSync(matrix, "utf8").replace("| `Monitor` | `MonitorInput` | generic |", "| `Monitor` | `MonitorInput` | generiC |"));
-    expect(staleOutputs(root)).toEqual([`${MATRIX_DIR}/claude-code.md`]);
+describe("agent coverage: the installed SDKs", () => {
+  // The gate a dependency bump meets: it fails only when uatu's code or
+  // annotations must change (an unreadable axis, a stale or unexplained
+  // annotation, a probe that no longer tells handled from unhandled), never
+  // because a version moved or the vocabulary grew.
+  test("both agents' reports build from the installed SDKs, controls included", () => {
+    const built = buildReports();
+    expect(built.map(report => report.id)).toEqual(["claude-code", "opencode"]);
+    for (const report of built) expect(report.axes.every(axis => axis.entries.length > 0)).toBe(true);
   });
 });

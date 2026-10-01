@@ -120,28 +120,33 @@ bunx @fission-ai/openspec validate --all --strict
 
 ### Agent SDK coverage
 
-`docs/agents/claude-code.md` and `docs/agents/opencode.md` record, for every
-message type, content-block or part type, and tool the installed agent SDKs
-declare, what uatu does with it: dedicated, generic, ignored, unhandled, or
-behavior-missing. The matrices, their badges (`docs/agents/*.svg`), and the
-README block between the `agent-coverage` markers are generated; do not edit
-them by hand. After an agent SDK bump (`@anthropic-ai/claude-agent-sdk`,
-`@anthropic-ai/sdk`, `@opencode-ai/sdk`, `@opencode/client`), or after changing how a normalizer or
-renderer treats a type, run:
+The [Agent SDK coverage dashboard](https://github.com/tjakobsson/uatu/issues/480)
+records, for every message type, content-block or part type, and tool the
+installed agent SDKs declare, what uatu does with it: dedicated, generic,
+ignored, unhandled, or behavior-missing. It is not committed. The `Agent SDK
+coverage` workflow (`.github/workflows/agent-coverage.yml`) regenerates it after
+every push to `main`, and when a merge adds or removes SDK vocabulary it posts a
+comment on the issue naming what changed. An agent SDK bump
+(`@anthropic-ai/claude-agent-sdk`, `@anthropic-ai/sdk`, `@opencode-ai/sdk`,
+`@opencode/client`) has nothing to regenerate.
+
+To preview what your branch would publish:
 
 ```bash
-bun run coverage:agents
+bun run coverage:agents                       # the dashboard body, on stdout
+gh issue view 480 --json body --jq .body > /tmp/published.md
+bun run coverage:agents --previous /tmp/published.md > /dev/null
+                                              # the comment it would post, on stderr
 ```
 
-and commit the regenerated files in the same PR. `bun test` fails with the
-stale path until you do; it never fails because coverage is incomplete. Only
-two things are written by hand, in `src/chat/claude/sdk-coverage.ts` and
-`src/chat/opencode/sdk-coverage.ts`: why an ignored type is dropped (every one
-needs a reason; a key ending in `*` covers a family), and which entries render
-without working (and what fixes them, by name). The generator rejects an
-annotation naming anything the installed SDK does not declare, and an ignored
-type nobody has explained — state why, or stop ignoring it so it reports as
-unhandled.
+`bun test` fails a bump only when uatu itself has to change, never because a
+version moved or coverage is incomplete. Only two things are written by hand,
+in `src/chat/claude/sdk-coverage.ts` and `src/chat/opencode/sdk-coverage.ts`:
+why an ignored type is dropped (every one needs a reason; a key ending in `*`
+covers a family), and which entries render without working (and what fixes
+them, by name). The generator, and with it `bun test`, rejects an annotation
+naming anything the installed SDK does not declare, and an ignored type nobody
+has explained — state why, or stop ignoring it so it reports as unhandled.
 
 The full Playwright suite takes longer than unit tests. Focused Playwright
 files are appropriate while iterating, but CI remains the final full-suite
