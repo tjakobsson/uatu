@@ -5367,6 +5367,34 @@ describe("windows and the default as Claude Code states them (claude-context-win
     }
   });
 
+  test("a model switch that outlasts its bound ends the walk; a later probe asks the rows it did not reach", async () => {
+    let slow = true;
+    const { provider, queries } = windowFixture({}, { windowReadTimeoutMs: 30, windowReprobeCooldownMs: 0 });
+    try {
+      const first = provider.listModels();
+      await waitFor(() => queries.length === 1);
+      const probe = queries[0]!;
+      const original = probe.setModel!;
+      // "sonnet" never finishes switching on the first probe.
+      probe.setModel = async model => { if (slow && model === "sonnet") return new Promise<void>(() => undefined); return original(model); };
+      await first;
+      await waitFor(() => probe.returned);
+      // Rows before it were read; the walk stopped at it, so a row after it was not asked.
+      expect(probe.modelCalls).not.toContain("haiku");
+      // The stalled switch never reached the recorder: the last recorded is the row before it.
+      expect(probe.modelCalls.at(-1)).toBe("fable[1m]");
+      slow = false;
+      // The next read sees unasked rows and probes again, asking only those.
+      const settledModels = await settled(provider, served => queries.length === 2 && queries[1]!.returned && find(served, "claude-opus-4-7").detail?.includes("1M") === true);
+      expect(queries[1]!.modelCalls).toContain("haiku");
+      expect(queries[1]!.modelCalls).not.toContain("opus");
+      expect(queries[1]!.modelCalls).not.toContain("sonnet");
+      expect(find(settledModels, "haiku").contextLimit).toBe(200_000);
+    } finally {
+      await provider.dispose();
+    }
+  });
+
   test("a CLI without the window controls is not re-probed on later reads", async () => {
     const { provider, queries } = windowFixture({ controls: false }, { windowReprobeCooldownMs: 0 });
     try {

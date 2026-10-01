@@ -3594,7 +3594,11 @@ export class ClaudeProvider implements ChatProvider {
       // use) is not re-asked on every refresh.
       this.probedRows.add(probeKey(row));
       const set = await bounded(query.setModel(row.selection.modelId).then(() => true), this.windowReadTimeoutMs, this.disposal.promise);
-      if (!set) continue;
+      // A switch that outlasted its bound may still land and change the
+      // session's model under the next row's read: this query is no longer
+      // trustworthy, so the walk ends here and the rows it did not reach are
+      // asked by the next probe, on a fresh query.
+      if (!set) return;
       const answer = await this.readProbeContext(query);
       const expected = stripWindowMarker(row.resolvesTo?.modelId ?? row.selection.modelId);
       if (answer?.window && answer.model && stripWindowMarker(answer.model) === expected) {
