@@ -5263,6 +5263,51 @@ describe("windows and the default as Claude Code states them (claude-context-win
     await provider.dispose();
   });
 
+  test("a stated window follows its model when a refresh offers it under another id", async () => {
+    const original = currentCatalog.slice();
+    const { provider, queries } = windowFixture({
+      behave: model => (model === "claude-opus-4-6" ? { model: "claude-opus-4-6", maxTokens: 1_000_000 } : undefined),
+    });
+    try {
+      await settled(provider, served => find(served, "claude-opus-4-6").contextLimit === 1_000_000);
+      // A CLI update: the catalog now lists Opus 4.6 under an alias, so the
+      // app-only full-id row drops out (never shadowing a catalog id).
+      currentCatalog.push({ value: "opus-legacy", resolvedModel: "claude-opus-4-6", displayName: "Opus 4.6", description: "Opus 4.6 · Previous generation" } as typeof currentCatalog[number]);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+      const refreshed = await settled(provider, served => served.some(model => model.selection.modelId === "opus-legacy"));
+      expect(refreshed.some(model => model.selection.modelId === "claude-opus-4-6")).toBe(false);
+      // The window Claude Code stated for the model, not the 200k fallback.
+      expect(find(refreshed, "opus-legacy").contextLimit).toBe(1_000_000);
+      expect(queries[1]!.modelCalls).toEqual([]);
+    } finally {
+      currentCatalog.splice(0, currentCatalog.length, ...original);
+      await provider.dispose();
+    }
+  });
+
+  test("an id two rows resolve to at different windows lends neither", async () => {
+    const original = currentCatalog.slice();
+    currentCatalog.push({ value: "fable", resolvedModel: "claude-fable-5-1", displayName: "Fable 5.1", description: "Fable at the standard window" } as typeof currentCatalog[number]);
+    // Two rows, one resolved id, two stated windows (900k is distinct from
+    // the 1M fallback so a guess between them would show).
+    const { provider } = windowFixture({ behave: model => (model === "fable" ? { model: "claude-fable-5-1", maxTokens: 200_000 } : model === "fable[1m]" ? { model: "claude-fable-5-1", maxTokens: 900_000 } : undefined) });
+    try {
+      await settled(provider, served => find(served, "fable").contextLimit === 200_000);
+      // A refreshed row resolving to claude-fable-5-1 under a new id has two
+      // candidate windows: it keeps the derived figure rather than guess.
+      currentCatalog.push({ value: "fable-next", resolvedModel: "claude-fable-5-1", displayName: "Fable 5.1", description: "x" } as typeof currentCatalog[number]);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+      const refreshed = await settled(provider, served => served.some(model => model.selection.modelId === "fable-next"));
+      expect(find(refreshed, "fable-next").contextLimit).toBe(1_000_000);
+      expect(find(refreshed, "fable").contextLimit).toBe(200_000);
+    } finally {
+      currentCatalog.splice(0, currentCatalog.length, ...original);
+      await provider.dispose();
+    }
+  });
+
   test("disposal while the walk runs stops it and closes the probe", async () => {
     const { provider, queries } = windowFixture({ behave: model => (model === "sonnet" ? "hang" : undefined) }, { windowReadTimeoutMs: 60_000 });
     await provider.listModels();

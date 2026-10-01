@@ -54,7 +54,13 @@ const moreModel = (modelId: string, name: string, contextLimit: number, variants
 
 /** A "More models" row's detail line, restated whenever its window is. */
 export function moreModelDetail(modelId: string, contextLimit: number): string {
-  return `${modelId} · ${contextLimit >= 1_000_000 ? "1M" : `${Math.round(contextLimit / 1_000)}k`} context · offered by the Claude apps`;
+  return `${modelId} · ${windowLabel(contextLimit)} context · offered by the Claude apps`;
+}
+
+/** 1_000_000 → "1M", 2_500_000 → "2.5M", 200_000 → "200k". */
+export function windowLabel(contextLimit: number): string {
+  if (contextLimit >= 1_000_000) return `${Number((contextLimit / 1_000_000).toFixed(1))}M`;
+  return `${Math.round(contextLimit / 1_000)}k`;
 }
 
 export const CLAUDE_MORE_MODELS: ChatModel[] = [

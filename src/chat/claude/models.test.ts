@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { CLAUDE_MODELS, CLAUDE_MORE_MODELS, MORE_MODELS_GROUP, claudeContextWindow, versionedModelName, withMoreModels } from "./models";
+import { CLAUDE_MODELS, CLAUDE_MORE_MODELS, MORE_MODELS_GROUP, claudeContextWindow, moreModelDetail, versionedModelName, windowLabel, withMoreModels } from "./models";
 import type { ChatModel } from "../types";
 
 describe("More models (D3)", () => {
@@ -53,6 +53,16 @@ describe("versioned model names (D2)", () => {
     expect(versionedModelName("Sonnet 4.6", "Sonnet 4.6 · older", "claude-sonnet-4-6")).toBe("Sonnet 4.6");
     // Nothing states a version: the display name stands rather than a guess.
     expect(versionedModelName("Mystery", "Mystery · no version anywhere", "mystery-model")).toBe("Mystery");
+  });
+});
+
+describe("window labels", () => {
+  test("a window above 1M is stated in millions, not collapsed to 1M", () => {
+    expect(windowLabel(200_000)).toBe("200k");
+    expect(windowLabel(1_000_000)).toBe("1M");
+    expect(windowLabel(2_000_000)).toBe("2M");
+    expect(windowLabel(2_500_000)).toBe("2.5M");
+    expect(moreModelDetail("claude-x", 2_000_000)).toBe("claude-x · 2M context · offered by the Claude apps");
   });
 });
 

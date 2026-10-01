@@ -516,6 +516,12 @@ export class ClaudeProvider implements ChatProvider {
   // applied). Held apart from `liveModels` so a live session's catalog
   // refresh cannot erase them; applied whenever the catalog is served.
   private readonly statedWindows = new Map<string, number>();
+  // The same windows by the exact id each row resolved to: a refresh can
+  // offer a stated model under another selection id (an app-only full id
+  // the catalog later lists under an alias), and the window follows the
+  // model. Only an unambiguous figure is lent — "fable" and "fable[1m]"
+  // resolve to one id at two windows.
+  private readonly statedByResolved = new Map<string, Set<number>>();
   private defaultRuns: { model: string; window?: number } | null = null;
   // Whether the probe's window walk has run (in full, in part, or not at
   // all on a CLI without the controls). Only a failed catalog re-probes.
@@ -655,7 +661,7 @@ export class ClaudeProvider implements ChatProvider {
    */
   private servedModels(): ChatModel[] {
     const rows = withMoreModels(this.liveModels ?? CLAUDE_MODELS).map(model => {
-      const stated = model.default ? undefined : this.statedWindows.get(model.selection.modelId);
+      const stated = model.default ? undefined : this.statedWindowFor(model);
       if (stated === undefined) return model;
       return {
         ...model,
@@ -664,6 +670,13 @@ export class ClaudeProvider implements ChatProvider {
       };
     });
     return this.presentDefault(rows);
+  }
+
+  private statedWindowFor(model: ChatModel): number | undefined {
+    const bySelection = this.statedWindows.get(model.selection.modelId);
+    if (bySelection !== undefined) return bySelection;
+    const byResolved = this.statedByResolved.get(model.resolvesTo?.modelId ?? model.selection.modelId);
+    return byResolved?.size === 1 ? [...byResolved][0] : undefined;
   }
 
   /**
@@ -3509,6 +3522,10 @@ export class ClaudeProvider implements ChatProvider {
       const expected = stripWindowMarker(row.resolvesTo?.modelId ?? row.selection.modelId);
       if (answer?.window && answer.model && stripWindowMarker(answer.model) === expected) {
         this.statedWindows.set(row.selection.modelId, answer.window);
+        const resolved = row.resolvesTo?.modelId ?? row.selection.modelId;
+        const windows = this.statedByResolved.get(resolved) ?? new Set<number>();
+        windows.add(answer.window);
+        this.statedByResolved.set(resolved, windows);
       }
     }
   }
