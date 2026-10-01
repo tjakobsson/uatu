@@ -5144,7 +5144,8 @@ describe("windows and the default as Claude Code states them (claude-context-win
     expect(entry.name).toBe("Default (recommended)");
     expect(entry.default).toBe(true);
     expect(entry.resolvesTo).toEqual({ providerId: "anthropic", modelId: "fable[1m]" });
-    expect(entry.detail).toBe("For your toughest challenges");
+    // Named as Claude Code names its default: the model first.
+    expect(entry.detail).toBe("Fable 5.1 · For your toughest challenges");
     expect(entry.variants).toEqual(["low", "medium", "high", "xhigh"]);
     expect(entry.contextLimit).toBe(1_000_000);
     // Effort validation follows what the default runs: max is not Fable's here.
@@ -5194,7 +5195,7 @@ describe("windows and the default as Claude Code states them (claude-context-win
       const served = await settled(provider, models => find(models, "fable").contextLimit === 200_000);
       const entry = find(served, "default");
       expect(entry.resolvesTo).toEqual({ providerId: "anthropic", modelId: "fable" });
-      expect(entry.detail).toBe("Fable at the standard window");
+      expect(entry.detail).toBe("Fable 5.1 · Fable at the standard window");
       expect(entry.variants).toEqual(["low", "medium", "high"]);
     } finally {
       currentCatalog.splice(0, currentCatalog.length, ...original);

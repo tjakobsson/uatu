@@ -739,12 +739,17 @@ export class ClaudeProvider implements ChatProvider {
     if (!match) {
       presented = { ...entry, resolvesTo: { providerId: "anthropic", modelId: runs.model }, detail: `Runs ${runs.model} · Claude Code's own model choice`, contextLimit };
     } else if (entry.resolvesTo && sameSelection(entry.resolvesTo, match.selection)) {
-      // The catalog already names what runs: its own description stands.
+      // The catalog already names what runs: Claude Code's own presentation
+      // of its default stands — a description that names the model ("Sonnet
+      // 5.5 · Efficient for routine tasks") and the effort it offers there.
       presented = { ...entry, contextLimit };
     } else {
       presented = { ...entry, resolvesTo: match.selection, contextLimit };
-      if (match.detail) presented.detail = match.detail;
-      else delete presented.detail;
+      // In Claude Code's own shape for its default: the model's name first,
+      // since a concrete row's description often omits it ("For your
+      // toughest challenges") and the default row's name does not carry it.
+      if (match.detail) presented.detail = match.detail.startsWith(match.name) ? match.detail : `${match.name} · ${match.detail}`;
+      else presented.detail = match.name;
       if (match.variants) presented.variants = [...match.variants];
       else delete presented.variants;
     }
