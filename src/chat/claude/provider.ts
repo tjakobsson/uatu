@@ -753,6 +753,10 @@ export class ClaudeProvider implements ChatProvider {
     let presented: ChatModel;
     if (!match) {
       presented = { ...entry, resolvesTo: { providerId: "anthropic", modelId: runs.model }, detail: `Runs ${runs.model} · Claude Code's own model choice`, contextLimit };
+      // Nothing states which effort levels that model takes; the catalog
+      // default's belong to another model, and an unsupported level must
+      // not be selectable — so none is offered.
+      delete presented.variants;
     } else if (entry.resolvesTo && sameSelection(entry.resolvesTo, match.selection)) {
       // The catalog already names what runs: Claude Code's own presentation
       // of its default stands — a description that names the model ("Sonnet

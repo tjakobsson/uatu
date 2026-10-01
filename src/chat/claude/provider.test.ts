@@ -5426,6 +5426,10 @@ describe("windows and the default as Claude Code states them (claude-context-win
     expect(entry.resolvesTo).toEqual({ providerId: "anthropic", modelId: "claude-experimental-9" });
     expect(entry.detail).toContain("claude-experimental-9");
     expect(entry.contextLimit).toBe(400_000);
+    // No effort levels are known for it: none is offered, and none is accepted.
+    expect(entry.variants).toBeUndefined();
+    const session = await provider.createSession("x");
+    await expect(provider.switchModel(session.id, { providerId: "anthropic", modelId: "default" }, "high")).rejects.toThrow();
     await provider.dispose();
   });
 

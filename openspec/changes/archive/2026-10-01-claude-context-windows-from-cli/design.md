@@ -127,8 +127,9 @@ read. When the catalog is served, the default row is rebuilt from it:
 When no served row matches, `resolvesTo` is `{ providerId: "anthropic",
 modelId: defaultRuns }` and `detail` names the id. The chip falls back to
 `Default · <id>` (`modelChipName` gains this branch) rather than the bare
-"Default (recommended)". Effort variants stay the catalog default row's,
-because nothing better is known for an unlisted model.
+"Default (recommended)". No effort variants are offered for it: the catalog
+default row's belong to another model, and an effort level the model does
+not support must not be selectable (revised in review on #483).
 
 When the unpinned read fails, `defaultRuns` stays unset and the catalog's own
 `resolvesTo` stands, which is today's behavior.
