@@ -13,6 +13,7 @@ import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskO
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
+import { contextReadout } from "../context-readout";
 
 class FakeQuery implements ClaudeQueryHandle {
   readonly emitted: unknown[] = [];
@@ -5059,7 +5060,7 @@ describe("windows and the default as Claude Code states them (claude-context-win
         return query;
       },
     });
-    return { provider, queries };
+    return { provider, queries, workspace, configDir };
   }
 
   const find = (models: Awaited<ReturnType<ClaudeProvider["listModels"]>>, id: string) => models.find(model => model.selection.modelId === id)!;
@@ -5224,6 +5225,111 @@ describe("windows and the default as Claude Code states them (claude-context-win
         currentCatalog.splice(0, currentCatalog.length, ...original);
         await provider.dispose();
       }
+    }
+  });
+
+  test("an unpinned conversation's usage is measured against the variant the default runs, live and reopened", async () => {
+    const original = currentCatalog.slice();
+    // fable[1m] first, fable second: the alias join would pick fable[1m].
+    currentCatalog.push({ value: "fable", resolvedModel: "claude-fable-5-1", displayName: "Fable 5.1", description: "Fable at the standard window" } as typeof currentCatalog[number]);
+    const { provider, queries, workspace, configDir } = windowFixture({
+      unpinned: { model: "claude-fable-5-1", maxTokens: 200_000 },
+      behave: model => (model === "fable" ? { model: "claude-fable-5-1", maxTokens: 200_000 } : undefined),
+    });
+    const { events, stop } = collect(provider);
+    try {
+      const served = await settled(provider, models => find(models, "fable").contextLimit === 200_000);
+      expect(find(served, "default").resolvesTo).toEqual({ providerId: "anthropic", modelId: "fable" });
+      const carriers = () => events.flatMap(event => event.updates)
+        .filter(update => update.kind === "upsert")
+        .map(update => (update as { item: { type: string; usage?: unknown; model?: { modelId: string } } }).item)
+        .filter(item => item.type === "assistant_message" && item.usage !== undefined);
+      // Unpinned: the default's variant.
+      const unpinned = await provider.createSession("x");
+      await provider.prompt(unpinned.id, { id: "r1", text: "hello", delivery: "queue" });
+      const live = queries.at(-1)!;
+      live.push({ type: "assistant", uuid: "a1", timestamp: "2026-10-01T10:00:00.000Z",
+        message: { role: "assistant", model: "claude-fable-5-1", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 3, output_tokens: 1 } } });
+      await waitFor(() => carriers().length > 0);
+      expect(carriers().at(-1)!.model?.modelId).toBe("fable");
+      const readout = contextReadout(carriers() as never, await provider.listModels(), undefined);
+      expect(readout?.limit).toBe(200_000);
+      // Pinned to fable[1m]: the alias join, untouched.
+      const pinned = await provider.createSession("y", { model: { providerId: "anthropic", modelId: "fable[1m]" } });
+      await provider.prompt(pinned.id, { id: "r2", text: "hello", delivery: "queue" });
+      const pinnedLive = queries.at(-1)!;
+      pinnedLive.push({ type: "assistant", uuid: "a2", timestamp: "2026-10-01T10:01:00.000Z",
+        message: { role: "assistant", model: "claude-fable-5-1", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 3, output_tokens: 1 } } });
+      await waitFor(() => carriers().length > 1);
+      expect(carriers().at(-1)!.model?.modelId).toBe("fable[1m]");
+      // Reopened from native storage, unpinned: the default's variant too.
+      writeFileSync(path.join(claudeProjectDir(workspace, configDir), "reopened-default.jsonl"), [
+        { type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-10-01T09:00:00Z", message: { role: "user", content: "hello" } },
+        { type: "assistant", uuid: "a9", parentUuid: "u1", isSidechain: false, timestamp: "2026-10-01T09:00:01Z", message: { role: "assistant", model: "claude-fable-5-1", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 5, cache_read_input_tokens: 150_000, output_tokens: 1 } } },
+      ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+      const page = await provider.listMessages("reopened-default", { limit: 10 });
+      const reopened = page.items.find(item => item.type === "assistant_message" && (item as { usage?: unknown }).usage) as { model?: { modelId: string } };
+      expect(reopened.model?.modelId).toBe("fable");
+      expect(contextReadout(page.items, await provider.listModels(), undefined)?.limit).toBe(200_000);
+    } finally {
+      stop();
+      currentCatalog.splice(0, currentCatalog.length, ...original);
+      await provider.dispose();
+    }
+  });
+
+  test("an unpinned conversation on a default no entry lists is measured against the default's stated window", async () => {
+    const { provider, queries, workspace, configDir } = windowFixture({ unpinned: { model: "claude-experimental-9", maxTokens: 400_000 } });
+    const { events, stop } = collect(provider);
+    try {
+      const models = await provider.listModels();
+      expect(find(models, "default").contextLimit).toBe(400_000);
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+      queries.at(-1)!.push({ type: "assistant", uuid: "a1", timestamp: "2026-10-01T10:00:00.000Z",
+        message: { role: "assistant", model: "claude-experimental-9", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 3, cache_read_input_tokens: 100_000, output_tokens: 1 } } });
+      const carriers = () => events.flatMap(event => event.updates)
+        .filter(update => update.kind === "upsert")
+        .map(update => (update as { item: { type: string; usage?: unknown; model?: { modelId: string } } }).item)
+        .filter(item => item.type === "assistant_message" && item.usage !== undefined);
+      await waitFor(() => carriers().length > 0);
+      expect(carriers().at(-1)!.model?.modelId).toBe("default");
+      expect(contextReadout(carriers() as never, await provider.listModels(), undefined)?.limit).toBe(400_000);
+      // Reopened: the same attribution from native storage.
+      writeFileSync(path.join(claudeProjectDir(workspace, configDir), "reopened-unlisted.jsonl"), [
+        { type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-10-01T09:00:00Z", message: { role: "user", content: "hello" } },
+        { type: "assistant", uuid: "a9", parentUuid: "u1", isSidechain: false, timestamp: "2026-10-01T09:00:01Z", message: { role: "assistant", model: "claude-experimental-9", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 5, cache_read_input_tokens: 200_000, output_tokens: 1 } } },
+      ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+      const page = await provider.listMessages("reopened-unlisted", { limit: 10 });
+      const readout = contextReadout(page.items, await provider.listModels(), undefined);
+      expect(readout?.limit).toBe(400_000);
+      expect(readout?.fraction).toBeCloseTo(0.5, 2);
+    } finally {
+      stop();
+      await provider.dispose();
+    }
+  });
+
+  test("a reopened conversation read before the default is known is re-attributed once it is", async () => {
+    const { provider, workspace, configDir } = windowFixture({ unpinned: { model: "claude-experimental-9", maxTokens: 400_000 } });
+    try {
+      writeFileSync(path.join(claudeProjectDir(workspace, configDir), "early-reopen.jsonl"), [
+        { type: "user", uuid: "u1", parentUuid: null, isSidechain: false, timestamp: "2026-10-01T09:00:00Z", message: { role: "user", content: "hello" } },
+        { type: "assistant", uuid: "a9", parentUuid: "u1", isSidechain: false, timestamp: "2026-10-01T09:00:01Z", message: { role: "assistant", model: "claude-experimental-9", content: [{ type: "text", text: "hi" }], usage: { input_tokens: 5, output_tokens: 1 } } },
+      ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+      const carrierModel = (items: Array<{ type: string; usage?: unknown; model?: { modelId: string } }>) =>
+        items.find(item => item.type === "assistant_message" && item.usage)?.model?.modelId;
+      // A conversation started first fills the catalog (and its aliases)
+      // from its own session; the default is not known until the probe.
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
+      await Bun.sleep(10);
+      expect(carrierModel((await provider.listMessages("early-reopen", { limit: 10 })).items as never)).toBe("claude-experimental-9");
+      await provider.listModels();
+      // The cached normalization is not reused across the default becoming known.
+      expect(carrierModel((await provider.listMessages("early-reopen", { limit: 10 })).items as never)).toBe("default");
+    } finally {
+      await provider.dispose();
     }
   });
 

@@ -684,6 +684,30 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   /**
+   * The entry a model id reported by a conversation's own session is
+   * attributed to — what the context readout finds its window by. A
+   * conversation that chose no model runs the default, so the id the
+   * default runs is the default's: its resolved entry, which may be one of
+   * several sharing that id ("fable" / "fable[1m]") where the first-wins
+   * alias join would pick another window, or the default entry itself when
+   * no entry lists the model. Any other id joins through the catalog's aliases.
+   */
+  private attributeModel(id: string, conversationId: string): string {
+    const target = this.defaultAttribution(conversationId);
+    if (target && this.defaultRuns && stripWindowMarker(id) === stripWindowMarker(this.defaultRuns.model)) return target;
+    return this.modelAliases.get(id) ?? id;
+  }
+
+  /** The entry an unpinned conversation's default model is attributed to, or null when it chose a model. */
+  private defaultAttribution(conversationId: string): string | null {
+    const chosen = this.configurations.get(conversationId)?.model?.modelId;
+    if ((chosen && chosen !== "default") || !this.defaultRuns) return null;
+    const served = this.servedModels();
+    const target = served.find(model => model.default)?.resolvesTo?.modelId;
+    return target && served.some(model => !model.default && model.selection.modelId === target) ? target : "default";
+  }
+
+  /**
    * The recommended default as what it actually runs here: an unpinned
    * session runs what Claude Code's settings select (user, project,
    * environment, managed), which can differ from the catalog's account-level
@@ -1007,7 +1031,7 @@ export class ClaudeProvider implements ChatProvider {
       const file = await fs.realpath(sourcePath());
       const stat = await fs.stat(file, { bigint: true });
       return historyVersion([file, stat.dev.toString(), stat.ino.toString(), stat.size.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString(),
-        sessionId, this.staged.get(sessionId)?.boundaryIndex, [...this.modelAliases]]);
+        sessionId, this.staged.get(sessionId)?.boundaryIndex, [...this.modelAliases], child ? null : this.defaultAttribution(sessionId)]);
     };
     let normalized: ReturnType<typeof normalizeTranscriptEntries> = { items: [], accounting: [] };
     let version = "empty";
@@ -1023,7 +1047,7 @@ export class ClaudeProvider implements ChatProvider {
             const boundary = reversibleTurns(mainline)[staged.boundaryIndex];
             if (boundary) mainline = mainline.slice(0, boundary.entryIndex);
           }
-          return normalizeTranscriptEntries(mainline, child ? undefined : sessionId, id => this.modelAliases.get(id) ?? id);
+          return normalizeTranscriptEntries(mainline, child ? undefined : sessionId, id => (child ? this.modelAliases.get(id) ?? id : this.attributeModel(id, sessionId)));
         });
         if (await signature() === version) break;
         this.historyReuse.invalidate(sessionId);
@@ -1491,7 +1515,7 @@ export class ClaudeProvider implements ChatProvider {
 
   private async readSession(session: LiveSession): Promise<void> {
     const memory = createClaudeEventMemory();
-    memory.resolveModel = id => this.modelAliases.get(id) ?? id;
+    memory.resolveModel = id => this.attributeModel(id, session.id);
     memory.rateLimit = this.rateLimitedSessions.get(session.id);
     try {
       for await (const message of session.query) {
