@@ -5022,7 +5022,7 @@ describe("windows and the default as Claude Code states them (claude-context-win
     contextFails?: boolean;
   };
 
-  function windowFixture(cli: Cli = {}, options: { windowReadTimeoutMs?: number; windowWalkBudgetMs?: number; windowReprobeCooldownMs?: number } = {}) {
+  function windowFixture(cli: Cli = {}, options: { windowReadTimeoutMs?: number; windowWalkBudgetMs?: number; windowReprobeCooldownMs?: number; defaultReadWaitMs?: number } = {}) {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-windows-")));
     const workspace = path.join(root, "workspace");
     mkdirSync(workspace, { recursive: true });
@@ -5390,6 +5390,34 @@ describe("windows and the default as Claude Code states them (claude-context-win
       expect(queries[1]!.modelCalls).not.toContain("opus");
       expect(queries[1]!.modelCalls).not.toContain("sonnet");
       expect(find(settledModels, "haiku").contextLimit).toBe(200_000);
+    } finally {
+      await provider.dispose();
+    }
+  });
+
+  test("a stalled default read does not hold the first catalog answer; it lands from a later read", async () => {
+    let answer!: () => void;
+    const late = new Promise<void>(resolve => (answer = resolve));
+    const { provider, queries } = windowFixture({ unpinned: { model: "claude-fable-5-1", maxTokens: 1_000_000 } }, { defaultReadWaitMs: 30 });
+    try {
+      const pending = provider.listModels();
+      await waitFor(() => queries.length === 1);
+      const probe = queries[0]!;
+      const original = probe.getContextUsage!;
+      // The unpinned read stalls until released; per-model reads are unaffected.
+      let first = true;
+      probe.getContextUsage = async opts => { if (first) { first = false; await late; } return original(opts); };
+      const started = performance.now();
+      const answered = await pending;
+      expect(performance.now() - started).toBeLessThan(1_000);
+      // The catalog's own resolution until Claude Code says otherwise.
+      expect(find(answered, "default").resolvesTo).toEqual({ providerId: "anthropic", modelId: "sonnet" });
+      // No model switch ran under the stalled unpinned read.
+      expect(probe.modelCalls).toEqual([]);
+      answer();
+      const later = await settled(provider, served => find(served, "default").resolvesTo?.modelId === "fable[1m]");
+      expect(find(later, "sonnet").contextLimit).toBe(1_000_000);
+      await waitFor(() => probe.returned);
     } finally {
       await provider.dispose();
     }

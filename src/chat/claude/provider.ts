@@ -201,6 +201,8 @@ export type ClaudeProviderOptions = {
   windowWalkBudgetMs?: number;
   /** Least time between probes for rows a catalog refresh introduced. Tests shorten it. */
   windowReprobeCooldownMs?: number;
+  /** How long the first catalog answer waits for what the default runs. Tests shorten it. */
+  defaultReadWaitMs?: number;
   // Re-read delays for a generated title that lands after the result.
   titleRefreshDelaysMs?: number[];
 };
@@ -224,6 +226,10 @@ const CATALOG_PROBE_COOLDOWN_MS = 60_000;
 // takes ~11 s. The per-step bound leaves room for a slow switch; the walk's
 // bound only stops a CLI that stalls on every row.
 const WINDOW_READ_TIMEOUT_MS = 8_000;
+// The first catalog answer waits this long for what the default runs: a
+// healthy CLI answers in milliseconds (its first control read, ~0.5 s cold);
+// past this, the catalog answers without it and the default lands later.
+const DEFAULT_READ_WAIT_MS = 2_000;
 const WINDOW_WALK_BUDGET_MS = 90_000;
 // One control round-trip after each turn; a CLI that never answers must not
 // hold the session open past this.
@@ -543,6 +549,7 @@ export class ClaudeProvider implements ChatProvider {
   // A CLI without the controls to state windows: nothing to re-probe for.
   private windowControlsMissing = false;
   private readonly windowReprobeCooldownMs: number;
+  private readonly defaultReadWaitMs: number;
   private readonly windowWalkBudgetMs: number;
   private readonly historyReuse = new HistoryReuse<ReturnType<typeof normalizeTranscriptEntries>>();
   private readonly catalogProbe: boolean;
@@ -636,6 +643,7 @@ export class ClaudeProvider implements ChatProvider {
     this.windowReadTimeoutMs = options.windowReadTimeoutMs ?? WINDOW_READ_TIMEOUT_MS;
     this.windowWalkBudgetMs = options.windowWalkBudgetMs ?? WINDOW_WALK_BUDGET_MS;
     this.windowReprobeCooldownMs = options.windowReprobeCooldownMs ?? CATALOG_PROBE_COOLDOWN_MS;
+    this.defaultReadWaitMs = options.defaultReadWaitMs ?? DEFAULT_READ_WAIT_MS;
     this.forkSession = options.forkSession ?? defaultForkSession;
     this.renameNativeSession = options.renameNativeSession ?? defaultRenameSession;
     this.stateFile = options.stateFile ?? defaultStateFile(options.workspacePath);
@@ -852,23 +860,31 @@ export class ClaudeProvider implements ChatProvider {
       }
       // The catalog stands from here; what follows only refines it, and a
       // failure keeps the derived figures. What the default runs is one
-      // read of a few milliseconds, so the first picker read carries it;
-      // the per-model windows cost a model switch each (up to ~2 s for a
-      // full id) and fill in behind, served from the next catalog read.
+      // read of a few milliseconds on a healthy CLI, so the first picker
+      // read waits briefly for it — but no longer than a short bound: the
+      // chat's availability waits on this answer, and a CLI that stalls on
+      // the read must not hold it. A late answer is served from a later
+      // read. The per-model windows (a model switch each, up to ~2 s for a
+      // full id) follow it on the same query, never alongside it: a switch
+      // under the unpinned read would change what it reports.
       this.windowsRead = true;
       this.windowProbeAt = this.now();
-      await this.readDefaultRuns(query).catch(() => undefined);
       if (!query.setModel || !query.getContextUsage) this.windowControlsMissing = true;
-      if (query.setModel && query.getContextUsage && !this.disposed) {
+      const defaultRead = this.readDefaultRuns(query).catch(() => undefined);
+      if (!this.disposed) {
         const walked = query;
         handedOff = true;
-        this.windowWalk = this.readStatedWindows(walked)
+        this.windowWalk = defaultRead
+          .then(() => (walked.setModel && walked.getContextUsage && !this.disposed ? this.readStatedWindows(walked) : undefined))
           .catch(() => undefined)
           .finally(async () => {
             this.windowWalk = null;
             await this.closeProbe(walked, queue);
           });
       }
+      let waited: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([defaultRead, new Promise<void>(resolve => { waited = setTimeout(resolve, this.defaultReadWaitMs); })]);
+      if (waited !== undefined) clearTimeout(waited);
     } finally {
       if (!handedOff) await this.closeProbe(query, queue);
     }
