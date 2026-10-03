@@ -38,7 +38,7 @@ jobs:
 
       - name: Audit dependencies for vulnerabilities
         # Fails on a moderate-or-higher advisory anywhere in the installed tree,
-        # including transitive packages. Matches the threshold used by the CI
-        # validate job, and the same accepted-advisory list
-        # (scripts/audit-dependencies.ts).
+        # including transitive packages, once it has a patched release; until
+        # then it's a warning annotation on the run. Same script as the CI
+        # validate job (scripts/audit-dependencies.ts).
         run: bun run audit

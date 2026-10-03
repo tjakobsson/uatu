@@ -159,12 +159,13 @@ jobs:
 
       - name: Audit dependencies for vulnerabilities
         # Fails the build on a moderate-or-higher advisory against the
-        # installed tree, so new advisories surface on the PR rather than by
-        # manual `bun audit`. Low-severity advisories are reported but do not
-        # block. Renovate (lockFileMaintenance + osvVulnerabilityAlerts) is the
-        # primary remediation path; this is the backstop. The script holds the
-        # advisories we accept on purpose (unpatched, dev tooling only), each
-        # with its reason, and fails once one of them is no longer reported.
+        # installed tree that has a patched release to upgrade to, so new
+        # advisories surface on the PR rather than by manual `bun audit`. One
+        # with no patched release yet is a warning annotation, and fails again
+        # once a fix is published (scripts/audit-dependencies.ts). Low-severity
+        # advisories are reported but do not block. Renovate (lockFileMaintenance
+        # + osvVulnerabilityAlerts) is the primary remediation path; this is the
+        # backstop.
         run: bun run audit
 
       - name: Run unit and integration tests

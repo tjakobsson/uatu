@@ -1,65 +1,114 @@
 // The dependency audit gate CI runs on every PR (ci.yml) and every Monday
-// (dependency-audit.yml): `bun audit` over the whole installed tree, failing on
-// a moderate-or-higher advisory.
+// (dependency-audit.yml): `bun audit` over the whole installed tree.
 //
-// ACCEPTED lists the advisories we have decided to carry. Each entry needs a
-// reason, and every one so far is an advisory with no patched release in a
-// package that only dev tooling pulls in, so it never reaches the shipped
-// binary. When a patch lands and the lockfile picks it up, the advisory stops
-// being reported and this script fails until its entry is deleted. That way
-// an ignore can't outlive the advisory it covers.
+// A moderate-or-higher advisory fails the run when its package has a release
+// outside the vulnerable range, because then there's something to upgrade to.
+// An advisory whose package has no such release yet can't be fixed by
+// upgrading, so it's reported as a warning annotation instead of blocking
+// every pipeline. There is no ignore list: the check reads the package's
+// published versions from the npm registry on every run, so the run starting
+// after a patched release is published fails again until we take it.
+// Low-severity advisories are printed and never block.
 
-type Accepted = { ghsa: string; pkg: string; reason: string };
+export type Advisory = {
+  id: number;
+  url: string;
+  title: string;
+  severity: string;
+  vulnerable_versions: string;
+};
 
-const ACCEPTED: Accepted[] = [
-  {
-    ghsa: "GHSA-vfj7-8cjw-p6xm",
-    pkg: "braces",
-    reason:
-      "Unpatched (<=3.0.3 is every release). Only @fission-ai/openspec pulls it in " +
-      "(fast-glob > micromatch), a dev CLI that expands our own spec globs.",
-  },
-  {
-    ghsa: "GHSA-ch52-4w7c-c8xp",
-    pkg: "http-cache-semantics",
-    reason:
-      "Unpatched (<=4.2.0 is every release). Only astro pulls it in, at static " +
-      "build time for the docs site; nothing serves its cache to users.",
-  },
-];
+export type Verdict = "fixable" | "unpatched" | "low";
 
-type Advisory = { url: string; severity: string };
+const BLOCKING_SEVERITIES = new Set(["moderate", "high", "critical"]);
 
-const json = Bun.spawnSync(["bun", "audit", "--json"], { stdout: "pipe", stderr: "inherit" });
-const text = json.stdout.toString().trim();
-let report: Record<string, Advisory[]>;
-try {
-  report = text === "" ? {} : JSON.parse(text);
-} catch {
-  console.error(`bun audit --json printed something that isn't JSON:\n${text}`);
-  process.exit(1);
+/**
+ * True when some stable published version is outside the vulnerable range and
+ * newer than the oldest vulnerable one. That's an upgrade target. Versions
+ * older than every vulnerable release, from before the bug existed, don't count.
+ */
+export function hasPatchedRelease(vulnerableRange: string, published: string[]): boolean {
+  const stable = published.filter(version => !version.includes("-"));
+  const vulnerable = stable.filter(version => Bun.semver.satisfies(version, vulnerableRange));
+  if (vulnerable.length === 0) return true;
+  const oldestVulnerable = vulnerable.reduce((a, b) => (Bun.semver.order(a, b) <= 0 ? a : b));
+  return stable.some(
+    version =>
+      !Bun.semver.satisfies(version, vulnerableRange) && Bun.semver.order(version, oldestVulnerable) > 0,
+  );
 }
 
-const reported = new Set(
-  Object.entries(report).flatMap(([pkg, advisories]) =>
-    advisories.map(advisory => `${pkg} ${advisory.url.split("/").pop()}`),
-  ),
-);
-const stale = ACCEPTED.filter(entry => !reported.has(`${entry.pkg} ${entry.ghsa}`));
-if (stale.length > 0) {
-  for (const entry of stale) {
-    console.error(
-      `${entry.ghsa} (${entry.pkg}) is accepted in scripts/audit-dependencies.ts ` +
-        "but bun audit no longer reports it. Delete the entry.",
-    );
+export function classify(advisory: Advisory, published: string[]): Verdict {
+  if (!BLOCKING_SEVERITIES.has(advisory.severity)) return "low";
+  return hasPatchedRelease(advisory.vulnerable_versions, published) ? "fixable" : "unpatched";
+}
+
+async function publishedVersions(pkg: string): Promise<string[]> {
+  const response = await fetch(`https://registry.npmjs.org/${pkg.replace("/", "%2f")}`, {
+    headers: { accept: "application/vnd.npm.install-v1+json" },
+  });
+  if (!response.ok) throw new Error(`npm registry answered ${response.status} for ${pkg}`);
+  const body = (await response.json()) as { versions?: Record<string, unknown> };
+  return Object.keys(body.versions ?? {});
+}
+
+function ghsaOf(advisory: Advisory): string {
+  return advisory.url.split("/").pop() ?? String(advisory.id);
+}
+
+async function main(): Promise<number> {
+  const audit = Bun.spawnSync(["bun", "audit", "--json"], { stdout: "pipe", stderr: "inherit" });
+  const text = audit.stdout.toString().trim();
+  let report: Record<string, Advisory[]>;
+  try {
+    report = text === "" ? {} : JSON.parse(text);
+  } catch {
+    console.error(`bun audit --json printed something that isn't JSON:\n${text}`);
+    return 1;
   }
-  process.exit(1);
+
+  const annotate = process.env.GITHUB_ACTIONS === "true";
+  let fixable = 0;
+  let unpatched = 0;
+  for (const [pkg, advisories] of Object.entries(report).sort(([a], [b]) => a.localeCompare(b))) {
+    let published: string[];
+    try {
+      published = await publishedVersions(pkg);
+    } catch (error) {
+      // Fail closed: without the version list we can't tell a fixable advisory
+      // from an unpatched one.
+      console.error(`Couldn't read ${pkg}'s published versions: ${(error as Error).message}`);
+      return 1;
+    }
+    const why = Bun.spawnSync(["bun", "why", pkg], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
+    for (const advisory of advisories) {
+      const verdict = classify(advisory, published);
+      const line = `${pkg} ${advisory.vulnerable_versions} (${advisory.severity}): ${advisory.title} ${advisory.url}`;
+      if (verdict === "fixable") {
+        fixable++;
+        console.error(`FAIL ${line}\n  A release outside the vulnerable range exists; upgrade to it.`);
+        if (annotate) console.log(`::error title=Fixable advisory ${ghsaOf(advisory)} (${pkg})::${line}`);
+      } else if (verdict === "unpatched") {
+        unpatched++;
+        console.warn(`WARN ${line}\n  No release outside the vulnerable range yet; this fails once one ships.`);
+        if (annotate) console.log(`::warning title=Unpatched advisory ${ghsaOf(advisory)} (${pkg})::${line}`);
+      } else {
+        console.log(`info ${line}`);
+      }
+      if (verdict !== "low" && why !== "") console.log(why.replace(/^/gm, "  "));
+    }
+  }
+
+  if (fixable > 0) {
+    console.error(`\n${fixable} advisory(ies) with a patched release: failing. ${unpatched} unpatched (warnings).`);
+    return 1;
+  }
+  console.log(
+    unpatched > 0
+      ? `\nNo fixable advisories. ${unpatched} unpatched advisory(ies) reported as warnings.`
+      : "\nNo moderate-or-higher advisories.",
+  );
+  return 0;
 }
 
-for (const entry of ACCEPTED) console.log(`accepted ${entry.ghsa} (${entry.pkg}): ${entry.reason}`);
-
-const gate = Bun.spawnSync(
-  ["bun", "audit", "--audit-level=moderate", ...ACCEPTED.map(entry => `--ignore=${entry.ghsa}`)],
-  { stdout: "inherit", stderr: "inherit" },
-);
-process.exit(gate.exitCode ?? 1);
+if (import.meta.main) process.exit(await main());
