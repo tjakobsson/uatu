@@ -43,6 +43,12 @@ const COPILOT_FIELDS = [
   { key: "enterpriseUrl", label: "Enter your GitHub Enterprise URL or domain", kind: "text" as const, valueType: "string", required: true, placeholder: "company.ghe.com", when: [{ key: "deploymentType", op: "eq" as const, value: "enterprise" }] },
 ];
 
+// A self-hosted OAuth app: the agent marks its client secret as sensitive.
+const GITLAB_FIELDS = [
+  { key: "instanceUrl", label: "GitLab instance URL", kind: "text" as const, valueType: "string", required: true, placeholder: "gitlab.example.com" },
+  { key: "clientSecret", label: "OAuth client secret", kind: "text" as const, valueType: "string", required: true, secret: true },
+];
+
 function openCodeTargets(): AccountTarget[] {
   const saved = (id: string): AccountCredential => ({ id, label: "Saved login", kind: "saved", active: true, removable: true });
   return [
@@ -50,6 +56,7 @@ function openCodeTargets(): AccountTarget[] {
     { id: "opencode", name: "OpenCode Zen", connected: true, credentials: [{ id: "opencode", label: "Built in", kind: "other", active: true, removable: false }], methods: [{ id: "key", kind: "key", label: "API key", fields: [] }] },
     { id: "cloudflare-workers-ai", name: "Cloudflare Workers AI", connected: false, credentials: [], methods: [{ id: "0", kind: "key", label: "API key", fields: [{ key: "accountId", label: "Enter your Cloudflare Account ID", kind: "text", valueType: "string", required: true, placeholder: "e.g. 1234567890abcdef1234567890abcdef" }] }] },
     { id: "github-copilot", name: "GitHub Copilot", connected: false, credentials: [], methods: [{ id: "0", kind: "oauth", label: "Login with GitHub Copilot", fields: COPILOT_FIELDS }] },
+    { id: "gitlab", name: "GitLab", connected: false, credentials: [], methods: [{ id: "0", kind: "oauth", label: "Login with a GitLab OAuth app", fields: GITLAB_FIELDS }] },
     { id: "groq", name: "Groq", connected: false, credentials: [], methods: [{ id: "key", kind: "key", label: "API key", fields: [] }, { id: "env", kind: "env", label: "Environment variable", variables: ["GROQ_API_KEY"] }] },
     { id: "openai", name: "OpenAI", connected: false, credentials: [], methods: [
       { id: "0", kind: "oauth", label: "ChatGPT Pro/Plus (browser)", fields: [] },
@@ -135,6 +142,9 @@ export function createFakeAgentAccounts(): FakeAgentAccounts {
       if (!method || method.kind !== "oauth") throw new AccountOperationError("That login method is not a browser login.");
       if (target === "github-copilot" && answers.deploymentType === "enterprise" && !String(answers.enterpriseUrl ?? "").trim()) {
         throw new AccountOperationError("Enter your GitHub Enterprise URL or domain is required.", "enterpriseUrl");
+      }
+      if (target === "gitlab" && !String(answers.clientSecret ?? "").trim()) {
+        throw new AccountOperationError("OAuth client secret is required.", "clientSecret");
       }
       const done = deferred();
       const expiresAt = expiry();

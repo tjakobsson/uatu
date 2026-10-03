@@ -7,7 +7,7 @@
  * 1.x `prompts` (`text` / `select`, one `when`) and 2.x `form` (typed fields,
  * a list of `when` conditions). Parsing is defensive. An agent may add prompt
  * types this code has never seen, and an unknown type becomes a plain text
- * field rather than hiding the method.
+ * field rather than hiding the method, masked when it looks sensitive.
  */
 
 import type { AccountField, AccountFieldCondition, AccountFieldOption } from "./agent-account-types";
@@ -53,6 +53,22 @@ function parseOptions(value: unknown): AccountFieldOption[] | undefined {
   return options.length ? options : undefined;
 }
 
+const SECRET_TYPES = new Set(["password", "secret"]);
+const SECRET_FLAGS = ["secret", "sensitive", "masked", "mask", "password"];
+
+/**
+ * Whether a prompt asks for something sensitive. Neither OpenCode generation
+ * declares such a prompt, but plugins and later versions can describe one as
+ * a `password` or `secret` type, a `password` format, or a boolean flag.
+ * Answering one in plain text would show it on screen, so any of these makes
+ * the field masked.
+ */
+function isSecretPrompt(raw: Record<string, unknown>): boolean {
+  if (typeof raw.type === "string" && SECRET_TYPES.has(raw.type)) return true;
+  if (raw.format === "password") return true;
+  return SECRET_FLAGS.some(flag => raw[flag] === true);
+}
+
 function withOptional(field: AccountField, extra: { placeholder?: string; description?: string; options?: AccountFieldOption[]; when?: AccountFieldCondition[] }): AccountField {
   return {
     ...field,
@@ -76,8 +92,9 @@ export function fieldsFromOpenCodeV1Prompts(prompts: unknown): AccountField[] {
     const key = text(raw?.key);
     if (!key) continue;
     const options = raw?.type === "select" ? parseOptions(raw.options) : undefined;
+    const secret = !options && isSecretPrompt(raw!);
     fields.push(withOptional(
-      { key, label: text(raw?.message) ?? key, kind: options ? "select" : "text", valueType: "string", required: true },
+      { key, label: text(raw?.message) ?? key, kind: options ? "select" : "text", valueType: "string", required: true, ...(secret ? { secret } : {}) },
       { placeholder: text(raw?.placeholder), options, when: parseConditions(raw?.when) },
     ));
   }
@@ -120,7 +137,8 @@ export function fieldsFromOpenCodeV2Form(form: unknown): AccountField[] {
       continue;
     }
     const options = raw?.custom === true ? undefined : parseOptions(raw?.options);
-    fields.push(withOptional({ key, label, kind: options ? "select" : "text", valueType: "string", required }, { ...extra, options }));
+    const secret = !options && isSecretPrompt(raw!);
+    fields.push(withOptional({ key, label, kind: options ? "select" : "text", valueType: "string", required, ...(secret ? { secret } : {}) }, { ...extra, options }));
   }
   return fields;
 }

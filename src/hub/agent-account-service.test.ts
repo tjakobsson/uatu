@@ -136,7 +136,8 @@ function harness(options: { claude?: () => AccountRuntimeStart; fetch?: (input: 
     },
     now: () => clock.now,
     timers: clock,
-    sleep: async () => undefined,
+    // Instant, but yields like a real wait so work that answers at once lands first.
+    sleep: () => flush(),
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
   return { clock, adapters, runtimes, changed, changes, service, setNotify: (next: typeof notify) => { notify = next; } };
@@ -194,6 +195,57 @@ describe("account runtimes", () => {
   });
 });
 
+describe("answer deadline", () => {
+  test("a status read that never answers stops the runtime, shows the agent as not answering, and the next read starts it again", async () => {
+    const { service, adapters, runtimes, clock } = harness();
+    const status = adapters.claude.status.bind(adapters.claude);
+    adapters.claude.status = () => new Promise(() => undefined);
+    expect((await service.read()).agents.find(agent => agent.agent === "claude")?.state).toBe("starting");
+    await clock.advance(30_000);
+    expect(service.isRunning("claude")).toBe(false);
+    expect(runtimes.filter(runtime => runtime.adapter === adapters.claude).map(runtime => runtime.stops)).toEqual([1]);
+    expect(service.snapshot().agents.find(agent => agent.agent === "claude")).toMatchObject({ state: "unavailable", message: "Claude Code did not answer within 30s. Try again." });
+    adapters.claude.status = status;
+    expect((await service.read()).agents.find(agent => agent.agent === "claude")?.state).toBe("ready");
+  });
+
+  test("a login start that never answers is refused at the deadline and does not hold up the next start", async () => {
+    const { service, adapters, clock } = harness();
+    await service.read();
+    const startLogin = adapters.opencode.startLogin.bind(adapters.opencode);
+    const late = deferred();
+    adapters.opencode.startLogin = async () => {
+      adapters.opencode.startLogin = startLogin;
+      await late.promise;
+      return startLogin();
+    };
+    const first = service.startLogin("opencode", "groq", "0", {}).catch(caught => caught);
+    const second = service.startLogin("opencode", "groq", "1", {});
+    await flush();
+    await clock.advance(30_000);
+    expect(await first).toBeInstanceOf(AgentNotReadyError);
+    expect((await second).attempts.map(attempt => [attempt.methodId, attempt.state])).toEqual([["1", "pending"]]);
+    // The agent's login arriving after the deadline has nobody to finish it.
+    late.resolve();
+    await flush();
+    expect(adapters.opencode.logins.map(login => login.cancelled)).toEqual([false, true]);
+  });
+
+  test("a change that never answers does not hold up the next change", async () => {
+    const { service, adapters, clock } = harness();
+    await service.read();
+    const connectKey = adapters.opencode.connectKey.bind(adapters.opencode);
+    adapters.opencode.connectKey = () => new Promise(() => undefined);
+    const hung = service.connectKey("opencode", "groq", "api", "sk-hung-key", {}).catch(caught => caught);
+    await flush();
+    await clock.advance(30_000);
+    expect(await hung).toBeInstanceOf(AgentNotReadyError);
+    adapters.opencode.connectKey = connectKey;
+    await service.connectKey("opencode", "groq", "api", "sk-next-key", {});
+    expect(adapters.opencode.keys.map(([, , key]) => key)).toEqual(["sk-next-key"]);
+  });
+});
+
 describe("key logins", () => {
   test("hand the key to the agent, re-read, and tell running workspaces", async () => {
     const { service, adapters, changed } = harness();
@@ -211,6 +263,18 @@ describe("key logins", () => {
     expect(error).toBeInstanceOf(AccountOperationError);
     expect(error.message).toBe("key [redacted] is invalid");
     expect(changed).toEqual([]);
+  });
+
+  test("what the user typed into a method's fields is scrubbed from the agent's errors, like the key", async () => {
+    const { service, adapters } = harness();
+    adapters.opencode.startLogin = async () => {
+      throw new Error("bad client secret gloas-typed-secret for gitlab.example.com");
+    };
+    const login = await service.startLogin("opencode", "gitlab", "0", { clientSecret: "gloas-typed-secret", instanceUrl: "gitlab.example.com" }).catch(caught => caught);
+    expect(login.message).toBe("bad client secret [redacted] for [redacted]");
+    adapters.opencode.connectKeyError = new Error("key sk-typed-key rejected for account acct-typed-id");
+    const key = await service.connectKey("opencode", "groq", "key", "sk-typed-key", { accountId: "acct-typed-id" }).catch(caught => caught);
+    expect(key.message).toBe("key [redacted] rejected for account [redacted]");
   });
 
   test("scrubbing ignores very short values", () => {
@@ -280,6 +344,43 @@ describe("login attempts", () => {
     await service.startLogin("opencode", "groq", "0", {});
     expect(adapters.opencode.logins[0]?.cancelled).toBe(true);
     expect(service.snapshot().attempts.map(attempt => attempt.state)).toEqual(["cancelled", "pending"]);
+  });
+
+  test("two starts for the same target at once leave one attempt pending", async () => {
+    const { service, adapters } = harness();
+    await Promise.all([service.startLogin("opencode", "groq", "0", {}), service.startLogin("opencode", "groq", "1", {})]);
+    expect(adapters.opencode.logins.map(login => login.cancelled)).toEqual([true, false]);
+    expect(service.snapshot().attempts.map(attempt => [attempt.methodId, attempt.state])).toEqual([["0", "cancelled"], ["1", "pending"]]);
+  });
+
+  test("a failed start does not hold up the next one", async () => {
+    const { service, adapters } = harness();
+    const startLogin = adapters.opencode.startLogin.bind(adapters.opencode);
+    adapters.opencode.startLogin = async () => {
+      adapters.opencode.startLogin = startLogin;
+      throw new Error("the agent refused");
+    };
+    const results = await Promise.allSettled([service.startLogin("opencode", "groq", "0", {}), service.startLogin("opencode", "groq", "1", {})]);
+    expect(results.map(result => result.status)).toEqual(["rejected", "fulfilled"]);
+    expect(service.snapshot().attempts.map(attempt => [attempt.methodId, attempt.state])).toEqual([["1", "pending"]]);
+  });
+
+  test("a login the agent starts after the Hub stopped is cancelled, not tracked", async () => {
+    const { service, adapters } = harness();
+    await service.read();
+    const gate = deferred();
+    const startLogin = adapters.opencode.startLogin.bind(adapters.opencode);
+    adapters.opencode.startLogin = async () => {
+      await gate.promise;
+      return startLogin();
+    };
+    const started = service.startLogin("opencode", "groq", "0", {}).catch(caught => caught);
+    await flush();
+    await service.dispose();
+    gate.resolve();
+    expect(await started).toBeInstanceOf(AgentNotReadyError);
+    expect(adapters.opencode.logins[0]?.cancelled).toBe(true);
+    expect(service.snapshot().attempts).toEqual([]);
   });
 
   test("a failure carries the agent's message, scrubbed of submitted codes", async () => {

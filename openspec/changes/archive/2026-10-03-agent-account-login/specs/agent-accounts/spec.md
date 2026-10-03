@@ -36,7 +36,10 @@ itself, such as one that reads an environment variable or runs a local
 helper command, SHALL be listed with what the user does instead: the
 variable to set in the Hub's environment, or the agent's own login command.
 An agent that is not installed or cannot be reached SHALL be reported with
-its diagnostic, without hiding the other agents. Status reads SHALL NOT start a login, change a credential, or spend
+its diagnostic, without hiding the other agents. An agent that does not
+answer a status read, a login start, or a login change within a bounded time
+SHALL be reported as not answering, and SHALL NOT hold up later requests; the
+next request SHALL start it again. Status reads SHALL NOT start a login, change a credential, or spend
 model tokens.
 
 #### Scenario: Claude Code is not logged in
@@ -61,19 +64,29 @@ model tokens.
 - **THEN** the OpenCode row reports it is not installed with the diagnostic
 - **AND** the Claude Code row is fully usable
 
+#### Scenario: An agent stops answering
+- **WHEN** Claude Code starts but never answers the request for its login
+- **THEN** its row reports that it did not answer instead of staying "Checking"
+- **AND** the next visit starts Claude Code again
+
 ### Requirement: Users log in with an API key
 For every provider or agent login method that accepts a key, Agent accounts
 SHALL offer a masked key field together with the method's own extra fields,
 honoring each field's type, options, placeholder, and the condition under
-which it appears. Submitting SHALL hand the key and answers to the agent, then
-clear the key field. Saved keys SHALL NOT be redisplayed or returned by any
-response. A rejected key or missing required field SHALL be reported next to
+which it appears. A field the agent marks as sensitive SHALL be masked like
+the key. Submitting SHALL hand the key and answers to the agent, then
+clear the key field and any sensitive field. Saved keys SHALL NOT be redisplayed or returned by any
+response, and an agent's error message SHALL NOT repeat the key or an answer. A rejected key or missing required field SHALL be reported next to
 that method's controls.
 
 #### Scenario: Key with an extra field
 - **WHEN** a user logs in to a provider whose key method also asks for an account id
 - **THEN** the form shows the key field and the account id field
 - **AND** after a successful submit the provider is listed as logged in and the key field is empty
+
+#### Scenario: Sensitive field is masked
+- **WHEN** a provider's login method asks for a value the agent marks as a password
+- **THEN** the field is masked and is empty again once the login has started
 
 #### Scenario: Conditional field appears on demand
 - **WHEN** a method's field is shown only for one answer to an earlier select field
@@ -90,7 +103,10 @@ that the browser will fail to load that address unless it runs on the Hub
 machine, take the full address the browser landed on, and have the Hub
 deliver it to the agent's waiting listener on the Hub machine. A user SHALL
 be able to cancel an attempt in progress. Starting a login for an agent or
-provider SHALL replace that agent's or provider's earlier unfinished attempt.
+provider SHALL replace that agent's or provider's earlier unfinished attempt,
+and starts made at the same moment SHALL leave at most one unfinished. Starting
+again after a failed or expired attempt SHALL reuse its answers, except that
+a sensitive field SHALL be asked for again rather than kept by the page.
 
 #### Scenario: Device-code login from a phone
 - **WHEN** a user starts a device-code login on a phone
@@ -109,6 +125,14 @@ provider SHALL replace that agent's or provider's earlier unfinished attempt.
 #### Scenario: Attempt expires
 - **WHEN** a started login is not completed before the agent's deadline
 - **THEN** Agent accounts reports it expired and offers to start again
+
+#### Scenario: Starting again asks for a sensitive field
+- **WHEN** an attempt whose method asked for a sensitive field expires and the user starts again
+- **THEN** the method's form shows the earlier answers, asks for the sensitive field again, and starts nothing until it is entered
+
+#### Scenario: Two starts at once
+- **WHEN** a user starts two logins for the same provider at the same moment
+- **THEN** one attempt is in progress and the other is cancelled
 
 ### Requirement: Pasted redirect addresses are confined to the attempt
 The Hub SHALL deliver a pasted redirect address only when its scheme, host,

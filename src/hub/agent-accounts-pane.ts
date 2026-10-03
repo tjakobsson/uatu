@@ -28,6 +28,7 @@ export function createAgentAccountsPane() {
     kind: "text" | "select";
     valueType: string;
     required: boolean;
+    secret?: boolean;
     placeholder?: string;
     description?: string;
     options?: Array<{ value: string; label: string; hint?: string }>;
@@ -85,7 +86,7 @@ export function createAgentAccountsPane() {
   // Controls with a request in flight, by control key, with their busy label.
   const busy = new Map<string, string>();
   // The answers a login started with, so "Start again" asks nothing twice.
-  // Never a key, code, or address: only a method's own non-secret fields.
+  // Never a key, code, address, or a field the agent marked secret.
   const startedWith = new Map<string, Record<string, string>>();
   let filter = "";
 
@@ -515,7 +516,7 @@ export function createAgentAccountsPane() {
       control = select;
     } else {
       const input = make("input");
-      input.type = "text";
+      input.type = field.secret ? "password" : "text";
       input.autocomplete = "off";
       if (field.placeholder) input.placeholder = field.placeholder;
       control = input;
@@ -603,6 +604,7 @@ export function createAgentAccountsPane() {
           // Saved: the key is dropped from the page, not kept for the next render.
           keyInput!.value = "";
           for (const input of keptInputs(formKey + ":key")) input.value = "";
+          clearSecrets(formKey, method);
         });
       } else {
         void startLogin(agent, target.id, method, answers, formKey);
@@ -620,9 +622,41 @@ export function createAgentAccountsPane() {
     return attempts.sort((a, b) => b.startedAt - a.startedAt)[0];
   }
 
+  function secretFields(method: Method): Field[] {
+    return method.kind === "key" || method.kind === "oauth" ? method.fields.filter(field => field.secret) : [];
+  }
+
+  /** Drops the answers to a method's secret fields from the page once they were sent. */
+  function clearSecrets(formKey: string, method: Method): void {
+    for (const field of secretFields(method)) for (const input of keptInputs(formKey + ":" + field.key)) input.value = "";
+  }
+
   async function startLogin(agent: Agent, target: string, method: Method, answers: Record<string, string>, key: string): Promise<void> {
-    startedWith.set(agent.agent + ":" + target + ":" + method.id, answers);
-    await act(key, "Starting…", API + "/login", { agent: agent.agent, target, method: method.id, ...(Object.keys(answers).length ? { answers } : {}) });
+    const kept = { ...answers };
+    for (const field of secretFields(method)) delete kept[field.key];
+    startedWith.set(agent.agent + ":" + target + ":" + method.id, kept);
+    const formKey = method.kind + ":" + agent.agent + ":" + target + ":" + method.id;
+    await act(key, "Starting…", API + "/login", { agent: agent.agent, target, method: method.id, ...(Object.keys(answers).length ? { answers } : {}) }, () => clearSecrets(formKey, method));
+  }
+
+  /**
+   * "Start again" for a method with a secret field: its answer was not kept,
+   * so the method's form below asks for it again instead of starting blind.
+   */
+  function askAgain(agent: Agent, target: string, method: Method): void {
+    const formKey = method.kind + ":" + agent.agent + ":" + target + ":" + method.id;
+    const labels = secretFields(method).map(field => field.label);
+    errors.set(formKey, "Enter " + labels.join(" and ") + " again, then log in.");
+    render(true);
+    // The other answers come back as they were, so only the secret is typed again.
+    for (const [key, value] of Object.entries(startedWith.get(agent.agent + ":" + target + ":" + method.id) ?? {})) {
+      for (const input of keptInputs(formKey + ":" + key)) if (!input.value) input.value = value;
+    }
+    const first = secretFields(method)[0];
+    const input = first ? keptInputs(formKey + ":" + first.key)[0] : undefined;
+    const form = input?.closest<HTMLElement>("[data-fields]");
+    if (form) applyConditions(form);
+    input?.focus();
   }
 
   async function logout(agent: Agent, target: string, credential: string, name: string, key: string): Promise<void> {
@@ -658,7 +692,11 @@ export function createAgentAccountsPane() {
     const restart = () => {
       const method = (agent.agent === "claude" ? agent.methods : agent.targets.find(target => target.id === attempt.target)?.methods ?? []).find(candidate => candidate.id === attempt.methodId);
       const key = "restart:" + attempt.id;
-      const node = button("Start again", key, () => { if (method) void startLogin(agent, attempt.target, method, startedWith.get(methodKey) ?? {}, key); });
+      const node = button("Start again", key, () => {
+        if (!method) return;
+        if (secretFields(method).length) askAgain(agent, attempt.target, method);
+        else void startLogin(agent, attempt.target, method, startedWith.get(methodKey) ?? {}, key);
+      });
       node.disabled = node.disabled || !method;
       return node;
     };

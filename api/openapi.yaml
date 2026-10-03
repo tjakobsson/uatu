@@ -2110,6 +2110,7 @@ components:
         kind: { enum: [text, select] }
         valueType: { enum: [string, number, boolean, list], description: "How the Hub converts the submitted string; `list` is comma-separated." }
         required: { type: boolean }
+        secret: { type: boolean, description: "The agent marked the answer as sensitive. Clients mask it and do not keep it after submitting." }
         placeholder: { type: string }
         description: { type: string }
         options:

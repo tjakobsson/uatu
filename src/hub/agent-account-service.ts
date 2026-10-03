@@ -44,6 +44,10 @@ const RETAIN_MS = 5 * 60_000;
 const REFRESH_MS = 2_000;
 const READ_WAIT_MS = 4_000;
 const SETTLE_WAIT_MS = 3_000;
+// How long an agent gets to answer one account call before its runtime is
+// stopped. A hung call would otherwise hold the agent: a status read keeps it
+// "starting" for good, and a hung change or login start holds every later one.
+const ANSWER_MS = 30_000;
 
 export type Timers = {
   setTimeout(callback: () => void, ms: number): unknown;
@@ -82,6 +86,7 @@ export type AgentAccountServiceOptions = {
   refreshMs?: number;
   readWaitMs?: number;
   settleWaitMs?: number;
+  answerMs?: number;
 };
 
 type AgentEntry = {
@@ -89,6 +94,9 @@ type AgentEntry = {
   // Login changes for this agent run one at a time, each through its
   // workspace notification, so a replayed removal cannot overtake a newer login.
   changes: Promise<void>;
+  // Login starts for this agent run one at a time, so a start always sees
+  // the attempt an earlier one inserted and cancels it.
+  loginStarts: Promise<void>;
   runtime: AccountRuntime | null;
   adapter: AccountAdapter | null;
   starting: Promise<void> | null;
@@ -117,6 +125,14 @@ export function scrubSecrets(message: string, secrets: readonly string[]): strin
     if (trimmed.length >= 4) scrubbed = scrubbed.split(trimmed).join("[redacted]");
   }
   return scrubbed;
+}
+
+/**
+ * What the user typed into a method's fields. Scrubbed from agent errors like
+ * a key: the Hub doesn't know which ones the agent treats as sensitive.
+ */
+function answerValues(answers: Record<string, unknown>): string[] {
+  return Object.values(answers).filter((value): value is string => typeof value === "string");
 }
 
 function initialStatus(agent: AccountAgentId): AccountAgentStatus {
@@ -148,6 +164,7 @@ export class AgentAccountService {
   private readonly refreshMs: number;
   private readonly readWaitMs: number;
   private readonly settleWaitMs: number;
+  private readonly answerMs: number;
   private disposed = false;
 
   constructor(private readonly options: AgentAccountServiceOptions) {
@@ -161,10 +178,12 @@ export class AgentAccountService {
     this.refreshMs = options.refreshMs ?? REFRESH_MS;
     this.readWaitMs = options.readWaitMs ?? READ_WAIT_MS;
     this.settleWaitMs = options.settleWaitMs ?? SETTLE_WAIT_MS;
+    this.answerMs = options.answerMs ?? ANSWER_MS;
     for (const { agent } of ACCOUNT_AGENTS) {
       this.entries.set(agent, {
         agent,
         changes: Promise.resolve(),
+        loginStarts: Promise.resolve(),
         runtime: null,
         adapter: null,
         starting: null,
@@ -209,7 +228,7 @@ export class AgentAccountService {
     const entry = this.entry(agent);
     await this.serialized(entry, async () => {
       const adapter = await this.adapterFor(entry);
-      await this.scrubbed([key], () => adapter.connectKey(target, methodId, key, answers));
+      await this.scrubbed([key, ...answerValues(answers)], () => this.answered(entry, () => adapter.connectKey(target, methodId, key, answers)));
       await this.changed(entry, { kind: "added" });
     });
     return this.snapshot();
@@ -217,13 +236,31 @@ export class AgentAccountService {
 
   async startLogin(agent: AccountAgentId, target: string, methodId: string, answers: Record<string, unknown>): Promise<AgentAccountsSnapshot> {
     const entry = this.entry(agent);
+    const run = entry.loginStarts.then(() => this.startLoginNow(entry, target, methodId, answers));
+    entry.loginStarts = run.then(() => undefined, () => undefined);
+    await run;
+    return this.snapshot();
+  }
+
+  /** Cancels the target's unfinished attempt, starts the new one, and records it; never two at once per agent. */
+  private async startLoginNow(entry: AgentEntry, target: string, methodId: string, answers: Record<string, unknown>): Promise<void> {
+    const agent = entry.agent;
     const adapter = await this.adapterFor(entry);
     for (const existing of this.attempts.values()) {
       if (existing.attempt.agent === agent && existing.attempt.target === target && existing.attempt.state === "pending") {
         await this.cancelEntry(existing);
       }
     }
-    const login = await this.scrubbed([], () => adapter.startLogin(target, methodId, answers));
+    const typed = answerValues(answers);
+    const login = await this.scrubbed(typed, () =>
+      // A login the agent starts after the deadline has nobody to finish it.
+      this.answered(entry, () => adapter.startLogin(target, methodId, answers), late => void late.cancel().catch(() => undefined)),
+    );
+    if (this.disposed) {
+      // The Hub stopped while the agent was starting this login; nothing would track it.
+      await login.cancel().catch(() => undefined);
+      throw new AgentNotReadyError("The Hub is shutting down.");
+    }
     const startedAt = this.now();
     const expiresAt = login.expiresAt !== undefined && login.expiresAt > startedAt ? login.expiresAt : startedAt + this.attemptTtlMs;
     let resolveSettled!: () => void;
@@ -244,7 +281,7 @@ export class AgentAccountService {
         expiresAt,
       },
       login,
-      secrets: [],
+      secrets: [...typed],
       cancelled: false,
       settled,
       resolveSettled,
@@ -261,7 +298,6 @@ export class AgentAccountService {
         return this.settle(attempt, "failed", scrubSecrets(agentErrorMessage(error, "The login failed."), attempt.secrets));
       },
     );
-    return this.snapshot();
   }
 
   async submitCode(attemptId: string, code: string): Promise<AgentAccountsSnapshot> {
@@ -305,7 +341,7 @@ export class AgentAccountService {
     const entry = this.entry(agent);
     await this.serialized(entry, async () => {
       const adapter = await this.adapterFor(entry);
-      await this.scrubbed([], () => adapter.logout(target, credentialId));
+      await this.scrubbed([], () => this.answered(entry, () => adapter.logout(target, credentialId)));
       await this.changed(entry, { kind: "removed", target, credential: credentialId });
     });
     return this.snapshot();
@@ -315,7 +351,7 @@ export class AgentAccountService {
     const entry = this.entry(agent);
     await this.serialized(entry, async () => {
       const adapter = await this.adapterFor(entry);
-      await this.scrubbed([], () => adapter.activate(credentialId));
+      await this.scrubbed([], () => this.answered(entry, () => adapter.activate(credentialId)));
       await this.changed(entry, { kind: "activated", credential: credentialId });
     });
     return this.snapshot();
@@ -430,7 +466,7 @@ export class AgentAccountService {
     const adapter = entry.adapter;
     if (!adapter) return;
     try {
-      const read = await adapter.status();
+      const read = await this.answered(entry, () => adapter.status());
       if (entry.adapter !== adapter) return;
       entry.refreshedAt = this.now();
       entry.status = {
@@ -460,6 +496,51 @@ export class AgentAccountService {
     return entry.adapter;
   }
 
+  /**
+   * Runs one call into the agent's adapter, bounded by the answer deadline.
+   * When the agent misses it, its runtime is stopped (which closes the
+   * session or server the call was waiting on), the agent shows as not
+   * answering, and the next request starts it again. `onLate` receives a
+   * result that arrives after the deadline.
+   */
+  private answered<T>(entry: AgentEntry, call: () => Promise<T>, onLate?: (value: T) => void): Promise<T> {
+    const adapter = entry.adapter;
+    return new Promise<T>((resolve, reject) => {
+      let work: Promise<T>;
+      let ended = false;
+      const timer = this.timers.setTimeout(() => {
+        if (ended) return;
+        ended = true;
+        void work.then(value => onLate?.(value), () => undefined);
+        const error = new AgentNotReadyError(`${entry.status.name} did not answer within ${Math.round(this.answerMs / 1000)}s. Try again.`);
+        if (entry.adapter !== adapter) return reject(error);
+        void this.stopRuntime(entry).then(() => {
+          entry.status = { ...entry.status, state: "unavailable", message: error.message };
+          reject(error);
+        });
+      }, this.answerMs);
+      try {
+        work = call();
+      } catch (error) {
+        work = Promise.reject(error);
+      }
+      work.then(
+        value => {
+          if (ended) return;
+          ended = true;
+          this.timers.clearTimeout(timer);
+          resolve(value);
+        },
+        error => {
+          if (ended) return;
+          ended = true;
+          this.timers.clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
   /** Runs `operation` after every earlier change for this agent, and holds the next until it ends. */
   private serialized<T>(entry: AgentEntry, operation: () => Promise<T>): Promise<T> {
     const run = entry.changes.then(operation);
@@ -480,6 +561,7 @@ export class AgentAccountService {
     try {
       return await operation();
     } catch (error) {
+      if (error instanceof AgentNotReadyError) throw error;
       if (error instanceof AccountOperationError) {
         throw new AccountOperationError(scrubSecrets(error.message, secrets), error.field);
       }

@@ -183,6 +183,31 @@ test.describe("Settings → Agent accounts", () => {
     await expect(copilot.getByRole("button", { name: "Start again" })).toBeEnabled();
   });
 
+  test("a field the agent marks secret is masked, and starting again asks for it instead of keeping it", async ({ hub, hubContext }, testInfo) => {
+    const page = await hubContext.newPage();
+    await openSettings(page);
+    const gitlab = await findProvider(page, "gitlab", "gitlab");
+    const instance = gitlab.locator('input[name="instanceUrl"]');
+    const secret = gitlab.locator('input[name="clientSecret"]');
+    await expect(instance).toHaveAttribute("type", "text");
+    await expect(secret).toHaveAttribute("type", "password");
+    await instance.fill("gitlab.example.com");
+    await secret.fill("gloas-client-secret");
+    await accountsControl(hub, { action: "expireNextAfter", ms: 1_500 });
+    await gitlab.getByRole("button", { name: "Log in" }).click();
+    await expect(gitlab.locator(".agent-attempt.is-expired")).toContainText("The login expired before it was finished.");
+    await gitlab.getByRole("button", { name: "Start again" }).click();
+    // Nothing started blind: the form asks for the secret, which the page did not keep.
+    await expect(gitlab.locator(".agent-method-form .local-error")).toHaveText("Enter OAuth client secret again, then log in.");
+    await expect(gitlab.locator('input[name="clientSecret"]')).toHaveValue("");
+    await expect(gitlab.locator('input[name="clientSecret"]')).toBeFocused();
+    await expect(gitlab.locator('input[name="instanceUrl"]')).toHaveValue("gitlab.example.com");
+    await captureScreenshot(page, testInfo, "agent-accounts-secret-field-start-again");
+    await gitlab.locator('input[name="clientSecret"]').fill("gloas-client-secret");
+    await gitlab.getByRole("button", { name: "Log in" }).click();
+    await expect(gitlab.locator(".agent-device-code-value")).toHaveText(FAKE_DEVICE_CODE);
+  });
+
   test("where the agent keeps several keys for a provider, another can be made the active one", async ({ hub, hubContext }) => {
     await accountsControl(hub, { action: "twoGroqKeys" });
     const page = await hubContext.newPage();

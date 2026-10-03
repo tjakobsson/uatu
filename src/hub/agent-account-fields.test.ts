@@ -88,8 +88,22 @@ describe("OpenCode 1.x prompts", () => {
   });
 
   test("an unknown prompt type falls back to text instead of hiding the method", () => {
-    expect(fieldsFromOpenCodeV1Prompts([{ type: "password", key: "secret", message: "Secret" }])).toEqual([
-      { key: "secret", label: "Secret", kind: "text", valueType: "string", required: true },
+    expect(fieldsFromOpenCodeV1Prompts([{ type: "color", key: "theme", message: "Theme" }])).toEqual([
+      { key: "theme", label: "Theme", kind: "text", valueType: "string", required: true },
+    ]);
+  });
+
+  test("a sensitive prompt is a masked text field", () => {
+    expect(fieldsFromOpenCodeV1Prompts([
+      { type: "password", key: "pass", message: "Password" },
+      { type: "secret", key: "token", message: "Token" },
+      { type: "text", key: "pin", message: "PIN", sensitive: true },
+      { type: "text", key: "account", message: "Account" },
+    ]).map(field => [field.key, field.kind, field.secret ?? false])).toEqual([
+      ["pass", "text", true],
+      ["token", "text", true],
+      ["pin", "text", true],
+      ["account", "text", false],
     ]);
   });
 
@@ -100,6 +114,20 @@ describe("OpenCode 1.x prompts", () => {
 });
 
 describe("OpenCode 2.x form", () => {
+  test("a sensitive string field is masked; a select never is", () => {
+    expect(fieldsFromOpenCodeV2Form([
+      { type: "string", key: "pass", title: "Password", format: "password", required: true },
+      { type: "password", key: "token", title: "Token" },
+      { type: "string", key: "region", title: "Region", secret: true, options: [{ value: "eu", label: "EU" }] },
+      { type: "string", key: "account", title: "Account" },
+    ]).map(field => [field.key, field.kind, field.secret ?? false])).toEqual([
+      ["pass", "text", true],
+      ["token", "text", true],
+      ["region", "select", false],
+      ["account", "text", false],
+    ]);
+  });
+
   test("Copilot's form maps to the same fields as 1.x prompts", () => {
     const fields = fieldsFromOpenCodeV2Form(V2_COPILOT_FORM);
     expect(fields.map(field => [field.key, field.kind, field.required, field.when])).toEqual([

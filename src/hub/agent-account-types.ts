@@ -29,6 +29,11 @@ export type AccountField = {
   kind: "text" | "select";
   valueType: "string" | "number" | "boolean" | "list";
   required: boolean;
+  /**
+   * The agent marked the answer as sensitive (a password-type prompt). The
+   * page masks it and never keeps it for "Start again".
+   */
+  secret?: boolean;
   placeholder?: string;
   description?: string;
   options?: AccountFieldOption[];
