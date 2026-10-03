@@ -36,7 +36,9 @@ src/
 │                   output tail, and the re-read from disk that follows a
 │                   run which streams nothing; surface says whether the
 │                   chat is the surface in front, which the hub switcher's
-│                   viewed acknowledgement also reads);
+│                   viewed acknowledgement also reads; login-action says
+│                   where a missing login is fixed: the Hub's Settings, or
+│                   the agent's own command outside a Hub);
 │                   agent-specific stacks below the seam in
 │                   chat/opencode/ (the loopback server runtime, which
 │                   decides the spawned server's generation from its
@@ -46,7 +48,8 @@ src/
 │                   `@opencode/client`; the shared normalization core sits
 │                   at the root) and chat/claude/ (probe runtime,
 │                   per-conversation SDK sessions, transcript reader,
-│                   model catalog, normalization). One conversation is
+│                   model catalog, normalization, account: what
+│                   `accountInfo()` says about the login). One conversation is
 │                   owned by one agent for life; ids are agent-qualified
 │                   on the wire (`<agentId>:<providerId>`). Each agent's
 │                   `sdk-coverage.ts` holds the hand-kept annotations for
@@ -112,7 +115,12 @@ src/
 │                   worktree-* (the linked Git worktree service — git
 │                   probes, journal, reconciler, rename/delete guards — and
 │                   its published JSON family at `worktree-api.ts`,
-│                   `/api/hub/worktrees`), pages, server, main
+│                   `/api/hub/worktrees`), agent-account-* (Settings →
+│                   Agent accounts: the machine's OpenCode and Claude Code
+│                   logins through the Hub's own short-lived agent runtimes,
+│                   login attempts, loopback-redirect delivery, and the
+│                   notice that tells running workspaces; the pane is
+│                   `agent-accounts-pane.ts`), pages, server, main
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA assets, shared browser notification enrollment UI,

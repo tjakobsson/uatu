@@ -37,7 +37,7 @@ import type {
   ReversibleHistoryState,
   SubagentLine,
   TokenUsage,
-  ToolItem, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
+  ToolItem, AgentUsageReport, UsageReadMode, UsageReadResult, ChatAccountChange, ChatLoginState } from "./types";
 import { ConversationNotFoundError, isSessionInWorkspace } from "./workspace";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -420,6 +420,16 @@ export class ChatAdapter {
 
   models(): Promise<ChatModel[]> {
     return this.provider.listModels();
+  }
+
+  /** Whether the machine's logins let the agent run a turn, as last read; undefined when the provider cannot say. */
+  loginState(): ChatLoginState | undefined {
+    return this.provider.loginState?.();
+  }
+
+  /** The machine's logins changed (Agent accounts): the provider re-reads and replays. */
+  async accountsChanged(change: ChatAccountChange): Promise<void> {
+    await this.provider.accountsChanged?.(change);
   }
 
   agent(): ChatAgent {

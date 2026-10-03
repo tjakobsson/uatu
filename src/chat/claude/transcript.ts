@@ -95,6 +95,9 @@ export type TranscriptEntry = {
   // "sdk" for a prompt an SDK host sent, "scheduled" for a fired wakeup
   // (spike, claude-scheduled-wakeups D8). Absent from older records.
   turnOrigin?: string;
+  // An assistant record the CLI wrote for a failed API call names the
+  // failure here (`authentication_failed`, `rate_limit`, …).
+  error?: string;
 };
 
 export type TranscriptReadResult = {
@@ -167,6 +170,7 @@ function validateEntry(value: unknown): TranscriptEntry | null {
     ...(origin ? { origin } : {}),
     ...(record.isMeta === true ? { isMeta: true } : {}),
     ...(typeof record.turnOrigin === "string" && record.turnOrigin ? { turnOrigin: record.turnOrigin } : {}),
+    ...(typeof record.error === "string" && record.error ? { error: record.error } : {}),
   };
 }
 

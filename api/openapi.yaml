@@ -30,6 +30,7 @@ tags:
   - { name: Hub authentication, description: Native JSON session creation and revocation. }
   - { name: Hub, description: "Workspace registry, lifecycle, browsing, device sessions, and per-user workspace state." }
   - { name: Hub credentials, description: "Hub-managed credentials, workspace assignments, and credential-tool readiness." }
+  - { name: Hub agent accounts, description: "The Hub machine's chat-agent logins (OpenCode providers and the Claude Code account): status, key and browser logins, logout, and credential switching. Logins are written to each agent's own store and apply to every workspace and every user of the Hub; the Hub keeps no agent secret." }
   - { name: Clone jobs, description: "Asynchronous clone creation, interaction, cancellation, and events." }
   - { name: Live stream, description: "One SSE connection per client for document state, conversation inventory and events, and cross-workspace activity." }
   - { name: Worktrees, description: "Git worktrees of a workspace's repository as independent workspaces: authoritative inventory, remote fetch, creation, opening, read-only deletion preflight, guarded deletion, and registering or forgetting a checkout. Every operation runs over the same service and the same safety rules as the Hub's own worktree presentation." }
@@ -620,6 +621,122 @@ paths:
         '429': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /api/hub/agent-accounts:
+    get:
+      operationId: hubGetAgentAccounts
+      tags: [Hub agent accounts]
+      summary: Read every chat agent's login state and the logins in progress
+      description: Starts the Hub's own short-lived agent runtimes when they are not running and waits a bounded time for them. An agent still starting is reported as `starting`; poll until it settles. Reads never start a login, change a credential, or spend model tokens.
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/agent-accounts/key:
+    post:
+      operationId: hubConnectAgentAccountKey
+      tags: [Hub agent accounts]
+      summary: Log in to an agent provider with a key
+      description: The key and answers are handed to the agent's own login interface and are never stored or returned by the Hub.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountKeyRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '400': { $ref: '#/components/responses/AgentAccountError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/AgentAccountError' }
+        '500': { $ref: '#/components/responses/AgentAccountError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/agent-accounts/login:
+    post:
+      operationId: hubStartAgentAccountLogin
+      tags: [Hub agent accounts]
+      summary: Start a browser or device-code login
+      description: Replaces this agent's or provider's earlier unfinished login. The answer lists the new attempt with the URL to open and how to finish it.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountLoginRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '400': { $ref: '#/components/responses/AgentAccountError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/AgentAccountError' }
+        '500': { $ref: '#/components/responses/AgentAccountError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/agent-accounts/attempts/{attemptId}/code:
+    parameters: [{ $ref: '#/components/parameters/AgentAccountAttemptId' }]
+    post:
+      operationId: hubSubmitAgentAccountCode
+      tags: [Hub agent accounts]
+      summary: Finish a code login with the code the sign-in page showed
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountCodeRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '400': { $ref: '#/components/responses/AgentAccountError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/AgentAccountError' }
+        '500': { $ref: '#/components/responses/AgentAccountError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/agent-accounts/attempts/{attemptId}/redirect:
+    parameters: [{ $ref: '#/components/parameters/AgentAccountAttemptId' }]
+    post:
+      operationId: hubSubmitAgentAccountRedirect
+      tags: [Hub agent accounts]
+      summary: Finish a loopback-redirect login with the address the browser landed on
+      description: Delivered only when the address is `http:` on a loopback host with the port and path of this attempt's own callback; anything else is refused without any request. The Hub requests it once on the Hub machine, follows no redirect, and discards the listener's answer.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountRedirectRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '400': { $ref: '#/components/responses/AgentAccountError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/AgentAccountError' }
+        '500': { $ref: '#/components/responses/AgentAccountError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/agent-accounts/attempts/{attemptId}/cancel:
+    parameters: [{ $ref: '#/components/parameters/AgentAccountAttemptId' }]
+    post:
+      operationId: hubCancelAgentAccountLogin
+      tags: [Hub agent accounts]
+      summary: Cancel a login in progress
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '400': { $ref: '#/components/responses/AgentAccountError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/AgentAccountError' }
+        '500': { $ref: '#/components/responses/AgentAccountError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/agent-accounts/logout:
+    post:
+      operationId: hubLogoutAgentAccount
+      tags: [Hub agent accounts]
+      summary: Log out a saved agent login on the Hub machine
+      description: Applies to every workspace and the agent's own tools. Logins the Hub cannot remove (an environment key, a configuration file, a third-party cloud provider) are refused.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountLogoutRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '400': { $ref: '#/components/responses/AgentAccountError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/AgentAccountError' }
+        '500': { $ref: '#/components/responses/AgentAccountError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+  /api/hub/agent-accounts/activate:
+    post:
+      operationId: hubActivateAgentAccountCredential
+      tags: [Hub agent accounts]
+      summary: Make a saved credential the active one for its provider
+      description: Offered only where the agent supports several saved credentials per provider (`capabilities.activate`).
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountActivateRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/AgentAccounts' }
+        '400': { $ref: '#/components/responses/AgentAccountError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/AgentAccountError' }
+        '500': { $ref: '#/components/responses/AgentAccountError' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/credentials/token:
     post:
       operationId: hubCreateTokenCredential
@@ -1223,6 +1340,7 @@ components:
     WorkspaceId: { name: workspaceId, in: path, required: true, schema: { $ref: '#/components/schemas/WorkspaceId' } }
     CredentialId: { name: credentialId, in: path, required: true, schema: { $ref: '#/components/schemas/CredentialId' } }
     CredentialTool: { name: tool, in: path, required: true, schema: { $ref: '#/components/schemas/CredentialToolName' } }
+    AgentAccountAttemptId: { name: attemptId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 64 } }
     JobId: { name: jobId, in: path, required: true, schema: { type: string, minLength: 1 } }
     LiveStreamId: { name: streamId, in: path, required: true, schema: { type: string, minLength: 1 }, description: "Opaque id from the stream's hello event." }
   responses:
@@ -1251,6 +1369,14 @@ components:
       description: Request failed; the response must not be stored because the request may contain secret input.
       headers: { Cache-Control: { schema: { type: string, const: no-store } } }
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    AgentAccounts:
+      description: Every chat agent's login state and the logins in progress, without any secret
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountsSnapshot' } } }
+    AgentAccountError:
+      description: An Agent accounts request failed; `field` names the input it concerns, never its value
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/AgentAccountError' } } }
     Revoked:
       description: Session revoked
       content:
@@ -1912,6 +2038,191 @@ components:
       properties: { status: { enum: [cancelled, terminal] } }
       additionalProperties: false
     EmptyObject: { type: object, additionalProperties: false }
+    AgentAccountError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, description: "What went wrong, safe to show. Never contains a submitted key, code, or address." }
+        field: { type: string, maxLength: 256, description: "The submitted field the error concerns (`key`, `code`, `address`, or a method field's key)." }
+      additionalProperties: false
+    AgentAccountId: { enum: [opencode, claude] }
+    AgentAccountAnswers:
+      type: object
+      description: Answers to a login method's extra fields, as strings; the Hub converts each to the field's `valueType`.
+      maxProperties: 32
+      additionalProperties: { type: string, x-uatu-maxUtf8Bytes: 4096 }
+    AgentAccountKeyRequest:
+      type: object
+      required: [agent, target, method, key]
+      properties:
+        agent: { $ref: '#/components/schemas/AgentAccountId' }
+        target: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }
+        method: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }
+        key: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 65536, description: "One-operation secret. Handed to the agent; never persisted or returned by the Hub." }
+        answers: { $ref: '#/components/schemas/AgentAccountAnswers' }
+      additionalProperties: false
+    AgentAccountLoginRequest:
+      type: object
+      required: [agent, target, method]
+      properties:
+        agent: { $ref: '#/components/schemas/AgentAccountId' }
+        target: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256, description: "The OpenCode provider or integration id; `claude` for Claude Code." }
+        method: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }
+        answers: { $ref: '#/components/schemas/AgentAccountAnswers' }
+      additionalProperties: false
+    AgentAccountCodeRequest:
+      type: object
+      required: [code]
+      properties: { code: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 8192, description: "One-operation secret: the code the sign-in page showed. Never persisted or returned." } }
+      additionalProperties: false
+    AgentAccountRedirectRequest:
+      type: object
+      required: [address]
+      properties: { address: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 8192, description: "The full address the browser landed on. One-operation secret: never persisted or returned." } }
+      additionalProperties: false
+    AgentAccountLogoutRequest:
+      type: object
+      required: [agent, target, credential]
+      properties:
+        agent: { $ref: '#/components/schemas/AgentAccountId' }
+        target: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }
+        credential: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }
+      additionalProperties: false
+    AgentAccountActivateRequest:
+      type: object
+      required: [agent, credential]
+      properties:
+        agent: { $ref: '#/components/schemas/AgentAccountId' }
+        credential: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }
+      additionalProperties: false
+    AgentAccountFieldCondition:
+      type: object
+      required: [key, op, value]
+      properties: { key: { type: string }, op: { enum: [eq, neq] }, value: { type: string } }
+      additionalProperties: false
+    AgentAccountField:
+      type: object
+      required: [key, label, kind, valueType, required]
+      description: One extra field a login method asks for. Shown only while every `when` condition holds against the earlier answers.
+      properties:
+        key: { type: string }
+        label: { type: string }
+        kind: { enum: [text, select] }
+        valueType: { enum: [string, number, boolean, list], description: "How the Hub converts the submitted string; `list` is comma-separated." }
+        required: { type: boolean }
+        secret: { type: boolean, description: "The agent marked the answer as sensitive. Clients mask it and do not keep it after submitting." }
+        placeholder: { type: string }
+        description: { type: string }
+        options:
+          type: array
+          items: { type: object, required: [value, label], properties: { value: { type: string }, label: { type: string }, hint: { type: string } }, additionalProperties: false }
+        when: { type: array, items: { $ref: '#/components/schemas/AgentAccountFieldCondition' } }
+      additionalProperties: false
+    AgentAccountCompletion: { enum: [device, code, redirect], description: "`device`: approve on the provider's site, nothing to paste. `code`: paste the code the sign-in page shows. `redirect`: the sign-in redirects to a loopback address on the Hub machine; from another device, paste the address the browser landed on." }
+    AgentAccountKeyMethod:
+      type: object
+      required: [id, kind, label, fields]
+      properties: { id: { type: string }, kind: { const: key }, label: { type: string }, fields: { type: array, items: { $ref: '#/components/schemas/AgentAccountField' } } }
+      additionalProperties: false
+    AgentAccountOAuthMethod:
+      type: object
+      required: [id, kind, label, fields]
+      properties: { id: { type: string }, kind: { const: oauth }, label: { type: string }, fields: { type: array, items: { $ref: '#/components/schemas/AgentAccountField' } }, completion: { $ref: '#/components/schemas/AgentAccountCompletion' } }
+      additionalProperties: false
+    AgentAccountEnvMethod:
+      type: object
+      required: [id, kind, label, variables]
+      description: The agent reads a variable from its environment; set it in the Hub's environment.
+      properties: { id: { type: string }, kind: { const: env }, label: { type: string }, variables: { type: array, items: { type: string } } }
+      additionalProperties: false
+    AgentAccountCommandMethod:
+      type: object
+      required: [id, kind, label, command]
+      description: The agent runs a local helper the Hub does not run; log in with `command` on the Hub machine.
+      properties: { id: { type: string }, kind: { const: command }, label: { type: string }, command: { type: string } }
+      additionalProperties: false
+    AgentAccountMethod:
+      oneOf:
+        - { $ref: '#/components/schemas/AgentAccountKeyMethod' }
+        - { $ref: '#/components/schemas/AgentAccountOAuthMethod' }
+        - { $ref: '#/components/schemas/AgentAccountEnvMethod' }
+        - { $ref: '#/components/schemas/AgentAccountCommandMethod' }
+    AgentAccountCredential:
+      type: object
+      required: [id, label, kind, active, removable]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        kind: { enum: [key, oauth, saved, env, config, other], description: "`key`/`oauth`: saved by a key or browser login. `saved`: saved by a login whose kind the agent does not report. `env`: read from the agent's environment. `config`: set in the agent's configuration. `other`: anything else, such as a built-in provider." }
+        active: { type: boolean }
+        removable: { type: boolean }
+        variables: { type: array, items: { type: string } }
+        status: { type: string, description: "The agent's own message about the credential, such as needing a new login." }
+      additionalProperties: false
+    AgentAccountTarget:
+      type: object
+      required: [id, name, connected, credentials, methods]
+      description: One OpenCode provider (1.x) or integration (2.x).
+      properties:
+        id: { type: string }
+        name: { type: string }
+        connected: { type: boolean }
+        credentials: { type: array, items: { $ref: '#/components/schemas/AgentAccountCredential' } }
+        methods: { type: array, items: { $ref: '#/components/schemas/AgentAccountMethod' } }
+      additionalProperties: false
+    ClaudeAccountState:
+      type: object
+      required: [source]
+      properties:
+        source: { enum: [subscription, console, env-api-key, env-token, api-key-helper, third-party, none, unknown] }
+        email: { type: string }
+        organization: { type: string }
+        plan: { type: string }
+        provider: { type: string, description: "The API backend when it is not Anthropic's own." }
+      additionalProperties: false
+    AgentAccountStatus:
+      type: object
+      required: [agent, name, state, capabilities, targets, methods, loginCommand]
+      properties:
+        agent: { $ref: '#/components/schemas/AgentAccountId' }
+        name: { type: string }
+        state: { enum: [idle, starting, ready, not-installed, unavailable] }
+        version: { type: string }
+        generation: { enum: [1, 2] }
+        message: { type: string }
+        capabilities:
+          type: object
+          required: [login, logout, activate]
+          properties: { login: { type: boolean }, logout: { type: boolean }, activate: { type: boolean } }
+          additionalProperties: false
+        targets: { type: array, items: { $ref: '#/components/schemas/AgentAccountTarget' } }
+        claude: { $ref: '#/components/schemas/ClaudeAccountState' }
+        methods: { type: array, items: { $ref: '#/components/schemas/AgentAccountMethod' } }
+        loginCommand: { type: string }
+      additionalProperties: false
+    AgentAccountAttempt:
+      type: object
+      required: [id, agent, target, methodId, url, instructions, completion, state, startedAt, expiresAt]
+      properties:
+        id: { type: string }
+        agent: { $ref: '#/components/schemas/AgentAccountId' }
+        target: { type: string }
+        methodId: { type: string }
+        url: { type: string }
+        instructions: { type: string }
+        completion: { $ref: '#/components/schemas/AgentAccountCompletion' }
+        state: { enum: [pending, complete, failed, expired, cancelled] }
+        message: { type: string }
+        startedAt: { type: number, description: Unix epoch milliseconds. }
+        expiresAt: { type: number, description: Unix epoch milliseconds. }
+      additionalProperties: false
+    AgentAccountsSnapshot:
+      type: object
+      required: [agents, attempts]
+      properties:
+        agents: { type: array, items: { $ref: '#/components/schemas/AgentAccountStatus' } }
+        attempts: { type: array, items: { $ref: '#/components/schemas/AgentAccountAttempt' } }
+      additionalProperties: false
     ChatAgentDescriptor: { type: object, required: [id, name], description: "The identity of one offered agent. Capabilities ride the agent's availability, which only exists once its runtime has spoken.", properties: { id: { type: string, minLength: 1, maxLength: 64, pattern: '^[^:]+$' }, name: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ConversationStatus: { enum: [idle, sending, running, completed, interrupted, failed, background, retrying, compacting, scheduled], description: "`background`: no turn is running but the agent still holds live background work; prompting is possible. Presented only for agents declaring `background-tasks`. `scheduled`: nothing runs, but the agent's session holds one or more future turns it scheduled for itself (pending `scheduled_wakeup` items); prompting is possible, and the session can be released. Presented only for agents declaring `scheduled-wakeups`; `background` wins when both hold. `retrying` and `compacting` are live-turn states with a name: the agent is waiting to retry a failed API request, or compacting its context; both return to `running` when the turn resumes." }
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
@@ -1939,7 +2250,7 @@ components:
         - { $ref: '#/components/schemas/QuestionItem' }
         - { type: object, required: [id, type, createdAt, entries], description: "The agent's live task list: one presentation per conversation, upserted in place as items progress — never an entry per update. Present only for agents that keep a task list.", properties: { id: { type: string }, type: { const: task_progress }, createdAt: { type: number }, entries: { type: array, items: { $ref: '#/components/schemas/TaskProgressEntry' } } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, status], properties: { id: { type: string }, type: { const: turn_status }, createdAt: { type: number }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
-        - { type: object, required: [id, type, createdAt, level, message], properties: { id: { type: string }, type: { const: notice }, createdAt: { type: number }, level: { enum: [info, warning, error] }, message: { type: string }, code: { type: string, minLength: 1, maxLength: 512, description: "A machine-readable kind for notices the surface reacts to: `rate-limit-warning` and `rate-limit-rejected` carry the current rate-limit standing and are data for the composer, never a timeline row — a client MUST treat them the way it treats `context_report`. The standing occupies one item id for the conversation's life, upserted as it changes and removed when requests are allowed again. `refusal-fallback` names a model swap. Absent otherwise." }, resetsAt: { type: number, minimum: 0, description: "When the rate-limit standing's window resets." } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, level, message], properties: { id: { type: string }, type: { const: notice }, createdAt: { type: number }, level: { enum: [info, warning, error] }, message: { type: string }, code: { type: string, minLength: 1, maxLength: 512, description: "A machine-readable kind for notices the surface reacts to: `rate-limit-warning` and `rate-limit-rejected` carry the current rate-limit standing and are data for the composer, never a timeline row — a client MUST treat them the way it treats `context_report`. The standing occupies one item id for the conversation's life, upserted as it changes and removed when requests are allowed again. `refusal-fallback` names a model swap. `login-failed` marks a turn that failed because the agent's login is missing, expired, or refused; `message` is the agent's own words, and a client offers a way to log in. `reauthenticating` is the one item an agent occupies while it signs in again mid-session, removed when that finishes. Absent otherwise." }, resetsAt: { type: number, minimum: 0, description: "When the rate-limit standing's window resets." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, total], description: "The agent's own statement of how full the context window is, at the point in the timeline where it was reported (after a turn, after a compaction). Data for the context readout, never rendered as a row: a client MUST treat it like the empty-markdown usage carrier. The readout uses whichever of a report or a usage carrier is newest in the timeline.", properties: { id: { type: string }, type: { const: context_report }, createdAt: { type: number }, total: { type: integer, minimum: 0, description: "Tokens occupying the window." }, max: { type: integer, minimum: 1, description: "The window the total was measured against. Absent when the agent did not state one; the reporting model's known limit then applies." }, model: { $ref: '#/components/schemas/ModelSelection' }, categories: { type: array, items: { type: object, required: [name, tokens, kind], properties: { name: { type: string, minLength: 1 }, tokens: { type: integer, minimum: 0 }, kind: { enum: [used, free, buffer, deferred], description: "`used` rows occupy the window and sum to `total`; `free` is the remaining window; `buffer` a compaction reserve; `deferred` rows are out-of-window tool schemas listed for awareness only." } }, additionalProperties: false } }, plan: { $ref: '#/components/schemas/PlanUtilization' } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, taskId, description, status], description: "One background task the agent runs (a backgrounded command, a backgrounded subagent, a monitor), updated in place as it progresses and settles. A running task is presented in the composer's live list, a settled one as a timeline row with its outcome and summary; `toolUseId` links it to the tool row that launched it. Only for agents declaring `background-tasks`; ambient housekeeping tasks never appear.", properties: { id: { type: string }, type: { const: background_task }, createdAt: { type: number }, taskId: { type: string, minLength: 1, maxLength: 512 }, description: { type: string, minLength: 1 }, taskType: { type: string }, toolUseId: { type: string, minLength: 1, maxLength: 512 }, status: { enum: [running, completed, failed, stopped] }, progress: { type: string, description: "The agent's latest progress note, while running." }, summary: { type: string, description: "The agent's summary, once settled." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, wakeupId, prompt, recurring, schedule, status], description: "One future turn the agent scheduled for itself (a self-paced wakeup, a cron, a loop), as its session reports it, updated in place through its life. `pending` rows are listed with the conversation's scheduled state and shown in the timeline; a one-shot that fired reads `fired` with `firedTurnId` naming the `user_message` (origin `wakeup`) that opened its turn; a recurring one stays `pending` across fires with `nextFireAt` moving on. `cancelled`: the agent removed it, or the user cancelled it or released the session; the workspace blocks a cancelled wakeup from firing again even if the agent's tooling later rebuilds it. `paused`: the session ended, but the agent's tooling rebuilds this wakeup (a cron) when the conversation runs again; `message` says so, and a conversation opened without a live session lists its paused wakeups. `lost`: the session ended some other way and the schedule ended with it; `message` says so. A reopened conversation whose session is gone replays no pending row. Only for agents declaring `scheduled-wakeups`.", properties: { id: { type: string }, type: { const: scheduled_wakeup }, createdAt: { type: number }, wakeupId: { type: string, minLength: 1, maxLength: 512 }, prompt: { type: string, description: "The prompt the wakeup submits when it fires, as the agent reports it (possibly clipped by the agent)." }, recurring: { type: boolean }, schedule: { type: string, minLength: 1, description: "Five-field cron expression in the workspace host's local time; a one-shot encodes a single fire time." }, nextFireAt: { type: number, minimum: 0, description: "The workspace's reading of the next fire time (epoch ms), for display only: the agent fires on its own clock. Only on a pending row, and absent when the expression could not be read." }, status: { enum: [pending, fired, cancelled, paused, lost] }, firedTurnId: { type: string, minLength: 1, maxLength: 512 }, message: { type: string, description: "What happened to a wakeup that did not fire, when that needs saying (a lost or paused schedule)." } }, additionalProperties: false }

@@ -2,6 +2,21 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 10 / Workspace 22 - Unreleased (agent accounts)
+
+Compatibility: additive
+
+### Changes
+
+- New `Hub agent accounts` operations manage the Hub machine's chat-agent logins: OpenCode providers and the Claude Code account. `GET /api/hub/agent-accounts` (`hubGetAgentAccounts`) reports each agent's login state, the login methods it offers with their extra fields, and the logins in progress. The POST operations log in with a key (`hubConnectAgentAccountKey`), start a browser or device-code login (`hubStartAgentAccountLogin`), finish it with a pasted code (`hubSubmitAgentAccountCode`) or with the address a loopback redirect landed on (`hubSubmitAgentAccountRedirect`), cancel it (`hubCancelAgentAccountLogin`), log out (`hubLogoutAgentAccount`), and switch the active credential (`hubActivateAgentAccountCredential`).
+- Logins are written to each agent's own store on the Hub machine, so they apply to every workspace, every Hub user, and the agents' own tools there. The Hub keeps no agent secret, and no response carries a key, token, code, or pasted address. Errors from these operations use `AgentAccountError`, whose optional `field` names the input concerned.
+- A pasted redirect address is requested only when it is `http:` on a loopback host with the port and path of the attempt's own callback, and the Hub follows no redirect from it.
+- Conversation `notice` items may carry two new `code` values. `login-failed` marks a turn that failed because the agent's login is missing, expired, or refused, with the agent's own words as `message`. `reauthenticating` is the one item an agent occupies while it signs in again mid-session. `code` was already an open string, so the schema is unchanged.
+
+### Migration
+
+None. The operations are new and existing operations are unchanged. A client that presents notices by `code` can offer a way to log in on `login-failed`; one that does not keeps showing it as an error notice.
+
 ## Hub 10 / Workspace 22 - Unreleased
 
 Compatibility: breaking (workspace)

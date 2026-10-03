@@ -13,7 +13,10 @@ import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideSt
 import { CredentialToolManager, readyToolPath } from "./credential-tools";
 import { OpenPgpCredentialManager, type OpenPgpCredentialOperations } from "./openpgp-credentials";
 import { TokenCredentialManager } from "./token-credentials";
-import { createStoredCloneCredentialResolver, createStoredCredentialContextResolver } from "./credential-context";
+import { createStoredCloneCredentialResolver, createStoredCredentialContextResolver, stripAmbientCredentialEnvironment } from "./credential-context";
+import { createAccountRuntimeFactory } from "./agent-account-runtime";
+import { AgentAccountService } from "./agent-account-service";
+import { createAccountChangeNotifier } from "./agent-account-propagation";
 import { CloneJobManager } from "./clone-jobs";
 import { CloneProcessAdapter } from "./clone-process";
 import { FolderManager } from "./folder-manager";
@@ -24,6 +27,7 @@ import { PersonalWorkspaceStateStore } from "./personal-state";
 import { ActivityMarkStore } from "./activity-marks";
 import { PathReservationCoordinator } from "./path-reservations";
 import {
+  agentAccountsPath,
   ensureCredentialStateDirs,
   ensureCanonicalStateDir,
   acquireHubStateLease,
@@ -625,8 +629,19 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     },
     workspaceName: id => registry.byId(id)?.displayName ?? id,
   });
+  // The machine's agent logins. Its runtimes see the environment workspaces
+  // see, so they read and write the same agent stores.
+  const agentAccounts = new AgentAccountService({
+    runtimes: createAccountRuntimeFactory({
+      cwd: agentAccountsPath(stateRoot),
+      env: stripAmbientCredentialEnvironment(process.env),
+    }),
+    // Running workspaces replay each change on their own agent servers.
+    onChanged: createAccountChangeNotifier({ sessions }),
+  });
   const server = startHubServer({
     config,
+    agentAccounts,
     registry,
     sessions,
     sessionStore,
@@ -679,6 +694,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
           await activityMarks.flush();
           activityMarks.close();
           await notifications.dispose();
+          await agentAccounts.dispose();
         },
         stateLease,
         cloneJobs: server.cloneJobs,

@@ -52,11 +52,16 @@ export function parseChatAvailability(value: unknown): ChatAvailability {
       expectKeys(record, ["state"], "chat availability");
       break;
     case "ready":
-      expectKeys(record, ["state", "version", "agent"], "chat availability");
+      expectKeys(record, ["state", "version", "agent", "login", "accountsRevision"], "chat availability");
       expectNonEmptyString(record.version, "version");
       // Optional: absent for the moment between the runtime reporting ready
       // and the adapter existing to describe the agent.
       if (record.agent !== undefined) parseChatAgent(record.agent);
+      // Optional: absent until the agent has said whether a login is usable.
+      if (record.login !== undefined) expectOneOf(record.login, ["ok", "missing", "unknown"], "login state");
+      if (record.accountsRevision !== undefined && (!Number.isInteger(record.accountsRevision) || (record.accountsRevision as number) < 0)) {
+        throw new Error("invalid accounts revision");
+      }
       break;
     case "unavailable":
       expectKeys(record, ["state", "reason", "message", "diagnostics"], "chat availability");

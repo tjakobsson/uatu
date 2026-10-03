@@ -22,7 +22,7 @@ import type {
 } from "../../provider";
 import { pendingPermissionFields } from "../normalization";
 import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, storedAccounting, storedPromptId, supportedFormFields } from "./normalization";
-import type { ChatAgent, ChatCommand, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
+import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 
 /**
  * The OpenCode 2.x provider: the same `ChatProvider` seam as the 1.x stack,
@@ -58,6 +58,8 @@ export function createOpenCodeV2Provider(options: {
 export class OpenCodeV2Provider implements ChatProvider {
   private readonly historyReuse = new HistoryReuse<StoredMessage[]>();
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
+  // How many models the last catalog read offered; null before the first.
+  private offeredModels: number | null = null;
   private readonly mcpServers = new McpServerNames(() => this.mcpServerNames());
   private readonly normalize: ReturnType<typeof createOpenCodeV2Normalizer>;
   private readonly workspace: string;
@@ -173,7 +175,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   async listModels(): Promise<ChatModel[]> {
     const [models, providers] = await this.catalog();
     const providerNames = new Map(providers.map(provider => [provider.id, provider.name]));
-    return models
+    const offered = models
       .filter(model => model.enabled !== false && model.status !== "deprecated")
       .map(model => {
         const variants = model.variants.map(variant => variant.id);
@@ -188,6 +190,32 @@ export class OpenCodeV2Provider implements ChatProvider {
         };
       })
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
+    this.offeredModels = offered.length;
+    return offered;
+  }
+
+  // 2.x lists only models it can run: its free models need no login, and a
+  // provider's models appear once it is logged in. So "missing" means no
+  // model at all; unknown until the catalog has been read once.
+  loginState(): ChatLoginState {
+    if (this.offeredModels === null) return "unknown";
+    return this.offeredModels > 0 ? "ok" : "missing";
+  }
+
+  /**
+   * A login saved through another OpenCode server shows here on the next
+   * read. A removal or switch is replayed on this server by credential id:
+   * the store already reflects it, so the replay only updates what this
+   * server holds in memory. A server without credential routes (2.0.13)
+   * answers 404, which is ignored.
+   */
+  async accountsChanged(change: ChatAccountChange): Promise<void> {
+    if (change.kind === "removed") {
+      await this.client.credential.remove({ credentialID: change.credential } as Parameters<OpenCodeV2Client["credential"]["remove"]>[0]).catch(() => undefined);
+    } else if (change.kind === "activated") {
+      await this.client.credential.activate({ credentialID: change.credential } as Parameters<OpenCodeV2Client["credential"]["activate"]>[0]).catch(() => undefined);
+    }
+    await this.listModels().catch(() => undefined);
   }
 
   /**

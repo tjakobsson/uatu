@@ -23,7 +23,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, pendingPermissionFields, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
+import type { ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 
 type Result<T> = { data?: T; error?: unknown };
 type ReversibleTurn = { id: string; providerId: string; draft: RestoredDraft; summary: string };
@@ -93,6 +93,8 @@ export class OpenCodeV1Provider implements ChatProvider {
   private readonly compatibilitySessions = new Set<string>();
   private readonly historyReuse = new HistoryReuse<ProviderMessage[]>();
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
+  // How many models the last catalog read offered; null before the first.
+  private offeredModels: number | null = null;
   private readonly mcpServers = new McpServerNames(() => this.mcpServerNames());
 
   constructor(
@@ -159,7 +161,7 @@ export class OpenCodeV1Provider implements ChatProvider {
   async listModels(): Promise<ChatModel[]> {
     const response = unwrap(await this.client.provider.list({ directory: this.directory }));
     const connected = new Set(response.connected);
-    return response.all
+    const models = response.all
       .filter(provider => connected.has(provider.id))
       .flatMap(provider => Object.values(provider.models).map(model => {
         // OpenCode reports variants as a keyed map; the ids are its keys.
@@ -178,6 +180,28 @@ export class OpenCodeV1Provider implements ChatProvider {
         };
       }))
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
+    this.offeredModels = models.length;
+    return models;
+  }
+
+  // OpenCode's free provider needs no login, so "missing" means no model at
+  // all is offered; unknown until the catalog has been read once.
+  loginState(): ChatLoginState {
+    if (this.offeredModels === null) return "unknown";
+    return this.offeredModels > 0 ? "ok" : "missing";
+  }
+
+  /**
+   * A login saved through another OpenCode server shows here on the next
+   * read. A removal is replayed on this server: the store already lacks the
+   * entry, so `auth.remove` changes nothing on disk and drops what this
+   * server holds in memory, with no restart and no effect on a running turn.
+   */
+  async accountsChanged(change: ChatAccountChange): Promise<void> {
+    if (change.kind === "removed") {
+      await this.client.auth.remove({ providerID: change.target }).catch(() => undefined);
+    }
+    await this.listModels().catch(() => undefined);
   }
 
   async newConversationConfiguration(): Promise<ConversationConfiguration> {

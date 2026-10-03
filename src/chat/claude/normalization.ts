@@ -1,7 +1,7 @@
 import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
-import { RATE_LIMIT_ITEM_ID, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
+import { LOGIN_FAILED_NOTICE_CODE as LOGIN_FAILED_CODE, RATE_LIMIT_ITEM_ID, REAUTHENTICATING_NOTICE_CODE as REAUTHENTICATING_CODE, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
 import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, readsAsWakeupPrompt, scheduledWakeupPrompt, type TranscriptEntry } from "./transcript";
 
 type RecordValue = Record<string, unknown>;
@@ -68,6 +68,12 @@ export type ClaudeEventMemory = {
   // on every request, and all those restatements are this one record, so a
   // return to allowed retires one item rather than appending a third notice.
   rateLimit?: { level: "warning" | "rejected"; since: number };
+  // The turn failed on the login (an assistant frame named the login
+  // error): its failed status then says nothing more, the login notice
+  // carries the agent's words.
+  loginFailed?: boolean;
+  // An `auth_status` notice is on show (the CLI is signing in again).
+  authStatus?: boolean;
   // Prompts earlier scheduling calls (ScheduleWakeup, CronCreate) asked to
   // be woken with: how a stored fired wakeup is told from other injected
   // records where the store names no turn origin (D8).
@@ -133,6 +139,12 @@ export function startsAgentRun(record: Record<string, unknown>): boolean {
   return !ambient && typeof record.subagent_type === "string" && record.subagent_type !== "";
 }
 
+
+// The assistant-frame errors that mean the login, not the request, failed
+// (the SDK's SDKAssistantMessageError).
+const LOGIN_ERRORS: ReadonlySet<string> = new Set(["authentication_failed", "oauth_org_not_allowed"]);
+// The one item an `auth_status` sequence occupies.
+const AUTH_STATUS_ITEM_ID = "notice:auth-status";
 const MEMORY_LIMIT = 2_048;
 
 // Message types, and `system` subtypes, the SDK emits that deliberately
@@ -541,10 +553,54 @@ function normalizeMessage(
     return { ...base, outcome: "ignored" };
   }
 
+  // The CLI re-authenticating mid-session: one notice while it runs, kept as
+  // a login failure if it fails, retired if it succeeds.
+  if (type === "auth_status") {
+    const envelope = envelopeIdentity(record);
+    if (!envelope) return { ...base, outcome: "unparseable" };
+    const output = asArray(record.output).filter((line): line is string => typeof line === "string" && line.trim() !== "").join(" ").trim();
+    const error = typeof record.error === "string" ? record.error.trim() : "";
+    if (record.isAuthenticating === true || error) {
+      memory.authStatus = true;
+      const item: ConversationItem = error
+        ? { id: AUTH_STATUS_ITEM_ID, type: "notice", createdAt: envelope.createdAt, level: "error", code: LOGIN_FAILED_CODE, message: error }
+        : { id: AUTH_STATUS_ITEM_ID, type: "notice", createdAt: envelope.createdAt, level: "info", code: REAUTHENTICATING_CODE, message: output || "Claude Code is signing in again." };
+      return { ...base, outcome: "handled", updates: [{ kind: "upsert", item }] };
+    }
+    if (memory.authStatus) {
+      memory.authStatus = false;
+      return { ...base, outcome: "handled", updates: [{ kind: "remove", itemId: AUTH_STATUS_ITEM_ID }] };
+    }
+    return { ...base, outcome: "ignored" };
+  }
+
   if (type === "assistant") {
     const envelope = envelopeIdentity(record);
     if (!envelope) return { ...base, outcome: "unparseable" };
     const message = asRecord(record.message);
+    // The login is missing, expired, or refused: the CLI writes a synthetic
+    // message saying so. It becomes the login-failure notice, which carries
+    // the CLI's words as its detail and which the surface presents with a
+    // way to log in, rather than an assistant reply.
+    if (typeof record.error === "string" && LOGIN_ERRORS.has(record.error)) {
+      memory.loginFailed = true;
+      const text = contentBlocks(message.content)
+        .flatMap(block => block.type === "text" && typeof block.text === "string" ? [block.text.trim()] : [])
+        .filter(Boolean)
+        .join("\n");
+      return {
+        ...base,
+        outcome: "handled",
+        updates: [...resumeAfterTransient(memory), { kind: "upsert", item: {
+          id: `notice:login:${envelope.uuid}`,
+          type: "notice",
+          createdAt: envelope.createdAt,
+          level: "error",
+          code: LOGIN_FAILED_CODE,
+          message: text || "Claude Code has no usable login.",
+        } }],
+      };
+    }
     const raw = typeof message.model === "string" ? message.model : undefined;
     const reported = raw !== undefined ? (memory.resolveModel?.(raw) ?? raw) : undefined;
     // A frame produced inside a subagent (parent tool use set) speaks for
@@ -737,7 +793,11 @@ function normalizeMessage(
     // The turn is over, whatever it was in the middle of: a later frame
     // must not "resume" a retry or a compaction into a running status.
     memory.transient = undefined;
-    const message = !failed ? undefined
+    // A turn that failed on the login already says so in its notice; its
+    // status adds nothing but the same words again.
+    const loginFailed = memory.loginFailed === true;
+    memory.loginFailed = false;
+    const message = !failed || loginFailed ? undefined
       : typeof record.result === "string" && record.result.trim() ? record.result
         : errors.length > 0 ? errors.join("; ") : undefined;
     // Turn status rides the ordered update stream like any other change.
@@ -780,6 +840,7 @@ export function normalizeTranscriptEntries(entries: TranscriptEntry[], parentSes
         ...(entry.origin ? { origin: entry.origin } : {}),
         ...(entry.isMeta ? { isMeta: true } : {}),
         ...(entry.turnOrigin ? { turnOrigin: entry.turnOrigin } : {}),
+        ...(entry.error ? { error: entry.error } : {}),
       },
       memory,
       "stored",

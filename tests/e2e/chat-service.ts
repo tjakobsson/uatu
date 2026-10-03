@@ -10,7 +10,7 @@ import { ConversationInventoryBroadcaster, type ConversationInventorySubscriptio
 import { ReversibleHistoryTargetError } from "../../src/chat/provider";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
-import { isLiveConversationStatus, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult } from "../../src/chat/types";
+import { isLiveConversationStatus, type AgentUsageReport, type ChatAccountChange, type ChatLoginState, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult } from "../../src/chat/types";
 import type {
   ChatActivity,
   ChatCapability,
@@ -163,11 +163,39 @@ export class FakeE2EChatService implements WorkspaceChatService {
     ];
   }
 
+  // The machine's login as this fake agent reports it (agent-accounts). Absent
+  // until a test sets it, like an agent that has not said. An accounts change
+  // from the Hub bumps the revision and moves the login the way a real agent's
+  // re-read would: a login makes it usable and brings the models back, a
+  // logout of the last provider leaves it with none.
+  private login: ChatLoginState | undefined;
+  private accountsRevision = 0;
+  readonly accountChanges: ChatAccountChange[] = [];
+
+  setLogin(login: ChatLoginState | undefined, options: { silent?: boolean } = {}): void {
+    this.login = login;
+    if (!options.silent) this.invalidateInventory();
+  }
+
+  async accountsChanged(change: ChatAccountChange): Promise<void> {
+    this.accountChanges.push(change);
+    this.accountsRevision += 1;
+    if (change.kind === "added") {
+      this.login = "ok";
+      if (this.modelInventory.length === 0) this.modelInventory = FakeE2EChatService.defaultModels();
+    } else if (change.kind === "removed") {
+      this.login = "missing";
+      this.modelInventory = [];
+    }
+  }
+
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
     return this.unavailable ?? {
       state: "ready",
       version: "e2e",
+      ...(this.login ? { login: this.login } : {}),
+      ...(this.accountsRevision ? { accountsRevision: this.accountsRevision } : {}),
       agent: {
         id: this.agentId,
         name: this.agentName,
@@ -703,6 +731,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   reset(): void {
+    this.login = undefined;
+    this.accountsRevision = 0;
+    this.accountChanges.length = 0;
     this.usageReport = null;
     this.usageReadOutcome = { outcome: "no-live-session" };
     this.usageReads.length = 0;

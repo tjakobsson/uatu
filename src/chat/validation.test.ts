@@ -155,6 +155,11 @@ describe("chat domain validation", () => {
     });
     expect(parseConversationSummary(summary)).toBeDefined();
     for (const item of items) expect(parseConversationItem(item)).toBeDefined();
+    // A ready agent says whether a login is usable and how often logins changed.
+    expect(parseChatAvailability({ state: "ready", version: "2.1.281", login: "missing", accountsRevision: 3 })).toEqual({ state: "ready", version: "2.1.281", login: "missing", accountsRevision: 3 });
+    expect(() => parseChatAvailability({ state: "ready", version: "1", login: "maybe" })).toThrow();
+    expect(() => parseChatAvailability({ state: "ready", version: "1", accountsRevision: -1 })).toThrow();
+    expect(() => parseChatAvailability({ state: "ready", version: "1", accountsRevision: 1.5 })).toThrow();
 
     const snapshot = {
       conversation: summary,

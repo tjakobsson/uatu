@@ -1362,3 +1362,39 @@ describe("OpenCode 2.x provider: reversible history", () => {
     expect(empty.requests("POST", "/api/session/ses_e/revert/stage")).toHaveLength(0);
   });
 });
+
+describe("OpenCodeV2Provider accounts", () => {
+  const model = (providerID: string, id: string) => ({ id, modelID: id, providerID, name: id, capabilities: { tools: true, input: ["text"], output: ["text"] }, variants: [], limit: { context: 8000, output: 800 }, status: "active", enabled: true, cost: [], time: { released: 0 } });
+
+  test("login state is unknown before the catalog is read, ok while any model is offered, missing when none is", async () => {
+    let models = [model("opencode", "free")];
+    const { provider } = fakeOpenCode({
+      "GET /api/model": () => scoped(models),
+      "GET /api/provider": () => scoped([{ id: "opencode", name: "OpenCode Zen", activation: "auto", package: "x" }]),
+    });
+    const instance = provider();
+    expect(instance.loginState()).toBe("unknown");
+    await instance.listModels();
+    expect(instance.loginState()).toBe("ok");
+    models = [];
+    await instance.listModels();
+    expect(instance.loginState()).toBe("missing");
+  });
+
+  test("a removal or switch is replayed on this server by credential id; an addition is only re-read", async () => {
+    const { provider, calls } = fakeOpenCode({
+      "GET /api/model": () => scoped([model("opencode", "free")]),
+      "GET /api/provider": () => scoped([{ id: "opencode", name: "OpenCode Zen", activation: "auto", package: "x" }]),
+    });
+    const instance = provider();
+    await instance.accountsChanged({ kind: "added" });
+    expect(calls.filter(call => call.path.includes("credential"))).toEqual([]);
+    // The credential routes are absent here (as on 2.0.13): the 404s are ignored.
+    await expect(instance.accountsChanged({ kind: "removed", target: "groq", credential: "cred_a" })).resolves.toBeUndefined();
+    await expect(instance.accountsChanged({ kind: "activated", credential: "cred_b" })).resolves.toBeUndefined();
+    expect(calls.filter(call => call.path.includes("credential")).map(call => `${call.method} ${call.path}`)).toEqual([
+      "DELETE /api/credential/cred_a",
+      "POST /api/credential/cred_b/activate",
+    ]);
+  });
+});

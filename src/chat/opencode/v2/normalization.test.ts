@@ -486,3 +486,21 @@ describe("OpenCode 2.x normalization: a real MCP tool permission", () => {
     expect(row && "input" in row ? row.input : "").toContain("tools.tracker.create_issue");
   });
 });
+
+// The error OpenCode 2.0.13 reported for a rejected Groq key on 2026-10-03.
+describe("OpenCode 2.x login failures", () => {
+  test("a provider.auth failure is a login failure, on the step and on the turn", () => {
+    const normalize = createOpenCodeV2Normalizer(WORKSPACE);
+    const memory = createOpenCodeV2Memory();
+    const base = { created: 5, location: { directory: WORKSPACE } };
+    const at = (type: string, data: Record<string, unknown>) => normalize({ ...base, id: `e_${type}`, type, data: { sessionID: "ses_l", ...data } }, memory);
+    const rejected = { type: "provider.auth", message: "Invalid API Key", status: 401 };
+    at("session.execution.started", {});
+    expect(upserts(at("session.execution.failed", { error: rejected }))).toEqual([expect.objectContaining({ type: "notice", level: "error", code: "login-failed", message: "Invalid API Key" })]);
+    at("session.execution.started", {});
+    expect(upserts(at("session.step.failed", { assistantMessageID: "msg_l", error: rejected }))).toEqual([expect.objectContaining({ code: "login-failed" })]);
+    at("session.execution.started", {});
+    const other = upserts(at("session.execution.failed", { error: { type: "provider.no-route", message: "Model unavailable" } }))[0];
+    expect(other).not.toHaveProperty("code");
+  });
+});

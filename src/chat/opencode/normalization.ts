@@ -1,6 +1,6 @@
 import { boundedSet } from "../../shared/bounded-map";
 import { attachmentIdFromFileUri, attachmentIdFromText } from "../attachment-store";
-import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
+import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, LOGIN_FAILED_NOTICE_CODE, type ConversationConfiguration, type ConversationItem, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "../types";
 import type { NormalizedEventOutcome, NormalizedProviderEvent, NormalizedProviderUpdate, NormalizedSessionLifecycle } from "../provider";
 
 /**
@@ -490,7 +490,7 @@ export function normalizeCanonicalEvent(type: string, data: RecordValue, context
     case "session.step.failed": {
       const message = errorMessage(data.error) || text(data.message) || "The turn failed";
       return { conversationId, updates: [
-        { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message } },
+        { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message, ...(isLoginError(data.error) ? { code: LOGIN_FAILED_NOTICE_CODE } : {}) } },
         { kind: "status", status: "failed", message },
       ] };
     }
@@ -898,6 +898,20 @@ function commandText(state: RecordValue): string {
 function toolContent(value: unknown): string | undefined {
   const content = array(value).map(item => record(item)).filter(item => item.type === "text").map(item => text(item.text)).join("\n");
   return content || undefined;
+}
+
+/**
+ * Whether a turn failed on the provider's login rather than on the request.
+ * 1.x: `ProviderAuthError` (no usable credential), or an `APIError` the
+ * provider answered 401 (a rejected key). 2.x: `provider.auth`, or status
+ * 401. Shapes as both generations reported a rejected Groq key on
+ * 2026-10-03 (1.18.34, 2.0.13).
+ */
+export function isLoginError(value: unknown): boolean {
+  const error = record(value);
+  const data = record(error.data);
+  if (error.name === "ProviderAuthError" || error.type === "provider.auth") return true;
+  return data.statusCode === 401 || error.status === 401 || error.statusCode === 401;
 }
 
 export function errorMessage(value: unknown): string | undefined {

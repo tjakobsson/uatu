@@ -8,6 +8,7 @@ import path from "node:path";
 import {
   credentialGnuPgPath,
   credentialRuntimePath,
+  agentAccountsPath,
   credentialSecretsPath,
   credentialsPath,
   credentialTokenStorePath,
@@ -117,6 +118,7 @@ describe("resolveHubStateRoot", () => {
     expect(credentialTokenStorePath("/s")).toBe("/s/credential-secrets/tokens.json");
     expect(credentialGnuPgPath("/s")).toBe("/s/credential-gnupg");
     expect(credentialRuntimePath("/s")).toBe("/s/credential-runtime");
+    expect(agentAccountsPath("/s")).toBe("/s/agent-accounts");
   });
 });
 
@@ -432,7 +434,7 @@ describe("ensureCredentialStateDirs", () => {
     const stateRoot = await tempStateRoot();
     await ensureStateDir(stateRoot);
     await ensureCredentialStateDirs(stateRoot);
-    for (const directory of [credentialSecretsPath(stateRoot), credentialGnuPgPath(stateRoot), credentialRuntimePath(stateRoot)]) {
+    for (const directory of [credentialSecretsPath(stateRoot), credentialGnuPgPath(stateRoot), credentialRuntimePath(stateRoot), agentAccountsPath(stateRoot)]) {
       expect((await stat(directory)).mode & 0o777).toBe(0o700);
     }
 

@@ -4,6 +4,15 @@ import type { CoverageAnnotations } from "../coverage-annotations";
  * Claude Code coverage annotations (see coverage-annotations.ts). Message
  * entries are named `type` or `type/subtype`; tools by the name Claude Code
  * calls them on the wire.
+ *
+ * The report has no axis for session methods, so one dependency is recorded
+ * here instead: the Hub's Agent accounts (src/hub/agent-account-claude.ts)
+ * logs in through `claudeAuthenticate`, `claudeOAuthCallback`, and
+ * `claudeOAuthWaitForCompletion`, which the SDK implements and the CLI answers
+ * but `sdk.d.ts` does not declare. They are feature-detected; when an SDK
+ * update drops them, Agent accounts names `claude auth login` instead.
+ * `accountInfo()` (declared) supplies the login state, and `auth_status`
+ * frames are presented as the re-authenticating notice.
  */
 export const claudeCoverageAnnotations: CoverageAnnotations & {
   // `sdk-tools.d.ts` declares one `<Name>Input` per tool; the wire name is

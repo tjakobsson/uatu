@@ -9030,6 +9030,69 @@ body.terminal-transcript-open .touch-tab-bar {
   display: none;
 }
 
+/* The selected agent has no usable login. Docked to the composer like the
+   queue, at the same gutter, so it reads as part of where a message is
+   typed rather than as a transcript row. */
+.chat-login-notice {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.6rem;
+  margin: 0.5rem max(1rem, calc((100% - 52rem) / 2)) 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border-soft));
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface-raised));
+}
+
+.chat-login-notice[hidden] {
+  display: none;
+}
+
+.chat-login-notice-text {
+  color: var(--danger);
+}
+
+/* A turn that failed on the login: the agent's own words under a plain
+   heading, and the way to log in. */
+.chat-notice.chat-login-failed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-soft));
+}
+
+.chat-login-failed p {
+  margin: 0;
+}
+
+.chat-login-failed-title {
+  font-weight: 600;
+}
+
+.chat-login-failed-detail {
+  color: var(--chat-activity-fg);
+  overflow-wrap: anywhere;
+}
+
+.chat-login-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.chat-login-link:hover,
+.chat-login-link:focus-visible {
+  text-decoration: underline;
+}
+
+.chat-login-command code {
+  font-family: var(--mono-font-family);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
 /* Docked next to the composer, the queue owns the seam: the composer's own
    border-top would double up. */
 .chat-queue:not([hidden]) + .chat-composer {

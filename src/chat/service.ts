@@ -21,12 +21,19 @@ import type {
   PermissionOutcome,
   ModelSelection,
   QuestionOutcome,
-  ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
+  ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult, ChatAccountChange } from "./types";
 
 export interface WorkspaceChatService {
   readonly notificationFeed?: NotificationFeed;
   status(): Promise<ChatAvailability>;
   retry(): Promise<ChatAvailability>;
+  /**
+   * The machine's logins changed through the Hub's Agent accounts. Bumps
+   * the agent's `accountsRevision` and lets its provider re-read and replay
+   * the change. Starts nothing: an agent not yet running reads fresh when
+   * it starts.
+   */
+  accountsChanged?(change: ChatAccountChange): Promise<void>;
   models(): Promise<ChatModel[]>;
   modes(): Promise<ChatMode[]>;
   commands(): Promise<ChatCommand[]>;
@@ -156,6 +163,9 @@ export class LazyChatService implements WorkspaceChatService {
   private adapter: ChatAdapter | null = null;
   private retryPromise: Promise<ChatAvailability> | null = null;
   private disposed = false;
+  // Bumped on every login change reported by the Hub, so clients know to
+  // re-read this agent's catalogs.
+  private accountsRevision = 0;
   // Outlives any one adapter: a watcher stays attached while the adapter is
   // built, retried, or replaced — and each of those is itself a change.
   private readonly activityChanges = new ConversationInventoryBroadcaster();
@@ -191,7 +201,15 @@ export class LazyChatService implements WorkspaceChatService {
       // knows a process is up, and only the adapter's provider knows who it
       // is and what it offers.
       const adapter = await this.ensureAdapter();
-      return { ...availability, agent: adapter.agent() };
+      const login = adapter.loginState();
+      // The revision is omitted while no login has changed: a client reads
+      // absent as 0, and a workspace that never saw a change answers as before.
+      return {
+        ...availability,
+        agent: adapter.agent(),
+        ...(login ? { login } : {}),
+        ...(this.accountsRevision > 0 ? { accountsRevision: this.accountsRevision } : {}),
+      };
     } catch (error) {
       // Deliberately not cached: ensureAdapter forgets a rejected attempt, so
       // the next status() call rebuilds and re-probes. A transient failure — a
@@ -207,6 +225,11 @@ export class LazyChatService implements WorkspaceChatService {
         message: "The installed OpenCode version is not compatible with chat.",
       };
     }
+  }
+
+  async accountsChanged(change: ChatAccountChange): Promise<void> {
+    this.accountsRevision += 1;
+    await this.adapter?.accountsChanged(change).catch(() => undefined);
   }
 
   // User-initiated recovery from a cached startup failure. Drops the adapter

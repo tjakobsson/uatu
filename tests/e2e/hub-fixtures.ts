@@ -53,6 +53,8 @@ type WorkerOptions = {
   hubCredentials: boolean;
   // Observe the children's notification feeds and record pushes — see hub-server.ts.
   hubPush: boolean;
+  // Serve Agent accounts over fake agent runtimes — see hub-server.ts.
+  hubAgentAccounts: boolean;
 };
 
 export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
@@ -60,9 +62,10 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
   hubWorktrees: [false, { option: true, scope: "worker" }],
   hubCredentials: [false, { option: true, scope: "worker" }],
   hubPush: [false, { option: true, scope: "worker" }],
+  hubAgentAccounts: [false, { option: true, scope: "worker" }],
 
   hubProcess: [
-    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush }, use, workerInfo) => {
+    async ({ hubWorkspaces, hubWorktrees, hubCredentials, hubPush, hubAgentAccounts }, use, workerInfo) => {
       const { hubPort, end } = hubPortBlock(workerInfo.parallelIndex);
       if (hubWorkspaces.length >= HUB_PORTS_PER_WORKER) {
         throw new Error(`a hub worker serves at most ${HUB_PORTS_PER_WORKER - 1} workspaces`);
@@ -77,6 +80,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures & WorkerOptions>({
           UATU_E2E_HUB_WORKSPACES: hubWorkspaces.join(","),
           UATU_E2E_HUB_WORKTREES: hubWorktrees ? "1" : "0",
           UATU_E2E_HUB_CREDENTIALS: hubCredentials ? "1" : "0",
+          UATU_E2E_HUB_AGENT_ACCOUNTS: hubAgentAccounts ? "1" : "0",
           UATU_E2E_HUB_PUSH: hubPush ? "1" : "0",
           UATU_E2E_EXIT_ON_STDIN_CLOSE: "1",
         },

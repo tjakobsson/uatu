@@ -12,6 +12,7 @@ import {
   array,
   createProviderEventMemory,
   errorMessage,
+  isLoginError,
   normalizeCanonicalEvent,
   normalizeEventWith,
   normalizeToolPart,
@@ -26,6 +27,7 @@ import {
   tokensToUsage,
   usageUpsert, compactionNoticeId } from "../normalization";
 import type { ConversationItem, StructuredQuestion, TokenUsage } from "../../types";
+import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
 
 export type { NormalizedProviderEvent };
 
@@ -230,7 +232,7 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         if (memory && conversationId) memory.failures.delete(conversationId);
         if (reported === message) return { conversationId, updates: [{ kind: "status", status: "failed", message }] };
         return { conversationId, updates: [
-          { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message } },
+          { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message, ...(isLoginError(data.error) ? { code: LOGIN_FAILED_NOTICE_CODE } : {}) } },
           { kind: "status", status: "failed", message },
         ] };
       }

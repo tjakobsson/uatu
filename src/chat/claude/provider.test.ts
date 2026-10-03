@@ -5620,3 +5620,53 @@ describe("windows and the default as Claude Code states them (claude-context-win
     expect(queries[0]!.modelCalls.length).toBe(calls);
   });
 });
+
+describe("ClaudeProvider login state", () => {
+  test("reads the login on its own short-lived session, re-reads on an accounts change, and never asks a live session", async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-login-")));
+    const workspace = path.join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const configDir = path.join(root, "config");
+    mkdirSync(claudeProjectDir(workspace, configDir), { recursive: true });
+    let info: Record<string, unknown> = { tokenSource: "none", apiProvider: "firstParty" };
+    const accountReads: FakeQuery[] = [];
+    const queries: FakeQuery[] = [];
+    const provider = new ClaudeProvider({
+      workspacePath: workspace,
+      stateFile: path.join(workspace, ".uatu-test-state.json"),
+      executable: "/usr/local/bin/claude",
+      configDir,
+      queryFactory: input => {
+        const query = new FakeQuery(input) as FakeQuery & { accountInfo?: () => Promise<unknown> };
+        query.accountInfo = async () => {
+          accountReads.push(query);
+          return info;
+        };
+        queries.push(query);
+        return query;
+      },
+    });
+    expect(provider.loginState()).toBe("unknown");
+    await waitFor(() => provider.loginState() === "missing");
+    const live = await provider.createSession("x");
+    await provider.prompt(live.id, { id: "r1", text: "go", delivery: "queue" });
+    // The live session is the one query that is neither a login read nor closed.
+    const liveQuery = queries.find(query => !accountReads.includes(query) && !query.returned);
+    expect(liveQuery).toBeDefined();
+    info = { subscriptionType: "Claude Max", apiProvider: "firstParty" };
+    await provider.accountsChanged();
+    expect(provider.loginState()).toBe("ok");
+    expect(accountReads).not.toContain(liveQuery);
+    // Every login read closed its session.
+    expect(accountReads.every(query => query.returned)).toBe(true);
+    await provider.dispose();
+  });
+
+  test("an environment key or a third-party provider counts as a usable login", async () => {
+    const { claudeLoginState, claudeAccountState } = await import("./account");
+    expect(claudeLoginState(claudeAccountState({ apiKeySource: "ANTHROPIC_API_KEY", apiProvider: "firstParty" }))).toBe("ok");
+    expect(claudeLoginState(claudeAccountState({ apiProvider: "bedrock" }))).toBe("ok");
+    expect(claudeLoginState(claudeAccountState({ tokenSource: "none", apiProvider: "firstParty" }))).toBe("missing");
+    expect(claudeLoginState(claudeAccountState({ tokenSource: "something-new", apiProvider: "firstParty" }))).toBe("unknown");
+  });
+});

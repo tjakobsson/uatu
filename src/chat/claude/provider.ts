@@ -20,12 +20,13 @@ import type {
 } from "../provider";
 import type { ConversationItem, ScheduledWakeupItem } from "../types";
 import { ScheduledWakeupUnavailableError } from "../provider";
-import { TASK_OUTPUT_TAIL_MAX_BYTES, type AgentUsageReport, type BackgroundTaskOutput, type ChatAgent, type ChatCommand, type ChatMode, type ChatModel, type ConversationConfiguration, type ModelSelection, type PermissionRequest, type PlanExtraUsage, type PlanModelWindow, type PlanUtilization, type PlanUtilizationWindow, type QuestionRequest, type ReversibleHistoryResult, type ReversibleHistoryState, type SessionModelTotals, type SessionTotals, type StructuredQuestion, type UsageReadMode, type UsageReadResult } from "../types";
+import { LOGIN_FAILED_NOTICE_CODE, TASK_OUTPUT_TAIL_MAX_BYTES, type AgentUsageReport, type BackgroundTaskOutput, type ChatAgent, type ChatLoginState, type ChatCommand, type ChatMode, type ChatModel, type ConversationConfiguration, type ModelSelection, type PermissionRequest, type PlanExtraUsage, type PlanModelWindow, type PlanUtilization, type PlanUtilizationWindow, type QuestionRequest, type ReversibleHistoryResult, type ReversibleHistoryState, type SessionModelTotals, type SessionTotals, type StructuredQuestion, type UsageReadMode, type UsageReadResult } from "../types";
 import { BackgroundTaskUnavailableError, InvalidQuestionAnswerError, ReleaseUnavailableError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "../provider";
 import { nextCronFire } from "./cron";
 import { CLAUDE_MODELS, MORE_MODELS_GROUP, claudeContextWindow, findClaudeModel, moreModelDetail, stripWindowMarker, versionedModelName, withMoreModels } from "./models";
 import { claudeToolInteraction, createClaudeEventMemory, describeSessionScopedUpdates, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries, claudeModelSelection, sessionScopedSuggestions, settleForegroundRuns, startsAgentRun, taskFacts, type BackgroundTaskFacts, type ClaudeEventMemory } from "./normalization";
 import { ClaudeNotificationLifecycle } from "./notification-lifecycle";
+import { claudeAccountState, claudeLoginState, parseClaudeAccountInfo } from "./account";
 import { listTranscriptSessions, readSessionTranscript, readTranscriptTitles, sessionTranscriptPath, subagentTranscriptPath, claudeConfigDir, transcriptCrons, type TranscriptCron } from "./transcript";
 
 /**
@@ -60,6 +61,8 @@ export type ClaudeQueryHandle = AsyncIterable<unknown> & {
    */
   usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?(options?: { skipBehaviors?: boolean }): Promise<unknown>;
   rewindFiles?(userMessageId: string, options?: { dryRun?: boolean }): Promise<ClaudeRewindFilesResult>;
+  /** The login in effect: account, plan, and where the credential comes from. */
+  accountInfo?(): Promise<unknown>;
   return?(value?: unknown): Promise<IteratorResult<unknown, void>>;
 };
 
@@ -219,6 +222,9 @@ const DEFAULT_TITLE = "New conversation";
  */
 export const CLAUDE_PERMISSION_SCOPE_NOTE = "“Allow always” also covers similar requests for the rest of this turn. Nothing is saved to your settings.";
 const CATALOG_PROBE_TIMEOUT_MS = 20_000;
+// The login read is one control request on a fresh session: generous for a
+// cold CLI start, short enough that a wedged CLI cannot hold the read.
+const LOGIN_READ_TIMEOUT_MS = 20_000;
 const CATALOG_PROBE_COOLDOWN_MS = 60_000;
 // The window walk on the probe, run behind the catalog: a summary read
 // answers in milliseconds, but each model switch costs ~0.2 s for an alias
@@ -518,6 +524,13 @@ export class ClaudeProvider implements ChatProvider {
   // before any session has run.
   private liveModels: ChatModel[] | null = null;
   private modelAliases = new Map<string, string>();
+  // Whether a turn can run under the machine's login, as `accountInfo()`
+  // last said; null until read. Read on a short-lived promptless session,
+  // never on a conversation's, and again whenever Agent accounts reports a
+  // change or a turn fails on its login.
+  private login: ChatLoginState | null = null;
+  private loginRead: Promise<void> | null = null;
+  private loginReadQueued = false;
   // What Claude Code itself states before any turn, read on the catalog
   // probe: each offered row's window, keyed by its selection id, and the
   // model an unpinned session actually runs in this workspace (settings
@@ -651,6 +664,73 @@ export class ClaudeProvider implements ChatProvider {
     this.backgroundGraceMs = options.backgroundGraceMs ?? BACKGROUND_FOLLOW_UP_GRACE_MS;
     this.usageReadTimeoutMs = options.usageReadTimeoutMs ?? USAGE_READ_TIMEOUT_MS;
     this.titleRefreshDelaysMs = options.titleRefreshDelaysMs ?? TITLE_REFRESH_DELAYS_MS;
+  }
+
+  loginState(): ChatLoginState {
+    if (this.login === null && this.catalogProbe) void this.readLogin();
+    return this.login ?? "unknown";
+  }
+
+  async accountsChanged(): Promise<void> {
+    await this.readLogin();
+  }
+
+  /**
+   * Reads the login on its own promptless session (no transcript, no model
+   * call), then closes it. A read requested while one runs is queued once
+   * behind it, so a change that lands mid-read is never answered by the
+   * stale read.
+   */
+  private readLogin(): Promise<void> {
+    if (this.disposed || !this.catalogProbe) return Promise.resolve();
+    if (this.loginRead) {
+      if (!this.loginReadQueued) {
+        this.loginReadQueued = true;
+        this.loginRead = this.loginRead.then(() => {
+          this.loginReadQueued = false;
+          return this.performLoginRead();
+        });
+      }
+      return this.loginRead;
+    }
+    const read = this.performLoginRead().finally(() => {
+      if (this.loginRead === read) this.loginRead = null;
+    });
+    this.loginRead = read;
+    return read;
+  }
+
+  private async performLoginRead(): Promise<void> {
+    if (this.disposed) return;
+    const queue = new PushQueue<ClaudeUserEnvelope>();
+    let query: ClaudeQueryHandle;
+    try {
+      query = this.queryFactory({
+        prompt: queue,
+        options: { cwd: this.workspacePath, pathToClaudeCodeExecutable: this.executable, enableFileCheckpointing: false },
+      });
+    } catch {
+      return;
+    }
+    void (async () => { for await (const _ of query) { /* nothing to read */ } })().catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (!query.accountInfo) return;
+      const answer = await Promise.race([
+        query.accountInfo(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("account read timed out")), LOGIN_READ_TIMEOUT_MS);
+        }),
+      ]);
+      const info = parseClaudeAccountInfo(answer);
+      if (info && !this.disposed) this.login = claudeLoginState(claudeAccountState(info));
+    } catch {
+      // Unknown stays unknown; a known state is kept rather than guessed over.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      queue.close();
+      await query.return?.().catch(() => undefined);
+    }
   }
 
   describe(): ChatAgent {
@@ -1595,6 +1675,9 @@ export class ClaudeProvider implements ChatProvider {
         this.trackSessionLevel(session, message, memory);
         this.trackSchedulingCalls(session, message, memory);
         const normalized = normalizeClaudeMessage(message, memory, "live", session.id);
+        // A turn that failed on the login: what the composer says about the
+        // login must not wait for the next accounts change to catch up.
+        if (normalized.updates.some(update => update.kind === "upsert" && update.item.type === "notice" && update.item.code === LOGIN_FAILED_NOTICE_CODE)) void this.readLogin();
         this.learnSubagentRuns(session, message);
         if (memory.rateLimit) this.rateLimitedSessions.set(session.id, memory.rateLimit); else this.rateLimitedSessions.delete(session.id);
         this.adoptRefusalFallback(session.id, message);

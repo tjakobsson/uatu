@@ -60,6 +60,33 @@ function fixtureRuntime(): OpenCodeService {
 }
 
 describe("LazyChatService", () => {
+  test("a ready agent reports its login state, and every accounts change bumps the revision and reaches the provider", async () => {
+    const changes: unknown[] = [];
+    let login: "ok" | "missing" = "missing";
+    const service = new LazyChatService({
+      workspacePath: "/workspace",
+      runtime: fixtureRuntime(),
+      createProvider: () => ({
+        ...provider(),
+        loginState: () => login,
+        accountsChanged: async (change: unknown) => {
+          changes.push(change);
+          login = "ok";
+        },
+      }),
+    });
+    // Before anything runs, an accounts change starts nothing and still counts.
+    await service.accountsChanged({ kind: "added" });
+    expect(changes).toEqual([]);
+    await service.listConversations();
+    expect(await service.status()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT, login: "missing", accountsRevision: 1 });
+    await service.accountsChanged({ kind: "removed", target: "groq", credential: "groq" });
+    expect(changes).toEqual([{ kind: "removed", target: "groq", credential: "groq" }]);
+    expect(await service.status()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT, login: "ok", accountsRevision: 2 });
+    await service.dispose();
+  });
+
+
   test("status never spawns OpenCode; listing a conversation does", async () => {
     let spawns = 0;
     const exits: Array<(code: number) => void> = [];

@@ -1,4 +1,5 @@
 import { onUiModeChange, uiMode, type UiMode } from "../shell/ui-mode";
+import { loginActionElement, type LoginAction } from "./login-action";
 import type {
   ChatAgent,
   ChatCapability,
@@ -120,6 +121,9 @@ export type ChatConfigurationPickerState = {
   models: ChatModel[];
   modes: ChatMode[];
   configuration: ConversationConfiguration;
+  // What an empty model list says instead of "No models are available":
+  // why it is empty, and how to fix it.
+  emptyNotice?: { message: string; action?: LoginAction };
 };
 
 export type ChatConfigurationPickerElements = {
@@ -463,9 +467,16 @@ export function createChatConfigurationPicker(
     elements.resultStatus.textContent = modelResultCountLabel(filtered.length);
     elements.empty.hidden = filtered.length !== 0;
     if (filtered.length === 0) {
-      elements.empty.textContent = state.models.length === 0
-        ? "No models are available."
-        : "No models match your search.";
+      if (state.models.length === 0 && state.emptyNotice) {
+        const text = elements.empty.ownerDocument.createElement("span");
+        text.textContent = state.emptyNotice.message;
+        elements.empty.replaceChildren(text);
+        if (state.emptyNotice.action) elements.empty.append(" ", loginActionElement(elements.empty.ownerDocument, state.emptyNotice.action));
+      } else {
+        elements.empty.textContent = state.models.length === 0
+          ? "No models are available."
+          : "No models match your search.";
+      }
     }
 
     const rows = selectableRows();

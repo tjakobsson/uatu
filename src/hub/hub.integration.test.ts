@@ -3366,7 +3366,10 @@ describe("hub end to end", () => {
       for (const candidate of Object.values(pathItem)) {
         const operation = candidate as { operationId?: unknown; tags?: unknown } | null;
         const operationId = operation?.operationId;
-        if (typeof operationId === "string" && !(Array.isArray(operation?.tags) && operation.tags.includes("Hub credentials"))) {
+        // Credentials and agent accounts have their own black-box suites
+        // (credential-api and agent-account-api integration tests).
+        const ownSuite = Array.isArray(operation?.tags) && (operation.tags.includes("Hub credentials") || operation.tags.includes("Hub agent accounts"));
+        if (typeof operationId === "string" && !ownSuite) {
           documented.add(operationId);
         }
       }
