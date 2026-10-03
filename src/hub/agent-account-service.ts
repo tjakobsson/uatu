@@ -127,6 +127,14 @@ export function scrubSecrets(message: string, secrets: readonly string[]): strin
   return scrubbed;
 }
 
+/** Removes one copy of each value: the same value may also have been submitted earlier. */
+function forget(secrets: string[], values: readonly string[]): void {
+  for (const value of values) {
+    const index = secrets.lastIndexOf(value);
+    if (index >= 0) secrets.splice(index, 1);
+  }
+}
+
 /**
  * What the user typed into a method's fields. Scrubbed from agent errors like
  * a key: the Hub doesn't know which ones the agent treats as sensitive.
@@ -309,7 +317,14 @@ export class AgentAccountService {
     attempt.secrets.push(code);
     const entry = this.entry(attempt.attempt.agent);
     this.touch(entry);
-    await this.scrubbed(attempt.secrets, () => this.answered(entry, () => attempt.login.submitCode!(code)));
+    try {
+      await this.scrubbed(attempt.secrets, () => this.answered(entry, () => attempt.login.submitCode!(code)));
+    } catch (error) {
+      // A refused code is dropped at once; only an accepted one is held, to
+      // scrub the agent's last word on this login.
+      forget(attempt.secrets, [code]);
+      throw error;
+    }
     await Promise.race([attempt.settled, this.sleep(this.settleWaitMs)]);
     return this.snapshot();
   }
@@ -321,11 +336,13 @@ export class AgentAccountService {
     }
     // Refused before any request when it is not this attempt's own callback.
     const target = confineRedirect(address, attempt.login.callback);
-    attempt.secrets.push(address, target.search.slice(1));
+    const delivered = [address, target.search.slice(1)];
+    attempt.secrets.push(...delivered);
     this.touch(this.entry(attempt.attempt.agent));
     try {
       await deliverRedirect(target, this.fetch);
     } catch {
+      forget(attempt.secrets, delivered);
       throw new AccountOperationError("The login's listener on the Hub machine did not answer. Start the login again.");
     }
     await Promise.race([attempt.settled, this.sleep(this.settleWaitMs)]);
@@ -559,6 +576,9 @@ export class AgentAccountService {
   }
 
   private async changed(entry: AgentEntry, change: ChatAccountChange): Promise<void> {
+    // A read already running may have started before the change; the change
+    // is announced with a read that started after it.
+    await entry.refreshing?.catch(() => undefined);
     await this.refresh(entry);
     try {
       await this.options.onChanged?.(entry.agent, change);

@@ -330,6 +330,27 @@ describe("workspace notification", () => {
     ]);
   });
 
+  test("a change is announced with a status read that started after it, not one already running", async () => {
+    const { service, adapters, clock } = harness();
+    await service.read();
+    await clock.advance(2_000);
+    const gate = deferred();
+    const status = adapters.opencode.status.bind(adapters.opencode);
+    adapters.opencode.status = async () => {
+      // Taken before the key lands, answered after.
+      const before = await status();
+      adapters.opencode.status = status;
+      await gate.promise;
+      return before;
+    };
+    await service.read();
+    const saved = service.connectKey("opencode", "groq", "key", "sk-fresh-key", {});
+    await flush();
+    gate.resolve();
+    const snapshot = await saved;
+    expect(snapshot.agents.find(agent => agent.agent === "opencode")?.targets[0]?.connected).toBe(true);
+  });
+
   test("the next change for an agent waits for the previous change's notification", async () => {
     const { service, adapters, setNotify } = harness();
     let release!: () => void;
@@ -414,15 +435,29 @@ describe("login attempts", () => {
     expect(service.snapshot().attempts).toEqual([]);
   });
 
-  test("a failure carries the agent's message, scrubbed of submitted codes", async () => {
+  test("a failure carries the agent's message, scrubbed of the code it took", async () => {
+    const { service, adapters } = harness();
+    adapters.opencode.completion = "code";
+    const { attempts } = await service.startLogin("opencode", "groq", "0", {});
+    // The agent takes the code, then fails the login quoting it.
+    adapters.opencode.logins[0]!.login.submitCode = async () => undefined;
+    await service.submitCode(attempts[0]!.id, "taken-code");
+    adapters.opencode.logins[0]!.completion.reject(new Error("denied for taken-code"));
+    await flush();
+    expect(service.snapshot().attempts[0]).toMatchObject({ state: "failed", message: "denied for [redacted]" });
+  });
+
+  test("a refused code is scrubbed from its own error and not held afterwards", async () => {
     const { service, adapters } = harness();
     adapters.opencode.completion = "code";
     const { attempts } = await service.startLogin("opencode", "groq", "0", {});
     const error = await service.submitCode(attempts[0]!.id, "wrong").catch(caught => caught);
     expect(error.message).toBe("code [redacted] was rejected");
+    // Dropped once refused: the Hub no longer holds it, so a later message
+    // quoting it is not scrubbed either.
     adapters.opencode.logins[0]!.completion.reject(new Error("denied for wrong"));
     await flush();
-    expect(service.snapshot().attempts[0]).toMatchObject({ state: "failed", message: "denied for [redacted]" });
+    expect(service.snapshot().attempts[0]).toMatchObject({ state: "failed", message: "denied for wrong" });
   });
 
   test("a pasted code completes a code login", async () => {
@@ -490,6 +525,18 @@ describe("redirect delivery", () => {
     expect(requests.length).toBe(1);
     expect(requests[0]?.input).toBe("http://localhost:1455/auth/callback?code=c0de&state=st");
     expect(requests[0]?.init.redirect).toBe("manual");
+  });
+
+  test("an address the listener never took is not held after the failure", async () => {
+    const setup = harness({ fetch: async () => { throw new Error("connection refused"); } });
+    setup.adapters.opencode.completion = "redirect";
+    const { service, adapters } = setup;
+    const { attempts } = await service.startLogin("opencode", "openai", "0", {});
+    const error = await service.submitRedirect(attempts[0]!.id, "http://127.0.0.1:1455/auth/callback?code=c0de-lost&state=st").catch(caught => caught);
+    expect(error.message).toBe("The login's listener on the Hub machine did not answer. Start the login again.");
+    adapters.opencode.logins[0]!.completion.reject(new Error("no callback for code=c0de-lost&state=st"));
+    await flush();
+    expect(service.snapshot().attempts[0]).toMatchObject({ state: "failed", message: "no callback for code=c0de-lost&state=st" });
   });
 
   for (const [name, address] of [
