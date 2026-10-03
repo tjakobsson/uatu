@@ -162,8 +162,10 @@ jobs:
         # installed tree, so new advisories surface on the PR rather than by
         # manual `bun audit`. Low-severity advisories are reported but do not
         # block. Renovate (lockFileMaintenance + osvVulnerabilityAlerts) is the
-        # primary remediation path; this is the backstop.
-        run: bun audit --audit-level=moderate
+        # primary remediation path; this is the backstop. The script holds the
+        # advisories we accept on purpose (unpatched, dev tooling only), each
+        # with its reason, and fails once one of them is no longer reported.
+        run: bun run audit
 
       - name: Run unit and integration tests
         # `bun test --parallel=4`: four worker processes, each running whole

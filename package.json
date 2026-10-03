@@ -16,6 +16,7 @@
     "test:ci": "bun test --parallel=4 --timings=tests/unit-timings.json",
     "typecheck": "tsc --noEmit",
     "check:licenses": "bun run src/shared/license-check.ts",
+    "audit": "bun run scripts/audit-dependencies.ts",
     "coverage:agents": "bun run scripts/agent-coverage.ts",
     "e2e:install": "playwright install chromium webkit",
     "test:e2e": "playwright test",
