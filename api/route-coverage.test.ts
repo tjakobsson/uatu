@@ -144,6 +144,15 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["workspaceGetPersonalState", 'suffix === "/api/personal-state"'],
     ["workspacePatchPersonalState", 'suffix === "/api/personal-state"'],
     ["hubAcknowledgeWorkspaceActivity", 'suffix === "/api/activity-viewed"'],
+    // The agent accounts family dispatches on its path prefix to one handler.
+    ["hubGetAgentAccounts", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
+    ["hubConnectAgentAccountKey", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
+    ["hubStartAgentAccountLogin", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
+    ["hubSubmitAgentAccountCode", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
+    ["hubSubmitAgentAccountRedirect", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
+    ["hubCancelAgentAccountLogin", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
+    ["hubLogoutAgentAccount", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
+    ["hubActivateAgentAccountCredential", "pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)"],
   ] as const;
   expect(hub.map(item => item.operationId).sort()).toEqual(expected.map(item => item[0]).sort());
   for (const [, marker] of expected) expect(source).toContain(marker);
@@ -177,7 +186,10 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     /^\/api\/hub\/credentials\/[^/]+\/public-key$/,
     /^\/api\/hub\/credential-tools\/[^/]+(?:\/test)?$/,
     /^\/api\/hub\/credentials\/[^/]+\/(?:unlock|lock|enable|disable|assign|unassign|test|delete)$/,
+    // The agent accounts handler matches attempt actions relative to its prefix.
+    /^\/api\/hub\/agent-accounts\/attempts\/[^/]+\/(?:code|redirect|cancel)$/,
   ];
+  expect(await Bun.file(new URL("src/hub/agent-account-api.ts", root)).text()).toContain("/^attempts\\/([^/]+)\\/(code|redirect|cancel)$/");
   expect(routeRegexes.length).toBeGreaterThan(0);
   const samplePaths = hub.map(item => item.path.replace(/\{[^}]+\}/g, "sample"));
   for (const regex of routeRegexes) {

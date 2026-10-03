@@ -55,6 +55,8 @@ import {
 } from "./proxy";
 import { LiveBroker } from "./live-broker";
 import { NotificationRequestError, type HubNotifications } from "./notifications";
+import { AGENT_ACCOUNTS_PATH, handleAgentAccountRequest } from "./agent-account-api";
+import type { AgentAccountsApi } from "./agent-account-service";
 import { createWorktreeApi, isWorktreeApiPath, WORKTREE_API_PATH, type WorktreeStartOutcome } from "./worktree-api";
 import { assertNoRegisteredWorktreeDependents, type WorktreeService } from "./worktree-service";
 import { WorktreeReconciler } from "./worktree-reconciler";
@@ -104,6 +106,9 @@ export type HubDeps = {
   worktrees?: WorktreeService;
   cloneCredentials?: CloneCredentialResolver;
   credentialApi?: CredentialApiServices;
+  // The machine's agent logins (Settings → Agent accounts). Absent (tests,
+  // the e2e harness) answers its routes with 503.
+  agentAccounts?: AgentAccountsApi;
   gitCommand?: () => string;
   // The brokered live stream. startHubServer assembles them when absent;
   // a handler built directly gets its own pair.
@@ -1750,6 +1755,14 @@ export function createHubFetchHandler(deps: HubDeps) {
           current: record.id === session.sessionId,
         })),
       });
+    }
+
+    if (pathname === AGENT_ACCOUNTS_PATH || pathname.startsWith(`${AGENT_ACCOUNTS_PATH}/`)) {
+      if (!deps.agentAccounts) return json(503, { error: "agent accounts are unavailable" }, NO_STORE_HEADERS);
+      if (request.method !== "GET" && !csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      return (await handleAgentAccountRequest(request, pathname, deps.agentAccounts))!;
     }
 
     // State-changing endpoints: POST-only + same-origin (CSRF) for

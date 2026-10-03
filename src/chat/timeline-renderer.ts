@@ -1,5 +1,6 @@
 import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
+import { loginActionMarkup, type LoginAction } from "./login-action";
 import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
@@ -11,7 +12,7 @@ import type { AcceptedDraft, ChatProjection } from "./projection";
 import { formatUsd } from "./usage";
 import { wakeupRowLabel } from "./scheduled-wakeups";
 import { dateTime, dayLabel, fullDate, knownTime, localDayKey, localDaysBetween, nextLocalMidnight, weekdayClock } from "./dates";
-import { isLiveConversationStatus, isRateLimitStanding, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
+import { LOGIN_FAILED_NOTICE_CODE, isLiveConversationStatus, isRateLimitStanding, type ActivityStatus, type ConversationItem, type ConversationStatus, type MessageAttachment, type PermissionOutcome, type QueuedMessage, type QuestionRequest, type RevertedUserMessage, type TokenUsage, type ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string; shellVariant?: string };
 const deferredBodies = new WeakMap<HTMLElement, () => void>();
@@ -70,6 +71,9 @@ export class TimelineRenderer {
   // The owning agent's persistent-approval sentence, set by the surface from
   // the agent's declaration; a card renders whatever its agent declared.
   permissionScopeNote: string | undefined;
+  // How this conversation's agent gets a login, set by the surface: a
+  // login-failure notice offers it.
+  loginAction: LoginAction | undefined;
   // Permission cards the reader has moved into the "Allow always"
   // confirmation stage. Owned by the surface, read here: the stage is a
   // reader's choice the renderer is told about, not something to recover
@@ -188,7 +192,7 @@ export class TimelineRenderer {
       // the card first rendered (a recovered request, a 1.x part under
       // load), and the card must fill in when it does.
       const linkedTool = item.type === "permission" ? linkedToolRow(item, toolRows) : undefined;
-      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming), linkedTool?.id ?? "", linkedTool?.input ?? ""].join("\u0001");
+      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming), linkedTool?.id ?? "", linkedTool?.input ?? "", this.loginAction ? `${this.loginAction.agentName}\u0002${this.loginAction.href ?? ""}` : ""].join("\u0001");
       if (entry?.shellVariant !== undefined && entry.item === item && entry.active === active && entry.variant === variant
         && entry.shellVariant === this.shellVariant(entry.node, item.id)) {
         nodes.set(item.id, entry.node);
@@ -240,7 +244,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer, confirming, linkedTool);
+      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer, confirming, linkedTool, this.loginAction);
       const node = buildNode(markup(this.deferClosedActivity));
       if (this.deferClosedActivity && node.matches("details.chat-activity:not([open])")) {
         node.setAttribute("data-chat-lazy", "");
@@ -1180,7 +1184,7 @@ export class RevertedMessagesDockRenderer {
 
 type RequestOrigin = { conversationId: string; label: string };
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false, linkedTool?: ToolItem): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false, linkedTool?: ToolItem, loginAction?: LoginAction): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A prompt a scheduled wakeup submitted opens that wakeup's turn. It is
@@ -1201,6 +1205,13 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);
     return `<footer class="chat-item chat-turn-status is-${item.status}" data-chat-item-id="${id}"${stamp} role="status">${escapeHtml(statusLabel(item.status))}${item.message ? `: ${escapeHtml(item.message)}` : ""}${worked ? ` <span class="chat-turn-worked">· worked ${worked}</span>` : ""}</footer>`;
+  }
+  // A turn that failed on the login: named as a login failure, the agent's
+  // own words as the detail, and the way to log in.
+  if (item.type === "notice" && item.code === LOGIN_FAILED_NOTICE_CODE) {
+    const title = loginAction ? `${loginAction.agentName} login failed` : "Login failed";
+    const action = loginAction ? `<p class="chat-login-failed-action">${loginActionMarkup(loginAction)}</p>` : "";
+    return `<aside class="chat-item chat-notice is-error chat-login-failed" data-chat-item-id="${id}"${stamp} data-notice-code="${escapeHtmlAttribute(item.code)}" role="alert"><p class="chat-login-failed-title">${escapeHtml(title)}</p><p class="chat-login-failed-detail">${escapeHtml(item.message)}</p>${action}</aside>`;
   }
   if (item.type === "notice") {
     // A reset time is formatted here, in the reader's zone, never on the server.

@@ -236,6 +236,17 @@ describe("declared defaults", () => {
 });
 
 describe("configuration picker controller", () => {
+  it("an empty list with no usable login says why and offers the way to log in", () => {
+    const { elements, controller } = fixture();
+    controller.update({ ...readyState(), models: [], configuration: {}, emptyNotice: { message: "No provider is logged in.", action: { agentName: "OpenCode", href: "/settings#agent-accounts/opencode", command: "opencode auth login" } } });
+    expect(elements.empty.hidden).toBe(false);
+    expect(elements.empty.textContent).toBe("No provider is logged in. Log in to OpenCode");
+    expect(elements.empty.querySelector("a")?.getAttribute("href")).toBe("/settings#agent-accounts/opencode");
+    // Without a notice an empty list keeps the plain sentence.
+    controller.update({ ...readyState(), models: [], configuration: {} });
+    expect(elements.empty.textContent).toBe("No models are available.");
+  });
+
   it("renders grouped, selected, unavailable, filtered, and capability-gated content", () => {
     const fixtureValue = fixture();
     const { elements, controller } = fixtureValue;

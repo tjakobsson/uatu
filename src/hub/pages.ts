@@ -14,6 +14,7 @@ import { escapeHtml } from "../shared/html";
 import { PWA_ICON_VERSION } from "../pwa/icons";
 import { worktreeDialogScript } from "../shell/worktree-dialog";
 import { createDashboardGroups, dashboardGroupsStyle } from "./dashboard-groups";
+import { agentAccountsPaneStyle, createAgentAccountsPane } from "./agent-accounts-pane";
 import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, SCP_REMOTE_PATTERN } from "./credential-presentation";
 
 // Inline the brand SVG (the file ships a fixed navy fill; the dark-scheme
@@ -680,7 +681,14 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   <div class="pane-header"><h2>Workspaces</h2></div>
   <div id="workspaces"><p class="empty">Loading…</p></div>
 </section>`;
-  const settings = `${credentials}<section class="pane">
+  const agentAccounts = `<section class="pane" id="agent-accounts-pane">
+  <div class="pane-header"><h2>Agent accounts</h2><span id="agent-accounts-meta" class="pane-meta">Checking…</span></div>
+  <p class="agent-accounts-scope">Logins here belong to this machine. They apply to every workspace and every user of this Hub, and to OpenCode and Claude Code when run on this machine.</p>
+  <p id="agent-accounts-error" class="error-text agent-accounts-load-error" role="alert" hidden></p>
+  <div id="agent-accounts"><p class="empty">Checking agent logins…</p></div>
+</section>
+`;
+  const settings = `${credentials}${agentAccounts}<section class="pane">
   <div class="pane-header"><h2>Workspace defaults</h2></div>
   <form id="workspace-defaults-form" class="form-stack">
     <p id="workspace-defaults-status" class="row-detail" style="margin: 0;">Loading…</p>
@@ -714,6 +722,10 @@ const renderDashboardGroups = (${createDashboardGroups.toString()})();
 const dashboardGroupsStyle = document.createElement("style");
 dashboardGroupsStyle.textContent = ${JSON.stringify(dashboardGroupsStyle)};
 document.head.append(dashboardGroupsStyle);
+const createAgentAccountsPane = ${createAgentAccountsPane.toString()};
+const agentAccountsStyle = document.createElement("style");
+agentAccountsStyle.textContent = ${JSON.stringify(agentAccountsPaneStyle)};
+document.head.append(agentAccountsStyle);
 const pageMode = document.querySelector("[data-hub-page]").dataset.hubPage;
 const errorEl = document.getElementById("action-error");
 const sharedUidDismissalKey = ${sharedUidDismissalKey};
@@ -2707,6 +2719,8 @@ function initWorkspaceDefaults() {
 function initSettingsPage() {
   initSharedUidAdvisory();
   initWorkspaceDefaults();
+  const agentAccountsPane = createAgentAccountsPane();
+  agentAccountsPane.start();
   for (const reveal of document.querySelectorAll("[data-reveal-secret]")) {
     const field = document.getElementById(reveal.dataset.revealSecret);
     reveal.onclick = () => {
@@ -2743,6 +2757,7 @@ function initSettingsPage() {
   });
   window.addEventListener("pageshow", event => {
     if (!event.persisted) return;
+    agentAccountsPane.reload();
     loadSettingsState();
     loadDevices();
     loadCredentials();

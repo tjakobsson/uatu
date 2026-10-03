@@ -32,6 +32,11 @@
 //                                session page is visible, with the grace
 //                                period shortened to
 //                                UATU_E2E_HUB_PRESENCE_GRACE_MS (default 1500)
+//   UATU_E2E_HUB_AGENT_ACCOUNTS  "1" serves Agent accounts over fake agent
+//                                runtimes (tests/e2e/agent-accounts-fake.ts)
+//                                and tells running children about changes as
+//                                the real Hub does; the readiness line's
+//                                `agentAccountsControl` drives the fakes
 //   UATU_E2E_HUB_CREDENTIALS     "1" serves the credential API (token
 //                                credentials only — no ssh/gpg tooling) with
 //                                a resolver that reads a linked worktree's
@@ -83,6 +88,9 @@ import { WorktreeJournal, WorktreeProvenanceStore } from "../../src/hub/worktree
 import { createOnboardingWorktreeRegistrar } from "../../src/hub/worktree-registrar";
 import { WorktreeService } from "../../src/hub/worktree-service";
 import { waitForPortsFree } from "./ports";
+import { createFakeAgentAccounts } from "./agent-accounts-fake";
+import { AgentAccountService, type AgentAccountsApi } from "../../src/hub/agent-account-service";
+import { createAccountChangeNotifier } from "../../src/hub/agent-account-propagation";
 
 export const HUB_E2E_USER = { name: "e2e", password: "e2e-hub-password" };
 export const HUB_E2E_READY_PREFIX = "uatu-e2e-hub ";
@@ -107,6 +115,9 @@ export type HubE2EInfo = {
   // deliveries show what the hub decided — held, sent, or discarded.
   pushLog?: string;
   notificationStore?: string;
+  // With UATU_E2E_HUB_AGENT_ACCOUNTS: POST `{ action, … }` here to approve a
+  // device login, shorten the next login's deadline, or set Claude's login.
+  agentAccountsControl?: string;
 };
 
 const HUB_PORT = Number.parseInt(process.env.UATU_E2E_HUB_PORT ?? "21000", 10);
@@ -126,6 +137,7 @@ const KILL_WAIT_MS = 3_000;
 const WORKTREES = process.env.UATU_E2E_HUB_WORKTREES === "1";
 const CREDENTIALS = process.env.UATU_E2E_HUB_CREDENTIALS === "1";
 const PUSH = process.env.UATU_E2E_HUB_PUSH === "1";
+const AGENT_ACCOUNTS = process.env.UATU_E2E_HUB_AGENT_ACCOUNTS === "1";
 const EXIT_ON_STDIN_CLOSE = process.env.UATU_E2E_EXIT_ON_STDIN_CLOSE === "1";
 const PRESENCE_GRACE_MS = Number.parseInt(process.env.UATU_E2E_HUB_PRESENCE_GRACE_MS ?? "1500", 10);
 
@@ -371,7 +383,42 @@ const notifications = new HubNotifications({ store: notificationStore,
   authorized: (principal, id) => sessionStore.resolve(principal.sessionId)?.user === principal.user && (id === undefined || Boolean(registry.byId(id))),
   workspaceName: id => registry.byId(id)?.displayName ?? id,
 });
+// Agent accounts over fake runtimes. The service is rebuilt on every test
+// reset (its attempts and runtimes are one test's state); the server holds
+// a delegate, so the routes always reach the current one.
+const fakeAccounts = AGENT_ACCOUNTS ? createFakeAgentAccounts() : null;
+const newAccountService = () => new AgentAccountService({
+  runtimes: fakeAccounts!.runtimes,
+  onChanged: createAccountChangeNotifier({ sessions }),
+});
+let accountService = fakeAccounts ? newAccountService() : null;
+const agentAccounts: AgentAccountsApi | undefined = fakeAccounts ? {
+  read: () => accountService!.read(),
+  connectKey: (...args) => accountService!.connectKey(...args),
+  startLogin: (...args) => accountService!.startLogin(...args),
+  submitCode: (...args) => accountService!.submitCode(...args),
+  submitRedirect: (...args) => accountService!.submitRedirect(...args),
+  cancel: (...args) => accountService!.cancel(...args),
+  logout: (...args) => accountService!.logout(...args),
+  activate: (...args) => accountService!.activate(...args),
+} : undefined;
+const accountsControl = fakeAccounts ? Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  async fetch(request) {
+    const body = await request.json().catch(() => ({})) as { action?: string; target?: string; ms?: number; source?: string };
+    switch (body.action) {
+      case "approve": return Response.json({ approved: fakeAccounts.control.approve(String(body.target)) });
+      case "expireNextAfter": fakeAccounts.control.expireNextAfter(Number(body.ms)); return Response.json({ ok: true });
+      case "claudeSource": fakeAccounts.control.setClaudeSource(String(body.source) as never); return Response.json({ ok: true });
+      case "twoGroqKeys": fakeAccounts.control.twoGroqKeys(); return Response.json({ ok: true });
+      default: return Response.json({ error: "unknown action" }, { status: 400 });
+    }
+  },
+}) : null;
+
 const server = startHubServer({ config, registry, sessions, sessionStore, personalState, notifications,
+  ...(agentAccounts ? { agentAccounts } : {}),
   ...(PUSH ? { presenceGraceMs: PRESENCE_GRACE_MS } : {}),
   ...(WORKTREES ? { onboarding, worktrees: worktreesService,
     worktreeReconcilerOptions: { minIntervalMs: 100, periodMs: 500 } } : {}),
@@ -383,7 +430,13 @@ for (const workspace of workspaces) {
 }
 
 if (PUSH) notifications.start();
-const info: HubE2EInfo = { origin, user: HUB_E2E_USER, workspaces, ...(PUSH ? { pushLog, notificationStore: notificationStorePath } : {}) };
+const info: HubE2EInfo = {
+  origin,
+  user: HUB_E2E_USER,
+  workspaces,
+  ...(PUSH ? { pushLog, notificationStore: notificationStorePath } : {}),
+  ...(accountsControl ? { agentAccountsControl: `http://127.0.0.1:${accountsControl.port}/` } : {}),
+};
 console.log(`${HUB_E2E_READY_PREFIX}${JSON.stringify(info)}`);
 
 // The per-test reset: hub-fixtures.ts writes `reset <serial>` to stdin and
@@ -402,6 +455,12 @@ async function resetForTest(): Promise<void> {
   if (pristine) {
     pristine = false;
     return;
+  }
+  if (fakeAccounts) {
+    const previous = accountService;
+    fakeAccounts.control.reset();
+    accountService = newAccountService();
+    await previous?.dispose();
   }
   await Promise.all(workspaces.map(async workspace => {
     await sessions.stop(workspace.id);
@@ -432,6 +491,9 @@ const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
   await notifications.dispose();
+  await accountService?.dispose();
+  accountsControl?.stop(true);
+  fakeAccounts?.listener.stop();
   server.worktreeReconciler?.dispose();
   server.live.endAll();
   server.liveBroker.dispose();

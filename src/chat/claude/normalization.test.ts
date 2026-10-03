@@ -350,3 +350,79 @@ describe("forked runs and typed command output", () => {
     expect(memory.tasks.size).toBe(0);
   });
 });
+
+// The frames a turn without a login produced on CLI 2.1.281 (2026-10-03, an
+// isolated config directory): a synthetic assistant message naming the
+// login error, then an error result with the same words.
+describe("Claude login failures", () => {
+  const failedLogin = {
+    type: "assistant",
+    uuid: "login-frame",
+    timestamp: "2026-10-03T10:00:00Z",
+    error: "authentication_failed",
+    message: { id: "synthetic-1", model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "Not logged in · Please run /login" }] },
+  };
+  const failedResult = { type: "result", subtype: "success", uuid: "login-result", timestamp: "2026-10-03T10:00:01Z", is_error: true, result: "Not logged in · Please run /login", terminal_reason: "api_error" };
+
+  test("the synthetic message becomes a login-failure notice with the CLI's words, and the failed status does not repeat them", () => {
+    const memory = createClaudeEventMemory();
+    const notice = normalizeClaudeMessage(failedLogin, memory, "live");
+    expect(notice.updates).toEqual([{ kind: "upsert", item: {
+      id: "notice:login:login-frame",
+      type: "notice",
+      createdAt: Date.parse("2026-10-03T10:00:00Z"),
+      level: "error",
+      code: "login-failed",
+      message: "Not logged in · Please run /login",
+    } }]);
+    const item = notice.updates[0]!.kind === "upsert" ? notice.updates[0]!.item : null;
+    expect(parseConversationItem(JSON.parse(JSON.stringify(item)))).toEqual(item!);
+    expect(normalizeClaudeMessage(failedResult, memory, "live").updates).toEqual([{ kind: "status", status: "failed" }]);
+    // The next failure that is not a login one says its own words again.
+    expect(normalizeClaudeMessage({ ...failedResult, uuid: "other", result: "Model not found" }, memory, "live").updates).toEqual([{ kind: "status", status: "failed", message: "Model not found" }]);
+  });
+
+  test("an organization the login may not use is a login failure too", () => {
+    const update = normalizeClaudeMessage({ ...failedLogin, error: "oauth_org_not_allowed" }, createClaudeEventMemory(), "live").updates[0];
+    expect(update).toMatchObject({ kind: "upsert", item: { code: "login-failed" } });
+  });
+
+  test("other assistant errors keep their message as a reply", () => {
+    const updates = normalizeClaudeMessage({ ...failedLogin, error: "rate_limit" }, createClaudeEventMemory(), "live").updates;
+    expect(updates.some(update => update.kind === "upsert" && update.item.type === "notice")).toBe(false);
+  });
+
+  test("a stored login failure replays as the same notice", () => {
+    const { items } = normalizeTranscriptEntries([{
+      kind: "assistant", uuid: "login-frame", timestamp: Date.parse("2026-10-03T10:00:00Z"), error: "authentication_failed",
+      message: failedLogin.message, parentUuid: null, isSidechain: false, parentToolUseId: null,
+    }]);
+    expect(items).toMatchObject([{ id: "notice:login:login-frame", type: "notice", code: "login-failed", message: "Not logged in · Please run /login" }]);
+  });
+
+  test("the transcript reader keeps the stored login error, as the CLI writes it", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "uatu-claude-login-"));
+    try {
+      const file = path.join(directory, "session.jsonl");
+      writeFileSync(file, `${JSON.stringify({
+        type: "assistant", uuid: "login-frame", parentUuid: null, timestamp: "2026-10-03T10:00:00Z", isSidechain: false,
+        error: "authentication_failed", isApiErrorMessage: true, message: failedLogin.message,
+      })}\n`);
+      const { entries } = await readSessionTranscript(file);
+      expect(normalizeTranscriptEntries(entries).items).toMatchObject([{ id: "notice:login:login-frame", code: "login-failed" }]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("re-authentication is one notice while it runs, kept as a failure if it fails, retired if it succeeds", () => {
+    const memory = createClaudeEventMemory();
+    const frame = (fields: Record<string, unknown>) => ({ type: "auth_status", uuid: `auth-${JSON.stringify(fields)}`, timestamp: "2026-10-03T10:00:00Z", output: [], ...fields });
+    expect(normalizeClaudeMessage(frame({ isAuthenticating: true, output: ["Refreshing token"] }), memory, "live").updates).toEqual([{ kind: "upsert", item: {
+      id: "notice:auth-status", type: "notice", createdAt: Date.parse("2026-10-03T10:00:00Z"), level: "info", code: "reauthenticating", message: "Refreshing token",
+    } }]);
+    expect(normalizeClaudeMessage(frame({ isAuthenticating: false }), memory, "live").updates).toEqual([{ kind: "remove", itemId: "notice:auth-status" }]);
+    expect(normalizeClaudeMessage(frame({ isAuthenticating: false }), memory, "live")).toMatchObject({ outcome: "ignored", updates: [] });
+    expect(normalizeClaudeMessage(frame({ isAuthenticating: false, error: "Token refresh failed" }), memory, "live").updates[0]).toMatchObject({ kind: "upsert", item: { id: "notice:auth-status", level: "error", code: "login-failed", message: "Token refresh failed" } });
+  });
+});

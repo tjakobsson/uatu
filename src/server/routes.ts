@@ -20,7 +20,7 @@ import { HistoryChangedError } from "../chat/history-reuse";
 import { resolveStartupTimeoutMs } from "../chat/opencode/opencode-service";
 import { ChatUnavailableError } from "../chat/service";
 import { UnknownAgentError, type MultiAgentWorkspaceChatService } from "../chat/agents";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, TASK_OUTPUT_TAIL_DEFAULT_BYTES, TASK_OUTPUT_TAIL_MAX_BYTES, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type UsageReadMode } from "../chat/types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, TASK_OUTPUT_TAIL_DEFAULT_BYTES, TASK_OUTPUT_TAIL_MAX_BYTES, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type UsageReadMode, type ChatAccountChange } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { StreamLifecycleMetrics, type StreamOutcome } from "../debug/stream-metrics";
 import { getDocumentDiff } from "../document/diff";
@@ -603,6 +603,24 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return run(() => deps.chatService.retry(body.agentId as string));
       },
     },
+    // Hub → child only: a login change made through the Hub's Agent accounts.
+    // Behind the mutation gate like retry, since it replays a removal on the
+    // workspace's own agent server.
+    [p("/api/chat/accounts-changed")]: {
+      POST: async (request: Request) => {
+        const rejected = mutationGate(request);
+        if (rejected) return rejected;
+        const body = await parseJsonObject(request, ["agentId", "change"]);
+        if (body instanceof Response) return body;
+        if (typeof body.agentId !== "string" || !body.agentId) return chatError(400, "agentId must be a non-empty string");
+        const change = parseAccountChange(body.change);
+        if (!change) return chatError(400, "change must be an accounts change");
+        return run(async () => {
+          await deps.chatService.accountsChanged(body.agentId as string, change);
+          return { ok: true };
+        });
+      },
+    },
     [p("/api/chat/models")]: {
       GET: async (request: Request) => authenticated(request) ?? withAgentScope(request, agentId => run(async () => ({
         models: await deps.chatService.models(agentId),
@@ -1111,6 +1129,24 @@ function routeIdentity(request: RouteRequest, name: string): string | Response {
   let value = request.params?.[name] ?? "";
   try { value = decodeURIComponent(value); } catch { return chatError(400, `invalid ${name}`); }
   return validIdentity(value) ? value : chatError(400, `invalid ${name}`);
+}
+
+/** The accounts change the Hub sends; null when it is not one. */
+export function parseAccountChange(value: unknown): ChatAccountChange | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const text = (key: string) => typeof record[key] === "string" && (record[key] as string).length > 0 && (record[key] as string).length <= 256 ? record[key] as string : null;
+  if (record.kind === "added" && Object.keys(record).length === 1) return { kind: "added" };
+  if (record.kind === "removed") {
+    const target = text("target");
+    const credential = text("credential");
+    return target && credential ? { kind: "removed", target, credential } : null;
+  }
+  if (record.kind === "activated") {
+    const credential = text("credential");
+    return credential ? { kind: "activated", credential } : null;
+  }
+  return null;
 }
 
 function bodyIdentity(body: Record<string, unknown>, name: string): string | Response {

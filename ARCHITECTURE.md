@@ -242,7 +242,8 @@ src/
 │                         HTTP/WS reverse proxy, the live broker
 │                         (live-broker.ts, live-sse.ts), hub auth (users, signed
 │                         cookie, rate limit, CSRF), dashboard pages, server
-│                         assembly, process wiring
+│                         assembly, process wiring, Agent accounts
+│                         (agent-account-*.ts: the machine's agent logins)
 ├── watchdog/             Heartbeat-driven hang recovery — spawned sibling
 │                         subprocess + forensic dump bundle
 ├── debug/                Observability — XDG-cache path resolution +
@@ -556,7 +557,7 @@ The chat surface speaks one timeline model for every agent (`src/chat/types.ts`)
 | `background_task` | A task the agent runs in the background, updated in place from start to settling. Running ones are listed above the composer with a stop control and open for inspection; settled ones are rows. A `foreground` one is the run a typed command launched, listed with the subagents only. | Composer list, drill-down, timeline |
 | `context_report` | The agent's own statement of window occupancy (total, max, categories, plan utilization). Data for the readout, never a row; the readout uses whichever of a report or a usage carrier is newest. | Context meter |
 | `compaction` | Where the agent compacted its context, with before/after figures | Timeline marker |
-| `turn_status`, `notice` | A turn's outcome; warnings and errors. A `notice.code` (`rate-limit-*`, `refusal-fallback`) drives the composer's badge. | Timeline, composer |
+| `turn_status`, `notice` | A turn's outcome; warnings and errors. A `notice.code` (`rate-limit-*`, `refusal-fallback`) drives the composer's badge. `login-failed` marks a turn that failed on the agent's login and renders with the way to log in; `reauthenticating` is the one item an agent occupies while it signs in again. | Timeline, composer |
 
 Conversation status is `idle`, `sending`, `running`, `completed`, `interrupted`, `failed`, plus four named states: `retrying` and `compacting` are live-turn states (the composer offers Cancel, a new prompt is held), `background` means no turn is running but the agent still holds live background work (prompting is possible), and `scheduled` means nothing runs but the agent's session holds future turns it scheduled for itself (prompting is possible; the composer lists the wakeups with a release). `isLiveConversationStatus()` in `types.ts` is the one rule for which statuses are live.
 
@@ -609,6 +610,22 @@ UATU_REAL_OPENCODE_V1=$(which opencode) \
 UATU_REAL_OPENCODE_V2=~/.local/opt/opencode-v2/bin/real/opencode \
 bun test src/chat/opencode/real-opencode.integration.test.ts
 ```
+
+### Agent accounts
+
+The Hub's Settings page manages the machine's agent logins: OpenCode's providers and Claude Code's account. Logins are written where each agent keeps them (OpenCode's store, Claude Code's login), so they apply to every workspace, every Hub user, and the agents' own tools on the machine; the Hub keeps no secret of its own, and no response carries one. The capability is `openspec/specs/agent-accounts/`.
+
+Agent runtimes otherwise exist only inside running workspaces, and a login has to work with none running, so the Hub starts its own (`src/hub/agent-account-runtime.ts`): an `opencode serve` through the same `OpenCodeService` a workspace uses, in a Hub-owned working directory with the workspaces' environment, and Claude Code's executable for short-lived SDK sessions. They start on the first request and stop after five idle minutes, never while a login is pending. One adapter per agent and generation (`agent-account-opencode-v1.ts`, `agent-account-opencode-v2.ts`, `agent-account-claude.ts`, behind `agent-account-adapter.ts`) turns each agent's interface into one model (`agent-account-types.ts`): providers with their login methods and form fields (`agent-account-fields.ts` normalizes 1.x prompts and 2.x forms), saved credentials, and Claude's account.
+
+- **OpenCode 1.x** uses `@opencode-ai/sdk/v2`'s `provider.auth`, `provider.oauth.authorize/callback`, `auth.set` and `auth.remove`. After each change the Hub resets its own server (`instance.dispose`): a 1.x instance that has listed its providers reports a key saved afterwards as `custom`, without a key, until it reloads.
+- **OpenCode 2.x** uses `integration.*` and, where the server answers them, `credential.*` (2.0.13 does not: logout and switching are then not offered).
+- **Claude Code** reads `accountInfo()` and logs in through the SDK's `claudeAuthenticate`, `claudeOAuthCallback` and `claudeOAuthWaitForCompletion`, which the CLI answers but `sdk.d.ts` does not declare; they are feature-detected, and without them the page names `claude auth login`. Only the `manualUrl` is used, which ends on a page showing a code to paste. Logout runs `claude auth logout`.
+
+`agent-account-service.ts` owns attempts. A started login is finished one of three ways (`agent-account-redirect.ts` classifies it): a device code approved on the provider's site, a code pasted back, or, for a browser login that redirects to a loopback listener on the Hub machine, the address the browser landed on. That address is requested by the Hub only when it is `http:` on a loopback host with the attempt's own callback port and path, once, following no redirect. A secret submitted (key, code, address) is scrubbed from any agent message that echoes it.
+
+A change reaches running workspaces through the internal child route `POST /api/chat/accounts-changed` (`agent-account-propagation.ts`), sent to every running session; the Hub runs one agent's changes one at a time and finishes notifying before the next. The workspace replays a removal or switch on its own agent server (1.x `auth.remove`, 2.x `credential.remove`/`activate`), which changes nothing on disk and updates that server's memory without a restart, re-reads Claude's login, bumps the agent's `accountsRevision`, and ticks the inventory. A page re-reads `/api/chat/status` on every inventory tick and re-reads an agent's catalogs when its revision moved. Ready availability also carries `login` (`ok`, `missing`, `unknown`); a missing one shows a notice above the composer and in the model picker, linked to `/settings#agent-accounts/<agent>` in a Hub-served session (`src/chat/login-action.ts`) and naming the agent's login command elsewhere.
+
+The Settings pane is `src/hub/agent-accounts-pane.ts`, inlined into the page the way `dashboard-groups.ts` is. The e2e Hub runs the real service over fake runtimes (`tests/e2e/agent-accounts-fake.ts`, `UATU_E2E_HUB_AGENT_ACCOUNTS`); `src/hub/agent-account-real-opencode.integration.test.ts` (`UATU_REAL_OPENCODE`) and the Agent accounts case in `src/chat/claude/real-claude.integration.test.ts` (`UATU_REAL_CLAUDE`) run against the installed agents in throwaway homes.
 
 ## Terminal subsystem
 

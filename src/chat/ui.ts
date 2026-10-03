@@ -43,10 +43,11 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type ContextReportItem, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type SessionTotals } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type AgentChatStatus, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatLoginState, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSnapshot, type ConversationSummary, type ContextReportItem, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type RestoredDraft, type ReversibleHistoryResult, type SessionTotals } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
+import { loginActionElement, loginActionFor, type LoginAction } from "./login-action";
 import { copyChatText } from "./copy-actions";
 import { announceConversationInventory, renderConversationInventoryAwareness, renderSelectedConversationDeleted } from "./inventory-presentation";
 import { ConversationInventoryTracker, SerializedInventoryReconciler, conversationActivitySuffix, conversationDayGroup, dedupeConversationInventory, isConversationChooserActivationKey, patchConversationOptions, retainedPresentationConversationIds } from "./inventory-reconciler";
@@ -153,6 +154,7 @@ export function initChat(api = new ChatApiClient()): void {
   const configurationVariantSection = document.querySelector<HTMLElement>("#chat-configuration-variant-section");
   const configurationVariant = document.querySelector<HTMLSelectElement>("#chat-configuration-variant");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
+  const loginNotice = document.querySelector<HTMLElement>("#chat-login-notice");
   const rateLimitLive = document.querySelector<HTMLElement>("#chat-rate-limit-live");
   const planUsage = document.querySelector<HTMLDetailsElement>("#chat-plan-usage");
   const planUsageSummary = document.querySelector<HTMLElement>("#chat-plan-usage-summary");
@@ -540,6 +542,96 @@ export function initChat(api = new ChatApiClient()): void {
   const declares = (capability: ChatCapability) => agent?.capabilities.includes(capability) ?? true;
   const agentStatusFor = (agentId: string | undefined): AgentChatStatus | undefined =>
     agentStatuses.find(status => status.agent.id === agentId);
+  // How the selected agent gets a login: the Hub's Settings, or its command.
+  const contextLoginAction = (): LoginAction | undefined => {
+    const status = agentStatusFor(contextAgentId);
+    return status ? loginActionFor(status.agent.id, status.agent.name) : undefined;
+  };
+  const contextLoginState = (): ChatLoginState | undefined => {
+    const availability = agentStatusFor(contextAgentId)?.availability;
+    return availability?.state === "ready" ? availability.login : undefined;
+  };
+  // Each agent's `accountsRevision` as last seen. It moves when a login
+  // changes through the Hub's Agent accounts: the agent's catalogs are then
+  // re-read, and an empty model list is believed (the last provider logged
+  // out) rather than skipped as a list that has not loaded yet.
+  const accountsRevisions = new Map<string, number>();
+  const setAgentStatuses = (next: AgentChatStatus[]) => {
+    agentStatuses = next;
+    for (const status of next) {
+      if (status.availability.state !== "ready") continue;
+      const revision = status.availability.accountsRevision ?? 0;
+      const known = accountsRevisions.get(status.agent.id);
+      accountsRevisions.set(status.agent.id, revision);
+      if (known === undefined || known === revision) continue;
+      if (contextAgentId === status.agent.id && agentCatalogs.has(status.agent.id)) void refreshBankedCommands(status.agent.id, { acceptEmpty: true });
+      else agentCatalogs.delete(status.agent.id);
+    }
+    renderLoginNotice();
+  };
+  // Status re-reads that land together collapse into one, plus one more if
+  // another was asked for while it ran.
+  let statusReread: Promise<void> | null = null;
+  let statusRereadQueued = false;
+  const rereadStatuses = () => {
+    if (statusReread) {
+      statusRereadQueued = true;
+      return;
+    }
+    statusReread = (async () => {
+      try {
+        setAgentStatuses(await api.status());
+      } catch {
+        // The next tick or poll asks again.
+      }
+    })().finally(() => {
+      statusReread = null;
+      if (statusRereadQueued) {
+        statusRereadQueued = false;
+        rereadStatuses();
+      }
+    });
+  };
+  // While the selected agent has no usable login, or has not said yet,
+  // status is re-read now and then: a login made outside UatuCode (a
+  // terminal) sends no tick, and a first login read lands after the agent
+  // is ready. Nothing is polled once the login is known to work.
+  const LOGIN_POLL_MS = 5_000;
+  let loginPoll: ReturnType<typeof setTimeout> | null = null;
+  const scheduleLoginPoll = (state: ChatLoginState | undefined) => {
+    if (state !== "missing" && state !== "unknown") {
+      if (loginPoll !== null) { clearTimeout(loginPoll); loginPoll = null; }
+      return;
+    }
+    if (loginPoll !== null) return;
+    loginPoll = setTimeout(() => {
+      loginPoll = null;
+      if (document.visibilityState === "hidden") {
+        scheduleLoginPoll(contextLoginState());
+        return;
+      }
+      rereadStatuses();
+    }, LOGIN_POLL_MS);
+  };
+  // The selected agent cannot run a turn: said where a message is typed,
+  // with the way to log in. Present for a new conversation and an existing
+  // one alike, since both are typed into here.
+  const renderLoginNotice = () => {
+    const state = contextLoginState();
+    scheduleLoginPoll(state);
+    if (!loginNotice) return;
+    const status = agentStatusFor(contextAgentId);
+    const missing = state === "missing" && status !== undefined;
+    loginNotice.hidden = !missing;
+    if (!missing) {
+      loginNotice.replaceChildren();
+      return;
+    }
+    const text = document.createElement("span");
+    text.className = "chat-login-notice-text";
+    text.textContent = `${status.agent.name} is not logged in.`;
+    loginNotice.replaceChildren(text, " ", loginActionElement(document, loginActionFor(status.agent.id, status.agent.name)));
+  };
   // A conversation names its agent on its summary; a child conversation the
   // inventory never lists still carries the owner as its id prefix.
   const conversationAgentId = (conversationId: string | null | undefined): string | undefined => {
@@ -1698,6 +1790,7 @@ export function initChat(api = new ChatApiClient()): void {
     rendering = true;
     // The card states the owning agent's own persistent-approval reach.
     renderer.permissionScopeNote = agent?.permissionScopeNote;
+    renderer.loginAction = contextLoginAction();
     const conversation = conversations.find(value => value.id === projection?.conversationId);
     renderer.conversationTitle = conversation ? displayConversationTitle(conversation) : chatHeading();
     const dirty = renderer.render(items, projection, expanded, declares("subagents"), declares("reversible-history"), turnStartedAt(projection));
@@ -2646,7 +2739,14 @@ export function initChat(api = new ChatApiClient()): void {
       offersReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
     configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
-    configurationPicker?.update({ agent, models, modes, configuration });
+    configurationPicker?.update({
+      agent,
+      models,
+      modes,
+      configuration,
+      // An empty list with no usable login says why, and how to fix it.
+      ...(models.length === 0 && contextLoginState() === "missing" ? { emptyNotice: { message: "No provider is logged in.", action: contextLoginAction() } } : {}),
+    });
     syncAttachControl();
     syncControls();
   };
@@ -3604,6 +3704,7 @@ export function initChat(api = new ChatApiClient()): void {
     if (!drilldownItems || !drilldownTimeline) return;
     childScroll?.beforeMutation();
     childRenderer.permissionScopeNote = agent?.permissionScopeNote;
+    childRenderer.loginAction = contextLoginAction();
     childRenderer.conversationTitle = child?.label;
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"), false, turnStartedAt(child?.projection));
     childRenderer.setShellOutputsHidden(false);
@@ -4529,6 +4630,7 @@ export function initChat(api = new ChatApiClient()): void {
   const applyAgentContext = async (agentId: string | undefined): Promise<void> => {
     const status = agentStatusFor(agentId) ?? agentStatuses[0];
     contextAgentId = status?.agent.id;
+    renderLoginNotice();
     models = [];
     modes = [];
     commands = [];
@@ -4659,7 +4761,7 @@ export function initChat(api = new ChatApiClient()): void {
   // would overwrite the reloaded one.
   const catalogRefreshes = new LatestRefresh();
   // Settles once every read it started has landed or failed.
-  const refreshBankedCommands = (agentId: string | undefined): Promise<void> => {
+  const refreshBankedCommands = (agentId: string | undefined, options: { acceptEmpty?: boolean } = {}): Promise<void> => {
     if (!agentId) return Promise.resolve();
     const banked = agentCatalogs.get(agentId);
     if (!banked) return Promise.resolve();
@@ -4681,7 +4783,7 @@ export function initChat(api = new ChatApiClient()): void {
     // new entries — so the banked model list refreshes on the same cadence.
     if (agent?.capabilities.includes("models")) {
       reads.push(api.models(agentId).then(list => {
-        if (!current() || list.length === 0) return;
+        if (!current() || (list.length === 0 && !options.acceptEmpty)) return;
         banked.models = list;
         if (contextAgentId === agentId) {
           models = list;
@@ -4711,7 +4813,7 @@ export function initChat(api = new ChatApiClient()): void {
       const watching = contextAgentId;
       if (!watching || conversationAgentId(presentation.selectedId) !== watching) return;
       try {
-        agentStatuses = await api.status();
+        setAgentStatuses(await api.status());
       } catch {
         return;
       }
@@ -4727,7 +4829,9 @@ export function initChat(api = new ChatApiClient()): void {
     if (inventoryStream) return;
     try {
       inventoryStream = api.inventoryStream({
-        invalidation: () => { void inventoryReconciler.request(); },
+        // A tick may also mean a login changed (Agent accounts): status is
+        // in-memory on the server, so it is re-read alongside the inventory.
+        invalidation: () => { void inventoryReconciler.request(); rereadStatuses(); },
         error: error => interruptions.report("inventory", error),
         recovered: () => interruptions.clear("inventory"),
       });
@@ -4799,7 +4903,7 @@ export function initChat(api = new ChatApiClient()): void {
       announce(`Starting ${agentName}…`);
       try {
         const next = await api.retry(agentId);
-        agentStatuses = agentStatuses.map(status => status.agent.id === agentId ? next : status);
+        setAgentStatuses(agentStatuses.map(status => status.agent.id === agentId ? next : status));
         if (next.availability.state === "unavailable") {
           showUnavailable(agentId, next.availability, options);
           return;
@@ -4833,7 +4937,7 @@ export function initChat(api = new ChatApiClient()): void {
     bootstrapRead = initialRead;
     readError.hidden = true;
     try {
-      agentStatuses = await api.status();
+      setAgentStatuses(await api.status());
       seedUsageFromStatuses();
       // Every offered agent down at once is the only full takeover: with no
       // agent to converse with, the surface's job is the diagnosis + retry.
@@ -4887,7 +4991,7 @@ export function initChat(api = new ChatApiClient()): void {
       // that every agent is down after all, the takeover renders now
       // rather than after a reload.
       void api.status().then(next => {
-        agentStatuses = next;
+        setAgentStatuses(next);
         if (next.length > 0 && next.every(status => status.availability.state === "unavailable")) {
           for (const status of next) {
             if (status.availability.state === "unavailable") showUnavailable(status.agent.id, status.availability, { takeover: true });

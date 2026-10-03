@@ -1377,6 +1377,25 @@ describe("recalled memory rows and coded notices", () => {
     expect(notice.getAttribute("role")).toBe("status");
   });
 
+  test("a login failure names the agent, keeps its words, and offers the way to log in", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const failure: ConversationItem = { id: "notice:login:1", type: "notice", createdAt: 1, level: "error", code: "login-failed", message: "Not logged in · Please run /login" };
+    renderer.loginAction = { agentName: "Claude Code", href: "/settings#agent-accounts/claude", command: "claude auth login" };
+    renderer.render(host, projectionWith([failure]), new Set());
+    const notice = host.querySelector('[data-chat-item-id="notice:login:1"]')!;
+    expect(notice.getAttribute("role")).toBe("alert");
+    expect(notice.querySelector(".chat-login-failed-title")?.textContent).toBe("Claude Code login failed");
+    expect(notice.querySelector(".chat-login-failed-detail")?.textContent).toBe("Not logged in · Please run /login");
+    expect(notice.querySelector("a.chat-login-link")?.getAttribute("href")).toBe("/settings#agent-accounts/claude");
+    expect(notice.querySelector("a.chat-login-link")?.textContent).toBe("Log in to Claude Code");
+    // Outside a Hub there is no Settings page: the agent's own command.
+    renderer.loginAction = { agentName: "Claude Code", href: null, command: "claude auth login" };
+    renderer.render(host, projectionWith([failure]), new Set());
+    expect(host.querySelector(".chat-login-failed a")).toBeNull();
+    expect(host.querySelector(".chat-login-command code")?.textContent).toBe("claude auth login");
+  });
+
   test("a rate-limit standing is data for the composer, never a row", () => {
     const renderer = new TimelineRenderer();
     const host = target();

@@ -1,4 +1,4 @@
-import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -369,4 +369,16 @@ export interface ChatProvider {
    * started for the read and retired again. A failure says why.
    */
   readUsage?(mode: UsageReadMode): Promise<UsageReadResult>;
+  /**
+   * Whether the machine's logins let this agent run a turn, as last read:
+   * no I/O. Absent: the agent cannot say.
+   */
+  loginState?(): ChatLoginState;
+  /**
+   * The machine's logins changed through the Hub's Agent accounts. The
+   * provider re-reads what it caches about them and replays a removal or
+   * switch on its own agent server; it never restarts anything and never
+   * touches a running turn.
+   */
+  accountsChanged?(change: ChatAccountChange): Promise<void>;
 }

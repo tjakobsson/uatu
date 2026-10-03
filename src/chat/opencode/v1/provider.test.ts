@@ -1269,3 +1269,55 @@ describe("quietCancellation", () => {
   });
 });
 
+
+describe("OpenCodeV1Provider accounts", () => {
+  function accountsClient(connected: () => string[]) {
+    const removed: string[] = [];
+    const client = {
+      provider: {
+        list: async () => ({ data: {
+          connected: connected(),
+          default: {},
+          all: [
+            { id: "opencode", name: "OpenCode Zen", models: { free: { id: "free", name: "Free" } } },
+            { id: "groq", name: "Groq", models: { llama: { id: "llama", name: "Llama" } } },
+          ],
+        } }),
+      },
+      auth: { remove: async (input: { providerID: string }) => { removed.push(input.providerID); return { data: true }; } },
+    } as unknown as OpencodeClient;
+    return { client, removed };
+  }
+
+  test("login state is unknown before the catalog is read, ok while any model is offered, missing when none is", async () => {
+    let connected = ["opencode"];
+    const { client } = accountsClient(() => connected);
+    const provider = new OpenCodeV1Provider(client, "/workspace");
+    expect(provider.loginState()).toBe("unknown");
+    await provider.listModels();
+    expect(provider.loginState()).toBe("ok");
+    connected = [];
+    await provider.listModels();
+    expect(provider.loginState()).toBe("missing");
+  });
+
+  test("a removal is replayed on this server by provider, and an addition is only re-read", async () => {
+    let connected = ["opencode", "groq"];
+    const { client, removed } = accountsClient(() => connected);
+    const provider = new OpenCodeV1Provider(client, "/workspace");
+    await provider.accountsChanged({ kind: "added" });
+    expect(removed).toEqual([]);
+    connected = ["opencode"];
+    await provider.accountsChanged({ kind: "removed", target: "groq", credential: "groq" });
+    expect(removed).toEqual(["groq"]);
+    expect((await provider.listModels()).map(model => model.selection.providerId)).toEqual(["opencode"]);
+  });
+
+  test("a replay the server refuses is ignored", async () => {
+    const client = {
+      provider: { list: async () => ({ data: { connected: ["opencode"], default: {}, all: [] } }) },
+      auth: { remove: async () => { throw new Error("gone"); } },
+    } as unknown as OpencodeClient;
+    await expect(new OpenCodeV1Provider(client, "/workspace").accountsChanged({ kind: "removed", target: "groq", credential: "groq" })).resolves.toBeUndefined();
+  });
+});

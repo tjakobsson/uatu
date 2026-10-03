@@ -6,7 +6,7 @@ Define workspace-scoped OpenCode conversations and the responsive web chat surfa
 ## Requirements
 
 ### Requirement: Chat uses the workspace's OpenCode installation and identity
-When an OpenCode conversation is first needed in a running workspace, UatuCode SHALL discover the `opencode` executable available to that workspace process and start a loopback-only OpenCode service whose lifetime is owned by the workspace server. Opening Chat, or conversing with another agent, MUST NOT by itself start the OpenCode service. The service SHALL use OpenCode's existing user configuration and authentication; UatuCode MUST NOT request, copy, persist, or transmit provider API keys. If OpenCode is unavailable, cannot start, or is not authenticated, the workspace, all non-chat capabilities, and conversations with other agents SHALL remain usable and the Chat surface SHALL report an actionable unavailable state attributed to OpenCode.
+When an OpenCode conversation is first needed in a running workspace, UatuCode SHALL discover the `opencode` executable available to that workspace process and start a loopback-only OpenCode service whose lifetime is owned by the workspace server. Opening Chat, or conversing with another agent, MUST NOT by itself start the OpenCode service. The service SHALL use OpenCode's existing user configuration and authentication. A workspace's chat MUST NOT request provider API keys or other provider credentials. UatuCode SHALL accept a provider credential only through the Hub's Agent accounts area, which hands it to OpenCode's own login interface; UatuCode MUST NOT copy, persist, log, or return it. If OpenCode is unavailable, cannot start, or is not authenticated, the workspace, all non-chat capabilities, and conversations with other agents SHALL remain usable and the Chat surface SHALL report an actionable unavailable state attributed to OpenCode.
 
 Startup SHALL be observed as two separately bounded phases, distinguished by whether OpenCode has answered at the protocol level rather than by any text it emits. Until a probe receives an HTTP response, the generous bind budget applies; from the first HTTP response onward, a shorter health budget applies. A startup that fails SHALL be attributed to the phase that failed: if no probe ever received an HTTP response, the failure SHALL report that OpenCode never accepted a health request at the probed endpoint; if any probe did, the failure SHALL report that OpenCode answered but never became healthy, naming the endpoint and the last status observed. A health probe SHALL be individually bounded so that a connection which is accepted but never answered does not consume the whole budget.
 
@@ -17,6 +17,10 @@ UatuCode MUST NOT depend on the format of any text OpenCode writes to its standa
 #### Scenario: Existing OpenCode authentication is reused
 - **WHEN** the workspace user has already authenticated OpenCode and starts an OpenCode conversation
 - **THEN** UatuCode connects using that existing OpenCode identity without asking for a provider API key
+
+#### Scenario: Chat never asks for a key
+- **WHEN** an OpenCode conversation runs in a workspace with no provider logged in
+- **THEN** the chat directs the user to Agent accounts and offers no field for a provider key
 
 #### Scenario: OpenCode is not installed
 - **WHEN** the workspace cannot resolve an OpenCode executable
@@ -2310,6 +2314,7 @@ While restoration is pending, repeated inventories that omit the remembered conv
 - **WHEN** the remembered conversation arrives and restoration completes
 - **THEN** Chat does not open itself or move keyboard focus
 - **AND** existing inventory-awareness acknowledgement rules remain unchanged
+
 ### Requirement: Chat serves whichever OpenCode generation the workspace has installed
 UatuCode SHALL converse through an OpenCode 1.x server and through an OpenCode 2.x server with the same Chat surface, the same agent identity, and the same conversation operations. The generation is a property of the spawned server, decided by its readiness answer, and SHALL be fixed for that server's lifetime; a later start — a retry, a restart after an unexpected exit — SHALL decide again, so a binary replaced on disk is served by the matching generation without a workspace restart. Conversation identifiers, capability declarations, and the chat routes SHALL NOT change form between generations; a capability the running generation cannot back SHALL be left undeclared rather than declared and broken.
 

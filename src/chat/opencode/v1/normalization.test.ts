@@ -1182,3 +1182,25 @@ describe("caption cardinality and replay bounds", () => {
     expect((stored as { attachments: unknown[] }).attachments).toHaveLength(8);
   });
 });
+
+// The error OpenCode 1.18.34 reported for a rejected Groq key on 2026-10-03,
+// trimmed of its response headers.
+describe("OpenCode 1.x login failures", () => {
+  const rejectedKey = { name: "APIError", data: { message: "Invalid API Key", statusCode: 401, isRetryable: false } };
+
+  test("a provider's 401 or a missing credential marks the failure notice as a login failure", () => {
+    for (const error of [rejectedKey, { name: "ProviderAuthError", data: { providerID: "groq", message: "No credentials for groq" } }]) {
+      const updates = normalizeProviderEvent({ id: "error-event", type: "session.error", data: { sessionID: "s1", error } }).updates;
+      const notice = updates.find(update => update.kind === "upsert");
+      expect(notice).toMatchObject({ kind: "upsert", item: { type: "notice", level: "error", code: "login-failed", message: error.data.message } });
+      if (notice?.kind === "upsert") expect(parseConversationItem(JSON.parse(JSON.stringify(notice.item)))).toEqual(notice.item);
+    }
+  });
+
+  test("any other failure stays an ordinary error notice", () => {
+    for (const error of [{ name: "APIError", data: { message: "Overloaded", statusCode: 529 } }, { data: { message: "Provider failed" } }]) {
+      const notice = normalizeProviderEvent({ id: "error-event", type: "session.error", data: { sessionID: "s1", error } }).updates.find(update => update.kind === "upsert");
+      expect(notice?.kind === "upsert" && notice.item.type === "notice" && notice.item.code).toBeFalsy();
+    }
+  });
+});

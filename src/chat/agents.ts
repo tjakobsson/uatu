@@ -22,7 +22,7 @@ import type {
   ModelSelection,
   PermissionOutcome,
   QuestionOutcome,
-  ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult } from "./types";
+  ReversibleHistoryResult, AgentUsageReport, UsageReadMode, UsageReadResult, ChatAccountChange } from "./types";
 
 export type { AgentChatStatus, ChatAgentDescriptor } from "./types";
 
@@ -80,6 +80,8 @@ export type MultiAgentChatServiceOptions = {
  * status is per-agent. Implemented by the router below and by test fakes.
  */
 export interface MultiAgentWorkspaceChatService {
+  /** A login change made through the Hub's Agent accounts (internal route). */
+  accountsChanged(agentId: string, change: ChatAccountChange): Promise<void>;
   readonly notificationFeed?: NotificationFeed;
   agents(): ChatAgentDescriptor[];
   defaultAgentId(): string;
@@ -216,6 +218,18 @@ export class MultiAgentChatService implements MultiAgentWorkspaceChatService {
     // a repaired agent's conversations must re-enter the chooser.
     if (availability.state === "ready") this.inventoryHub.refresh();
     return { agent: agent.descriptor, availability };
+  }
+
+  /**
+   * A login change made through the Hub's Agent accounts. The agent re-reads
+   * and replays it, then every client is ticked: a client re-reads status on
+   * an inventory tick, sees the agent's `accountsRevision` move, and re-reads
+   * that agent's catalogs.
+   */
+  async accountsChanged(agentId: string, change: ChatAccountChange): Promise<void> {
+    const agent = this.requireAgent(agentId);
+    await agent.service.accountsChanged?.(change);
+    this.inventoryHub.tick();
   }
 
   async models(agentId: string): Promise<ChatModel[]> { return this.requireAgent(agentId).service.models(); }

@@ -35,6 +35,7 @@ class StubAgentService implements WorkspaceChatService {
 
   async status() { return this.availability; }
   async retry() { this.calls.push({ method: "retry", args: [] }); return this.availability; }
+  async accountsChanged(change: unknown) { this.calls.push({ method: "accountsChanged", args: [change] }); }
   async models() { return this.record("models", [], []); }
   async modes() { return this.record("modes", [], []); }
   async commands() { return this.record("commands", [], []); }
@@ -114,6 +115,21 @@ function fixture(): { service: MultiAgentChatService; a: StubAgentService; b: St
   ];
   return { service: new MultiAgentChatService({ workspacePath: process.cwd(), agents }), a, b };
 }
+
+describe("accounts changes", () => {
+  test("reach only the named agent and tick every inventory subscriber", async () => {
+    const { service, a, b } = fixture();
+    const subscription = await service.subscribeInventory();
+    await subscription.next();
+    const tick = subscription.next();
+    await service.accountsChanged("claude", { kind: "added" });
+    expect(await tick).toEqual({ value: undefined, done: false });
+    expect(b.calls.filter(call => call.method === "accountsChanged")).toEqual([{ method: "accountsChanged", args: [{ kind: "added" }] }]);
+    expect(a.calls.filter(call => call.method === "accountsChanged")).toEqual([]);
+    await expect(service.accountsChanged("nobody", { kind: "added" })).rejects.toThrow("unknown chat agent");
+    subscription.cancel();
+  });
+});
 
 describe("qualified conversation ids", () => {
   test("qualify and parse round-trip, provider ids pass through untouched", () => {

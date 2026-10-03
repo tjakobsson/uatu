@@ -5,7 +5,7 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import { ConversationInventoryBroadcaster } from "../chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../chat/service";
-import { isLiveConversationStatus, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
+import { isLiveConversationStatus, type ChatAccountChange, type AgentUsageReport, type BackgroundTaskOutput, type UsageReadMode, type UsageReadResult, type ChatActivity, type ChatAvailability, type ConversationSnapshot, type ConversationStatus, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type ReversibleHistoryResult } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError } from "../chat/adapter";
 import { ReversibleHistoryTargetError, InvalidQuestionAnswerError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../chat/provider";
@@ -40,6 +40,8 @@ class FakeChatService implements WorkspaceChatService {
 
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
   async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
+  accountChanges: ChatAccountChange[] = [];
+  async accountsChanged(change: ChatAccountChange): Promise<void> { this.accountChanges.push(change); }
   async models() { return [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }]; }
   usageReport: AgentUsageReport | null = null;
   usageReads: Array<{ requestId: string; mode: UsageReadMode }> = [];
@@ -304,6 +306,25 @@ describe("workspace chat routes", () => {
     expect((await post({ agentId: "nobody", requestId: "r1", mode: "start" })).status).toBe(404);
     expect(await (await post({ agentId: "opencode", requestId: "r1", mode: "live-only" })).json()).toEqual({ report: service.usageReport });
     expect(service.usageReads).toEqual([{ requestId: "r1", mode: "live-only" }]);
+  });
+
+  test("a login change from the Hub reaches the agent through the mutation gate, validated", async () => {
+    const service = new FakeChatService();
+    const table = routes(service, "/s/project/");
+    const handler = table["/s/project/api/chat/accounts-changed"] as { POST(request: Request): Promise<Response> };
+    const post = (body: unknown, origin = "http://127.0.0.1:4711") => handler.POST(request("/s/project/api/chat/accounts-changed", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }));
+    expect((await handler.POST(new Request("http://127.0.0.1:4711/s/project/api/chat/accounts-changed", { method: "POST", body: "{}" }))).status).toBe(401);
+    expect((await post({ agentId: "opencode", change: { kind: "added" } }, "https://attacker.example")).status).toBe(403);
+    expect((await post({ agentId: "opencode", change: { kind: "removed", target: "groq" } })).status).toBe(400);
+    expect((await post({ agentId: "opencode", change: { kind: "added", extra: 1 } })).status).toBe(400);
+    expect((await post({ agentId: "opencode", change: { kind: "deleted" } })).status).toBe(400);
+    expect((await post({ agentId: "nobody", change: { kind: "added" } })).status).toBe(404);
+    expect((await post({ agentId: "opencode", change: { kind: "removed", target: "groq", credential: "groq" } })).status).toBe(200);
+    expect((await post({ agentId: "opencode", change: { kind: "activated", credential: "cred_b" } })).status).toBe(200);
+    expect(service.accountChanges).toEqual([
+      { kind: "removed", target: "groq", credential: "groq" },
+      { kind: "activated", credential: "cred_b" },
+    ]);
   });
 
   test("streams the normalized initial inventory signal under a relocated base path", async () => {

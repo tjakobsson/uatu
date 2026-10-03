@@ -106,6 +106,13 @@ export function credentialRuntimePath(stateRoot: string): string {
   return path.join(stateRoot, "credential-runtime");
 }
 
+// The working directory of the Hub's own short-lived agent runtimes, which
+// exist only to read and change the machine's agent logins. Nothing secret is
+// written here: logins live in each agent's own store.
+export function agentAccountsPath(stateRoot: string): string {
+  return path.join(stateRoot, "agent-accounts");
+}
+
 async function assertPrivateDirectory(directory: string): Promise<void> {
   const stats = await fs.lstat(directory);
   if (stats.isSymbolicLink()) throw new Error(`refusing symlink for Hub private directory: ${directory}`);
@@ -264,4 +271,5 @@ export async function ensureCredentialStateDirs(stateRoot: string): Promise<void
   await ensurePrivateDirectory(credentialSecretsPath(stateRoot));
   await ensurePrivateDirectory(credentialGnuPgPath(stateRoot));
   await ensurePrivateDirectory(credentialRuntimePath(stateRoot));
+  await ensurePrivateDirectory(agentAccountsPath(stateRoot));
 }

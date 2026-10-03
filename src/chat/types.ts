@@ -118,13 +118,34 @@ export type ChatAvailability =
   // `agent` is absent for the moment between the runtime reporting ready and
   // the adapter existing to describe it. A surface that has no agent yet says
   // nothing about one rather than guessing a name.
-  | { state: "ready"; version: string; agent?: ChatAgent }
+  // `login`: whether the machine's logins let the agent run a turn, as the
+  // agent last said (absent until it has). `accountsRevision`: bumped on every
+  // login change made through the Hub's Agent accounts, so a client knows to
+  // re-read this agent's catalogs.
+  | { state: "ready"; version: string; agent?: ChatAgent; login?: ChatLoginState; accountsRevision?: number }
   | {
     state: "unavailable";
     reason: "not-installed" | "startup-failed" | "unsupported";
     message: string;
     diagnostics?: ChatStartupDiagnostics;
   };
+
+/**
+ * Whether the machine's logins let an agent run a turn. `missing`: nothing
+ * usable (Claude Code: no login or key; OpenCode: no model offered at all,
+ * since its free models need none). `unknown`: the agent has not said.
+ */
+export type ChatLoginState = "ok" | "missing" | "unknown";
+
+/**
+ * A login change made through the Hub's Agent accounts, as a running
+ * workspace hears about it. `removed` and `activated` name what changed so
+ * the workspace can replay it on its own agent server.
+ */
+export type ChatAccountChange =
+  | { kind: "added" }
+  | { kind: "removed"; target: string; credential: string }
+  | { kind: "activated"; credential: string };
 
 // `background`: no turn is running, but the agent still holds live background
 // work (a backgrounded command, a subagent, a monitor). Distinct from both
@@ -526,6 +547,16 @@ export type NoticeItem = TimelineItemBase & {
  * the same contract `context_report` has with the context readout.
  */
 export const RATE_LIMIT_ITEM_ID = "notice:rate-limit";
+
+/**
+ * Notice codes for the agent's login. `login-failed`: a turn failed because
+ * the agent's login is missing, expired, or refused; the message is the
+ * agent's own words, and the surface offers a way to log in. A timeline row.
+ * `reauthenticating`: the agent is signing in again mid-session; one item,
+ * retired when it finishes.
+ */
+export const LOGIN_FAILED_NOTICE_CODE = "login-failed";
+export const REAUTHENTICATING_NOTICE_CODE = "reauthenticating";
 
 /**
  * The notice codes that carry a standing. Exactly these two: the contract

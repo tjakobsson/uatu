@@ -440,6 +440,72 @@ describe("chat permission confirmation", () => {
   });
 });
 
+describe("agent logins", () => {
+  test("a login change re-reads the catalog, believes an empty list, and the composer says the agent is not logged in", async () => {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const model = (name: string) => ({ selection: { providerId: "groq", modelId: name }, provider: "Groq", name });
+    let login: "ok" | "missing" = "ok";
+    let revision = 0;
+    let catalog = [model("llama")];
+    let modelReads = 0;
+    let statusReads = 0;
+    let inventory: { invalidation(event: unknown): void } | undefined;
+    const api = {
+      status: async () => {
+        statusReads += 1;
+        return [{
+          agent: { id: "opencode", name: "OpenCode" },
+          availability: { state: "ready", version: "1.18.34", agent: { id: "opencode", name: "OpenCode", capabilities: ["models"] }, login, ...(revision ? { accountsRevision: revision } : {}) },
+        }];
+      },
+      conversations: async () => [{ ...conversation("one"), agent: { id: "opencode", name: "OpenCode" } }],
+      commands: async () => [],
+      models: async () => { modelReads += 1; return catalog; },
+      snapshot: async (id: string) => snapshot(id),
+      stream: () => ({ close() {} }),
+      inventoryStream: (handlers: { invalidation(event: unknown): void }) => { inventory = handlers; return { close() {} }; },
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+
+    const { initChat } = await import(`./ui.ts?agent-logins-ui-test=${Date.now()}`);
+    initChat(api);
+    const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+    const notice = document.querySelector<HTMLElement>("#chat-login-notice")!;
+    const empty = document.querySelector<HTMLElement>("#chat-configuration-empty")!;
+    await waitUntil(() => !form.hidden && modelReads === 1 && inventory !== undefined, () => document.querySelector("#chat-state")?.textContent ?? "no chat state");
+    expect(notice.hidden).toBe(true);
+
+    // The last provider is logged out through Agent accounts: the workspace
+    // bumps the revision and ticks the inventory.
+    login = "missing";
+    revision = 1;
+    catalog = [];
+    inventory!.invalidation({ type: "conversation.inventory" });
+    await waitUntil(() => modelReads === 2 && !notice.hidden, () => `model reads ${modelReads}, notice hidden ${notice.hidden}`);
+    expect(notice.textContent).toBe("OpenCode is not logged in. Run opencode auth login where UatuCode runs.");
+    await waitUntil(() => !empty.hidden && (empty.textContent ?? "").startsWith("No provider is logged in."), () => `picker empty: ${empty.hidden} ${empty.textContent}`);
+
+    // Logging in again clears the notice and the models come back.
+    login = "ok";
+    revision = 2;
+    catalog = [model("llama")];
+    const before = statusReads;
+    inventory!.invalidation({ type: "conversation.inventory" });
+    await waitUntil(() => statusReads > before && modelReads === 3 && notice.hidden === true, () => `model reads ${modelReads}, notice hidden ${notice.hidden}`);
+    await waitUntil(() => empty.hidden === true, () => `picker empty: ${empty.hidden} ${empty.textContent}`);
+
+    // A tick that changes nothing re-reads status but not the catalog.
+    const settled = statusReads;
+    inventory!.invalidation({ type: "conversation.inventory" });
+    await waitUntil(() => statusReads > settled);
+    expect(modelReads).toBe(3);
+  });
+});
+
 describe("chat scheduled wakeups", () => {
   test("the composer lists pending wakeups and Release calls the control once, then the state clears", async () => {
     const { document, window } = parseHTML(html);

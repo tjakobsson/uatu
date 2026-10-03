@@ -366,6 +366,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     message?: string;
     capabilities?: ChatCapability[];
     models?: ChatModel[];
+    login?: string;
     commands?: ChatCommand[];
     child?: boolean;
     invalidate?: boolean;
@@ -527,6 +528,13 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "models":
       targetFake.setModels(body.models ?? []);
       return Response.json({ ok: true });
+    // The agent's login, as it reports it on status (agent-accounts). The
+    // inventory is ticked so an open page re-reads status at once.
+    case "login":
+      targetFake.setLogin(body.login === "ok" || body.login === "missing" || body.login === "unknown" ? body.login : undefined);
+      return Response.json({ ok: true });
+    case "accountChanges":
+      return Response.json({ changes: targetFake.accountChanges });
     case "commands":
       targetFake.setExtraCommands(body.commands ?? []);
       return Response.json({ ok: true });

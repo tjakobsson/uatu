@@ -11,6 +11,7 @@ import { stripWindowMarker } from "./models";
 import { ClaudeProvider } from "./provider";
 import { ClaudeRuntime } from "./runtime";
 import { claudeConfigDir, claudeProjectDir } from "./transcript";
+import { CLAUDE_METHOD_CONSOLE, CLAUDE_METHOD_SUBSCRIPTION, ClaudeAccountAdapter } from "../../hub/agent-account-claude";
 
 // Opt-in only: this spends real tokens against the developer's own
 // authenticated `claude` install. Run with UATU_REAL_CLAUDE=1.
@@ -22,6 +23,52 @@ afterEach(async () => {
 });
 
 describe.skipIf(!enabled)("real Claude Code integration", () => {
+  test("Agent accounts on an isolated config: no login is reported, both methods start at the code page, and the real login is untouched", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-real-claude-accounts-"));
+    temporaryRoots.push(root);
+    const workspace = path.join(root, "workspace");
+    const configDir = path.join(root, "config");
+    await mkdir(workspace);
+    await mkdir(configDir);
+    const runtime = new ClaudeRuntime({ workspacePath: workspace });
+    const availability = await runtime.ensure();
+    if (availability.state !== "ready") return;
+    // The Hub's environment, without any login a variable could supply, and
+    // with Claude Code's whole configuration in a throwaway folder.
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && !key.startsWith("ANTHROPIC_") && !key.startsWith("CLAUDE_CODE_OAUTH_TOKEN")) env[key] = value;
+    }
+    env.CLAUDE_CONFIG_DIR = configDir;
+    const realFiles = [path.join(os.homedir(), ".claude.json"), path.join(claudeConfigDir(), ".credentials.json"), path.join(claudeConfigDir(), "settings.json")];
+    const snapshot = () => realFiles.map(file => (existsSync(file) ? readFileSync(file).toString("base64") : null));
+    const before = snapshot();
+
+    const adapter = new ClaudeAccountAdapter({ cwd: workspace, executable: runtime.executablePath()!, env });
+    try {
+      const started = Date.now();
+      const status = await adapter.status();
+      console.log(`[agent accounts] status read in ${Date.now() - started} ms`);
+      expect(status.claude).toEqual({ source: "none" });
+      expect(status.methods.map(method => method.id)).toEqual([CLAUDE_METHOD_SUBSCRIPTION, CLAUDE_METHOD_CONSOLE]);
+      expect(adapter.capabilities).toEqual({ login: true, logout: false, activate: false });
+      for (const method of [CLAUDE_METHOD_SUBSCRIPTION, CLAUDE_METHOD_CONSOLE]) {
+        const login = await adapter.startLogin("claude", method);
+        expect(login.completion).toBe("code");
+        expect(login.callback).toBeNull();
+        const redirect = new URL(new URL(login.url).searchParams.get("redirect_uri")!);
+        console.log(`[agent accounts] ${method} redirects to ${redirect.origin}${redirect.pathname}`);
+        // A page that shows the code to paste back, never a loopback listener.
+        expect(redirect.protocol).toBe("https:");
+        expect(redirect.pathname.endsWith("/oauth/code/callback")).toBe(true);
+        await login.cancel();
+      }
+    } finally {
+      await adapter.dispose();
+    }
+    expect(snapshot()).toEqual(before);
+  }, 90_000);
+
   test("a usage read in a workspace without a conversation lists no session afterwards", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-real-claude-usage-"));
     temporaryRoots.push(root);
