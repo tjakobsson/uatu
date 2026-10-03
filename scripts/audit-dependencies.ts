@@ -26,15 +26,25 @@ const BLOCKING_SEVERITIES = new Set(["moderate", "high", "critical"]);
  * True when some stable published version is outside the vulnerable range and
  * newer than the oldest vulnerable one. That's an upgrade target. Versions
  * older than every vulnerable release, from before the bug existed, don't count.
+ *
+ * Throws when no published version is in the vulnerable range at all. bun
+ * audit reported one installed, so the version list contradicts the audit,
+ * and neither verdict would be true.
  */
 export function hasPatchedRelease(vulnerableRange: string, published: string[]): boolean {
-  const stable = published.filter(version => !version.includes("-"));
-  const vulnerable = stable.filter(version => Bun.semver.satisfies(version, vulnerableRange));
-  if (vulnerable.length === 0) return true;
+  const vulnerable = published.filter(version => Bun.semver.satisfies(version, vulnerableRange));
+  if (vulnerable.length === 0) {
+    throw new Error(
+      `none of its ${published.length} published versions is in the vulnerable range ${vulnerableRange}, ` +
+        "so there's nothing to compare a fix against",
+    );
+  }
   const oldestVulnerable = vulnerable.reduce((a, b) => (Bun.semver.order(a, b) <= 0 ? a : b));
-  return stable.some(
+  return published.some(
     version =>
-      !Bun.semver.satisfies(version, vulnerableRange) && Bun.semver.order(version, oldestVulnerable) > 0,
+      !version.includes("-") &&
+      !Bun.semver.satisfies(version, vulnerableRange) &&
+      Bun.semver.order(version, oldestVulnerable) > 0,
   );
 }
 
@@ -109,9 +119,9 @@ async function main(): Promise<number> {
     try {
       verdicts = await classifyPackage(advisories, () => publishedVersions(pkg));
     } catch (error) {
-      // Fail closed: without the version list we can't tell a fixable advisory
-      // from an unpatched one.
-      console.error(`Couldn't read ${pkg}'s published versions: ${(error as Error).message}`);
+      // Fail closed: without a usable version list we can't tell a fixable
+      // advisory from an unpatched one.
+      console.error(`Couldn't classify ${pkg}'s advisories: ${(error as Error).message}`);
       return 1;
     }
     const why = Bun.spawnSync(["bun", "why", pkg], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();

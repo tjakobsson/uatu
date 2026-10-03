@@ -74,4 +74,15 @@ describe("audit-dependencies", () => {
     );
     expect(verdicts).toEqual(["low", "fixable"]);
   });
+
+  test("a version list with nothing in the vulnerable range is an error, not a fix", () => {
+    expect(() => hasPatchedRelease("<=3.0.3", [])).toThrow("vulnerable range");
+    expect(() => hasPatchedRelease("<=3.0.3", ["3.0.4", "3.1.0"])).toThrow("vulnerable range");
+  });
+
+  test("a vulnerable prerelease anchors the comparison, but only a stable release is a fix", () => {
+    const range = ">=4.0.0-beta.1 <4.0.0-beta.3";
+    expect(hasPatchedRelease(range, ["4.0.0-beta.1", "4.0.0-beta.3"])).toBe(false);
+    expect(hasPatchedRelease(range, ["4.0.0-beta.1", "4.0.0"])).toBe(true);
+  });
 });
