@@ -65,6 +65,21 @@ export function parseAuditOutput(stdout: string, exitCode: number | null): Recor
   return report as Record<string, Advisory[]>;
 }
 
+/**
+ * Classifies one package's advisories, asking for its published versions only
+ * when one of them could block. Low advisories never block, so a package that
+ * has only those can't fail the gate through a failed registry lookup.
+ */
+export async function classifyPackage(
+  advisories: Advisory[],
+  lookupVersions: () => Promise<string[]>,
+): Promise<Verdict[]> {
+  const published = advisories.some(advisory => BLOCKING_SEVERITIES.has(advisory.severity))
+    ? await lookupVersions()
+    : [];
+  return advisories.map(advisory => classify(advisory, published));
+}
+
 async function publishedVersions(pkg: string): Promise<string[]> {
   const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, {
     headers: { accept: "application/vnd.npm.install-v1+json" },
@@ -90,9 +105,9 @@ async function main(): Promise<number> {
   let fixable = 0;
   let unpatched = 0;
   for (const [pkg, advisories] of Object.entries(report).sort(([a], [b]) => a.localeCompare(b))) {
-    let published: string[];
+    let verdicts: Verdict[];
     try {
-      published = await publishedVersions(pkg);
+      verdicts = await classifyPackage(advisories, () => publishedVersions(pkg));
     } catch (error) {
       // Fail closed: without the version list we can't tell a fixable advisory
       // from an unpatched one.
@@ -100,8 +115,8 @@ async function main(): Promise<number> {
       return 1;
     }
     const why = Bun.spawnSync(["bun", "why", pkg], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
-    for (const advisory of advisories) {
-      const verdict = classify(advisory, published);
+    for (const [index, advisory] of advisories.entries()) {
+      const verdict = verdicts[index];
       const line = `${pkg} ${advisory.vulnerable_versions} (${advisory.severity}): ${advisory.title} ${advisory.url}`;
       if (verdict === "fixable") {
         fixable++;

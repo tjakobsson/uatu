@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { type Advisory, classify, hasPatchedRelease, parseAuditOutput } from "./audit-dependencies";
+import { type Advisory, classify, classifyPackage, hasPatchedRelease, parseAuditOutput } from "./audit-dependencies";
 
 function advisory(severity: string, vulnerable_versions: string): Advisory {
   return { id: 1, url: "https://github.com/advisories/GHSA-test", title: "test", severity, vulnerable_versions };
@@ -56,5 +56,22 @@ describe("audit-dependencies", () => {
     expect(typeof parseAuditOutput("audit request failed", 1)).toBe("string");
     expect(typeof parseAuditOutput("[]", 0)).toBe("string");
     expect(typeof parseAuditOutput('{"braces": "nope"}', 1)).toBe("string");
+  });
+
+  test("a package with only low advisories needs no version lookup", async () => {
+    const failingLookup = () => Promise.reject(new Error("registry down"));
+    expect(await classifyPackage([advisory("low", "<=3.0.3")], failingLookup)).toEqual(["low"]);
+  });
+
+  test("a package with a blocking advisory looks its versions up, and a failed lookup throws", async () => {
+    const failingLookup = () => Promise.reject(new Error("registry down"));
+    await expect(classifyPackage([advisory("low", "<1.0.0"), advisory("high", "<=3.0.3")], failingLookup)).rejects.toThrow(
+      "registry down",
+    );
+    const verdicts = await classifyPackage(
+      [advisory("low", "<1.0.0"), advisory("high", "<=3.0.3")],
+      async () => ["3.0.3", "3.0.4"],
+    );
+    expect(verdicts).toEqual(["low", "fixable"]);
   });
 });
