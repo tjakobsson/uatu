@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { type Advisory, classify, hasPatchedRelease } from "./audit-dependencies";
+import { type Advisory, classify, hasPatchedRelease, parseAuditOutput } from "./audit-dependencies";
 
 function advisory(severity: string, vulnerable_versions: string): Advisory {
   return { id: 1, url: "https://github.com/advisories/GHSA-test", title: "test", severity, vulnerable_versions };
@@ -35,5 +35,26 @@ describe("audit-dependencies", () => {
 
   test("a low advisory never blocks, patched or not", () => {
     expect(classify(advisory("low", "<=3.0.3"), ["3.0.3", "3.0.4"])).toBe("low");
+  });
+
+  test("a clean audit is an empty report", () => {
+    expect(parseAuditOutput("{}\n", 0)).toEqual({});
+  });
+
+  test("an audit with advisories returns them despite its nonzero exit", () => {
+    const stdout = JSON.stringify({ braces: [advisory("high", "<=3.0.3")] });
+    expect(parseAuditOutput(stdout, 1)).toEqual({ braces: [advisory("high", "<=3.0.3")] });
+  });
+
+  test("a failed advisory request is an error, not a clean report", () => {
+    expect(typeof parseAuditOutput("", 1)).toBe("string");
+    expect(typeof parseAuditOutput("", 0)).toBe("string");
+    expect(typeof parseAuditOutput("{}", 1)).toBe("string");
+  });
+
+  test("output that isn't a report is an error", () => {
+    expect(typeof parseAuditOutput("audit request failed", 1)).toBe("string");
+    expect(typeof parseAuditOutput("[]", 0)).toBe("string");
+    expect(typeof parseAuditOutput('{"braces": "nope"}', 1)).toBe("string");
   });
 });

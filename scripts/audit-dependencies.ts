@@ -43,8 +43,30 @@ export function classify(advisory: Advisory, published: string[]): Verdict {
   return hasPatchedRelease(advisory.vulnerable_versions, published) ? "fixable" : "unpatched";
 }
 
+/**
+ * Reads `bun audit --json`. A clean tree prints `{}` and exits 0; advisories
+ * print an object of them and exit 1. Anything else, including the empty
+ * stdout and exit 1 of a failed advisory request, means no audit happened.
+ */
+export function parseAuditOutput(stdout: string, exitCode: number | null): Record<string, Advisory[]> | string {
+  const text = stdout.trim();
+  let report: unknown;
+  try {
+    report = JSON.parse(text);
+  } catch {
+    return `bun audit --json exited ${exitCode} without a JSON report${text === "" ? "" : `:\n${text}`}`;
+  }
+  if (typeof report !== "object" || report === null || Array.isArray(report)) {
+    return `bun audit --json printed something other than a report:\n${text}`;
+  }
+  const entries = Object.values(report);
+  if (!entries.every(Array.isArray)) return `bun audit --json printed a report of an unexpected shape:\n${text}`;
+  if (exitCode !== 0 && entries.length === 0) return `bun audit --json exited ${exitCode} with an empty report`;
+  return report as Record<string, Advisory[]>;
+}
+
 async function publishedVersions(pkg: string): Promise<string[]> {
-  const response = await fetch(`https://registry.npmjs.org/${pkg.replace("/", "%2f")}`, {
+  const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, {
     headers: { accept: "application/vnd.npm.install-v1+json" },
   });
   if (!response.ok) throw new Error(`npm registry answered ${response.status} for ${pkg}`);
@@ -58,12 +80,9 @@ function ghsaOf(advisory: Advisory): string {
 
 async function main(): Promise<number> {
   const audit = Bun.spawnSync(["bun", "audit", "--json"], { stdout: "pipe", stderr: "inherit" });
-  const text = audit.stdout.toString().trim();
-  let report: Record<string, Advisory[]>;
-  try {
-    report = text === "" ? {} : JSON.parse(text);
-  } catch {
-    console.error(`bun audit --json printed something that isn't JSON:\n${text}`);
+  const report = parseAuditOutput(audit.stdout.toString(), audit.exitCode);
+  if (typeof report === "string") {
+    console.error(report);
     return 1;
   }
 
