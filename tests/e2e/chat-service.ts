@@ -172,9 +172,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private accountsRevision = 0;
   readonly accountChanges: ChatAccountChange[] = [];
 
-  setLogin(login: ChatLoginState | undefined): void {
+  setLogin(login: ChatLoginState | undefined, options: { silent?: boolean } = {}): void {
     this.login = login;
-    this.invalidateInventory();
+    if (!options.silent) this.invalidateInventory();
   }
 
   async accountsChanged(change: ChatAccountChange): Promise<void> {

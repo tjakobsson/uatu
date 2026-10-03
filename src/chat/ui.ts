@@ -582,7 +582,9 @@ export function initChat(api = new ChatApiClient()): void {
       try {
         setAgentStatuses(await api.status());
       } catch {
-        // The next tick or poll asks again.
+        // The next tick asks again. A login poll whose read failed has nothing
+        // else to wake it, so it is scheduled again from the last known state.
+        scheduleLoginPoll(contextLoginState());
       }
     })().finally(() => {
       statusReread = null;

@@ -245,12 +245,13 @@ export class AgentAccountService {
   /** Cancels the target's unfinished attempt, starts the new one, and records it; never two at once per agent. */
   private async startLoginNow(entry: AgentEntry, target: string, methodId: string, answers: Record<string, unknown>): Promise<void> {
     const agent = entry.agent;
-    const adapter = await this.adapterFor(entry);
     for (const existing of this.attempts.values()) {
       if (existing.attempt.agent === agent && existing.attempt.target === target && existing.attempt.state === "pending") {
         await this.cancelEntry(existing);
       }
     }
+    // Taken after the cancels: one the agent missed restarts the runtime.
+    const adapter = await this.adapterFor(entry);
     const typed = answerValues(answers);
     const login = await this.scrubbed(typed, () =>
       // A login the agent starts after the deadline has nobody to finish it.
@@ -306,8 +307,9 @@ export class AgentAccountService {
       throw new AccountOperationError("This login does not take a code.");
     }
     attempt.secrets.push(code);
-    this.touch(this.entry(attempt.attempt.agent));
-    await this.scrubbed(attempt.secrets, () => attempt.login.submitCode!(code));
+    const entry = this.entry(attempt.attempt.agent);
+    this.touch(entry);
+    await this.scrubbed(attempt.secrets, () => this.answered(entry, () => attempt.login.submitCode!(code)));
     await Promise.race([attempt.settled, this.sleep(this.settleWaitMs)]);
     return this.snapshot();
   }
@@ -333,7 +335,8 @@ export class AgentAccountService {
   async cancel(attemptId: string): Promise<AgentAccountsSnapshot> {
     const attempt = this.attempts.get(attemptId);
     if (!attempt) throw new AttemptNotFoundError();
-    if (attempt.attempt.state === "pending") await this.cancelEntry(attempt);
+    // Settled at once; the agent's side ends in the background, within its deadline.
+    if (attempt.attempt.state === "pending") void this.cancelEntry(attempt);
     return this.snapshot();
   }
 
@@ -364,7 +367,7 @@ export class AgentAccountService {
       this.timers.clearTimeout(attempt.retainTimer);
       if (attempt.attempt.state === "pending") {
         attempt.cancelled = true;
-        await attempt.login.cancel().catch(() => undefined);
+        await this.answered(this.entry(attempt.attempt.agent), () => attempt.login.cancel()).catch(() => undefined);
       }
     }
     this.attempts.clear();
@@ -413,6 +416,13 @@ export class AgentAccountService {
     entry.refreshedAt = Number.NEGATIVE_INFINITY;
     // The last read stays on show; the next request starts a runtime and re-reads.
     if (entry.status.state === "ready") entry.status = { ...entry.status, state: "idle" };
+    // A login runs inside the runtime, so a stopped one can't finish. Idle
+    // stops wait for logins to end, so these are runtimes that stopped answering.
+    for (const attempt of this.attempts.values()) {
+      if (attempt.attempt.agent !== entry.agent || attempt.attempt.state !== "pending") continue;
+      attempt.cancelled = true;
+      this.settle(attempt, "failed", `${entry.status.name} stopped answering, so this login can't finish. Start it again.`);
+    }
     await runtime?.stop().catch(() => undefined);
   }
 
@@ -569,17 +579,18 @@ export class AgentAccountService {
     }
   }
 
+  /** Settles the attempt at once, then has the agent end its side, within the answer deadline. */
   private async cancelEntry(attempt: AttemptEntry): Promise<void> {
     attempt.cancelled = true;
-    await attempt.login.cancel().catch(() => undefined);
     this.settle(attempt, "cancelled");
+    await this.answered(this.entry(attempt.attempt.agent), () => attempt.login.cancel()).catch(() => undefined);
   }
 
   private async expire(attempt: AttemptEntry): Promise<void> {
     if (attempt.attempt.state !== "pending") return;
     this.settle(attempt, "expired");
     attempt.cancelled = true;
-    await attempt.login.cancel().catch(() => undefined);
+    await this.answered(this.entry(attempt.attempt.agent), () => attempt.login.cancel()).catch(() => undefined);
   }
 
   private settle(attempt: AttemptEntry, state: Exclude<AccountAttemptState, "pending">, message?: string): void {

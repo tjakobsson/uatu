@@ -38,8 +38,9 @@ helper command, SHALL be listed with what the user does instead: the
 variable to set in the Hub's environment, or the agent's own login command.
 An agent that is not installed or cannot be reached SHALL be reported with
 its diagnostic, without hiding the other agents. An agent that does not
-answer a status read, a login start, or a login change within a bounded time
-SHALL be reported as not answering, and SHALL NOT hold up later requests; the
+answer a status read or any step of a login, logout, or switch within a
+bounded time SHALL be reported as not answering, and SHALL NOT hold up later
+requests; a login it had in progress SHALL be reported as failed, and the
 next request SHALL start it again. Status reads SHALL NOT start a login, change a credential, or spend
 model tokens.
 

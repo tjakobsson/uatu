@@ -231,6 +231,37 @@ describe("answer deadline", () => {
     expect(adapters.opencode.logins.map(login => login.cancelled)).toEqual([false, true]);
   });
 
+  test("a code the agent never answers is refused at the deadline, and the login fails instead of waiting", async () => {
+    const { service, adapters, clock } = harness();
+    adapters.opencode.completion = "code";
+    const { attempts } = await service.startLogin("opencode", "groq", "0", {});
+    adapters.opencode.logins[0]!.login.submitCode = () => new Promise(() => undefined);
+    const submitted = service.submitCode(attempts[0]!.id, "pasted-code").catch(caught => caught);
+    await flush();
+    await clock.advance(30_000);
+    expect(await submitted).toBeInstanceOf(AgentNotReadyError);
+    expect(service.isRunning("opencode")).toBe(false);
+    expect(service.snapshot().attempts[0]).toMatchObject({ state: "failed", message: "OpenCode stopped answering, so this login can't finish. Start it again." });
+  });
+
+  test("cancel answers at once even when the agent never ends its side", async () => {
+    const { service, adapters } = harness();
+    const { attempts } = await service.startLogin("opencode", "groq", "0", {});
+    adapters.opencode.logins[0]!.login.cancel = () => new Promise(() => undefined);
+    expect((await service.cancel(attempts[0]!.id)).attempts[0]?.state).toBe("cancelled");
+  });
+
+  test("a replacement start behind a cancel the agent never answers goes ahead on a restarted runtime", async () => {
+    const { service, adapters, runtimes, clock } = harness();
+    await service.startLogin("opencode", "groq", "0", {});
+    adapters.opencode.logins[0]!.login.cancel = () => new Promise(() => undefined);
+    const replacement = service.startLogin("opencode", "groq", "1", {});
+    await flush();
+    await clock.advance(30_000);
+    expect((await replacement).attempts.map(attempt => [attempt.methodId, attempt.state])).toEqual([["0", "cancelled"], ["1", "pending"]]);
+    expect(runtimes.filter(runtime => runtime.adapter === adapters.opencode).map(runtime => runtime.stops)).toEqual([1, 0]);
+  });
+
   test("a change that never answers does not hold up the next change", async () => {
     const { service, adapters, clock } = harness();
     await service.read();

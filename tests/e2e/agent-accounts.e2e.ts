@@ -289,6 +289,29 @@ test.describe("chat and agent logins", () => {
     await expect(session.locator(".chat-configuration-model").first()).toBeVisible();
   });
 
+  test("a login made outside UatuCode clears the notice, even after a status read failed", async ({ hub, hubContext }) => {
+    const workspace = hub.workspaces[0]!;
+    await childChatControl(workspace, { action: "login", login: "missing" });
+    const session = await openSessionTab(hubContext, workspace);
+    await openChatPanel(session);
+    const notice = session.locator("#chat-login-notice");
+    await expect(notice).toContainText("OpenCode is not logged in.");
+    // The next login poll's read fails; only that poll can notice a login
+    // made in a terminal, which sends no tick.
+    let failed = 0;
+    await session.route("**/api/chat/status*", async route => {
+      if (failed === 0) {
+        failed += 1;
+        await route.fulfill({ status: 503, body: "unavailable" });
+      } else {
+        await route.continue();
+      }
+    });
+    await expect.poll(() => failed, { timeout: 10_000 }).toBe(1);
+    await childChatControl(workspace, { action: "login", login: "ok", silent: true });
+    await expect(notice).toBeHidden({ timeout: 15_000 });
+  });
+
   test("a turn that failed on the login names the agent, keeps its words, and links to log in", async ({ browser, hub, hubContext }, testInfo) => {
     const workspace = hub.workspaces[0]!;
     const seeded = await childChatControl(workspace, {

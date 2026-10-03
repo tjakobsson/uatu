@@ -367,6 +367,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     capabilities?: ChatCapability[];
     models?: ChatModel[];
     login?: string;
+    silent?: boolean;
     commands?: ChatCommand[];
     child?: boolean;
     invalidate?: boolean;
@@ -529,9 +530,10 @@ async function handleE2EChat(request: Request): Promise<Response> {
       targetFake.setModels(body.models ?? []);
       return Response.json({ ok: true });
     // The agent's login, as it reports it on status (agent-accounts). The
-    // inventory is ticked so an open page re-reads status at once.
+    // inventory is ticked so an open page re-reads status at once, unless
+    // `silent`: a login made in a terminal, which no tick announces.
     case "login":
-      targetFake.setLogin(body.login === "ok" || body.login === "missing" || body.login === "unknown" ? body.login : undefined);
+      targetFake.setLogin(body.login === "ok" || body.login === "missing" || body.login === "unknown" ? body.login : undefined, { silent: body.silent === true });
       return Response.json({ ok: true });
     case "accountChanges":
       return Response.json({ changes: targetFake.accountChanges });
