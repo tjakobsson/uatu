@@ -359,7 +359,7 @@ A history snapshot SHALL identify a stream cursor; reconnecting from a retained 
 ### Requirement: Chat presents turns as readable conversation with inspectable activity
 The web Chat surface SHALL render user prompts and streamed assistant Markdown as the primary conversation, with safe code rendering consistent with UatuCode's existing rendering posture. Reasoning, tool calls, command execution, file changes, and tool results SHALL be represented as subordinate, inspectable activity with running, completed, failed, and cancelled states rather than flattened into assistant prose. Every activity row SHALL name what it acted on where the agent reported it, including a shell command's command line, a file operation's path, and a search's pattern, so a row and any group summary it joins are legible without being opened. While a tool or command runs, its output SHALL be shown as it streams rather than only on completion, and its elapsed time SHALL be shown where the agent reports progress without output, so long-running activity shows progress. A finished non-shell tool's output SHALL retain its summary and bounded preview with a way to see the rest. Shell tools and normalized command items SHALL instead present a summary and one bounded-height scrollback viewport containing all available provider-supplied output, while running and after completion. Earlier shell output SHALL be reachable by scrolling rather than a separate preview or "Show more lines" disclosure. A command that completes before the surface renders a running update MUST still retain inspectable output and its provider-reported completion or failure state. Untrusted Markdown, tool output, filenames, and errors MUST NOT create active markup or script execution.
 
-While a turn is running, the trailing run of activity SHALL be collapsed behind a single working line rather than rendered as flat rows. The line SHALL carry a live indicator, the elapsed time of the turn, and the step currently in flight, and SHALL be present from the moment the prompt is accepted, before any step has arrived, so the same line carries the turn from waiting to done. Opening the working line SHALL reveal its member rows with their live state, and a running member with output SHALL still open itself so its output viewport is visible. Shell output SHALL initially follow the bottom and respect subsequent reader scrolling. A working line the reader opened SHALL remain open when the turn finishes and the line settles into the finished group summary. Popping out or resizing shell output SHALL count as the reader opening both the output and its containing activity group. That output and group SHALL remain open on completion or failure. A group line SHALL carry a status indicator, live while its turn runs, neutral when every member finished cleanly, and failed when any member failed. A failed outcome MUST NOT rely on colour alone. The line SHALL also state in words that a step failed, in text that is visible and part of the line's accessible name, without the group being opened. The live indicator's motion SHALL honour the reader's reduced-motion preference.
+While a turn is running, the trailing run of activity SHALL be collapsed behind a single working line rather than rendered as flat rows. Activity, for the working line and for finished groups, SHALL include file-change rows: a file change reported between two steps SHALL join the run around it rather than end it, and a file-change row SHALL count as a finished, clean member, never as the step in flight and never as a failed step. A group summary SHALL name a file-change row by its operation and path, after the steps the summary names, and the row itself SHALL state its operation in that same word — Created, Updated, Deleted — wherever it is shown. The line SHALL carry a live indicator, the elapsed time of the turn, and the step currently in flight, and SHALL be present from the moment the prompt is accepted, before any step has arrived, so the same line carries the turn from waiting to done. Opening the working line SHALL reveal its member rows with their live state, and a running member with output SHALL still open itself so its output viewport is visible. Shell output SHALL initially follow the bottom and respect subsequent reader scrolling. A working line the reader opened SHALL remain open when the turn finishes and the line settles into the finished group summary. Popping out or resizing shell output SHALL count as the reader opening both the output and its containing activity group. That output and group SHALL remain open on completion or failure. A group line SHALL carry a status indicator, live while its turn runs, neutral when every member finished cleanly, and failed when any member failed. A failed outcome MUST NOT rely on colour alone. The line SHALL also state in words that a step failed, in text that is visible and part of the line's accessible name, without the group being opened. The live indicator's motion SHALL honour the reader's reduced-motion preference.
 
 #### Scenario: Assistant answer remains visually primary
 - **WHEN** a turn contains assistant text interleaved with multiple tool calls
@@ -445,6 +445,30 @@ While a turn is running, the trailing run of activity SHALL be collapsed behind 
 - **AND** popped-out output remains open on the same item until the reader returns it inline, opens another item, switches conversations, closes its owning child transcript, or the item is removed or its view is disposed
 - **AND** the provider-reported outcome remains visible without resetting the reading state
 
+
+#### Scenario: A file-change row joins the run around it
+- **WHEN** a finished turn reports a tool step, a file change for the path that step wrote, and two more tool steps, with no assistant text between them
+- **THEN** those rows collapse behind one group line
+- **AND** the line counts the file-change row among its steps
+
+#### Scenario: A file-change row stays inside the working line
+- **WHEN** a turn is running and the agent has reported a step, a file change, and a further running step
+- **THEN** none of the three renders as a flat row
+- **AND** the working line names the running step, not the file change
+
+#### Scenario: A group summary names a file change by operation and path
+- **WHEN** a finished group contains a file-change row for `src/foo.ts` reported as an update
+- **THEN** the group line's summary names it as an update of `src/foo.ts`
+- **AND** it does not take a place before the tool steps the summary names
+
+#### Scenario: A file-change row says the same word as its summary
+- **WHEN** a file-change row reported as an update is shown, inside a group or flat
+- **THEN** the row reads "Updated" followed by the path
+- **AND** the word is the one its group summary would count it under
+
+#### Scenario: A file-change row alone does not make a group
+- **WHEN** a finished turn reports a single file change between two assistant messages
+- **THEN** the file-change row renders flat, as it did before
 ### Requirement: Shell output reads as the terminal would render it
 Where a tool's output carries terminal escape sequences, Chat SHALL interpret them rather than show them. Select-graphic-rendition styling, including the 16 standard colours, 256-colour and truecolour foreground and background, bold, dim, italic, underline, inverse, and strikethrough, SHALL be rendered as styling. Carriage-return overwrites and erase-line sequences SHALL be applied so a line that was rewritten in place shows only its final content, and any other control sequence SHALL be removed from the shown text. Interpreting escapes MUST NOT create active markup or script execution, whatever the sequences or the text around them contain.
 

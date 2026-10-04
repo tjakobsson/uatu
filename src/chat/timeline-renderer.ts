@@ -764,10 +764,21 @@ type TimelineSegment = {
 
 const GROUP_MIN = 3;
 
-type ActivityItem = Extract<ConversationItem, { type: "tool" | "command" | "reasoning" | "background_task" }>;
+type ActivityItem = Extract<ConversationItem, { type: "tool" | "command" | "reasoning" | "background_task" | "file_change" }>;
 
 function isActivity(item: ConversationItem): item is ActivityItem {
-  return item.type === "tool" || item.type === "command" || item.type === "reasoning" || item.type === "background_task";
+  return item.type === "tool" || item.type === "command" || item.type === "reasoning" || item.type === "background_task" || item.type === "file_change";
+}
+
+/**
+ * A member's lifecycle state, where it has one. A file-change row reports
+ * what a step did to a file; it is not a step, so it has no state — it never
+ * runs, never fails, and never holds a run back from folding. OpenCode
+ * reports one per touched path on nearly every message, so a run split by
+ * them would never reach GROUP_MIN.
+ */
+function stepStatus(item: ActivityItem): Exclude<ActivityItem, { type: "file_change" }>["status"] | undefined {
+  return item.type === "file_change" ? undefined : item.status;
 }
 
 /**
@@ -797,9 +808,9 @@ export function awaitingFirstResponse(items: readonly ConversationItem[], status
 
 /**
  * Splits the timeline into flat items and groupable runs. A run of
- * consecutive activity rows (tool, command, reasoning, background task)
- * collapses behind one group line when it is long enough and every member
- * has finished. The trailing run of a still-running turn collapses from its
+ * consecutive activity rows (tool, command, reasoning, background task,
+ * file change) collapses behind one group line when it is long enough and
+ * every member has finished. The trailing run of a still-running turn collapses from its
  * very first member instead: that is the work happening now, and one line
  * saying so — opened on demand — keeps the timeline calm while it does.
  * Letting the first steps render flat and then fold at three would be the
@@ -818,7 +829,7 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
   let run: ActivityItem[] = [];
   const flushRun = (isTail: boolean) => {
     if (run.length === 0) return;
-    const finished = run.every(item => item.status !== "running" && item.status !== "pending");
+    const finished = run.every(item => stepStatus(item) !== "running" && stepStatus(item) !== "pending");
     const live = isTail && !acceptedDrafts && isLiveConversationStatus(status);
     segments.push(live || (run.length >= GROUP_MIN && finished)
       ? { group: describeGroup(run, live), items: run }
@@ -845,7 +856,7 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
 }
 
 function describeGroup(run: readonly ActivityItem[], live: boolean): TimelineGroup {
-  const failed = run.filter(item => item.status === "failed").length;
+  const failed = run.filter(item => stepStatus(item) === "failed").length;
   return {
     id: `group:${run[0]!.id}`,
     live,
@@ -867,12 +878,17 @@ function failedLabel(failed: number): string {
 
 /**
  * The step in flight, for the working line: the last member still running or
- * pending, else the last member (between steps, the line names what just
- * happened rather than going blank). Not the rolling summary — "Fetch … ·
- * WebSearch ×3" reads as a ledger, and a status line should read as a status.
+ * pending, else the last step (between steps, the line names what just
+ * happened rather than going blank). A file-change row is passed over for
+ * that: "Updated foo.ts" on a live line reads as a step in flight, and it is
+ * the result of the Edit before it. Only a tail of nothing but file rows
+ * names one. Not the rolling summary — "Fetch … · WebSearch ×3" reads as a
+ * ledger, and a status line should read as a status.
  */
 function currentStep(run: readonly ActivityItem[]): string {
-  const step = run.findLast(item => item.status === "running" || item.status === "pending") ?? run[run.length - 1]!;
+  const step = run.findLast(item => stepStatus(item) === "running" || stepStatus(item) === "pending")
+    ?? run.findLast(item => item.type !== "file_change")
+    ?? run[run.length - 1]!;
   const { label, subject } = stepName(step);
   return subject ? `${label} ${workspaceRelative(subject)}` : label;
 }
@@ -908,14 +924,18 @@ function renderGroup(id: string, awaiting: boolean, open: boolean): string {
  * How a step is named on a group line: its kind, and what it acted on where
  * the agent said. Grouped reasoning stays "Thought" without a duration — the
  * line counts kinds of steps, and per-entry timings belong on the entries.
+ * A file change is named by what happened to the file: "Updated foo.ts".
  */
 function stepName(item: ActivityItem): { label: string; subject: string | undefined } {
+  if (item.type === "file_change") return { label: FILE_CHANGE_LABELS[item.operation], subject: item.path };
   if (item.type === "command") return { label: "Shell", subject: commandSubject(item.command) };
   if (item.type === "reasoning") return { label: item.label ?? (item.status === "completed" ? "Thought" : "Thinking"), subject: undefined };
   if (item.type === "background_task") return { label: backgroundTaskLabel(item), subject: item.description };
   const detail = describeToolDetail(item);
   return { label: detail.label, subject: toolSubject(detail) };
 }
+
+const FILE_CHANGE_LABELS: Record<Extract<ConversationItem, { type: "file_change" }>["operation"], string> = { create: "Created", update: "Updated", delete: "Deleted" };
 
 // How many steps a collapsed group names before it counts the rest.
 const GROUP_NAMED = 3;
@@ -927,13 +947,16 @@ const GROUP_NAMED = 3;
  * is what makes the line legible without opening it (spec: a group still
  * names the commands it contains); counting keeps a long run to one line,
  * and reasoning steps — which act on nothing — never take a named slot.
+ * Neither does a file change: its path is the one the Edit before it already
+ * named, so a slot spent on it says the same file twice and pushes the next
+ * tool into the counted tail. File rows are counted ("Updated ×2").
  */
 function groupSummary(run: readonly ActivityItem[]): string {
   const named: string[] = [];
   const counts = new Map<string, number>();
   for (const item of run) {
     const { label, subject } = stepName(item);
-    if (subject && named.length < GROUP_NAMED) {
+    if (subject && item.type !== "file_change" && named.length < GROUP_NAMED) {
       named.push(`${label} ${workspaceRelative(subject)}`);
       continue;
     }
@@ -1245,8 +1268,10 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
     const why = item.message ? `<p class="chat-wakeup-message">${escapeHtml(item.message)}</p>` : "";
     return `<aside class="chat-item chat-wakeup is-${item.status}" data-chat-item-id="${id}"${stamp} role="status"><div class="chat-wakeup-head">${WAKEUP_ICON}<span class="chat-wakeup-label">${escapeHtml(wakeupRowLabel(item))}</span>${turn}</div>${item.prompt ? `<div class="chat-wakeup-subject">${escapeHtml(item.prompt)}</div>` : ""}${why}</aside>`;
   }
+  // The row says the word its group summary counts it under ("Updated"),
+  // from the same table, so the two cannot drift.
   if (item.type === "file_change") {
-    return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(item.operation)}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
+    return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(FILE_CHANGE_LABELS[item.operation])}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
   }
   if (item.type === "task_progress") {
     // One presentation, updated in place: the same item id re-renders this

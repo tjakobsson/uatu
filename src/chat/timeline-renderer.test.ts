@@ -727,6 +727,97 @@ describe("activity grouping", () => {
     renderer.render(host, projectionWith([user, tool("a"), tool("b"), tool("c"), answer], { status: "idle" }), new Set(["group:tool:a"]));
     expect(host.querySelector('[data-chat-item-id="group:tool:a"]')!.hasAttribute("open")).toBe(true);
   });
+
+  // OpenCode reports every touched path as a file-change row — one per file
+  // on each message's snapshot, one per output path of an edit — so an edit
+  // turn arrives as read · edit · update · read · edit · update. The rows
+  // are activity: they join the run around them instead of ending it.
+  describe("file-change rows", () => {
+    const changed = (path: string, operation: "create" | "update" | "delete" = "update"): ConversationItem => ({ id: `file:${path}`, type: "file_change", createdAt: 1, path, operation });
+    const edit = (path: string, status: "running" | "completed" = "completed"): ConversationItem => ({ id: `tool:edit:${path}`, type: "tool", createdAt: 1, name: "edit", status, input: JSON.stringify({ filePath: path, oldString: "a", newString: "b" }) });
+    const ids = (host: HTMLElement) => Array.from(host.children).map(child => child.getAttribute("data-chat-item-id"));
+
+    test("a file-change row joins the finished run around it", () => {
+      const renderer = new TimelineRenderer();
+      const host = target();
+      renderer.render(host, projectionWith([user, tool("a"), changed("a.ts"), tool("b"), tool("c"), answer], { status: "idle" }), new Set());
+      expect(ids(host)).toEqual(["message:u1", "group:tool:a", "part:a1"]);
+      const group = host.querySelector('[data-chat-item-id="group:tool:a"]')!;
+      expect(group.querySelector(".chat-group-count")!.textContent).toBe("4 steps");
+      expect(group.getAttribute("data-outcome")).toBe("clean");
+      expect(group.querySelector(".chat-group-outcome")!.textContent).toBe("");
+      expect(Array.from(group.querySelectorAll(".chat-group-items > [data-chat-item-id]")).map(node => node.getAttribute("data-chat-item-id")))
+        .toEqual(["tool:a", "file:a.ts", "tool:b", "tool:c"]);
+      expect(group.querySelector('.chat-group-items .chat-file-change[data-chat-item-id="file:a.ts"]')).not.toBeNull();
+    });
+
+    test("a file-change row stays inside the working line", () => {
+      const renderer = new TimelineRenderer();
+      const host = target();
+      renderer.render(host, projectionWith([user, edit("a.ts"), changed("a.ts"), tool("b", "running")], { status: "running" }), new Set(), true, false, Date.now() - 5_000);
+      expect(ids(host)).toEqual(["message:u1", "group:tool:edit:a.ts"]);
+      const line = host.querySelector(".chat-activity-group")!;
+      expect(line.getAttribute("data-outcome")).toBe("live");
+      // The step in flight, not the file the last Edit wrote.
+      expect(line.querySelector(".chat-activity-subject")!.textContent).toBe("Read b.ts");
+      expect(line.querySelectorAll(".chat-group-items > [data-chat-item-id]")).toHaveLength(3);
+    });
+
+    test("a lone file-change row renders flat", () => {
+      const renderer = new TimelineRenderer();
+      const host = target();
+      const first: ConversationItem = { id: "part:a0", type: "assistant_message", createdAt: 2, markdown: "Saved." };
+      renderer.render(host, projectionWith([user, first, changed("a.ts"), answer], { status: "idle" }), new Set());
+      expect(host.querySelector(".chat-activity-group")).toBeNull();
+      expect(ids(host)).toEqual(["message:u1", "part:a0", "file:a.ts", "part:a1"]);
+      expect(host.querySelector(':scope > .chat-file-change[data-chat-item-id="file:a.ts"]')).not.toBeNull();
+    });
+
+    test("the row says the word its summary counts it under", () => {
+      const renderer = new TimelineRenderer();
+      const host = target();
+      // Flat and as a member, the row reads "Updated a.ts" — the summary's
+      // word, never the raw operation name.
+      renderer.render(host, projectionWith([user, changed("a.ts"), answer, changed("b.ts", "create"), changed("c.ts"), changed("d.ts", "delete")], { status: "idle" }), new Set());
+      const flat = host.querySelector(':scope > .chat-file-change[data-chat-item-id="file:a.ts"]')!;
+      expect(flat.textContent!.replace(/\s+/g, " ").trim()).toBe("Updated a.ts");
+      const members = Array.from(host.querySelectorAll(".chat-group-items .chat-file-change")).map(node => node.textContent!.replace(/\s+/g, " ").trim());
+      expect(members).toEqual(["Created b.ts", "Updated c.ts", "Deleted d.ts"]);
+      expect(host.querySelector(".chat-activity-subject")!.textContent).toBe("Created · Updated · Deleted");
+    });
+
+    test("the summary counts file changes after the steps it names", () => {
+      const renderer = new TimelineRenderer();
+      const host = target();
+      renderer.render(host, projectionWith([user, edit("foo.ts"), changed("foo.ts"), edit("bar.ts"), changed("bar.ts"), tool("baz"), answer], { status: "idle" }), new Set());
+      const group = host.querySelector(".chat-activity-group")!;
+      // The named slots go to the tools; "Updated foo.ts" would name the file
+      // the Edit before it already named.
+      expect(group.querySelector(".chat-activity-subject")!.textContent).toBe("Edit foo.ts · Edit bar.ts · Read baz.ts · Updated ×2");
+      expect(group.querySelector(".chat-group-count")!.textContent).toBe("5 steps");
+    });
+
+    test("the summary names each operation", () => {
+      const renderer = new TimelineRenderer();
+      const host = target();
+      renderer.render(host, projectionWith([user, changed("a.ts", "create"), changed("b.ts"), changed("c.ts", "delete"), answer], { status: "idle" }), new Set());
+      const group = host.querySelector(".chat-activity-group")!;
+      expect(ids(host)).toEqual(["message:u1", "group:file:a.ts", "part:a1"]);
+      expect(group.querySelector(".chat-activity-subject")!.textContent).toBe("Created · Updated · Deleted");
+      renderer.render(host, projectionWith([user, changed("a.ts"), changed("b.ts"), changed("c.ts"), answer], { status: "idle" }), new Set());
+      expect(host.querySelector(".chat-activity-subject")!.textContent).toBe("Updated ×3");
+    });
+
+    test("the working line names the last step, not the file row after it", () => {
+      const renderer = new TimelineRenderer();
+      const host = target();
+      renderer.render(host, projectionWith([user, edit("a.ts"), changed("a.ts")], { status: "running" }), new Set(), true, false, Date.now() - 5_000);
+      expect(host.querySelector(".chat-activity-subject")!.textContent).toBe("Edit a.ts");
+      // A tail of nothing but file rows has only a file row to name.
+      renderer.render(host, projectionWith([user, changed("a.ts"), changed("b.ts")], { status: "running" }), new Set(), true, false, Date.now() - 5_000);
+      expect(host.querySelector(".chat-activity-subject")!.textContent).toBe("Updated b.ts");
+    });
+  });
 });
 
 describe("awaiting the first response", () => {

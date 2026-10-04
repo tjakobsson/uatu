@@ -9880,6 +9880,52 @@ html[data-ui-mode="touch"] .chat-header {
   border-left: 2px solid var(--border-medium);
 }
 
+/* A file-change row among a group's members is one of its steps and reads
+   like its neighbours: the operation where a tool row has its label, the
+   path where it has its subject, in the same mono and at the same size —
+   not the boxed card it is as a flat row, which among quiet one-liners
+   reads as the one thing on the list that matters. The path stays a button
+   (it opens the file); the underline arrives on hover, as it does nowhere
+   else on a step row. */
+.chat-group-items .chat-file-change {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  margin-bottom: 0.1rem;
+  padding: 0.2rem 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 0.875em;
+}
+
+.chat-group-items .chat-file-change > span {
+  flex: 0 0 auto;
+}
+
+.chat-group-items .chat-file-change button {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  color: var(--chat-activity-fg);
+  font-family: var(--mono-font-family);
+  font-size: 0.94em;
+  text-decoration: none;
+}
+
+.chat-group-items .chat-file-change button:hover,
+.chat-group-items .chat-file-change button:focus-visible {
+  text-decoration: underline;
+}
+
+html[data-ui-mode="touch"] .chat-group-items .chat-file-change {
+  padding: 0.12rem 0;
+  font-size: 0.8125rem;
+}
+
 html[data-ui-mode="touch"] .chat-activity-group > summary,
 html[data-ui-mode="touch"] .chat-activity-group > .chat-group-line {
   font-size: 0.8125rem;
