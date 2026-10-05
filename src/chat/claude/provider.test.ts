@@ -5106,6 +5106,105 @@ describe("conversation window discovery", () => {
     } finally { stop(); await provider.dispose(); }
   });
 
+  for (const lateReply of [false, true]) {
+    test(`a timed-out window read releases its slot and retries (${lateReply ? "late reply" : "never settles"})`, async () => {
+      const first = Promise.withResolvers<unknown>();
+      let summaryReads = 0;
+      let fullReads = 0;
+      const { provider, queries } = fixture(query => {
+        query.getContextUsage = async options => {
+          if (options?.detail === "summary") return ++summaryReads === 1 ? first.promise : answer;
+          fullReads += 1;
+          return { ...answer, totalTokens: 250_000 };
+        };
+      }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 10, windowRetryDelaysMs: [1] });
+      const { events, stop } = collect(provider);
+      try {
+        const session = await provider.createSession("x", { model });
+        await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+        await waitFor(() => events.some(event => event.eventType === "context.window"));
+        expect(summaryReads).toBe(2);
+        expect(provider.windowDiagnostics()).toContainEqual(expect.objectContaining({ outcome: "timeout", phase: "session" }));
+        if (lateReply) first.resolve({ ...answer, maxTokens: 200_000 });
+        queries[0]!.push({ type: "result", subtype: "success", uuid: "done", session_id: session.id, is_error: false });
+        await waitFor(() => events.some(event => event.eventType === "context.reported"));
+        expect(fullReads).toBe(1);
+        const windows = events.flatMap(event => event.updates).flatMap(update => update.kind === "upsert" && update.item.type === "context_window" ? [update.item.limit] : []);
+        expect(windows).toEqual([1_000_000, 1_000_000]);
+        expect(contextReadout((await provider.listMessages(session.id, { limit: 1 })).items, [], undefined)).toMatchObject({ used: 250_000, limit: 1_000_000 });
+      } finally { stop(); await provider.dispose(); }
+    });
+  }
+
+  test.each([false, true])("an account change during startup revalidates before prompt delivery (old read settles: %s)", async settleOldRead => {
+    const first = Promise.withResolvers<unknown>();
+    const order: string[] = [];
+    let reads = 0;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = () => {
+        order.push(`read:${++reads}`);
+        return reads === 1 ? first.promise : Promise.resolve({ ...answer, maxTokens: 200_000 });
+      };
+    }, { onWindowDiagnostic: diagnostic => { if (diagnostic.outcome === "confirmed") order.push(`confirmed:${diagnostic.epoch}`); } });
+    try {
+      const session = await provider.createSession("x", { model });
+      const prompt = provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await waitFor(() => reads === 1);
+      const sent = queries[0]!.input.prompt[Symbol.asyncIterator]().next().then(() => { order.push("delivered"); });
+      await provider.accountsChanged();
+      if (settleOldRead) first.resolve(answer);
+      await prompt;
+      await sent;
+      expect(order).toEqual(["read:1", "read:2", "confirmed:1", "delivered"]);
+      const windows = (await provider.listMessages(session.id, { limit: 1 })).items.filter(item => item.type === "context_window");
+      expect(windows).toHaveLength(1);
+      expect(windows[0]).toMatchObject({ limit: 200_000 });
+    } finally { await provider.dispose(); }
+  });
+
+  test("post-turn context reports recover after all summary attempts time out", async () => {
+    let summaries = 0;
+    let reports = 0;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = options => {
+        if (options?.detail === "summary") { summaries += 1; return new Promise(() => undefined); }
+        reports += 1;
+        return Promise.resolve({ ...answer, totalTokens: 250_000 });
+      };
+    }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 10, windowRetryDelaysMs: [1] });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await waitFor(() => provider.windowDiagnostics().filter(record => record.outcome === "timeout").length === 2);
+      queries[0]!.push({ type: "result", subtype: "success", uuid: "done", session_id: session.id, is_error: false });
+      await waitFor(() => events.some(event => event.eventType === "context.reported"));
+      expect(summaries).toBe(2);
+      expect(reports).toBe(1);
+      expect(contextReadout((await provider.listMessages(session.id, { limit: 1 })).items, [], undefined)).toMatchObject({ used: 250_000, limit: 1_000_000 });
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("a turn-end report supersedes a still-hanging startup read", async () => {
+    let reports = 0;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = options => {
+        if (options?.detail === "summary") return new Promise(() => undefined);
+        reports += 1;
+        return Promise.resolve({ ...answer, totalTokens: 250_000 });
+      };
+    }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 60_000 });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      queries[0]!.push({ type: "result", subtype: "success", uuid: "done", session_id: session.id, is_error: false });
+      await waitFor(() => events.some(event => event.eventType === "context.reported"));
+      expect(reports).toBe(1);
+      await waitFor(() => queries[0]!.returned);
+    } finally { stop(); await provider.dispose(); }
+  });
+
   test("a reply from before an account change is discarded", async () => {
     const held = Promise.withResolvers<unknown>();
     const { provider } = fixture(query => { query.getContextUsage = () => held.promise; }, { defaultReadWaitMs: 1 });

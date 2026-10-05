@@ -266,9 +266,9 @@ type LiveSession = {
   windowResolved?: string;
   windowSequence: number;
   windowRead?: Promise<void>;
+  windowReadAbort?: AbortController;
   windowReady?: Promise<void>;
   windowRetry?: ReturnType<typeof setTimeout>;
-  windowDeadline?: ReturnType<typeof setTimeout>;
   cancelSequence: number;
   windowAttempts: number;
   windowAccountEpoch: number;
@@ -717,6 +717,7 @@ export class ClaudeProvider implements ChatProvider {
       session.windowSequence += 1;
       session.windowConfirmed = false;
       if (session.windowRetry) clearTimeout(session.windowRetry);
+      this.cancelSessionWindowRead(session);
     }
     this.catalogChanged();
     await this.readLogin();
@@ -1450,11 +1451,18 @@ export class ClaudeProvider implements ChatProvider {
     }
     session.pendingTurns += 1;
     const cancelSequence = session.cancelSequence;
-    if (session.windowAccountEpoch !== this.accountEpoch) {
-      this.resetSessionWindow(session);
-      session.windowReady = this.prepareSessionWindow(session);
-    }
-    await session.windowReady;
+    // An account change can land inside the startup wait. Revalidate before
+    // delivery, sharing one total grace budget even if accounts change again.
+    const windowWaitUntil = performance.now() + this.defaultReadWaitMs;
+    do {
+      if (session.windowAccountEpoch !== this.accountEpoch) {
+        this.resetSessionWindow(session);
+        session.windowReady = this.prepareSessionWindow(session);
+      }
+      const remaining = windowWaitUntil - performance.now();
+      if (remaining <= 0 || session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || this.disposed) break;
+      await bounded(session.windowReady ?? Promise.resolve(), remaining, this.disposal.promise);
+    } while (session.windowAccountEpoch !== this.accountEpoch);
     if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || this.disposed) {
       session.pendingTurns = Math.max(0, session.pendingTurns - 1);
       if (this.live.get(sessionId) === session && session.pendingTurns === 0) await this.retireIfIdle(session);
@@ -1618,7 +1626,7 @@ export class ClaudeProvider implements ChatProvider {
     this.live.clear();
     for (const session of sessions) {
       if (session.windowRetry) clearTimeout(session.windowRetry);
-      if (session.windowDeadline) clearTimeout(session.windowDeadline);
+      this.cancelSessionWindowRead(session);
       this.clearIdleTimer(session);
       this.abandonInteractions(session.id, "The workspace shut down before the user answered.");
       // Shutdown is the process exit a schedule cannot survive (D6): a
@@ -1954,7 +1962,7 @@ export class ClaudeProvider implements ChatProvider {
       });
     } finally {
       if (session.windowRetry) clearTimeout(session.windowRetry);
-      if (session.windowDeadline) clearTimeout(session.windowDeadline);
+      this.cancelSessionWindowRead(session);
     }
   }
 
@@ -3737,9 +3745,16 @@ export class ClaudeProvider implements ChatProvider {
     return renamed;
   }
 
+  private cancelSessionWindowRead(session: LiveSession): void {
+    const abort = session.windowReadAbort;
+    session.windowReadAbort = undefined;
+    session.windowRead = undefined;
+    abort?.abort();
+  }
+
   private resetSessionWindow(session: LiveSession, selection = session.windowSelection): void {
     if (session.windowRetry) clearTimeout(session.windowRetry);
-    if (session.windowDeadline) clearTimeout(session.windowDeadline);
+    this.cancelSessionWindowRead(session);
     session.contextKey = randomUUID();
     session.windowSelection = selection;
     session.windowResolved = undefined;
@@ -3802,13 +3817,23 @@ export class ClaudeProvider implements ChatProvider {
     const diagnostic = (outcome: WindowDiagnostic["outcome"], answer?: ClaudeWindowAnswer) => this.windowDiagnostic({ phase: "session", source: "session", selected, resolved: answer?.model, epoch, outcome, ...(answer ? { limit: answer.limit } : {}) });
     if (!session.query.getContextUsage) { diagnostic("unsupported"); return; }
     session.windowAttempts += 1;
-    let expired = false;
-    const timer = setTimeout(() => { expired = true; diagnostic("timeout"); }, this.windowReadTimeoutMs);
-    session.windowDeadline = timer;
+    const timedOut = Symbol("window read timed out");
+    const cancelled = Symbol("window read cancelled");
+    const deadline = Promise.withResolvers<symbol>();
+    const abort = new AbortController();
+    const onAbort = () => deadline.resolve(cancelled);
+    abort.signal.addEventListener("abort", onAbort, { once: true });
+    session.windowReadAbort = abort;
+    const timer = setTimeout(() => deadline.resolve(timedOut), this.windowReadTimeoutMs);
     timer.unref?.();
     const current = () => !this.disposed && this.live.get(session.id) === session && key === session.contextKey && epoch === this.accountEpoch && sequence === session.windowSequence;
-    const read = Promise.resolve().then(() => session.query.getContextUsage!({ detail: "summary" })).then(raw => {
-      if (!current() || expired) { diagnostic("stale"); return; }
+    // The SDK does not expose cancellation for this control request. Bound
+    // our waiter instead: an abandoned SDK reply can settle later, but loses
+    // this race and cannot publish or occupy the next attempt's slot.
+    const request = (async () => session.query.getContextUsage!({ detail: "summary" }))();
+    const read = Promise.race([request, deadline.promise]).then(raw => {
+      if (!current() || abort.signal.aborted) { diagnostic("stale"); return; }
+      if (raw === timedOut) { diagnostic("timeout"); return; }
       const answer = claudeWindowAnswer(raw);
       const row = this.liveModels?.find(model => model.selection.modelId === selected);
       const expected = session.windowResolved ?? row?.resolvesTo?.modelId ?? (selected?.startsWith("claude-") ? selected : undefined);
@@ -3818,13 +3843,10 @@ export class ClaudeProvider implements ChatProvider {
       diagnostic("confirmed", answer);
     }).catch(() => diagnostic("failed")).finally(() => {
       clearTimeout(timer);
-      if (session.windowDeadline === timer) session.windowDeadline = undefined;
+      abort.signal.removeEventListener("abort", onAbort);
+      if (session.windowReadAbort === abort) session.windowReadAbort = undefined;
       if (session.windowRead === read) session.windowRead = undefined;
-      if (!current()) {
-        if (key !== session.contextKey) this.startSessionWindowRead(session);
-        return;
-      }
-      if (session.windowConfirmed) return;
+      if (!current() || abort.signal.aborted || session.windowConfirmed) return;
       const delay = this.windowRetryDelaysMs[session.windowAttempts - 1];
       if (delay === undefined) return;
       session.windowRetry = setTimeout(() => { session.windowRetry = undefined; this.startSessionWindowRead(session); }, delay);
@@ -3850,10 +3872,10 @@ export class ClaudeProvider implements ChatProvider {
     const key = session.contextKey;
     const epoch = this.accountEpoch;
     const sequence = ++session.windowSequence;
-    if (session.windowRead) {
-      await bounded(session.windowRead, CONTEXT_REPORT_TIMEOUT_MS, this.disposal.promise);
-      if (Boolean(session.windowRead)) return;
-    }
+    // This newer full report supersedes discovery. Waiting for the old
+    // summary could spend the report's entire budget on an abandoned read.
+    if (session.windowRetry) clearTimeout(session.windowRetry);
+    this.cancelSessionWindowRead(session);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       // Plan utilization rides the same report when the login reports it
@@ -3891,7 +3913,7 @@ export class ClaudeProvider implements ChatProvider {
     if (this.live.get(session.id) !== session) return;
     this.clearIdleTimer(session);
     if (session.windowRetry) clearTimeout(session.windowRetry);
-    if (session.windowDeadline) clearTimeout(session.windowDeadline);
+    this.cancelSessionWindowRead(session);
     // A run that never reported its end does not outlive the query that
     // ran it; settled before the session leaves the live map, so the
     // child's status is the last thing this query says about it.

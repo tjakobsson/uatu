@@ -568,8 +568,11 @@ or account contexts. It retains bounded `context_window` records for snapshot
 recovery, and attaches the same `contextKey` to the usage they describe. A newer
 session observation can increase or decrease a limit. Known fallback values are
 estimates; unknown model ids have no invented 200k limit. Transient discovery
-failures get bounded retries, while a control request still pending on a live
-query is never duplicated by a retry. `UATU_DEBUG=1` logs the model ids, phase,
+failures get bounded retries. Each logical read races its SDK request against
+a deadline and invalidation signal, releasing the in-flight slot even if the
+SDK never answers. Abandoned replies cannot publish or clear a newer read.
+Account changes during startup trigger revalidation before delivery within
+the same total startup wait budget. `UATU_DEBUG=1` logs the model ids, phase,
 source, epoch, and outcome of discovery without prompt or credential payloads.
 
 Catalog discoveries advance an agent-scoped revision carried by the existing

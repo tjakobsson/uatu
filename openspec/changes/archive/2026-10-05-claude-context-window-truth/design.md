@@ -123,6 +123,11 @@ continuation checks D2 before publishing. Never await this work inside the
 stream reader, and never retire a live conversation because a metadata
 read timed out.
 
+Recheck the account epoch after the startup wait, immediately before prompt
+delivery. An account change releases the old waiter and starts discovery for
+the current account. All such revalidation shares one total startup grace
+budget, so repeated account changes cannot keep extending prompt startup.
+
 The startup result supplies only window metadata. A full post-turn report
 still supplies the breakdown and may correct the limit. Prefer the model
 named by the actual response, reconciled with the execution binding, over
@@ -169,10 +174,14 @@ do not reset the backoff or create a retry storm.
 
 A probe whose timed-out `setModel` could still complete is retired before
 retrying on a fresh probe. Never switch a live conversation as a discovery
-retry. Do not overlap unresolved control reads on the same live query;
-if a read remains hung, keep the provisional display and allow the next
-query or normal report to recover. Disposal cancels timers and closes
-owned probes. Keep failures observable using model ids, source, phase,
+retry. Keep one active logical discovery attempt per live query. Race its
+SDK request against the deadline and an invalidation signal; either releases
+the in-flight slot even if the SDK request never settles. The SDK has no
+cancellation method for this control, so an abandoned request may reply later,
+but it has lost the race and cannot publish or clear a newer attempt. This
+allows bounded retries and normal context reports to recover after a timeout.
+Disposal cancels waiters and timers and closes owned probes. Keep failures
+observable using model ids, source, phase,
 epoch, and failure category in the existing diagnostic mechanism, without
 logging prompts or credentials.
 

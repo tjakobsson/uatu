@@ -36,7 +36,8 @@ similar `maxTokens` and `rawMaxTokens` field names.
 ## Automated checks
 
 - `bun run typecheck`: passed.
-- `bun run test:ci`: 4,827 passed, 15 skipped, zero failed across 273 files.
+- `bun run test:ci`: 4,833 passed, 15 skipped, zero failed across 273 files,
+  including the PR review follow-up below.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
 - Focused Playwright suites `chat-claude-polish`, `chat-configuration`, and
@@ -84,3 +85,26 @@ v0.7.0, verified directly from that tag. A future fix PR for this user-visible
 correction therefore remains a visible `fix(chat)` release entry. The earlier
 background catalog probe was added after that tag in #483; this change also
 finishes its live-delivery and retry behavior.
+
+## PR #492 review follow-up
+
+Both review findings were reproduced with failing tests before their fixes:
+
+- [Bound the actual session window read](https://github.com/tjakobsson/uatu/pull/492#discussion_r4186834677).
+  The deadline now settles the logical waiter and releases its in-flight slot,
+  even when the SDK request never settles. The configured retry budget still
+  applies. A late SDK reply loses the race and cannot overwrite the retry's
+  answer. Turn-end reports explicitly supersede pending discovery rather than
+  spending their own timeout budget waiting for it.
+- [Recheck the account epoch after the startup wait](https://github.com/tjakobsson/uatu/pull/492#discussion_r4186834681).
+  Account changes release obsolete discovery waiters. Prompt delivery rechecks
+  the epoch after waiting and starts the current account's read before queueing
+  the prompt. Revalidation shares one total startup grace budget.
+
+Six new cases cover a permanently hung request, a late timed-out reply,
+account changes with both settling and hung old reads, recovery after the
+summary retry budget is exhausted, and turn-end recovery while discovery is
+still hanging. The focused provider/window/readout suite passed 237 tests;
+typecheck and the full parallel unit/integration suite also passed. The archived
+design and architecture guidance now describe bounded logical waiters rather
+than assuming SDK control requests can be cancelled.
