@@ -170,6 +170,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // logout of the last provider leaves it with none.
   private login: ChatLoginState | undefined;
   private accountsRevision = 0;
+  private catalogRevision = 0;
   readonly accountChanges: ChatAccountChange[] = [];
 
   setLogin(login: ChatLoginState | undefined, options: { silent?: boolean } = {}): void {
@@ -196,6 +197,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       version: "e2e",
       ...(this.login ? { login: this.login } : {}),
       ...(this.accountsRevision ? { accountsRevision: this.accountsRevision } : {}),
+      ...(this.catalogRevision ? { catalogRevision: `e2e:${this.catalogRevision}` } : {}),
       agent: {
         id: this.agentId,
         name: this.agentName,
@@ -211,6 +213,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   setModels(models: ChatModel[]): void {
     this.modelInventory = structuredClone(models);
+    this.catalogRevision += 1;
+    this.inventory.invalidate();
   }
 
   // Commands a test adds on top of the fixture's own (long descriptions for
@@ -733,6 +737,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   reset(): void {
     this.login = undefined;
     this.accountsRevision = 0;
+    this.catalogRevision = 0;
     this.accountChanges.length = 0;
     this.usageReport = null;
     this.usageReadOutcome = { outcome: "no-live-session" };

@@ -122,7 +122,7 @@ export type ChatAvailability =
   // agent last said (absent until it has). `accountsRevision`: bumped on every
   // login change made through the Hub's Agent accounts, so a client knows to
   // re-read this agent's catalogs.
-  | { state: "ready"; version: string; agent?: ChatAgent; login?: ChatLoginState; accountsRevision?: number }
+  | { state: "ready"; version: string; agent?: ChatAgent; login?: ChatLoginState; accountsRevision?: number; catalogRevision?: string }
   | {
     state: "unavailable";
     reason: "not-installed" | "startup-failed" | "unsupported";
@@ -196,6 +196,7 @@ export type ChatModel = {
   variants?: string[];
   // The model's context-window size in tokens, when the agent reports it.
   contextLimit?: number;
+  contextWindow?: ContextWindowMetadata;
   // Whether this model can see image attachments, as the agent reports it.
   // Drives the attach control's inactive state; absent means not reported,
   // which the surface treats as no.
@@ -317,6 +318,7 @@ export type AssistantMessageItem = TimelineItemBase & {
   // The model that reported this carrier's usage, so a context percentage is
   // measured against that model's window even after another model is selected.
   model?: ModelSelection;
+  contextKey?: string;
   // The agent that produced the message, as the provider names it (OpenCode:
   // `build`, `plan`, `compaction`, a subagent's kind). Rides the usage carrier
   // so the cost receipt can name the main agent's lines instead of lumping
@@ -582,19 +584,38 @@ export type ContextReportCategory = {
   kind: "used" | "free" | "buffer" | "deferred";
 };
 
+/** Where a context limit came from, independently of occupancy. */
+export type ContextWindowMetadata = {
+  source: "session" | "catalog" | "estimate";
+  freshness: "current" | "cached";
+  observedAt?: number;
+  // Only populated when the agent explicitly distinguishes these values.
+  kind?: "effective" | "compaction";
+  capacity?: number;
+  compactionThreshold?: number;
+};
+
+/** Limit-only data. Never an occupancy sample or a rendered timeline row. */
+export type ContextWindowItem = TimelineItemBase & {
+  type: "context_window";
+  model: ModelSelection;
+  contextKey?: string;
+  limit: number;
+  window: ContextWindowMetadata;
+};
+
 /**
- * The agent's own statement of how full the context window is, at the point
- * in the timeline where it was reported (after a turn, after a compaction).
- * Never rendered as a row: the context readout reads it, the way it reads
- * the empty-markdown usage carriers, and prefers whichever is newest.
- * `max` is the window the total was measured against; absent when the
- * report did not state one, in which case the model's known limit stands.
+ * The agent's own occupancy report, after a turn or compaction. Never a row.
+ * The newest report or usage carrier supplies occupancy; window-only updates
+ * may correct its denominator without replacing that occupancy.
  */
 export type ContextReportItem = TimelineItemBase & {
   type: "context_report";
   total: number;
   max?: number;
   model?: ModelSelection;
+  contextKey?: string;
+  window?: ContextWindowMetadata;
   categories?: ContextReportCategory[];
   // Plan utilization the login reports (claude.ai plans only): percent of
   // each rate-limit window used and when it resets. Empty when the login
@@ -800,6 +821,7 @@ export type ConversationItem =
   | TurnStatusItem
   | NoticeItem
   | ContextReportItem
+  | ContextWindowItem
   | CompactionItem
   | BackgroundTaskItem
   | ScheduledWakeupItem;
@@ -837,6 +859,9 @@ export type ConversationSnapshot = {
 
 export type ConversationInventoryEvent = {
   type: "conversation.inventory";
+  // Agent-qualified catalog versions. A changed version invalidates only
+  // that agent's banked catalog; this also repairs missed pushes on reconnect.
+  catalogs?: Record<string, string>;
 };
 
 type ChatEventBase = {

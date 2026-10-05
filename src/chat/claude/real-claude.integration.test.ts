@@ -142,6 +142,7 @@ describe.skipIf(!enabled)("real Claude Code integration", () => {
         if (model.default) continue;
         await direct.setModel(model.selection.modelId);
         const answer = await direct.getContextUsage({ detail: "summary" });
+        console.log(`[window evidence] ${JSON.stringify({ selection: model.selection.modelId, resolvedModel: answer.model, maxTokens: answer.maxTokens, rawMaxTokens: answer.rawMaxTokens, autoCompactThreshold: answer.autoCompactThreshold, isAutoCompactEnabled: answer.isAutoCompactEnabled })}`);
         if (stripWindowMarker(answer.model) !== stripWindowMarker(model.resolvesTo?.modelId ?? model.selection.modelId)) continue;
         expect(model.contextLimit).toBeGreaterThan(0);
         expect({ id: model.selection.modelId, window: model.contextLimit }).toEqual({ id: model.selection.modelId, window: answer.maxTokens });

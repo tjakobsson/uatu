@@ -1555,15 +1555,18 @@ export function initChat(api = new ChatApiClient()): void {
   // breakdown rebuilds that would come out identical.
   let paintedSource: ConversationItem | undefined;
   let paintedUsageModel: string | undefined;
+  let paintedWindowKey: string | undefined;
   const syncContextIndicator = () => {
     if (!contextUsage?.isConnected || !contextUsageFill || !contextUsageLabel || !contextUsageBreakdown) return;
     // The newest report or carrier, scanned from the tail — it is almost
     // always right at the end of a long timeline (see context-readout.ts).
     const readout = contextReadout(projection?.items ?? [], models, displayedConfiguration().model);
     const reportingModel = readout?.model ? modelValue(readout.model) : "";
-    if (readout?.source === paintedSource && reportingModel === paintedUsageModel) return;
+    const windowKey = JSON.stringify([readout?.limit, readout?.window]);
+    if (readout?.source === paintedSource && reportingModel === paintedUsageModel && windowKey === paintedWindowKey) return;
     paintedSource = readout?.source;
     paintedUsageModel = reportingModel;
+    paintedWindowKey = windowKey;
     if (!readout || !declares("context")) {
       contextUsage.hidden = true;
       contextUsage.open = false;
@@ -1579,12 +1582,15 @@ export function initChat(api = new ChatApiClient()): void {
     // The figure states the fill in words as well as in width, so the tier
     // colouring below is emphasis on something already legible rather than
     // the only signal.
-    contextUsageLabel.textContent = fraction === undefined ? "?" : `${Math.round(fraction * 100)}%`;
+    const estimated = readout.window?.source === "estimate";
+    contextUsageLabel.textContent = fraction === undefined ? formatTokens(used) : `${estimated ? "~" : ""}${Math.round(fraction * 100)}%`;
     contextUsage.dataset.fill = fraction === undefined ? "unknown" : fraction >= 0.9 ? "full" : fraction >= 0.75 ? "high" : "normal";
     contextUsage.dataset.source = readout.source.type === "context_report" ? "report" : "usage";
+    contextUsage.dataset.windowSource = readout.window?.source ?? (limit === undefined ? "unknown" : "legacy");
+    contextUsage.dataset.windowFreshness = readout.window?.freshness ?? "current";
     contextUsage.title = fraction === undefined
-      ? `${used.toLocaleString()} tokens in the context window`
-      : `${used.toLocaleString()} of ${limit!.toLocaleString()} tokens in the context window`;
+      ? `${used.toLocaleString()} tokens used · Limit unavailable`
+      : `${used.toLocaleString()} of ${limit!.toLocaleString()} tokens in the context window${estimated ? " · Estimated limit" : readout.window?.freshness === "cached" ? " · Cached limit" : ""}`;
     contextUsageBreakdown.replaceChildren(...readout.rows.flatMap(([label, value]) => {
       const term = document.createElement("dt");
       term.textContent = label;
@@ -1592,6 +1598,13 @@ export function initChat(api = new ChatApiClient()): void {
       detail.textContent = value.toLocaleString();
       return [term, detail];
     }));
+    if (limit === undefined) {
+      const term = document.createElement("dt");
+      term.textContent = "Limit";
+      const detail = document.createElement("dd");
+      detail.textContent = "Limit unavailable";
+      contextUsageBreakdown.append(term, detail);
+    }
     contextUsage.hidden = false;
   };
 
@@ -4790,6 +4803,7 @@ export function initChat(api = new ChatApiClient()): void {
         if (contextAgentId === agentId) {
           models = list;
           renderConfiguration();
+          syncContextIndicator();
         }
       }).catch(() => undefined));
     }
@@ -4827,15 +4841,23 @@ export function initChat(api = new ChatApiClient()): void {
     }, 1_500);
   };
 
+  const catalogRevisions = new Map<string, string>();
   const startInventoryStream = () => {
     if (inventoryStream) return;
     try {
       inventoryStream = api.inventoryStream({
         // A tick may also mean a login changed (Agent accounts): status is
         // in-memory on the server, so it is re-read alongside the inventory.
-        invalidation: () => { void inventoryReconciler.request(); rereadStatuses(); },
+        invalidation: event => {
+          void inventoryReconciler.request(); rereadStatuses();
+          for (const [agentId, revision] of Object.entries(event.catalogs ?? {})) {
+            if (catalogRevisions.get(agentId) === revision) continue;
+            catalogRevisions.set(agentId, revision);
+            void refreshBankedCommands(agentId);
+          }
+        },
         error: error => interruptions.report("inventory", error),
-        recovered: () => interruptions.clear("inventory"),
+        recovered: () => { interruptions.clear("inventory"); refreshCatalogsOnUse(); },
       });
     } catch (error) {
       announce(messageOf(error), true);

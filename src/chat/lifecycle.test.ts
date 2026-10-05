@@ -63,7 +63,7 @@ describe("chat lifecycle recovery", () => {
     let inventoryReads = 0;
     let catalogReads = 0;
     let statusReads = 0;
-    let inventoryHandlers: { invalidation: () => void } | undefined;
+    let inventoryHandlers: Parameters<ChatApiClient["inventoryStream"]>[0] | undefined;
     const api = {
       status: async () => [{ agent, availability: ++statusReads === 1
         ? { state: "idle" } : { state: "ready", version: "test", agent } }],
@@ -96,7 +96,7 @@ describe("chat lifecycle recovery", () => {
     // settlement makes the form visible, even before late inventory lands.
     catalog.resolve();
     await waitUntil(() => !document.querySelector<HTMLFormElement>("#chat-composer")!.hidden);
-    inventoryHandlers!.invalidation();
+    inventoryHandlers!.invalidation({ type: "conversation.inventory" });
     await waitUntil(() => inventoryReads === 2);
     streamInventory.resolve(inventory);
     await waitUntil(() => select.value === selectedId);
@@ -1053,7 +1053,7 @@ async function startupFixture(options: { savedId?: string | null; multipleAgents
   const creation = Promise.withResolvers<ConversationSnapshot>();
   let inventoryReads = 0;
   let current: ReturnType<typeof summary>[] = [];
-  let handlers: { invalidation(): void } | undefined;
+  let handlers: Parameters<ChatApiClient["inventoryStream"]>[0] | undefined;
   const reads: string[] = [], creations: (string | undefined)[] = [], prompts: unknown[] = [];
   const pendingReads: { id: string; signal?: AbortSignal; result: ReturnType<typeof Promise.withResolvers<ConversationSnapshot>> }[] = [];
   const streams: { id: string; closed: boolean }[] = [];
@@ -1104,7 +1104,7 @@ async function startupFixture(options: { savedId?: string | null; multipleAgents
     async inventory(ids: string[]) {
       current = ids.map(summary);
       const before = inventoryReads;
-      handlers!.invalidation();
+      handlers!.invalidation({ type: "conversation.inventory" });
       await waitUntil(() => inventoryReads > before);
       await settle();
     },

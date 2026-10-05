@@ -1,5 +1,6 @@
 import { boundedSet } from "../../shared/bounded-map";
 import { measureChatWork } from "../performance";
+import { claudeWindowAnswer } from "./context-window";
 import type { NormalizedProviderEvent, NormalizedProviderUpdate } from "../provider";
 import { LOGIN_FAILED_NOTICE_CODE as LOGIN_FAILED_CODE, RATE_LIMIT_ITEM_ID, REAUTHENTICATING_NOTICE_CODE as REAUTHENTICATING_CODE, type BackgroundTaskUsage, type ContextReportItem, type ConversationItem, type MessageAttachment, type ModelSelection, type StructuredQuestion, type TokenUsage } from "../types";
 import { foldCommandMarkup, parseTaskNotification, readsAsTaskNotification, readsAsWakeupPrompt, scheduledWakeupPrompt, type TranscriptEntry } from "./transcript";
@@ -679,6 +680,12 @@ function normalizeMessage(
         usage,
         ...(model ? { model: claudeModelSelection(model) } : {}),
       } });
+    }
+    if (!subagentFrame && record.context_usage) {
+      const context = asRecord(record.context_usage);
+      const reportedModel = typeof context.model === "string" ? memory.resolveModel?.(context.model) ?? context.model : memory.lastModel;
+      const report = normalizeContextUsage({ ...context, totalTokens: context.total_tokens }, envelope.createdAt, reportedModel);
+      if (report) updates.push({ kind: "upsert", item: report });
     }
     rememberFrameItems(memory, envelope.uuid, updates);
     return {
@@ -1520,12 +1527,13 @@ export function markTasksBackgrounded(memory: ClaudeEventMemory, tasks: Array<{ 
 export function normalizeContextUsage(value: unknown, createdAt: number, model?: string): ContextReportItem | null {
   const record = asRecord(value);
   if (typeof record.totalTokens !== "number" || !Number.isFinite(record.totalTokens) || record.totalTokens < 0) return null;
-  const max = typeof record.maxTokens === "number" && record.maxTokens > 0 ? record.maxTokens
-    : typeof record.rawMaxTokens === "number" && record.rawMaxTokens > 0 ? record.rawMaxTokens : undefined;
+  const answer = claudeWindowAnswer(record);
+  const max = answer?.limit;
   const categories = asArray(record.categories).flatMap(entry => {
     const category = asRecord(entry);
     if (typeof category.name !== "string" || !category.name || typeof category.tokens !== "number" || category.tokens < 0) return [];
-    const kind = category.isDeferred === true || /\(deferred\)/i.test(category.name) ? "deferred" as const
+    const kind = category.kind === "used" || category.kind === "free" || category.kind === "buffer" || category.kind === "deferred" ? category.kind
+      : category.isDeferred === true || /\(deferred\)/i.test(category.name) ? "deferred" as const
       : /free space/i.test(category.name) ? "free" as const
         : /buffer/i.test(category.name) ? "buffer" as const
           : "used" as const;
@@ -1539,6 +1547,7 @@ export function normalizeContextUsage(value: unknown, createdAt: number, model?:
     createdAt,
     total: Math.round(record.totalTokens),
     ...(max === undefined ? {} : { max: Math.round(max) }),
+    ...(answer && (answer.details.kind === "compaction" || answer.details.compactionThreshold !== undefined) ? { window: { source: "session" as const, freshness: "current" as const, observedAt: createdAt, ...answer.details } } : {}),
     ...(model ? { model: claudeModelSelection(model) } : {}),
     ...(categories.length > 0 ? { categories } : {}),
   };

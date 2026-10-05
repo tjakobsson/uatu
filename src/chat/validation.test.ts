@@ -451,6 +451,12 @@ describe("chat domain validation", () => {
     const report = { id: "context:1", type: "context_report", createdAt: 5, total: 9697, max: 1_000_000, model: { providerId: "anthropic", modelId: "opus[1m]" }, categories: [{ name: "Messages", tokens: 10, kind: "used" }, { name: "Free space", tokens: 990_303, kind: "free" }] } as ConversationItem;
     expect(parseConversationItem(report)).toEqual(report);
     expect(parseConversationItem({ id: "context:2", type: "context_report", createdAt: 5, total: 0 })).toBeTruthy();
+    const window = { id: "w", type: "context_window", createdAt: 5, model: { providerId: "anthropic", modelId: "opus" }, contextKey: "query:1", limit: 1_000_000, window: { source: "session", freshness: "current", observedAt: 5 } } as const;
+    expect(parseConversationItem(window)).toEqual(window);
+    for (const limit of [0, -1, Infinity, NaN, 1.5]) expect(() => parseConversationItem({ ...window, limit })).toThrow(/positive integer/);
+    expect(() => parseConversationItem({ ...window, total: 0 })).toThrow(/unknown/);
+    expect(() => parseConversationItem({ ...window, window: { source: "guessed", freshness: "current" } })).toThrow(/source/);
+    expect(() => parseConversationItem({ ...window, window: { source: "session", freshness: "stale" } })).toThrow(/freshness/);
     expect(() => parseConversationItem({ id: "context:3", type: "context_report", createdAt: 5 })).toThrow(/total/);
     expect(() => parseConversationItem({ ...report, max: 0 })).toThrow(/max/);
     expect(() => parseConversationItem({ ...report, categories: [{ name: "Messages", tokens: 10, kind: "spent" }] })).toThrow(/category kind/);

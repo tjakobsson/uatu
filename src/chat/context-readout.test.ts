@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { contextReadout } from "./context-readout";
-import type { ChatModel, ConversationItem } from "./types";
+import type { ChatModel, ContextWindowItem, ConversationItem } from "./types";
 
 const models: ChatModel[] = [
   { selection: { providerId: "anthropic", modelId: "opus[1m]" }, provider: "Anthropic", name: "Opus 5 (1M context)", contextLimit: 1_000_000 },
@@ -12,6 +12,42 @@ const carrier = (id: string, createdAt: number, input: number, cacheRead: number
 });
 
 describe("context readout source selection", () => {
+  const window = (limit: number, observedAt: number, contextKey = "q1"): ContextWindowItem => ({
+    id: `window:${contextKey}`, type: "context_window", createdAt: 1, model: models[1]!.selection,
+    contextKey, limit, window: { source: "session", freshness: "current", observedAt },
+  });
+
+  test("limit-only updates preserve occupancy and follow observation order, not insertion position", () => {
+    const usage = { ...carrier("u", 3, 100, 149_900), contextKey: "q1" } as ConversationItem;
+    const full = window(1_000_000, 4);
+    expect(contextReadout([full, usage], models, undefined)).toEqual(expect.objectContaining({ source: usage, used: 150_000, limit: 1_000_000, fraction: 0.15 }));
+    const oldReport: ConversationItem = { id: "report", type: "context_report", createdAt: 2, total: 100_000, max: 200_000, model: models[1]!.selection, contextKey: "q1" };
+    expect(contextReadout([full, oldReport, usage], models, undefined)?.limit).toBe(1_000_000);
+    const smaller = window(200_000, 5);
+    expect(contextReadout([smaller, oldReport, usage], models, undefined)?.fraction).toBe(0.75);
+    expect(contextReadout([full], models, undefined)).toBeUndefined();
+  });
+
+  test("execution keys isolate window variants and staged model changes", () => {
+    const usage = { ...carrier("u", 3, 100, 49_900), contextKey: "q1" } as ConversationItem;
+    expect(contextReadout([window(200_000, 1), window(1_000_000, 4, "q2"), usage], models, models[0]!.selection)?.limit).toBe(200_000);
+    const alias = window(1_000_000, 5);
+    alias.model = { providerId: "anthropic", modelId: "claude-sonnet-5" };
+    expect(contextReadout([alias, usage], models, undefined)?.limit).toBe(1_000_000);
+  });
+
+  test("catalog provenance distinguishes estimates from reported boundaries and cached observations", () => {
+    const usage = carrier("u", 3, 100, 209_900);
+    const estimated: ChatModel[] = [{ ...models[1]!, contextWindow: { source: "estimate", freshness: "current" } }];
+    expect(contextReadout([usage], estimated, undefined)?.limit).toBeUndefined();
+    const reported: ChatModel[] = [{ ...models[1]!, contextWindow: { source: "catalog", freshness: "current", kind: "compaction", capacity: 1_000_000 } }];
+    expect(contextReadout([usage], reported, undefined)?.rows).toContainEqual(["Compaction window", 200_000]);
+    expect(contextReadout([usage], reported, undefined)?.rows).toContainEqual(["Model capacity", 1_000_000]);
+    const cached = window(1_000_000, 5);
+    cached.window.freshness = "cached";
+    expect(contextReadout([cached, usage], estimated, undefined)?.rows).toContainEqual(["Cached limit", 1_000_000]);
+    expect(contextReadout([carrier("small", 1, 100, 49_900)], estimated, undefined)?.rows).toContainEqual(["Estimated limit", 200_000]);
+  });
   test("a report of 300k against 1M paints 30% and lists the agent's used categories", () => {
     const report: ConversationItem = {
       id: "context:report:1", type: "context_report", createdAt: 10, total: 300_000, max: 1_000_000,

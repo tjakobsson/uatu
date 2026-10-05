@@ -129,8 +129,8 @@ describe("OpenCode 2.x provider: identity and catalogs", () => {
       "GET /api/provider": () => scoped([{ id: "opencode", name: "OpenCode Zen", activation: "auto", package: "x" }, { id: "berget", name: "Berget", activation: "enabled", package: "y" }]),
     });
     expect(await provider().listModels()).toEqual([
-      { selection: { providerId: "berget", modelId: "think" }, provider: "Berget", name: "Thinker", variants: ["high", "low"], contextLimit: 128000 },
-      { selection: { providerId: "opencode", modelId: "flash" }, provider: "OpenCode Zen", name: "Flash", contextLimit: 200000, imageInput: true },
+      { selection: { providerId: "berget", modelId: "think" }, provider: "Berget", name: "Thinker", variants: ["high", "low"], contextLimit: 128000, contextWindow: { source: "catalog", freshness: "current" } },
+      { selection: { providerId: "opencode", modelId: "flash" }, provider: "OpenCode Zen", name: "Flash", contextLimit: 200000, contextWindow: { source: "catalog", freshness: "current" }, imageInput: true },
     ]);
   });
 

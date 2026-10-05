@@ -722,7 +722,11 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                 }
                 pending = null;
                 if (!result.done) {
-                  controller.enqueue(encoder.encode('event: inventory\ndata: {"type":"conversation.inventory"}\n\n'));
+                  const catalogs: Record<string, string> = {};
+                  for (const entry of await deps.chatService!.status()) {
+                    if (entry.availability.state === "ready" && entry.availability.catalogRevision) catalogs[entry.agent.id] = entry.availability.catalogRevision;
+                  }
+                  controller.enqueue(encoder.encode(`event: inventory\ndata: ${JSON.stringify({ type: "conversation.inventory", ...(Object.keys(catalogs).length ? { catalogs } : {}) })}\n\n`));
                   return;
                 }
                 await finish(endedBy("completed"));

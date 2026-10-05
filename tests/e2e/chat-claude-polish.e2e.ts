@@ -126,6 +126,24 @@ async function bootClaude(page: Page, request: APIRequestContext, title: string,
 test.describe("Claude Code chat polish (fixture-driven)", () => {
   test.use({ viewport: { width: 1400, height: 1000 } });
 
+  test("a corrected catalog limit repaints an unchanged usage message", async ({ page, request }) => {
+    const models = claudeModels.map(model => model.selection.modelId === "sonnet" ? { ...model, contextLimit: 200_000 } : model);
+    await bootClaude(page, request, "Late window discovery", [carrier("usage:unchanged", 2, "sonnet", 100, 149_900)], {}, false, models);
+    const label = page.locator("#chat-context-usage-label");
+    await expect(label).toHaveText("75%");
+    await control(request, { action: "models", agent: "claude", models: claudeModels });
+    await expect(label).toHaveText("15%");
+  });
+
+  test("confirming an estimated window updates the source without another usage message", async ({ page, request }) => {
+    const models = claudeModels.map(model => ({ ...model, contextWindow: { source: "estimate" as const, freshness: "current" as const } }));
+    await bootClaude(page, request, "Confirm window", [carrier("usage:same", 2, "sonnet", 100, 149_900)], {}, false, models);
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("~15%");
+    await control(request, { action: "models", agent: "claude", models: models.map(model => ({ ...model, contextWindow: { source: "catalog", freshness: "current" } })) });
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("15%");
+    await expect(page.locator("#chat-context-usage")).toHaveAttribute("data-window-source", "catalog");
+  });
+
   test("the context readout prefers the session's own report and expands to its categories", async ({ page, request }, testInfo) => {
     const id = await bootClaude(page, request, "Context report", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "Summarize the repo" },
@@ -170,9 +188,9 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     ], { model: { providerId: "anthropic", modelId: "claude-opus-4-6" } });
     const label = page.locator("#chat-context-usage-label");
     const meter = page.locator("#chat-context-usage");
-    await expect(label).toHaveText("?");
+    await expect(label).toHaveText("213k");
     await expect(meter).toHaveAttribute("data-fill", "unknown");
-    await expect(meter).toHaveAttribute("title", "212,897 tokens in the context window");
+    await expect(meter).toHaveAttribute("title", "212,897 tokens used · Limit unavailable");
     // The session states its window: 1M. The report and every later call
     // measure against it, not the catalog.
     await control(request, { action: "item", conversationId: id, item: { id: "context:report:1", type: "context_report", createdAt: 3, total: 213_000, max: 1_000_000, model: { providerId: "anthropic", modelId: "claude-opus-4-6" } } });
@@ -298,7 +316,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     // proves the typed id reached the conversation configuration.
     expect(stats).toBeTruthy();
     await control(request, { action: "item", conversationId: id, item: carrier("usage:t1", 50, "claude-opus-4-9", 100, 900) });
-    await expect(page.locator("#chat-context-usage-label")).toHaveText("?");
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("1.0k");
     await expect(page.locator("#chat-context-usage")).toHaveAttribute("data-fill", "unknown");
   });
 
@@ -1269,6 +1287,36 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await capture(page, testInfo, "phase3-generated-title-in-chooser");
   });
 });
+
+for (const touch of [false, true]) {
+  test.describe(`Claude live window discovery on ${touch ? "touch" : "desktop"}`, () => {
+    test.use(touch ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1400, height: 1000 } });
+    test("a running turn recovers its window past an estimate and after reconnect", async ({ page, request }, testInfo) => {
+      const model = { providerId: "anthropic", modelId: "claude-opus-4-6" };
+      const id = await bootClaude(page, request, "Live window discovery", [carrier("usage:held", 2, model.modelId, 2, 212_895)], { model }, touch);
+      await control(request, { action: "status", conversationId: id, status: "running" });
+      const label = page.locator("#chat-context-usage-label");
+      await expect(label).toHaveText("213k");
+      await expect(page.locator("#chat-context-usage")).toHaveAttribute("data-fill", "unknown");
+      await page.locator("#chat-context-usage > summary").click();
+      await expect(page.locator("#chat-context-usage-breakdown")).toContainText("Limit unavailable");
+      await capture(page, testInfo, "context-limit-unavailable");
+      await control(request, { action: "item", conversationId: id, item: {
+        id: "window:live", type: "context_window", createdAt: 3, model, limit: 1_000_000,
+        window: { source: "session", freshness: "current", observedAt: 3 },
+      } });
+      await expect(label).toHaveText("21%");
+      await expect(page.locator("#chat-context-usage")).toHaveAttribute("title", "212,897 of 1,000,000 tokens in the context window");
+      await expect(page.locator('[data-chat-item-id="window:live"]')).toHaveCount(0);
+      await capture(page, testInfo, "context-limit-confirmed-during-turn");
+      await page.reload();
+      if (touch) await page.locator("#touch-tab-chat").click();
+      else await openChatPanel(page);
+      await expect(label).toHaveText("21%");
+      await expect(page.locator("#chat-context-usage")).toHaveAttribute("data-window-source", "session");
+    });
+  });
+}
 
 test.describe("Claude Code plan readout at phone width", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });

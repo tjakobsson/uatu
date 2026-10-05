@@ -263,6 +263,11 @@ export class ChatAdapter {
   // establish what a later sparse deletion can have removed.
   private readonly listedSessions = new Map<string, true>();
   private readonly inventory = new ConversationInventoryBroadcaster();
+  private catalogSequence = 0;
+
+  catalogRevision(): string | undefined {
+    return this.catalogSequence ? `${this.generation}:${this.catalogSequence}` : undefined;
+  }
   // Conversations with a turn in flight, tracked at the adapter so the fact
   // survives projection eviction. This is what distinguishes "the store says
   // running because OpenCode died mid-turn" from "running right now".
@@ -2330,6 +2335,10 @@ export class ChatAdapter {
     try {
       for await (const normalized of this.provider.events(signal)) {
         if (signal.aborted) break;
+        if (normalized.catalogsChanged) {
+          this.catalogSequence += 1;
+          this.inventory.invalidate();
+        }
         if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
           this.countDiscard(normalized.outcome, normalized.eventType);
         }

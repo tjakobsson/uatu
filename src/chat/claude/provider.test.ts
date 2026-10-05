@@ -9,7 +9,7 @@ import spikeRevival from "../../../tests/fixtures/claude-sdk/spike-cron-revival.
 import forkedRuns from "../../../tests/fixtures/claude-sdk/forked-runs-2.1.280.json";
 import type { NormalizedProviderEvent } from "../provider";
 import { createClaudeEventMemory, markTasksBackgrounded, normalizeClaudeMessage, normalizeContextUsage, normalizeTranscriptEntries } from "./normalization";
-import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
+import { ClaudeProvider, normalizePlanUtilization, normalizeSessionTotals, taskOutputKey, wakeupPromptMatches, WAKEUP_PAUSED_MESSAGE, WAKEUP_PAUSED_ONCE_MESSAGE, type ClaudeProviderOptions, type ClaudeQueryHandle, type ClaudeQueryInput, type ClaudeUserEnvelope } from "./provider";
 import type { QuestionRequest } from "../types";
 import { BackgroundTaskUnavailableError, ReleaseUnavailableError, ScheduledWakeupUnavailableError } from "../provider";
 import { claudeProjectDir } from "./transcript";
@@ -70,7 +70,7 @@ class FakeQuery implements ClaudeQueryHandle {
   }
 }
 
-function fixture(prepare?: (query: FakeQuery) => void, options: { usageReadTimeoutMs?: number } = {}): { provider: ClaudeProvider; queries: FakeQuery[]; configDir: string; workspace: string } {
+function fixture(prepare?: (query: FakeQuery) => void, options: Partial<ClaudeProviderOptions> = {}): { provider: ClaudeProvider; queries: FakeQuery[]; configDir: string; workspace: string } {
   const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "uatu-claude-provider-")));
   const workspace = path.join(root, "workspace");
   mkdirSync(workspace, { recursive: true });
@@ -4990,6 +4990,190 @@ describe("scheduled wakeups hold, fire, release, and lose (claude-scheduled-wake
   });
 });
 
+describe("conversation window discovery", () => {
+  const model = { providerId: "anthropic", modelId: "claude-opus-5-5" };
+  const answer = { model: model.modelId, maxTokens: 1_000_000, rawMaxTokens: 1_000_000, totalTokens: 999 };
+
+  test("the session states its window before prompt delivery and snapshot recovery keeps live occupancy", async () => {
+    const held = Promise.withResolvers<unknown>();
+    const { provider, queries } = fixture(query => { query.getContextUsage = () => held.promise; });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      const prompt = provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await waitFor(() => queries.length === 1);
+      const query = queries[0]!;
+      let delivered = false;
+      const sent = query.input.prompt[Symbol.asyncIterator]().next().then(() => { delivered = true; });
+      expect(delivered).toBe(false);
+      held.resolve(answer);
+      await prompt;
+      await sent;
+      await waitFor(() => events.some(event => event.eventType === "context.window"));
+      expect(events.flatMap(event => event.updates).some(update => update.kind === "upsert" && update.item.type === "context_report")).toBe(false);
+      query.push({ type: "assistant", uuid: "live-usage", session_id: session.id, message: { role: "assistant", model: model.modelId, content: [{ type: "text", text: "working" }], usage: { input_tokens: 10, cache_read_input_tokens: 249_990 } } });
+      await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "usage:live-usage")));
+      const page = await provider.listMessages(session.id, { limit: 1 });
+      const readout = contextReadout(page.items, [], undefined);
+      expect(readout).toMatchObject({ used: 250_000, limit: 1_000_000, fraction: 0.25 });
+      expect(page.items.filter(item => item.type === "context_window")).toHaveLength(1);
+      expect(page.nextCursor).toBeUndefined();
+      expect(provider.windowDiagnostics()).toContainEqual(expect.objectContaining({ selected: model.modelId, resolved: model.modelId, outcome: "confirmed" }));
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("a slow answer does not hold delivery or cancellation and corrects the running turn", async () => {
+    const held = Promise.withResolvers<unknown>();
+    const { provider, queries } = fixture(query => { query.getContextUsage = () => held.promise; }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 500 });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      expect((await queries[0]!.input.prompt[Symbol.asyncIterator]().next()).done).toBe(false);
+      held.resolve(answer);
+      await waitFor(() => events.some(event => event.eventType === "context.window"));
+      expect(events.some(event => event.eventType === "result")).toBe(false);
+      await provider.interrupt(session.id);
+      expect(queries[0]!.interrupts).toBe(1);
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("cancellation during startup prevents a delayed prompt from being delivered", async () => {
+    const held = Promise.withResolvers<unknown>();
+    const { provider, queries } = fixture(query => { query.getContextUsage = () => held.promise; });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      const prompt = provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await waitFor(() => events.some(event => event.eventType === "prompt.accepted"));
+      await provider.interrupt(session.id);
+      held.resolve(answer);
+      await prompt;
+      expect((await queries[0]!.input.prompt[Symbol.asyncIterator]().next()).done).toBe(true);
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("a cancellation does not swallow a subsequent accepted prompt", async () => {
+    const { provider, queries } = fixture();
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+      await provider.interrupt(session.id);
+      await provider.prompt(session.id, { id: "r2", text: "second", delivery: "queue" });
+      const reader = queries[0]!.input.prompt[Symbol.asyncIterator]();
+      expect((await reader.next()).value.message.content).toEqual([{ type: "text", text: "first" }]);
+      let second: unknown;
+      void reader.next().then(result => { second = result.value; });
+      await waitFor(() => second !== undefined);
+      expect(second).toMatchObject({ message: { content: [{ type: "text", text: "second" }] } });
+    } finally { await provider.dispose(); }
+  });
+
+  test("a late old-model answer cannot override the new smaller window", async () => {
+    const held = Promise.withResolvers<unknown>();
+    let calls = 0;
+    const nextModel = { providerId: "anthropic", modelId: "claude-haiku-4-5-20251001" };
+    const { provider } = fixture(query => {
+      query.setModel = async () => undefined;
+      query.getContextUsage = () => ++calls === 1 ? held.promise : Promise.resolve({ ...answer, model: nextModel.modelId, maxTokens: 200_000 });
+    }, { defaultReadWaitMs: 1 });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await provider.switchModel(session.id, nextModel);
+      held.resolve(answer);
+      await waitFor(() => events.some(event => event.eventType === "context.window"));
+      const windows = events.flatMap(event => event.updates).filter(update => update.kind === "upsert" && update.item.type === "context_window");
+      expect(windows).toHaveLength(1);
+      expect(windows[0]).toMatchObject({ item: { limit: 200_000, model: nextModel } });
+      expect(provider.windowDiagnostics()).toContainEqual(expect.objectContaining({ outcome: "stale" }));
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("transient session failure retries once without losing the accepted turn", async () => {
+    let calls = 0;
+    const { provider } = fixture(query => { query.getContextUsage = async () => { if (++calls === 1) throw new Error("closed"); return answer; }; }, { windowRetryDelaysMs: [1] });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await waitFor(() => events.some(event => event.eventType === "context.window"));
+      expect(calls).toBe(2);
+      const diagnostics = provider.windowDiagnostics();
+      expect(diagnostics).toContainEqual(expect.objectContaining({ outcome: "failed", phase: "session", selected: model.modelId }));
+      expect(JSON.stringify(diagnostics)).not.toContain("hello");
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("a reply from before an account change is discarded", async () => {
+    const held = Promise.withResolvers<unknown>();
+    const { provider } = fixture(query => { query.getContextUsage = () => held.promise; }, { defaultReadWaitMs: 1 });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await provider.accountsChanged();
+      held.resolve(answer);
+      await waitFor(() => provider.windowDiagnostics().some(record => record.outcome === "stale"));
+      expect(events.some(event => event.eventType === "context.window")).toBe(false);
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("a dead query's late answer cannot overwrite its replacement", async () => {
+    const held = Promise.withResolvers<unknown>();
+    let starts = 0;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = ++starts === 1 ? () => held.promise : async () => ({ ...answer, maxTokens: 200_000 });
+    }, { defaultReadWaitMs: 1 });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+      queries[0]!.fail(new Error("process exited"));
+      await waitFor(() => provider.liveSessionCount() === 0);
+      await provider.prompt(session.id, { id: "r2", text: "second", delivery: "queue" });
+      held.resolve(answer);
+      await waitFor(() => provider.windowDiagnostics().some(record => record.outcome === "stale"));
+      const windows = events.flatMap(event => event.updates).filter(update => update.kind === "upsert" && update.item.type === "context_window");
+      expect(windows).toHaveLength(1);
+      expect(windows[0]).toMatchObject({ item: { limit: 200_000 } });
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("automatic retries have a finite budget and diagnostics omit error payloads", async () => {
+    let calls = 0;
+    const { provider } = fixture(query => { query.getContextUsage = async () => { calls += 1; throw new Error("private-token"); }; }, { windowRetryDelaysMs: [0, 0] });
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+      await waitFor(() => provider.windowDiagnostics().filter(record => record.outcome === "failed").length === 3);
+      await provider.prompt(session.id, { id: "r2", text: "second", delivery: "queue" });
+      expect(calls).toBe(3);
+      expect(JSON.stringify(provider.windowDiagnostics())).not.toContain("private-token");
+    } finally { await provider.dispose(); }
+  });
+
+  test("a reported compaction window and model capacity remain separate", async () => {
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = async () => ({ ...answer, maxTokens: 200_000, totalTokens: 210_000, over_limit: { kind: "compaction_window" } });
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({ session: { model_usage: { [model.modelId]: { contextWindow: 1_000_000 } } } });
+    });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      queries[0]!.push({ type: "result", subtype: "success", uuid: "done", session_id: session.id, is_error: false });
+      await waitFor(() => events.some(event => event.eventType === "context.reported"));
+      const page = await provider.listMessages(session.id, { limit: 1 });
+      const readout = contextReadout(page.items, [], undefined)!;
+      expect(readout.rows).toContainEqual(["Compaction window", 200_000]);
+      expect(readout.rows).toContainEqual(["Model capacity", 1_000_000]);
+      expect(readout.fraction).toBe(1);
+    } finally { stop(); await provider.dispose(); }
+  });
+});
+
 describe("windows and the default as Claude Code states them (claude-context-windows-from-cli)", () => {
   // The catalog as CLI 2.1.281 served it on 2026-10-01: no window field, the
   // default resolving to the account default (Sonnet 5.5).
@@ -5103,6 +5287,20 @@ describe("windows and the default as Claude Code states them (claude-context-win
     await provider.dispose();
   });
 
+  test("a failed window read remains retryable", async () => {
+    let attempts = 0;
+    const { provider } = windowFixture({ behave: model => {
+      if (model !== "claude-opus-4-6") return undefined;
+      return ++attempts === 1 ? "throw" : { model, maxTokens: 1_000_000 };
+    } }, { windowReprobeCooldownMs: 0 });
+    try {
+      await settled(provider, models => find(models, "claude-opus-4-6").contextLimit === 1_000_000);
+      expect(attempts).toBeGreaterThan(1);
+    } finally {
+      await provider.dispose();
+    }
+  });
+
   test("reading windows never touches a live conversation's model, and a refresh keeps what was stated", async () => {
     const { provider, queries } = windowFixture({ unpinned: { model: "claude-fable-5-1", maxTokens: 1_000_000 } });
     await provider.listModels();
@@ -5110,7 +5308,7 @@ describe("windows and the default as Claude Code states them (claude-context-win
     await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
     const live = queries[1]!;
     // The live session's own catalog refresh lands (captureModels).
-    await waitFor(() => live.contextReads.length === 0 && queries.length === 2);
+    await waitFor(() => live.contextReads.length === 1 && queries.length === 2);
     await Bun.sleep(10);
     const models = await provider.listModels();
     expect(live.modelCalls).toEqual([]);
@@ -5388,7 +5586,8 @@ describe("windows and the default as Claude Code states them (claude-context-win
       const settledModels = await settled(provider, served => queries.length === 2 && queries[1]!.returned && find(served, "claude-opus-4-7").detail?.includes("1M") === true);
       expect(queries[1]!.modelCalls).toContain("haiku");
       expect(queries[1]!.modelCalls).not.toContain("opus");
-      expect(queries[1]!.modelCalls).not.toContain("sonnet");
+      // A timed-out switch was not a successful read: retry it as well.
+      expect(queries[1]!.modelCalls).toContain("sonnet");
       expect(find(settledModels, "haiku").contextLimit).toBe(200_000);
     } finally {
       await provider.dispose();
@@ -5469,7 +5668,7 @@ describe("windows and the default as Claude Code states them (claude-context-win
       await provider.prompt(session.id, { id: "r1", text: "hello", delivery: "queue" });
       const refreshed = await settled(provider, served => find(served, "haiku").resolvesTo?.modelId === "claude-haiku-6");
       // The derived figure for the new model, not the 640k stated for the old one.
-      expect(find(refreshed, "haiku").contextLimit).toBe(200_000);
+      expect(find(refreshed, "haiku").contextLimit).toBeUndefined();
     } finally {
       currentCatalog.splice(0, currentCatalog.length, ...original);
       await provider.dispose();

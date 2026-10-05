@@ -172,7 +172,7 @@ describe("OpenCode v2 identity policy", () => {
     const provider = new OpenCodeV1Provider(client, "/workspace");
 
     expect(await provider.listModels()).toEqual([
-      { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol", variants: ["high", "xhigh"], contextLimit: 200000 },
+      { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol", variants: ["high", "xhigh"], contextLimit: 200000, contextWindow: { source: "catalog", freshness: "current" } },
       { selection: { providerId: "opencode", modelId: "free" }, provider: "OpenCode", name: "Free" },
     ]);
     // The variants capability is declared now that listModels reports variants.

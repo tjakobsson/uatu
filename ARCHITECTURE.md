@@ -556,8 +556,30 @@ The chat surface speaks one timeline model for every agent (`src/chat/types.ts`)
 | `task_progress` | The agent's todo list, one presentation updated in place | Pinned track |
 | `background_task` | A task the agent runs in the background, updated in place from start to settling. Running ones are listed above the composer with a stop control and open for inspection; settled ones are rows. A `foreground` one is the run a typed command launched, listed with the subagents only. | Composer list, drill-down, timeline |
 | `context_report` | The agent's own statement of window occupancy (total, max, categories, plan utilization). Data for the readout, never a row; the readout uses whichever of a report or a usage carrier is newest. | Context meter |
+| `context_window` | A limit-only observation, scoped by model and execution `contextKey`, with source and freshness. Replayed and recovered as data, never a row or an occupancy sample. | Context meter |
 | `compaction` | Where the agent compacted its context, with before/after figures | Timeline marker |
 | `turn_status`, `notice` | A turn's outcome; warnings and errors. A `notice.code` (`rate-limit-*`, `refusal-fallback`) drives the composer's badge. `login-failed` marks a turn that failed on the agent's login and renders with the way to log in; `reauthenticating` is the one item an agent occupies while it signs in again. | Timeline, composer |
+
+Claude context-window discovery is independent of occupancy. A query asks for
+`getContextUsage({ detail: "summary" })` before its first prompt. Prompt delivery
+waits at most two seconds; an eligible late answer can correct the window while
+the turn runs. The provider rejects replies from superseded query, selection,
+or account contexts. It retains bounded `context_window` records for snapshot
+recovery, and attaches the same `contextKey` to the usage they describe. A newer
+session observation can increase or decrease a limit. Known fallback values are
+estimates; unknown model ids have no invented 200k limit. Transient discovery
+failures get bounded retries, while a control request still pending on a live
+query is never duplicated by a retry. `UATU_DEBUG=1` logs the model ids, phase,
+source, epoch, and outcome of discovery without prompt or credential payloads.
+
+Catalog discoveries advance an agent-scoped revision carried by the existing
+inventory stream's optional `catalogs` map. Browsers refresh the changed agent's
+banked models and repaint the meter without opening the picker. The paint key
+includes limit and provenance, so an unchanged usage item does not hide a
+correction. The readout labels estimated and cached limits; with no usable limit
+it shows tokens used and explains that the limit is unavailable. Explicit
+compaction boundaries and separately reported model capacity keep their own
+labels. Neither a summary discovery nor a catalog refresh replaces occupancy.
 
 Conversation status is `idle`, `sending`, `running`, `completed`, `interrupted`, `failed`, plus four named states: `retrying` and `compacting` are live-turn states (the composer offers Cancel, a new prompt is held), `background` means no turn is running but the agent still holds live background work (prompting is possible), and `scheduled` means nothing runs but the agent's session holds future turns it scheduled for itself (prompting is possible; the composer lists the wakeups with a release). `isLiveConversationStatus()` in `types.ts` is the one rule for which statuses are live.
 

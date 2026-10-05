@@ -1424,6 +1424,33 @@ describe("reversible history coordination", () => {
 });
 
 describe("prompt, abort, permission, and question mutations", () => {
+  test("catalog changes advance the agent revision and invalidate inventory without a conversation", async () => {
+    const provider = new FakeProvider();
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const inventory = adapter.subscribeInventory();
+    await inventory.next();
+    const pump = adapter.startEventPump();
+    try {
+      expect(adapter.catalogRevision()).toBeUndefined();
+      provider.eventQueue.push({ type: "catalog.updated", normalized: { updates: [], outcome: "handled", eventType: "catalog.updated", catalogsChanged: true } });
+      await liveEventsApplied(adapter, provider);
+      await expectInventorySignal(inventory);
+      expect(adapter.catalogRevision()).toBe("g:1");
+      expect(provider.sessions).toEqual([]);
+    } finally { inventory.cancel(); await adapter.stopEventPump(); await pump; await adapter.dispose(); }
+  });
+  test("provider-held window metadata survives projection eviction", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("a"), fixtureSession("b")];
+    const window: ConversationItem = { id: "window", type: "context_window", createdAt: 1, model: { providerId: "anthropic", modelId: "opus" }, limit: 1_000_000, window: { source: "session", freshness: "current" } };
+    provider.listMessages = async id => ({ items: id === "a" ? [window] : [], accounting: [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+    try {
+      expect((await adapter.history("a")).items).toContainEqual(window);
+      await adapter.history("b");
+      expect((await adapter.history("a")).items).toContainEqual(window);
+    } finally { await adapter.dispose(); }
+  });
   test("snapshots recover provider-owned configuration and cache only while projected", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("a"), fixtureSession("b")];

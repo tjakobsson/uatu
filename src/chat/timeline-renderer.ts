@@ -160,7 +160,7 @@ export class TimelineRenderer {
     // only a settled one takes a place in the timeline (D8). A foreground
     // run's row never does: it is listed with the subagents, and the command
     // that ran it prints its own output into the timeline (D13).
-    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === "") && item.type !== "context_report"
+    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === "") && item.type !== "context_report" && item.type !== "context_window"
       && !isRateLimitStanding(item)
       && !(item.type === "background_task" && (item.status === "running" || item.foreground === true)));
 
@@ -799,7 +799,7 @@ export function awaitingFirstResponse(items: readonly ConversationItem[], status
     // A previous turn's footer, a hidden usage carrier, a context report,
     // and a compaction marker say nothing about THIS turn's response; keep
     // looking past them.
-    if (item.type === "turn_status" || item.type === "context_report" || item.type === "compaction") continue;
+    if (item.type === "turn_status" || item.type === "context_report" || item.type === "context_window" || item.type === "compaction") continue;
     if (item.type === "assistant_message" && item.markdown === "") continue;
     return false;
   }
@@ -1251,7 +1251,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   if (item.type === "compaction") return `<div class="chat-item chat-compaction" data-chat-item-id="${id}"${stamp} role="status"><span class="chat-compaction-label">${escapeHtml(compactionLabel(item))}</span></div>`;
   // Never reached: reports are filtered before rendering. Kept exhaustive so
   // a new kind fails loudly here rather than falling into the activity shell.
-  if (item.type === "context_report") return "";
+  if (item.type === "context_report" || item.type === "context_window") return "";
   // A settled background task: its outcome and the agent's summary, in
   // place. (Running ones are filtered out above and listed by the composer.)
   if (item.type === "background_task") {

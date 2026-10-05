@@ -175,7 +175,7 @@ export class OpenCodeV1Provider implements ChatProvider {
           provider: provider.name,
           name: model.name,
           ...(variants.length ? { variants } : {}),
-          ...(model.limit?.context ? { contextLimit: model.limit.context } : {}),
+          ...(model.limit?.context ? { contextLimit: model.limit.context, contextWindow: { source: "catalog" as const, freshness: "current" as const } } : {}),
           ...(imageInput ? { imageInput } : {}),
         };
       }))

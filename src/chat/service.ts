@@ -209,6 +209,7 @@ export class LazyChatService implements WorkspaceChatService {
         agent: adapter.agent(),
         ...(login ? { login } : {}),
         ...(this.accountsRevision > 0 ? { accountsRevision: this.accountsRevision } : {}),
+        ...(adapter.catalogRevision() ? { catalogRevision: adapter.catalogRevision() } : {}),
       };
     } catch (error) {
       // Deliberately not cached: ensureAdapter forgets a rejected attempt, so

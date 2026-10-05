@@ -18,15 +18,14 @@ const FULL_EFFORT = ["low", "medium", "high", "xhigh", "max"] as const;
 const STANDARD_EFFORT = ["low", "medium", "high"] as const;
 
 export const CLAUDE_MODELS: ChatModel[] = [
-  // The CLI's default resolves to Opus 5 (probed 2026-09-09), so the
-  // sentinel row carries that window until the live catalog says otherwise.
-  { selection: claudeModelSelection("default"), provider: "Anthropic", name: "Default (recommended)", default: true, detail: "Claude Code's own model choice", variants: [...FULL_EFFORT], contextLimit: 1_000_000, imageInput: true },
+  // A default without a resolved model has no defensible window estimate.
+  { selection: claudeModelSelection("default"), provider: "Anthropic", name: "Default (recommended)", default: true, detail: "Claude Code's own model choice", variants: [...FULL_EFFORT], imageInput: true },
   // Fable 5 runs the enlarged window (probed 2026-09-02), fallback or not.
   { selection: claudeModelSelection("claude-fable-5"), provider: "Anthropic", name: "Fable 5", variants: [...FULL_EFFORT], contextLimit: 1_000_000, imageInput: true },
   { selection: claudeModelSelection("claude-opus-5"), provider: "Anthropic", name: "Opus 5", variants: [...FULL_EFFORT], contextLimit: 1_000_000, imageInput: true },
   { selection: claudeModelSelection("claude-sonnet-5"), provider: "Anthropic", name: "Sonnet 5", variants: [...FULL_EFFORT], contextLimit: 1_000_000, imageInput: true },
   { selection: claudeModelSelection("claude-haiku-4-5-20251001"), provider: "Anthropic", name: "Haiku 4.5", variants: [...STANDARD_EFFORT], contextLimit: 200_000, imageInput: true },
-];
+].map(model => ({ ...model, ...(model.contextLimit ? { contextWindow: { source: "estimate" as const, freshness: "current" as const } } : {}) }));
 
 // The group label under which the app-only set is offered: a heading of its
 // own in the picker so the catalog's rows stay first and unmistakable (D3).
@@ -48,13 +47,14 @@ const moreModel = (modelId: string, name: string, contextLimit: number, variants
   name,
   variants: [...variants],
   contextLimit,
+  contextWindow: { source: "estimate", freshness: "current" },
   imageInput: true,
-  detail: moreModelDetail(modelId, contextLimit),
+  detail: moreModelDetail(modelId, contextLimit, true),
 });
 
 /** A "More models" row's detail line, restated whenever its window is. */
-export function moreModelDetail(modelId: string, contextLimit: number): string {
-  return `${modelId} · ${windowLabel(contextLimit)} context · offered by the Claude apps`;
+export function moreModelDetail(modelId: string, contextLimit: number, estimated = false): string {
+  return `${modelId} · ${windowLabel(contextLimit)}${estimated ? " estimated" : ""} context · offered by the Claude apps`;
 }
 
 /** 1_000_000 → "1M", 2_500_000 → "2.5M", 200_000 → "200k". */
@@ -106,11 +106,11 @@ export function findClaudeModel(modelId: string): ChatModel | undefined {
  * The fallback window for a model Claude Code has not stated one for (the
  * live ModelInfo carries no context-window field): the "[1m]" variant
  * marker anywhere in its ids means the enlarged window; failing that, the
- * manifest's figure for the id; failing that, the 200k standard. The
+ * manifest's figure for the id; failing that, unknown. The
  * "default" sentinel names no model of its own, so only its resolved id
  * speaks for it.
  */
-export function claudeContextWindow(...ids: Array<string | undefined>): number {
+export function claudeContextWindow(...ids: Array<string | undefined>): number | undefined {
   if (ids.some(id => id?.includes("[1m]"))) return 1_000_000;
   for (const id of ids) {
     if (!id || id === "default") continue;
@@ -118,7 +118,7 @@ export function claudeContextWindow(...ids: Array<string | undefined>): number {
     const known = findClaudeModel(bare)?.contextLimit ?? FALLBACK_WINDOWS[bare];
     if (known !== undefined) return known;
   }
-  return 200_000;
+  return undefined;
 }
 
 /** "claude-opus-5[1m]" → "claude-opus-5": the id without its window marker. */
@@ -158,4 +158,3 @@ function versionFromModelId(id: string | undefined): string | undefined {
   const match = /^claude-[a-z]+-(\d+(?:-\d+)*?)(?:-\d{8})?$/.exec(stripped);
   return match ? match[1]!.replaceAll("-", ".") : undefined;
 }
-

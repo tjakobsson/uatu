@@ -2,6 +2,19 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 10 / Workspace 23 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `ConversationItem` gains `context_window`, a data-only window observation with source and freshness. It changes the context meter's denominator without replacing its token count. `assistant_message` and `context_report` can carry a matching `contextKey`; reports can carry window metadata too.
+- `ConversationInventoryEvent.catalogs` carries agent-scoped catalog revisions. A changed revision asks a connected client to re-read that agent's catalog, including newly discovered context limits.
+
+### Migration
+
+Regenerate strict workspace live-payload clients for revision 23. Do not render `context_window` as a message. Join it to usage by execution identity when present, preserve model/window variants, and repaint when the limit or its source changes. Label estimates and cached observations; an unavailable limit is not a full window. The Hub revision remains 10. Model-list provenance and availability catalog revisions are internal same-build workspace fields.
+
 ## Hub 10 / Workspace 22 - Unreleased (agent accounts)
 
 Compatibility: additive

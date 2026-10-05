@@ -195,6 +195,18 @@ describe("streaming protocol is closed", () => {
 });
 
 describe("conversation configuration", () => {
+  test("window-only observations and execution keys agree with runtime validation", async () => {
+    const { parseConversationItem } = await import("../src/chat/validation");
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationItem, openapi.components.schemas));
+    const window = { id: "w", type: "context_window", createdAt: 1, model: { providerId: "anthropic", modelId: "opus" }, contextKey: "q1", limit: 1_000_000, window: { source: "session", freshness: "current", observedAt: 1 } } as const;
+    expect(validate(window)).toBe(true);
+    expect(parseConversationItem(window)).toEqual(window);
+    expect(validate({ ...window, limit: 0 })).toBe(false);
+    expect(validate({ ...window, total: 1 })).toBe(false);
+    expect(validate({ id: "u", type: "assistant_message", createdAt: 1, markdown: "", contextKey: "q1" })).toBe(true);
+    expect(validate({ id: "r", type: "context_report", createdAt: 1, total: 250_000, contextKey: "q1", window: window.window })).toBe(true);
+  });
   test("tool and command optional completion timestamps agree with runtime validation", async () => {
     const { parseConversationItem } = await import("../src/chat/validation");
     const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
@@ -246,6 +258,8 @@ describe("live stream topics", () => {
     expect(fixture.data.topic).toBe("inventory");
     expect(fixture.data.event).toEqual({ kind: "data", data: { type: "conversation.inventory" } });
     expect(validate(fixture.data.event.data)).toBe(true);
+    expect(validate({ type: "conversation.inventory", catalogs: { claude: "g:2" } })).toBe(true);
+    expect(validate({ type: "conversation.inventory", catalogs: { claude: 2 } })).toBe(false);
     expect(validate({ type: "conversation.inventory", conversationId: "conversation-1" })).toBe(false);
     expect(validate({ type: "conversation.updated" })).toBe(false);
   });

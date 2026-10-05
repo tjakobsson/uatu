@@ -13,6 +13,12 @@ import type { CoverageAnnotations } from "../coverage-annotations";
  * update drops them, Agent accounts names `claude auth login` instead.
  * `accountInfo()` (declared) supplies the login state, and `auth_status`
  * frames are presented as the re-authenticating notice.
+ * `getContextUsage({ detail: "summary" })` supplies the selected query's
+ * window before its first prompt and the catalog probe's per-model windows.
+ * Full reads still supply occupancy after turns and on demand. Structured
+ * assistant `context_usage` fields preserve explicit compaction boundaries;
+ * `model_usage.contextWindow` supplies a separate capacity only for the exact
+ * reporting model. Limit-only updates never replace token occupancy.
  */
 export const claudeCoverageAnnotations: CoverageAnnotations & {
   // `sdk-tools.d.ts` declares one `<Name>Input` per tool; the wire name is

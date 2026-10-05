@@ -52,7 +52,8 @@ export function parseChatAvailability(value: unknown): ChatAvailability {
       expectKeys(record, ["state"], "chat availability");
       break;
     case "ready":
-      expectKeys(record, ["state", "version", "agent", "login", "accountsRevision"], "chat availability");
+      expectKeys(record, ["state", "version", "agent", "login", "accountsRevision", "catalogRevision"], "chat availability");
+      expectOptionalIdentity(record.catalogRevision, "catalog revision");
       expectNonEmptyString(record.version, "version");
       // Optional: absent for the moment between the runtime reporting ready
       // and the adapter existing to describe the agent.
@@ -119,12 +120,13 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
-  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput", "detail", "default", "resolvesTo"], "chat model");
+  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "contextWindow", "imageInput", "detail", "default", "resolvesTo"], "chat model");
   expectModelSelection(record.selection);
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
   if (record.variants !== undefined) expectStringArray(record.variants, "model variants", true);
-  if (record.contextLimit !== undefined && (typeof record.contextLimit !== "number" || record.contextLimit < 1)) throw new Error("model contextLimit must be a positive number");
+  if (record.contextLimit !== undefined) expectPositiveLimit(record.contextLimit, "model contextLimit");
+  if (record.contextWindow !== undefined) expectContextWindow(record.contextWindow);
   if (record.imageInput !== undefined && typeof record.imageInput !== "boolean") throw new Error("model imageInput must be a boolean");
   if (record.detail !== undefined) expectNonEmptyString(record.detail, "model detail");
   if (record.default !== undefined && typeof record.default !== "boolean") throw new Error("model default must be a boolean");
@@ -370,6 +372,22 @@ function expectTokenUsage(value: unknown, label: string): void {
   expectOptionalNonNegative(usage.costUsd, `${label} costUsd`);
 }
 
+function expectPositiveLimit(value: unknown, label: string): void {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`${label} must be a positive integer`);
+}
+
+function expectContextWindow(value: unknown): void {
+  const window = expectRecord(value, "context window");
+  expectKeys(window, ["source", "freshness", "observedAt", "kind", "capacity", "compactionThreshold"], "context window");
+  expectOneOf(window.source, ["session", "catalog", "estimate"], "window source");
+  expectOneOf(window.freshness, ["current", "cached"], "window freshness");
+  expectOptionalTimestamp(window.observedAt, "window observedAt");
+  if (window.kind !== undefined) expectOneOf(window.kind, ["effective", "compaction"], "window kind");
+  for (const key of ["capacity", "compactionThreshold"]) {
+    if (window[key] !== undefined) expectPositiveLimit(window[key], `window ${key}`);
+  }
+}
+
 export function parseConversationItem(value: unknown): ConversationItem {
   const record = expectRecord(value, "conversation item");
   const type = expectString(record.type, "conversation item type");
@@ -386,7 +404,8 @@ export function parseConversationItem(value: unknown): ConversationItem {
       if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "user message attachment");
       break;
     case "assistant_message":
-      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model", "agent"], type);
+      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model", "agent", "contextKey"], type);
+      expectOptionalIdentity(record.contextKey, "assistant contextKey");
       expectString(record.markdown, "assistant markdown");
       expectOptionalTimestamp(record.completedAt, "completedAt");
       expectTokenUsage(record.usage, "assistant usage");
@@ -455,7 +474,9 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.resetsAt, "notice resetsAt");
       break;
     case "context_report": {
-      expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories", "plan", "session"], type);
+      expectKeys(record, ["id", "type", "createdAt", "total", "max", "model", "categories", "plan", "session", "contextKey", "window"], type);
+      expectOptionalIdentity(record.contextKey, "report contextKey");
+      if (record.window !== undefined) expectContextWindow(record.window);
       if (record.plan !== undefined) expectPlanUtilization(record.plan, "context report plan");
       if (record.session !== undefined) {
         const session = expectRecord(record.session, "context report session");
@@ -493,6 +514,13 @@ export function parseConversationItem(value: unknown): ConversationItem {
       }
       break;
     }
+    case "context_window":
+      expectKeys(record, ["id", "type", "createdAt", "model", "contextKey", "limit", "window"], type);
+      expectModelSelection(record.model);
+      expectOptionalIdentity(record.contextKey, "window contextKey");
+      expectPositiveLimit(record.limit, "window limit");
+      expectContextWindow(record.window);
+      break;
     case "background_task":
       expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground"], type);
       expectIdentity(record.taskId, "background task id");
@@ -599,8 +627,15 @@ export function parseQueuedMessages(value: unknown): QueuedMessage[] {
 
 export function parseConversationInventoryEvent(value: unknown): ConversationInventoryEvent {
   const record = expectRecord(value, "conversation inventory event");
-  expectKeys(record, ["type"], "conversation inventory event");
+  expectKeys(record, ["type", "catalogs"], "conversation inventory event");
   if (record.type !== "conversation.inventory") throw new Error("invalid conversation inventory event type");
+  if (record.catalogs !== undefined) {
+    const catalogs = expectRecord(record.catalogs, "catalog revisions");
+    for (const [agent, revision] of Object.entries(catalogs)) {
+      expectIdentity(agent, "catalog agent");
+      expectIdentity(revision, "catalog revision");
+    }
+  }
   return value as ConversationInventoryEvent;
 }
 

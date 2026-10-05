@@ -67,7 +67,10 @@ describe("window labels", () => {
 });
 
 describe("catalog windows (#347)", () => {
-  test("a window marker means 1M; a plain id takes the fallback figure; the rest is the 200k standard", () => {
+  test("an unknown model has no invented context limit", () => {
+    expect(claudeContextWindow("claude-unknown-99")).toBeUndefined();
+  });
+  test("a window marker means 1M; a known plain id takes an estimate; the rest is unknown", () => {
     expect(claudeContextWindow("opus[1m]", "claude-opus-5[1m]")).toBe(1_000_000);
     expect(claudeContextWindow("claude-fable-5-1[1m]")).toBe(1_000_000);
     // Opus 5 runs the enlarged window on its plain id: the alias row the
@@ -82,7 +85,7 @@ describe("catalog windows (#347)", () => {
     expect(claudeContextWindow("claude-sonnet-4-6")).toBe(200_000);
     expect(claudeContextWindow("haiku", "claude-haiku-4-5-20251001")).toBe(200_000);
     expect(claudeContextWindow("claude-opus-4-6")).toBe(200_000);
-    expect(claudeContextWindow("claude-mystery-9")).toBe(200_000);
+    expect(claudeContextWindow("claude-mystery-9")).toBeUndefined();
   });
 
   test("the default sentinel speaks only through what it resolves to", () => {
@@ -90,6 +93,6 @@ describe("catalog windows (#347)", () => {
     expect(claudeContextWindow("default", "claude-opus-5")).toBe(1_000_000);
     expect(claudeContextWindow("default", "claude-sonnet-5-5")).toBe(1_000_000);
     expect(claudeContextWindow("default", "claude-haiku-4-5-20251001")).toBe(200_000);
-    expect(claudeContextWindow("default", undefined)).toBe(200_000);
+    expect(claudeContextWindow("default", undefined)).toBeUndefined();
   });
 });

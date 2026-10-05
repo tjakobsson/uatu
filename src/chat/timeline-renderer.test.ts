@@ -1730,10 +1730,12 @@ describe("compaction markers and context reports", () => {
     renderer.render(host, projectionWith([
       tool("tool:a", 1),
       { id: "context:report:1", type: "context_report", createdAt: 2, total: 9_697, max: 1_000_000 },
+      { id: "window:1", type: "context_window", createdAt: 2, model: { providerId: "anthropic", modelId: "opus" }, limit: 1_000_000, window: { source: "session", freshness: "current" } },
       tool("tool:b", 3),
       tool("tool:c", 4),
     ], { status: "completed" }), new Set());
     expect(host.querySelector('[data-chat-item-id="context:report:1"]')).toBeNull();
+    expect(host.querySelector('[data-chat-item-id="window:1"]')).toBeNull();
     expect(host.querySelectorAll(".chat-activity-group")).toHaveLength(1);
   });
 });

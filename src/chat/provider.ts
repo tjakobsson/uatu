@@ -102,6 +102,7 @@ export type NormalizedEventOutcome =
   | "unparseable";
 
 export type NormalizedProviderEvent = {
+  catalogsChanged?: boolean;
   conversationId?: string;
   updates: NormalizedProviderUpdate[];
   outcome: NormalizedEventOutcome;

@@ -42,7 +42,12 @@ export function groupChatModels(models: ChatModel[]): ModelGroup[] {
 }
 
 export function modelIdentityLabel(model: ChatModel): string {
-  return model.detail ?? `${model.provider} · ${model.selection.providerId}/${model.selection.modelId}`;
+  const detail = model.detail ?? `${model.provider} · ${model.selection.providerId}/${model.selection.modelId}`;
+  if (!model.contextWindow) return detail;
+  if (model.contextLimit === undefined) return `${detail} · Limit unavailable`;
+  if (detail.includes("estimated context")) return detail;
+  const label = model.contextWindow.source === "estimate" ? "Estimated limit" : model.contextWindow.freshness === "cached" ? "Cached limit" : "Context window";
+  return `${detail} · ${label}: ${model.contextLimit.toLocaleString()} tokens`;
 }
 
 export function agentControlledModelLabel(agentName?: string): string {

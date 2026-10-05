@@ -3,6 +3,7 @@ import type { ChatEvent, ConversationSnapshot } from "./types";
 import { ConversationProjection } from "./adapter";
 import { addAcceptedDraft, applyChatEvent, confirmAcceptedDraft, dropQueuedMessage, noteQueuedMessage, prependSnapshot, projectionFromSnapshot, refreshFromSnapshot } from "./projection";
 import { ConversationReplay } from "./replay";
+import { contextReadout } from "./context-readout";
 
 const snapshot = (items: ConversationSnapshot["items"] = []): ConversationSnapshot => ({
   conversation: { id: "c1", title: "Chat", createdAt: 1, updatedAt: 1, status: "running" },
@@ -14,6 +15,17 @@ const snapshot = (items: ConversationSnapshot["items"] = []): ConversationSnapsh
 });
 
 describe("chat projection", () => {
+  test("a window correction survives replay duplicates and snapshot recovery without replacing usage", () => {
+    const usage = { id: "usage", type: "assistant_message" as const, markdown: "", createdAt: 2, usage: { input: 250_000 }, model: { providerId: "anthropic", modelId: "opus" }, contextKey: "q1" };
+    const initial = projectionFromSnapshot(snapshot([usage]));
+    const event: ChatEvent = { generation: "g1", sequence: 5, conversationId: "c1", type: "item.upsert", item: { id: "window", type: "context_window", createdAt: 1, model: usage.model, contextKey: "q1", limit: 1_000_000, window: { source: "session", freshness: "current", observedAt: 3 } } };
+    const applied = applyChatEvent(initial, event).projection;
+    const duplicate = applyChatEvent(applied, event);
+    expect(duplicate.outcome).toBe("duplicate");
+    const recovered = projectionFromSnapshot(snapshot(applied.items));
+    expect(contextReadout(recovered.items, [], undefined)).toMatchObject({ used: 250_000, limit: 1_000_000, fraction: 0.25 });
+    expect(recovered.items.filter(item => item.type === "context_window")).toHaveLength(1);
+  });
   test("upserts by identity, ignores duplicates, and rejects sequence gaps", () => {
     const initial = projectionFromSnapshot(snapshot());
     const event: ChatEvent & { type: "item.upsert" } = { generation: "g1", sequence: 5, conversationId: "c1", type: "item.upsert", item: { id: "a1", type: "assistant_message", createdAt: 2, markdown: "one" } };
