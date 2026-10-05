@@ -36,7 +36,7 @@ similar `maxTokens` and `rawMaxTokens` field names.
 ## Automated checks
 
 - `bun run typecheck`: passed.
-- `bun run test:ci`: 4,833 passed, 15 skipped, zero failed across 273 files,
+- `bun run test:ci`: 4,844 passed, 15 skipped, zero failed across 273 files,
   including the PR review follow-up below.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
@@ -108,3 +108,22 @@ still hanging. The focused provider/window/readout suite passed 237 tests;
 typecheck and the full parallel unit/integration suite also passed. The archived
 design and architecture guidance now describe bounded logical waiters rather
 than assuming SDK control requests can be cancelled.
+
+## Second review: recovery after a failed full report
+
+[The second review](https://github.com/tjakobsson/uatu/pull/492#discussion_r4188313494)
+found that a turn-end report could take over discovery, fail, and leave a
+background or scheduled session without further summary retries. Six variants
+reproduced that failure before the fix.
+
+Full reports now return discovery to the shared summary retry scheduler when
+the same live execution still needs a confirmed window. This covers turn-end
+and on-demand reports. The original retry count and backoff budget survive
+the handoff; cancelling a pending retry clears both its timer and its occupied
+slot. Superseded reports cannot rearm discovery for a newer execution.
+
+Eleven new cases cover rejection, timeout, invalid data, and occupancy without
+a limit across both background and scheduled sessions, plus an already-queued
+retry, on-demand recovery, and exhaustion of the original retry budget. The
+focused provider/window/readout suite passed 248 tests; typecheck and the full
+parallel suite passed with 4,844 tests and 15 skips.

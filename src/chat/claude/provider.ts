@@ -208,6 +208,8 @@ export type ClaudeProviderOptions = {
   /** How long the first catalog answer waits for what the default runs. Tests shorten it. */
   defaultReadWaitMs?: number;
   windowRetryDelaysMs?: number[];
+  /** Turn-end context/plan read budget. Tests shorten it. */
+  contextReportTimeoutMs?: number;
   onWindowDiagnostic?: (diagnostic: WindowDiagnostic) => void;
   // Re-read delays for a generated title that lands after the result.
   titleRefreshDelaysMs?: number[];
@@ -560,6 +562,7 @@ export class ClaudeProvider implements ChatProvider {
   private readonly windowFailures = new Map<string, { attempts: number; retryAt: number }>();
   private windowRetryTimer?: ReturnType<typeof setTimeout>;
   private readonly windowRetryDelaysMs: number[];
+  private readonly contextReportTimeoutMs: number;
   private accountEpoch = 0;
   private readonly contextWindows = new Map<string, Map<string, ContextWindowItem>>();
   private readonly usageContexts = new Map<string, { contextKey: string; model?: ModelSelection }>();
@@ -684,6 +687,7 @@ export class ClaudeProvider implements ChatProvider {
     this.windowReprobeCooldownMs = options.windowReprobeCooldownMs ?? CATALOG_PROBE_COOLDOWN_MS;
     this.defaultReadWaitMs = options.defaultReadWaitMs ?? DEFAULT_READ_WAIT_MS;
     this.windowRetryDelaysMs = options.windowRetryDelaysMs ?? [1_000, 5_000, 30_000];
+    this.contextReportTimeoutMs = options.contextReportTimeoutMs ?? CONTEXT_REPORT_TIMEOUT_MS;
     this.onWindowDiagnostic = options.onWindowDiagnostic;
     this.forkSession = options.forkSession ?? defaultForkSession;
     this.renameNativeSession = options.renameNativeSession ?? defaultRenameSession;
@@ -716,7 +720,6 @@ export class ClaudeProvider implements ChatProvider {
     for (const session of this.live.values()) {
       session.windowSequence += 1;
       session.windowConfirmed = false;
-      if (session.windowRetry) clearTimeout(session.windowRetry);
       this.cancelSessionWindowRead(session);
     }
     this.catalogChanged();
@@ -1625,7 +1628,6 @@ export class ClaudeProvider implements ChatProvider {
     const sessions = [...this.live.values()];
     this.live.clear();
     for (const session of sessions) {
-      if (session.windowRetry) clearTimeout(session.windowRetry);
       this.cancelSessionWindowRead(session);
       this.clearIdleTimer(session);
       this.abandonInteractions(session.id, "The workspace shut down before the user answered.");
@@ -1961,7 +1963,6 @@ export class ClaudeProvider implements ChatProvider {
         eventType: "session.failed",
       });
     } finally {
-      if (session.windowRetry) clearTimeout(session.windowRetry);
       this.cancelSessionWindowRead(session);
     }
   }
@@ -3407,7 +3408,7 @@ export class ClaudeProvider implements ChatProvider {
    * The `/usage` read: the plan windows when the login has plan limits, and
    * the session's own running totals; bounded like the context read.
    */
-  private async readPlanUtilization(session: LiveSession, timeoutMs = CONTEXT_REPORT_TIMEOUT_MS): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
+  private async readPlanUtilization(session: LiveSession, timeoutMs = this.contextReportTimeoutMs): Promise<{ plan: PlanUtilization; session?: SessionTotals } | undefined> {
     if (this.live.get(session.id) !== session) return undefined;
     const seq = ++session.usageSeq;
     const answer = await this.readUsageAnswer(session.query, timeoutMs);
@@ -3533,6 +3534,7 @@ export class ClaudeProvider implements ChatProvider {
     const contextKey = session.contextKey;
     const epoch = this.accountEpoch;
     const windowSequence = ++session.windowSequence;
+    this.cancelSessionWindowRead(session);
     try {
       const seq = ++session.usageSeq;
       const [answer, contextRaw] = await Promise.all([
@@ -3563,6 +3565,7 @@ export class ClaudeProvider implements ChatProvider {
       return { report: { plan: usage.plan, readAt: this.lastUsage?.readAt ?? this.now(), conversationId: session.id } };
     } finally {
       session.usageReads -= 1;
+      if (contextKey === session.contextKey && epoch === this.accountEpoch && windowSequence === session.windowSequence && !this.sessionIsIdle(session)) this.scheduleSessionWindowRetry(session);
       // Only what this read is answerable for retires here: a session it
       // started, or a retirement it held back. A session some other
       // control operation is using is that operation's to retire. A
@@ -3746,6 +3749,8 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   private cancelSessionWindowRead(session: LiveSession): void {
+    if (session.windowRetry !== undefined) clearTimeout(session.windowRetry);
+    session.windowRetry = undefined;
     const abort = session.windowReadAbort;
     session.windowReadAbort = undefined;
     session.windowRead = undefined;
@@ -3753,7 +3758,6 @@ export class ClaudeProvider implements ChatProvider {
   }
 
   private resetSessionWindow(session: LiveSession, selection = session.windowSelection): void {
-    if (session.windowRetry) clearTimeout(session.windowRetry);
     this.cancelSessionWindowRead(session);
     session.contextKey = randomUUID();
     session.windowSelection = selection;
@@ -3847,12 +3851,25 @@ export class ClaudeProvider implements ChatProvider {
       if (session.windowReadAbort === abort) session.windowReadAbort = undefined;
       if (session.windowRead === read) session.windowRead = undefined;
       if (!current() || abort.signal.aborted || session.windowConfirmed) return;
-      const delay = this.windowRetryDelaysMs[session.windowAttempts - 1];
-      if (delay === undefined) return;
-      session.windowRetry = setTimeout(() => { session.windowRetry = undefined; this.startSessionWindowRead(session); }, delay);
-      session.windowRetry.unref?.();
+      this.scheduleSessionWindowRetry(session);
     });
     session.windowRead = read;
+  }
+
+  /** Resume discovery without replenishing the current binding's retry budget. */
+  private scheduleSessionWindowRetry(session: LiveSession): void {
+    if (this.disposed || this.live.get(session.id) !== session || session.windowConfirmed || session.windowRead || session.windowRetry !== undefined || session.windowAccountEpoch !== this.accountEpoch || !session.query.getContextUsage) return;
+    const delay = session.windowAttempts === 0 ? 0 : this.windowRetryDelaysMs[session.windowAttempts - 1];
+    if (delay === undefined) return;
+    const key = session.contextKey;
+    const sequence = session.windowSequence;
+    const epoch = this.accountEpoch;
+    session.windowRetry = setTimeout(() => {
+      session.windowRetry = undefined;
+      if (key !== session.contextKey || sequence !== session.windowSequence || epoch !== this.accountEpoch) return;
+      this.startSessionWindowRead(session);
+    }, delay);
+    session.windowRetry.unref?.();
   }
 
   /** The CLI's own context breakdown, emitted as a report item after a turn. */
@@ -3874,7 +3891,6 @@ export class ClaudeProvider implements ChatProvider {
     const sequence = ++session.windowSequence;
     // This newer full report supersedes discovery. Waiting for the old
     // summary could spend the report's entire budget on an abandoned read.
-    if (session.windowRetry) clearTimeout(session.windowRetry);
     this.cancelSessionWindowRead(session);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -3885,7 +3901,7 @@ export class ClaudeProvider implements ChatProvider {
       const planRead = this.readPlanUtilization(session);
       const raw = await Promise.race([
         session.query.getContextUsage(),
-        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTEXT_REPORT_TIMEOUT_MS); }),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), this.contextReportTimeoutMs); }),
       ]);
       if (raw === null || session.reportGeneration !== generation || key !== session.contextKey || epoch !== this.accountEpoch || sequence !== session.windowSequence || this.live.get(session.id) !== session) return;
       const answer = claudeWindowAnswer(raw);
@@ -3905,6 +3921,10 @@ export class ClaudeProvider implements ChatProvider {
       // The per-message carrier stands.
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      // A full report borrowed discovery's slot. If it could not confirm a
+      // window, hand the remaining retry budget back while work keeps this
+      // query alive. An obsolete report must not disturb a newer attempt.
+      if (session.reportGeneration === generation && key === session.contextKey && epoch === this.accountEpoch && sequence === session.windowSequence && !this.sessionIsIdle(session)) this.scheduleSessionWindowRetry(session);
     }
   }
 
@@ -3912,7 +3932,6 @@ export class ClaudeProvider implements ChatProvider {
   private async retireSession(session: LiveSession): Promise<void> {
     if (this.live.get(session.id) !== session) return;
     this.clearIdleTimer(session);
-    if (session.windowRetry) clearTimeout(session.windowRetry);
     this.cancelSessionWindowRead(session);
     // A run that never reported its end does not outlive the query that
     // ran it; settled before the session leaves the live map, so the

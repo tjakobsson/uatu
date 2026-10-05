@@ -180,9 +180,15 @@ the in-flight slot even if the SDK request never settles. The SDK has no
 cancellation method for this control, so an abandoned request may reply later,
 but it has lost the race and cannot publish or clear a newer attempt. This
 allows bounded retries and normal context reports to recover after a timeout.
+Turn-end and on-demand full reports cancel the pending summary attempt and its
+retry timer while they take over. If a report cannot confirm a window, and
+its query, account, selection, and sequence are still current, return
+discovery to the shared summary retry scheduler while live work holds the
+query. Keep the original attempt count and backoff budget. A stale report,
+an already-confirmed window, or an idle query does not rearm discovery.
 Disposal cancels waiters and timers and closes owned probes. Keep failures
-observable using model ids, source, phase,
-epoch, and failure category in the existing diagnostic mechanism, without
+observable using model ids, source, phase, epoch, and failure category in the
+existing diagnostic mechanism, without
 logging prompts or credentials.
 
 Alternative: mark all failures unsupported or retry on every render.

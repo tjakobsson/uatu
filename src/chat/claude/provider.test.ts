@@ -5205,6 +5205,110 @@ describe("conversation window discovery", () => {
     } finally { stop(); await provider.dispose(); }
   });
 
+  for (const lifetime of ["background", "scheduled"] as const) {
+    for (const failure of ["reject", "invalid", "no-limit", "timeout"] as const) {
+      test(`a failed turn-end report restores discovery for ${lifetime} work (${failure})`, async () => {
+        let summaries = 0;
+        let reports = 0;
+        const { provider, queries } = fixture(query => {
+          query.getContextUsage = options => {
+            if (options?.detail === "summary") return ++summaries === 1 ? new Promise(() => undefined) : Promise.resolve(answer);
+            reports += 1;
+            if (failure === "reject") return Promise.reject(new Error("unavailable"));
+            if (failure === "timeout") return new Promise(() => undefined);
+            return Promise.resolve(failure === "invalid" ? {} : { model: model.modelId, totalTokens: 250_000 });
+          };
+        }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 60_000, contextReportTimeoutMs: 10, windowRetryDelaysMs: [1] });
+        const { events, stop } = collect(provider);
+        try {
+          const session = await provider.createSession("x", { model });
+          await provider.prompt(session.id, { id: "r1", text: "first", delivery: "queue" });
+          const query = queries[0]!;
+          query.push({ type: "assistant", uuid: "usage", session_id: session.id, message: { role: "assistant", model: model.modelId, content: [{ type: "text", text: "working" }], usage: { input_tokens: 250_000 } } });
+          if (lifetime === "background") {
+            query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Long job" }] });
+          } else {
+            await query.input.options.hooks!.Stop![0]!.hooks[0]!({ hook_event_name: "Stop", stop_hook_active: false, background_tasks: [], session_crons: [{ id: "w1", schedule: "*/5 * * * *", recurring: true, prompt: "Check progress" }] }, undefined, { signal: new AbortController().signal });
+          }
+          query.push({ type: "result", subtype: "success", uuid: "done", session_id: session.id, is_error: false });
+          await waitFor(() => events.some(event => event.eventType === "context.window"));
+          expect(summaries).toBe(2);
+          expect(reports).toBe(1);
+          expect(provider.liveSessionCount()).toBe(1);
+          expect(query.returned).toBe(false);
+          expect(contextReadout((await provider.listMessages(session.id, { limit: 1 })).items, [], undefined)).toMatchObject({ used: 250_000, limit: 1_000_000 });
+          await provider.prompt(session.id, { id: "r2", text: "second", delivery: "queue" });
+          expect(queries).toHaveLength(1);
+          expect(summaries).toBe(2);
+        } finally { stop(); await provider.dispose(); }
+      });
+    }
+  }
+
+  test("a failed full report restores a summary retry that was already queued", async () => {
+    let summaries = 0;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = options => {
+        if (options?.detail === "summary" && ++summaries > 1) return Promise.resolve(answer);
+        return Promise.reject(new Error("unavailable"));
+      };
+    }, { defaultReadWaitMs: 1, windowRetryDelaysMs: [20] });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      const query = queries[0]!;
+      query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Long job" }] });
+      query.push({ type: "result", subtype: "success", uuid: "done", session_id: session.id, is_error: false });
+      await waitFor(() => events.some(event => event.eventType === "context.window"));
+      expect(summaries).toBe(2);
+      expect(query.returned).toBe(false);
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("a failed on-demand report returns discovery to the summary retry path", async () => {
+    let summaries = 0;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = options => {
+        if (options?.detail === "summary") return ++summaries === 1 ? new Promise(() => undefined) : Promise.resolve(answer);
+        return Promise.reject(new Error("unavailable"));
+      };
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({});
+    }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 60_000, windowRetryDelaysMs: [1] });
+    const { events, stop } = collect(provider);
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await provider.readUsage("live-only");
+      await waitFor(() => events.some(event => event.eventType === "context.window"));
+      expect(summaries).toBe(2);
+      expect(queries[0]!.returned).toBe(false);
+    } finally { stop(); await provider.dispose(); }
+  });
+
+  test("failed full reports do not replenish an exhausted summary retry budget", async () => {
+    let summaries = 0;
+    const { provider, queries } = fixture(query => {
+      query.getContextUsage = options => {
+        if (options?.detail === "summary" && ++summaries === 1) return new Promise(() => undefined);
+        return Promise.reject(new Error("unavailable"));
+      };
+      query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET = async () => ({});
+    }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 60_000, windowRetryDelaysMs: [0] });
+    try {
+      const session = await provider.createSession("x", { model });
+      await provider.prompt(session.id, { id: "r", text: "hello", delivery: "queue" });
+      await provider.readUsage("live-only");
+      await waitFor(() => provider.windowDiagnostics().some(record => record.outcome === "failed"));
+      expect(summaries).toBe(2);
+      await provider.readUsage("live-only");
+      // Any wrongly replenished zero-delay retry precedes this timer turn.
+      await Bun.sleep(0);
+      expect(summaries).toBe(2);
+      expect(queries[0]!.returned).toBe(false);
+    } finally { await provider.dispose(); }
+  });
+
   test("a reply from before an account change is discarded", async () => {
     const held = Promise.withResolvers<unknown>();
     const { provider } = fixture(query => { query.getContextUsage = () => held.promise; }, { defaultReadWaitMs: 1 });
