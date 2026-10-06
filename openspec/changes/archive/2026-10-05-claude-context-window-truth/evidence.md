@@ -207,3 +207,21 @@ live stream, then verifies an automatic catch-up read and the corrected meter.
 The UI/lifecycle/refresh suites and typecheck passed. The focused browser suites
 passed 61 tests, and the full parallel suite passed with 4,863 tests and 15
 skips; the DOM cases run inside the existing isolated UI-file test process.
+
+## Seventh review: matching invalidations during a failed refresh
+
+[The review finding](https://github.com/tjakobsson/uatu/pull/492#discussion_r4194112554)
+identified that a matching revision received during an in-flight refresh was
+coalesced away even if that request later failed. Regression tests reproduced
+the missing automatic retry.
+
+Matching requests now retain one pending retry on the active refresh. Success
+consumes the demand; failure replays it once if the bank and revision remain
+current. A failed retry stops without further invalidations. Reconnect and
+picker reads participate in the same ownership tracking, so a superseded
+request cannot replace its successor or lose demand that arrived during it.
+
+The eight catalog-revision DOM cases pass, including four new cases covering
+coalesced retry, stopping after retry failure, and request ownership across
+reconnect. Typecheck, the full parallel suite with 4,863 tests and 15 skips,
+and all 61 focused browser tests passed.

@@ -178,6 +178,13 @@ revision supersede a slower read. Failed or discarded reads do not acknowledge
 the revision. Refreshes use the target agent's capabilities, including while
 another agent is selected. Initial catalog installation also repaints the meter.
 
+Matching invalidations received while a refresh runs coalesce into one pending
+retry. The active request owns that demand, including a request started by
+reconnect or picker use. On success the revision is acknowledged and no retry
+is needed. On failure, replay the queued demand once if the bank and revision
+are still current. A failed retry does not create another attempt without a
+new invalidation. A superseded request cannot clear or restart its successor.
+
 The Hub retains the latest complete inventory payload, including the current
 catalog revision map, for synthesized opening and catch-up ticks on shared or
 lingering upstreams. Coalescing retains one latest payload rather than a tick

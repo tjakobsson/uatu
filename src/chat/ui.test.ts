@@ -553,6 +553,7 @@ describe("catalog revisions", () => {
       select: (id: string) => { const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!; select.value = id; select.dispatchEvent(new Event("change", { bubbles: true })); },
       statusReads: () => statusReads,
       invalidate: (revision: string) => inventory!.invalidation({ type: "conversation.inventory", catalogs: { claude: revision } }),
+      recover: () => inventory!.recovered?.(),
       finish: () => { for (const read of reads) read.resolve([]); window.dispatchEvent(new Event("pagehide")); },
     };
   }
@@ -591,6 +592,82 @@ describe("catalog revisions", () => {
     } finally { f.finish(); }
   });
 
+  test("matching ticks received before failure coalesce into one automatic retry", async () => {
+    const f = await fixture();
+    try {
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.label() === "75%");
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length === 2);
+      for (let tick = 0; tick < 4; tick += 1) f.invalidate("g:2");
+      expect(f.reads).toHaveLength(2);
+      f.reads[1]!.reject(new Error("temporary transport failure"));
+      await waitUntil(() => f.reads.length === 3, () => "retry from the already-received invalidation");
+      f.reads[2]!.resolve([model(1_000_000)]);
+      await waitUntil(() => f.label() === "15%");
+      expect(f.reads).toHaveLength(3);
+    } finally { f.finish(); }
+  });
+
+  test("a queued retry does not loop on failure without another invalidation", async () => {
+    const f = await fixture();
+    try {
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.label() === "75%");
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length === 2);
+      f.invalidate("g:2");
+      f.reads[1]!.reject(new Error("first failure"));
+      await waitUntil(() => f.reads.length === 3);
+      f.reads[2]!.reject(new Error("retry failure"));
+      // Drain completion jobs; the failed retry has no queued demand to run.
+      await Bun.sleep(0);
+      expect(f.reads).toHaveLength(3);
+      expect(f.label()).toBe("75%");
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length === 4);
+      f.reads[3]!.resolve([model(1_000_000)]);
+      await waitUntil(() => f.label() === "15%");
+    } finally { f.finish(); }
+  });
+
+  test("an old queued retry cannot supersede the reconnect's newer refresh", async () => {
+    const f = await fixture();
+    try {
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.label() === "75%");
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length === 2);
+      f.invalidate("g:2");
+      f.recover();
+      await waitUntil(() => f.reads.length === 3);
+      f.reads[1]!.reject(new Error("old request failed"));
+      await Bun.sleep(0);
+      expect(f.reads).toHaveLength(3);
+      f.reads[2]!.resolve([model(1_000_000)]);
+      await waitUntil(() => f.label() === "15%");
+    } finally { f.finish(); }
+  });
+
+  test("a matching tick during a reconnect refresh retries that request if it fails", async () => {
+    const f = await fixture();
+    try {
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.label() === "75%");
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length === 2);
+      f.recover();
+      await waitUntil(() => f.reads.length === 3);
+      f.invalidate("g:2");
+      f.reads[1]!.reject(new Error("superseded request failed"));
+      f.reads[2]!.reject(new Error("reconnect request failed"));
+      await waitUntil(() => f.reads.length === 4, () => "retry owned by the reconnect refresh");
+      f.reads[3]!.resolve([model(1_000_000)]);
+      await waitUntil(() => f.label() === "15%");
+      expect(f.reads).toHaveLength(4);
+    } finally { f.finish(); }
+  });
+
   test("a newer revision can finish first without an older refresh overwriting it", async () => {
     const f = await fixture();
     try {
@@ -598,6 +675,7 @@ describe("catalog revisions", () => {
       await waitUntil(() => f.label() === "75%");
       f.invalidate("g:2");
       await waitUntil(() => f.reads.length === 2);
+      f.invalidate("g:2");
       f.invalidate("g:3");
       await waitUntil(() => f.reads.length === 3);
       f.reads[2]!.resolve([model(1_000_000)]);

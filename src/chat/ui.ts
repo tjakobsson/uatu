@@ -4780,13 +4780,16 @@ export function initChat(api = new ChatApiClient()): void {
   // latest one's answers are installed, or a pre-reload list landing late
   // would overwrite the reloaded one.
   const catalogRefreshes = new LatestRefresh();
-  const catalogRevisionReads = new Map<string, { bank: AgentCatalogs; revision: string }>();
-  // Settles once every read it started has landed or failed.
+  const catalogRevisionReads = new Map<string, { bank: AgentCatalogs; revision: string; retryRequested: boolean }>();
+  // Settles once every read has landed or failed. Track revision demand on
+  // every refresh, including one started by a reconnect or picker action.
   const refreshBankedCommands = (agentId: string | undefined, options: { acceptEmpty?: boolean } = {}): Promise<void> => {
     if (!agentId) return Promise.resolve();
     const banked = agentCatalogs.get(agentId);
     if (!banked) return Promise.resolve();
     const revision = catalogRevisions.get(agentId);
+    const revisionRead = revision === undefined ? undefined : { bank: banked, revision, retryRequested: false };
+    if (revisionRead) catalogRevisionReads.set(agentId, revisionRead);
     const availability = agentStatusFor(agentId)?.availability;
     const capabilities = availability?.state === "ready" ? availability.agent?.capabilities : undefined;
     const has = (capability: ChatCapability) => capabilities?.includes(capability) ?? true;
@@ -4831,7 +4834,13 @@ export function initChat(api = new ChatApiClient()): void {
       }).catch(() => { complete = false; }));
     }
     return Promise.all(reads).then(() => {
-      if (current() && complete && reads.length > 0 && revision !== undefined) banked.catalogRevision = revision;
+      const stillCurrent = current();
+      if (stillCurrent && complete && reads.length > 0 && revision !== undefined) banked.catalogRevision = revision;
+      if (!revisionRead || catalogRevisionReads.get(agentId) !== revisionRead) return;
+      catalogRevisionReads.delete(agentId);
+      // One retry consumes all matching invalidations received during this
+      // attempt. Failure alone never creates more work or an automatic loop.
+      if (stillCurrent && !complete && revisionRead.retryRequested && catalogRevisions.get(agentId) === revision) refreshCatalogRevision(agentId);
     });
   };
 
@@ -4840,12 +4849,11 @@ export function initChat(api = new ChatApiClient()): void {
     const revision = catalogRevisions.get(agentId);
     if (!bank || revision === undefined || bank.catalogRevision === revision) return;
     const inflight = catalogRevisionReads.get(agentId);
-    if (inflight?.bank === bank && inflight.revision === revision) return;
-    const read = { bank, revision };
-    catalogRevisionReads.set(agentId, read);
-    void refreshBankedCommands(agentId).finally(() => {
-      if (catalogRevisionReads.get(agentId) === read) catalogRevisionReads.delete(agentId);
-    });
+    if (inflight?.bank === bank && inflight.revision === revision) {
+      inflight.retryRequested = true;
+      return;
+    }
+    void refreshBankedCommands(agentId);
   };
 
   const refreshIdleAgentContext = () => {

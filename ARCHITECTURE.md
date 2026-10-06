@@ -596,6 +596,10 @@ The browser keeps revisions received before initial catalog loading as pending.
 Once the catalog is banked, it catches up automatically and acknowledges the
 revision only after a successful current refresh. Duplicate in-flight revisions
 are coalesced; newer revisions can supersede older reads through `LatestRefresh`.
+Matching ticks received during a refresh retain one queued retry if that
+attempt fails. Every refresh owns this demand, including reconnect and picker
+reads. Success consumes it, and a failed retry needs a new invalidation to run
+again; an obsolete read cannot restart work over its replacement.
 The paint key
 includes limit and provenance, so an unchanged usage item does not hide a
 correction. The readout labels estimated and cached limits; with no usable limit
