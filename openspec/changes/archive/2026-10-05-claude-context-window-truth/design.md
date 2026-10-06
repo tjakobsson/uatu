@@ -231,6 +231,12 @@ observable using model ids, source, phase, epoch, and failure category in the
 existing diagnostic mechanism, without
 logging prompts or credentials.
 
+Catalog walks keep their promise identity until query cleanup completes.
+An older walk superseded by an account change still closes its own query,
+but only the current owner clears the shared walk handle and schedules retries.
+`windowsSettled()` follows a replacement installed while it was waiting,
+including when the caller began waiting before the account change.
+
 Alternative: mark all failures unsupported or retry on every render.
 The first loses recovery; the second multiplies processes and reads.
 

@@ -27,8 +27,8 @@ that settings stay byte-identical and no transcript is written.
 - Haiku 4.5 reported 200,000, with an auto-compaction threshold of 167,000.
 - The served windows matched direct CLI answers for every matching offered
   model in the test.
-- The final recorded run returned its initial catalog in 763 ms and finished
-  the background window walk in 7,946 ms while the full unit suite also ran.
+- The latest recorded run returned its initial catalog in 571 ms and finished
+  the background window walk in 7,292 ms while the full unit suite also ran.
 
 These observations distinguish an effective context window from the separately
 named auto-compaction threshold. They do not infer hard capacity from the
@@ -37,7 +37,7 @@ similar `maxTokens` and `rawMaxTokens` field names.
 ## Automated checks
 
 - `bun run typecheck`: passed.
-- `bun run test:ci`: 4,863 passed, 15 skipped, zero failed across 273 files,
+- `bun run test:ci`: 4,866 passed, 15 skipped, zero failed across 273 files,
   including the PR review follow-up below.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
@@ -225,3 +225,19 @@ The eight catalog-revision DOM cases pass, including four new cases covering
 coalesced retry, stopping after retry failure, and request ownership across
 reconnect. Typecheck, the full parallel suite with 4,863 tests and 15 skips,
 and all 61 focused browser tests passed.
+
+## Eighth review: ownership of replacement catalog walks
+
+[The review finding](https://github.com/tjakobsson/uatu/pull/492#discussion_r4196708158)
+identified that an obsolete catalog walk could clear the replacement's shared
+handle after an account change. Cleanup now closes its own query first and
+releases the shared handle or schedules retries only if it still owns that
+handle. The settlement helper follows any replacement installed while waiting.
+
+Three regression cases failed before the fix. They cover settlement beginning
+before or after replacement, repeated catalog reads while the replacement is
+blocked, stale results staying out of the current catalog, and keeping ownership
+until query cleanup completes. The focused provider/window/readout suite passed
+268 tests and typecheck passed. The full parallel suite passed with 4,866 tests
+and 15 skips. The promptless real-Claude catalog test passed again with 23
+assertions, unchanged settings, and no transcript created.

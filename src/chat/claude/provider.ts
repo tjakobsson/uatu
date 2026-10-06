@@ -1029,14 +1029,22 @@ export class ClaudeProvider implements ChatProvider {
       if (!this.disposed) {
         const walked = query;
         handedOff = true;
-        this.windowWalk = defaultRead
+        const walk = defaultRead
           .then(() => (walked.setModel && walked.getContextUsage && !this.disposed && epoch === this.accountEpoch ? this.readStatedWindows(walked, epoch) : undefined))
           .catch(() => undefined)
           .finally(async () => {
-            this.windowWalk = null;
-            await this.closeProbe(walked, queue);
-            this.scheduleWindowRetries();
+            try {
+              await this.closeProbe(walked, queue);
+            } finally {
+              // An account change may have installed a replacement walk.
+              // Only the owner can release the slot or schedule its retries.
+              if (this.windowWalk === walk) {
+                this.windowWalk = null;
+                this.scheduleWindowRetries();
+              }
+            }
           });
+        this.windowWalk = walk;
       }
       let waited: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([defaultRead, new Promise<void>(resolve => { waited = setTimeout(resolve, this.defaultReadWaitMs); })]);
@@ -1052,8 +1060,11 @@ export class ClaudeProvider implements ChatProvider {
    * For callers that need the complete figures, such as the real-CLI test.
    */
   async windowsSettled(): Promise<void> {
-    await this.hydration?.catch(() => undefined);
-    await this.windowWalk?.catch(() => undefined);
+    // A replacement can be installed while the walk we awaited is closing.
+    while (this.hydration || this.windowWalk) {
+      await this.hydration?.catch(() => undefined);
+      await this.windowWalk?.catch(() => undefined);
+    }
   }
 
   private async closeProbe(query: ClaudeQueryHandle | undefined, queue: PushQueue<ClaudeUserEnvelope>): Promise<void> {

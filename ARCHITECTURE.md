@@ -585,6 +585,9 @@ the same total startup wait budget. Changes after delivery also reset and
 restart discovery for queries held by a turn, background work, or wakeups.
 `UATU_DEBUG=1` logs the model ids, phase,
 source, epoch, and outcome of discovery without prompt or credential payloads.
+Catalog walks retain their ownership handle through query cleanup. An obsolete
+walk closes its own query but cannot release a replacement's handle or alter
+its retry schedule; callers waiting for settled windows follow replacements.
 
 Catalog discoveries advance an agent-scoped revision carried by the existing
 inventory stream's optional `catalogs` map. Browsers refresh the changed agent's

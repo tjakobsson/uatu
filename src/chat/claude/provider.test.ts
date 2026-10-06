@@ -5609,6 +5609,84 @@ describe("conversation window discovery", () => {
 });
 
 describe("windows and the default as Claude Code states them (claude-context-windows-from-cli)", () => {
+  for (const waitingBeforeReplacement of [false, true]) {
+    test(`an obsolete catalog walk cannot release its replacement (already waiting: ${waitingBeforeReplacement})`, async () => {
+      const oldRead = Promise.withResolvers<unknown>();
+      const newRead = Promise.withResolvers<unknown>();
+      const probes: FakeQuery[] = [];
+      const reading = new Set<number>();
+      const { provider } = fixture(query => {
+        let selected: string | undefined;
+        let index = 0;
+        query.supportedModels = async () => {
+          probes.push(query);
+          index = probes.length;
+          return [{ value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus" }];
+        };
+        query.setModel = async model => { selected = model; };
+        query.getContextUsage = () => {
+          if (selected === "opus" && index <= 2) {
+            reading.add(index);
+            return index === 1 ? oldRead.promise : newRead.promise;
+          }
+          return Promise.resolve({ model: selected ?? "claude-opus-5-5", maxTokens: 1_000_000 });
+        };
+      }, { catalogProbe: true, windowReadTimeoutMs: 60_000, windowReprobeCooldownMs: 0 });
+      let settled = false;
+      let waiting: Promise<void> | undefined;
+      const wait = () => provider.windowsSettled().then(() => { settled = true; });
+      try {
+        await provider.listModels();
+        await waitFor(() => reading.has(1));
+        if (waitingBeforeReplacement) { waiting = wait(); await Bun.sleep(0); }
+        await provider.accountsChanged();
+        await provider.listModels();
+        await waitFor(() => reading.has(2));
+        oldRead.resolve({ model: "claude-opus-5-5", maxTokens: 111_000 });
+        await waitFor(() => probes[0]!.returned);
+        waiting ??= wait();
+        await Bun.sleep(0);
+        expect(settled).toBe(false);
+        await Promise.all(Array.from({ length: 4 }, () => provider.listModels()));
+        expect(probes).toHaveLength(2);
+        newRead.resolve({ model: "claude-opus-5-5", maxTokens: 500_000 });
+        await waiting;
+        expect(settled).toBe(true);
+        expect(probes[1]!.returned).toBe(true);
+        expect((await provider.listModels()).find(model => model.selection.modelId === "opus")?.contextLimit).toBe(500_000);
+      } finally {
+        oldRead.resolve({});
+        newRead.resolve({});
+        await provider.dispose();
+        await waiting;
+      }
+    });
+  }
+
+  test("a catalog walk remains owned until its query cleanup completes", async () => {
+    const close = Promise.withResolvers<void>();
+    let closing = false;
+    const { provider, queries } = fixture(query => {
+      let selected: string | undefined;
+      query.supportedModels = async () => [{ value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus" }];
+      query.setModel = async model => { selected = model; };
+      query.getContextUsage = async () => ({ model: selected === "opus" || !selected ? "claude-opus-5-5" : selected, maxTokens: 1_000_000 });
+      const finish = query.return.bind(query);
+      query.return = async () => { closing = true; await close.promise; return finish(); };
+    }, { catalogProbe: true });
+    try {
+      await provider.listModels();
+      await waitFor(() => closing);
+      let settled = false;
+      const waiting = provider.windowsSettled().then(() => { settled = true; });
+      await Bun.sleep(0);
+      expect(settled).toBe(false);
+      close.resolve();
+      await waiting;
+      expect(queries[0]!.returned).toBe(true);
+    } finally { close.resolve(); await provider.dispose(); }
+  });
+
   // The catalog as CLI 2.1.281 served it on 2026-10-01: no window field, the
   // default resolving to the account default (Sonnet 5.5).
   const currentCatalog = [
