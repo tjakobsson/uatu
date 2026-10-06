@@ -1402,7 +1402,13 @@ export class ClaudeProvider implements ChatProvider {
         const survivor = this.live.get(sessionId);
         if (survivor) {
           const priorModel = configurationBefore?.model?.modelId;
-          if (input.model) await survivor.query.setModel?.(priorModel === undefined || priorModel === "default" ? undefined : priorModel).catch(() => undefined);
+          if (input.model) {
+            // Discard the abandoned selection's reads before restoring the
+            // controls. The explicit sentinel also restores an unpinned
+            // binding: undefined would keep resetSessionWindow's selection.
+            this.resetSessionWindow(survivor, priorModel ?? "default");
+            await survivor.query.setModel?.(priorModel === undefined || priorModel === "default" ? undefined : priorModel).catch(() => undefined);
+          }
           // Unset resolves to the declared default (auto) — the mode the
           // session actually runs — not "leave whatever the failed request
           // applied".
@@ -1410,6 +1416,7 @@ export class ClaudeProvider implements ChatProvider {
           if (input.variant !== undefined || input.model) {
             await survivor.query.applyFlagSettings?.({ effortLevel: configurationBefore?.variant ?? null }).catch(() => undefined);
           }
+          if (input.model && this.live.get(sessionId) === survivor) survivor.windowReady = this.prepareSessionWindow(survivor);
         }
       }
       if (stagedBefore) {

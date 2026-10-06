@@ -4994,6 +4994,58 @@ describe("conversation window discovery", () => {
   const model = { providerId: "anthropic", modelId: "claude-opus-5-5" };
   const answer = { model: model.modelId, maxTokens: 1_000_000, rawMaxTokens: 1_000_000, totalTokens: 999 };
 
+  for (const previous of [undefined, "default", model.modelId]) {
+    for (const failure of ["model-rejected", "attachment-missing"] as const) {
+      test(`model staging rollback restores the ${previous ?? "unpinned"} window (${failure})`, async () => {
+        const stagedModel = "claude-haiku-4-5-20251001";
+        const stagedRead = Promise.withResolvers<unknown>();
+        let actualModel: string | undefined;
+        let originalSummaries = 0;
+        const switches: Array<string | undefined> = [];
+        const { provider, queries, workspace } = fixture(query => {
+          actualModel = query.input.options.model;
+          query.setModel = async selected => {
+            switches.push(selected);
+            if (selected === stagedModel && failure === "model-rejected") throw new Error("model unavailable");
+            actualModel = selected;
+          };
+          query.getContextUsage = options => {
+            if (actualModel === stagedModel) return stagedRead.promise;
+            if (options?.detail === "summary") originalSummaries += 1;
+            return Promise.resolve(answer);
+          };
+        }, { defaultReadWaitMs: 1, windowReadTimeoutMs: 60_000, windowRetryDelaysMs: [] });
+        const { events, stop } = collect(provider);
+        try {
+          const session = await provider.createSession("x", previous ? { model: { providerId: "anthropic", modelId: previous } } : {});
+          await provider.prompt(session.id, { id: "r1", text: "start background work", delivery: "queue" });
+          const query = queries[0]!;
+          query.push({ type: "system", subtype: "background_tasks_changed", uuid: "bg", session_id: session.id, tasks: [{ task_id: "b1", task_type: "local_bash", description: "Long job" }] });
+          query.push({ type: "result", subtype: "success", uuid: "done", session_id: session.id, is_error: false });
+          await waitFor(() => events.some(event => event.eventType === "context.reported"));
+          const before = await provider.getConversationConfiguration(session.id);
+          await expect(provider.prompt(session.id, {
+            id: "refused", text: "stage another model", delivery: "queue", model: { providerId: "anthropic", modelId: stagedModel },
+            ...(failure === "attachment-missing" ? { attachments: [{ id: "gone", name: "gone.png", mimeType: "image/png", absolutePath: path.join(workspace, "gone.png") }] } : {}),
+          })).rejects.toThrow(failure === "model-rejected" ? "model unavailable" : "ENOENT");
+          expect(await provider.getConversationConfiguration(session.id)).toEqual(before);
+          expect(switches).toEqual([stagedModel, previous === "default" ? undefined : previous]);
+          await provider.prompt(session.id, { id: "r2", text: "continue without choosing a model", delivery: "queue" });
+          query.push({ type: "assistant", uuid: "after-rollback", session_id: session.id, message: { role: "assistant", model: model.modelId, content: [], usage: { input_tokens: 250_000 } } });
+          await waitFor(() => events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "usage:after-rollback")));
+          // A late answer from the abandoned selection cannot overwrite the
+          // restored model's denominator, even though the query survived.
+          stagedRead.resolve({ ...answer, model: stagedModel, maxTokens: 200_000 });
+          expect(contextReadout((await provider.listMessages(session.id, { limit: 1 })).items, [], undefined)).toMatchObject({ used: 250_000, limit: 1_000_000, window: { freshness: "current" } });
+          expect(originalSummaries).toBe(2);
+          expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.type === "context_window" && update.item.limit === 200_000))).toBe(false);
+          expect(events.some(event => event.updates.some(update => update.kind === "upsert" && update.item.id === "message:refused"))).toBe(false);
+          expect(queries).toHaveLength(1);
+        } finally { stop(); await provider.dispose(); }
+      });
+    }
+  }
+
   test("the session states its window before prompt delivery and snapshot recovery keeps live occupancy", async () => {
     const held = Promise.withResolvers<unknown>();
     const { provider, queries } = fixture(query => { query.getContextUsage = () => held.promise; });

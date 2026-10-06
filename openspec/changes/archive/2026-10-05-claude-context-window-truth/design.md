@@ -103,6 +103,12 @@ An account change invalidates cross-account reuse. A new query reads its
 own settings rather than inheriting a prior query's window as current.
 An ordinary catalog refresh alone does not downgrade a confirmed answer.
 
+Prompt-admission rollback restores the window binding with the prior model
+configuration. Invalidate the abandoned selection's reads before restoring
+the live controls, then prepare the previous binding on the surviving query.
+This applies both to a rejected model switch and to later admission failures,
+such as an attachment disappearing after the switch succeeded.
+
 Keep a private cache binding with each observation: the requested selection,
 actual resolved model, and the known alias/default resolution at observation
 time. Unset and explicit `default` selections share an identity. Reuse a cached

@@ -575,6 +575,8 @@ supersedes the cached default. Transient discovery
 failures get bounded retries. Each logical read races its SDK request against
 a deadline and invalidation signal, releasing the in-flight slot even if the
 SDK never answers. Abandoned replies cannot publish or clear a newer read.
+If prompt admission rolls back a staged model, it also restores the previous
+window binding and restarts discovery after restoring the live controls.
 Turn-end and on-demand reports take over pending discovery. If a current
 report cannot confirm a window and work keeps the query alive, discovery
 resumes with its remaining summary retry budget, rather than starting over.

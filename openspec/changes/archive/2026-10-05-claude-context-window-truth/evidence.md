@@ -37,7 +37,7 @@ similar `maxTokens` and `rawMaxTokens` field names.
 ## Automated checks
 
 - `bun run typecheck`: passed.
-- `bun run test:ci`: 4,857 passed, 15 skipped, zero failed across 273 files,
+- `bun run test:ci`: 4,863 passed, 15 skipped, zero failed across 273 files,
   including the PR review follow-up below.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
@@ -169,3 +169,20 @@ legacy payloads; and clearing old revisions when the child reconnects.
 The broker, endpoint, and live-stream integration suites passed 94 tests.
 Typecheck, API validation, and the six-tab Hub live-stream browser/performance
 test passed. The full parallel suite passed with 4,857 tests and 15 skips.
+
+## Fifth review: window restoration on model-staging rollback
+
+[The review finding](https://github.com/tjakobsson/uatu/pull/492#discussion_r4193577951)
+identified that prompt-admission rollback restored the configuration and live
+model controls but left window discovery bound to the abandoned selection.
+Rollback now invalidates that selection's pending reads, restores the previous
+window binding, and prepares discovery after restoring the surviving query's
+controls. Unpinned conversations explicitly restore the default binding.
+
+Six failing-before-fix cases cover unpinned, explicit-default, and pinned
+conversations, with either a rejected model switch or a later missing-attachment
+failure. The attachment cases also reproduced an abandoned model's late 200k
+answer overwriting the original model's 1M denominator. The tests now verify
+correct follow-up usage, fresh discovery, and rejection of those stale answers.
+The focused provider/window/readout suite passed 265 tests; typecheck passed;
+the full parallel suite passed with 4,863 tests and 15 skips.
