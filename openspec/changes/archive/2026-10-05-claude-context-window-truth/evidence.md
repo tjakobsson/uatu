@@ -1,6 +1,7 @@
 # Context-window verification
 
-Verified on October 5, 2026, starting from main `6ee68368` with local changes.
+Initial verification on October 5, 2026, started from main `6ee68368` with
+local changes. Subsequent PR review checks are recorded below.
 
 ## Reproduced defects
 
@@ -36,7 +37,7 @@ similar `maxTokens` and `rawMaxTokens` field names.
 ## Automated checks
 
 - `bun run typecheck`: passed.
-- `bun run test:ci`: 4,844 passed, 15 skipped, zero failed across 273 files,
+- `bun run test:ci`: 4,855 passed, 15 skipped, zero failed across 273 files,
   including the PR review follow-up below.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
@@ -127,3 +128,28 @@ a limit across both background and scheduled sessions, plus an already-queued
 retry, on-demand recovery, and exhaustion of the original retry budget. The
 focused provider/window/readout suite passed 248 tests; typecheck and the full
 parallel suite passed with 4,844 tests and 15 skips.
+
+## Third review: default caches and post-delivery account changes
+
+Both findings were reproduced before the fixes:
+
+- [Post-delivery account changes](https://github.com/tjakobsson/uatu/pull/492#discussion_r4189598435)
+  now reset the window binding and restart discovery for queries held by live
+  work or scheduled wakeups. Idle queries keep lazy revalidation on their next
+  prompt. The startup wait follows a replaced readiness promise as well as the
+  account epoch, preserving its total wait budget.
+- [Default-model cache reuse](https://github.com/tjakobsson/uatu/pull/492#discussion_r4189598441)
+  now matches private observation bindings rather than comparing a requested
+  `default` with the attributed concrete model name. Unset and explicit default
+  selections share an identity. The binding also retains the actual resolved
+  model and known catalog resolution, so a known alias or variant change cannot
+  inherit an unrelated limit. A fresh answer or usage naming another model
+  supersedes the cached default; the current query's answer wins over a stale
+  catalog default.
+
+Eleven added regressions cover post-delivery discovery and background/scheduled
+retry recovery, default caching during slow and failed reads, changed actual
+defaults, and rejection of cache reuse across variant changes and alias
+retargeting. The five initial regression cases failed before product edits.
+The focused provider/window/readout suite passed 259 tests; typecheck passed;
+the full parallel suite passed with 4,855 tests and 15 skips.

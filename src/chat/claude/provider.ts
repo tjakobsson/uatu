@@ -565,6 +565,9 @@ export class ClaudeProvider implements ChatProvider {
   private readonly contextReportTimeoutMs: number;
   private accountEpoch = 0;
   private readonly contextWindows = new Map<string, Map<string, ContextWindowItem>>();
+  // Private cache identity, retained only as long as its observation. The
+  // attributed model on the wire may be an alias, not the requested default.
+  private readonly windowBindings = new WeakMap<ContextWindowItem, { selection: string; resolvedModel: string; resolutionKey: string }>();
   private readonly usageContexts = new Map<string, { contextKey: string; model?: ModelSelection }>();
   private readonly latestContextUsage = new Map<string, Extract<ConversationItem, { type: "assistant_message" | "context_report" }>>();
   private readonly windowDiagnosticRecords: WindowDiagnostic[] = [];
@@ -718,9 +721,15 @@ export class ClaudeProvider implements ChatProvider {
     this.windowsRead = false;
     if (this.windowRetryTimer) clearTimeout(this.windowRetryTimer);
     for (const session of this.live.values()) {
-      session.windowSequence += 1;
-      session.windowConfirmed = false;
-      this.cancelSessionWindowRead(session);
+      if (!this.sessionIsIdle(session)) {
+        this.resetSessionWindow(session);
+        session.windowReady = this.prepareSessionWindow(session);
+      } else {
+        // An idle query will be revalidated if another prompt claims it.
+        session.windowSequence += 1;
+        session.windowConfirmed = false;
+        this.cancelSessionWindowRead(session);
+      }
     }
     this.catalogChanged();
     await this.readLogin();
@@ -1457,6 +1466,7 @@ export class ClaudeProvider implements ChatProvider {
     // An account change can land inside the startup wait. Revalidate before
     // delivery, sharing one total grace budget even if accounts change again.
     const windowWaitUntil = performance.now() + this.defaultReadWaitMs;
+    let waitedFor: Promise<void> | undefined;
     do {
       if (session.windowAccountEpoch !== this.accountEpoch) {
         this.resetSessionWindow(session);
@@ -1464,8 +1474,9 @@ export class ClaudeProvider implements ChatProvider {
       }
       const remaining = windowWaitUntil - performance.now();
       if (remaining <= 0 || session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || this.disposed) break;
-      await bounded(session.windowReady ?? Promise.resolve(), remaining, this.disposal.promise);
-    } while (session.windowAccountEpoch !== this.accountEpoch);
+      waitedFor = session.windowReady;
+      await bounded(waitedFor ?? Promise.resolve(), remaining, this.disposal.promise);
+    } while (session.windowAccountEpoch !== this.accountEpoch || waitedFor !== session.windowReady);
     if (session.cancelSequence !== cancelSequence || this.live.get(sessionId) !== session || this.disposed) {
       session.pendingTurns = Math.max(0, session.pendingTurns - 1);
       if (this.live.get(sessionId) === session && session.pendingTurns === 0) await this.retireIfIdle(session);
@@ -1778,7 +1789,8 @@ export class ClaudeProvider implements ChatProvider {
           if (update.item.type === "assistant_message" && !update.item.usage) continue;
           const rawModel = update.item.type === "assistant_message" ? (message as { message?: { model?: string } }).message?.model : undefined;
           if (rawModel && session.windowResolved && stripWindowMarker(rawModel) !== stripWindowMarker(session.windowResolved)) {
-            this.resetSessionWindow(session, rawModel);
+            const cached = this.contextWindows.get(session.id)?.get(session.contextKey)?.window.freshness === "cached";
+            this.resetSessionWindow(session, cached ? session.windowSelection : rawModel);
             session.windowResolved = rawModel;
             session.windowReady = this.prepareSessionWindow(session);
           }
@@ -3789,6 +3801,7 @@ export class ClaudeProvider implements ChatProvider {
       model, contextKey: session.contextKey, limit: answer.limit,
       window: { source: "session", freshness: "current", observedAt, ...answer.details, ...(capacity && capacity !== answer.limit ? { capacity } : {}) },
     };
+    this.windowBindings.set(item, { selection: session.windowSelection ?? "default", resolvedModel: answer.model, resolutionKey: this.windowResolutionKey(session) });
     boundedSet(records, session.contextKey, item, 32);
     boundedSet(this.contextWindows, session.id, records, 256);
     session.windowResolved = answer.model;
@@ -3797,13 +3810,33 @@ export class ClaudeProvider implements ChatProvider {
     return item;
   }
 
+  /** Detect a changed known alias/default without preferring an older catalog
+   * resolution to what this conversation's own query actually reported. */
+  private windowResolutionKey(session: LiveSession): string {
+    const selection = session.windowSelection ?? "default";
+    if (selection === "default" && this.defaultRuns) return JSON.stringify([this.defaultAttribution(session.id), this.defaultRuns.model, this.defaultRuns.window]);
+    const row = this.liveModels?.find(candidate => candidate.selection.modelId === selection);
+    const target = selection === "default" ? this.liveModels?.find(candidate => candidate.selection.modelId === row?.resolvesTo?.modelId) : undefined;
+    return JSON.stringify([row?.resolvesTo?.modelId, target?.resolvesTo?.modelId]);
+  }
+
   private prepareSessionWindow(session: LiveSession): Promise<void> {
     // A previous query's answer is useful while revalidating, but never
     // copied across a model/window variant or account change.
-    const selection = session.windowSelection;
-    const previous = [...(this.contextWindows.get(session.id)?.values() ?? [])].reverse().find(item => item.model.modelId === selection);
+    const selection = session.windowSelection ?? "default";
+    const resolutionKey = this.windowResolutionKey(session);
+    const previous = [...(this.contextWindows.get(session.id)?.values() ?? [])].reverse().find(item => {
+      const binding = this.windowBindings.get(item);
+      return binding?.selection === selection && binding.resolutionKey === resolutionKey
+        && (!session.windowResolved || stripWindowMarker(binding.resolvedModel) === stripWindowMarker(session.windowResolved));
+    });
     if (previous && !session.windowConfirmed) {
       const cached: ContextWindowItem = { ...previous, id: `context:window:${session.contextKey}`, contextKey: session.contextKey, window: { ...previous.window, freshness: "cached" } };
+      const binding = this.windowBindings.get(previous)!;
+      this.windowBindings.set(cached, binding);
+      // A later assistant frame can disprove the cached model even when the
+      // fresh window read fails. Its usage must not inherit the old limit.
+      session.windowResolved = binding.resolvedModel;
       const records = this.contextWindows.get(session.id)!;
       boundedSet(records, session.contextKey, cached, 32);
       this.emit(session.id, { updates: [{ kind: "upsert", item: cached }], outcome: "handled", eventType: "context.window.cached" });
@@ -3839,8 +3872,11 @@ export class ClaudeProvider implements ChatProvider {
       if (!current() || abort.signal.aborted) { diagnostic("stale"); return; }
       if (raw === timedOut) { diagnostic("timeout"); return; }
       const answer = claudeWindowAnswer(raw);
-      const row = this.liveModels?.find(model => model.selection.modelId === selected);
-      const expected = session.windowResolved ?? row?.resolvesTo?.modelId ?? (selected?.startsWith("claude-") ? selected : undefined);
+      const cached = this.contextWindows.get(session.id)?.get(key)?.window.freshness === "cached";
+      const row = selected !== "default" ? this.liveModels?.find(model => model.selection.modelId === selected) : undefined;
+      // The default delegates to this query's settings. A cached resolution
+      // cannot veto a fresh answer naming a newly selected default model.
+      const expected = (cached ? undefined : session.windowResolved) ?? row?.resolvesTo?.modelId ?? (selected?.startsWith("claude-") ? selected : undefined);
       if (!answer?.model) { diagnostic("failed"); return; }
       if (expected && stripWindowMarker(expected) !== stripWindowMarker(answer.model)) { diagnostic("mismatch", answer); return; }
       this.retainWindow(session, answer);

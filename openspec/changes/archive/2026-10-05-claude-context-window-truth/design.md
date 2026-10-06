@@ -103,6 +103,14 @@ An account change invalidates cross-account reuse. A new query reads its
 own settings rather than inheriting a prior query's window as current.
 An ordinary catalog refresh alone does not downgrade a confirmed answer.
 
+Keep a private cache binding with each observation: the requested selection,
+actual resolved model, and the known alias/default resolution at observation
+time. Unset and explicit `default` selections share an identity. Reuse a cached
+observation only while that selection and known resolution still match; a
+fresh query answer can replace the cached model, and usage naming another
+model invalidates the cached binding before its tokens are measured. This
+preserves the session's own answer over an older, unchanged catalog default.
+
 Alternative: keep the largest number ever seen, or latch the first answer.
 Both fail when Claude legitimately reports a smaller window. Wall-clock
 timestamps alone also cannot reject an old request that finishes late.
@@ -127,6 +135,11 @@ Recheck the account epoch after the startup wait, immediately before prompt
 delivery. An account change releases the old waiter and starts discovery for
 the current account. All such revalidation shares one total startup grace
 budget, so repeated account changes cannot keep extending prompt startup.
+The wait also follows a replacement readiness promise started by the account
+change, rather than treating the cancelled old waiter as current readiness.
+After prompt delivery, an account change resets the binding and restarts
+discovery for queries still held by live work or scheduled wakeups. An idle
+query leaves revalidation to its next accepted prompt.
 
 The startup result supplies only window metadata. A full post-turn report
 still supplies the breakdown and may correct the limit. Prefer the model

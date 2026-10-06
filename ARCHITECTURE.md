@@ -567,7 +567,11 @@ the turn runs. The provider rejects replies from superseded query, selection,
 or account contexts. It retains bounded `context_window` records for snapshot
 recovery, and attaches the same `contextKey` to the usage they describe. A newer
 session observation can increase or decrease a limit. Known fallback values are
-estimates; unknown model ids have no invented 200k limit. Transient discovery
+estimates; unknown model ids have no invented 200k limit. Cached observations
+retain their requested selection, resolved model, and known catalog resolution.
+Unset and explicit default selections share a cache identity; known alias or
+variant changes prevent reuse. A fresh answer or usage naming another model
+supersedes the cached default. Transient discovery
 failures get bounded retries. Each logical read races its SDK request against
 a deadline and invalidation signal, releasing the in-flight slot even if the
 SDK never answers. Abandoned replies cannot publish or clear a newer read.
@@ -575,7 +579,9 @@ Turn-end and on-demand reports take over pending discovery. If a current
 report cannot confirm a window and work keeps the query alive, discovery
 resumes with its remaining summary retry budget, rather than starting over.
 Account changes during startup trigger revalidation before delivery within
-the same total startup wait budget. `UATU_DEBUG=1` logs the model ids, phase,
+the same total startup wait budget. Changes after delivery also reset and
+restart discovery for queries held by a turn, background work, or wakeups.
+`UATU_DEBUG=1` logs the model ids, phase,
 source, epoch, and outcome of discovery without prompt or credential payloads.
 
 Catalog discoveries advance an agent-scoped revision carried by the existing
