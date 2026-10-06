@@ -5609,6 +5609,131 @@ describe("conversation window discovery", () => {
 });
 
 describe("windows and the default as Claude Code states them (claude-context-windows-from-cli)", () => {
+  for (const change of ["removed", "retargeted", "more-model-aliased"] as const) {
+    test(`obsolete window failures stop reopening catalog probes (${change})`, async () => {
+      let now = 0;
+      let changed = false;
+      let probes = 0;
+      const oldSelection = change === "more-model-aliased" ? "claude-opus-4-6" : "retired";
+      const rows = () => [
+        { value: "keep", resolvedModel: "claude-keep-1", displayName: "Keep" },
+        ...(!changed && change !== "more-model-aliased" ? [{ value: "retired", resolvedModel: "claude-retired-1", displayName: "Retired" }] : []),
+        ...(changed && change === "retargeted" ? [{ value: "retired", resolvedModel: "claude-replacement-2", displayName: "Replacement" }] : []),
+        ...(changed && change === "more-model-aliased" ? [{ value: "legacy", resolvedModel: oldSelection, displayName: "Legacy" }] : []),
+      ];
+      const { provider } = fixture(query => {
+        let selected: string | undefined;
+        query.supportedModels = async () => { probes += 1; return rows(); };
+        query.setModel = async model => { selected = model; };
+        query.getContextUsage = async () => {
+          if (!changed && selected === oldSelection) throw new Error("not available");
+          return { model: rows().find(row => row.value === selected)?.resolvedModel ?? selected ?? "claude-keep-1", maxTokens: 1_000_000 };
+        };
+      }, { catalogProbe: true, now: () => now, windowRetryDelaysMs: [60_000] });
+      try {
+        await provider.listModels();
+        await provider.windowsSettled();
+        expect(probes).toBe(1);
+        changed = true;
+        now = 60_000;
+        await provider.listModels();
+        await provider.windowsSettled();
+        expect(probes).toBe(2);
+        // Ordinary reads must not keep reopening probes for a retry key
+        // that the refreshed catalog can no longer visit.
+        for (let read = 0; read < 3; read += 1) {
+          await provider.listModels();
+          await provider.windowsSettled();
+        }
+        expect(probes).toBe(2);
+      } finally { await provider.dispose(); }
+    });
+  }
+
+  test("a late failure from a removed row cannot recreate an obsolete retry", async () => {
+    const late = Promise.withResolvers<unknown>();
+    let now = 0;
+    let changed = false;
+    let probes = 0;
+    let readingOld = false;
+    const rows = () => [{ value: "keep", resolvedModel: "claude-keep-1", displayName: "Keep" }, ...(!changed ? [{ value: "retired", resolvedModel: "claude-retired-1", displayName: "Retired" }] : [])];
+    const { provider } = fixture(query => {
+      let selected: string | undefined;
+      query.supportedModels = async () => { if (!query.input.options.sessionId && !query.input.options.resume) probes += 1; return rows(); };
+      query.setModel = async model => { selected = model; };
+      query.getContextUsage = () => {
+        if (selected === "retired") { readingOld = true; return late.promise; }
+        return Promise.resolve({ model: rows().find(row => row.value === selected)?.resolvedModel ?? selected ?? "claude-keep-1", maxTokens: 1_000_000 });
+      };
+    }, { catalogProbe: true, now: () => now, windowReadTimeoutMs: 60_000, windowRetryDelaysMs: [60_000] });
+    try {
+      await provider.listModels();
+      await waitFor(() => readingOld);
+      changed = true;
+      const session = await provider.createSession("x");
+      await provider.prompt(session.id, { id: "r", text: "refresh the catalog", delivery: "queue" });
+      expect((await provider.listModels()).some(model => model.selection.modelId === "retired")).toBe(false);
+      late.reject(new Error("old row failed after refresh"));
+      await provider.windowsSettled();
+      now = 60_000;
+      await provider.listModels();
+      await provider.windowsSettled();
+      expect(probes).toBe(1);
+    } finally { late.resolve({}); await provider.dispose(); }
+  });
+
+  test("catalog pruning preserves a More-model retry's remaining budget", async () => {
+    let now = 0;
+    let probes = 0;
+    let attempts = 0;
+    const { provider } = fixture(query => {
+      let selected: string | undefined;
+      query.supportedModels = async () => { probes += 1; return [{ value: "keep", resolvedModel: "claude-keep-1", displayName: "Keep" }]; };
+      query.setModel = async model => { selected = model; };
+      query.getContextUsage = async () => {
+        if (selected === "claude-opus-4-6") { attempts += 1; throw new Error("still unavailable"); }
+        return { model: selected === "keep" || !selected ? "claude-keep-1" : selected, maxTokens: 1_000_000 };
+      };
+    }, { catalogProbe: true, now: () => now, windowRetryDelaysMs: [60_000, 60_000] });
+    try {
+      for (const time of [0, 60_000, 120_000, 180_000, 240_000]) {
+        now = time;
+        await provider.listModels();
+        await provider.windowsSettled();
+      }
+      expect(probes).toBe(3);
+      expect(attempts).toBe(3);
+    } finally { await provider.dispose(); }
+  });
+
+  test("catalog pruning retains the unpinned retry when no default row is listed", async () => {
+    let now = 0;
+    let probes = 0;
+    let defaults = 0;
+    const { provider } = fixture(query => {
+      let selected: string | undefined;
+      query.supportedModels = async () => { probes += 1; return [{ value: "keep", resolvedModel: "claude-keep-1", displayName: "Keep" }]; };
+      query.setModel = async model => { selected = model; };
+      query.getContextUsage = async () => {
+        if (selected === undefined && ++defaults === 1) throw new Error("default read failed");
+        return { model: selected === "keep" || !selected ? "claude-keep-1" : selected, maxTokens: 1_000_000 };
+      };
+    }, { catalogProbe: true, now: () => now, windowRetryDelaysMs: [60_000] });
+    try {
+      await provider.listModels();
+      await provider.windowsSettled();
+      now = 60_000;
+      await provider.listModels();
+      await provider.windowsSettled();
+      expect(probes).toBe(2);
+      expect(defaults).toBe(2);
+      now = 120_000;
+      await provider.listModels();
+      await provider.windowsSettled();
+      expect(probes).toBe(2);
+    } finally { await provider.dispose(); }
+  });
+
   for (const waitingBeforeReplacement of [false, true]) {
     test(`an obsolete catalog walk cannot release its replacement (already waiting: ${waitingBeforeReplacement})`, async () => {
       const oldRead = Promise.withResolvers<unknown>();

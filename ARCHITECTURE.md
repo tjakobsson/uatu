@@ -588,6 +588,10 @@ source, epoch, and outcome of discovery without prompt or credential payloads.
 Catalog walks retain their ownership handle through query cleanup. An obsolete
 walk closes its own query but cannot release a replacement's handle or alter
 its retry schedule; callers waiting for settled windows follow replacements.
+Retry records are pruned against the currently offered selection/resolution
+keys before deciding or scheduling a probe. This includes "More models" and
+preserves the separate unpinned-default retry. Removed rows and late failures
+from an obsolete catalog cannot leave an expired retry reopening probes.
 
 Catalog discoveries advance an agent-scoped revision carried by the existing
 inventory stream's optional `catalogs` map. Browsers refresh the changed agent's

@@ -37,7 +37,7 @@ similar `maxTokens` and `rawMaxTokens` field names.
 ## Automated checks
 
 - `bun run typecheck`: passed.
-- `bun run test:ci`: 4,866 passed, 15 skipped, zero failed across 273 files,
+- `bun run test:ci`: 4,872 passed, 15 skipped, zero failed across 273 files,
   including the PR review follow-up below.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
@@ -241,3 +241,22 @@ until query cleanup completes. The focused provider/window/readout suite passed
 268 tests and typecheck passed. The full parallel suite passed with 4,866 tests
 and 15 skips. The promptless real-Claude catalog test passed again with 23
 assertions, unchanged settings, and no transcript created.
+
+## Ninth review: obsolete catalog retry records
+
+[The review finding](https://github.com/tjakobsson/uatu/pull/492#discussion_r4197075974)
+identified that a removed or retargeted row could leave an expired failure key
+that no later walk could visit, repeatedly reopening catalog probes. Four
+regressions reproduced the extra probes before the fix.
+
+Failure records are now pruned against the current offered selection/resolution
+keys when a catalog is installed and before checking or scheduling retries.
+The scheduling check also removes late failures from a superseded catalog.
+Applicable "More models" failures retain their attempt budget, and the
+unpinned-default retry remains valid even without a default row in the catalog.
+
+Six new cases cover row removal, retargeting, a newly aliased More-model row,
+late failure after removal, preservation of the remaining retry budget, and
+default discovery without a listed default. The focused provider/window/readout
+suite passed 274 tests; typecheck passed; the full parallel suite passed with
+4,872 tests and 15 skips.

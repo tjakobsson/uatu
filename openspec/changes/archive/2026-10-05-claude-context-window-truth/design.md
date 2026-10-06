@@ -212,6 +212,13 @@ automatic retries, after 1, 5, and 30 seconds, using injectable timing for
 tests. A new query or changed binding permits new discovery. Catalog reads
 do not reset the backoff or create a retry storm.
 
+Prune failure records against the current offered selection/resolution keys,
+including "More models", when installing a catalog and before checking or
+scheduling retries. Recheck at scheduling time because an old walk can fail
+after the catalog changed. Preserve applicable records and their remaining
+budget. The unpinned `default` read has a separate retry key even when the
+catalog does not list a default row.
+
 A probe whose timed-out `setModel` could still complete is retired before
 retrying on a fresh probe. Never switch a live conversation as a discovery
 retry. Keep one active logical discovery attempt per live query. Race its

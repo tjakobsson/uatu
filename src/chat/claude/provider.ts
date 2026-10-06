@@ -946,6 +946,7 @@ export class ClaudeProvider implements ChatProvider {
    */
   private async hydrateCatalog(): Promise<void> {
     if (!this.catalogProbe || this.disposed) return;
+    this.pruneWindowFailures();
     if (this.liveModels !== null && this.windowsRead) {
       // Claude Code updates itself under a running workspace and ships new
       // models that way; a refreshed catalog with rows no probe has asked
@@ -4077,7 +4078,20 @@ export class ClaudeProvider implements ChatProvider {
     this.windowFailures.set(key, { attempts, retryAt: delay === undefined ? Infinity : this.now() + Math.min(delay, this.windowReprobeCooldownMs) });
   }
 
+  private pruneWindowFailures(): void {
+    if (this.windowFailures.size === 0) return;
+    const offered = new Set(withMoreModels(this.liveModels ?? []).filter(row => !row.default).map(probeKey));
+    for (const key of this.windowFailures.keys()) {
+      // The unpinned read is independent of whether ModelInfo lists a
+      // default row. Other keys belong to an exact selection/resolution.
+      if (key !== "default" && !offered.has(key)) this.windowFailures.delete(key);
+    }
+  }
+
   private scheduleWindowRetries(): void {
+    // A walk that began before a catalog refresh may fail after it, so
+    // pruning only when installing the catalog would miss those late keys.
+    this.pruneWindowFailures();
     if (this.windowRetryTimer) clearTimeout(this.windowRetryTimer);
     this.windowRetryTimer = undefined;
     if (this.disposed || this.windowControlsMissing || this.windowWalk || this.hydration) return;
@@ -4109,6 +4123,7 @@ export class ClaudeProvider implements ChatProvider {
       if (models.length > 0) {
         this.liveModels = models;
         this.modelAliases = aliases;
+        this.scheduleWindowRetries();
         this.catalogChanged();
       }
     } catch {
