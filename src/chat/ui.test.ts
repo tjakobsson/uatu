@@ -4,7 +4,7 @@ import { parseHTML } from "linkedom";
 import type { ChatApiClient } from "./client";
 import type { RevealOptions } from "./coordinated-scroll";
 import { resetUsagePaneForTests } from "./usage-pane";
-import type { ChatCommand, ConversationSnapshot, ReversibleHistoryResult } from "./types";
+import type { ChatCommand, ChatModel, ConversationSnapshot, ReversibleHistoryResult } from "./types";
 
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
 const savedGlobals = new Map<string, unknown>();
@@ -503,6 +503,131 @@ describe("agent logins", () => {
     inventory!.invalidation({ type: "conversation.inventory" });
     await waitUntil(() => statusReads > settled);
     expect(modelReads).toBe(3);
+  });
+});
+
+describe("catalog revisions", () => {
+  const model = (limit: number): ChatModel => ({ selection: { providerId: "anthropic", modelId: "opus" }, provider: "Anthropic", name: "Opus", contextLimit: limit, contextWindow: { source: "catalog", freshness: "current" } });
+
+  async function fixture(withOther = false) {
+    const { document, window } = parseHTML(html);
+    installDomGlobals(document, window);
+    document.documentElement.setAttribute("data-ui-mode", "desktop");
+    document.documentElement.setAttribute("data-chat-panel", "open");
+    stubConversationSelect(document);
+    const storage = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", { configurable: true, value: {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    } });
+    const { presentationLocalStorage } = await import("../shell/presentation-storage");
+    presentationLocalStorage()!.setItem("uatu:chat-presentation", JSON.stringify({ selectedId: "claude:one", lastAgentId: "claude", drafts: {} }));
+    const reads: Array<ReturnType<typeof deferred<ChatModel[]>>> = [];
+    const readAgents: string[] = [];
+    let inventory: Parameters<ChatApiClient["inventoryStream"]>[0] | undefined;
+    let statusReads = 0;
+    const agent = { id: "claude", name: "Claude Code", capabilities: ["models", "context"] };
+    const other = { id: "other", name: "Other", capabilities: ["context"] };
+    const summary = { ...conversation("claude:one"), agent: { id: agent.id, name: agent.name } };
+    const summaries = [summary, ...(withOther ? [{ ...conversation("other:one"), agent: { id: other.id, name: other.name } }] : [])];
+    const api = {
+      status: async () => { statusReads += 1; return [agent, ...(withOther ? [other] : [])].map(agent => ({ agent, availability: { state: "ready", version: "test", agent } })); },
+      conversations: async () => summaries,
+      models: (agentId: string) => { readAgents.push(agentId); const read = deferred<ChatModel[]>(); reads.push(read); return read.promise; },
+      commands: async () => [],
+      modes: async () => [],
+      snapshot: async (id: string) => ({ ...snapshot(id), conversation: summaries.find(summary => summary.id === id)!, items: [{ id: "usage:one", type: "assistant_message", createdAt: 2, markdown: "", model: model(200_000).selection, usage: { input: 150_000 } }] }),
+      stream: () => ({ close() {} }),
+      inventoryStream: (handlers: Parameters<ChatApiClient["inventoryStream"]>[0]) => { inventory = handlers; return { close() {} }; },
+      attachmentUrl: (id: string) => `/api/chat/attachments/${id}`,
+    } as unknown as ChatApiClient;
+    const { initChat } = await import(`./ui.ts?catalog-revisions=${Math.random()}`);
+    initChat(api);
+    await waitUntil(() => reads.length === 1 && inventory !== undefined);
+    return {
+      reads,
+      readAgents,
+      label: () => document.querySelector("#chat-context-usage-label")?.textContent,
+      context: () => document.querySelector("#chat-context")?.textContent,
+      select: (id: string) => { const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select")!; select.value = id; select.dispatchEvent(new Event("change", { bubbles: true })); },
+      statusReads: () => statusReads,
+      invalidate: (revision: string) => inventory!.invalidation({ type: "conversation.inventory", catalogs: { claude: revision } }),
+      finish: () => { for (const read of reads) read.resolve([]); window.dispatchEvent(new Event("pagehide")); },
+    };
+  }
+
+  test("a revision received during initial loading is applied after the catalog is banked", async () => {
+    const f = await fixture();
+    try {
+      f.invalidate("g:1");
+      f.invalidate("g:2");
+      f.invalidate("g:2");
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.reads.length === 2, () => `${f.reads.length} model reads after bootstrap invalidation`);
+      f.invalidate("g:2");
+      expect(f.reads).toHaveLength(2);
+      f.reads[1]!.resolve([model(1_000_000)]);
+      await waitUntil(() => f.label() === "15%", () => `context label ${f.label()}`);
+      const before = f.statusReads();
+      f.invalidate("g:2");
+      await waitUntil(() => f.statusReads() > before);
+      expect(f.reads).toHaveLength(2);
+    } finally { f.finish(); }
+  });
+
+  test("a failed refresh leaves the same revision eligible for a later tick", async () => {
+    const f = await fixture();
+    try {
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.label() === "75%");
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length === 2);
+      f.reads[1]!.reject(new Error("temporary transport failure"));
+      await waitUntil(() => { f.invalidate("g:2"); return f.reads.length === 3; }, () => "retry of unacknowledged revision");
+      f.reads[2]!.resolve([model(1_000_000)]);
+      await waitUntil(() => f.label() === "15%");
+      expect(f.reads).toHaveLength(3);
+    } finally { f.finish(); }
+  });
+
+  test("a newer revision can finish first without an older refresh overwriting it", async () => {
+    const f = await fixture();
+    try {
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.label() === "75%");
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length === 2);
+      f.invalidate("g:3");
+      await waitUntil(() => f.reads.length === 3);
+      f.reads[2]!.resolve([model(1_000_000)]);
+      await waitUntil(() => f.label() === "15%");
+      f.reads[1]!.resolve([model(500_000)]);
+      const before = f.statusReads();
+      f.invalidate("g:3");
+      await waitUntil(() => f.statusReads() > before);
+      expect(f.label()).toBe("15%");
+      expect(f.reads).toHaveLength(3);
+    } finally { f.finish(); }
+  });
+
+  test("an inactive agent's revision uses its own catalog capabilities", async () => {
+    const f = await fixture(true);
+    try {
+      f.reads[0]!.resolve([model(200_000)]);
+      await waitUntil(() => f.label() === "75%");
+      f.select("other:one");
+      await waitUntil(() => f.context()?.includes("Other") === true);
+      const before = f.reads.length;
+      f.invalidate("g:2");
+      await waitUntil(() => f.reads.length > before, () => "inactive Claude catalog refresh");
+      expect(f.readAgents.at(-1)).toBe("claude");
+      f.reads.at(-1)!.resolve([model(1_000_000)]);
+      await f.reads.at(-1)!.promise;
+      expect(f.context()).toContain("Other");
+      f.select("claude:one");
+      await waitUntil(() => f.label() === "15%");
+    } finally { f.finish(); }
   });
 });
 

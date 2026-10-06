@@ -135,6 +135,44 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(label).toHaveText("15%");
   });
 
+  test("catalog revisions received before the first model response are applied after bootstrap", async ({ page, request }) => {
+    await page.addInitScript(() => {
+      const NativeEventSource = window.EventSource;
+      window.EventSource = class extends NativeEventSource {
+        constructor(url: string | URL, options?: EventSourceInit) {
+          super(url, options);
+          this.addEventListener("live", event => {
+            const envelope = JSON.parse((event as MessageEvent<string>).data);
+            if (envelope.topic === "inventory" && envelope.event?.kind === "data") Reflect.set(window, "__e2eCatalogs", envelope.event.data.catalogs ?? {});
+          });
+        }
+      };
+    });
+    const captured = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let reads = 0;
+    await page.route(/\/api\/chat\/models\?agent=claude$/, async route => {
+      if (++reads > 1) { await route.continue(); return; }
+      const response = await route.fetch();
+      captured.resolve();
+      await release.promise;
+      await route.fulfill({ response });
+    });
+    try {
+      const staleModels = claudeModels.map(model => model.selection.modelId === "sonnet" ? { ...model, contextLimit: 200_000 } : model);
+      await bootClaude(page, request, "Bootstrap window discovery", [carrier("usage:bootstrap", 2, "sonnet", 100, 149_900)], {}, false, staleModels);
+      await captured.promise;
+      const revision = () => page.evaluate(() => Reflect.get(window, "__e2eCatalogs")?.claude);
+      await expect.poll(revision).toBe("e2e:1");
+      await control(request, { action: "models", agent: "claude", models: claudeModels });
+      await expect.poll(revision).toBe("e2e:2");
+      expect(reads).toBe(1);
+      release.resolve();
+      await expect(page.locator("#chat-context-usage-label")).toHaveText("15%");
+      expect(reads).toBe(2);
+    } finally { release.resolve(); }
+  });
+
   test("confirming an estimated window updates the source without another usage message", async ({ page, request }) => {
     const models = claudeModels.map(model => ({ ...model, contextWindow: { source: "estimate" as const, freshness: "current" as const } }));
     await bootClaude(page, request, "Confirm window", [carrier("usage:same", 2, "sonnet", 100, 149_900)], {}, false, models);

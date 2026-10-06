@@ -42,7 +42,7 @@ similar `maxTokens` and `rawMaxTokens` field names.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
 - Focused Playwright suites `chat-claude-polish`, `chat-configuration`, and
-  `chat-agents`: 60 passed. New scenarios cover live catalog correction,
+  `chat-agents`: 61 passed. New scenarios cover live catalog correction,
   source-only confirmation, occupancy beyond an estimate, and reconnect on
   desktop and touch layouts.
 - `bun run api:validate` and the API contract/revision tests: passed. Redocly
@@ -186,3 +186,24 @@ answer overwriting the original model's 1M denominator. The tests now verify
 correct follow-up usage, fresh discovery, and rejection of those stale answers.
 The focused provider/window/readout suite passed 265 tests; typecheck passed;
 the full parallel suite passed with 4,863 tests and 15 skips.
+
+## Sixth review: revisions received before catalog bootstrap finishes
+
+[The review finding](https://github.com/tjakobsson/uatu/pull/492#discussion_r4193757479)
+identified that an early inventory revision could be marked seen while the
+initial catalog was still loading, leaving no bank to refresh. A DOM regression
+reproduced the stale single-read result before the fix.
+
+Received revisions now remain separate from each bank's last successful
+refresh. Initial catalog installation starts any pending catch-up read and
+repaints the meter. Duplicate in-flight revisions coalesce, newer revisions
+can supersede older reads, and failed or discarded refreshes do not acknowledge
+the revision. Agent-scoped refreshes use the target agent's capabilities.
+
+Four DOM regressions cover bootstrap invalidation, failed-refresh retry,
+out-of-order replies, and inactive-agent refresh. A real-browser regression
+holds the first model response until the newer revision has arrived over the
+live stream, then verifies an automatic catch-up read and the corrected meter.
+The UI/lifecycle/refresh suites and typecheck passed. The focused browser suites
+passed 61 tests, and the full parallel suite passed with 4,863 tests and 15
+skips; the DOM cases run inside the existing isolated UI-file test process.

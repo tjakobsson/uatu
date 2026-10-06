@@ -291,9 +291,12 @@ export function initChat(api = new ChatApiClient()): void {
   let agentStatuses: AgentChatStatus[] = [];
   // Catalogs are per agent; the bare lists below are the selected-agent view,
   // swapped whenever the conversation's owning agent changes.
-  type AgentCatalogs = { models: ChatModel[]; modes: ChatMode[]; commands: ChatCommand[]; commandInventoryAvailable: boolean };
+  type AgentCatalogs = { models: ChatModel[]; modes: ChatMode[]; commands: ChatCommand[]; commandInventoryAvailable: boolean; catalogRevision?: string };
   const agentCatalogs = new Map<string, AgentCatalogs>();
   const agentCatalogLoads = new Map<string, Promise<AgentCatalogs>>();
+  // Latest requested revision, including invalidations received before the
+  // initial catalog is banked. Each bank acknowledges only successful reads.
+  const catalogRevisions = new Map<string, string>();
   let catalogLoading = false;
   let contextAgentId: string | undefined;
   let models: ChatModel[] = [];
@@ -4696,7 +4699,9 @@ export function initChat(api = new ChatApiClient()): void {
     catalogLoading = false;
     form.hidden = false;
     renderConfiguration();
+    syncContextIndicator();
     syncControls();
+    refreshCatalogRevision(status.agent.id);
   };
 
   // Plan usage is per login: the workspace's last-known report is fetched
@@ -4775,51 +4780,72 @@ export function initChat(api = new ChatApiClient()): void {
   // latest one's answers are installed, or a pre-reload list landing late
   // would overwrite the reloaded one.
   const catalogRefreshes = new LatestRefresh();
+  const catalogRevisionReads = new Map<string, { bank: AgentCatalogs; revision: string }>();
   // Settles once every read it started has landed or failed.
   const refreshBankedCommands = (agentId: string | undefined, options: { acceptEmpty?: boolean } = {}): Promise<void> => {
     if (!agentId) return Promise.resolve();
     const banked = agentCatalogs.get(agentId);
     if (!banked) return Promise.resolve();
+    const revision = catalogRevisions.get(agentId);
+    const availability = agentStatusFor(agentId)?.availability;
+    const capabilities = availability?.state === "ready" ? availability.agent?.capabilities : undefined;
+    const has = (capability: ChatCapability) => capabilities?.includes(capability) ?? true;
     const latest = catalogRefreshes.begin(agentId);
     const current = () => agentCatalogs.get(agentId) === banked && latest();
+    let complete = true;
     const reads: Promise<unknown>[] = [];
-    if (agent?.capabilities.includes("commands") || agent?.capabilities.includes("reversible-history")) {
+    if (has("commands") || has("reversible-history")) {
       reads.push(api.commands(agentId).then(list => {
-        if (!current()) return;
+        if (!current()) { complete = false; return; }
         banked.commands = list;
         banked.commandInventoryAvailable = true;
         if (contextAgentId === agentId) {
           commands = list;
           if (slashQueryActive) renderCommandMenu();
         }
-      }).catch(() => undefined));
+      }).catch(() => { complete = false; }));
     }
     // Models change under a running page too — a Claude Code update ships
     // new entries — so the banked model list refreshes on the same cadence.
-    if (agent?.capabilities.includes("models")) {
+    if (has("models")) {
       reads.push(api.models(agentId).then(list => {
-        if (!current() || (list.length === 0 && !options.acceptEmpty)) return;
+        if (!current() || (list.length === 0 && !options.acceptEmpty)) { complete = false; return; }
         banked.models = list;
         if (contextAgentId === agentId) {
           models = list;
           renderConfiguration();
           syncContextIndicator();
         }
-      }).catch(() => undefined));
+      }).catch(() => { complete = false; }));
     }
     // Modes too: OpenCode's agents are its configuration, which a reload
     // (or an edit picked up on restart) changes under a running page.
-    if (agent?.capabilities.includes("modes")) {
+    if (has("modes")) {
       reads.push(api.modes(agentId).then(list => {
-        if (!current() || list.length === 0) return;
+        if (!current() || list.length === 0) { complete = false; return; }
         banked.modes = list;
         if (contextAgentId === agentId) {
           modes = list;
           renderConfiguration();
         }
-      }).catch(() => undefined));
+      }).catch(() => { complete = false; }));
     }
-    return Promise.all(reads).then(() => undefined);
+    return Promise.all(reads).then(() => {
+      if (current() && complete && reads.length > 0 && revision !== undefined) banked.catalogRevision = revision;
+    });
+  };
+
+  const refreshCatalogRevision = (agentId: string): void => {
+    const bank = agentCatalogs.get(agentId);
+    const revision = catalogRevisions.get(agentId);
+    if (!bank || revision === undefined || bank.catalogRevision === revision) return;
+    const inflight = catalogRevisionReads.get(agentId);
+    if (inflight?.bank === bank && inflight.revision === revision) return;
+    const read = { bank, revision };
+    catalogRevisionReads.set(agentId, read);
+    void refreshBankedCommands(agentId).finally(() => {
+      if (catalogRevisionReads.get(agentId) === read) catalogRevisionReads.delete(agentId);
+    });
   };
 
   const refreshIdleAgentContext = () => {
@@ -4841,7 +4867,6 @@ export function initChat(api = new ChatApiClient()): void {
     }, 1_500);
   };
 
-  const catalogRevisions = new Map<string, string>();
   const startInventoryStream = () => {
     if (inventoryStream) return;
     try {
@@ -4851,9 +4876,8 @@ export function initChat(api = new ChatApiClient()): void {
         invalidation: event => {
           void inventoryReconciler.request(); rereadStatuses();
           for (const [agentId, revision] of Object.entries(event.catalogs ?? {})) {
-            if (catalogRevisions.get(agentId) === revision) continue;
             catalogRevisions.set(agentId, revision);
-            void refreshBankedCommands(agentId);
+            refreshCatalogRevision(agentId);
           }
         },
         error: error => interruptions.report("inventory", error),

@@ -170,6 +170,14 @@ and context indicator. A reconnect re-reads the current catalog and obtains
 the conversation's retained window items in its snapshot. A refresh that
 started before a newer invalidation cannot install stale data over it.
 
+Keep received catalog revisions separate from each bank's last successfully
+refreshed revision. An invalidation arriving before the initial catalog is
+banked remains pending; installing that catalog starts the catch-up read.
+Coalesce repeated requests for the same bank and revision, but let a newer
+revision supersede a slower read. Failed or discarded reads do not acknowledge
+the revision. Refreshes use the target agent's capabilities, including while
+another agent is selected. Initial catalog installation also repaints the meter.
+
 The Hub retains the latest complete inventory payload, including the current
 catalog revision map, for synthesized opening and catch-up ticks on shared or
 lingering upstreams. Coalescing retains one latest payload rather than a tick
