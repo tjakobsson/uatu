@@ -586,7 +586,11 @@ source, epoch, and outcome of discovery without prompt or credential payloads.
 
 Catalog discoveries advance an agent-scoped revision carried by the existing
 inventory stream's optional `catalogs` map. Browsers refresh the changed agent's
-banked models and repaint the meter without opening the picker. The paint key
+banked models and repaint the meter without opening the picker. The Hub retains
+the latest inventory payload for joining and reconnecting pages, including
+those reusing a lingering upstream. A reopened child upstream starts with no
+retained payload, so old catalog revisions cannot cross into its new epoch.
+The paint key
 includes limit and provenance, so an unchanged usage item does not hide a
 correction. The readout labels estimated and cached limits; with no usable limit
 it shows tokens used and explains that the limit is unavailable. Explicit

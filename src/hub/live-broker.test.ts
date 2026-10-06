@@ -457,8 +457,10 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     expect(kinds(first.envelopes.filter(e => e.topic === "inventory"))).toEqual(["ready"]);
     const documentHead = first.envelopes.find(e => e.topic === "document" && e.event.kind === "data")!.cursor;
 
-    child.byPath("/conversations/events")[0]!.push('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
-    child.byPath("/conversations/events")[0]!.push('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+    const firstInventory = { type: "conversation.inventory", catalogs: { claude: "g1:1", opencode: "g2:1" } };
+    const latestInventory = { type: "conversation.inventory", catalogs: { claude: "g1:2", opencode: "g2:1" } };
+    child.byPath("/conversations/events")[0]!.push(`event: inventory\ndata: ${JSON.stringify(firstInventory)}\n\n`);
+    child.byPath("/conversations/events")[0]!.push(`event: inventory\ndata: ${JSON.stringify(latestInventory)}\n\n`);
     await waitFor(() => first.envelopes.filter(e => e.topic === "inventory" && e.event.kind === "data").length === 2, "two ticks");
     const inventoryTicks = first.envelopes.filter(e => e.topic === "inventory" && e.event.kind === "data");
     const inventoryHead = inventoryTicks[1]!.cursor;
@@ -475,6 +477,7 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     await waitFor(() => behind.envelopes.length === 2, "one tick + ready");
     expect(kinds(behind.envelopes)).toEqual(["data", "ready"]);
     expect(behind.envelopes[0]!.cursor).toBe(inventoryHead);
+    expect(behind.envelopes[0]!.event).toEqual({ kind: "data", data: latestInventory });
 
     // A first attach presents no cursor: it is owed the opening tick the
     // child gave this upstream's first subscriber long ago.
@@ -483,16 +486,17 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     await waitFor(() => joiner.envelopes.length === 2, "opening tick + ready");
     expect(kinds(joiner.envelopes)).toEqual(["data", "ready"]);
     expect(joiner.envelopes[0]!.cursor).toBe(inventoryHead);
+    expect(joiner.envelopes[0]!.event).toEqual({ kind: "data", data: latestInventory });
 
     const unplaceable = sink();
     live.subscribe(unplaceable, "ws", { topic: "document", key: "", cursor: "from-another-hub-life.9" });
     live.subscribe(unplaceable, "ws", { topic: "inventory", cursor: "from-another-hub-life.9" });
     await waitFor(() => unplaceable.envelopes.length === 4, "snapshot, tick, ready ×2");
     expect(unplaceable.envelopes.find(e => e.topic === "document")!.event).toEqual({ kind: "data", data: { generatedAt: 1 } });
-    expect(unplaceable.envelopes.find(e => e.topic === "inventory")!.event).toEqual({ kind: "data", data: { type: "conversation.inventory" } });
+    expect(unplaceable.envelopes.find(e => e.topic === "inventory")!.event).toEqual({ kind: "data", data: latestInventory });
   });
 
-  test("inventory: a page attaching to a lingering upstream gets its own opening tick, a fresh upstream's first page only the child's", async () => {
+  test.each([false, true])("inventory: a lingering upstream retains its opening tick payload (catalogs: %s)", async withCatalogs => {
     const child = fakeSource();
     const live = broker(child.source, { lingerMs: 500 });
     const before = sink();
@@ -500,7 +504,8 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     await waitFor(() => child.opened.length === 1, "one upstream");
     child.opened[0]!.push(": open\n\n");
     // The child's route opens every subscription with a reconcile tick.
-    child.opened[0]!.push('event: inventory\ndata: {"type":"conversation.inventory"}\n\n');
+    const inventory = { type: "conversation.inventory", ...(withCatalogs ? { catalogs: { claude: "g1:2", opencode: "g2:1" } } : {}) };
+    child.opened[0]!.push(`event: inventory\ndata: ${JSON.stringify(inventory)}\n\n`);
     await waitFor(() => before.envelopes.length === 2, "ready + the child's opening tick");
     // Fresh upstream: the child's own tick is the only one — no duplicate.
     expect(kinds(before.envelopes)).toEqual(["ready", "data"]);
@@ -514,10 +519,34 @@ describe("cursors, replay, and topic-scoped resync (2.2)", () => {
     live.subscribe(reloaded, "ws", { topic: "inventory" });
     await waitFor(() => reloaded.envelopes.length === 2, "opening tick + ready");
     expect(reloaded.envelopes.map(envelope => envelope.event)).toEqual([
-      { kind: "data", data: { type: "conversation.inventory" } },
+      { kind: "data", data: inventory },
       { kind: "ready" },
     ]);
     expect(child.opened).toHaveLength(1);
+  });
+
+  test("inventory: a reopened upstream forgets the previous child's catalog revisions", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "inventory" });
+    await waitFor(() => child.opened.length === 1, "first upstream");
+    child.opened[0]!.push('event: inventory\ndata: {"type":"conversation.inventory","catalogs":{"claude":"old:7"}}\n\n');
+    await waitFor(() => first.envelopes.some(envelope => envelope.event.kind === "data"), "first inventory payload");
+    const oldCursor = first.envelopes.find(envelope => envelope.event.kind === "data")!.cursor;
+    child.opened[0]!.end();
+    await waitFor(() => child.opened.length === 2, "reopened upstream");
+    child.opened[1]!.push(": open\n\n");
+    const reconnected = sink();
+    live.subscribe(reconnected, "ws", { topic: "inventory", cursor: oldCursor });
+    await waitFor(() => reconnected.envelopes.some(envelope => envelope.event.kind === "ready"), "reconnected ready");
+    expect(reconnected.envelopes[0]!.event).toEqual({ kind: "data", data: { type: "conversation.inventory" } });
+    child.opened[1]!.push('event: inventory\ndata: {"type":"conversation.inventory","catalogs":{"claude":"new:1"}}\n\n');
+    await waitFor(() => reconnected.envelopes.filter(envelope => envelope.event.kind === "data").length === 2, "new catalog revisions");
+    const joiner = sink();
+    live.subscribe(joiner, "ws", { topic: "inventory" });
+    expect(joiner.envelopes[0]!.event).toEqual({ kind: "data", data: { type: "conversation.inventory", catalogs: { claude: "new:1" } } });
+    expect(child.opened).toHaveLength(2);
   });
 
   test("the conversation buffer is byte-bounded", async () => {

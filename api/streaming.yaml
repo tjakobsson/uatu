@@ -25,8 +25,11 @@ channels:
         cursor: hub
         description: >-
           The workspace's conversation inventory changed. Invalidations may
-          collapse into one event. Read the inventory after `ready` and again
-          on every data event.
+          collapse into one event carrying the latest payload, including its
+          optional agent catalog revision map. Shared and lingering upstreams
+          retain that payload for joining or reconnecting pages. Read the
+          inventory after `ready` and again on every data event; refresh an
+          agent's catalog when its revision changes.
       conversation:
         domain: workspace
         key: LiveConversationKey

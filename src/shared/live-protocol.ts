@@ -62,7 +62,8 @@
 //   document      key = canonical watch-context query (documentContextKey);
 //                 data = the child's `state` payload (StatePayload).
 //   inventory     no key; data = the child's inventory invalidation
-//                 ({type:"conversation.inventory"}) — re-read the inventory.
+//                 ({type:"conversation.inventory", catalogs?: …}). Re-read
+//                 the inventory and invalidate changed agent catalogs.
 //   conversation  key = agent-qualified conversation id; data = one ChatEvent
 //                 (never type "resync" — that arrives as a `resync` signal).
 //   activity      no key; `ws` names the DESCRIBED workspace (any the user

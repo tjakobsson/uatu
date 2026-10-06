@@ -164,6 +164,12 @@ and context indicator. A reconnect re-reads the current catalog and obtains
 the conversation's retained window items in its snapshot. A refresh that
 started before a newer invalidation cannot install stale data over it.
 
+The Hub retains the latest complete inventory payload, including the current
+catalog revision map, for synthesized opening and catch-up ticks on shared or
+lingering upstreams. Coalescing retains one latest payload rather than a tick
+history. Reopening the child upstream clears that payload; before its first
+inventory frame, the existing bare invalidation remains the fallback.
+
 The indicator's paint key must include the effective limit, source,
 freshness, and any separately displayed boundary, in addition to usage
 source and model. Invoke it on catalog installation as well as conversation

@@ -37,7 +37,7 @@ similar `maxTokens` and `rawMaxTokens` field names.
 ## Automated checks
 
 - `bun run typecheck`: passed.
-- `bun run test:ci`: 4,855 passed, 15 skipped, zero failed across 273 files,
+- `bun run test:ci`: 4,857 passed, 15 skipped, zero failed across 273 files,
   including the PR review follow-up below.
   Ran with system Git/SSH and projected Git configuration removed from the
   child environment, as the repository instructions require for credential tests.
@@ -153,3 +153,19 @@ defaults, and rejection of cache reuse across variant changes and alias
 retargeting. The five initial regression cases failed before product edits.
 The focused provider/window/readout suite passed 259 tests; typecheck passed;
 the full parallel suite passed with 4,855 tests and 15 skips.
+
+## Fourth review: catalog revisions on brokered reconnects
+
+[The review finding](https://github.com/tjakobsson/uatu/pull/492#discussion_r4191941720)
+identified that the Hub synthesized bare inventory ticks for joining or
+reconnecting pages, dropping the catalog revisions the child had sent. The
+broker now retains one latest inventory payload and uses it for these ticks,
+including a lingering upstream. Reopening the child clears the retained
+payload, and the legacy bare tick remains the fallback before fresh data.
+
+Three regression cases failed before the fix. Coverage includes behind-head,
+no-cursor, and foreign-epoch subscribers; shared and lingering upstreams;
+legacy payloads; and clearing old revisions when the child reconnects.
+The broker, endpoint, and live-stream integration suites passed 94 tests.
+Typecheck, API validation, and the six-tab Hub live-stream browser/performance
+test passed. The full parallel suite passed with 4,857 tests and 15 skips.

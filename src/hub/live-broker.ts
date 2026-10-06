@@ -11,7 +11,8 @@
 //                 behind the head gets it as `data`, one at the head gets
 //                 nothing. Cursors are hub-assigned (`<epoch>.<seq>`).
 //   inventory     child /api/chat/conversations/events — an invalidation
-//                 tick. A joiner behind the head gets one tick. Hub cursors.
+//                 tick carrying current catalog revisions. A joiner behind
+//                 the head gets the latest tick payload. Hub cursors.
 //   conversation  child /api/chat/conversations/<id>/events. Cursors are the
 //                 child's own SSE ids (replay.ts). A bounded byte buffer
 //                 replays a cursor inside it; one behind the buffer is
@@ -292,7 +293,7 @@ class Upstream {
   originCursor: string | undefined;
   buffer: BufferedEvent[] = [];
   bufferBytes = 0;
-  // Document / activity: the latest snapshot, retained regardless of bytes.
+  // Document / activity snapshots and the latest inventory tick payload.
   latest: { cursor: string; data: unknown } | null = null;
   lingerTimer: ReturnType<typeof setTimeout> | null = null;
   retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -799,7 +800,7 @@ export class LiveBroker implements PresenceSource {
         const joinerOwedOpeningTick = subscriber.cursor === undefined && upstream.seq > 0;
         const behindHead = subscriber.cursor !== undefined && subscriber.cursor !== upstream.head;
         if (joinerOwedOpeningTick || behindHead) {
-          this.emitData(subscriber, { type: "conversation.inventory" }, upstream.head);
+          this.emitData(subscriber, upstream.latest?.data ?? { type: "conversation.inventory" }, upstream.head);
         }
         this.emitSignal(subscriber, { kind: "ready" }, upstream);
         return;
@@ -1159,7 +1160,11 @@ export class LiveBroker implements PresenceSource {
       case "inventory": {
         if (frame.event !== "inventory") return false;
         const cursor = this.nextHubCursor(upstream);
-        this.fanOut(upstream, parseJson(frame.data), cursor);
+        const data = parseJson(frame.data);
+        // Coalesce missed ticks without discarding their current catalog
+        // revisions. open() clears this payload when the child is reopened.
+        upstream.latest = { cursor, data };
+        this.fanOut(upstream, data, cursor);
         return false;
       }
       case "conversation": {
