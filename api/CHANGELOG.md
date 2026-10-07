@@ -2,9 +2,9 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
-## Hub 10 / Workspace 24 - Unreleased
+## Hub 11 / Workspace 24 - Unreleased
 
-Compatibility: breaking (workspace)
+Compatibility: breaking (hub, workspace)
 
 ### Changes
 
@@ -15,7 +15,7 @@ Compatibility: breaking (workspace)
 
 ### Migration
 
-Update document-topic consumers to apply a patch only when its epoch and predecessor match their current state. Resubscribe for a snapshot on a gap. Use file revisions to invalidate preview caches, and treat indexing as an incomplete inventory. Hub envelopes and other topics retain revision 10 semantics.
+Hub live-stream consumers must accept the document topic's snapshot-or-patch protocol under Hub revision 11. Workspace payload consumers must update to workspace revision 24 and apply a patch only when its epoch and predecessor match their current state. Resubscribe for a snapshot on a gap. Use file revisions to invalidate preview caches, and treat indexing as an incomplete inventory. The Hub envelope shape and other topics are unchanged.
 
 ## Hub 10 / Workspace 23 - Unreleased
 
