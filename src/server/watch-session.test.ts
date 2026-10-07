@@ -660,3 +660,51 @@ test("repository failure retains the complete snapshot and drains later events t
     await session.stop();
   }
 });
+
+test("a previewable image change is nominated for follow, another binary change is not", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-image-follow-"));
+  tempDirectories.push(dir);
+  const image = path.join(dir, "hero.svg");
+  const archive = path.join(dir, "bundle.zip");
+  await writeFile(path.join(dir, "README.md"), "# Readme\n");
+  await writeFile(image, `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>`);
+  await writeFile(archive, "PK\u0003\u0004\u0000zip");
+  // Each emitted change bumps every mtime, so each one broadcasts; a
+  // reconciliation tick in between rescans the same version and stays silent.
+  let version = 0;
+  const session = createWatchSession([{ kind: "dir", absolutePath: dir }], false, {
+    scan: async (...args) => {
+      const roots = await scanRoots(...args);
+      for (const doc of roots[0]!.docs) doc.mtimeMs = version;
+      return roots;
+    },
+    collectRepositories: async () => [],
+    // Polling takes its baseline at start, so the fixture writes above never
+    // arrive as events of their own and every nomination is the test's.
+    usePolling: true,
+  });
+  try {
+    await session.start();
+    const reader = session.eventsResponse().body!.getReader();
+    await readSsePayload(reader);
+
+    // Each step reads up to the frame carrying its own version.
+    const frameAt = async (wanted: number) => {
+      for (;;) {
+        const payload = await readSsePayload(reader);
+        if (payload.roots[0]!.docs[0]!.mtimeMs === wanted) return payload;
+      }
+    };
+
+    version += 1;
+    session._internalWatcher()!.emit("all", "change", image);
+    expect((await frameAt(1)).changedId).toBe(image);
+
+    version += 1;
+    session._internalWatcher()!.emit("all", "change", archive);
+    expect((await frameAt(2)).changedId).toBeNull();
+    await reader.cancel();
+  } finally {
+    await session.stop();
+  }
+});

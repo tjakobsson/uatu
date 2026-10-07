@@ -9,7 +9,13 @@ import { checkBuildFreshness } from "./freshness";
 import { applyProjectIdentity } from "./identity";
 import { findDocumentById, syncStateGeneration } from "./storage";
 import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
-import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
+import {
+  documentDiffCache,
+  forgetDocumentCache,
+  loadDocument,
+  previewImageDocumentIds,
+  refreshPreviewImages,
+} from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { markSearchResultsStale, noteSearchCorpusChange, syncSearchScope } from "../sidebar/search-pane";
@@ -91,6 +97,10 @@ function applyServerSnapshot(payload: StatePayload): void {
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.
   applyProjectIdentity(payload.roots);
+  // An image changed on disk gets a new URL wherever the preview shows it —
+  // embedded in the open document or opened as an image itself — even when
+  // the document around it did not change and is not reloaded.
+  refreshPreviewImages(payload.roots);
 }
 
 // Boot's initial /api/state payload. Applied like any snapshot, and recorded
@@ -156,6 +166,13 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
     appState.roots,
     payload.roots,
   );
+  // Images the preview shows inside the open document, read from the DOM as
+  // it is before this update touches it. Follow stays on that document when
+  // one of them is the changed file: the image refreshes in place instead
+  // (Rule C).
+  const shownImageIds = appState.followEnabled && payload.changedId
+    ? previewImageDocumentIds(payload.roots)
+    : new Set<string>();
 
   applyServerSnapshot(payload);
   // Transport is only proven once this generation's authoritative state has
@@ -198,6 +215,7 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
     payload.changedId,
     appState.followEnabled,
     appState.selectionCleared,
+    shownImageIds,
   ));
 
   // Reveal the newly-selected file only when selection actually changed —

@@ -10,7 +10,7 @@ import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
-import type { FileFacts, ViewMode } from "../shared/types";
+import type { FileFacts, RootGroup, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
 import { previewObserverRoot, previewScrollRoot } from "../shell/preview-scroll-root";
 import { renderBinaryUnavailable } from "./binary";
@@ -31,7 +31,9 @@ import {
   mountLayoutToolbar,
   syncLayoutChooser,
 } from "./layout";
-import { isViewableImageName, renderImagePreview } from "./image";
+import { renderImagePreview } from "./image";
+import { embeddedImageDocumentIds, refreshImageVersions } from "./image-version";
+import { isViewableImageName } from "../shared/viewable-image";
 import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
 import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
@@ -111,6 +113,18 @@ export function rememberDocumentPayload(payload: RenderedDocument): void {
 
 export function forgetDocumentCache(documentId: string): void {
   documentViewCache.delete(documentId);
+}
+
+// Called on every state update: points each image in the preview at the
+// current version of its file (see image-version.ts).
+export function refreshPreviewImages(roots: RootGroup[]): void {
+  refreshImageVersions(previewElement, roots);
+}
+
+// Ids of the watched image files the preview shows inline right now — both
+// panes in split layout (the source pane holds no images).
+export function previewImageDocumentIds(roots: RootGroup[]): Set<string> {
+  return embeddedImageDocumentIds(previewElement, roots);
 }
 
 // Mount a fetched document payload into the preview body. Centralizes the
@@ -210,6 +224,7 @@ export async function renderSinglePayload(
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
+  refreshImageVersions(previewElement, appState.roots);
   // For markdown / asciidoc, mount the inline layout chooser above the
   // preview body so users can switch between Single / Side by side /
   // Stacked from beside the content — same pattern as the diff view's
@@ -333,6 +348,7 @@ export async function renderSplitPayloads(
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
+  refreshImageVersions(renderedPane, appState.roots);
 
   attachMetadataCardToggleListener(renderedPane);
   // Lazy install (resolves on setup, diagrams stream in) — see the

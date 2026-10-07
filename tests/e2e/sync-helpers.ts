@@ -106,3 +106,12 @@ export async function waitForAppliedDocumentFrame(
     return hit ? "applied" : `waiting (applied generation ${applied}, ${frames.length} frames seen)`;
   }, match), { message: `document frame ${JSON.stringify(match)} applied` }).toBe("applied");
 }
+
+/**
+ * The decoded width of the image `selector` matches, or -1 while it is still
+ * loading. Poll it to wait for a given version of an image to be on screen:
+ * give each version a different intrinsic width.
+ */
+export function naturalWidth(page: Page, selector: string): Promise<number> {
+  return page.locator(selector).evaluate((el: HTMLImageElement) => (el.complete ? el.naturalWidth : -1));
+}

@@ -13,6 +13,7 @@ import {
   defaultDocumentId,
   findDocument,
   hasDocument,
+  isFollowableFile,
   type BuildSummary,
   type CompareTarget,
   type RepositorySnapshot,
@@ -367,8 +368,11 @@ export function createWatchSession(
       const nextFingerprint = createContextFingerprint(nextRoots, nextRepositories);
       const nextUnscopedFingerprint = hashCorpus(fingerprintRoots(nextRoots));
       const changedDoc = changedId ? findDocument(nextRoots, changedId) : undefined;
+      // Only a file Follow can show is nominated: documents and previewable
+      // images. Other binaries still broadcast (their mtime is part of the
+      // fingerprint) but never move a following client's selection.
       const changedDocumentId =
-        changedDoc && changedDoc.kind !== "binary" ? changedId : null;
+        changedDoc && isFollowableFile(changedDoc) ? changedId : null;
       // The unscoped fingerprint participates on its own: in a scoped
       // session, an out-of-scope change alters neither the visible
       // fingerprint nor `changedId`, yet a client holding widened search

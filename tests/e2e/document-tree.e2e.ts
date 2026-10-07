@@ -182,7 +182,7 @@ test("follow-mode auto-switch expands the new file's folder, selects it, and des
 test("clicking an image file renders an inline image preview", async ({ page, request }) => {
   // Use an SVG — its bytes are text, so they survive the e2e server's
   // JSON+utf8 file-write round-trip without any base64 dance. The
-  // VIEWABLE_IMAGE_EXTENSIONS set in app.ts includes .svg.
+  // VIEWABLE_IMAGE_EXTENSIONS set in src/shared/viewable-image.ts includes .svg.
   const svg = `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="#1ca8a7"/></svg>`;
   await bootSession(page, request, { extras: { "hero.svg": svg } });
 

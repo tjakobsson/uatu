@@ -76,6 +76,32 @@ describe("chooseSelectionForFileEvent — Rule C / Rule D", () => {
     expect(next).toBe("/tmp/docs/README.md");
   });
 
+  test("Rule C: follow on + changed image embedded in the shown document → selection stays", () => {
+    const roots = fixture();
+    roots[0]!.docs.push({
+      id: "/tmp/docs/hero.svg",
+      name: "hero.svg",
+      relativePath: "hero.svg",
+      mtimeMs: 50,
+      rootId: "/tmp/docs",
+      kind: "binary",
+    });
+    const shown = new Set(["/tmp/docs/hero.svg"]);
+    expect(chooseSelectionForFileEvent(roots, "/tmp/docs/README.md", "/tmp/docs/hero.svg", true, false, shown))
+      .toBe("/tmp/docs/README.md");
+    expect(chooseSelectionForFileEvent(roots, "/tmp/docs/README.md", "/tmp/docs/hero.svg", true))
+      .toBe("/tmp/docs/hero.svg");
+    // A document change is followed whatever the preview shows.
+    expect(chooseSelectionForFileEvent(
+      roots,
+      "/tmp/docs/README.md",
+      "/tmp/docs/guides/setup.md",
+      true,
+      false,
+      new Set(["/tmp/docs/guides/setup.md"]),
+    )).toBe("/tmp/docs/guides/setup.md");
+  });
+
   test("empty roots preserve a manual destination but have no default", () => {
     expect(chooseSelectionForFileEvent([], null, null, true)).toBeNull();
     expect(chooseSelectionForFileEvent([], "/some/id", "/other/id", false)).toBe("/some/id");
@@ -98,6 +124,22 @@ describe("selectionForChipTurnOn — Rule B catch-up", () => {
   test("returns the newest doc when current selection is null", () => {
     const roots = fixture();
     expect(selectionForChipTurnOn(roots, null)).toBe("/tmp/docs/guides/setup.md");
+  });
+
+  test("targets the newest document, not a newer image", () => {
+    // Rule B stays documents-only: on a fresh checkout every file shares the
+    // checkout time, so "newest image" would be an arbitrary asset. Images
+    // are followed only when they actually change (Rule C).
+    const roots = fixture();
+    roots[0]!.docs.push({
+      id: "/tmp/docs/hero.svg",
+      name: "hero.svg",
+      relativePath: "hero.svg",
+      mtimeMs: 50,
+      rootId: "/tmp/docs",
+      kind: "binary",
+    });
+    expect(selectionForChipTurnOn(roots, "/tmp/docs/README.md")).toBe("/tmp/docs/guides/setup.md");
   });
 
   test("returns null when there are no documents to follow", () => {

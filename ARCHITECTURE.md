@@ -539,9 +539,11 @@ sequenceDiagram
 The four authoritative rules of the `follow-mode` capability — defined in `openspec/specs/follow-mode/spec.md` — are the only paths that change `appState.followEnabled` or `appState.selectedId`:
 
 - **Rule A** (user clicks a tree row): selection moves to that file; follow turns off. Guarded by `TreeView.duringProgrammaticUpdate` so library-fired callbacks during mount or `resetPaths` are not mistaken for user input.
-- **Rule B** (user clicks the Follow toggle): `followEnabled` flips. Turning on jumps to the newest-mtime file in the current session.
-- **Rule C** (file event + follow on): selection moves to the changed file.
+- **Rule B** (user clicks the Follow toggle): `followEnabled` flips. Turning on jumps to the newest-mtime document in the current session (images are not candidates).
+- **Rule C** (file event + follow on): selection moves to the changed file when the preview can show it — a document, or an image it renders inline (`isFollowableFile` in `src/shared/types.ts`, used by both the server's `changedId` nomination and the client). Other binaries are ignored. The exception is an image embedded in the document on screen: `events.ts` collects the watched files the preview's images show (`previewImageDocumentIds`) before applying the update, and a change to one of them keeps the selection — the embedded image refreshes in place.
 - **Rule D** (file event + follow off): selection unchanged; if the changed file equals the current selection, the preview reloads in place; otherwise just the tree refreshes.
+
+Images in the preview — an opened image or one embedded in a rendered document — carry their file's mtime as a `?v=` query (`src/preview/image-version.ts`), re-stamped on mount and on every state update. A browser reuses an already-decoded image for an unchanged URL whatever the cache headers say, so this is what makes a changed image show its new content; the static-file fallback matches on the path and ignores the query.
 
 ## Chat surface
 
@@ -737,7 +739,7 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 | Default `Follow` at boot | on at `/`; forced off when arriving via a direct document URL (e.g. `/guides/setup.md`) |
 | `--no-follow` child flag | flips the default at `/` to off (source runs only; the hub never passes it) |
 | User clicks a tree row | selection moves; follow turns off (Rule A) |
-| User clicks the Follow switch | flips state; turning on jumps to the newest-mtime file (Rule B) |
+| User clicks the Follow switch | flips state; turning on jumps to the newest-mtime document; images are not candidates (Rule B) |
 | File changes on disk + follow on | selection moves to the changed file (Rule C) |
 | File changes on disk + follow off | current file reloads in place if it's what changed; otherwise tree refreshes silently (Rule D) |
 | Single-file root (a source run such as `bun run src/cli.ts serve some-file.md`; hub workspaces are folders) | Follow switch disabled — nothing else to follow |
