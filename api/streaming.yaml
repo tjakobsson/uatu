@@ -16,9 +16,9 @@ channels:
       document:
         domain: workspace
         key: LiveDocumentKey
-        dataSchema: WorkspaceState
+        dataSchema: DocumentUpdate
         cursor: hub
-        description: Each data event is a complete workspace state snapshot for the subscribed watch context.
+        description: A joining or behind subscriber receives a workspace snapshot; caught-up subscribers receive ordered file/repository patches. Apply patches only to their matching epoch and previousRevision; otherwise resubscribe for a snapshot. Discovery does not imply a live edit.
       inventory:
         domain: workspace
         dataSchema: ConversationInventoryEvent
@@ -147,6 +147,9 @@ channels:
       reconnection: A result event closes the stream. Reconnecting within the job retention window replays retained events — including the terminal result — and then closes again.
       errors: Unknown or non-owned jobs return HTTP 404 before stream start; no in-band error event exists.
 schemas:
+  DocumentUpdate:
+    description: Snapshot or incremental document patch, scoped to the subscription context.
+    $ref: ./openapi.yaml#/components/schemas/DocumentUpdate
   WorkspaceState:
     description: Same schema as openapi.yaml#/components/schemas/WorkspaceState.
     $ref: ./openapi.yaml#/components/schemas/WorkspaceState

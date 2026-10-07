@@ -1,11 +1,18 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { CompareBase, CompareTarget } from "../shared/types";
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 2500;
 const GIT_MAX_BUFFER = 256 * 1024;
+const cancellation = new AsyncLocalStorage<AbortSignal>();
+
+export function withGitCancellation<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  return cancellation.run(signal, operation);
+}
+export function throwIfGitCancelled(): void { cancellation.getStore()?.throwIfAborted(); }
 
 export type GitResult =
   | { ok: true; stdout: string; stderr: string }
@@ -28,19 +35,28 @@ export function recordGitMetric(name: string, delta = 1): void {
 export async function safeGit(
   cwd: string,
   args: string[],
-  options: { maxBuffer?: number; timeoutMs?: number } = {},
+  options: { maxBuffer?: number; timeoutMs?: number; input?: string } = {},
 ): Promise<GitResult> {
+  const signal = cancellation.getStore();
+  signal?.throwIfAborted();
   gitMetricsSink?.inc("git.execs_total");
   try {
-    const { stdout, stderr } = await execFileAsync("git", args, {
+    const operation = execFileAsync("git", args, {
       cwd,
       encoding: "utf8",
       maxBuffer: options.maxBuffer ?? GIT_MAX_BUFFER,
       timeout: options.timeoutMs ?? GIT_TIMEOUT_MS,
       windowsHide: true,
+      signal,
     });
+    if (options.input !== undefined) {
+      operation.child.stdin?.on("error", () => {});
+      operation.child.stdin?.end(options.input);
+    }
+    const { stdout, stderr } = await operation;
     return { ok: true, stdout, stderr };
   } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     const err = error as Error & { stdout?: string; stderr?: string; killed?: boolean; signal?: string };
     if (err.killed === true || err.signal === "SIGTERM") {
       gitMetricsSink?.inc("git.timeouts_total");

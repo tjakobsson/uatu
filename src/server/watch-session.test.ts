@@ -1,20 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import chokidar from "chokidar";
 
 import { MetricsRegistry } from "../debug/metrics";
 import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
-import type { IgnoreMatcher } from "../ignore/engine";
 import { WORKSPACE_API_REVISION } from "../shared/version";
-import { resolveWatchRoots, scanRoots } from "./roots";
+import { DocumentStateIndex, type DocumentUpdate, type DocumentSnapshot } from "../shared/document-updates";
+import { resolveWatchRoots } from "./roots";
 import {
-  attachWatcherCrashGuard,
-  buildWatcherIgnorePredicate,
-  canSetFileScope,
   createRefreshScheduler,
-  createStatePayload,
   createWatchSession,
   DOCUMENT_KEEPALIVE_MS,
   REFRESH_DEBOUNCE_MS,
@@ -27,9 +23,9 @@ afterEach(async () => {
   await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 });
 
-describe("createStatePayload", () => {
+describe("initial document state", () => {
   test("returns a well-formed payload with no startupMode field", () => {
-    const payload = createStatePayload([], true, null, { kind: "folder" }, []);
+    const payload = createWatchSession([], true).getStatePayload();
     expect("startupMode" in payload).toBe(false);
     expect(payload.initialFollow).toBe(true);
     expect(payload.scope).toEqual({ kind: "folder" });
@@ -39,7 +35,7 @@ describe("createStatePayload", () => {
   test("carries no config payload fields", () => {
     // `.uatu.json` no longer carries presentation config; the payload must
     // not resurrect the retired fields.
-    const payload = createStatePayload([], true, null, { kind: "folder" }, [], true);
+    const payload = createWatchSession([], true, { terminalEnabled: true }).getStatePayload();
     expect("monoConfig" in payload).toBe(false);
     expect("terminalConfig" in payload).toBe(false);
   });
@@ -68,15 +64,20 @@ async function readSseFrame(reader: ReadableStreamDefaultReader<Uint8Array>): Pr
   return new TextDecoder().decode(result.value);
 }
 
-async function readSsePayload(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReturnType<typeof createStatePayload>> {
-  const result = await Promise.race([
-    reader.read(),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SSE payload timeout")), 3000)),
-  ]);
-  const text = new TextDecoder().decode(result.value);
-  const data = text.split("data: ").at(-1)?.trim();
-  if (!data) throw new Error("SSE payload missing data");
-  return JSON.parse(data);
+const streamStates = new WeakMap<ReadableStreamDefaultReader<Uint8Array>, DocumentStateIndex>();
+async function readSsePayload(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<DocumentSnapshot> {
+  let index = streamStates.get(reader);
+  if (!index) streamStates.set(reader, index = new DocumentStateIndex());
+  for (;;) {
+    const text = await readSseFrame(reader);
+    if (text.startsWith(":")) continue;
+    const data = JSON.parse(text.split("data: ").at(-1)!.trim()) as DocumentUpdate;
+    // A context normalization is delivered as a fresh baseline.
+    if (data.kind === "snapshot") streamStates.set(reader, index = new DocumentStateIndex());
+    expect(index.apply(data)).toBe("applied");
+    if (data.kind === "patch" && !data.upserts.length && !data.removals.length) continue;
+    return index.snapshot()!;
+  }
 }
 
 describe("watchSession scope", () => {
@@ -272,7 +273,7 @@ describe("watchSession scope", () => {
     expect(DOCUMENT_KEEPALIVE_MS).toBe(15_000);
   });
 
-  test("canSetFileScope rejects unknown, ignored, secret-like, and binary document ids", async () => {
+  test("file scopes reject unknown, ignored, secret-like, and binary document ids", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-invalid-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
@@ -288,13 +289,13 @@ describe("watchSession scope", () => {
     await writeFile(secret, "TOKEN=secret\n");
     await writeFile(binary, "not really png");
 
-    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-
-    expect(canSetFileScope(roots, readme)).toBe(true);
-    expect(canSetFileScope(roots, path.join(tempDirectory, "missing.md"))).toBe(false);
-    expect(canSetFileScope(roots, ignored)).toBe(false);
-    expect(canSetFileScope(roots, secret)).toBe(false);
-    expect(canSetFileScope(roots, binary)).toBe(false);
+    const session = createWatchSession([{ kind: "dir", absolutePath: tempDirectory }], false, { collectRepositories: async () => [] });
+    try {
+      await session.start();
+      const pinned = (id: string) => session.getStatePayload(null, { scope: { kind: "file", documentId: id }, compareTarget: "base" }).scope.kind === "file";
+      expect(pinned(readme)).toBe(true);
+      for (const id of [path.join(tempDirectory, "missing.md"), ignored, secret, binary]) expect(pinned(id)).toBe(false);
+    } finally { await session.stop(); }
   });
 
   test("an SSE pin stays widened after its file is unlinked and recreated", async () => {
@@ -489,63 +490,6 @@ describe("createRefreshScheduler", () => {
   });
 });
 
-describe("buildWatcherIgnorePredicate", () => {
-  test("ignores any path with a `.git` segment between it and a watched root", () => {
-    const root = "/tmp/uatu-watch-root";
-    const predicate = buildWatcherIgnorePredicate([root], new Map<string, IgnoreMatcher>());
-
-    expect(predicate(path.join(root, ".git", "index.lock"))).toBe(true);
-    expect(predicate(path.join(root, ".git", "refs", "heads", "main"))).toBe(true);
-    expect(predicate(path.join(root, "nested", ".git", "HEAD"))).toBe(true);
-  });
-
-  test("does not ignore regular files outside `.git/`", () => {
-    const root = "/tmp/uatu-watch-root";
-    const predicate = buildWatcherIgnorePredicate([root], new Map<string, IgnoreMatcher>());
-
-    expect(predicate(path.join(root, "README.md"))).toBe(false);
-    expect(predicate(path.join(root, "src", "index.ts"))).toBe(false);
-    // Substring-only matchers would false-positive on `something.git/`, so
-    // verify the segment-equality check distinguishes those.
-    expect(predicate(path.join(root, "something.git", "file.md"))).toBe(false);
-  });
-
-  test("returns false for paths outside any watched root", () => {
-    const root = "/tmp/uatu-watch-root";
-    const predicate = buildWatcherIgnorePredicate([root], new Map<string, IgnoreMatcher>());
-
-    expect(predicate("/elsewhere/.git/index.lock")).toBe(false);
-    expect(predicate("/elsewhere/README.md")).toBe(false);
-  });
-
-  test("defers to the per-root IgnoreMatcher for non-`.git` paths", () => {
-    const root = "/tmp/uatu-watch-root";
-    const matcherCache = new Map<string, IgnoreMatcher>();
-    matcherCache.set(root, {
-      shouldIgnore: (rel: string) => rel === "secret.txt",
-      toChokidarIgnored: () => (testPath: string) =>
-        path.relative(root, testPath) === "secret.txt",
-    });
-    const predicate = buildWatcherIgnorePredicate([root], matcherCache);
-
-    expect(predicate(path.join(root, "secret.txt"))).toBe(true);
-    expect(predicate(path.join(root, "README.md"))).toBe(false);
-  });
-});
-
-describe("attachWatcherCrashGuard", () => {
-  test("attaches an `error` listener so a synthetic EINVAL does not throw", () => {
-    const emitter = new EventEmitter();
-    attachWatcherCrashGuard(emitter);
-
-    const synthetic = Object.assign(new Error("synthetic"), { code: "EINVAL" });
-    // Without an `error` listener, EventEmitter throws synchronously on emit.
-    // The listener installed by attachWatcherCrashGuard must absorb this.
-    expect(() => emitter.emit("error", synthetic)).not.toThrow();
-    expect(emitter.listenerCount("error")).toBeGreaterThan(0);
-  });
-});
-
 describe("createWatchSession watcher resilience", () => {
   test("a synthetic EINVAL on the underlying watcher does not crash the host", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-watcher-resilience-"));
@@ -574,58 +518,79 @@ describe("createWatchSession watcher resilience", () => {
   });
 });
 
-test("a slow scan cannot overlap a later refresh or publish after stop", async () => {
+test("a slow classification cannot publish after stop", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-ordered-"));
   tempDirectories.push(dir);
-  const file = path.join(dir, "a.md");
+  const file = path.join(dir, "a.unknown");
   await writeFile(file, "# A\n");
   let calls = 0;
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const session = createWatchSession([{ kind: "dir", absolutePath: dir }], false, {
-    scan: async (...args) => {
-      const result = await scanRoots(...args);
-      result[0]!.docs[0]!.mtimeMs = ++calls;
-      if (calls === 2) await gate;
-      return result;
+    classify: async () => {
+      if (++calls >= 2) await gate;
+      return "text";
     },
   });
   try {
     await session.start();
     const before = session.getStatePayload();
+    expect(calls).toBe(1);
     session._internalWatcher()!.emit("all", "change", file);
-    await waitUntil(() => calls === 2);
-    session._internalWatcher()!.emit("all", "change", file);
-    // Advance past the debounce while scan 2 is explicitly held open.
-    await new Promise(resolve => setTimeout(resolve, REFRESH_DEBOUNCE_MS * 2));
-    expect(calls).toBe(2);
+    await waitUntil(() => calls >= 2);
     await session.stop();
     release();
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await gate;
+    await Promise.resolve();
     expect(session.getRoots()).toEqual(before.roots);
-    expect(calls).toBe(2);
+    expect(calls).toBeGreaterThanOrEqual(2);
   } finally {
     release();
     await session.stop();
   }
 });
 
-test("repository failure retains the complete snapshot and drains later events to scoped subscribers", async () => {
+test("failed recovery retains the allowed inventory and concurrent retries share one replacement", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-recovery-"));
+  tempDirectories.push(dir);
+  const file = path.join(dir, "README.md");
+  await writeFile(file, "# Retained\n");
+  let refuse = false;
+  let observations = 0;
+  const session = createWatchSession([{ kind: "dir", absolutePath: dir }], false, {
+    usePolling: true, collectRepositories: async () => [],
+    watch: (...args: Parameters<typeof chokidar.watch>) => {
+      observations++;
+      if (refuse) throw new Error("controlled observation failure");
+      return chokidar.watch(...args);
+    },
+  });
+  try {
+    await session.start();
+    const before = session.getRoots();
+    refuse = true;
+    await expect(session.recover()).rejects.toThrow("controlled observation failure");
+    expect(session.getRoots()).toEqual(before);
+    expect(session.getStatePayload().discovery.status).toBe("error");
+    refuse = false;
+    await Promise.all([session.recover(), session.recover()]);
+    expect(observations).toBe(3);
+    expect(session.getStatePayload().discovery.status).toBe("ready");
+    expect(session.findDocument(file)?.name).toBe("README.md");
+  } finally { await session.stop(); }
+});
+
+test("repository failure preserves file progress for scoped subscribers", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-complete-"));
   tempDirectories.push(dir);
   const file = path.join(dir, "a.md");
   await writeFile(file, "# A\n");
-  let scanCount = 0;
+  let fail = false;
   const repoGate = Promise.withResolvers<void>();
   let collecting = false;
   const session = createWatchSession([{ kind: "dir", absolutePath: dir }], false, {
-    scan: async (...args) => {
-      const roots = await scanRoots(...args);
-      roots[0]!.docs[0]!.mtimeMs = ++scanCount;
-      return roots;
-    },
     collectRepositories: async (_entries, _roots, target) => {
-      if (scanCount === 2) {
+      if (fail) {
         collecting = true;
         if (target === "base") throw new Error("controlled repository failure");
         await repoGate.promise;
@@ -635,25 +600,25 @@ test("repository failure retains the complete snapshot and drains later events t
   });
   try {
     await session.start();
+    await waitUntil(() => session.getStatePayload().repositoryState.status === "ready");
     const before = session.getStatePayload();
     const context = { scope: { kind: "file" as const, documentId: file }, compareTarget: "last-commit" as const };
     const pinned = session.eventsResponse(context).body!.getReader();
     const folder = session.eventsResponse().body!.getReader();
     await Promise.all([readSsePayload(pinned), readSsePayload(folder)]);
+    fail = true;
     session._internalWatcher()!.emit("all", "change", file);
     await waitUntil(() => collecting);
     session._internalWatcher()!.emit("all", "change", file);
-    await new Promise(resolve => setTimeout(resolve, REFRESH_DEBOUNCE_MS * 2));
-    expect(scanCount).toBe(2);
-    expect(session.getStatePayload().roots).toEqual(before.roots);
-    repoGate.resolve();
     const [scoped, unscoped] = await Promise.all([readSsePayload(pinned), readSsePayload(folder)]);
     expect(scoped.scope).toEqual(context.scope);
     expect(scoped.compareTarget).toBe("last-commit");
     expect(unscoped.scope).toEqual({ kind: "folder" });
-    expect(scoped.roots[0]!.docs[0]!.mtimeMs).toBe(3);
-    expect(unscoped.roots).toEqual(session.getStatePayload().roots);
+    expect(scoped.roots[0]!.docs[0]!.revision).toBeGreaterThan(before.roots[0]!.docs[0]!.revision);
+    expect(unscoped.roots).toEqual(scoped.roots);
     expect(unscoped.changedId).toBe(file);
+    fail = false;
+    repoGate.resolve();
     await Promise.all([pinned.cancel(), folder.cancel()]);
   } finally {
     repoGate.resolve();

@@ -17,7 +17,7 @@ import type {
 } from "../shared/types";
 import { DEFAULT_COMPARE_TARGET } from "../shared/types";
 import type { WatchEntry } from "../server/roots";
-import { applyCompareTarget, resolveCompareBase, safeGit } from "./git-base-ref";
+import { applyCompareTarget, resolveCompareBase, safeGit, throwIfGitCancelled } from "./git-base-ref";
 import { loadIgnoreConfig } from "../ignore/config";
 
 export { safeGit, setGitMetricsSink } from "./git-base-ref";
@@ -53,6 +53,28 @@ export async function collectRepositorySnapshots(
     }),
   );
   return snapshots.sort((left, right) => left.rootPath.localeCompare(right.rootPath));
+}
+
+// Common work is scoped to this collection, so it is both shared across
+// comparison targets and discarded before the next repository generation.
+type SharedCollection = Map<string, Promise<unknown>>;
+function once<T>(shared: SharedCollection, key: string, read: () => Promise<T>): Promise<T> {
+  const prior = shared.get(key);
+  if (prior) return prior as Promise<T>;
+  const result = read(); shared.set(key, result); return result;
+}
+export async function collectRepositorySnapshotsByTarget(entries: WatchEntry[], roots: RootGroup[]): Promise<Record<CompareTarget, RepositorySnapshot[]>> {
+  const groups = await detectRepositoryGroups(entries, roots);
+  const rootsById = new Map(roots.map(root => [root.id, root]));
+  const snapshots = await Promise.all(groups.map(async group => {
+    const groupRoots = group.watchedRootIds.map(id => rootsById.get(id)).filter((root): root is RootGroup => Boolean(root));
+    const shared: SharedCollection = new Map();
+    return await Promise.all([snapshotGroup(group, groupRoots, "base", shared), snapshotGroup(group, groupRoots, "last-commit", shared)]);
+  }));
+  return {
+    base: snapshots.map(pair => pair[0]).sort((a, b) => a.rootPath.localeCompare(b.rootPath)),
+    "last-commit": snapshots.map(pair => pair[1]).sort((a, b) => a.rootPath.localeCompare(b.rootPath)),
+  };
 }
 
 async function detectRepositoryGroups(
@@ -113,27 +135,28 @@ async function snapshotGroup(
   group: RepositoryGroup,
   roots: readonly RootGroup[],
   compareTarget: CompareTarget,
+  shared: SharedCollection = new Map(),
 ): Promise<RepositorySnapshot> {
-  const configWarnings = await collectConfigWarnings(group.rootPath, group.configRoots);
+  const configWarnings = await once(shared, "warnings", () => collectConfigWarnings(group.rootPath, group.configRoots));
   if (group.status !== "git") {
     return unavailableSnapshot(group, "non-git", group.message, unavailableMetadata(group, "non-git", group.message), configWarnings);
   }
 
-  const metadata = await collectMetadata(group);
+  const metadata = await once(shared, "metadata", () => collectMetadata(group));
   if (metadata.status !== "git") {
     return unavailableSnapshot(group, "unavailable", metadata.message, metadata, configWarnings);
   }
 
-  const resolvedBase = await resolveCompareBase(group.rootPath);
+  const resolvedBase = await once(shared, "base", () => resolveCompareBase(group.rootPath));
   // Augment the resolved base with the requested compare target so the
   // snapshot carries the precise anchor and so collectChangedFiles knows
   // whether to include the committed merge-base..HEAD range.
   const base = applyCompareTarget(resolvedBase, compareTarget);
-  const knownTreePaths = await collectKnownTreePaths(group.rootPath, roots);
+  const knownTreePaths = await once(shared, "paths", () => collectKnownTreePaths(group.rootPath, roots));
   const [changedFiles, commitLog, gitIgnoredFiles] = await Promise.all([
-    collectChangedFiles(group.rootPath, base),
-    collectCommitLog(group.rootPath),
-    collectGitIgnoredFiles(group.rootPath, knownTreePaths),
+    once(shared, `changes:${base.compareTarget}`, () => collectChangedFiles(group.rootPath, base, shared)),
+    once(shared, "log", () => collectCommitLog(group.rootPath)),
+    once(shared, "ignored", () => collectGitIgnoredFiles(group.rootPath, knownTreePaths)),
   ]);
 
   return {
@@ -256,7 +279,7 @@ export async function collectConfigWarnings(repoRoot: string, configRoots: strin
   return warnings;
 }
 
-async function collectChangedFiles(repoRoot: string, base: CompareBase): Promise<ChangedFileSummary[]> {
+async function collectChangedFiles(repoRoot: string, base: CompareBase, shared: SharedCollection): Promise<ChangedFileSummary[]> {
   const specs: string[][] = [];
   // When the effective comparison is "vs HEAD" — the `last-commit` target, or
   // any target with no resolvable base (collapsed) — use a single `git diff
@@ -291,7 +314,7 @@ async function collectChangedFiles(repoRoot: string, base: CompareBase): Promise
       }
     }
   }
-  for (const file of await collectUntrackedFiles(repoRoot)) {
+  for (const file of await once(shared, "untracked", () => collectUntrackedFiles(repoRoot))) {
     if (!combined.has(file.path)) {
       combined.set(file.path, file);
     }
@@ -336,25 +359,13 @@ async function collectGitIgnoredFiles(repoRoot: string, knownTreePaths: Set<stri
   if (knownTreePaths.size === 0) {
     return [];
   }
-  // The output of `--ignored --exclude-standard` is unbounded — in this repo
-  // it ships ~1.6 MB (mostly node_modules contents). The default 256 KB
-  // buffer would silently truncate and the exec would error out, leaving
-  // every gitignored file unannotated with no log trail. 16 MB is enough for
-  // any realistic repo; if it ever overflows, the safe-fail path returns
-  // [] and the only consequence is missing annotations (no crash).
-  const result = await safeGit(
-    repoRoot,
-    ["ls-files", "--others", "--ignored", "--exclude-standard"],
-    { maxBuffer: 16 * 1024 * 1024 },
-  );
-  if (!result.ok || !result.stdout.trim()) {
-    return [];
-  }
   const out: string[] = [];
-  for (const line of result.stdout.trim().split("\n")) {
-    if (knownTreePaths.has(line)) {
-      out.push(line);
-    }
+  const paths = [...knownTreePaths];
+  for (let offset = 0; offset < paths.length; offset += 1000) {
+    const result = await safeGit(repoRoot, ["check-ignore", "-z", "--stdin"], {
+      input: paths.slice(offset, offset + 1000).join("\0") + "\0", maxBuffer: 1024 * 1024,
+    });
+    if (result.ok) for (const file of result.stdout.split("\0")) if (knownTreePaths.has(file)) out.push(file);
   }
   return out;
 }
@@ -367,6 +378,7 @@ async function collectUntrackedFiles(repoRoot: string): Promise<ChangedFileSumma
 
   const files: ChangedFileSummary[] = [];
   for (const relativePath of result.stdout.trim().split("\n")) {
+    throwIfGitCancelled();
     const additions = await countFileLines(path.join(repoRoot, relativePath));
     files.push({
       path: relativePath,
@@ -380,16 +392,26 @@ async function collectUntrackedFiles(repoRoot: string): Promise<ChangedFileSumma
   return files;
 }
 
+const lineCountCache = new Map<string, { identity: string; lines: number }>();
 async function countFileLines(filePath: string): Promise<number> {
+  throwIfGitCancelled();
   const stat = await fs.stat(filePath).catch(() => null);
   if (!stat || !stat.isFile() || stat.size > GIT_MAX_BUFFER) {
+    lineCountCache.delete(filePath);
     return 0;
   }
+  const identity = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  const previous = lineCountCache.get(filePath);
+  if (previous?.identity === identity) return previous.lines;
   const source = await fs.readFile(filePath, "utf8").catch(() => "");
+  throwIfGitCancelled();
   if (!source) {
     return 0;
   }
-  return source.replace(/\n$/, "").split("\n").length;
+  const lines = source.replace(/\n$/, "").split("\n").length;
+  lineCountCache.set(filePath, { identity, lines });
+  while (lineCountCache.size > 512) lineCountCache.delete(lineCountCache.keys().next().value!);
+  return lines;
 }
 
 async function collectDiffFiles(repoRoot: string, rangeArgs: string[]): Promise<ChangedFileSummary[]> {

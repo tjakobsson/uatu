@@ -27,6 +27,7 @@ export type CollectFileFactsOptions = {
   // or a diff-first load of a large file would bypass the diff endpoint's
   // blob-size caps.
   source?: string;
+  includeGit?: boolean;
 };
 
 export async function collectFileFacts(
@@ -34,7 +35,7 @@ export async function collectFileFacts(
 ): Promise<FileFacts | undefined> {
   const [stat, git] = await Promise.all([
     fs.stat(options.absolutePath).catch(() => null),
-    collectGitFacts(options.rootPath, options.absolutePath),
+    options.includeGit === false ? undefined : collectGitFacts(options.rootPath, options.absolutePath),
   ]);
 
   if (!stat) {
@@ -43,9 +44,10 @@ export async function collectFileFacts(
 
   return {
     lines: options.source !== undefined ? countLines(options.source) : null,
-    bytes: stat.size,
+    bytes: options.source === undefined ? stat.size : Buffer.byteLength(options.source),
     mtime: stat.mtime.toISOString(),
     ...(git ? { git } : {}),
+    ...(options.includeGit === false ? { gitState: "pending" as const } : {}),
   };
 }
 

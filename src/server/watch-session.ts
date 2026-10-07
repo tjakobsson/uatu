@@ -1,654 +1,375 @@
-// The live-reload engine: owns the chokidar watcher, the debounced rescan +
-// git-snapshot refresh cycle, contextual SSE subscribers, and terminal token.
-
-import { createRefreshQueue } from "./refresh-queue";
-import chokidar from "chokidar";
+// Session coordination. File events own the index; Git runs independently.
+import type chokidar from "chokidar";
+import { lstat, realpath } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import path from "node:path";
-import type { ReadableStreamDefaultController } from "node:stream/web";
-
-import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
+import { loadIgnoreMatcher } from "../ignore/engine";
 import { collectRepositorySnapshots } from "../document/git-data";
-import {
-  DEFAULT_COMPARE_TARGET,
-  defaultDocumentId,
-  findDocument,
-  hasDocument,
-  type BuildSummary,
-  type CompareTarget,
-  type RepositorySnapshot,
-  type RootGroup,
-  type Scope,
-  type StatePayload,
-  type TerminalAvailability,
-} from "../shared/types";
-import {
-  BUNDLED_WEB_REVISION,
-  BUILD,
-  formatBuildIdentifier,
-  WORKSPACE_API_REVISION,
-} from "../shared/version";
-import {
-  DEFAULT_WATCH_CONTEXT,
-  type WatchContext,
-} from "../shared/watch-context";
+import type { BuildSummary, RootGroup } from "../shared/types";
+import { BUILD, BUNDLED_WEB_REVISION, formatBuildIdentifier, WORKSPACE_API_REVISION } from "../shared/version";
+import { DEFAULT_WATCH_CONTEXT, type WatchContext } from "../shared/watch-context";
+import { normalizeDocumentContext, projectDocumentPatch, projectDocumentSnapshot, sameDocumentContext,
+  type DiscoveryState, type DocumentPatch, type DocumentSnapshot, type DocumentRoot } from "../shared/document-updates";
 import { StreamLifecycleMetrics, type StreamOutcome } from "../debug/stream-metrics";
-import { DEFAULT_RESPECT_GITIGNORE, scanRoots, type WatchEntry } from "./roots";
+import { DEFAULT_RESPECT_GITIGNORE, shouldDenyPath, type WatchEntry } from "./roots";
+import { FileIndex, type FileIndexBatch, type FileIndexOptions } from "./file-index";
+import { isPolicyFile, rootRelative } from "./watch-policy";
+import { createRepositoryRefresh, type RepositoryResults } from "./repository-refresh";
+import { observeFiles, type FileObserver } from "./file-observer";
 
-export const BUILD_SUMMARY: BuildSummary = {
-  version: BUILD.version,
-  branch: BUILD.branch,
-  commitSha: BUILD.commitSha,
-  commitShort: BUILD.commitShort,
-  release: BUILD.release,
-  identifier: formatBuildIdentifier(BUILD),
-  bundledWebRevision: BUNDLED_WEB_REVISION,
-};
-
-const encoder = new TextEncoder();
-
-type EventController = ReadableStreamDefaultController<Uint8Array>;
-
-// One connected browser. `keepalive` is the timer producing this stream's
-// comment frames; it is owned by the subscriber record so that every exit
-// path (client cancel, enqueue failure, session stop) releases it through
-// the same `dropSubscriber` call rather than leaking an interval per
-// disconnect.
-type Subscriber = {
-  controller: EventController;
-  context: WatchContext;
-  keepalive: ReturnType<typeof setInterval> | null;
-};
-
-export function canSetFileScope(roots: RootGroup[], documentId: string): boolean {
-  const document = findDocument(roots, documentId);
-  return Boolean(document && document.kind !== "binary");
-}
-
-export function createStatePayload(
-  roots: RootGroup[],
-  initialFollow: boolean,
-  changedId: string | null = null,
-  scope: Scope = { kind: "folder" },
-  repositories: RepositorySnapshot[] = [],
-  terminalEnabled?: boolean,
-  compareTarget: CompareTarget = DEFAULT_COMPARE_TARGET,
-  unscopedFingerprint?: string,
-): StatePayload {
-  return {
-    workspaceApiRevision: WORKSPACE_API_REVISION,
-    roots,
-    repositories,
-    compareTarget,
-    ...(unscopedFingerprint === undefined ? {} : { unscopedFingerprint }),
-    initialFollow,
-    defaultDocumentId: defaultDocumentId(roots),
-    changedId: changedId && hasDocument(roots, changedId) ? changedId : null,
-    generatedAt: Date.now(),
-    build: BUILD_SUMMARY,
-    scope,
-    ...(terminalEnabled === undefined ? {} : { terminal: (terminalEnabled ? "enabled" : "disabled") as TerminalAvailability }),
-  };
-}
-
-// Cadence for the document channel's transport keepalive. An SSE comment
-// frame produces bytes on an otherwise byte-silent stream so intermediaries
-// (the Hub proxy, tailscale serve, any fronting reverse proxy) do not treat
-// the connection as abandoned. It matches the Chat streams' cadence so the
-// two live channels age out of a proxy's idle window together. Comments are
-// invisible to `EventSource` listeners, so a keepalive can never reach the
-// application as state.
+export { createRefreshScheduler, REFRESH_DEBOUNCE_MS, REFRESH_MAX_WAIT_MS } from "./refresh-scheduler";
 export const DOCUMENT_KEEPALIVE_MS = 15_000;
-
+export const BUILD_SUMMARY: BuildSummary = {
+  version: BUILD.version, branch: BUILD.branch, commitSha: BUILD.commitSha, commitShort: BUILD.commitShort,
+  release: BUILD.release, identifier: formatBuildIdentifier(BUILD), bundledWebRevision: BUNDLED_WEB_REVISION,
+};
+const encoder = new TextEncoder();
 const KEEPALIVE_FRAME = ": keepalive\n\n";
 
 export type WatchSessionOptions = {
-  // Dependency seams for controlled refresh completion in watcher tests.
-  scan?: typeof scanRoots;
   collectRepositories?: typeof collectRepositorySnapshots;
   usePolling?: boolean;
   respectGitignore?: boolean;
   terminalEnabled?: boolean;
-  // Test seam: the keepalive cadence for the document event stream. Product
-  // code never sets it — a focused test would otherwise have to wait a real
-  // 15 seconds to observe one comment frame.
   keepaliveIntervalMs?: number;
-  // Optional metrics registry. When provided, the watch session will
-  // increment counters for watcher events and refresh lifecycle. Callers
-  // construct the registry so it can be shared with the snapshot writer
-  // and the /debug/metrics endpoint.
   metrics?: import("../debug/metrics").MetricsRegistry;
+  // Controlled classification and observation in lifecycle/resource tests.
+  classify?: FileIndexOptions["classify"];
+  watch?: typeof chokidar.watch;
 };
 
-// 32 random bytes, base64url-encoded — sufficient entropy that brute-forcing
-// over the localhost websocket is not viable. Regenerated per server start.
-function createTerminalToken(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-// Builds the predicate chokidar consults to decide whether to attach a native
-// watcher to a path. Two layers:
-//   1. Always exclude any path with a `.git` segment between it and a watched
-//      root. `.git/` is git's working metadata; transient files inside it
-//      (notably `.git/index.lock`) race with native fs.watch on macOS and
-//      crash the process with EINVAL when chokidar emits an unhandled error.
-//      This is the ONLY hardcoded directory we filter here — the broader
-//      indexer denylist (`node_modules`, `.next`, etc.) is intentionally NOT
-//      mirrored, because in the typical case it's already covered by the
-//      user's `.gitignore` and spreading the heuristic into the watcher
-//      would deepen an existing hack rather than minimize it.
-//   2. Defer to the per-root IgnoreMatcher (built from built-in defaults +
-//      .uatu.json ignore.exclude + .gitignore) for everything else.
-export function buildWatcherIgnorePredicate(
-  dirRoots: string[],
-  matcherCache: Map<string, IgnoreMatcher>,
-): (testPath: string) => boolean {
-  return (testPath: string): boolean => {
-    for (const rootPath of dirRoots) {
-      const rel = path.relative(rootPath, testPath);
-      if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
-        continue;
-      }
-      if (rel.split(path.sep).includes(".git")) {
-        return true;
-      }
-      const matcher = matcherCache.get(rootPath);
-      if (!matcher) {
-        continue;
-      }
-      return matcher.toChokidarIgnored()(testPath);
-    }
-    return false;
-  };
-}
-
-// Without an `error` listener, chokidar's underlying EventEmitter throws
-// synchronously when an "error" event fires — taking the host process down.
-// Real-world failures we have seen include `EINVAL` from a `watch` syscall
-// against `.git/index.lock` after git unlinks it. The contract here is
-// "process does not crash"; logging policy is intentionally minimal.
-export function attachWatcherCrashGuard(emitter: NodeJS.EventEmitter): void {
-  emitter.on("error", err => {
-    const code =
-      err instanceof Error && typeof (err as NodeJS.ErrnoException).code === "string"
-        ? ` (${(err as NodeJS.ErrnoException).code})`
-        : "";
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`uatu: watcher error${code}: ${message}`);
-  });
-}
-
-export const REFRESH_DEBOUNCE_MS = 150;
-// Upper bound on how long a sustained event stream may defer a refresh. A
-// trailing debounce alone lets sub-150 ms event cadences postpone the rescan
-// indefinitely; the cap guarantees bounded staleness while still letting
-// normal bursts (save storms, git checkout) coalesce. A robustness bound,
-// not a tunable — intentionally not configurable.
-export const REFRESH_MAX_WAIT_MS = 2000;
-
-type RefreshSchedulerClock = {
-  now(): number;
-  setTimer(fn: () => void, delayMs: number): ReturnType<typeof setTimeout>;
-  clearTimer(timer: ReturnType<typeof setTimeout>): void;
+type Subscriber = {
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  context: WatchContext;
+  keepalive: ReturnType<typeof setInterval> | null;
 };
-
-const realClock: RefreshSchedulerClock = {
-  // Monotonic on purpose: a wall-clock step backwards during sustained churn
-  // must not stretch `deadline - now` and defer refresh past the max-wait.
-  now: () => performance.now(),
-  setTimer: (fn, delayMs) => setTimeout(fn, delayMs),
-  clearTimer: timer => clearTimeout(timer),
+type ObservedRoot = {
+  index: FileIndex;
+  watcher: FileObserver;
+  ready: boolean;
+  finish: () => void;
 };
-
-// Trailing debounce with a max-wait cap. One timer: on every event the timer
-// is re-armed, but its delay is clamped so it never fires later than
-// `batchStartedAt + REFRESH_MAX_WAIT_MS`, where the batch starts at the first
-// event after the previous fire. A parallel max-wait timeout was rejected in
-// design — two timers firing near-simultaneously would need dedup guarding.
-export function createRefreshScheduler(
-  fire: (changedId: string | null) => void,
-  clock: RefreshSchedulerClock = realClock,
-) {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let pendingChangedId: string | null = null;
-  let batchStartedAt: number | null = null;
-
-  return {
-    schedule(changedId: string | null) {
-      if (changedId) {
-        pendingChangedId = changedId;
-      }
-
-      const now = clock.now();
-      if (batchStartedAt === null) {
-        batchStartedAt = now;
-      }
-
-      if (timer) {
-        clock.clearTimer(timer);
-      }
-
-      const deadline = batchStartedAt + REFRESH_MAX_WAIT_MS;
-      const delay = Math.max(0, Math.min(REFRESH_DEBOUNCE_MS, deadline - now));
-      timer = clock.setTimer(() => {
-        timer = null;
-        batchStartedAt = null;
-        const nextChangedId = pendingChangedId;
-        pendingChangedId = null;
-        fire(nextChangedId);
-      }, delay);
-    },
-    cancel() {
-      if (timer) {
-        clock.clearTimer(timer);
-        timer = null;
-      }
-      batchStartedAt = null;
-      pendingChangedId = null;
-    },
-  };
-}
 
 export type WatchSession = ReturnType<typeof createWatchSession>;
-
-export function createWatchSession(
-  entries: WatchEntry[],
-  initialFollow: boolean,
-  options: WatchSessionOptions = {},
-) {
-  const scan = options.scan ?? scanRoots;
-  const collectRepositories = options.collectRepositories ?? collectRepositorySnapshots;
-  const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
-  const terminalEnabled = options.terminalEnabled ?? false;
-  const terminalToken = createTerminalToken();
+export function createWatchSession(entries: WatchEntry[], initialFollow: boolean, options: WatchSessionOptions = {}) {
+  const epoch = crypto.randomUUID();
+  const terminalToken = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
   const metrics = options.metrics;
-  // The unscoped index holds every viewable doc under the watched roots,
-  // ignoring the current pin. Server-side direct-link dispatch consults this
-  // so a navigation to `/guides/setup.md` while pinned to `README.md` still
-  // returns the SPA shell — the SPA then renders a "session pinned" message
-  // (see design D4) instead of the request looking like a 404.
-  let unscopedRoots: RootGroup[] = [];
-  let stateFingerprint = "";
-  let unscopedFingerprint = "";
-  let repositoriesByTarget: Record<CompareTarget, RepositorySnapshot[]> = {
-    base: [],
-    "last-commit": [],
-  };
-  let reconcileTimer: ReturnType<typeof setInterval> | null = null;
-  const keepaliveIntervalMs = options.keepaliveIntervalMs ?? DOCUMENT_KEEPALIVE_MS;
   const streamMetrics = new StreamLifecycleMetrics(metrics);
+  const roots = new Map<string, ObservedRoot>();
+  const policies = new Map<string, FileIndex["policy"]>();
+  const prepared = new Map(entries.map(entry => [entry.absolutePath, Promise.withResolvers<ObservedRoot | null>()]));
+  const owned = new Set<ObservedRoot>();
   const subscribers = new Set<Subscriber>();
-  const matcherCache = new Map<string, IgnoreMatcher>();
-
-  const watchPaths = entries.map(entry => entry.absolutePath);
-  const dirRoots = entries.filter(entry => entry.kind === "dir").map(entry => entry.absolutePath);
-  const constrainedDocumentId = entries.length === 1 && entries[0]?.kind === "file"
-    ? entries[0].absolutePath
-    : null;
-
-  const isPathIgnored = buildWatcherIgnorePredicate(dirRoots, matcherCache);
-
-  let watcher: ReturnType<typeof chokidar.watch> | null = null;
-
-  const applyScope = (source: RootGroup[], scope: Scope): RootGroup[] => {
-    if (scope.kind === "folder") {
-      return source;
-    }
-
-    const pinnedId = scope.documentId;
-    const pinnedRoots: RootGroup[] = [];
-
-    for (const root of source) {
-      const doc = root.docs.find(candidate => candidate.id === pinnedId);
-      if (!doc) {
-        continue;
-      }
-
-      pinnedRoots.push({
-        ...root,
-        docs: [doc],
-      });
-    }
-
-    return pinnedRoots;
-  };
-
-  const normalizeContext = (context: WatchContext): WatchContext => {
-    if (constrainedDocumentId) {
-      return { ...context, scope: { kind: "file", documentId: constrainedDocumentId } };
-    }
-    return context.scope.kind === "file" && !canSetFileScope(unscopedRoots, context.scope.documentId)
-      ? { ...context, scope: { kind: "folder" } }
-      : context;
-  };
-
-  const payloadFor = (context: WatchContext, changedId: string | null = null): StatePayload => {
-    const normalized = normalizeContext(context);
-    const roots = applyScope(unscopedRoots, normalized.scope);
-    return createStatePayload(
-      roots,
-      initialFollow,
-      changedId,
-      normalized.scope,
-      repositoriesByTarget[normalized.compareTarget],
-      terminalEnabled,
-      normalized.compareTarget,
-      unscopedFingerprint,
-    );
-  };
-
-  const collectAllRepositorySnapshots = async (
-    nextRoots: RootGroup[],
-  ): Promise<Record<CompareTarget, RepositorySnapshot[]>> => {
-    const results = await Promise.allSettled([
-      collectRepositories(entries, nextRoots, "base"),
-      collectRepositories(entries, nextRoots, "last-commit"),
-    ]);
-    // Wait for both targets even when one fails, so the next refresh cannot
-    // overlap an unfinished collection. Publish neither target on failure.
-    const [base, lastCommit] = results;
-    if (base.status === "rejected") throw base.reason;
-    if (lastCommit.status === "rejected") throw lastCommit.reason;
-    return { base: base.value, "last-commit": lastCommit.value };
-  };
-
+  const recovery = new Map<string, Promise<void>>();
+  const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const failures = new Map<string, number>();
+  const rootErrors = new Map<string, string>();
+  let sequence = 0;
+  let revision = 0;
+  let corpusRevision = 0;
+  let latestFollowOrder = 0;
+  let latestChange: DocumentSnapshot["latestChange"];
+  let generatedAt = Date.now();
   let stopped = false;
-
-  const refresh = async (changedId: string | null) => {
-    metrics?.set("refresh.in_flight", 1);
-    const startedAt = Date.now();
-    try {
-      const nextRoots = await scan(entries, { respectGitignore, matcherCache });
-      const nextRepositories = await collectAllRepositorySnapshots(nextRoots);
-      if (stopped) return;
-      const nextFingerprint = createContextFingerprint(nextRoots, nextRepositories);
-      const nextUnscopedFingerprint = hashCorpus(fingerprintRoots(nextRoots));
-      const changedDoc = changedId ? findDocument(nextRoots, changedId) : undefined;
-      const changedDocumentId =
-        changedDoc && changedDoc.kind !== "binary" ? changedId : null;
-      // The unscoped fingerprint participates on its own: in a scoped
-      // session, an out-of-scope change alters neither the visible
-      // fingerprint nor `changedId`, yet a client holding widened search
-      // results needs to hear about it.
-      const shouldBroadcast =
-        nextFingerprint !== stateFingerprint
-        || changedDocumentId !== null
-        || nextUnscopedFingerprint !== unscopedFingerprint;
-
-      unscopedRoots = nextRoots;
-      repositoriesByTarget = nextRepositories;
-      stateFingerprint = nextFingerprint;
-      unscopedFingerprint = nextUnscopedFingerprint;
-
-      if (shouldBroadcast) {
-        broadcast(changedDocumentId);
-      }
-      metrics?.inc("refresh.completed_total");
-      metrics?.set("refresh.last_success_at", Date.now());
-      metrics?.set("refresh.last_duration_ms", Date.now() - startedAt);
-    } catch (err) {
-      metrics?.inc("refresh.errored_total");
-      throw err;
-    } finally {
-      metrics?.set("refresh.in_flight", 0);
+  let startPromise: Promise<void> | null = null;
+  let publishedRepositories: RepositoryResults | null = null;
+  const nextRevision = () => ++sequence;
+  const find = (id: string) => {
+    for (const root of roots.values()) {
+      const doc = root.index.documents.get(id);
+      if (doc && policies.get(doc.rootId)?.accepts(id)) return doc;
     }
+    return undefined;
+  };
+  const rootHeader = (entry: WatchEntry): DocumentRoot => roots.get(entry.absolutePath)?.index.metadata() ?? {
+    id: entry.absolutePath, path: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
+    label: path.basename(entry.absolutePath) || entry.absolutePath, hiddenCount: 0,
+  };
+  const unscopedRoots = () => entries.map(entry => {
+    const root = roots.get(entry.absolutePath);
+    const snapshot = root?.index.snapshot() ?? { ...rootHeader(entry), docs: [] };
+    const policy = policies.get(entry.absolutePath);
+    if (root && policy && root.index.policy !== policy) snapshot.docs = snapshot.docs.filter(doc => policy.accepts(doc.id));
+    return snapshot;
+  });
+  const discovery = (): DiscoveryState => {
+    const statuses = [...roots.values()].map(root => root.index.discovery);
+    const message = rootErrors.values().next().value ?? statuses.find(state => state.message)?.message;
+    return {
+      status: message ? "error" : recovery.size ? "recovering" : roots.size !== entries.length || statuses.some(state => state.status !== "ready") ? "indexing" : "ready",
+      discovered: statuses.reduce((n, state) => n + state.discovered, 0),
+      ...(message ? { message } : {}),
+    };
+  };
+  const normalize = (context: WatchContext): WatchContext => {
+    if (entries.length === 1 && entries[0]?.kind === "file") return { ...context, scope: { kind: "file", documentId: entries[0].absolutePath } };
+    return normalizeDocumentContext(context, discovery(), find);
+  };
+  const newest = (): string | null => {
+    let best: ReturnType<typeof find>;
+    for (const root of roots.values()) {
+      const id = root.index.newest.id;
+      const candidate = id ? root.index.documents.get(id) : undefined;
+      if (candidate && (!best || candidate.mtimeMs > best.mtimeMs || candidate.mtimeMs === best.mtimeMs && candidate.relativePath.localeCompare(best.relativePath) < 0)) best = candidate;
+    }
+    return best?.id ?? null;
   };
 
-  const refreshQueue = createRefreshQueue(refresh);
-  const refreshScheduler = createRefreshScheduler(nextChangedId => {
-    void refreshQueue.request(nextChangedId).catch(error => {
-      console.error(`uatu: failed to refresh state: ${error instanceof Error ? error.message : String(error)}`);
-    });
+  const repositories = createRepositoryRefresh({ entries, roots: unscopedRoots, collect: options.collectRepositories,
+    onProbe: () => metrics?.inc("reconcile.ticks_total"),
+    publish: (results, freshness) => {
+      if (stopped) return;
+      const changed = results !== publishedRepositories;
+      publishedRepositories = results;
+      publish({ upserts: [], removals: [], changedId: null, repositoryState: freshness }, changed);
+    },
   });
 
-  const scheduleRefresh = (changedId: string | null) => {
+  function snapshot(context: WatchContext = DEFAULT_WATCH_CONTEXT, changedId: string | null = null): DocumentSnapshot {
+    const normalized = normalize(context);
+    const state: DocumentSnapshot = {
+      kind: "snapshot", epoch, revision, workspaceApiRevision: WORKSPACE_API_REVISION,
+      roots: unscopedRoots(), repositories: repositories.results[normalized.compareTarget], compareTarget: normalized.compareTarget,
+      initialFollow, defaultDocumentId: discovery().status === "ready" ? newest() : null, changedId, generatedAt, build: BUILD_SUMMARY,
+      scope: { kind: "folder" }, discovery: discovery(), repositoryState: repositories.freshness,
+      unscopedFingerprint: `${epoch}:${corpusRevision}`, terminal: options.terminalEnabled ? "enabled" : "disabled",
+      ...(latestChange && find(latestChange.id)?.kind !== "binary" && find(latestChange.id) ? { latestChange } : {}),
+    };
+    return projectDocumentSnapshot(state, normalized, state.repositories);
+  }
+
+  function send(subscriber: Subscriber, value: DocumentSnapshot | DocumentPatch) {
+    try { subscriber.controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(value)}\n\n`)); }
+    catch { drop(subscriber, "failed"); }
+  }
+  function publish(fields: Pick<DocumentPatch, "upserts" | "removals" | "changedId"> & Partial<DocumentPatch>, repo = false) {
     if (stopped) return;
-    metrics?.inc("refresh.scheduled_total");
-    refreshScheduler.schedule(changedId);
-  };
-
-  const handleWatcherEvent = (eventName: string, filePath: string) => {
-    metrics?.inc(`watcher.events_total.${eventName}`);
-    const absolutePath = path.resolve(filePath);
-
-    // A root's `.gitignore` or `.uatu.json` itself just changed — drop the
-    // cached matcher so the upcoming scanRoots call rebuilds it from the new
-    // rules. Both files feed the per-root IgnoreMatcher (.uatu.json
-    // ignore.exclude and ignore.respectGitignore are read via
-    // loadIgnoreConfig in the ignore engine).
-    const baseName = path.basename(absolutePath);
-    if (baseName === ".gitignore" || baseName === ".uatu.json") {
-      const parentDir = path.dirname(absolutePath);
-      if (dirRoots.includes(parentDir)) {
-        matcherCache.delete(parentDir);
+    const previousRevision = revision;
+    revision = nextRevision();
+    if (fields.changedId) latestChange = { id: fields.changedId, revision };
+    generatedAt = Math.max(Date.now(), generatedAt + 1);
+    const patch: DocumentPatch = {
+      kind: "patch", epoch, previousRevision, revision, generatedAt,
+      ...DEFAULT_WATCH_CONTEXT, unscopedFingerprint: `${epoch}:${corpusRevision}`,
+      discovery: discovery(), defaultDocumentId: discovery().status === "ready" ? newest() : null, ...fields,
+    };
+    for (const subscriber of subscribers) {
+      const context = normalize(subscriber.context);
+      if (!sameDocumentContext(context, subscriber.context)) {
+        subscriber.context = context;
+        send(subscriber, snapshot(context, patch.changedId));
+        continue;
       }
+      const headers = entries.filter(entry => context.scope.kind === "folder" || roots.get(entry.absolutePath)?.index.documents.has(context.scope.documentId)).map(rootHeader);
+      send(subscriber, projectDocumentPatch(patch, context, headers, repo ? repositories.results[context.compareTarget] : undefined));
     }
+    metrics?.inc("refresh.completed_total");
+    metrics?.set("refresh.last_success_at", Date.now());
+  }
+  function fileBatch(root: ObservedRoot, batch: FileIndexBatch) {
+    if (stopped || roots.get(root.index.entry.absolutePath) !== root) return;
+    const policy = policies.get(root.index.entry.absolutePath)!;
+    const upserts = batch.upserts.filter(doc => policy.accepts(doc.id));
+    const removals = [...batch.removals, ...batch.upserts.filter(doc => !policy.accepts(doc.id)).map(doc => ({ rootId: doc.rootId, id: doc.id }))];
+    if (batch.upserts.length || batch.removals.length) {
+      corpusRevision++;
+      repositories.request();
+    }
+    const changedId = batch.changedOrder > latestFollowOrder && batch.changedId && policy.accepts(batch.changedId) ? batch.changedId : null;
+    if (changedId) latestFollowOrder = batch.changedOrder;
+    publish({ upserts, removals, changedId });
+  }
 
-    // Eligibility for follow is decided after the upcoming refresh — by then
-    // the rescanned roots tell us whether the path is text or binary.
-    const changedId = eventName !== "unlink" ? absolutePath : null;
-    scheduleRefresh(changedId);
-  };
+  async function observe(entry: WatchEntry, staged = false): Promise<ObservedRoot | null> {
+    const matcher = await loadIgnoreMatcher({ rootPath: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
+      respectGitignore: options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
+    if (stopped) return null;
+    let root!: ObservedRoot;
+    const index = new FileIndex(entry, matcher, { revision: nextRevision, classify: options.classify, publish: batch => fileBatch(root, batch),
+      onWork: kind => metrics?.inc(`index.${kind}_total`),
+    });
+    policies.set(entry.absolutePath, index.policy);
+    const watcher = options.watch ? options.watch(entry.absolutePath, {
+      ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
+      usePolling: options.usePolling ?? false, interval: 100, ignored: index.policy.ignored,
+    }) : observeFiles(entry, { ignored: index.policy.ignored, usePolling: options.usePolling, renew: staged,
+      onWork: kind => metrics?.inc(`index.${kind}_total`),
+    });
+    const ready = Promise.withResolvers<void>();
+    root = { index, watcher, ready: false, finish: () => ready.resolve() };
+    owned.add(root);
+    if (!staged) { roots.set(entry.absolutePath, root); prepared.get(entry.absolutePath)?.resolve(root); }
+    watcher.on("all", (event, file, stats) => {
+      if (stopped || !owned.has(root)) return;
+      metrics?.inc(`watcher.events_total.${event}`);
+      if (root.ready && isPolicyFile(entry, path.resolve(file))) { void recover(entry).catch(() => {}); return; }
+      index.observe(event, file, stats);
+    });
+    watcher.once("ready", () => {
+      root.ready = true; index.markReady();
+      void index.idle().then(() => ready.resolve());
+    });
+    watcher.on("error", error => {
+      metrics?.inc("watcher.errors_total");
+      index.fail(error);
+      rootErrors.set(entry.absolutePath, error instanceof Error ? error.message : String(error));
+      ready.reject(error);
+      if (!staged) scheduleRecovery(entry);
+    });
+    try { await ready.promise; }
+    catch (error) {
+      if (staged) { index.stop(); owned.delete(root); await watcher.close(); }
+      throw error;
+    }
+    return stopped ? null : root;
+  }
+
+  function scheduleRecovery(entry: WatchEntry) {
+    if (stopped || retryTimers.has(entry.absolutePath)) return;
+    const attempts = (failures.get(entry.absolutePath) ?? 0) + 1;
+    failures.set(entry.absolutePath, attempts);
+    if (attempts > 3) return;
+    const timer = setTimeout(() => {
+      retryTimers.delete(entry.absolutePath);
+      void recover(entry).catch(() => scheduleRecovery(entry));
+    }, 250 * 2 ** (attempts - 1));
+    retryTimers.set(entry.absolutePath, timer);
+  }
+  function recover(entry: WatchEntry): Promise<void> {
+    const current = recovery.get(entry.absolutePath);
+    if (current) return current;
+    if (stopped) return Promise.resolve();
+    const promise = (async () => {
+      const old = roots.get(entry.absolutePath);
+      const next = await observe(entry, true);
+      if (!next || stopped) return;
+      roots.set(entry.absolutePath, next);
+      rootErrors.delete(entry.absolutePath);
+      failures.delete(entry.absolutePath);
+      if (old) { owned.delete(old); old.index.stop(); old.finish(); await old.watcher.close(); }
+      corpusRevision++;
+      repositories.request();
+    })().catch(error => {
+      rootErrors.set(entry.absolutePath, error instanceof Error ? error.message : String(error));
+      throw error;
+    }).finally(() => {
+      recovery.delete(entry.absolutePath);
+      if (stopped) return;
+      revision = nextRevision(); generatedAt = Math.max(Date.now(), generatedAt + 1);
+      for (const subscriber of subscribers) { subscriber.context = normalize(subscriber.context); send(subscriber, snapshot(subscriber.context)); }
+    });
+    recovery.set(entry.absolutePath, promise);
+    publish({ upserts: [], removals: [], changedId: null });
+    return promise;
+  }
+
+  function drop(subscriber: Subscriber, outcome: StreamOutcome) {
+    if (subscriber.keepalive) clearInterval(subscriber.keepalive);
+    subscriber.keepalive = null;
+    if (subscribers.delete(subscriber)) streamMetrics.closed("document", outcome);
+    repositories.demand(subscribers.size > 0);
+  }
 
   return {
-    async start() {
-      // Pre-load matchers so the chokidar `ignored` predicate has something to
-      // consult during the watcher's very first stat sweep. The cache is also
-      // threaded into every subsequent scanRoots call so we don't re-read
-      // `.uatu.json` / `.gitignore` on every refresh.
-      for (const rootPath of dirRoots) {
-        const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore });
-        matcherCache.set(rootPath, matcher);
-      }
-
-      watcher = chokidar.watch(watchPaths, {
-        ignoreInitial: true,
-        usePolling: options.usePolling ?? false,
-        interval: 100,
-        awaitWriteFinish: {
-          // Loosened from 25ms in 2026-05 (see add-watch-freeze-diagnostics)
-          // to reduce main-thread fs.stat pressure during heavy file churn.
-          stabilityThreshold: 100,
-          pollInterval: 250,
-        },
-        ignored: isPathIgnored,
+    start() {
+      startPromise ??= Promise.all(entries.map(entry => observe(entry).catch(error => {
+        prepared.get(entry.absolutePath)?.resolve(null);
+        rootErrors.set(entry.absolutePath, error instanceof Error ? error.message : String(error));
+        scheduleRecovery(entry);
+      }))).then(() => {
+        if (!stopped) { publish({ upserts: [], removals: [], changedId: null }); repositories.request(); }
       });
-
-      const watcherReady = new Promise<void>(resolve => {
-        watcher!.once("ready", () => {
-          resolve();
-        });
-      });
-
-      watcher.on("all", handleWatcherEvent);
-      attachWatcherCrashGuard(watcher);
-
-      await watcherReady;
-      await refreshQueue.request(null);
-      if (stopped) return;
-      reconcileTimer = setInterval(() => {
-        metrics?.inc("reconcile.ticks_total");
-        void refreshQueue.request(null).catch(error => {
-          console.error(`uatu: failed to reconcile state: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      }, 5000);
+      return startPromise;
     },
-    stop() {
-      stopped = true;
-      refreshScheduler.cancel();
-      refreshQueue.stop();
-
-      if (reconcileTimer) {
-        clearInterval(reconcileTimer);
-      }
-
+    async stop() {
+      stopped = true; repositories.stop();
+      for (const pending of prepared.values()) pending.resolve(null);
+      for (const timer of retryTimers.values()) clearTimeout(timer);
+      retryTimers.clear();
       for (const subscriber of [...subscribers]) {
-        if (subscriber.keepalive) clearInterval(subscriber.keepalive);
-        subscriber.keepalive = null;
-        try {
-          subscriber.controller.close();
-        } catch {
-          // The browser may already have closed the SSE stream.
-        }
-        if (subscribers.delete(subscriber)) streamMetrics.closed("document", "completed");
+        drop(subscriber, "completed");
+        try { subscriber.controller.close(); } catch { /* Peer already closed. */ }
       }
-      return watcher ? watcher.close() : Promise.resolve();
+      await Promise.all([...owned].map(async root => { root.index.stop(); root.finish(); await root.watcher.close(); }));
+      owned.clear();
     },
-    getRoots(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
-      return applyScope(unscopedRoots, normalizeContext(context).scope);
+    async recover() { await Promise.all(entries.map(recover)); },
+    requestRepositoryRefresh() { repositories.request(); },
+    async ensureDocument(id: string) {
+      const existing = find(id);
+      if (existing && !recovery.has(existing.rootId)) return existing;
+      for (const entry of entries) {
+        const relative = rootRelative(entry, id);
+        if (!relative || shouldDenyPath(relative)) continue;
+        const root = roots.get(entry.absolutePath) ?? await prepared.get(entry.absolutePath)?.promise;
+        if (!root) continue;
+        // Apply the current policy even while an old inventory is retained.
+        const matcher = await loadIgnoreMatcher({ rootPath: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
+          respectGitignore: options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
+        if (entry.kind === "dir" && matcher.shouldIgnore(relative)) continue;
+        const base = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
+        const realBase = await realpath(base);
+        const realFile = await realpath(id).catch(() => null);
+        if (!realFile) continue;
+        const contained = path.relative(realBase, realFile);
+        if (contained === ".." || contained.startsWith(`..${path.sep}`) || path.isAbsolute(contained)) continue;
+        let current = base;
+        let allowed = true;
+        let leafStats: Stats | null = null;
+        for (const segment of relative.split("/")) {
+          current = path.join(current, segment);
+          const stats = await lstat(current).catch(() => null);
+          if (!stats || stats.isSymbolicLink()) { allowed = false; break; }
+          leafStats = stats;
+        }
+        if (!allowed || !leafStats) continue;
+        await root.index.request(id, leafStats);
+        return find(id);
+      }
+      return undefined;
     },
-    getUnscopedRoots() {
-      return unscopedRoots;
+    findDocument: find,
+    getDiscoveryState: discovery,
+    documentRevision: (id: string) => `${epoch}:${find(id)?.revision ?? "missing"}`,
+    repositoryGeneration: () => repositories.freshness.generation,
+    getDocumentRoots(id: string, context: WatchContext = DEFAULT_WATCH_CONTEXT): RootGroup[] {
+      const scope = normalize(context).scope;
+      if (scope.kind === "file" && scope.documentId !== id) return [];
+      const doc = find(id);
+      const root = doc ? roots.get(doc.rootId) : undefined;
+      return doc && root ? [{ ...root.index.metadata(), docs: [doc] }] : [];
     },
-    getRepositories(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
-      return repositoriesByTarget[context.compareTarget];
-    },
-    getTerminalToken() {
-      return terminalToken;
-    },
-    isTerminalEnabled() {
-      return terminalEnabled;
-    },
-    getSseSubscriberCount() {
-      return subscribers.size;
-    },
-    // Test-only handle: lets the regression suite emit synthetic chokidar
-    // errors against the real underlying watcher to verify the crash guard.
-    // Not part of the production API surface.
-    _internalWatcher(): NodeJS.EventEmitter | null {
-      return watcher;
-    },
+    getRoots(context: WatchContext = DEFAULT_WATCH_CONTEXT) { return snapshot(context).roots; },
+    getUnscopedRoots: unscopedRoots,
+    getRepositories(context: WatchContext = DEFAULT_WATCH_CONTEXT) { return repositories.results[context.compareTarget]; },
+    getTerminalToken: () => terminalToken,
+    isTerminalEnabled: () => options.terminalEnabled ?? false,
+    getSseSubscriberCount: () => subscribers.size,
+    _internalWatcher: () => roots.values().next().value?.watcher ?? null,
     getStatePayload(changedId: string | null = null, context: WatchContext = DEFAULT_WATCH_CONTEXT) {
-      return payloadFor(context, changedId);
+      for (const root of roots.values()) if (root.index.hasPendingChanges) root.index.flush();
+      return snapshot(context, changedId);
     },
-    // `options.reconnect` is the client saying this request replaces a stream
-    // it lost. It is a bare boolean marker — nothing about the previous
-    // connection travels with it — and exists so the workspace can count
-    // recoveries separately from first connects.
-    eventsResponse(context: WatchContext = DEFAULT_WATCH_CONTEXT, options: { reconnect?: boolean } = {}) {
-      let currentSubscriber: Subscriber | null = null;
-
+    eventsResponse(context: WatchContext = DEFAULT_WATCH_CONTEXT, streamOptions: { reconnect?: boolean } = {}) {
+      let subscriber: Subscriber | null = null;
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          const normalizedContext = normalizeContext(context);
-          const subscriber: Subscriber = { controller, context: normalizedContext, keepalive: null };
-          currentSubscriber = subscriber;
+          for (const root of roots.values()) if (root.index.hasPendingChanges) root.index.flush();
+          subscriber = { controller, context: normalize(context), keepalive: null };
           subscribers.add(subscriber);
-          streamMetrics.opened("document", { reconnect: options.reconnect === true });
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(normalizedContext))}\n\n`));
-          // A comment frame, not an event: `EventSource` never dispatches it,
-          // so the bytes keep every hop's idle timer alive without the client
-          // seeing a state update. An enqueue failure means the peer is gone
-          // between polls — release rather than retry.
-          subscriber.keepalive = setInterval(() => {
-            try {
-              controller.enqueue(encoder.encode(KEEPALIVE_FRAME));
-            } catch {
-              dropSubscriber(subscriber, "failed");
-            }
-          }, keepaliveIntervalMs);
-          if (typeof subscriber.keepalive.unref === "function") subscriber.keepalive.unref();
+          streamMetrics.opened("document", { reconnect: streamOptions.reconnect === true });
+          send(subscriber, snapshot(subscriber.context));
+          const current = subscriber;
+          current.keepalive = setInterval(() => {
+            try { controller.enqueue(encoder.encode(KEEPALIVE_FRAME)); } catch { drop(current, "failed"); }
+          }, options.keepaliveIntervalMs ?? DOCUMENT_KEEPALIVE_MS);
+          current.keepalive.unref?.();
+          repositories.demand(true);
         },
-        cancel() {
-          if (currentSubscriber) {
-            dropSubscriber(currentSubscriber, "cancelled");
-            currentSubscriber = null;
-          }
-        },
+        cancel() { if (subscriber) drop(subscriber, "cancelled"); subscriber = null; },
       });
-
-      return new Response(stream, {
-        headers: {
-          "cache-control": "no-cache",
-          connection: "keep-alive",
-          "content-type": "text/event-stream",
-        },
-      });
+      return new Response(stream, { headers: { "cache-control": "no-cache", connection: "keep-alive", "content-type": "text/event-stream" } });
     },
   };
-
-  // The single release path for a subscriber: stops its keepalive timer and
-  // forgets it. Called from stream cancel, a failed enqueue, and a failed
-  // keepalive alike so no exit leaves an interval running against a dead
-  // controller.
-  function dropSubscriber(subscriber: Subscriber, outcome: StreamOutcome) {
-    if (subscriber.keepalive) {
-      clearInterval(subscriber.keepalive);
-      subscriber.keepalive = null;
-    }
-    if (subscribers.delete(subscriber)) streamMetrics.closed("document", outcome);
-  }
-
-  function broadcast(changedId: string | null) {
-    for (const subscriber of subscribers) {
-      try {
-        // Once an invalid pin widens, folder scope becomes this subscriber's
-        // current context. Retaining the stale file id would re-pin the client
-        // if that path were recreated later in the same connection.
-        subscriber.context = normalizeContext(subscriber.context);
-        const message = encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(subscriber.context, changedId))}\n\n`);
-        subscriber.controller.enqueue(message);
-      } catch {
-        dropSubscriber(subscriber, "failed");
-      }
-    }
-  }
-}
-
-// Collapse a corpus fingerprint to a short opaque token. The full string
-// grows with the tree and travels in every SSE payload, so clients get a
-// hash to compare, never the corpus itself. djb2 is plenty: this is a
-// staleness hint, not an integrity check.
-function hashCorpus(input: string): string {
-  let hash = 5381;
-  for (let index = 0; index < input.length; index += 1) {
-    hash = ((hash << 5) + hash + input.charCodeAt(index)) | 0;
-  }
-  return (hash >>> 0).toString(36);
-}
-
-function fingerprintRoots(roots: RootGroup[]): string {
-  return JSON.stringify(
-    roots.map(root => ({
-      id: root.id,
-      docs: root.docs.map(doc => ({
-        id: doc.id,
-        relativePath: doc.relativePath,
-        mtimeMs: doc.mtimeMs,
-        kind: doc.kind,
-      })),
-    })),
-  );
-}
-
-function createContextFingerprint(
-  roots: RootGroup[],
-  repositories: Record<CompareTarget, RepositorySnapshot[]>,
-): string {
-  return `${fingerprintRoots(roots)}\nbase:${fingerprintRepositories(repositories.base)}\nlast-commit:${fingerprintRepositories(repositories["last-commit"])}`;
-}
-
-function fingerprintRepositories(repositories: RepositorySnapshot[]): string {
-  return JSON.stringify(
-    repositories.map(repository => ({
-      id: repository.id,
-      rootPath: repository.rootPath,
-      watchedRootIds: repository.watchedRootIds,
-      metadata: repository.metadata,
-      status: repository.status,
-      base: repository.base,
-      changedFiles: repository.changedFiles,
-      gitIgnoredFiles: repository.gitIgnoredFiles,
-      configWarnings: repository.configWarnings,
-      commitLog: repository.commitLog.map(commit => ({
-        sha: commit.sha,
-        subject: commit.subject,
-        message: commit.message,
-        author: commit.author,
-      })),
-    })),
-  );
 }

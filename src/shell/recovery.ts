@@ -32,9 +32,12 @@ export type StateReconciler<T> = {
 export function createStateReconciler<T>(options: {
   fetchState: () => Promise<T>;
   applyState: (value: T) => void;
-  // When the SERVER produced this payload. Only the server's own clock can
-  // order a fetch against a stream frame, and both come from the same process.
+  // Legacy timestamp ordering. Versioned consumers provide acceptState and
+  // use their protocol's epoch/revision checks instead.
   freshnessOf: (value: T) => number;
+  // Versioned protocols can order by epoch/revision/context instead of wall
+  // time. Undefined preserves the timestamp gate for legacy payloads.
+  acceptState?: (value: T) => boolean | undefined;
 }): StateReconciler<T> {
   // Two orderings, because the two hazards are different.
   //
@@ -68,8 +71,9 @@ export function createStateReconciler<T>(options: {
       if (sequence <= settledSequence) return false;
       settledSequence = sequence;
       const freshness = options.freshnessOf(payload);
-      if (freshness <= appliedFreshness) return false;
-      appliedFreshness = freshness;
+      const accepted = options.acceptState?.(payload);
+      if (accepted === false || accepted === undefined && freshness <= appliedFreshness) return false;
+      appliedFreshness = Math.max(appliedFreshness, freshness);
       options.applyState(payload);
       return true;
     },

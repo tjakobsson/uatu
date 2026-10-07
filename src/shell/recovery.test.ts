@@ -2,6 +2,23 @@ import { describe, expect, test } from "bun:test";
 
 import { createLifecycleRecovery, createStateReconciler, type LifecycleRecoveryTarget, type LifecycleRecoveryTimers } from "./recovery";
 
+test("explicit server versions can supersede equal timestamps without accepting an older revision", async () => {
+  let revision = 1;
+  let next = 2;
+  const applied: number[] = [];
+  const reconciler = createStateReconciler({
+    fetchState: async () => ({ revision: next, time: 1 }),
+    freshnessOf: payload => payload.time,
+    acceptState: payload => payload.revision > revision,
+    applyState: payload => { revision = payload.revision; applied.push(revision); },
+  });
+  reconciler.recordApplied(1);
+  expect(await reconciler.reconcile()).toBe(true);
+  next = 1;
+  expect(await reconciler.reconcile()).toBe(false);
+  expect(applied).toEqual([2]);
+});
+
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
 
 function defer<T>(): Deferred<T> {

@@ -8,9 +8,13 @@
 import { appState, type PreviewMode } from "./state";
 import { persistPersonalWorkspaceState } from "./personal-state";
 import { writeSelectionCleared } from "./selection-storage";
+import { documentIndex } from "./document-state";
 
 let selectedDestination: { id: string; name: string; relativePath: string } | null = null;
 let selectionGeneration = 0;
+let pendingDocumentPath: string | null = null;
+export function getPendingDocumentPath(): string | null { return pendingDocumentPath; }
+export function setPendingDocumentPath(path: string): void { pendingDocumentPath = path; }
 // Counts user activations (navigation-origin selections), including the user
 // activating the document that is already selected — which leaves
 // `selectionGeneration` alone. Watcher reconciles never move it.
@@ -30,11 +34,13 @@ export function getSelectionActivation(): number {
 }
 
 export function resumeDocumentSelection(): void {
+  pendingDocumentPath = null;
   appState.selectionCleared = false;
   writeSelectionCleared(false);
 }
 
 export function clearDocumentSelection(): void {
+  pendingDocumentPath = null;
   ++selectionGeneration;
   selectedDestination = null;
   appState.selectedId = null;
@@ -62,6 +68,15 @@ export function setSelectedId(next: string | null, origin: "reconcile" | "naviga
   }
   appState.selectedId = next;
   if (next) {
+    pendingDocumentPath = null;
+    if (documentIndex.epoch) {
+      const document = documentIndex.find(next);
+      if (document) {
+        selectedDestination = { id: document.id, name: document.name, relativePath: document.relativePath };
+        if (changed || origin === "navigation") persistPersonalWorkspaceState({ documentPath: document.relativePath });
+      }
+      return;
+    }
     for (const root of appState.roots) {
       const document = root.docs.find(candidate => candidate.id === next);
       if (document) {
@@ -81,5 +96,6 @@ export function setSelectedId(next: string | null, origin: "reconcile" | "naviga
 }
 
 export function setPreviewMode(next: PreviewMode): void {
+  if (next.kind === "commit") pendingDocumentPath = null;
   appState.previewMode = next;
 }

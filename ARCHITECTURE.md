@@ -16,7 +16,7 @@ flowchart LR
   Hub["uatu hub<br/>(src/hub/: auth, proxy, live broker)"]
   Child["session child<br/>(src/cli.ts serve, one per workspace)"]
   Session["WatchSession<br/>(src/server/watch-session.ts)"]
-  WS["chokidar<br/>file watcher"]
+  WS["recursive file observer<br/>Chokidar fallback"]
   Term["terminal<br/>(WebSocket ↔ PTY)"]
   FS[("docs tree<br/>on disk")]
   Term_PTY[("user's shell<br/>(real PTY)")]
@@ -35,10 +35,10 @@ flowchart LR
 The boundaries to keep in mind:
 
 - **The hub between browser and session child.** Browsers only talk to the hub. It authenticates them, then reverse-proxies HTTP and WebSockets under `/s/<id>/` to that workspace's loopback child and brokers the child's token (see [Base paths and the hub](#base-paths-and-the-hub)).
-- **HTTP between the SPA and its session child.** Under the session's base path, `/api/state` supplies the initial snapshot, `/api/document` and `/api/document/diff` render one path, and `/api/search` sweeps content. Scope and compare target travel as validated request context on all related requests; there are no process-global mutation endpoints.
+- **HTTP between the SPA and its session child.** Under the session's base path, `/api/state` supplies the initial snapshot, `/api/document` and `/api/document/diff` render one path, and `/api/search` sweeps content. `/api/document/facts` supplies Git provenance independently of document rendering. Scope and compare target travel as validated request context and never change another client's preferences.
 - **One live stream per page.** Pushed updates (document state, chat inventory, conversation events, other workspaces' activity) reach a page over a single `GET /api/hub/live` SSE connection to the hub. The child's own SSE routes are the internal hub↔child protocol (see [Live delivery](#live-delivery)).
 - **Per-client watch context.** The Change Overview measures against `base` (merge-base reviewer view) or `last-commit` (`HEAD` working view). `src/shared/watch-context.ts` serializes the client's scope and compare target, and `server/watch-session.ts` selects the corresponding roots and cached repository snapshot independently for each request and each document subscription. Two clients can therefore browse different scopes and comparison lenses through the same child process.
-- **Chokidar between the child and the filesystem.** The `WatchSession` debounces, applies the ignore policy, rebuilds the document index, and emits state events on the child's internal `/api/events` route.
+- **Event-fed file indexing.** `server/file-observer.ts` uses native recursive directory subscriptions and a bounded discovery walk, with Chokidar for polling or unsupported platforms. `server/file-index.ts` applies path-specific changes and publishes bounded batches through `WatchSession`; normal edits never trigger a full document scan.
 - **WebSocket between SPA and terminal subsystem.** Authenticated by a cookie set on `POST /api/auth`; multiplexed across multiple PTY panes by `terminal/server.ts`.
 - **A single Bun binary.** No node, no separate frontend bundler. The same binary runs the hub and every session child, and each child's `Bun.serve` serves the SPA and its API.
 
@@ -428,7 +428,7 @@ sequenceDiagram
   Tab->>Hub: GET /api/hub/live (ws, subs: document + inventory)
   Hub-->>Tab: ": open", then event: hello with the stream id
   Hub->>Child: GET base/api/events (first subscriber only)
-  Child-->>Hub: event: state (snapshot)
+  Child-->>Hub: event: state (snapshot or patch)
   Hub-->>Tab: event: live, topic document, cursor, data
   Note over Child: a watched file changes
   Child-->>Hub: event: state
@@ -439,7 +439,7 @@ sequenceDiagram
 
 - **The stream.** The response writes `: open` at once, then a `hello` event carrying an unguessable stream id, then `live` envelopes `{ ws, topic, key?, cursor, event }`. While idle it sends a `: keepalive` comment every 15 s. The query names the workspace (`ws`), opts into activity (`activity=1`), and lists the initial subscriptions with the cursor each one resumes from (`subs`).
 - **Subscription changes.** Selecting a conversation or opening a subagent never opens a connection. The page posts `add` and `remove` operations to `POST /api/hub/live/<streamId>/subscriptions`, which the hub accepts only from the hub session that owns the stream, so one tab can't steer another's. An `add` for a key that is already subscribed replaces it; that is how a topic re-attaches after a resync.
-- **Topics.** `document` is keyed by the watch context (compare target and scope) and carries the child's state snapshot. `inventory` is an invalidation tick that tells the chat client to re-read the merged inventory. `conversation` is keyed by the agent-qualified conversation id and carries one chat event. `activity` describes each workspace the user may access as `{ running, working, awaiting, finished }` — the first is the hub's own fact, the middle two the child's, and `finished` the hub's per-user composition; the hub validates it to that fixed shape before fan-out, so it can't carry content.
+- **Topics.** `document` is keyed by the watch context and carries a baseline snapshot followed by file patches and independent repository updates. The Hub applies patches to a keyed accumulator and materializes a current snapshot for joining or behind clients. The child epoch and predecessor revision protect application ordering independently of Hub transport cursors. Only full snapshots can replace queued document frames; patches retain their order. `inventory` invalidates the chat conversation list, `conversation` carries one conversation's events, and `activity` carries the validated workspace summary.
 - **Cursors and signals.** Each topic has its own opaque cursor, and only `data` events advance it. A reconnect presents every retained cursor, so each topic resumes independently and a stale conversation cursor never forces a document resync. Besides `data`, a topic can receive `ready` (attached, any owed replay written), `resync` (the cursor can't be replayed: take a fresh snapshot, then add the subscription again), or `unavailable` (the upstream failed or the child exited, and the hub is retrying). All three are scoped to their topic and never end the stream.
 
 **Fan-out at the hub.** `hub/live-broker.ts` holds one upstream subscription per (workspace, topic, key). The first interested client stream opens it and every later one shares it. The upstreams are the child's own SSE routes: `/api/events` for document state, `/api/chat/conversations/events` for the inventory, `/api/chat/conversations/<id>/events` for one conversation, and `/api/activity` for the workspace's working/awaiting summary (`hub/live-sse.ts` parses them). When the last subscriber leaves, the upstream lingers for 3 s (`LIVE_LINGER_MS`), so a reload or a quick A→B→A switch doesn't churn the child. After that the broker aborts it explicitly, which cancels the request at the child. Each upstream keeps a 256 KB replay buffer (`LIVE_REPLAY_BUFFER_BYTES`). A client cursor inside the buffer replays from the hub; one behind it falls back to the child's own replay, or its resync. An upstream failure sends `unavailable` to each subscriber, leaves every client stream open, and retries with capped backoff while anyone is still subscribed. The `activity` topic is computed per user: the hub merges its own session state (`running`) with each running child's `/api/activity` summary, which the broker subscribes to on its own account rather than on a client's (below). That summary stays two booleans, and `working` is the broader of them — a conversation counts while a turn is in flight *or* while the agent still holds live background work, so a workspace whose agent has backgrounded a command does not read as idle in someone else's switcher.
@@ -482,6 +482,62 @@ Failure paths:
 
 Pushed updates take a different path. The child emits state events on its internal `/api/events` route, and the hub fans them out to every subscribed page over `/api/hub/live` (see [Live delivery](#live-delivery)).
 
+### Discovery, updates, and recovery
+
+The CLI starts HTTP and prints its existing readiness URL while discovery runs.
+State distinguishes `indexing`, `ready`, `recovering`, and `error`; an incomplete
+inventory does not prove that a requested document is absent. Direct navigation
+can resolve one allowed path without waiting for the rest of the tree.
+An unresolved direct link retains its relative destination while indexing is
+incomplete or failed; successful recovery opens that destination rather than
+an unrelated default. Explicit navigation or enabling Follow cancels the wait.
+
+`server/file-observer.ts` starts observation before its discovery walk. Native
+subscriptions cover directory roots and can be shared with nested roots.
+Recovery opens fresh coverage before releasing the old observer. A single-file root observes its parent but accepts only
+that file. The observer bounds metadata work to 16 concurrent paths, excludes
+denied directories before descent, and does not follow symlink entries.
+Unsupported recursive watching and explicit polling use Chokidar's normalized
+initial events instead. Both backends supply stats to the index and normalize
+atomic replacement with a short removal delay.
+
+`server/file-index.ts` owns each root's path map, directory membership, and
+classification queue. Known extensions need no content read; unknown types
+use the existing 8 KB sniff with at most eight concurrent classifications.
+`newest-document.ts` maintains Follow's catch-up candidate without sorting the
+whole corpus per edit. File batches use a 150 ms trailing debounce with a
+two-second maximum wait, preserve every affected path, and yield between
+256-entry publication chunks. Initial discovery never acts as a Follow edit.
+
+`server/repository-refresh.ts` owns Git refreshes separately. It shares common
+work across comparison targets and marks results pending, stale, ready, or
+failed. Metadata probes run while document subscribers exist; visible Git
+panes also request bounded repository-only refreshes for changes outside narrow
+document roots. Those operations never initiate a document scan. Source and
+Rendered responses read fresh bytes and filesystem facts without waiting for
+Git. The browser enriches the facts strip through `/api/document/facts`, with
+one current in-flight request and revision/generation checks on completion.
+Session shutdown cancels repository Git subprocesses and prevents subsequent
+collection steps from starting under the cancelled operation.
+
+Ignore-policy changes, observation failures, and authenticated explicit
+`POST /api/index/recover` requests rebuild affected roots. Replacements collect
+a coherent inventory before taking ownership, and current exposure rules apply
+to reads while recovery is pending. Automatic observation recovery has bounded
+retries; the UI offers Retry indexing after failure. Browser transport recovery
+alone consumes current server state rather than starting another filesystem
+walk. There is no periodic document-tree rescan.
+
+`shared/document-updates.ts` supplies the Hub/browser reducer. Per-file revisions
+invalidate Source, Rendered, split, Diff, and image representations even when
+mtime is unchanged. Snapshots retain the latest eligible edit so a returning
+Follow client can catch up once; repository updates cannot replay that edit.
+Content-only patches avoid tree path reconciliation. Membership changes use
+the tree library's incremental methods, whose internal visible-row projection
+may still be rebuilt. Full snapshots and explicit filter changes can reset the
+tree. Index watch/stat/directory counters and independent repository probe
+counters remain available to the existing watchdog diagnostics.
+
 The route table that wires both of these requests is declared exactly once, in `src/server/routes.ts` via `buildRoutes({ mode: "prod" | "e2e", ... })`. Both `src/cli.ts` (production) and `tests/e2e/server.ts` (the Playwright harness) call it.
 
 ## State lifecycle
@@ -505,7 +561,8 @@ Every `appState` field has exactly one owning module: direct assignment (`appSta
 |---|---|
 | `selectedId`, `previewMode` | `shell/selection.ts` |
 | `followEnabled` | `shell/follow.ts` (the four follow-mode rules) |
-| `roots`, `repositories`, `scope`, `unscopedFingerprint` | `shell/events.ts` (`applyServerSnapshot`, module-private; boot enters through `adoptBootSnapshot`, which also records the snapshot's freshness so an older live frame is refused) |
+| `roots`, `repositories`, `discovery`, `repositoryFreshness`, `unscopedFingerprint` | `shell/events.ts`; boot adopts a snapshot, live delivery applies ordered patches |
+| `scope` | `shell/watch-context.ts` |
 | `viewMode`, `wrap` | `preview/view-mode.ts` |
 | `viewLayout`, `splitRatio` | `preview/layout.ts` |
 | `diffStyle` | `preview/diff.ts` |
@@ -516,15 +573,15 @@ Every `appState` field has exactly one owning module: direct assignment (`appSta
 
 ```mermaid
 sequenceDiagram
-  participant Watcher as chokidar (server)
+  participant Watcher as file observer and index (server)
   participant SSE as src/shell/events.ts
   participant State as src/shell/state.ts (appState)
   participant Sidebar as src/sidebar/shell.ts (renderSidebar)
   participant Preview as src/preview/mount.ts (loadDocument)
 
-  Watcher->>SSE: state event (new roots, repositories, scope, changedId)
-  SSE->>State: appState.roots / repositories / scope = ...
-  SSE->>Sidebar: renderSidebar()
+  Watcher->>SSE: document patch (upserts, removals, revisions, changedId)
+  SSE->>State: apply affected index entries
+  SSE->>Sidebar: apply membership and selection changes
   Note over SSE: chooseSelectionForFileEvent (follow-mode)
   alt Follow on
     SSE->>State: appState.selectedId = changed file (Rule C)
@@ -532,7 +589,7 @@ sequenceDiagram
   else Follow off, selection is the changed file
     SSE->>Preview: loadDocument(selectedId) — Rule D, reload in place
   else Follow off, selection unrelated to change
-    Note over SSE: tree re-renders, selection unchanged
+    Note over SSE: update affected entries, preserve selection
   end
 ```
 

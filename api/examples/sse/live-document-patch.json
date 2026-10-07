@@ -1,0 +1,27 @@
+{
+  "event": "live",
+  "data": {
+    "ws": "uatu",
+    "topic": "document",
+    "key": "compareTarget=base&scope=folder",
+    "cursor": "5",
+    "event": {
+      "kind": "data",
+      "data": {
+        "kind": "patch",
+        "epoch": "example-session",
+        "previousRevision": 4,
+        "revision": 5,
+        "generatedAt": 1,
+        "scope": { "kind": "folder" },
+        "compareTarget": "base",
+        "unscopedFingerprint": "example-session:1",
+        "roots": [{ "id": "/docs", "path": "/docs", "label": "docs", "hiddenCount": 0 }],
+        "upserts": [{ "id": "/docs/README.md", "rootId": "/docs", "relativePath": "README.md", "name": "README.md", "kind": "markdown", "mtimeMs": 1, "revision": 5 }],
+        "removals": [],
+        "changedId": "/docs/README.md",
+        "defaultDocumentId": "/docs/README.md"
+      }
+    }
+  }
+}

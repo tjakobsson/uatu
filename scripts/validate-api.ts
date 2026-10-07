@@ -110,6 +110,7 @@ export async function validateApi(): Promise<void> {
     ...structuredClone(openapi.components.schemas),
     ...structuredClone(streaming.schemas),
     WorkspaceState: openapi.components.schemas.WorkspaceState!,
+    DocumentUpdate: openapi.components.schemas.DocumentUpdate!,
     ChatEvent: openapi.components.schemas.ChatEvent!,
     ChatResyncEvent: openapi.components.schemas.ChatResyncEvent!,
     ConversationInventoryEvent: openapi.components.schemas.ConversationInventoryEvent!,

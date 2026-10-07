@@ -15,8 +15,8 @@ export type IgnoreMatcherOptions = {
 };
 
 export type IgnoreMatcher = {
-  shouldIgnore(relativePath: string): boolean;
-  toChokidarIgnored(): (testPath: string) => boolean;
+  shouldIgnore(relativePath: string, isDirectory?: boolean): boolean;
+  toChokidarIgnored(): (testPath: string, stats?: { isDirectory(): boolean }) => boolean;
 };
 
 // Always-on built-in defaults — applied even when `.uatu.json` is absent and
@@ -90,25 +90,25 @@ export async function loadIgnoreMatcher(options: IgnoreMatcherOptions): Promise<
     }
   }
 
-  const shouldIgnore = (relativePath: string): boolean => {
+  const shouldIgnore = (relativePath: string, isDirectory = false): boolean => {
     if (!relativePath || relativePath === ".") {
       return false;
     }
-    return ig.ignores(relativePath);
+    return ig.ignores(isDirectory && !relativePath.endsWith("/") ? `${relativePath}/` : relativePath);
   };
 
   return {
     shouldIgnore,
-    toChokidarIgnored(): (testPath: string) => boolean {
-      return (testPath: string) => {
+    toChokidarIgnored() {
+      return (testPath: string, stats?: { isDirectory(): boolean }) => {
         if (testPath === rootPath) {
           return false;
         }
         const rel = path.relative(rootPath, testPath);
-        if (!rel || rel.startsWith("..")) {
+        if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
           return false;
         }
-        return shouldIgnore(rel.split(path.sep).join("/"));
+        return shouldIgnore(rel.split(path.sep).join("/"), stats?.isDirectory());
       };
     },
   };

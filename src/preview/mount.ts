@@ -39,6 +39,8 @@ import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata
 import { syncViewToggle } from "./view-mode";
 import { getSelectedDestination, getSelectionActivation, getSelectionGeneration, setPreviewMode } from "../shell/selection";
 import { createDocumentLoadGuard } from "./load-generation";
+import { documentRevisionKey } from "../shell/document-state";
+import { enrichDocumentFacts, forgetDocumentFacts } from "./facts-enrichment";
 import {
   createDocumentLoadRetry,
   documentLoadRetryKey,
@@ -87,7 +89,7 @@ const previewShellElement: HTMLElement = previewShellElementMaybe;
 // (preserve scroll — the user is mid-read and a file-watcher reload must not
 // yank them back to the top).
 let lastLoadedDocumentId: string | null = null;
-const documentLoadGuard = createDocumentLoadGuard(getSelectionGeneration);
+const documentLoadGuard = createDocumentLoadGuard(getSelectionGeneration, documentRevisionKey);
 const documentLoadRetry = createDocumentLoadRetry();
 const alwaysCurrent = () => true;
 
@@ -110,7 +112,9 @@ export function rememberDocumentPayload(payload: RenderedDocument): void {
 }
 
 export function forgetDocumentCache(documentId: string): void {
+  forgetDocumentFacts(documentId);
   documentViewCache.delete(documentId);
+  documentDiffCache.delete(documentId);
 }
 
 // Mount a fetched document payload into the preview body. Centralizes the
@@ -150,6 +154,7 @@ export async function applyDocumentPayload(
   // Diff wires its comparison-specific variant in diff.ts. In split layouts
   // this shared chrome slot still renders exactly once above both panes.
   syncFileFactsStrip({ kind: "document", facts: payload.fileFacts });
+  void enrichDocumentFacts(payload, isCurrent);
 
   if (appState.viewLayout === "single" || !documentSupportsSplit(payload)) {
     await renderSinglePayload(payload, isCurrent);
@@ -245,6 +250,9 @@ export async function renderSplitForDocument(
   payload: RenderedDocument,
   isCurrent: () => boolean = alwaysCurrent,
 ): Promise<void> {
+  const ownsLoad = isCurrent;
+  const revision = documentRevisionKey(payload.id);
+  isCurrent = () => ownsLoad() && documentRevisionKey(payload.id) === revision && appState.selectedId === payload.id;
   if (!isCurrent()) return;
   const cache = documentViewCache.get(payload.id) ?? {};
   let sourcePayload = cache.source;
@@ -283,12 +291,15 @@ export async function fetchDocumentView(
   documentId: string,
   view: ViewMode,
 ): Promise<RenderedDocument | null> {
+  const revision = documentRevisionKey(documentId);
   try {
     const response = await fetch(
       contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(view)}`)),
+      { cache: "no-store" },
     );
     if (!response.ok) return null;
-    return (await response.json()) as RenderedDocument;
+    const payload = (await response.json()) as RenderedDocument;
+    return documentRevisionKey(documentId) === revision ? payload : null;
   } catch {
     return null;
   }
@@ -303,6 +314,9 @@ export async function renderSplitPayloads(
   renderedPayload: RenderedDocument,
   isCurrent: () => boolean = alwaysCurrent,
 ): Promise<void> {
+  const ownsLoad = isCurrent;
+  const revision = documentRevisionKey(sourcePayload.id);
+  isCurrent = () => ownsLoad() && documentRevisionKey(sourcePayload.id) === revision && appState.selectedId === sourcePayload.id;
   if (!isCurrent()) return;
   const orientation: "split-h" | "split-v" =
     appState.viewLayout === "split-v" ? "split-v" : "split-h";
@@ -397,6 +411,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // `#section`, cross-doc link with hash) run their own `scrollToFragment`
   // afterwards — the reset happens first, then the fragment scroll wins.
   const isDocumentSwitch = lastLoadedDocumentId !== documentId;
+  if (isDocumentSwitch && lastLoadedDocumentId) forgetDocumentFacts(lastLoadedDocumentId);
   lastLoadedDocumentId = documentId;
   if (isDocumentSwitch) {
     // The update signal marks "the doc you are viewing changed on disk" —
@@ -435,6 +450,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   setPreviewMode({ kind: "document" });
   if (doc.kind === "binary") {
     documentLoadRetry.settle();
+    syncFileFactsStrip({ kind: "hidden" });
     if (isViewableImageName(doc.name)) {
       renderImagePreview(doc);
     } else {
@@ -461,6 +477,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   try {
     const response = await fetch(
       contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(apiView)}`)),
+      { cache: "no-store" },
     );
     if (response.ok) payload = (await response.json()) as RenderedDocument;
     else failedStatus = response.status;

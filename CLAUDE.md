@@ -90,7 +90,14 @@ src/
 │                   indexing status); cli.ts imports these
 ├── server/         routes (single source of truth for the HTTP route
 │                   table + the shared fetch fallback), watch-session
-│                   (live-reload engine), roots (resolution + scanning),
+│                   (coordinates incremental document updates and recovery),
+│                   file-observer (native recursive directory observation,
+│                   shared subscriptions and bounded discovery; Chokidar is
+│                   the polling/unsupported-platform fallback), file-index
+│                   (path map, bounded classification and event batches),
+│                   repository-refresh (independent Git work and probes),
+│                   newest-document (incremental Follow catch-up),
+│                   roots (resolution + one-shot scanning),
 │                   search (content sweep over the watched roots),
 │                   render-dispatch, static-files, navigation, port-probe
 ├── document/       document + repository git concerns — metadata, diff,
@@ -127,7 +134,9 @@ src/
 │                   and the hub's push-only service worker
 └── shared/         html, types, license-check, version, worktree-contract
                     + worktree-branches (the worktree wire DTOs/errors and
-                    branch/destination rules shared by client and Hub)
+                    branch/destination rules shared by client and Hub),
+                    document-updates (versioned snapshots/patches and the
+                    keyed reducer used by Hub and browser)
 ```
 
 Outside `src/`: `desktop/macos/` is **UatuCode Desktop**, the SwiftUI macOS
@@ -175,6 +184,13 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
   `TreeView.withProgrammaticUpdate(fn)` guard that distinguishes real
   user clicks from library-fired callbacks. Spec at
   `openspec/specs/follow-mode/spec.md`.
+- **Document updates are incremental.** Serve the shell while discovery runs.
+  Use the observer's events and supplied stats to update the index; ordinary
+  edits and idle timers must never initiate a whole-tree scan. File delivery
+  and Source/Rendered content must not wait for Git. Only full snapshots may
+  be coalesced in the Hub queue; dropping a document patch loses its predecessor.
+  Browser preview and provenance work must check file revision and selection
+  ownership before updating content or caches.
 
 ## Release-note discipline
 

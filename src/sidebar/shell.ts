@@ -21,6 +21,9 @@ import {
   syncPaneDom,
 } from "./panes";
 import { disposeTreeView, ensureTreeView } from "./tree-mount";
+import type { DocumentPatch } from "../shared/document-updates";
+import { syncIndexStatus } from "../shell/index-status";
+import { documentIndex } from "../shell/document-state";
 
 const appShellElementMaybe = document.querySelector<HTMLDivElement>(".app-shell");
 const sidebarResizerElementMaybe = document.querySelector<HTMLDivElement>("#sidebar-resizer");
@@ -57,7 +60,8 @@ const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
 const SIDEBAR_MIN_WIDTH = 320;
 const SIDEBAR_MAX_WIDTH = 620;
 
-export function renderSidebar() {
+export function renderSidebar(incremental = false) {
+  syncIndexStatus();
   syncPaneDom();
   renderPanelsMenu();
   renderChangeOverview();
@@ -81,7 +85,8 @@ export function renderSidebar() {
     // message as a sibling element instead of overwriting #tree's children.
     treeElement.hidden = true;
     treeEmptyMessageElement.hidden = false;
-    treeEmptyMessageElement.textContent = "No files found in the watched roots.";
+    treeEmptyMessageElement.textContent = appState.discovery.status === "ready" ? "No files found in the watched roots."
+      : appState.discovery.status === "error" ? `Indexing failed: ${appState.discovery.message ?? "Unavailable"}` : "Indexing files…";
     return;
   }
 
@@ -98,7 +103,9 @@ export function renderSidebar() {
   const showFilterEmptyState = filterOn && !hasFilterMembership;
 
   if (showFilterEmptyState) {
-    disposeTreeView();
+    // Git can still be loading. Preserve the All-mode expansion snapshot
+    // while the filtered view is empty, so Changed -> All can restore it.
+    ensureTreeView().update(appState.roots, appState.selectedId, { filter, incremental });
     treeElement.hidden = true;
     treeEmptyMessageElement.hidden = false;
     treeEmptyMessageElement.textContent = filterEmptyStateCopy(appState.repositories);
@@ -115,7 +122,7 @@ export function renderSidebar() {
   treeElement.hidden = false;
   treeEmptyMessageElement.hidden = true;
   const view = ensureTreeView();
-  view.update(appState.roots, appState.selectedId, { filter });
+  view.update(appState.roots, appState.selectedId, { filter, incremental });
   view.setGitStatus(collectGitStatusEntries(appState.repositories));
 
   documentCountElement.textContent = formatFileCountDisplay({
@@ -125,6 +132,33 @@ export function renderSidebar() {
     totalCount,
     totalBinaryCount,
   });
+}
+
+export function renderSidebarPatch(patch: DocumentPatch): void {
+  syncIndexStatus();
+  const view = ensureTreeView();
+  if (!view.applyPatch(patch, appState.selectedId)) {
+    renderSidebar(true);
+    return;
+  }
+  if (patch.repositories && appState.filesPaneFilter !== "all" && !view.updateFilter(computeFilesPaneFilterMembership(appState.repositories))) {
+    renderSidebar(true);
+    return;
+  }
+  const filterEmpty = appState.filesPaneFilter !== "all" && !view.hasFilterMembers();
+  treeElement.hidden = filterEmpty || view.getVisibleLeafCount() === 0;
+  treeEmptyMessageElement.hidden = !treeElement.hidden;
+  if (treeElement.hidden) treeEmptyMessageElement.textContent = filterEmpty ? filterEmptyStateCopy(appState.repositories)
+    : appState.discovery.status === "ready" ? "No files found in the watched roots." : "Indexing files…";
+  documentCountElement.textContent = formatFileCountDisplay({ filterOn: appState.filesPaneFilter !== "all",
+    visibleCount: filterEmpty ? 0 : view.getVisibleLeafCount(), totalCount: documentIndex.documentCount,
+    visibleBinaryCount: filterEmpty ? 0 : view.getVisibleBinaryLeafCount(), totalBinaryCount: documentIndex.binaryCount });
+  documentCountElement.title = appState.discovery.status === "ready" ? "" : appState.discovery.message ?? "Indexing files…";
+  if (patch.repositories || patch.repositoryState) renderChangeOverview();
+  if (patch.repositories) {
+    renderGitLog(); syncFilesPaneFilterControl();
+    view.setGitStatus(collectGitStatusEntries(appState.repositories));
+  }
 }
 
 export function initSidebarCollapse() {

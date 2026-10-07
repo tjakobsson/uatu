@@ -150,9 +150,7 @@ function isKnownBinary(name: string): boolean {
   return ext.length > 0 && BINARY_EXTENSIONS.has(ext);
 }
 
-export async function classifyFile(absolutePath: string, name?: string): Promise<DocumentKind> {
-  const fileName = name ?? path.basename(absolutePath);
-
+export function classifyFileName(fileName: string): DocumentKind | null {
   if (isMarkdownPath(fileName)) {
     return "markdown";
   }
@@ -169,7 +167,11 @@ export async function classifyFile(absolutePath: string, name?: string): Promise
     return "binary";
   }
 
-  return await sniffBinary(absolutePath);
+  return null;
+}
+
+export async function classifyFile(absolutePath: string, name?: string): Promise<DocumentKind> {
+  return classifyFileName(name ?? path.basename(absolutePath)) ?? await sniffBinary(absolutePath);
 }
 
 async function sniffBinary(absolutePath: string): Promise<DocumentKind> {

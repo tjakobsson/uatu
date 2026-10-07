@@ -6,6 +6,7 @@
 
 import type { DocumentMeta } from "../shared/types";
 import { appState } from "./state";
+import { documentIndex } from "./document-state";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -45,6 +46,7 @@ export function findDocumentByRelativePath(relativePath: string): DocumentMeta |
 }
 
 export function findDocumentById(documentId: string): DocumentMeta | null {
+  if (documentIndex.epoch) return documentIndex.find(documentId) ?? null;
   for (const root of appState.roots) {
     const doc = root.docs.find(candidate => candidate.id === documentId);
     if (doc) {

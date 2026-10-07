@@ -12,6 +12,7 @@ import {
   setPreviewBase,
 } from "./header";
 import { hideViewToggle } from "./view-mode";
+import { documentRevisionKey } from "../shell/document-state";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -62,5 +63,5 @@ export function renderImagePreview(doc: DocumentMeta): void {
   // path separators to preserve, and we MUST encode `#` and `?` so filenames
   // like `screenshot#2.png` aren't truncated by the URL parser into a path
   // ending at `screenshot` plus a `#2.png` fragment.
-  previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" src="./${encodeURIComponent(doc.name)}"></div>`;
+  previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" src="./${encodeURIComponent(doc.name)}?revision=${encodeURIComponent(documentRevisionKey(doc.id))}"></div>`;
 }

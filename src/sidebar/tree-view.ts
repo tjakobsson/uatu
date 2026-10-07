@@ -12,6 +12,7 @@
 import { FileTree, themeToTreeStyles, type FileTreeDirectoryHandle, type FileTreeItemHandle, type GitStatusEntry, type TreeThemeStyles } from "@pierre/trees";
 
 import type { DocumentMeta, RepositorySnapshot, RootGroup } from "../shared/types";
+import type { DocumentPatch } from "../shared/document-updates";
 import { activeColorScheme, onColorSchemeChange, type ColorScheme } from "../shell/theme";
 
 // The library's palette is handed over as inline styles generated for the
@@ -47,6 +48,7 @@ export type FilesPaneFilterMembership = {
 };
 
 export type TreeViewUpdateOptions = {
+  incremental?: boolean;
   // When present, restricts the rendered path set to docs whose
   // watch-root-relative path is in the allow-list for their root (plus the
   // ancestor directories of those docs, auto-expanded). When null/undefined,
@@ -65,6 +67,11 @@ export class TreeView {
   private readonly onSelectDocument: TreeViewSelectionHandler;
   private readonly onDeselectDocument: (() => void) | undefined;
   private readonly pathToDocumentId = new Map<string, string>();
+  private readonly documentPaths = new Map<string, string>();
+  private readonly pathsByRoot = new Map<string, Map<string, string>>();
+  private readonly documentsByPath = new Map<string, DocumentMeta>();
+  private renderedPaths = new Set<string>();
+  private filter: FilesPaneFilterMembership | null = null;
   private readonly rootPrefixById = new Map<string, string>();
   // Visible-leaf counts the library is currently rendering. Drives the
   // sidebar's `N of M files` chip count; under filter Changed, these reflect
@@ -147,8 +154,21 @@ export class TreeView {
   ): void {
     const { paths: fullPaths, mapping, rootPrefix } = buildPathInputs(roots);
     this.pathToDocumentId.clear();
+    this.documentPaths.clear();
+    this.pathsByRoot.clear();
+    this.documentsByPath.clear();
     for (const [path, id] of mapping) {
       this.pathToDocumentId.set(path, id);
+      if (!this.documentPaths.has(id)) this.documentPaths.set(id, path);
+    }
+    for (const root of roots) {
+      const paths = new Map<string, string>();
+      this.pathsByRoot.set(root.id, paths);
+      for (const doc of root.docs) {
+        const path = `${rootPrefix.get(root.id) ?? ""}${doc.relativePath}`;
+        paths.set(doc.id, path);
+        this.documentsByPath.set(path, doc);
+      }
     }
     this.rootPrefixById.clear();
     for (const [id, prefix] of rootPrefix) {
@@ -156,6 +176,7 @@ export class TreeView {
     }
 
     const filter = options?.filter ?? null;
+    this.filter = filter;
     const nextFilterKind: "all" | "changed" = filter !== null ? "changed" : "all";
     const previousFilterKind = this.lastFilterKind;
 
@@ -273,6 +294,7 @@ export class TreeView {
         // `scrollToPath` to reveal virtualized rows for assertion.
         (this.container as unknown as { __pierreFileTree: FileTree }).__pierreFileTree = this.tree;
         this.lastPathsKey = pathsFingerprint(renderedPaths);
+        this.renderedPaths = new Set(renderedPaths);
         this.ensureRevealCueStyleElement();
         this.syncFollowOverrideObserver();
         this.applyFollowOverrideAttribute();
@@ -304,7 +326,14 @@ export class TreeView {
         // All) with the new reveal set before resetting.
         const preserved = nextFilterKind === "all" ? this.readExpandedPaths() : [];
         const mergedReveal = mergeUnique(autoExpanded, preserved);
-        tree.resetPaths(renderedPaths, { initialExpandedPaths: mergedReveal });
+        if (options?.incremental && previousFilterKind === nextFilterKind) {
+          const next = new Set(renderedPaths);
+          tree.batch([
+            ...[...this.renderedPaths].filter(path => !next.has(path)).map(path => ({ type: "remove" as const, path })),
+            ...renderedPaths.filter(path => !this.renderedPaths.has(path)).map(path => ({ type: "add" as const, path })),
+          ]);
+        } else tree.resetPaths(renderedPaths, { initialExpandedPaths: mergedReveal });
+        this.renderedPaths = new Set(renderedPaths);
         if (previousFilterKind === "all" && nextFilterKind === "all") {
           // Initialization also opens ancestors of expanded descendants. Undo
           // that implicit reveal without collapsing the descendants themselves.
@@ -336,7 +365,121 @@ export class TreeView {
   }
 
   // Push the latest changed-files list into the library's git-status API.
-  // Empty input clears all annotations.
+  applyPatch(patch: DocumentPatch, selectedId: string | null): boolean {
+    if (!this.tree) return false;
+    if (patch.roots?.some(root => !this.rootPrefixById.has(root.id))) return false;
+    const tree = this.tree;
+    const previousId = this.requestedDocumentId;
+    const operations: { type: "add" | "remove"; path: string }[] = [];
+    const removeVisible = (path: string) => {
+      if (!this.renderedPaths.delete(path)) return;
+      operations.push({ type: "remove", path });
+      this.renderedLeafCount--;
+      if (this.documentsByPath.get(path)?.kind === "binary") this.renderedBinaryLeafCount--;
+    };
+    const allowed = (doc: DocumentMeta) => !this.filter || this.filter.allowedByRoot.get(doc.rootId)?.has(doc.relativePath) || doc.id === selectedId;
+    this.withProgrammaticUpdate(this.currentSelectedPath, () => {
+      for (const ref of patch.removals) {
+        const path = this.pathsByRoot.get(ref.rootId)?.get(ref.id);
+        if (!path) continue;
+        removeVisible(path);
+        this.pathToDocumentId.delete(path);
+        this.pathsByRoot.get(ref.rootId)?.delete(ref.id);
+        this.documentsByPath.delete(path);
+        if (this.documentPaths.get(ref.id) === path) {
+          this.documentPaths.delete(ref.id);
+          for (const paths of this.pathsByRoot.values()) {
+            const other = paths.get(ref.id);
+            if (other) { this.documentPaths.set(ref.id, other); break; }
+          }
+        }
+      }
+      for (const doc of patch.upserts) {
+        const prefix = this.rootPrefixById.get(doc.rootId);
+        if (prefix === undefined) continue;
+        const path = `${prefix}${doc.relativePath}`;
+        if (!this.documentPaths.has(doc.id)) this.documentPaths.set(doc.id, path);
+        this.pathToDocumentId.set(path, doc.id);
+        this.pathsByRoot.get(doc.rootId)?.set(doc.id, path);
+        const visible = this.renderedPaths.has(path);
+        if (!allowed(doc)) removeVisible(path);
+        else {
+          if (!visible) {
+            this.renderedPaths.add(path); operations.push({ type: "add", path }); this.renderedLeafCount++;
+          } else if (this.documentsByPath.get(path)?.kind === "binary") this.renderedBinaryLeafCount--;
+          if (doc.kind === "binary") this.renderedBinaryLeafCount++;
+        }
+        this.documentsByPath.set(path, doc);
+      }
+      const old = this.currentSelectedPath ? this.documentsByPath.get(this.currentSelectedPath) : undefined;
+      if (old && !allowed(old)) removeVisible(this.currentSelectedPath!);
+      const nextPath = selectedId ? this.pathForDocumentId(selectedId) : null;
+      const nextDoc = nextPath ? this.documentsByPath.get(nextPath) : undefined;
+      if (nextPath && nextDoc && !this.renderedPaths.has(nextPath)) {
+        this.renderedPaths.add(nextPath); operations.push({ type: "add", path: nextPath });
+        this.renderedLeafCount++;
+        if (nextDoc.kind === "binary") this.renderedBinaryLeafCount++;
+      }
+      if (operations.length) tree.batch(operations);
+      this.requestedDocumentId = selectedId;
+      this.currentSelectedPath = selectedId ? this.pathForDocumentId(selectedId) : null;
+      this.followOverridePath = this.filter && this.currentSelectedPath
+        && !this.filter.allowedByRoot.get(this.documentsByPath.get(this.currentSelectedPath)?.rootId ?? "")?.has(this.documentsByPath.get(this.currentSelectedPath)?.relativePath ?? "")
+        ? this.currentSelectedPath : null;
+      this.syncFollowOverrideObserver();
+      this.applyFollowOverrideAttribute();
+      this.syncDocumentSelection(selectedId, this.currentSelectedPath, previousId !== selectedId);
+    });
+    // A later explicit full update recomputes its fingerprint; ordinary live
+    // patches do not sort/join the complete path list to maintain a hash.
+    if (operations.length) this.lastPathsKey = "";
+    return true;
+  }
+
+  // Reconcile Git filter membership from changed paths, without rebuilding
+  // the mapping for every unrelated file in the workspace.
+  updateFilter(filter: FilesPaneFilterMembership): boolean {
+    if (!this.tree || this.lastFilterKind !== "changed") return false;
+    this.filter = filter;
+    const wanted = new Set<string>();
+    for (const [rootId, paths] of filter.allowedByRoot) {
+      const prefix = this.rootPrefixById.get(rootId);
+      if (prefix === undefined) continue;
+      for (const relative of paths) {
+        const path = `${prefix}${relative}`;
+        if (this.documentsByPath.has(path)) wanted.add(path);
+      }
+    }
+    this.followOverridePath = this.currentSelectedPath && !wanted.has(this.currentSelectedPath) ? this.currentSelectedPath : null;
+    if (this.currentSelectedPath) wanted.add(this.currentSelectedPath);
+    const added = [...wanted].filter(path => !this.renderedPaths.has(path));
+    const removed = [...this.renderedPaths].filter(path => !wanted.has(path));
+    this.withProgrammaticUpdate(this.currentSelectedPath, () => {
+      if (added.length || removed.length) {
+        this.tree!.batch([...removed.map(path => ({ type: "remove" as const, path })), ...added.map(path => ({ type: "add" as const, path }))]);
+        for (const path of new Set(added.flatMap(ancestorPaths))) {
+          const handle = this.tree!.getItem(path);
+          if (handle && isDirectoryHandle(handle)) handle.expand();
+        }
+        this.lastPathsKey = "";
+      }
+      this.renderedPaths = wanted;
+      this.renderedLeafCount = wanted.size;
+      this.renderedBinaryLeafCount = [...wanted].filter(path => this.documentsByPath.get(path)?.kind === "binary").length;
+      this.syncFollowOverrideObserver();
+      this.applyFollowOverrideAttribute();
+      this.syncDocumentSelection(this.requestedDocumentId, this.currentSelectedPath, false);
+    });
+    return true;
+  }
+
+  hasFilterMembers(): boolean {
+    if (!this.filter) return true;
+    for (const paths of this.filter.allowedByRoot.values()) if (paths.size) return true;
+    return false;
+  }
+
+  // Empty input clears all Git annotations.
   setGitStatus(entries: readonly GitStatusForView[]): void {
     if (this.tree === null) {
       return;
@@ -602,12 +745,7 @@ export class TreeView {
   }
 
   private pathForDocumentId(documentId: string): string | null {
-    for (const [path, id] of this.pathToDocumentId) {
-      if (id === documentId) {
-        return path;
-      }
-    }
-    return null;
+    return this.documentPaths.get(documentId) ?? null;
   }
 
   // Read the library's current expansion state by probing every directory

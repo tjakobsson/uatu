@@ -1,0 +1,16 @@
+{
+  "files": 1000,
+  "fixtureReadyMs": 179.57379200000003,
+  "totalMs": 943.6786669999999,
+  "tree": {
+    "resets": 0,
+    "adds": 0,
+    "removes": 0
+  },
+  "patches": [
+    {
+      "entries": 1,
+      "bytes": 965
+    }
+  ]
+}

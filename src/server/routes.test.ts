@@ -186,6 +186,17 @@ describe("buildRoutes — base-path prefixing", () => {
 });
 
 describe("buildRoutes — watch context", () => {
+  test("index recovery and repository refresh retain credential and origin gates", async () => {
+    let calls = 0;
+    const routes = buildFontTestRoutes(undefined, (() => ({ recover: async () => { calls++; }, requestRepositoryRefresh: () => { calls++; } })) as never);
+    for (const endpoint of ["/api/index/recover", "/api/repositories/refresh"]) {
+      const handler = routes[endpoint] as { POST: (request: Request) => Response | Promise<Response> };
+      expect((await handler.POST(new Request(`http://127.0.0.1${endpoint}`, { method: "POST" }))).status).toBe(401);
+      expect((await handler.POST(new Request(`http://127.0.0.1${endpoint}?t=test-credential`, { method: "POST", headers: { origin: "http://127.0.0.1:9999" } }))).status).toBe(403);
+      expect((await handler.POST(new Request(`http://127.0.0.1${endpoint}?t=test-credential`, { method: "POST", headers: { origin: "http://127.0.0.1" } }))).ok).toBe(true);
+    }
+    expect(calls).toBe(2);
+  });
   test("lets the session normalize a stale file scope", async () => {
     let receivedScope: unknown;
     const getSession = (() => ({
@@ -195,8 +206,8 @@ describe("buildRoutes — watch context", () => {
       },
     })) as never;
     const routes = buildFontTestRoutes(undefined, getSession);
-    const handler = routes["/api/state"] as { GET: (request: Request) => Response };
-    const response = handler.GET(new Request(
+    const handler = routes["/api/state"] as { GET: (request: Request) => Promise<Response> };
+    const response = await handler.GET(new Request(
       "http://127.0.0.1/api/state?scope=file&documentId=%2Fremoved%2FREADME.md",
     ));
 
@@ -217,7 +228,7 @@ describe("buildRoutes — /api/document failures", () => {
       await writeFile(filePath, "# Notes\n");
       const roots = await scanRoots([{ kind: "dir", absolutePath: directory }]);
       await prepare(filePath);
-      const getSession = (() => ({ getRoots: () => roots })) as never;
+      const getSession = (() => ({ getDocumentRoots: () => roots, ensureDocument: async () => roots[0]?.docs[0] })) as never;
       const handler = buildFontTestRoutes(undefined, getSession)["/api/document"] as {
         GET: (request: Request) => Promise<Response>;
       };

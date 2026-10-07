@@ -8,6 +8,7 @@
 import { appUrl } from "../shared/app-url";
 import { contextualAppUrl } from "../shell/watch-context";
 import { appState } from "../shell/state";
+import { documentIndex } from "../shell/document-state";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import type { SearchEvent, SearchFileResult } from "../server/search";
 import {
@@ -498,6 +499,10 @@ export function noteSearchCorpusChange(): void {
     return;
   }
   if (results.length === 0) {
+    return;
+  }
+  if (documentIndex.epoch) {
+    if (results.some(result => !documentIndex.find(result.documentId))) { stale = true; renderNotice(); }
     return;
   }
   const present = new Set<string>();

@@ -15,11 +15,21 @@ import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { pushSelection, recordEmptySelection } from "./history";
 import { appState } from "./state";
-import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId } from "./selection";
+import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId, getSelectionGeneration, getSelectionActivation } from "./selection";
 import { persistPersonalWorkspaceState } from "./personal-state";
 import { revealPreviewSurface } from "./tab-bar";
 
 export { chooseSelectionForFileEvent };
+let pendingCatchUp: { generation: number; activation: number } | null = null;
+
+export function finishFollowDiscovery(defaultId: string | null, liveChange: string | null): string | null {
+  if (liveChange) { pendingCatchUp = null; return null; }
+  if (!pendingCatchUp || appState.discovery.status !== "ready") return null;
+  const intent = pendingCatchUp;
+  pendingCatchUp = null;
+  return appState.followEnabled && intent.generation === getSelectionGeneration() && intent.activation === getSelectionActivation()
+    ? defaultId : null;
+}
 
 const followToggleElementMaybe = document.querySelector<HTMLButtonElement>("#follow-toggle");
 
@@ -47,6 +57,7 @@ export function initFollowToggle(): void {
 // this module flip it; boot / URL routing / navigation call sites use this
 // instead of assigning directly (module-structure appState field ownership).
 export function setFollowEnabled(next: boolean, restore = false): void {
+  if (!next) pendingCatchUp = null;
   // Reading a saved Follow preference during boot is not a user enabling it.
   if (next && !restore) resumeDocumentSelection();
   appState.followEnabled = next;
@@ -65,6 +76,11 @@ export function applyChipClick(): void {
   syncFollowToggle();
 
   if (!wasEnabled && appState.followEnabled) {
+    if (appState.discovery.status !== "ready") {
+      pendingCatchUp = { generation: getSelectionGeneration(), activation: getSelectionActivation() };
+      setPreviewMode({ kind: "document" });
+      return;
+    }
     const jumpTo = selectionForChipTurnOn(appState.roots, appState.selectedId);
     if (jumpTo) {
       setSelectedId(jumpTo);

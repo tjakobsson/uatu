@@ -6,8 +6,8 @@
 //
 // Topics and their cursors (src/shared/live-protocol.ts is the contract):
 //
-//   document      child /api/events?<context>. Every frame is a full state
-//                 snapshot, so a "replay" is the latest snapshot: a joiner
+//   document      child /api/events?<context>. Ordered patches maintain a
+//                 keyed inventory; replay materializes its snapshot: a joiner
 //                 behind the head gets it as `data`, one at the head gets
 //                 nothing. Cursors are hub-assigned (`<epoch>.<seq>`).
 //   inventory     child /api/chat/conversations/events — an invalidation
@@ -69,6 +69,7 @@ import {
 } from "../shared/live-protocol";
 import { SseFrameParser, type SseFrame } from "./live-sse";
 import { statusCategoryOf, type ProxyStatusCategory } from "./proxy";
+import { DocumentStateIndex, type DocumentUpdate } from "../shared/document-updates";
 import { PRESENCE_GRACE_MS, type Presence, type PresenceSource } from "./presence";
 
 // Where upstream bytes come from. The hub implements it over the session
@@ -295,6 +296,7 @@ class Upstream {
   bufferBytes = 0;
   // Document / activity snapshots and the latest inventory tick payload.
   latest: { cursor: string; data: unknown } | null = null;
+  documentIndex: DocumentStateIndex | null = null;
   lingerTimer: ReturnType<typeof setTimeout> | null = null;
   retryTimer: ReturnType<typeof setTimeout> | null = null;
   retryDelayMs = 0;
@@ -779,7 +781,7 @@ export class LiveBroker implements PresenceSource {
       case "activity": {
         subscriber.live = true;
         if (upstream.latest && subscriber.cursor !== upstream.head) {
-          this.emitData(subscriber, upstream.latest.data, upstream.latest.cursor);
+          this.emitData(subscriber, upstream.documentIndex?.snapshot() ?? upstream.latest.data, upstream.latest.cursor);
         }
         this.emitSignal(subscriber, { kind: "ready" }, upstream);
         return;
@@ -1045,6 +1047,7 @@ export class LiveBroker implements PresenceSource {
       upstream.seq = 0;
       upstream.head = `${upstream.epoch}.0`;
       upstream.latest = null;
+      upstream.documentIndex = null;
       upstream.buffer = [];
       upstream.bufferBytes = 0;
     }
@@ -1151,9 +1154,20 @@ export class LiveBroker implements PresenceSource {
     switch (upstream.topic) {
       case "document": {
         if (frame.event !== "state") return false;
-        const cursor = this.nextHubCursor(upstream);
         const data = parseJson(frame.data);
-        upstream.latest = { cursor, data };
+        if (data && typeof data === "object" && "kind" in data && (data.kind === "snapshot" || data.kind === "patch")) {
+          upstream.documentIndex ??= new DocumentStateIndex();
+          const result = upstream.documentIndex.apply(data as DocumentUpdate);
+          if (result === "resync") {
+            this.fail(upstream, "unreachable");
+            return true;
+          }
+          if (result === "ignored") return false;
+        }
+        const cursor = this.nextHubCursor(upstream);
+        // The keyed accumulator materializes only when a client joins. Holding
+        // the patch here must never make a joiner mistake it for a baseline.
+        upstream.latest = { cursor, data: upstream.documentIndex ? null : data };
         this.fanOut(upstream, data, cursor);
         return false;
       }

@@ -114,9 +114,10 @@ class ClientStream {
     if (this.ended) return;
     const subscriptionId = envelope.topic === "activity" ? null : liveSubscriptionId({ topic: envelope.topic, key: envelope.key });
     if (envelope.event.kind === "resync" && subscriptionId !== null) this.subscriptions.delete(subscriptionId);
-    // Document frames are full workspace snapshots (megabytes for a large
-    // tree); conversation frames are events and are never coalesced.
-    const coalescible = envelope.topic === "document" && envelope.event.kind === "data";
+    // Only a complete baseline can replace an undelivered document frame.
+    // Patches name their predecessor, so dropping one creates a replay gap.
+    const coalescible = envelope.topic === "document" && envelope.event.kind === "data"
+      && !(envelope.event.data && typeof envelope.event.data === "object" && "kind" in envelope.event.data && envelope.event.data.kind === "patch");
     this.enqueue(subscriptionId, formatLiveEnvelope(envelope), coalescible);
   }
 

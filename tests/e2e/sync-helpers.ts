@@ -57,6 +57,8 @@ export async function recordDocumentFrames(page: Page): Promise<void> {
     const frames: unknown[] = [];
     scope.__e2eDocumentFrames = frames;
     const Native = window.EventSource;
+    const documents = new Map<string, { id: string; relativePath: string }>();
+    let defaultId: string | null = null;
     window.EventSource = class extends Native {
       constructor(url: string | URL, options?: EventSourceInit) {
         super(url, options);
@@ -64,17 +66,28 @@ export async function recordDocumentFrames(page: Page): Promise<void> {
           const frame = JSON.parse((event as MessageEvent).data);
           if (frame.topic !== "document" || frame.event?.kind !== "data") return;
           const state = frame.event.data as {
+            kind?: string;
             generatedAt: number;
             changedId: string | null;
             defaultDocumentId: string | null;
-            roots: { docs: { id: string; relativePath: string }[] }[];
+            roots?: { docs?: { id: string; relativePath: string }[] }[];
+            upserts?: { id: string; relativePath: string }[];
+            removals?: { id: string }[];
           };
-          const docs = state.roots.flatMap(root => root.docs);
+          if (state.kind !== "patch") {
+            documents.clear();
+            for (const doc of state.roots?.flatMap(root => root.docs ?? []) ?? []) documents.set(doc.id, doc);
+          } else {
+            for (const doc of state.upserts ?? []) documents.set(doc.id, doc);
+            for (const doc of state.removals ?? []) documents.delete(doc.id);
+          }
+          if (state.defaultDocumentId !== undefined) defaultId = state.defaultDocumentId;
+          const docs = [...documents.values()];
           const pathOf = (id: string | null) => docs.find(doc => doc.id === id)?.relativePath ?? null;
           frames.push({
             generatedAt: state.generatedAt,
             changed: pathOf(state.changedId),
-            defaultPath: pathOf(state.defaultDocumentId),
+            defaultPath: pathOf(defaultId),
             paths: docs.map(doc => doc.relativePath),
           });
           if (frames.length > 100) frames.shift();

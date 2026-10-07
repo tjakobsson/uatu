@@ -94,6 +94,11 @@ for (const touch of [false, true]) {
     test.use(touch ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : {});
     test.beforeEach(async ({ page, request }, testInfo) => {
       await request.post("/__e2e/reset", { data: { git: testInfo.title.includes("commit selection"), extras: { "a-selected.txt": "Selected text contents\n", "hero.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>' } } });
+      // This suite replaces live delivery with controlled snapshots, so wait
+      // for the repository baseline it will otherwise never receive.
+      if (testInfo.title.includes("commit selection")) {
+        await expect.poll(async () => (await request.get("/api/state").then(r => r.json())).repositoryState.status).toBe("ready");
+      }
       await installStream(page);
       await page.goto("/");
       const state = await request.get("/api/state").then(r => r.json());

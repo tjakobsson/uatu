@@ -4,6 +4,8 @@ import { encodeReplayCursor } from "../chat/replay";
 import { MetricsRegistry } from "../debug/metrics";
 import { upstreamActiveGauge, upstreamCounter } from "../debug/stream-metrics";
 import type { LiveEnvelope } from "../shared/live-protocol";
+import type { DocumentSnapshot, DocumentPatch } from "../shared/document-updates";
+import { BUILD_SUMMARY, createWatchSession } from "../server/watch-session";
 import {
   createRepeatFoldingDiagnosticSink,
   LiveBroker,
@@ -219,6 +221,39 @@ describe("refcounted upstreams (2.1)", () => {
 });
 
 describe("cursors, replay, and topic-scoped resync (2.2)", () => {
+  test("document joiners receive a materialized snapshot after live patches", async () => {
+    const child = fakeSource();
+    const live = broker(child.source);
+    const first = sink();
+    live.subscribe(first, "ws", { topic: "document", key: "" });
+    await waitFor(() => child.opened.length === 1, "document upstream");
+    const initial: DocumentSnapshot = {
+      ...createWatchSession([], true).getStatePayload(), roots: [], kind: "snapshot", epoch: "child", revision: 0, build: BUILD_SUMMARY,
+      discovery: { status: "ready", discovered: 0 }, repositoryState: { status: "ready", generation: 1 },
+    };
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(initial)}\n\n`);
+    await waitFor(() => first.envelopes.length === 2, "initial snapshot and ready");
+    const patch: DocumentPatch = {
+      kind: "patch", epoch: "child", previousRevision: 0, revision: 1, generatedAt: Date.now() + 1,
+      scope: { kind: "folder" }, compareTarget: "base", unscopedFingerprint: "1", changedId: "/docs/a.md",
+      roots: [{ id: "/docs", path: "/docs", label: "docs", hiddenCount: 0 }], removals: [],
+      upserts: [{ id: "/docs/a.md", rootId: "/docs", name: "a.md", relativePath: "a.md", mtimeMs: 1, revision: 1, kind: "markdown" }],
+    };
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify(patch)}\n\n`);
+    await waitFor(() => first.envelopes.length === 3, "live patch");
+    expect(first.envelopes[2]!.event).toEqual({ kind: "data", data: patch });
+    const second = sink();
+    live.subscribe(second, "ws", { topic: "document", key: "" });
+    await waitFor(() => second.envelopes.length === 2, "joined snapshot");
+    expect(second.envelopes[0]!.event).toMatchObject({ kind: "data", data: { kind: "snapshot", revision: 1, roots: [{ docs: patch.upserts }] } });
+    expect(second.envelopes[0]!.cursor).toBe(first.envelopes[2]!.cursor);
+    const atHead = sink();
+    live.subscribe(atHead, "ws", { topic: "document", key: "", cursor: first.envelopes[2]!.cursor });
+    expect(atHead.envelopes.map(event => event.event.kind)).toEqual(["ready"]);
+    child.opened[0]!.push(`event: state\ndata: ${JSON.stringify({ ...patch, previousRevision: 8, revision: 9 })}\n\n`);
+    await waitFor(() => child.opened[0]!.cancelled, "gap recovery");
+    expect(first.envelopes.at(-1)?.event.kind).toBe("unavailable");
+  });
   test("a stale conversation cursor resyncs the conversation topic while the document topic replays", async () => {
     const child = fakeSource({
       refuse: path => {

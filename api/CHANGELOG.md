@@ -2,6 +2,21 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required. An entry is headed `Unreleased` until the release that ships it; the release-prep step replaces that with the version tag (`v0.7.0`), so a consumer can tell which revision pair a given uatu version speaks. An additive change that lands after a pair has shipped gets its own entry under the same pair, stamped with its own release, rather than being appended to the shipped entry.
 
+## Hub 10 / Workspace 24 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- The document topic now carries `DocumentUpdate`: a snapshot with discovery state, epoch, and revision, followed by path-specific patches and independent repository freshness updates.
+- File revisions identify saves independently of modification time. The Hub supplies coherent snapshots to joining or behind subscribers.
+- Snapshots retain the latest eligible edit revision for Follow catch-up without replaying it after unrelated repository refreshes.
+- Workspace startup can report indexing before its inventory is complete. Same-build document rendering and Git provenance requests are independent; the internal recovery and provenance routes remain excluded from the public workspace API.
+
+### Migration
+
+Update document-topic consumers to apply a patch only when its epoch and predecessor match their current state. Resubscribe for a snapshot on a gap. Use file revisions to invalidate preview caches, and treat indexing as an incomplete inventory. Hub envelopes and other topics retain revision 10 semantics.
+
 ## Hub 10 / Workspace 23 - Unreleased
 
 Compatibility: breaking (workspace)

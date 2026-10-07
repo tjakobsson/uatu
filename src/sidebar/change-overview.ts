@@ -83,8 +83,13 @@ function renderRepositoryName(repository: RepositorySnapshot): string {
 }
 
 export function renderChangeOverview() {
+  const freshness = appState.repositoryFreshness;
+  const pending = freshness.status !== "ready" ? `<div class="pane-empty" role="status">${escapeHtml(
+    freshness.status === "error" ? "Repository refresh failed; showing the last available data."
+      : freshness.status === "stale" ? "Refreshing repository data…" : "Loading repository data…",
+  )}</div>` : "";
   if (appState.repositories.length === 0) {
-    changeOverviewElement.innerHTML = `<div class="pane-empty">Repository data is unavailable.</div>`;
+    changeOverviewElement.innerHTML = pending || `<div class="pane-empty">Repository data is unavailable.</div>`;
     return;
   }
 
@@ -135,7 +140,7 @@ export function renderChangeOverview() {
     })
     .join("");
 
-  changeOverviewElement.innerHTML = renderCompareTargetControl() + sections;
+  changeOverviewElement.innerHTML = pending + renderCompareTargetControl() + sections;
 }
 
 export function filterMembershipHasAnyPath(filter: FilesPaneFilterMembership): boolean {

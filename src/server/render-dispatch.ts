@@ -69,8 +69,8 @@ export async function renderDocument(
   }
 
   const source = await fs.readFile(document.id, "utf8");
-  // Facts collection (stat + two git subprocesses) overlaps the render work
-  // below; awaited just before assembling the payload.
+  // Filesystem facts overlap rendering. Git provenance is requested by the
+  // browser independently and cannot delay this content response.
   // The root group always exists for a found document; the dirname fallback
   // is a type-level guard only.
   const rootPath = roots.find(root => root.id === document.rootId)?.path ?? path.dirname(document.id);
@@ -78,6 +78,7 @@ export async function renderDocument(
     absolutePath: document.id,
     rootPath,
     source,
+    includeGit: false,
   });
   const requestedView: ViewMode = options.view ?? "rendered";
   // Text / source files have no separate rendered representation, so a

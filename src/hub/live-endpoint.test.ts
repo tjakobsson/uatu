@@ -339,6 +339,19 @@ describe("LiveEndpoint (in-process)", () => {
 
   const documentSubs = encodeURIComponent(JSON.stringify([{ topic: "document", key: "" }]));
 
+  test("a reading client resumes every queued document patch in predecessor order", async () => {
+    const baseline = (await Bun.file(new URL("../../api/examples/sse/live-document.json", import.meta.url)).json()).data.event.data;
+    const template = (await Bun.file(new URL("../../api/examples/sse/live-document-patch.json", import.meta.url)).json()).data.event.data;
+    const stalled = await stalledStream(`ws=ws&subs=${documentSubs}`);
+    const upstream = child.byPath("/api/events")[0]!;
+    upstream.push(`event: state\ndata: ${JSON.stringify(baseline)}\n\n`);
+    await stalled.resume(envelopes => envelopes.some(event => event.event.kind === "ready"));
+    upstream.push([5, 6, 7].map(revision => `event: state\ndata: ${JSON.stringify({ ...template, previousRevision: revision - 1, revision })}\n\n`).join(""));
+    const received = await stalled.resume(envelopes => envelopes.filter(event => event.event.kind === "data").length === 3);
+    expect(received.filter(event => event.event.kind === "data").map(event => (dataOf(event) as { revision: number }).revision)).toEqual([5, 6, 7]);
+    await stalled.reader.cancel();
+  });
+
   test("a document snapshot larger than the queue cap reaches a reading client intact", async () => {
     // The cap is 4 KiB here; a real workspace snapshot runs to megabytes. A
     // single frame is always admitted — the cap bounds what is queued

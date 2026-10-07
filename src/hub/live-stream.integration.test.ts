@@ -220,8 +220,15 @@ describe("brokered live stream over a real child", () => {
 
     await sessions.start("proj");
     await tab.waitFor(
-      t => ofTopic(t, "document").slice(before).filter(e => e.event.kind === "data").length >= 1
-        && ofTopic(t, "document").at(-1)!.event.kind === "ready",
+      t => {
+        const events = ofTopic(t, "document").slice(before);
+        const unavailable = events.findIndex(event => event.event.kind === "unavailable");
+        const recovered = events.slice(unavailable + 1);
+        const snapshot = recovered.findIndex(event => event.event.kind === "data");
+        // Discovery/Git patches can follow ready immediately. Readiness is
+        // an ordered acknowledgement, not necessarily the final frame.
+        return unavailable >= 0 && snapshot >= 0 && recovered.slice(snapshot + 1).some(event => event.event.kind === "ready");
+      },
       "fresh snapshot then ready after restart",
       30_000,
     );

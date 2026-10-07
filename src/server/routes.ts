@@ -10,6 +10,7 @@
 // Both server entry points obtain both pieces here with mode-specific deps.
 
 import type { Serve } from "bun";
+import path from "node:path";
 
 import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidPermissionChoiceError, InvalidVariantSelectionError, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../chat/adapter";
 import { AttachmentStoreError } from "../chat/attachment-store";
@@ -147,6 +148,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
   };
 
   const chat = buildChatRoutes(deps, p);
+  const provenance = new Map<string, Promise<unknown>>();
 
   const modeRoutes =
     deps.mode === "prod"
@@ -243,8 +245,14 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
       },
     }),
     [p("/api/state")]: {
-      GET: (request: Request) => {
+      GET: async (request: Request) => {
         const context = requestContext(request);
+        const requested = new URL(request.url).searchParams.get("documentPath");
+        if (requested && !requested.includes("\0") && !requested.split(/[\\/]/).includes("..")) {
+          for (const root of getSession().getUnscopedRoots()) {
+            if (await getSession().ensureDocument(path.resolve(root.path, requested))) break;
+          }
+        }
         return context instanceof Response
           ? context
           : Response.json(getSession().getStatePayload(null, context));
@@ -264,8 +272,9 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         const view = rawView && isViewMode(rawView) ? rawView : undefined;
 
         try {
-          const document = await renderDocument(getSession().getRoots(context), documentId, { view });
-          return Response.json(document);
+          if (!await getSession().ensureDocument(documentId)) throw new Error("document not found");
+          const document = await renderDocument(getSession().getDocumentRoots(documentId, context), documentId, { view });
+          return Response.json(document, { headers: { "cache-control": "no-store" } });
         } catch (error) {
           const status = documentErrorStatus(error);
           if (status === 415) {
@@ -280,6 +289,53 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
           console.error(`uatu: /api/document render failed for ${documentId}:`, error);
           return Response.json({ error: "document render failed" }, { status });
         }
+      },
+    },
+    [p("/api/document/facts")]: {
+      GET: async (request: Request) => {
+        const context = requestContext(request);
+        if (context instanceof Response) return context;
+        const url = new URL(request.url);
+        const id = url.searchParams.get("id");
+        if (!id) return Response.json({ error: "missing document id" }, { status: 400 });
+        const session = getSession();
+        const roots = session.getDocumentRoots(id, context);
+        const doc = findDocument(roots, id);
+        if (!doc) return Response.json({ error: "document not found" }, { status: 404 });
+        const revision = session.documentRevision(id);
+        const generation = session.repositoryGeneration();
+        const key = `${revision}:${generation}:${id}`;
+        let pending = provenance.get(key);
+        if (!pending) {
+          pending = collectFileFacts({ absolutePath: id, rootPath: roots[0]!.path }).then(facts => ({
+            revision, generation, git: facts?.git,
+            gitState: facts?.git ? "ready" : session.getRepositories(context).some(repo => repo.status === "non-git" && repo.watchedRootIds.includes(doc.rootId)) ? "non-git" : "unavailable",
+          }));
+          provenance.set(key, pending);
+          while (provenance.size > 128) provenance.delete(provenance.keys().next().value!);
+        }
+        const facts = await pending;
+        if (revision !== session.documentRevision(id) || generation !== session.repositoryGeneration()) {
+          provenance.delete(key);
+          return Response.json({ error: "file facts changed" }, { status: 409 });
+        }
+        return Response.json(facts, { headers: { "cache-control": "no-store" } });
+      },
+    },
+    [p("/api/index/recover")]: {
+      POST: async (request: Request) => {
+        if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
+        if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
+        await getSession().recover();
+        return Response.json({ ok: true });
+      },
+    },
+    [p("/api/repositories/refresh")]: {
+      POST: (request: Request) => {
+        if (!hasValidWorkspaceCredentials(request, new URL(request.url), deps.getWorkspaceCredential())) return new Response("Unauthorized", { status: 401 });
+        if (!isAllowedOrigin(request.headers.get("origin"), new URL(request.url))) return new Response("Forbidden", { status: 403 });
+        getSession().requestRepositoryRefresh();
+        return Response.json({ ok: true }, { status: 202 });
       },
     },
     [p("/api/document/diff")]: {

@@ -228,7 +228,8 @@ async function runWatch(options: WatchOptions) {
       terminalEnabled,
       metrics,
     });
-    await watchSession.start();
+    // HTTP readiness is independent of the file inventory and Git work.
+    void watchSession.start().catch(error => console.error("uatu: indexing failed:", error));
 
     if (terminalEnabled) {
       terminalServer = createTerminalServer({
@@ -239,6 +240,8 @@ async function runWatch(options: WatchOptions) {
 
     const navigationFetch = createNavigationFetchHandler({
       getUnscopedRoots: () => watchSession!.getUnscopedRoots(),
+      ensureDocument: id => watchSession!.ensureDocument(id),
+      isIndexComplete: () => watchSession!.getDiscoveryState().status === "ready",
       getEntries: () => rootEntries,
       getRespectGitignore: () => options.respectGitignore,
       getServer: () => server!,

@@ -39,6 +39,8 @@ import { normalizeBasePath, stripBasePath } from "../../src/shared/base-path";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, spaShellResponse } from "../../src/server/navigation";
 import { resolveWatchRoots, type WatchEntry } from "../../src/server/roots";
 import { createWatchSession } from "../../src/server/watch-session";
+import { classifyFile } from "../../src/document/classify";
+import { collectRepositorySnapshots } from "../../src/document/git-data";
 import {
   buildFetchFallback,
   buildRoutes,
@@ -82,6 +84,10 @@ let terminalClosesHeld = 0;
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
 let activeFollow = true;
+let discoveryGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
+let repositoryGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
+let nativeWatch = false;
+let failDiscovery = false;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
 let personalState: Record<string, unknown> = { version: 1 };
@@ -254,6 +260,12 @@ async function handleE2EReset(request: Request): Promise<Response> {
     uatuConfig?: unknown;
     respectGitignore?: boolean;
     follow?: boolean;
+    holdDiscovery?: boolean;
+    holdRepositories?: boolean;
+    releaseDiscovery?: boolean;
+    releaseRepositories?: boolean;
+    nativeWatch?: boolean;
+    failDiscovery?: boolean;
   } = {};
   try {
     const text = await request.text();
@@ -263,6 +275,17 @@ async function handleE2EReset(request: Request): Promise<Response> {
   } catch {
     body = {};
   }
+
+  if (body.releaseDiscovery || body.releaseRepositories) {
+    if (body.releaseDiscovery) { discoveryGate?.resolve(); discoveryGate = null; failDiscovery = false; }
+    if (body.releaseRepositories) { repositoryGate?.resolve(); repositoryGate = null; }
+    return Response.json({ ok: true });
+  }
+  discoveryGate?.resolve(); repositoryGate?.resolve();
+  discoveryGate = body.holdDiscovery ? Promise.withResolvers<void>() : null;
+  repositoryGate = body.holdRepositories ? Promise.withResolvers<void>() : null;
+  nativeWatch = body.nativeWatch ?? false;
+  failDiscovery = body.failDiscovery ?? false;
 
   // A reset replaces the child in place. Tell the broker just as a real
   // session restart would, so no lingering upstream serves the previous tree
@@ -325,6 +348,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
       "utf8",
     );
   }
+  if (discoveryGate || failDiscovery) await fs.writeFile(path.join(activeWorkspaceRoot, "indexing-gate.unknown"), "Waiting for discovery\n");
   if (body.git) {
     await initE2EGitRepository();
   }
@@ -706,6 +730,8 @@ server = Bun.serve({
 
 const navigationFetch = createNavigationFetchHandler({
   getUnscopedRoots: () => watchSession.getUnscopedRoots(),
+  ensureDocument: id => watchSession.ensureDocument(id),
+  isIndexComplete: () => watchSession.getDiscoveryState().status === "ready",
   getEntries: () => activeEntries,
   getRespectGitignore: () => activeRespectGitignore,
   getServer: () => server,
@@ -761,12 +787,27 @@ async function createSession(options: { resetWorkspace: boolean }) {
     : [activeWorkspaceRoot];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
+  const heldDiscovery = discoveryGate;
+  const heldRepository = repositoryGate;
   const session = createWatchSession(entries, activeFollow, {
-    usePolling: true,
+    usePolling: !nativeWatch,
     respectGitignore: activeRespectGitignore,
     terminalEnabled,
+    ...(heldDiscovery || failDiscovery ? { classify: async (file: string, name?: string) => {
+      if (file.endsWith("/indexing-gate.unknown")) {
+        if (heldDiscovery) await heldDiscovery.promise;
+        if (failDiscovery) throw new Error("Controlled indexing failure");
+      }
+      return classifyFile(file, name);
+    } } : {}),
+    ...(heldRepository ? { collectRepositories: async (...args: Parameters<typeof collectRepositorySnapshots>) => {
+      await heldRepository.promise;
+      return collectRepositorySnapshots(...args);
+    } } : {}),
   });
-  await session.start();
+  const started = session.start();
+  if (heldDiscovery) void started.catch(error => console.error(error));
+  else await started;
   return session;
 }
 

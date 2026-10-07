@@ -4,23 +4,31 @@
 Surface per-file facts (size, line count, git provenance, freshness) as a strip in every document view, and signal in-place updates when the active document changes on disk.
 ## Requirements
 ### Requirement: File facts ride the document render payload
-The server SHALL compute file facts for every document render and attach them to the `/api/document` payload. Facts SHALL include line count and byte size of the on-disk file. For documents inside a git root, facts SHALL additionally include the last commit touching the file (author name, author date, short SHA, subject) and whether the working tree differs from HEAD for that path. Facts SHALL be recomputed on every render so live-reload keeps them current.
+The server SHALL compute filesystem facts for every document render and attach them to the `/api/document` payload when available. Facts SHALL include the line count and byte size for the rendered source and its observed modification time. Source and Rendered content delivery MUST NOT wait for Git subprocesses. For documents inside a Git root, the client SHALL obtain the last commit touching the file and its clean, dirty, or uncommitted state independently and enrich the facts strip when available. Pending, stale, and unavailable Git facts SHALL be distinguishable from verified clean or uncommitted facts. Filesystem facts SHALL refresh with every render, and Git enrichment SHALL be scoped to the selected document, content revision, and repository generation. Obsolete enrichment MUST NOT replace newer facts. Git failure SHALL leave the document and filesystem facts usable.
 
 #### Scenario: Document in a git root
-- **WHEN** the client fetches `/api/document` for a committed file in a git-backed root
-- **THEN** the payload includes line count, byte size, last-commit author, author date, short SHA, and a clean/dirty flag
+- **WHEN** the client fetches a committed document
+- **THEN** it can display rendered content and filesystem facts before Git lookup finishes
+- **AND** matching Git facts subsequently supply author, date, short SHA, and clean or dirty state
 
 #### Scenario: Document in a non-git root
-- **WHEN** the client fetches `/api/document` for a file in a watched root that is not a git repository
-- **THEN** the payload includes line count, byte size, and the file's modification time, with no git fields
+- **WHEN** the client fetches a file from a non-Git watched root
+- **THEN** the payload includes line count, byte size, and modification time with no Git fields
+- **AND** no indefinite Git-loading indicator is displayed
 
 #### Scenario: File never committed
-- **WHEN** the file exists in a git root but has no commit touching it
-- **THEN** the payload carries no last-commit fields and marks the file as uncommitted
+- **WHEN** independent Git lookup confirms that no commit touches the selected file
+- **THEN** the facts strip marks it uncommitted with no last-commit fields
+- **AND** a pending lookup alone is not treated as that confirmation
 
 #### Scenario: Git lookup fails
-- **WHEN** the git subprocess errors or times out during facts collection
-- **THEN** the document render still succeeds, and facts degrade to the non-git shape
+- **WHEN** a Git subprocess errors, times out, or remains pending
+- **THEN** document rendering and file-change reloads continue without waiting for it
+- **AND** the facts strip reports unavailable or pending provenance alongside filesystem facts
+
+#### Scenario: Old facts arrive after another save
+- **WHEN** an enrichment request for an older file revision finishes after a new save or navigation
+- **THEN** it cannot overwrite the current strip or cause another document render
 
 ### Requirement: Facts strip is shown in all document views
 The preview SHALL render a file facts strip when the active document is displayed in Rendered, Source, or Diff view. Text/code files, which are always source-rendered, SHALL also show the strip. The strip SHALL remain preview chrome separate from the Rendered view's frontmatter metadata card.

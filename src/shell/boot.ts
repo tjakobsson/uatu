@@ -30,8 +30,8 @@ import {
   loadPersonalWorkspaceState,
   persistPersonalWorkspaceState,
 } from "./personal-state";
-import { contextualAppUrl } from "./watch-context";
-import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId } from "./selection";
+import { applyWatchContext } from "../shared/watch-context";
+import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId, setPendingDocumentPath } from "./selection";
 import { readSelectionCleared } from "./selection-storage";
 import {
   commitPreviewParamsFromUrl,
@@ -60,10 +60,21 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
   ]);
   let payload = (await response.json()) as StatePayload;
 
+  const requestedPath = urlRelativePath || personalState.documentPath;
+  if (requestedPath) {
+    const url = applyWatchContext(new URL(appUrl(`/api/state?documentPath=${encodeURIComponent(requestedPath)}`), window.location.href), {
+      scope: payload.scope, compareTarget: payload.compareTarget,
+    });
+    const resolved = await fetch(url, { cache: "no-store" });
+    if (resolved.ok) payload = await resolved.json() as StatePayload;
+  }
+
   adoptCompareTarget(personalState.compareTarget ?? "base");
   if (personalState.previewMode) applyViewMode(personalState.previewMode);
   if (payload.compareTarget !== appState.compareTarget) {
-    const contextualResponse = await fetch(contextualAppUrl(appUrl("/api/state")));
+    const contextualResponse = await fetch(applyWatchContext(new URL(appUrl("/api/state"), window.location.href), {
+      scope: payload.scope, compareTarget: appState.compareTarget,
+    }));
     if (contextualResponse.ok) payload = (await contextualResponse.json()) as StatePayload;
   }
 
@@ -115,6 +126,12 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
       setSelectedId(requestedDoc.id);
       explicitDocumentPath = requestedDoc.relativePath;
       setPreviewMode({ kind: "document" });
+    } else if (!requestedDoc && appState.discovery.status !== "ready" && (payload.scope.kind === "folder"
+      || payload.scope.documentId.replaceAll("\\", "/").endsWith(`/${urlRelativePath}`))) {
+      setSelectedId(null);
+      setPendingDocumentPath(urlRelativePath);
+      setPreviewMode({ kind: "empty" });
+      directLinkMessage = { title: "Document indexing", body: `Waiting for indexing to resolve ${urlRelativePath}.` };
     } else if (payload.scope.kind === "file") {
       // Direct link to a doc outside the CLI single-file watch scope. Keep
       // the scoped doc as the selection but render a "session scoped to a
@@ -133,6 +150,7 @@ export async function loadInitialState(onWorkspaceReady?: () => void) {
     } else {
       // Direct link that doesn't resolve to any known doc in the index.
       setSelectedId(null);
+      if (!requestedDoc) setPendingDocumentPath(urlRelativePath);
       setPreviewMode({ kind: "empty" });
       directLinkMessage = {
         title: "Document not found",

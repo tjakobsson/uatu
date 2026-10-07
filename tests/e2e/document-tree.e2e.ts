@@ -35,13 +35,22 @@ async function bootSession(
   // or importing application state. Empty preview is not a refresh barrier.
   await page.addInitScript(() => {
     const Native = window.EventSource;
+    const documents = new Map<string, any>();
     window.EventSource = class extends Native {
       constructor(url: string | URL, options?: EventSourceInit) {
         super(url, options);
         this.addEventListener("live", event => {
           const frame = JSON.parse((event as MessageEvent).data);
           if (frame.topic === "document" && frame.event?.kind === "data") {
-            const state = frame.event.data;
+            const update = frame.event.data;
+            if (update.kind === "patch") {
+              for (const doc of update.upserts) documents.set(`${doc.rootId}\0${doc.id}`, doc);
+              for (const ref of update.removals) documents.delete(`${ref.rootId}\0${ref.id}`);
+            } else {
+              documents.clear();
+              for (const root of update.roots) for (const doc of root.docs) documents.set(`${doc.rootId}\0${doc.id}`, doc);
+            }
+            const state = { ...update, roots: [{ docs: [...documents.values()] }] };
             requestAnimationFrame(() => requestAnimationFrame(() => {
               (window as any).__treeDeliveredIndex = state;
             }));

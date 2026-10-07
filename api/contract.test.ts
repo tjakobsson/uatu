@@ -240,7 +240,7 @@ describe("live stream topics", () => {
   test("each topic names its payload schema and the domain that owns it", async () => {
     const streaming = await readYaml<{ channels: { live: { topics: Record<string, unknown> } } }>("api/streaming.yaml");
     expect(streaming.channels.live.topics).toMatchObject({
-      document: { domain: "workspace", dataSchema: "WorkspaceState" },
+      document: { domain: "workspace", dataSchema: "DocumentUpdate" },
       inventory: { domain: "workspace", dataSchema: "ConversationInventoryEvent" },
       conversation: { domain: "workspace", dataSchema: "ChatEvent", resyncDataSchema: "ChatResyncEvent" },
       activity: { domain: "hub", dataSchema: "WorkspaceActivity" },

@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { scanRoots } from "./roots";
+import { setGitMetricsSink } from "../document/git-data";
 
 const tempDirectories: string[] = [];
 
@@ -13,6 +14,23 @@ afterEach(async () => {
 });
 
 describe("renderDocument", () => {
+  test("source and rendered content do not start or await Git work", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-independent-"));
+    tempDirectories.push(directory);
+    const file = path.join(directory, "README.md");
+    await writeFile(file, "# Fresh bytes\n");
+    const roots = await scanRoots([{ kind: "dir", absolutePath: directory }]);
+    let commands = 0;
+    setGitMetricsSink({ inc: name => { if (name === "git.execs_total") commands++; } });
+    try {
+      for (const view of ["source", "rendered"] as const) {
+        const payload = await renderDocument(roots, file, { view });
+        expect(payload.html).toContain("Fresh bytes");
+        expect(payload.fileFacts).toMatchObject({ lines: 1, bytes: 14, gitState: "pending" });
+      }
+      expect(commands).toBe(0);
+    } finally { setGitMetricsSink(null); }
+  });
   test("renders a markdown document through the markdown pipeline", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-md-"));
     tempDirectories.push(tempDirectory);

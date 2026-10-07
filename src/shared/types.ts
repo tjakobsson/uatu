@@ -7,6 +7,8 @@ export type DocumentMeta = {
   mtimeMs: number;
   rootId: string;
   kind: DocumentKind;
+  // Present on event-fed inventories; changes even for equal-mtime saves.
+  revision?: number;
 };
 
 export type RootGroup = {
@@ -21,10 +23,8 @@ export type RootGroup = {
   hiddenCount: number;
 };
 
-// Repo-derived facts about the on-disk file behind a rendered document,
-// computed fresh on every /api/document render (live reload keeps them
-// current). `git` is absent for non-git roots and whenever the git lookup
-// fails — the render itself must never fail because facts collection did.
+// Facts about the rendered file. Filesystem facts accompany fresh content;
+// Git provenance is separate and generation-bound. Diff can collect both.
 // String fields are HTML-escaped server-side before serialization, matching
 // the sanitizeMetadata posture.
 export type FileFactsGit = {
@@ -45,6 +45,7 @@ export type FileFacts = {
   bytes: number;
   mtime: string; // ISO 8601
   git?: FileFactsGit;
+  gitState?: "pending" | "stale" | "ready" | "unavailable" | "non-git";
 };
 
 export type BuildSummary = {
@@ -174,7 +175,7 @@ export type StatePayload = WorkspaceApiCompatibility & {
   generatedAt: number;
   build: BuildSummary;
   scope: Scope;
-  // Opaque hash of the *unscoped* corpus (ids, paths, mtimes). In a scoped
+  // Opaque revision of the *unscoped* corpus. In a scoped
   // session the client never sees the unscoped roots, yet a widened search's
   // results live there — comparing this across snapshots is the only way it
   // can notice those documents changing.
@@ -458,6 +459,7 @@ export function shouldRefreshPreview(
   return Boolean(previous && next && (
     previous.mtimeMs !== next.mtimeMs
     || previous.kind !== next.kind
+    || previous.revision !== next.revision
   ));
 }
 

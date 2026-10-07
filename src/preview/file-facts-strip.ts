@@ -132,6 +132,7 @@ export function renderFileFactsStripHtml(state: FactsStripState, nowMs: number):
       git?.shortSha ? segment(git.shortSha, "file-facts-sha") : "",
       lines ? segment(lines) : "",
       segment(size),
+      facts.gitState === "pending" ? segment("Git pending") : facts.gitState === "stale" ? segment("Git refreshing…") : facts.gitState === "unavailable" ? segment("Git unavailable") : "",
     ]);
   }
 

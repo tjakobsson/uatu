@@ -3,9 +3,19 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { resolveCompareBase, safeGit } from "./git-base-ref";
+import { resolveCompareBase, safeGit, withGitCancellation } from "./git-base-ref";
 
 const tempDirectories: string[] = [];
+
+test("cancellation interrupts owned Git work without affecting another caller", async () => {
+  const controller = new AbortController();
+  // This command waits for stdin, so completion depends on cancellation,
+  // rather than on guessing how long a fast Git command takes.
+  const pending = withGitCancellation(controller.signal, () => safeGit(process.cwd(), ["hash-object", "--stdin"]));
+  controller.abort(new Error("session stopped"));
+  await expect(pending).rejects.toThrow("session stopped");
+  expect((await safeGit(process.cwd(), ["--version"])).ok).toBe(true);
+});
 
 afterEach(async () => {
   await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));

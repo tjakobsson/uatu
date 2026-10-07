@@ -3,6 +3,7 @@
 // plain 404s — plus the cross-platform browser opener used at startup.
 
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 import { stripBasePath } from "../shared/base-path";
 import type { DocumentMeta, RootGroup } from "../shared/types";
@@ -216,6 +217,8 @@ export async function spaShellResponse(
 // helper takes getters rather than captured snapshots.
 export function createNavigationFetchHandler(deps: {
   getUnscopedRoots: () => RootGroup[];
+  ensureDocument?: (id: string) => Promise<DocumentMeta | undefined>;
+  isIndexComplete?: () => boolean;
   getEntries: () => WatchEntry[];
   getRespectGitignore: () => boolean;
   getServer: () => { hostname?: string | undefined; port?: number | undefined };
@@ -338,6 +341,23 @@ export function createNavigationFetchHandler(deps: {
       if (doc) {
         return await spaShellResponse(deps.getServer(), basePath);
       }
+      if (deps.ensureDocument) {
+        let relative: string | null = null;
+        try { relative = decodeURIComponent(pathname).replace(/^\/+/, ""); } catch { /* Invalid URL. */ }
+        if (relative && !relative.includes("\0") && !relative.split(/[\\/]/).includes("..")) {
+          for (const entry of deps.getEntries()) {
+            const root = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
+            try {
+              if (await deps.ensureDocument(path.resolve(root, relative))) return await spaShellResponse(deps.getServer(), basePath);
+            } catch {
+              // Navigation stays in the app when targeted resolution fails;
+              // the preview/index state reports the unavailable document.
+              return await spaShellResponse(deps.getServer(), basePath);
+            }
+          }
+        }
+      }
+      if (deps.isIndexComplete?.() === false) return await spaShellResponse(deps.getServer(), basePath);
     }
 
     const response = await staticFileResponse(pathname, deps.getEntries(), {

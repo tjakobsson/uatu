@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 10.23.0-experimental
+  version: 10.24.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 10 and workspace revision 23
+  summary: Hub revision 10 and workspace revision 24
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves one family itself, personal
@@ -21,7 +21,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 10
-    workspaceApiRevision: 23
+    workspaceApiRevision: 24
 servers:
   - url: https://{hubHost}
     variables:
@@ -2319,7 +2319,7 @@ components:
     DocumentMeta:
       type: object
       required: [id, name, relativePath, mtimeMs, rootId, kind]
-      properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] } }
+      properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] }, revision: { type: integer, minimum: 0 } }
       additionalProperties: false
     RootGroup:
       type: object
@@ -2330,6 +2330,12 @@ components:
       type: object
       required: [workspaceApiRevision, roots, repositories, compareTarget, initialFollow, defaultDocumentId, changedId, generatedAt, build, scope]
       properties:
+        kind: { const: snapshot }
+        epoch: { type: string }
+        revision: { type: integer, minimum: 0 }
+        discovery: { $ref: '#/components/schemas/DocumentDiscovery' }
+        repositoryState: { $ref: '#/components/schemas/RepositoryFreshness' }
+        latestChange: { type: object, required: [id, revision], properties: { id: { type: string }, revision: { type: integer, minimum: 0 } }, additionalProperties: false }
         workspaceApiRevision: { type: integer, minimum: 1 }
         roots: { type: array, items: { $ref: '#/components/schemas/RootGroup' } }
         repositories: { type: array, items: { $ref: '#/components/schemas/RepositorySnapshot' } }
@@ -2342,6 +2348,46 @@ components:
         scope: { oneOf: [{ type: object, required: [kind], properties: { kind: { const: folder } }, additionalProperties: false }, { type: object, required: [kind, documentId], properties: { kind: { const: file }, documentId: { type: string } }, additionalProperties: false }] }
         unscopedFingerprint: { type: string }
         terminal: { enum: [enabled, disabled] }
+      additionalProperties: false
+    DocumentUpdate:
+      oneOf:
+        - { $ref: '#/components/schemas/WorkspaceState' }
+        - { $ref: '#/components/schemas/DocumentPatch' }
+    DocumentDiscovery:
+      type: object
+      required: [status, discovered]
+      properties: { status: { enum: [indexing, ready, recovering, error] }, discovered: { type: integer, minimum: 0 }, message: { type: string } }
+      additionalProperties: false
+    RepositoryFreshness:
+      type: object
+      required: [generation, status]
+      properties: { generation: { type: integer, minimum: 0 }, status: { enum: [pending, ready, stale, error] }, message: { type: string } }
+      additionalProperties: false
+    DocumentRoot:
+      type: object
+      required: [id, label, path, hiddenCount]
+      properties: { id: { type: string }, label: { type: string }, path: { type: string }, hiddenCount: { type: integer, minimum: 0 } }
+      additionalProperties: false
+    DocumentPatch:
+      type: object
+      required: [kind, epoch, previousRevision, revision, generatedAt, scope, compareTarget, unscopedFingerprint, upserts, removals, changedId]
+      properties:
+        kind: { const: patch }
+        epoch: { type: string }
+        previousRevision: { type: integer, minimum: 0 }
+        revision: { type: integer, minimum: 0 }
+        generatedAt: { type: number }
+        scope: { oneOf: [{ type: object, required: [kind], properties: { kind: { const: folder } }, additionalProperties: false }, { type: object, required: [kind, documentId], properties: { kind: { const: file }, documentId: { type: string } }, additionalProperties: false }] }
+        compareTarget: { enum: [base, last-commit] }
+        unscopedFingerprint: { type: string }
+        upserts: { type: array, items: { $ref: '#/components/schemas/DocumentMeta' } }
+        removals: { type: array, items: { type: object, required: [rootId, id], properties: { rootId: { type: string }, id: { type: string } }, additionalProperties: false } }
+        roots: { type: array, items: { $ref: '#/components/schemas/DocumentRoot' } }
+        discovery: { $ref: '#/components/schemas/DocumentDiscovery' }
+        repositories: { type: array, items: { $ref: '#/components/schemas/RepositorySnapshot' } }
+        repositoryState: { $ref: '#/components/schemas/RepositoryFreshness' }
+        defaultDocumentId: { type: [string, 'null'] }
+        changedId: { type: [string, 'null'] }
       additionalProperties: false
     BuildSummary:
       type: object

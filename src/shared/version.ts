@@ -36,12 +36,12 @@ export const PACKAGE_VERSION: string = packageJsonVersion;
 // and the web assets bundled with the same product build. This is only part
 // of the stale-web-client handshake; external clients use the independent
 // public API revisions below.
-export const BUNDLED_WEB_REVISION = 1;
+export const BUNDLED_WEB_REVISION = 2;
 
 // Public wire-contract compatibility identities. Breaking changes increment
 // only the affected domain; product and bundled-web changes do not.
 export const HUB_API_REVISION = 10;
-export const WORKSPACE_API_REVISION = 23;
+export const WORKSPACE_API_REVISION = 24;
 
 function runGit(args: string[]): string | null {
   try {

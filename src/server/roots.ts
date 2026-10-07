@@ -253,7 +253,7 @@ async function walkAllFiles(
       .split(path.sep)
       .join("/");
 
-    if (matcher.shouldIgnore(relativeFromRoot)) {
+    if (matcher.shouldIgnore(relativeFromRoot, entry.isDirectory())) {
       // Count files we filter out via the user-controlled matcher. Directories
       // count as one (we don't recurse to count their contents — that would
       // defeat the point of the matcher's perf benefit).

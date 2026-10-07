@@ -26,6 +26,7 @@ import {
   type ViewMode,
 } from "../shared/types";
 import { presentationLocalStorage } from "./presentation-storage";
+import type { DiscoveryState, RepositoryFreshness } from "../shared/document-updates";
 
 // Best-effort access to window.localStorage. Wrapped because cross-origin
 // iframes, certain privacy modes, and quota issues can make the property
@@ -170,6 +171,8 @@ export function readGitLogLimitPreference(): number {
 export const appState = {
   roots: [] as RootGroup[],
   repositories: [] as RepositorySnapshot[],
+  discovery: { status: "ready", discovered: 0 } as DiscoveryState,
+  repositoryFreshness: { status: "pending", generation: 0 } as RepositoryFreshness,
   selectedId: null as string | null,
   selectionCleared: false,
   previewMode: { kind: "document" } as PreviewMode,
