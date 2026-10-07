@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { collectConfigWarnings, collectRepositorySnapshots, collectRepositorySnapshotsByTarget, parseDiffPath, safeGit, setGitMetricsSink } from "./git-data";
 import type { WatchEntry } from "../server/roots";
+import type { RepositorySnapshot } from "../shared/types";
 
 const tempDirectories: string[] = [];
 
@@ -24,8 +25,14 @@ describe("repository snapshots", () => {
       const separate = commands;
       commands = 0;
       const combined = await collectRepositorySnapshotsByTarget(entries, []);
-      expect(combined.base).toEqual(base);
-      expect(combined["last-commit"]).toEqual(last);
+      // Separate Git invocations can cross a second boundary. Compare the
+      // repository data without Git's wall-clock-relative display text.
+      const stable = (snapshots: RepositorySnapshot[]) => snapshots.map(snapshot => ({
+        ...snapshot,
+        commitLog: snapshot.commitLog.map(({ relativeTime, ...commit }) => commit),
+      }));
+      expect(stable(combined.base)).toEqual(stable(base));
+      expect(stable(combined["last-commit"])).toEqual(stable(last));
       expect(commands).toBeLessThan(separate);
     } finally { setGitMetricsSink(null); }
   });

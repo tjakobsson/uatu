@@ -279,8 +279,11 @@ describe("usage", () => {
     expect(text).toContain("uatu hub [--config <PATH>] [--port <PORT>] [--exit-on-stdin-close]");
     expect(text).toContain("uatu hub hash-password");
     expect(text).toContain("docs/SELF-HOSTING.md");
-    expect(text).not.toMatch(/\bserve\b/);
-    expect(text).not.toMatch(/\bwatch\b/);
+    // The build header includes the branch name, which may contain either
+    // word. Only the usage body describes the supported commands.
+    const usage = text.slice(text.indexOf("Usage:"));
+    expect(usage).not.toMatch(/\bserve\b/);
+    expect(usage).not.toMatch(/\bwatch\b/);
   });
 
   test("usage lists only flags a user can reach", () => {

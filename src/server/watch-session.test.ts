@@ -580,6 +580,56 @@ test("failed recovery retains the allowed inventory and concurrent retries share
   } finally { await session.stop(); }
 });
 
+test("a policy edit during recovery is applied before recovery settles", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-policy-recovery-"));
+  tempDirectories.push(dir);
+  const file = path.join(dir, "notes.md");
+  const config = path.join(dir, ".uatu.json");
+  await writeFile(file, "# Notes\n");
+  await writeFile(config, JSON.stringify({ ignore: { exclude: [] } }));
+  const replacementReady = Promise.withResolvers<void>();
+  let releaseReplacement = () => {};
+  let observations = 0;
+  const session = createWatchSession([{ kind: "dir", absolutePath: dir }], false, {
+    usePolling: true, collectRepositories: async () => [],
+    watch: (...args: Parameters<typeof chokidar.watch>) => {
+      const watcher = chokidar.watch(...args);
+      if (++observations === 2) {
+        const emit = watcher.emit.bind(watcher);
+        watcher.emit = (event, ...values) => {
+          if (event === "ready") {
+            releaseReplacement = () => { emit(event, ...values); };
+            replacementReady.resolve();
+            return true;
+          }
+          return emit(event, ...values);
+        };
+      }
+      return watcher;
+    },
+  });
+  try {
+    await session.start();
+    const original = session._internalWatcher()!;
+    await writeFile(config, JSON.stringify({ ignore: { exclude: ["notes.md"] } }));
+    const recovery = session.recover();
+    await replacementReady.promise;
+    expect(session.findDocument(file)).toBeUndefined();
+    await writeFile(config, JSON.stringify({ ignore: { exclude: [] } }));
+    // Deliver the newer policy event while the replacement's ready callback
+    // is held, rather than racing the watcher against a fixed delay.
+    original.emit("all", "change", config);
+    releaseReplacement();
+    await recovery;
+    expect(session.getDiscoveryState().status).toBe("ready");
+    expect(session.findDocument(file)?.name).toBe("notes.md");
+    expect(observations).toBeGreaterThanOrEqual(3);
+  } finally {
+    releaseReplacement();
+    await session.stop();
+  }
+}, 15000);
+
 test("repository failure preserves file progress for scoped subscribers", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-complete-"));
   tempDirectories.push(dir);

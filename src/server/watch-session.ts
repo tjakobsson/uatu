@@ -62,6 +62,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   const owned = new Set<ObservedRoot>();
   const subscribers = new Set<Subscriber>();
   const recovery = new Map<string, Promise<void>>();
+  const pendingPolicyRecovery = new Set<string>();
   const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const failures = new Map<string, number>();
   const rootErrors = new Map<string, string>();
@@ -203,7 +204,10 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     watcher.on("all", (event, file, stats) => {
       if (stopped || !owned.has(root)) return;
       metrics?.inc(`watcher.events_total.${event}`);
-      if (root.ready && isPolicyFile(entry, path.resolve(file))) { void recover(entry).catch(() => {}); return; }
+      if (isPolicyFile(entry, path.resolve(file)) && (root.ready || event === "change" || event === "unlink")) {
+        void recover(entry, true).catch(() => {});
+        return;
+      }
       index.observe(event, file, stats);
     });
     watcher.once("ready", () => {
@@ -236,25 +240,34 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     }, 250 * 2 ** (attempts - 1));
     retryTimers.set(entry.absolutePath, timer);
   }
-  function recover(entry: WatchEntry): Promise<void> {
+  function recover(entry: WatchEntry, policyChanged = false): Promise<void> {
     const current = recovery.get(entry.absolutePath);
-    if (current) return current;
+    if (current) {
+      if (policyChanged) pendingPolicyRecovery.add(entry.absolutePath);
+      return current;
+    }
     if (stopped) return Promise.resolve();
     const promise = (async () => {
-      const old = roots.get(entry.absolutePath);
-      const next = await observe(entry, true);
-      if (!next || stopped) return;
-      roots.set(entry.absolutePath, next);
-      rootErrors.delete(entry.absolutePath);
-      failures.delete(entry.absolutePath);
-      if (old) { owned.delete(old); old.index.stop(); old.finish(); await old.watcher.close(); }
-      corpusRevision++;
-      repositories.request();
+      do {
+        pendingPolicyRecovery.delete(entry.absolutePath);
+        const old = roots.get(entry.absolutePath);
+        const next = await observe(entry, true);
+        if (!next || stopped) return;
+        roots.set(entry.absolutePath, next);
+        rootErrors.delete(entry.absolutePath);
+        failures.delete(entry.absolutePath);
+        if (old) { owned.delete(old); old.index.stop(); old.finish(); await old.watcher.close(); }
+        corpusRevision++;
+        repositories.request();
+        // A policy edit can arrive after the replacement loaded its matcher.
+        // Keep one follow-up pass so coalescing cannot discard that edit.
+      } while (!stopped && pendingPolicyRecovery.has(entry.absolutePath));
     })().catch(error => {
       rootErrors.set(entry.absolutePath, error instanceof Error ? error.message : String(error));
       throw error;
     }).finally(() => {
       recovery.delete(entry.absolutePath);
+      pendingPolicyRecovery.delete(entry.absolutePath);
       if (stopped) return;
       revision = nextRevision(); generatedAt = Math.max(Date.now(), generatedAt + 1);
       for (const subscriber of subscribers) { subscriber.context = normalize(subscriber.context); send(subscriber, snapshot(subscriber.context)); }
@@ -294,7 +307,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       await Promise.all([...owned].map(async root => { root.index.stop(); root.finish(); await root.watcher.close(); }));
       owned.clear();
     },
-    async recover() { await Promise.all(entries.map(recover)); },
+    async recover() { await Promise.all(entries.map(entry => recover(entry))); },
     requestRepositoryRefresh() { repositories.request(); },
     async ensureDocument(id: string) {
       const existing = find(id);
