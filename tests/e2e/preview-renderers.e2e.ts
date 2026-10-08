@@ -62,56 +62,56 @@ test("a multi-file burst refreshes the active document when another path is nomi
   const marker = `Burst refresh ${Date.now()}`;
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 
+  type Batch = { changedId: string | null; upserts: string[] };
   await page.evaluate(async () => {
     const state = window as unknown as {
-      __uatuWatchEvents?: Array<string | null>;
+      __uatuWatchEvents?: Array<{ changedId: string | null; upserts: string[] }>;
       __uatuWatchSource?: EventSource;
     };
     state.__uatuWatchEvents = [];
     // An observer on the brokered live stream, subscribed to the same
-    // document topic the page holds; it records each batch's nominated path.
+    // document topic the page holds; it records each batch's nominated path
+    // and the documents it carries.
     const subs = JSON.stringify([{ topic: "document", key: "compareTarget=base&scope=folder" }]);
     const source = new EventSource(`/api/hub/live?subs=${encodeURIComponent(subs)}`);
     state.__uatuWatchSource = source;
     source.addEventListener("live", event => {
-      const envelope = JSON.parse((event as MessageEvent<string>).data) as { topic: string; event: { kind: string; data?: { changedId: string | null } } };
+      const envelope = JSON.parse((event as MessageEvent<string>).data) as {
+        topic: string;
+        event: { kind: string; data?: { changedId: string | null; upserts?: Array<{ id: string }> } };
+      };
       if (envelope.topic !== "document" || envelope.event.kind !== "data" || !envelope.event.data) return;
-      state.__uatuWatchEvents!.push(envelope.event.data.changedId);
+      const { changedId, upserts = [] } = envelope.event.data;
+      state.__uatuWatchEvents!.push({ changedId, upserts: upserts.map(doc => doc.id) });
     });
     await new Promise<void>((resolve, reject) => {
       source.addEventListener("open", () => resolve(), { once: true });
       source.addEventListener("error", () => reject(new Error("watch observer failed to connect")), { once: true });
     });
   });
-  await expect.poll(() => page.evaluate(() => (
-    window as unknown as { __uatuWatchEvents?: Array<string | null> }
-  ).__uatuWatchEvents?.length ?? 0)).toBeGreaterThan(0);
-  // Both writes pass through awaitWriteFinish with the same spacing, so the
-  // later binary event lands in the same debounce batch and the batch's
-  // representative path is null. Event-loop jitter under a loaded suite can
-  // split the pair into two batches, which nominates README instead — that
-  // is a scheduling artifact, not the behavior under test, so the burst is
-  // retried until it lands as one batch.
+  const events = () => page.evaluate(() => (window as unknown as { __uatuWatchEvents: Batch[] }).__uatuWatchEvents);
+  await expect.poll(async () => (await events()).length).toBeGreaterThan(0);
+  const readme = workspacePath("README.md");
+  // README and a second document are written 50 ms apart, so they normally
+  // land in one batch, which nominates the later document. Event-loop jitter
+  // under a loaded suite can split the pair, and README's own batch then
+  // nominates README. That is a scheduling artifact, not the behavior under
+  // test, so the burst is retried until README's update arrives in a batch
+  // that nominates another path.
+  let round = 0;
   await expect.poll(async () => {
-    const before = await page.evaluate(() => (
-      window as unknown as { __uatuWatchEvents: Array<string | null> }
-    ).__uatuWatchEvents.length);
-    await fs.writeFile(workspacePath("README.md"), `# Uatu\n\n${marker}\n`, "utf8");
+    const before = (await events()).length;
+    round++;
+    await fs.writeFile(readme, `# Uatu\n\n${marker} ${round}\n`, "utf8");
     await page.waitForTimeout(50);
-    await fs.writeFile(
-      workspacePath("hero.svg"),
-      `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>`,
-      "utf8",
-    );
-    await expect.poll(() => page.evaluate(() => (
-      window as unknown as { __uatuWatchEvents: Array<string | null> }
-    ).__uatuWatchEvents.length)).toBeGreaterThan(before);
-    return page.evaluate(() => (
-      window as unknown as { __uatuWatchEvents: Array<string | null> }
-    ).__uatuWatchEvents.at(-1));
-  }, { timeout: 20_000 }).toBeNull();
+    await fs.writeFile(workspacePath("burst-companion.md"), `# Companion ${round}\n`, "utf8");
+    await expect.poll(async () => (await events()).slice(before)
+      .some(batch => batch.upserts.includes(workspacePath("burst-companion.md")))).toBe(true);
+    return (await events()).slice(before)
+      .some(batch => batch.upserts.includes(readme) && batch.changedId !== null && batch.changedId !== readme);
+  }, { timeout: 20_000 }).toBe(true);
 
-  await expect(page.locator("#preview")).toContainText(marker);
+  await expect(page.locator("#preview")).toContainText(`${marker} ${round}`);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 });
 
