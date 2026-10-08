@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -15,6 +16,23 @@ test("cancellation interrupts owned Git work without affecting another caller", 
   controller.abort(new Error("session stopped"));
   await expect(pending).rejects.toThrow("session stopped");
   expect((await safeGit(process.cwd(), ["--version"])).ok).toBe(true);
+});
+
+test("reading status leaves the index untouched, so the repository probe sees no change", async () => {
+  const repo = await createRepo({ initialBranch: "main" });
+  const index = path.join(repo, ".git", "index");
+  const fingerprint = async () => { const s = await stat(index); return `${s.mtimeMs}:${s.ctimeMs}:${s.ino}`; };
+  // A touched-but-unchanged file is the stat refresh `git status` would cache.
+  const later = new Date(Date.now() + 60_000);
+  await utimes(path.join(repo, "README.md"), later, later);
+  const before = await fingerprint();
+  expect((await safeGit(repo, ["status", "--porcelain=v1"])).ok).toBe(true);
+  expect(await fingerprint()).toBe(before);
+  // Control: the same command with optional locks allowed rewrites the index.
+  const env = { ...process.env };
+  delete env.GIT_OPTIONAL_LOCKS;
+  execFileSync("git", ["status", "--porcelain=v1"], { cwd: repo, env });
+  expect(await fingerprint()).not.toBe(before);
 });
 
 afterEach(async () => {

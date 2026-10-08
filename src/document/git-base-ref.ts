@@ -43,6 +43,10 @@ export async function safeGit(
   try {
     const operation = execFileAsync("git", args, {
       cwd,
+      // uatu only observes repositories. Without this, `git status` rewrites
+      // .git/index to cache refreshed stat data, and the repository probe
+      // reads that write as a new change and refreshes again.
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
       encoding: "utf8",
       maxBuffer: options.maxBuffer ?? GIT_MAX_BUFFER,
       timeout: options.timeoutMs ?? GIT_TIMEOUT_MS,

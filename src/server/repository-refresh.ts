@@ -7,6 +7,7 @@ import type { WatchEntry } from "./roots";
 import { createRefreshScheduler } from "./refresh-scheduler";
 import { withGitCancellation } from "../document/git-base-ref";
 
+export const STALE_NOTICE_MS = 1000;
 export type RepositoryResults = Record<CompareTarget, RepositorySnapshot[]>;
 export function createRepositoryRefresh(options: {
   entries: WatchEntry[];
@@ -14,6 +15,7 @@ export function createRepositoryRefresh(options: {
   collect?: typeof collectRepositorySnapshots;
   publish: (results: RepositoryResults, freshness: RepositoryFreshness) => void;
   probeIntervalMs?: number;
+  staleNoticeMs?: number;
   onProbe?: () => void;
 }) {
   const collect = options.collect ?? collectRepositorySnapshots;
@@ -30,13 +32,41 @@ export function createRepositoryRefresh(options: {
   const cancellation = new AbortController();
   const scheduler = createRefreshScheduler(() => { void refresh(); });
 
+  // A routine refresh finishes well inside this window. Announcing "stale" at
+  // its start would swap the change overview and the facts strip to a
+  // refreshing notice and back on every probe; only a slow one says so.
+  let staleNotice: ReturnType<typeof setTimeout> | null = null;
+  let staleAnnounced = false;
+  let published: RepositoryFreshness | null = null;
+  function emit() {
+    published = freshness;
+    options.publish(results, freshness);
+  }
+  function clearStaleNotice() {
+    if (staleNotice) clearTimeout(staleNotice);
+    staleNotice = null;
+    staleAnnounced = false;
+  }
+  function announceStale() {
+    staleNotice = null;
+    if (stopped || freshness.status !== "ready") return;
+    staleAnnounced = true;
+    freshness = { ...freshness, status: "stale" };
+    emit();
+  }
+
   async function refresh() {
     if (stopped) return;
     if (running) { dirty = true; return; }
     running = true;
     dirty = false;
-    freshness = { ...freshness, status: freshness.generation ? "stale" : "pending" };
-    options.publish(results, freshness);
+    if (freshness.generation === 0 || freshness.status === "error") {
+      freshness = { ...freshness, status: freshness.generation ? "stale" : "pending" };
+      emit();
+    } else if (freshness.status === "ready" && !staleNotice) {
+      staleNotice = setTimeout(announceStale, options.staleNoticeMs ?? STALE_NOTICE_MS);
+      (staleNotice as { unref?: () => void }).unref?.();
+    }
     try {
       const roots = options.roots();
       let next: RepositoryResults;
@@ -49,14 +79,20 @@ export function createRepositoryRefresh(options: {
         next = { base: base.value, "last-commit": last.value };
       }
       if (stopped) return;
-      results = next;
-      freshness = { status: dirty ? "stale" : "ready", generation: freshness.generation + 1 };
+      // An identical result keeps its identity and generation, so clients
+      // neither repaint repository views nor refetch Git facts.
+      const changed = freshness.generation === 0 || JSON.stringify(next) !== JSON.stringify(results);
+      if (changed) results = next;
+      // A queued follow-up keeps any announced "stale" until it completes.
+      const status = dirty && staleAnnounced ? "stale" : "ready";
+      freshness = { status, generation: freshness.generation + (changed ? 1 : 0) };
     } catch (error) {
       if (!stopped) freshness = { ...freshness, status: "error", message: error instanceof Error ? error.message : String(error) };
     } finally {
       running = false;
       if (!stopped) {
-        options.publish(results, freshness);
+        if (!dirty || freshness.status === "error") clearStaleNotice();
+        if (freshness.status === "error" || freshness.generation !== published?.generation || freshness.status !== published.status) emit();
         if (dirty) scheduler.schedule();
       }
     }
@@ -125,6 +161,7 @@ export function createRepositoryRefresh(options: {
     stop() {
       stopped = true; scheduler.cancel();
       cancellation.abort();
+      if (staleNotice) clearTimeout(staleNotice);
       if (probeTimer) clearInterval(probeTimer);
     },
   };
