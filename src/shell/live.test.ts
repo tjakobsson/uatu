@@ -14,6 +14,7 @@ import {
   onManualRecovery,
   recoverLiveChannel,
   registerRecoveryWork,
+  registerLiveTeardown,
   requestManualRecovery,
   watchPageLifecycle,
 } from "./live";
@@ -197,6 +198,8 @@ describe("the page's live channel singleton", () => {
   test("a pagehide releases the channel whether or not the browser promises a restore, and never disposes it", () => {
     let disposed = 0;
     let suspends = 0;
+    let consumerDisposals = 0;
+    registerLiveTeardown(() => { consumerDisposals++; });
     const channel = {
       connect() {},
       suspend() { suspends += 1; },
@@ -215,6 +218,11 @@ describe("the page's live channel singleton", () => {
     win.fire("pagehide", { persisted: false });
     expect(suspends).toBe(2);
     expect(disposed).toBe(0);
+    expect(consumerDisposals).toBe(0);
+    disposeLiveChannel();
+    expect(consumerDisposals).toBe(1);
+    disposeLiveChannel();
+    expect(consumerDisposals).toBe(1);
   });
 
   test("a wake-up after an unpersisted pagehide reconnects the same channel", async () => {

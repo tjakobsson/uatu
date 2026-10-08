@@ -27,7 +27,7 @@ import {
 import { applyChannelStatus } from "./connection";
 import type { LiveSubscriptionHandle, LiveTopicConsumer } from "./live-channel";
 import { fetchWithinBudget } from "./bounded-fetch";
-import { liveChannel, registerRecoveryWork } from "./live";
+import { liveChannel, registerLiveTeardown, registerRecoveryWork } from "./live";
 import { createStateReconciler } from "./recovery";
 import { renderBuildBadge } from "./connection";
 import { appUrl } from "../shared/app-url";
@@ -145,16 +145,26 @@ export function adoptBootSnapshot(payload: StatePayload): void {
 export function connectEvents() {
   if (!installed) {
     installed = true;
-    liveChannel().onStatus(applyChannelStatus);
-    registerRecoveryWork(() => stateReconciler.reconcile());
+    const unsubscribeStatus = liveChannel().onStatus(applyChannelStatus);
+    const unregisterRecovery = registerRecoveryWork(() => stateReconciler.reconcile());
     // Repository-only refresh covers edits outside a narrow document root.
     // Hidden pages and pages without visible Git UI do not request it.
-    setInterval(() => {
+    const repositoryRefresh = setInterval(() => {
       if (document.visibilityState === "hidden") return;
       const visible = ["change-overview", "git-log"] as const;
       if (appState.viewMode !== "diff" && !visible.some(id => appState.panes[id].visible && !appState.panes[id].collapsed)) return;
       void fetch(appUrl("/api/repositories/refresh"), { method: "POST", signal: AbortSignal.timeout(4000) }).catch(() => {});
     }, 5000);
+    registerLiveTeardown(() => {
+      clearInterval(repositoryRefresh);
+      unsubscribeStatus();
+      unregisterRecovery();
+      documentSubscription?.close();
+      documentSubscription = null;
+      subscriptionKey = null;
+      documentStateHeld = false;
+      installed = false;
+    });
   }
   subscribeDocument();
   liveChannel().connect();

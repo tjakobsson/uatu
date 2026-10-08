@@ -10,7 +10,7 @@
 // events.ts is driven for real against a linkedom DOM of the shell's
 // index.html, with the page's one live channel replaced by a controllable one.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import type { LiveChannel, LiveTopicConsumer } from "./live-channel";
@@ -64,8 +64,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  const { installLiveChannelForTests } = await import("./live");
-  installLiveChannelForTests(null);
+  const { disposeLiveChannel } = await import("./live");
+  disposeLiveChannel();
   for (const frame of frames.splice(0)) frame(performance.now());
   for (const [name, descriptor] of savedGlobals) {
     if (descriptor) Object.defineProperty(globalThis, name, descriptor);
@@ -129,6 +129,46 @@ async function settle(): Promise<void> {
 }
 
 describe("boot state and the first live frame", () => {
+  test("disposing the live channel releases repository polling and wake-up work", async () => {
+    const { disposeLiveChannel, installLiveChannelForTests, recoverLiveChannel } = await import("./live");
+    const { connectEvents } = await import("./events");
+    const { appState } = await import("./state");
+    const intervals = spyOn(globalThis, "setInterval");
+    const clears = spyOn(globalThis, "clearInterval");
+    const fetcher = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({}));
+    const previousView = appState.viewMode;
+    try {
+      installLiveChannelForTests(controllableChannel().channel);
+      connectEvents();
+      connectEvents();
+      expect(intervals).toHaveBeenCalledTimes(1);
+      const [tick, delay] = intervals.mock.calls[0]!;
+      expect(delay).toBe(5000);
+      appState.viewMode = "diff";
+      (tick as () => void)();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+
+      disposeLiveChannel();
+      expect(clears).toHaveBeenCalledWith(intervals.mock.results[0]!.value);
+      installLiveChannelForTests(controllableChannel().channel);
+      await recoverLiveChannel();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+
+      // An explicit new connection installs exactly one fresh polling timer.
+      connectEvents();
+      expect(intervals).toHaveBeenCalledTimes(2);
+      disposeLiveChannel();
+      expect(clears).toHaveBeenCalledWith(intervals.mock.results[1]!.value);
+    } finally {
+      disposeLiveChannel();
+      for (const result of intervals.mock.results) if (result.type === "return") clearInterval(result.value);
+      appState.viewMode = previousView;
+      fetcher.mockRestore();
+      clears.mockRestore();
+      intervals.mockRestore();
+    }
+  });
+
   test("a live frame the server produced before boot's state is refused, and a newer one applies", async () => {
     const { installLiveChannelForTests } = await import("./live");
     const { adoptBootSnapshot, connectEvents } = await import("./events");

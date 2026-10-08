@@ -14,6 +14,8 @@ type Options = {
   ignored: ReturnType<typeof createWatchPolicy>["ignored"];
   usePolling?: boolean;
   renew?: boolean;
+  // Controlled native notifications with real filesystem reads in tests.
+  watch?: typeof watch;
   onWork?: (kind: "watch" | "stat" | "directory") => void;
 };
 type NativeSubscription = { watcher: FSWatcher; listeners: Set<(event: string, file: string | null) => void> };
@@ -24,7 +26,7 @@ function contained(root: string, file: string): boolean {
   return rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }
 
-function subscribe(root: string, listener: (event: string, file: string | null) => void, onWork?: Options["onWork"], renew = false): () => void {
+function subscribe(root: string, listener: (event: string, file: string | null) => void, onWork?: Options["onWork"], renew = false, watchFiles = watch): () => void {
   // Nested roots share coverage. Recovery requests a fresh handle before the
   // old observer releases its subscription, even if that old handle is stale.
   const parent = renew ? undefined : [...subscriptions.keys()].find(candidate => contained(candidate, root));
@@ -32,7 +34,7 @@ function subscribe(root: string, listener: (event: string, file: string | null) 
   let subscription = renew ? undefined : subscriptions.get(key);
   if (!subscription) {
     const listeners = new Set<(event: string, file: string | null) => void>();
-    const watcher = watch(root, { recursive: true }, (event, filename) => {
+    const watcher = watchFiles(root, { recursive: true }, (event, filename) => {
       const file = filename == null ? null : path.resolve(root, filename.toString());
       for (const receive of listeners) receive(event, file);
     });
@@ -94,10 +96,25 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
     this.release = subscribe(root, (event, file) => {
       if (this.stopped) return;
       if (file === null) { this.emit("error", new Error("Filesystem observation needs recovery")); return; }
-      if (entry.kind === "file" ? file !== entry.absolutePath : !contained(entry.absolutePath, file)) return;
+      if (entry.kind === "file") {
+        // Save-by-rename can report only the temporary sibling's name. The
+        // single allowed destination is enough to reconcile that ambiguity.
+        if (file !== entry.absolutePath && !(event === "rename" && path.dirname(file) === entry.parentDir)) return;
+        this.emit("raw", event, file);
+        this.enqueue(entry.absolutePath, false);
+        return;
+      }
+      if (!contained(entry.absolutePath, file)) return;
       this.emit("raw", event, file);
-      if (!options.ignored(file)) this.enqueue(file, false);
-    }, options.onWork, options.renew);
+      if (event === "rename") {
+        // Native backends need not name both sides of a rename. Even an
+        // ignored temporary source can have replaced an allowed sibling.
+        // The keyed queue coalesces bursts; force one shallow parent check.
+        const parent = path.dirname(file);
+        if (contained(entry.absolutePath, parent) && !options.ignored(parent)) this.enqueue(parent, true);
+      }
+      if (!options.ignored(file)) this.enqueue(file, event === "rename");
+    }, options.onWork, options.renew, options.watch);
     // Listeners are attached by the caller before either discovery or errors
     // can be delivered. Watching starts before the walk, closing its race.
     queueMicrotask(() => this.enqueue(entry.absolutePath, true));
@@ -141,6 +158,7 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
       this.ready = true;
       this.emit("ready");
     }
+    if (!this.pending.size && !this.activePaths.size) this.emit("idle");
   }
 
   private async inspect(file: string, discover: boolean): Promise<void> {
@@ -182,8 +200,12 @@ class DirectoryObserver extends EventEmitter implements FileObserver {
         const child = path.join(file, entry.name);
         present.add(child);
         // Dirent supplies the kind needed by ignore policy before descending.
-        if (entry.isSymbolicLink() || this.options.ignored(child, entry)) continue;
+        if (entry.isSymbolicLink() || this.options.ignored(child, entry)) { this.remove(child); continue; }
         if (!this.known.has(child)) this.enqueue(child, true);
+        // Recheck existing entries after an ambiguous rename, including a
+        // replaced target whose name never left the directory. Known child
+        // directories use the metadata fast path rather than another crawl.
+        else if (discover || previous?.isDirectory() && previous.ino !== stats.ino) this.enqueue(child, false);
       }
       for (const child of this.children.get(file) ?? []) if (!present.has(child)) this.scheduleRemoval(child);
     } else {

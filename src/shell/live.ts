@@ -20,6 +20,7 @@ import { currentSessionRunningFact } from "./session-running";
 let channel: LiveChannel | null = null;
 let lifecycle: LifecycleRecovery | null = null;
 const recoveryWork = new Set<() => Promise<unknown>>();
+const teardownWork = new Set<() => void>();
 // Set while the page has released its stream because it was hidden.
 let releasedInBackground = false;
 
@@ -83,6 +84,13 @@ export function installLiveChannelForTests(next: LiveChannel | null): void {
 export function registerRecoveryWork(work: () => Promise<unknown>): () => void {
   recoveryWork.add(work);
   return () => { recoveryWork.delete(work); };
+}
+
+// Consumer resources belong to the page's live lifecycle too. Explicit
+// disposal releases them; background suspension keeps them available on wake.
+export function registerLiveTeardown(work: () => void): () => void {
+  teardownWork.add(work);
+  return () => { teardownWork.delete(work); };
 }
 
 // A wake-up IS a recovery: the stream this page holds may have died silently
@@ -278,6 +286,9 @@ export function awaitConfirmedLive(): ConfirmedLiveWait {
 // released (see `releaseLiveChannel`), not disposed, so it can come back.
 export function disposeLiveChannel(): void {
   releasedInBackground = false;
+  const teardown = [...teardownWork];
+  teardownWork.clear();
+  for (const dispose of teardown) dispose();
   manualAttempt?.cancel();
   for (const cancel of [...liveWaits]) cancel();
   channel?.dispose();

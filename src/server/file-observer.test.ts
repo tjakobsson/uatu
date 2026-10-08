@@ -2,7 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { Stats } from "node:fs";
+import { EventEmitter } from "node:events";
+import type { Stats, FSWatcher, watch } from "node:fs";
 import { observeFiles, type FileObserver } from "./file-observer";
 import { createWatchPolicy } from "./watch-policy";
 import { loadIgnoreMatcher } from "../ignore/engine";
@@ -27,17 +28,87 @@ async function until(predicate: () => boolean, description: string) {
     await Bun.sleep(10);
   }
 }
-async function observed(entry: WatchEntry, polling = false, onWork?: (kind: "watch" | "stat" | "directory") => void, renew = false) {
+async function observed(entry: WatchEntry, polling = false, onWork?: (kind: "watch" | "stat" | "directory") => void, renew = false, nativeWatch?: typeof watch) {
   const matcher = await loadIgnoreMatcher({ rootPath: entry.kind === "dir" ? entry.absolutePath : entry.parentDir,
     respectGitignore: true, isSingleFileRoot: entry.kind === "file" });
   const policy = createWatchPolicy(entry, matcher);
-  const observer = observeFiles(entry, { ignored: policy.ignored, usePolling: polling, onWork, renew });
+  const observer = observeFiles(entry, { ignored: policy.ignored, usePolling: polling, onWork, renew, watch: nativeWatch });
   observers.push(observer);
   const events: { event: string; file: string; stats?: Stats }[] = [];
   observer.on("all", (event, file, stats) => events.push({ event, file, stats }));
   await new Promise<void>((resolve, reject) => { observer.once("ready", resolve); observer.once("error", reject); });
   return { observer, events, policy };
 }
+
+function controlledNativeWatch() {
+  let receive!: (event: string, file: string | null) => void;
+  const watchFiles = ((_root: string, _options: unknown, listener: typeof receive) => {
+    receive = listener;
+    const watcher = new EventEmitter() as FSWatcher;
+    watcher.close = () => { watcher.emit("close"); };
+    return watcher;
+  }) as typeof watch;
+  return { watch: watchFiles, notify: (event: string, file: string) => receive(event, file) };
+}
+
+for (const singleFile of [false, true]) {
+  test(`native source-only rename refreshes a ${singleFile ? "single-file" : "directory"} root`, async () => {
+    const root = await fixture();
+    const file = path.join(root, "a.md");
+    const temporary = path.join(root, "save.tmp");
+    await writeFile(file, "# Before\n");
+    await writeFile(path.join(root, ".gitignore"), "*.tmp\n");
+    await mkdir(path.join(root, "unrelated"));
+    await writeFile(path.join(root, "unrelated", "b.md"), "# Unrelated\n");
+    const native = controlledNativeWatch();
+    const work: string[] = [];
+    const entry: WatchEntry = singleFile ? { kind: "file", absolutePath: file, parentDir: root } : { kind: "dir", absolutePath: root };
+    const { observer, events } = await observed(entry, false, kind => work.push(kind), false, native.watch);
+    const previous = await stat(file);
+    events.length = 0; work.length = 0;
+    await writeFile(temporary, "# Replacement\n");
+    await rename(temporary, file);
+    // Preserve mtime so the observer must check identity/ctime/size.
+    await utimes(file, previous.atime, previous.mtime);
+    let idle = false;
+    observer.once("idle", () => { idle = true; });
+    // Some native backends report only the ignored, now-missing source name.
+    // A burst should coalesce into one parent reconciliation.
+    for (let i = 0; i < 20; i++) native.notify("rename", "save.tmp");
+    await until(() => idle, "source-only rename reconciliation");
+    expect(events.filter(event => event.event === "change").map(event => event.file)).toEqual([file]);
+    expect(events.some(event => event.event === "unlink" && event.file === file)).toBe(false);
+    expect(work.filter(kind => kind === "directory")).toHaveLength(singleFile ? 0 : 1);
+    if (singleFile) expect(work).toEqual(["stat"]);
+
+    events.length = 0; work.length = 0;
+    await writeFile(file, "# Ordinary edit\n");
+    const changed = new Promise<void>(resolve => observer.once("idle", resolve));
+    native.notify("change", "a.md");
+    await changed;
+    expect(events.filter(event => event.event === "change").map(event => event.file)).toEqual([file]);
+    expect(work).toEqual(["stat"]);
+  }, 10000);
+}
+
+test("native rename reconciliation removes a target replaced with a symlink", async () => {
+  const root = await fixture();
+  const outside = await fixture();
+  const file = path.join(root, "a.md");
+  const target = path.join(outside, "outside.md");
+  await writeFile(file, "# Before\n");
+  await writeFile(target, "# Outside\n");
+  const native = controlledNativeWatch();
+  const { observer, events } = await observed({ kind: "dir", absolutePath: root }, false, undefined, false, native.watch);
+  events.length = 0;
+  await symlink(target, path.join(root, "save.tmp"));
+  await rename(path.join(root, "save.tmp"), file);
+  let idle = false;
+  observer.once("idle", () => { idle = true; });
+  native.notify("rename", "save.tmp");
+  await until(() => idle, "symlink replacement reconciliation");
+  expect(events.map(({ event, file }) => ({ event, file }))).toEqual([{ event: "unlink", file }]);
+});
 
 test("native discovery prunes denied directories and supplies file stats", async () => {
   const root = await fixture();

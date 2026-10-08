@@ -501,6 +501,12 @@ Unsupported recursive watching and explicit polling use Chokidar's normalized
 initial events instead. Both backends supply stats to the index and normalize
 atomic replacement with a short removal delay.
 
+A native rename notification may name only the temporary source. The observer
+coalesces those notifications into a shallow metadata check of the containing
+directory, including existing entries that may have been replaced. A single-file
+root rechecks only its allowed target. Unchanged subdirectories are not crawled;
+ordinary content-change notifications still inspect only the reported path.
+
 `server/file-index.ts` owns each root's path map, directory membership, and
 classification queue. Known extensions need no content read; unknown types
 use the existing 8 KB sniff with at most eight concurrent classifications.
