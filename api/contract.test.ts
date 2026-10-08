@@ -4,6 +4,7 @@ import { readdir } from "node:fs/promises";
 import { createAjv, openApiOperations, readJson, readYaml, schemaForAjv, validateApi } from "../scripts/validate-api";
 import { HUB_COOKIE_NAME, hubCookieName } from "../src/hub/auth";
 import { isVisibleFolderName } from "../src/hub/folder-manager";
+import type { DocumentPatch, DocumentSnapshot } from "../src/shared/document-updates";
 import {
   formatLiveEnvelope,
   formatLiveHello,
@@ -237,6 +238,32 @@ describe("conversation configuration", () => {
 });
 
 describe("live stream topics", () => {
+  test("snapshot documents and patch upserts require valid file revisions", async () => {
+    const [openapi, snapshotFixture, patchFixture] = await Promise.all([
+      readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml"),
+      readJson<{ data: { event: { data: DocumentSnapshot } } }>("api/examples/sse/live-document.json"),
+      readJson<{ data: { event: { data: DocumentPatch } } }>("api/examples/sse/live-document-patch.json"),
+    ]);
+    const snapshot = snapshotFixture.data.event.data;
+    const patch = patchFixture.data.event.data;
+    const { revision, ...document } = patch.upserts[0]!;
+    const snapshotWith = (doc: object) => ({ ...snapshot, roots: [{ ...patch.roots![0], docs: [doc] }] });
+    const patchWith = (doc: object) => ({ ...patch, upserts: [doc] });
+    for (const [schema, withEntry, fileRevision] of [
+      ["WorkspaceState", snapshotWith, snapshot.revision],
+      ["DocumentPatch", patchWith, revision],
+    ] as const) {
+      for (const schemaName of [schema, "DocumentUpdate"]) {
+        const validate = createAjv().compile(schemaForAjv(openapi.components.schemas[schemaName], openapi.components.schemas));
+        expect(validate(withEntry({ ...document, revision: fileRevision }))).toBe(true);
+        expect(validate(withEntry(document)), `${schemaName}: ${schema} entry without revision`).toBe(false);
+        for (const revision of [null, -1, 1.5, "1"]) {
+          expect(validate(withEntry({ ...document, revision }))).toBe(false);
+        }
+      }
+    }
+  });
+
   test("document snapshots require their protocol and freshness fields", async () => {
     const [openapi, fixture] = await Promise.all([
       readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml"),

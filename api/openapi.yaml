@@ -2318,7 +2318,7 @@ components:
     ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor, conversation-rewritten] } }, additionalProperties: false }
     DocumentMeta:
       type: object
-      required: [id, name, relativePath, mtimeMs, rootId, kind]
+      required: [id, name, relativePath, mtimeMs, rootId, kind, revision]
       properties: { id: { type: string }, name: { type: string }, relativePath: { type: string }, mtimeMs: { type: number }, rootId: { type: string }, kind: { enum: [markdown, asciidoc, text, binary] }, revision: { type: integer, minimum: 0 } }
       additionalProperties: false
     RootGroup:
