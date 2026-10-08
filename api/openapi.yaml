@@ -2328,7 +2328,7 @@ components:
       additionalProperties: false
     WorkspaceState:
       type: object
-      required: [workspaceApiRevision, roots, repositories, compareTarget, initialFollow, defaultDocumentId, changedId, generatedAt, build, scope]
+      required: [kind, epoch, revision, discovery, repositoryState, workspaceApiRevision, roots, repositories, compareTarget, initialFollow, defaultDocumentId, changedId, generatedAt, build, scope]
       properties:
         kind: { const: snapshot }
         epoch: { type: string }

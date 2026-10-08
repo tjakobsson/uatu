@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import type { StatePayload } from "../../src/shared/types";
+import type { DocumentPatch, DocumentSnapshot, DocumentUpdate } from "../../src/shared/document-updates";
 import { expect, test, showGitLogPane } from "./fixtures";
 import { openTreeFile, revealTreeRow, treeRow, waitForTreeIdle } from "./tree-helpers";
 
@@ -27,7 +28,7 @@ async function installStream(page: Page) {
     window.EventSource = Controlled as unknown as typeof EventSource;
   });
 }
-async function deliver(page: Page, state: StatePayload) {
+async function deliver(page: Page, state: StatePayload | DocumentUpdate) {
   await page.waitForFunction(() => Boolean((window as any).__documentStream));
   await page.evaluate(state => {
     state.generatedAt = Math.max(Date.now(), ((window as any).__stamp ?? 0) + 1);
@@ -38,6 +39,139 @@ async function deliver(page: Page, state: StatePayload) {
   }, state);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
+
+function repositoryPatch(state: DocumentSnapshot): DocumentPatch {
+  const previousRevision = state.revision++;
+  state.repositoryState = { status: "ready", generation: state.repositoryState.generation + 1 };
+  state.changedId = null;
+  return {
+    kind: "patch", epoch: state.epoch, previousRevision, revision: state.revision,
+    generatedAt: state.generatedAt, scope: state.scope, compareTarget: state.compareTarget,
+    unscopedFingerprint: state.unscopedFingerprint!, upserts: [], removals: [], changedId: null,
+    repositories: state.repositories, repositoryState: state.repositoryState,
+  };
+}
+
+test.describe("repository preview updates", () => {
+  test.use({ serviceWorkers: "block" });
+  test.beforeEach(async ({ page, request }) => {
+    await request.post("/__e2e/reset", { data: { git: true } });
+    await expect.poll(async () => (await request.get("/api/state").then(r => r.json())).repositoryState.status).toBe("ready");
+    await installStream(page);
+  });
+  test.afterEach(async ({ page, request }) => {
+    await page.close();
+    await request.post("/__e2e/reset");
+  });
+
+  for (const delivery of ["patch", "snapshot", "resume"] as const) {
+    test(`${delivery} refreshes an active diff after a Git-only change`, async ({ page, request }) => {
+      let baseRef = "before-commit";
+      await page.route("**/api/document/diff?*", route => route.fulfill({ json: { kind: "unchanged", baseRef } }));
+      await page.goto("/README.md");
+      await expect(page.locator("#preview-path")).toHaveText("README.md");
+      const state: DocumentSnapshot = await request.get("/api/state").then(r => r.json());
+      await deliver(page, state);
+      await page.locator("#view-diff").click();
+      await expect(page.locator(".uatu-diff-state")).toContainText("before-commit");
+      await page.locator("#follow-toggle").focus();
+      baseRef = "after-commit";
+      const patch = repositoryPatch(state);
+      if (delivery === "resume") {
+        await page.route("**/api/state*", route => route.fulfill({ json: state }));
+        await page.evaluate(() => {
+          const event = new Event("pageshow");
+          Object.defineProperty(event, "persisted", { value: true });
+          window.dispatchEvent(event);
+        });
+      } else await deliver(page, delivery === "patch" ? patch : state);
+      await expect(page.locator(".uatu-diff-state")).toContainText("after-commit");
+      await expect(page.locator("#preview-path")).toHaveText("README.md");
+      await expect(page).toHaveURL(/\/README\.md$/);
+      await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+      await expect(page.locator("#follow-toggle")).toBeFocused();
+    });
+  }
+
+  test("a repository update invalidates a cached diff while Rendered stays visible", async ({ page, request }) => {
+    let baseRef = "cached-before-commit";
+    let documentReads = 0;
+    page.on("request", request => { if (new URL(request.url()).pathname === "/api/document") documentReads++; });
+    await page.route("**/api/document/diff?*", route => route.fulfill({ json: { kind: "unchanged", baseRef } }));
+    await page.goto("/README.md");
+    await expect(page.locator("#preview-path")).toHaveText("README.md");
+    const state: DocumentSnapshot = await request.get("/api/state").then(r => r.json());
+    await deliver(page, state);
+    await page.locator("#view-diff").click();
+    await expect(page.locator(".uatu-diff-state")).toContainText("cached-before-commit");
+    await page.locator("#view-rendered").click();
+    await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
+    const content = await page.locator("#preview").textContent();
+    const reads = documentReads;
+    baseRef = "fresh-after-commit";
+    await deliver(page, repositoryPatch(state));
+    await expect(page.locator("#preview")).toHaveText(content!);
+    expect(documentReads).toBe(reads);
+    await page.locator("#view-diff").click();
+    await expect(page.locator(".uatu-diff-state")).toContainText("fresh-after-commit");
+  });
+
+  test("a late diff response cannot restore an older repository generation", async ({ page, request }) => {
+    let requests = 0;
+    let held = false;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    await page.route("**/api/document/diff?*", async route => {
+      if (++requests === 1) {
+        held = true;
+        await gate;
+        await route.fulfill({ json: { kind: "unchanged", baseRef: "obsolete-repository" } });
+      } else await route.fulfill({ json: { kind: "unchanged", baseRef: "current-repository" } });
+    });
+    try {
+      await page.goto("/README.md");
+      await expect(page.locator("#preview-path")).toHaveText("README.md");
+      const state: DocumentSnapshot = await request.get("/api/state").then(r => r.json());
+      await deliver(page, state);
+      await page.locator("#view-diff").click();
+      await expect.poll(() => held).toBe(true);
+      await deliver(page, repositoryPatch(state));
+      await expect(page.locator(".uatu-diff-state")).toContainText("current-repository");
+      const finished = responseDelivered(page, "/api/document/diff?");
+      release();
+      await finished;
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await expect(page.locator(".uatu-diff-state")).toContainText("current-repository");
+      await page.locator("#view-rendered").click();
+      await page.locator("#view-diff").click();
+      await expect(page.locator(".uatu-diff-state")).toContainText("current-repository");
+    } finally { release(); }
+  });
+
+  test("repository patches re-resolve a commit removed from and restored to the log", async ({ page, request }) => {
+    await page.goto("/README.md");
+    await expect(page.locator("#preview-path")).toHaveText("README.md");
+    const state: DocumentSnapshot = await request.get("/api/state").then(r => r.json());
+    await deliver(page, state);
+    await showGitLogPane(page);
+    await page.locator("#git-log .commit-log a", { hasText: "add feature doc" }).click();
+    await expect(page.locator("#preview-title")).toHaveText("add feature doc");
+    const url = page.url();
+    const sha = new URL(url).searchParams.get("commit")!;
+    const repositories = structuredClone(state.repositories);
+    state.repositories = state.repositories.map(repository => ({ ...repository, commitLog: repository.commitLog.filter(commit => commit.sha !== sha) }));
+    await deliver(page, repositoryPatch(state));
+    await expect(page.locator("#preview-title")).toHaveText("Commit preview unavailable");
+    await expect(page.locator("#preview")).not.toContainText("Full commit message body");
+    await expect(page).toHaveURL(url);
+    state.repositories = repositories;
+    await deliver(page, repositoryPatch(state));
+    await expect(page.locator("#preview-title")).toHaveText("add feature doc");
+    await expect(page.locator("#preview")).toContainText("Full commit message body");
+    await expect(page).toHaveURL(url);
+    await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  });
+});
 // The late response is not merely fulfilled but in the page: the browser has
 // its whole body. What the page does with it runs in the tasks right after,
 // which the two frames the callers then wait out cover.

@@ -56,6 +56,10 @@ function loadingSignal(): LoadingSignal {
 import { documentRevisionKey } from "../shell/document-state";
 let diffLoadGeneration = 0;
 
+function diffRevisionKey(documentId: string): string {
+  return `${documentRevisionKey(documentId)}:${appState.repositoryFreshness.generation}:${appState.compareTarget}`;
+}
+
 export function cancelDiffPresentation(): void {
   ++diffLoadGeneration;
   ++diffRenderGeneration;
@@ -65,10 +69,10 @@ export function cancelDiffPresentation(): void {
 export async function applyDiffForActiveDocument(documentId: string): Promise<void> {
   const selectionGeneration = getSelectionGeneration();
   const generation = ++diffLoadGeneration;
-  const revision = documentRevisionKey(documentId);
+  const revision = diffRevisionKey(documentId);
   const isCurrent = () => generation === diffLoadGeneration
     && selectionGeneration === getSelectionGeneration()
-    && revision === documentRevisionKey(documentId)
+    && revision === diffRevisionKey(documentId)
     && appState.previewMode.kind === "document"
     && appState.selectedId === documentId
     && appState.viewMode === "diff"
@@ -135,9 +139,9 @@ export async function renderDiffIntoPreview(
 ): Promise<void> {
   const selectionGeneration = getSelectionGeneration();
   const generation = ++diffRenderGeneration;
-  const revision = documentRevisionKey(documentId);
+  const revision = diffRevisionKey(documentId);
   const isCurrent = () => generation === diffRenderGeneration && ownsLoad()
-    && revision === documentRevisionKey(documentId)
+    && revision === diffRevisionKey(documentId)
     && selectionGeneration === getSelectionGeneration()
     && appState.previewMode.kind === "document"
     && appState.selectedId === documentId && appState.viewMode === "diff"

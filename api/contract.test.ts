@@ -237,6 +237,23 @@ describe("conversation configuration", () => {
 });
 
 describe("live stream topics", () => {
+  test("document snapshots require their protocol and freshness fields", async () => {
+    const [openapi, fixture] = await Promise.all([
+      readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml"),
+      readJson<{ data: { event: { data: Record<string, unknown> } } }>("api/examples/sse/live-document.json"),
+    ]);
+    for (const schema of ["WorkspaceState", "DocumentUpdate"]) {
+      const validate = createAjv().compile(schemaForAjv(openapi.components.schemas[schema], openapi.components.schemas));
+      const snapshot = fixture.data.event.data;
+      expect(validate(snapshot)).toBe(true);
+      for (const field of ["kind", "epoch", "revision", "discovery", "repositoryState"]) {
+        const incomplete = { ...snapshot };
+        delete incomplete[field];
+        expect(validate(incomplete), `${schema} without ${field}`).toBe(false);
+      }
+    }
+  });
+
   test("each topic names its payload schema and the domain that owns it", async () => {
     const streaming = await readYaml<{ channels: { live: { topics: Record<string, unknown> } } }>("api/streaming.yaml");
     expect(streaming.channels.live.topics).toMatchObject({

@@ -10,6 +10,7 @@ import { applyProjectIdentity } from "./identity";
 import { findDocumentById, findDocumentByRelativePath, syncStateGeneration } from "./storage";
 import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
 import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
+import { applyDiffForActiveDocument } from "../preview/diff";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar, renderSidebarPatch } from "../sidebar/shell";
 import { documentIndex, resetDocumentIndex, documentRevisionKey } from "./document-state";
@@ -86,6 +87,12 @@ function renderPendingDocument(): boolean {
   return true;
 }
 
+function hasNewRepositoryState(update: DocumentUpdate): boolean {
+  const previous = documentIndex.view();
+  return update.epoch !== previous?.epoch || update.compareTarget !== previous?.compareTarget
+    || update.repositoryState !== undefined && update.repositoryState.generation !== previous?.repositoryState.generation;
+}
+
 // Owner mutator for the server-snapshot triple (`roots`, `repositories`,
 // `scope`). The SSE reducer below is the ongoing writer; the boot path
 // (`shell/boot.ts`) applies its initial /api/state payload through
@@ -93,9 +100,11 @@ function renderPendingDocument(): boolean {
 function applyServerSnapshot(payload: StatePayload): boolean {
   if ((payload as DocumentSnapshot).kind === "snapshot") {
     const snapshot = payload as DocumentSnapshot;
+    const repositoryChanged = hasNewRepositoryState(snapshot);
     const previous = documentIndex.view();
     if (previous && !sameDocumentContext(previous, snapshot)) resetDocumentIndex();
     if (documentIndex.apply(snapshot) !== "applied") return false;
+    if (repositoryChanged) documentDiffCache.clear();
     appState.discovery = snapshot.discovery;
     appState.repositoryFreshness = snapshot.repositoryState;
   }
@@ -174,12 +183,13 @@ const documentConsumer: LiveTopicConsumer = {
 async function applyDocumentPatch(patch: DocumentPatch, generation: number): Promise<void> {
   if (!liveChannel().isCurrent(generation)) return;
   const mode = appState.previewMode;
-  const hadCommit = mode.kind === "commit" && appState.repositories.some(repository => repository.id === mode.repositoryId && repository.commitLog.some(commit => commit.sha === mode.sha));
+  const repositoryChanged = hasNewRepositoryState(patch);
   const selected = appState.selectedId;
   const previousDocument = selected ? documentIndex.find(selected) : undefined;
   const result = documentIndex.apply(patch);
   if (result === "resync") { subscribeDocument(); return; }
   if (result === "ignored") { liveChannel().confirm(generation); return; }
+  if (repositoryChanged) documentDiffCache.clear();
   const payload = documentIndex.view()!;
   appState.roots = payload.roots;
   appState.repositories = payload.repositories;
@@ -195,7 +205,7 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   noteSearchCorpusChange();
   if (mode.kind === "commit") {
     renderSidebarPatch(patch);
-    if (patch.repositories && !hadCommit) renderCommitPreview(mode);
+    if (patch.repositories) renderCommitPreview(mode);
     return;
   }
 
@@ -231,6 +241,8 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   if (next && reload) {
     await loadDocument(next);
     if (next === selected && appState.selectedId === next && current) signalActiveDocumentUpdated();
+  } else if (next && repositoryChanged && appState.viewMode === "diff") {
+    await applyDiffForActiveDocument(next);
   } else if (!next && !renderPendingDocument() && reload) renderEmptyPreview("No document selected", "Waiting for viewable files");
 }
 
@@ -249,6 +261,7 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
     return;
   }
   const previousSelectedId = appState.selectedId;
+  const repositoryChanged = (payload as DocumentSnapshot).kind === "snapshot" && hasNewRepositoryState(payload as DocumentSnapshot);
   const changedId = payload.changedId ?? ((payload as DocumentSnapshot).kind === "snapshot" ? unseenSnapshotChange(documentIndex, payload as DocumentSnapshot) : null);
   const previousScope = appState.scope;
   const shouldReload = Boolean(documentIndex.epoch && (payload as DocumentSnapshot).epoch
@@ -344,6 +357,8 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
 
   if (appState.selectedId && !hasDocument(payload.roots, appState.selectedId)) {
     await loadDocument(appState.selectedId);
+  } else if (appState.selectedId && repositoryChanged && appState.viewMode === "diff") {
+    await applyDiffForActiveDocument(appState.selectedId);
   } else if (!appState.selectedId) {
     if (!renderPendingDocument()) renderEmptyPreview("No document selected", "Waiting for viewable files");
   }
@@ -394,6 +409,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
     // stream's first frame sees no mtime difference either — so this is the
     // only place the staleness is still visible.
     const selectedId = appState.selectedId;
+    const repositoryChanged = (payload as DocumentSnapshot).kind === "snapshot" && hasNewRepositoryState(payload as DocumentSnapshot);
     const changedId = (payload as DocumentSnapshot).kind === "snapshot" ? unseenSnapshotChange(documentIndex, payload as DocumentSnapshot) : payload.changedId;
     const staleSelection = Boolean(documentIndex.epoch && (payload as DocumentSnapshot).epoch
       && documentIndex.epoch !== (payload as DocumentSnapshot).epoch) || shouldRefreshPreview(
@@ -418,6 +434,10 @@ const stateReconciler = createStateReconciler<StatePayload>({
     syncStateGeneration(payload.generatedAt);
     renderBuildBadge(payload.build);
     renderSidebar();
+    if (appState.previewMode.kind === "commit") {
+      renderCommitPreview(appState.previewMode);
+      return;
+    }
     const activeId = appState.selectedId;
     if (activeId && (staleSelection || activeId !== selectedId)) {
       forgetDocumentCache(activeId);
@@ -427,6 +447,8 @@ const stateReconciler = createStateReconciler<StatePayload>({
         // silent.
         if (appState.selectedId === selectedId && hasDocument(appState.roots, selectedId)) signalActiveDocumentUpdated();
       });
+    } else if (activeId && repositoryChanged && appState.viewMode === "diff") {
+      void applyDiffForActiveDocument(activeId);
     } else if (!activeId && !renderPendingDocument() && reconcileFollow) renderEmptyPreview("No document selected", "Waiting for viewable files");
   },
 });
