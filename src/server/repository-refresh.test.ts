@@ -136,3 +136,18 @@ test("a slow refresh is announced stale once the grace passes", async () => {
     expect(published.slice(3)).toEqual([{ status: "ready", generation: 2 }]);
   } finally { gate?.resolve(); refresh.stop(); }
 });
+
+test("a commit age that only advanced with the clock is not a repository change", async () => {
+  const published: RepositoryFreshness[] = [];
+  let age = "5 seconds ago";
+  const refresh = createRepositoryRefresh({ entries: [], roots: () => [], publish: (_results, freshness) => { published.push(freshness); },
+    collect: async () => [{ id: "repo", commitLog: [{ sha: "abc1234", relativeTime: age }] }] as unknown as RepositorySnapshot[],
+  });
+  try {
+    await refresh.refresh();
+    age = "2 minutes ago";
+    await refresh.refresh();
+    expect(published).toHaveLength(2);
+    expect(refresh.freshness).toEqual({ status: "ready", generation: 1 });
+  } finally { refresh.stop(); }
+});

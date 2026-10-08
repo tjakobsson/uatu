@@ -9,6 +9,13 @@ import { withGitCancellation } from "../document/git-base-ref";
 
 export const STALE_NOTICE_MS = 1000;
 export type RepositoryResults = Record<CompareTarget, RepositorySnapshot[]>;
+// Commit ages are Git's wall-clock `%cr` text ("5 seconds ago"). They advance
+// without any repository change, so they don't count as one; displayed ages
+// update with the next real change.
+function repositoryFingerprint(results: RepositoryResults): string {
+  return JSON.stringify(results, (key, value) => key === "relativeTime" ? undefined : value);
+}
+
 export function createRepositoryRefresh(options: {
   entries: WatchEntry[];
   roots: () => RootGroup[];
@@ -81,7 +88,7 @@ export function createRepositoryRefresh(options: {
       if (stopped) return;
       // An identical result keeps its identity and generation, so clients
       // neither repaint repository views nor refetch Git facts.
-      const changed = freshness.generation === 0 || JSON.stringify(next) !== JSON.stringify(results);
+      const changed = freshness.generation === 0 || repositoryFingerprint(next) !== repositoryFingerprint(results);
       if (changed) results = next;
       // A queued follow-up keeps any announced "stale" until it completes.
       const status = dirty && staleAnnounced ? "stale" : "ready";
