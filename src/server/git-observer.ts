@@ -262,7 +262,15 @@ export function createGitObserver(options: Options): GitObserver {
       for (const directory of candidates.directories) directories.add(directory);
       if (candidates.nonGitRoot) {
         const real = await realpath(candidates.nonGitRoot).catch(() => null);
-        if (real) { directories.add(real); nonGit.add(real); }
+        if (real) {
+          directories.add(real);
+          nonGit.add(real);
+          // `git init` creates .git before it writes HEAD, so the first
+          // resolution can still find no repository. Watching the half-made
+          // .git lets its HEAD or config write resolve again.
+          const pending = path.join(real, ".git");
+          if (await stat(pending).then(info => info.isDirectory(), () => false)) directories.add(pending);
+        }
       }
       const repository = await narrowRepository(entry);
       if (repository) narrow.set(repository.topLevel, [...(narrow.get(repository.topLevel) ?? []), repository.root]);

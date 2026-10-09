@@ -300,3 +300,17 @@ test("a root that becomes a repository is observed from its first commit", async
   await git(directory, ["commit", "-m", "first"]);
   await until(() => names.includes("main") || names.includes("HEAD") || names.includes("index"), "the first commit");
 }, 20_000);
+
+test("a .git directory that appears before git init finishes is still resolved", async () => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "uatu-git-observer-halfmade-")));
+  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const { observer, names } = observe([dir(directory)]);
+  await observer.start();
+  // Linux reports .git as soon as it exists, before HEAD is written.
+  const gitDir = path.join(directory, ".git");
+  await mkdir(gitDir);
+  await until(() => names.includes(".git"), "the empty .git directory");
+  await until(() => observer.directories().includes(gitDir), "the half-made .git to be watched");
+  await git(directory, ["init", "--initial-branch=main"]);
+  await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the full Git-metadata watch set");
+}, 20_000);
