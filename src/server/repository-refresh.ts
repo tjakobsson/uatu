@@ -4,10 +4,22 @@ import { collectRepositorySnapshots, collectRepositorySnapshotsByTarget, safeGit
 import type { CompareTarget, RepositorySnapshot, RootGroup } from "../shared/types";
 import type { RepositoryFreshness } from "../shared/document-updates";
 import type { WatchEntry } from "./roots";
-import { createRefreshScheduler } from "./refresh-scheduler";
+import { createRefreshScheduler, type RefreshSchedulerClock } from "./refresh-scheduler";
 import { withGitCancellation } from "../document/git-base-ref";
+import { createGitObserver, hasNarrowRoot, type GitObserver } from "./git-observer";
+import { pollingRequested } from "./file-observer";
 
 export const STALE_NOTICE_MS = 1000;
+// Successive collections start at least this far apart. The first trigger
+// after a quiet period still collects within the scheduler's debounce.
+export const MIN_COLLECTION_GAP_MS = 2000;
+// Only the polling fallback uses this; native observation has no timer.
+export const GIT_POLL_INTERVAL_MS = 5000;
+const realClock: RefreshSchedulerClock = {
+  now: () => performance.now(),
+  setTimer: (fn, delay) => { const timer = setTimeout(fn, delay); timer.unref?.(); return timer; },
+  clearTimer: clearTimeout,
+};
 export type RepositoryResults = Record<CompareTarget, RepositorySnapshot[]>;
 // Commit ages are Git's wall-clock `%cr` text ("5 seconds ago"). They advance
 // without any repository change, so they don't count as one; displayed ages
@@ -23,9 +35,19 @@ export function createRepositoryRefresh(options: {
   publish: (results: RepositoryResults, freshness: RepositoryFreshness) => void;
   probeIntervalMs?: number;
   staleNoticeMs?: number;
-  onProbe?: () => void;
+  minCollectionGapMs?: number;
+  // Polling mode skips native Git observation, like the content watcher.
+  usePolling?: boolean;
+  clock?: RefreshSchedulerClock;
+  observe?: typeof createGitObserver;
+  onObserverEvent?: () => void;
+  onFallback?: (error: unknown) => void;
+  // Each polling-fallback tick, for tests.
+  onPoll?: () => void;
 }) {
   const collect = options.collect ?? collectRepositorySnapshots;
+  const clock = options.clock ?? realClock;
+  const gap = options.minCollectionGapMs ?? MIN_COLLECTION_GAP_MS;
   let results: RepositoryResults = { base: [], "last-commit": [] };
   let freshness: RepositoryFreshness = { status: "pending", generation: 0 };
   let stopped = false;
@@ -36,8 +58,28 @@ export function createRepositoryRefresh(options: {
   let probing = false;
   let probeFiles: string[] | null = null;
   let fingerprint: string | null = null;
+  // A narrow root's out-of-root edits have no file to stat, so each fallback
+  // tick collects instead.
+  let narrow = false;
+  let observer: GitObserver | null = null;
+  let fellBack = false;
+  let demandEpoch = 0;
+  let lastStart = -Infinity;
+  let gapTimer: ReturnType<typeof setTimeout> | null = null;
   const cancellation = new AbortController();
-  const scheduler = createRefreshScheduler(() => { void refresh(); });
+  const scheduler = createRefreshScheduler(() => { paced(); }, clock);
+
+  // Scheduled refreshes respect the minimum gap; a trigger inside it waits
+  // for the gap and coalesces with anything else that arrives meanwhile.
+  function paced() {
+    if (stopped) return;
+    if (running) { dirty = true; return; }
+    const wait = lastStart + gap - clock.now();
+    if (wait <= 0) { void refresh(); return; }
+    dirty = true;
+    armStaleNotice();
+    gapTimer ??= clock.setTimer(() => { gapTimer = null; paced(); }, wait);
+  }
 
   // A routine refresh finishes well inside this window. Announcing "stale" at
   // its start would swap the change overview and the facts strip to a
@@ -49,8 +91,12 @@ export function createRepositoryRefresh(options: {
     published = freshness;
     options.publish(results, freshness);
   }
+  function armStaleNotice() {
+    if (freshness.status !== "ready" || staleNotice) return;
+    staleNotice = clock.setTimer(announceStale, options.staleNoticeMs ?? STALE_NOTICE_MS);
+  }
   function clearStaleNotice() {
-    if (staleNotice) clearTimeout(staleNotice);
+    if (staleNotice) clock.clearTimer(staleNotice);
     staleNotice = null;
     staleAnnounced = false;
   }
@@ -67,13 +113,12 @@ export function createRepositoryRefresh(options: {
     if (running) { dirty = true; return; }
     running = true;
     dirty = false;
+    lastStart = clock.now();
+    if (gapTimer) { clock.clearTimer(gapTimer); gapTimer = null; }
     if (freshness.generation === 0 || freshness.status === "error") {
       freshness = { ...freshness, status: freshness.generation ? "stale" : "pending" };
       emit();
-    } else if (freshness.status === "ready" && !staleNotice) {
-      staleNotice = setTimeout(announceStale, options.staleNoticeMs ?? STALE_NOTICE_MS);
-      (staleNotice as { unref?: () => void }).unref?.();
-    }
+    } else armStaleNotice();
     try {
       const roots = options.roots();
       let next: RepositoryResults;
@@ -110,6 +155,7 @@ export function createRepositoryRefresh(options: {
     probing = true;
     try {
       if (!probeFiles) {
+        narrow = await hasNarrowRoot(options.entries);
         const files = new Set<string>();
         for (const entry of options.entries) {
           if (stopped || !demanded) return;
@@ -138,38 +184,81 @@ export function createRepositoryRefresh(options: {
         return s ? `${file}:${s.mtimeMs}:${s.ctimeMs}:${s.size}:${s.ino}` : `${file}:missing`;
       }))).join("\n");
       if (stopped || !demanded) return;
-      if (fingerprint !== null && next !== fingerprint) {
-        probeFiles = null; // A branch switch can change the active ref path.
+      if (fingerprint !== null && (next !== fingerprint || narrow)) {
+        if (next !== fingerprint) probeFiles = null; // A branch switch can change the active ref path.
         dirty = true;
         scheduler.schedule();
       }
       fingerprint = next;
-      options.onProbe?.();
+      options.onPoll?.();
     } finally { probing = false; }
   }
+
+  function startPolling() {
+    void withGitCancellation(cancellation.signal, probe).catch(() => {});
+    probeTimer = setInterval(() => { void withGitCancellation(cancellation.signal, probe).catch(() => {}); }, options.probeIntervalMs ?? GIT_POLL_INTERVAL_MS);
+    probeTimer.unref?.();
+  }
+
+  // Native observation failed: poll for the rest of this demand period rather
+  // than flap between the two. The next demand tries native watching again.
+  function fallBack(error: unknown) {
+    if (fellBack || !demanded || stopped) return;
+    fellBack = true;
+    observer?.close();
+    observer = null;
+    options.onFallback?.(error);
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`uatu: Git metadata watching failed (${reason}); checking every ${(options.probeIntervalMs ?? GIT_POLL_INTERVAL_MS) / 1000} s instead`);
+    startPolling();
+    // A change may have gone unreported while the watch was failing.
+    dirty = true;
+    scheduler.schedule();
+  }
+
+  function release() {
+    observer?.close();
+    observer = null;
+    if (probeTimer) clearInterval(probeTimer);
+    probeTimer = null;
+    probeFiles = null;
+    fingerprint = null;
+    fellBack = false;
+  }
+
+  function request() { if (!stopped) { dirty = true; scheduler.schedule(); } }
 
   return {
     get results() { return results; },
     get freshness() { return freshness; },
-    request() { if (!stopped) { dirty = true; scheduler.schedule(); } },
+    // Whether Git metadata is currently polled rather than observed.
+    get polling() { return probeTimer !== null; },
+    request,
     refresh,
     demand(active: boolean) {
       if (active === demanded || stopped) return;
       demanded = active;
-      if (probeTimer) clearInterval(probeTimer);
-      probeTimer = null;
-      if (active) {
-        void withGitCancellation(cancellation.signal, probe).catch(() => {});
-        dirty = true; scheduler.schedule();
-        probeTimer = setInterval(() => { void withGitCancellation(cancellation.signal, probe).catch(() => {}); }, options.probeIntervalMs ?? 5000);
-        probeTimer.unref?.();
-      }
+      const epoch = ++demandEpoch;
+      release();
+      if (!active) return;
+      dirty = true; scheduler.schedule();
+      if (pollingRequested(options.usePolling)) { startPolling(); return; }
+      const next = (options.observe ?? createGitObserver)({
+        entries: options.entries,
+        onChange: () => { options.onObserverEvent?.(); request(); },
+        onFailure: error => { if (observer === next) fallBack(error); },
+      });
+      observer = next;
+      void withGitCancellation(cancellation.signal, () => next.start()).catch(error => {
+        if (epoch === demandEpoch && observer === next) fallBack(error);
+      });
     },
     stop() {
       stopped = true; scheduler.cancel();
       cancellation.abort();
-      if (staleNotice) clearTimeout(staleNotice);
-      if (probeTimer) clearInterval(probeTimer);
+      if (staleNotice) clock.clearTimer(staleNotice);
+      if (gapTimer) clock.clearTimer(gapTimer);
+      release();
     },
   };
 }

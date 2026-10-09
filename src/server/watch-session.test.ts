@@ -9,6 +9,7 @@ import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from ".
 import { WORKSPACE_API_REVISION } from "../shared/version";
 import { DocumentStateIndex, type DocumentUpdate, type DocumentSnapshot } from "../shared/document-updates";
 import { resolveWatchRoots } from "./roots";
+import { safeGit } from "../document/git-base-ref";
 import {
   createRefreshScheduler,
   createWatchSession,
@@ -264,6 +265,36 @@ describe("watchSession scope", () => {
       expect(metrics.get(closedCounter("document", "completed"))).toBe(1);
       expect(metrics.get(activeGauge("document"))).toBe(0);
       await second.cancel().catch(() => undefined);
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("a subscribed session counts Git metadata events without polling", async () => {
+    const repository = await mkdtemp(path.join(os.tmpdir(), "uatu-git-observer-metrics-"));
+    tempDirectories.push(repository);
+    await writeFile(path.join(repository, "README.md"), "# Readme\n");
+    const git = (args: string[]) => safeGit(repository, ["-c", "user.name=Test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false", ...args]);
+    await git(["init", "--initial-branch=main"]);
+    await git(["add", "."]);
+    await git(["commit", "-m", "initial"]);
+    const metrics = new MetricsRegistry();
+    const session = createWatchSession([{ kind: "dir", absolutePath: repository }], true, { metrics });
+    try {
+      await session.start();
+      const reader = session.eventsResponse().body!.getReader();
+      await readSseFrame(reader);
+      // The observer opens its handles asynchronously; keep committing until
+      // one is reported.
+      const deadline = performance.now() + 10_000;
+      for (let attempt = 0; (metrics.get("git_observer.events_total") ?? 0) === 0; attempt++) {
+        if (performance.now() > deadline) throw new Error("no Git observer event was counted");
+        await git(["commit", "--allow-empty", "-m", `metadata ${attempt}`]);
+        await Bun.sleep(50);
+      }
+      expect(metrics.get("git_observer.fallback_total") ?? 0).toBe(0);
+      expect(metrics.get("reconcile.ticks_total") ?? 0).toBe(0);
+      await reader.cancel();
     } finally {
       await session.stop();
     }

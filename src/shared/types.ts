@@ -133,7 +133,11 @@ export type CommitLogEntry = {
   subject: string;
   message: string;
   author: string | null;
+  // Git's wall-clock text ("3 hours ago") as of collection. Kept for older
+  // clients; it goes stale between collections.
   relativeTime: string | null;
+  // Commit time in epoch milliseconds. Clients render the age from this.
+  committedAtMs: number | null;
 };
 
 export type RepositorySnapshot = {

@@ -95,7 +95,10 @@ src/
 │                   shared subscriptions and bounded discovery; Chokidar is
 │                   the polling/unsupported-platform fallback), file-index
 │                   (path map, bounded classification and event batches),
-│                   repository-refresh (independent Git work and probes),
+│                   repository-refresh (independent, paced Git
+│                   collection) + git-observer (event-driven Git metadata
+│                   watch, plus the working tree for narrow roots; a stat
+│                   probe only as the polling fallback),
 │                   newest-document (incremental Follow catch-up),
 │                   roots (resolution + one-shot scanning),
 │                   search (content sweep over the watched roots),

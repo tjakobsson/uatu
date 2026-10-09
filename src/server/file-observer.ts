@@ -63,9 +63,15 @@ function subscribe(root: string, listener: (event: string, file: string | null) 
   };
 }
 
-export function observeFiles(entry: WatchEntry, options: Options): FileObserver {
+// Polling mode: the session's --poll choice, overridden either way by
+// Chokidar's own CHOKIDAR_USEPOLLING. The Git metadata observer follows it too.
+export function pollingRequested(usePolling: boolean | undefined): boolean {
   const poll = process.env.CHOKIDAR_USEPOLLING?.toLowerCase();
-  const polling = poll === undefined ? options.usePolling === true : poll !== "false" && poll !== "0" && poll !== "";
+  return poll === undefined ? usePolling === true : poll !== "false" && poll !== "0" && poll !== "";
+}
+
+export function observeFiles(entry: WatchEntry, options: Options): FileObserver {
+  const polling = pollingRequested(options.usePolling);
   if (!polling) {
     try { return new DirectoryObserver(entry, options); }
     catch (error) {

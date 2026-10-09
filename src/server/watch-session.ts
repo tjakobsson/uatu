@@ -118,7 +118,9 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
   };
 
   const repositories = createRepositoryRefresh({ entries, roots: unscopedRoots, collect: options.collectRepositories,
-    onProbe: () => metrics?.inc("reconcile.ticks_total"),
+    usePolling: options.usePolling,
+    onObserverEvent: () => metrics?.inc("git_observer.events_total"),
+    onFallback: () => metrics?.inc("git_observer.fallback_total"),
     publish: (results, freshness) => {
       if (stopped) return;
       const changed = results !== publishedRepositories;

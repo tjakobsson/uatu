@@ -40,9 +40,16 @@ async function deliver(page: Page, state: StatePayload | DocumentUpdate) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
+// A Git-only change as the server publishes it: a commit moves HEAD, and
+// the repository generation advances. (An identical result is never
+// republished, so a bare generation bump does not occur.)
 function repositoryPatch(state: DocumentSnapshot): DocumentPatch {
   const previousRevision = state.revision++;
   state.repositoryState = { status: "ready", generation: state.repositoryState.generation + 1 };
+  state.repositories = state.repositories.map(repository => ({
+    ...repository,
+    metadata: { ...repository.metadata, commitShort: `commit-${state.repositoryState.generation}` },
+  }));
   state.changedId = null;
   return {
     kind: "patch", epoch: state.epoch, previousRevision, revision: state.revision,

@@ -542,7 +542,9 @@ async function collectCommitLog(repoRoot: string): Promise<CommitLogEntry[]> {
   const result = await safeGit(repoRoot, [
     "log",
     `--max-count=${MAX_COMMITS}`,
-    "--pretty=format:%h%x09%an%x09%cr%x09%s%x00%B%x00",
+    // %cr is kept on the wire for older clients; current clients render
+    // ages from %ct, which doesn't change with the clock.
+    "--pretty=format:%h%x09%an%x09%cr%x09%ct%x09%s%x00%B%x00",
   ], {
     maxBuffer: 1024 * 1024,
   });
@@ -557,13 +559,15 @@ async function collectCommitLog(repoRoot: string): Promise<CommitLogEntry[]> {
     if (!metadata) {
       continue;
     }
-    const [sha = "", author = "", relativeTime = "", ...subjectParts] = metadata.split("\t");
+    const [sha = "", author = "", relativeTime = "", committedAt = "", ...subjectParts] = metadata.split("\t");
     const subject = subjectParts.join("\t") || "(no subject)";
     const message = parts[index + 1]?.trim() || subject;
+    const seconds = Number.parseInt(committedAt, 10);
     commits.push({
       sha,
       author: author || null,
       relativeTime: relativeTime || null,
+      committedAtMs: Number.isFinite(seconds) ? seconds * 1000 : null,
       subject,
       message,
     });

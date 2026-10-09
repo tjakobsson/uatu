@@ -12,10 +12,11 @@ Compatibility: breaking (hub, workspace)
 - File revisions identify saves independently of modification time. The Hub supplies coherent snapshots to joining or behind subscribers.
 - Snapshots retain the latest eligible edit revision for Follow catch-up without replaying it after unrelated repository refreshes.
 - Workspace startup can report indexing before its inventory is complete. Same-build document rendering and Git provenance requests are independent; the internal recovery and provenance routes remain excluded from the public workspace API.
+- Commit-log entries are documented as `CommitLogEntry` and gain `committedAtMs`, the commit time in epoch milliseconds. `relativeTime` remains, but it no longer advances between repository changes, because an identical repository result is not republished.
 
 ### Migration
 
-Hub live-stream consumers must accept the document topic's snapshot-or-patch protocol under Hub revision 11. Workspace payload consumers must update to workspace revision 24 and apply a patch only when its epoch and predecessor match their current state. Resubscribe for a snapshot on a gap. Use file revisions to invalidate preview caches, and treat indexing as an incomplete inventory. The Hub envelope shape and other topics are unchanged.
+Hub live-stream consumers must accept the document topic's snapshot-or-patch protocol under Hub revision 11. Workspace payload consumers must update to workspace revision 24 and apply a patch only when its epoch and predecessor match their current state. Resubscribe for a snapshot on a gap. Use file revisions to invalidate preview caches, and treat indexing as an incomplete inventory. Render commit ages from `committedAtMs` rather than `relativeTime`. The Hub envelope shape and other topics are unchanged.
 
 ## Hub 10 / Workspace 23 - Unreleased
 

@@ -226,6 +226,21 @@ describe("repository snapshots", () => {
     expect(snapshots[0]?.commitLog[0]?.subject).toBe("add feature");
     expect(snapshots[0]?.commitLog[0]?.message).toContain("Body line two.");
   });
+
+  test("commit entries carry the commit time, so ages can be rendered as time passes", async () => {
+    const repo = await createRepo();
+    await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "--date=2026-01-02T03:04:05Z", "-m", "dated\tsubject"], {});
+    const committed = await safeGit(repo, ["log", "-1", "--format=%ct"]);
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+    const entry = snapshots[0]?.commitLog[0];
+    expect(entry?.committedAtMs).toBe(Number(committed.stdout.trim()) * 1000);
+    // A tab in the subject stays in the subject.
+    expect(entry?.subject).toBe("dated\tsubject");
+    expect(entry?.relativeTime).toBeString();
+  });
 });
 
 describe("config warnings and path parsing", () => {

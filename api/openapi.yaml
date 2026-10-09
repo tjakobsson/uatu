@@ -2409,8 +2409,19 @@ components:
         gitIgnoredFiles: { type: array, items: { type: string } }
         configWarnings: { type: array, items: { type: string } }
         message: { type: [string, 'null'] }
-        commitLog: { type: array, items: { type: object, additionalProperties: true } }
+        commitLog: { type: array, items: { $ref: '#/components/schemas/CommitLogEntry' } }
       additionalProperties: false
+    CommitLogEntry:
+      type: object
+      description: "One recent commit. Entries are open objects: consumers must ignore fields they don't know."
+      properties:
+        sha: { type: string, description: "Short commit SHA." }
+        subject: { type: string }
+        message: { type: string, description: "Full commit message." }
+        author: { type: [string, 'null'] }
+        relativeTime: { type: [string, 'null'], description: "Git's relative age text as of collection (\"3 hours ago\"). It does not advance between repository changes; render ages from committedAtMs instead." }
+        committedAtMs: { type: [number, 'null'], description: "Commit time in epoch milliseconds. Clients render the commit's age from this so it stays current." }
+      additionalProperties: true
     LiveCursor:
       type: string
       x-uatu-maxUtf8Bytes: 1024

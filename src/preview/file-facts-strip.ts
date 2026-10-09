@@ -8,6 +8,7 @@
 // require the full page skeleton.
 
 import { escapeHtml } from "../shared/html";
+import { formatAbsoluteDate, formatRelativeTime } from "../shared/relative-time";
 import type { FileFacts } from "../shared/types";
 
 export type FactsStripState =
@@ -41,45 +42,9 @@ export function formatByteSize(bytes: number): string {
   return `${rounded} ${unit}`;
 }
 
-const MINUTE_MS = 60_000;
-const HOUR_MS = 3_600_000;
-const DAY_MS = 86_400_000;
-
-// Relative time for the freshness segment ("modified 2m ago"). Beyond a week
-// it degrades to the absolute date — "modified 94d ago" reads worse than the
-// date itself.
-export function formatRelativeTime(iso: string, nowMs: number): string {
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) {
-    return "";
-  }
-  const delta = Math.max(0, nowMs - then);
-  if (delta < MINUTE_MS) {
-    return "just now";
-  }
-  if (delta < HOUR_MS) {
-    return `${Math.floor(delta / MINUTE_MS)}m ago`;
-  }
-  if (delta < DAY_MS) {
-    return `${Math.floor(delta / HOUR_MS)}h ago`;
-  }
-  if (delta < 7 * DAY_MS) {
-    return `${Math.floor(delta / DAY_MS)}d ago`;
-  }
-  return formatAbsoluteDate(iso);
-}
-
-export function formatAbsoluteDate(iso: string): string {
-  const parsed = new Date(iso);
-  if (Number.isNaN(parsed.getTime())) {
-    return "";
-  }
-  return parsed.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
+// The formatters moved to shared/relative-time so the Git Log can share
+// them; re-exported for existing importers.
+export { formatAbsoluteDate, formatRelativeTime } from "../shared/relative-time";
 
 // --- pure HTML builder ------------------------------------------------------
 

@@ -54,10 +54,37 @@ function loadingSignal(): LoadingSignal {
 // first (rapid file switching while Diff is active) cannot clear the busy
 // state out from under the request the user is actually waiting on.
 import { documentRevisionKey } from "../shell/document-state";
+import { diffInputKey } from "./diff-input-key";
 let diffLoadGeneration = 0;
 
+function currentDiffInputKey(documentId: string): string {
+  return diffInputKey(documentId, appState.repositories, appState.compareTarget);
+}
+
 function diffRevisionKey(documentId: string): string {
-  return `${documentRevisionKey(documentId)}:${appState.repositoryFreshness.generation}:${appState.compareTarget}`;
+  return `${documentRevisionKey(documentId)}:${currentDiffInputKey(documentId)}`;
+}
+
+// The diff-input key each cached diff was fetched under, and the key each
+// document's latest diff request was made under (cached or still in
+// flight). A repository update drops only the cache entries whose key moved,
+// and re-requests the active diff only when its own key moved.
+const cachedDiffKeys = new Map<string, string>();
+const requestedDiffKeys = new Map<string, string>();
+
+export function dropStaleDiffs(): void {
+  for (const [documentId, key] of cachedDiffKeys) {
+    if (documentDiffCache.has(documentId) && key === currentDiffInputKey(documentId)) continue;
+    cachedDiffKeys.delete(documentId);
+    documentDiffCache.delete(documentId);
+  }
+}
+
+// Whether the repository data the document's diff was requested under has
+// moved on in a way that can change that diff.
+export function diffInputsMoved(documentId: string): boolean {
+  const requested = requestedDiffKeys.get(documentId);
+  return requested !== undefined && requested !== currentDiffInputKey(documentId);
 }
 
 export function cancelDiffPresentation(): void {
@@ -67,6 +94,7 @@ export function cancelDiffPresentation(): void {
 }
 
 export async function applyDiffForActiveDocument(documentId: string): Promise<void> {
+  requestedDiffKeys.set(documentId, currentDiffInputKey(documentId));
   const selectionGeneration = getSelectionGeneration();
   const generation = ++diffLoadGeneration;
   const revision = diffRevisionKey(documentId);
@@ -95,6 +123,7 @@ export async function applyDiffForActiveDocument(documentId: string): Promise<vo
         return;
       }
       documentDiffCache.set(documentId, fetched);
+      cachedDiffKeys.set(documentId, currentDiffInputKey(documentId));
       // The user may have switched away while the fetch was in flight; only
       // apply if the active selection AND view mode are still consistent.
       if (

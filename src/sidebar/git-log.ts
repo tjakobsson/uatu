@@ -10,6 +10,7 @@ import { GIT_LOG_LIMIT_KEY, appState, isGitLogLimit } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { revealPreviewSurface } from "../shell/tab-bar";
 import { activateCommitPreview } from "../shell/url";
+import { commitAgesRendered, commitBylineHtml } from "../shell/commit-ages";
 
 const gitLogElementMaybe = document.querySelector<HTMLDivElement>("#git-log");
 const gitLogLimitElementMaybe = document.querySelector<HTMLSelectElement>("#git-log-limit");
@@ -72,7 +73,7 @@ export function renderGitLog() {
               >
                 <code>${escapeHtml(commit.sha)}</code>
                 <span>${escapeHtml(commit.subject)}</span>
-                <small>${escapeHtml([commit.author, commit.relativeTime].filter(Boolean).join(" · "))}</small>
+                <small>${commitBylineHtml(commit)}</small>
               </a>
             </li>
           `).join("")}
@@ -80,6 +81,7 @@ export function renderGitLog() {
       </section>
     `;
   }).join("");
+  commitAgesRendered();
 }
 
 export function baseModeLabel(mode: RepositorySnapshot["base"]["mode"]): string {

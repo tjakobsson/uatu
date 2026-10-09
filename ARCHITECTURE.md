@@ -517,14 +517,34 @@ two-second maximum wait, preserve every affected path, and yield between
 
 `server/repository-refresh.ts` owns Git refreshes separately. It shares common
 work across comparison targets and marks results pending, stale, ready, or
-failed. Metadata probes run while document subscribers exist; visible Git
-panes also request bounded repository-only refreshes for changes outside narrow
-document roots. Those operations never initiate a document scan. Source and
-Rendered responses read fresh bytes and filesystem facts without waiting for
-Git. The browser enriches the facts strip through `/api/document/facts`, with
-one current in-flight request and revision/generation checks on completion.
-Session shutdown cancels repository Git subprocesses and prevents subsequent
-collection steps from starting under the cancelled operation.
+failed. Collection is triggered by file batches and, while document
+subscribers exist, by `server/git-observer.ts`. That observer works like VS
+Code's Git extension: non-recursive watches on the Git directory, the shared
+Git directory of a linked worktree, and the directories holding the current
+branch and compare-base refs. It ignores lock and temp files, `objects`,
+`FETCH_HEAD` and fsmonitor cookies, and re-resolves its paths when a `HEAD`
+moves. A watch root narrower than its repository also gets one recursive
+working-tree watch on the repository top level, filtered by `.git`, the root
+itself, and the top-level `.gitignore`, because edits there never reach the
+content watcher. The browser never polls for repository data. In polling mode,
+or after a watch fails, a stat probe of the same Git files runs every 5 s
+instead, collecting on every tick for narrow roots. Collections start at most
+once per 2 s after the first prompt one; Git reads run with
+`GIT_OPTIONAL_LOCKS=0`, so collection never rewrites the index it observes. A
+result identical to the published one (ignoring Git's wall-clock
+`relativeTime`) publishes nothing and keeps its generation, and "stale" is
+announced only when a collection is still pending after one second. Those
+operations never initiate a document scan. Source and Rendered responses read
+fresh bytes and filesystem facts without waiting for Git. The browser enriches
+the facts strip through `/api/document/facts`, with one current in-flight
+request and revision/generation checks on completion. Commit ages in the Git
+Log and the commit preview are rendered in the browser from `committedAtMs`
+(`shell/commit-ages.ts`, one ticker, paused while the page is hidden). Diff
+mode re-fetches the active diff after a repository update only when that
+file's diff inputs moved (`preview/diff-input-key.ts`: `HEAD`, compare base and
+target, and the file's change entry). Session shutdown cancels repository Git
+subprocesses and prevents subsequent collection steps from starting under the
+cancelled operation.
 
 Ignore-policy changes, observation failures, and authenticated explicit
 `POST /api/index/recover` requests rebuild affected roots. Replacements collect
@@ -541,8 +561,9 @@ Follow client can catch up once; repository updates cannot replay that edit.
 Content-only patches avoid tree path reconciliation. Membership changes use
 the tree library's incremental methods, whose internal visible-row projection
 may still be rebuilt. Full snapshots and explicit filter changes can reset the
-tree. Index watch/stat/directory counters and independent repository probe
-counters remain available to the existing watchdog diagnostics.
+tree. Index watch/stat/directory counters and the Git observer's
+`git_observer.events_total` and `git_observer.fallback_total` remain available
+to the existing watchdog diagnostics.
 
 The route table that wires both of these requests is declared exactly once, in `src/server/routes.ts` via `buildRoutes({ mode: "prod" | "e2e", ... })`. Both `src/cli.ts` (production) and `tests/e2e/server.ts` (the Playwright harness) call it.
 

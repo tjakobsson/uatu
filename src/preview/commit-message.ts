@@ -10,6 +10,7 @@ import type { RepositorySnapshot } from "../shared/types";
 import { clearPreviewType } from "./header";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { hideViewToggle } from "./view-mode";
+import { commitAgesRendered, commitBylineHtml } from "../shell/commit-ages";
 
 const previewTitleElementMaybe = document.querySelector<HTMLElement>("#preview-title");
 const previewPathElementMaybe = document.querySelector<HTMLElement>("#preview-path");
@@ -48,10 +49,11 @@ export function renderCommitMessage(
   previewElement.innerHTML = `
     <section class="commit-preview">
       <header>
-        <p>${escapeHtml([commit.author, commit.relativeTime].filter(Boolean).join(" · "))}</p>
+        <p>${commitBylineHtml(commit)}</p>
         <code>${escapeHtml(commit.sha)}</code>
       </header>
       <pre>${escapeHtml(commit.message)}</pre>
     </section>
   `;
+  commitAgesRendered();
 }

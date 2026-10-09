@@ -129,42 +129,33 @@ async function settle(): Promise<void> {
 }
 
 describe("boot state and the first live frame", () => {
-  test("disposing the live channel releases repository polling and wake-up work", async () => {
+  test("the page never polls for repository data, and disposing the channel releases wake-up work", async () => {
     const { disposeLiveChannel, installLiveChannelForTests, recoverLiveChannel } = await import("./live");
     const { connectEvents } = await import("./events");
     const { appState } = await import("./state");
     const intervals = spyOn(globalThis, "setInterval");
-    const clears = spyOn(globalThis, "clearInterval");
     const fetcher = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({}));
     const previousView = appState.viewMode;
     try {
-      installLiveChannelForTests(controllableChannel().channel);
-      connectEvents();
-      connectEvents();
-      expect(intervals).toHaveBeenCalledTimes(1);
-      const [tick, delay] = intervals.mock.calls[0]!;
-      expect(delay).toBe(5000);
+      // Diff mode and the Git panes once drove a 5 s repository refresh; the
+      // server observes Git itself now.
       appState.viewMode = "diff";
-      (tick as () => void)();
-      expect(fetcher).toHaveBeenCalledTimes(1);
-
-      disposeLiveChannel();
-      expect(clears).toHaveBeenCalledWith(intervals.mock.results[0]!.value);
       installLiveChannelForTests(controllableChannel().channel);
-      await recoverLiveChannel();
-      expect(fetcher).toHaveBeenCalledTimes(1);
-
-      // An explicit new connection installs exactly one fresh polling timer.
       connectEvents();
-      expect(intervals).toHaveBeenCalledTimes(2);
+      connectEvents();
+      expect(intervals).not.toHaveBeenCalled();
+      expect(fetcher.mock.calls.filter(([input]) => String(input).includes("/api/repositories/refresh"))).toEqual([]);
+
       disposeLiveChannel();
-      expect(clears).toHaveBeenCalledWith(intervals.mock.results[1]!.value);
+      installLiveChannelForTests(controllableChannel().channel);
+      const before = fetcher.mock.calls.length;
+      await recoverLiveChannel();
+      // The disposed connection's state recovery is gone with it.
+      expect(fetcher.mock.calls.length).toBe(before);
     } finally {
       disposeLiveChannel();
-      for (const result of intervals.mock.results) if (result.type === "return") clearInterval(result.value);
       appState.viewMode = previousView;
       fetcher.mockRestore();
-      clears.mockRestore();
       intervals.mockRestore();
     }
   });

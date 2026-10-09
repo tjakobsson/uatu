@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
 import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
-import { standardBeforeEach } from "./fixtures";
+import { showGitLogPane, standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -320,4 +320,51 @@ test("Diff segment appears alongside Source / Rendered for Markdown and AsciiDoc
   await expect(page.locator("#view-rendered")).toBeHidden();
   await expect(page.locator("#view-source")).toBeVisible();
   await expect(page.locator("#view-diff")).toBeVisible();
+});
+
+test.describe("repository updates while Diff is open", () => {
+  // Requests are counted at the page; the pass-through service worker would
+  // hide them, as in the slow-fetch test above.
+  test.use({ serviceWorkers: "block" });
+
+  test("only a change to the open file's diff inputs re-fetches it", async ({ page, request }) => {
+    await request.post("/__e2e/reset", {
+      data: { git: true, dirty: { "feature.md": "# Feature\n\nCommitted branch change.\n\nAdded review-time edit.\n" } },
+    });
+    await page.reload();
+    await revealTreeRow(page, "feature.md");
+    await openTreeFile(page, "feature.md");
+    await page.locator("#view-diff").click();
+    await expect(page.locator(".uatu-diff-host")).toBeVisible();
+    await expect(page.locator("#view-diff")).not.toHaveAttribute("aria-busy", "true");
+
+    const diffRequests: string[] = [];
+    page.on("request", candidate => { if (new URL(candidate.url()).pathname.endsWith("/api/document/diff")) diffRequests.push(candidate.url()); });
+    await page.evaluate(() => {
+      const state = window as unknown as { __diffBusy?: number };
+      state.__diffBusy = 0;
+      new MutationObserver(() => {
+        if (document.querySelector("#view-diff")?.getAttribute("aria-busy") === "true") state.__diffBusy! += 1;
+      }).observe(document.querySelector("#view-diff")!, { attributes: true, attributeFilter: ["aria-busy"] });
+    });
+    const busyCount = () => page.evaluate(() => (window as unknown as { __diffBusy: number }).__diffBusy);
+
+    // Another file changes: the repository update reaches the page (README
+    // gains its Git status) without touching feature.md's diff.
+    await fs.appendFile(workspacePath("README.md"), "\nAn unrelated edit.\n", "utf8");
+    await expect(treeRow(page, "README.md")).toHaveAttribute("data-item-git-status", /.+/);
+    expect(diffRequests).toEqual([]);
+    expect(await busyCount()).toBe(0);
+
+    // A commit moves HEAD: the open diff is fetched again, once.
+    const { execFileSync } = await import("node:child_process");
+    const git = (...args: string[]) => execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "user.name=Uatu Test", "-c", "user.email=uatu@example.test", ...args], { cwd: workspacePath(), stdio: "ignore" });
+    git("add", "-A");
+    git("commit", "-m", "commit the review edits");
+    await showGitLogPane(page);
+    await expect(page.locator("#git-log")).toContainText("commit the review edits");
+    await expect.poll(() => diffRequests.length).toBe(1);
+    await expect(page.locator(".uatu-diff-host")).toBeVisible();
+    expect(diffRequests).toHaveLength(1);
+  });
 });
