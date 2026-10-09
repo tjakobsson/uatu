@@ -46,7 +46,7 @@ The watched directories are:
 
 Events for lock and temp files (`*.lock`, `*.new`), `objects`, `FETCH_HEAD`, `gc.pid`/`gc.log` and watchman cookies are dropped. `FETCH_HEAD` changes on every fetch, even one that moves no ref; a fetch that moves a ref also renames that ref or `packed-refs`. Every other event calls `request()`.
 
-The observer re-resolves its path set itself. It does so when it sees a `HEAD` entry change in a watched directory (a branch switch moves the worktree's `HEAD`, and a new remote default moves `refs/remotes/origin/HEAD`). It also does so on any event while a candidate directory is missing, for example before the first fetch creates `refs/remotes/origin`. Re-resolution is coalesced, closes handles that are no longer wanted, and opens new ones. Directories are compared by real path, so `/tmp` and `/private/tmp` spellings of one directory share a handle. Handles are opened while demanded and closed when demand drops.
+The observer re-resolves its path set itself. It does so when it sees a `HEAD` entry change in a watched directory (a branch switch moves the worktree's `HEAD`, and a new remote default moves `refs/remotes/origin/HEAD`). It also does so on any event while a candidate directory is missing, for example before the first fetch creates `refs/remotes/origin`. Re-resolution is coalesced, closes handles that are no longer wanted, and opens new ones. While any candidate directory is missing, every event re-resolves, including the noise names. On Linux the first fetch reports only `FETCH_HEAD` at the Git directory, while it creates `refs/remotes/origin` below it. A directory that gains a handle on re-resolution reports a change, since its entries were written before the watch existed. Directories are compared by real path, so `/tmp` and `/private/tmp` spellings of one directory share a handle. Handles are opened while demanded and closed when demand drops.
 
 *Alternatives considered:*
 - **Reuse `file-observer.ts` with a recursive watch on `.git`.** Rejected. `objects/` churns on every fetch and gc, a recursive watch over `.git` is exactly what the spec forbids for content watching, and FSEvents coalescing gains nothing.
@@ -92,7 +92,7 @@ The timer is removed. The `/api/repositories/refresh` route stays as an explicit
 For each watch entry, the observer compares the entry with `git rev-parse --show-toplevel` (by real path). When the entry is narrower, or is a single file, the observer adds one **recursive** watch on the repository top level. Events from it are dropped when they fall:
 - under a `.git` path segment (the metadata watches cover Git state);
 - inside the watched root itself (the content watcher already requests a collection for those);
-- under a path matched by the repository's top-level `.gitignore`. This uses the `ignore` package the ignore engine already uses; nested `.gitignore` files are not consulted.
+- under a path matched by the repository's top-level `.gitignore`, unless Git tracks that file anyway (`git ls-files --cached --ignored --exclude-standard`, refreshed when `.gitignore` or the index changes). This uses the `ignore` package the ignore engine already uses; nested `.gitignore` files are not consulted.
 
 A missed nested `.gitignore` only costs a paced collection whose unchanged result publishes nothing. A filter that wrongly dropped a tracked path would leave data stale, so the filter errs towards triggering. Several narrow entries in one repository share one tree watch. Whole-repository roots open no tree watch.
 

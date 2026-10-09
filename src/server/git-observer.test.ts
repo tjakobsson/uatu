@@ -215,3 +215,48 @@ test("narrow entries in one repository share one working-tree watch", async () =
   observer.close();
   expect(observer.trees()).toEqual([]);
 });
+
+test("the first fetch into a never-fetched remote is observed even when only FETCH_HEAD is reported", async () => {
+  const { directory, remote } = await checkout();
+  const fresh = path.join(directory, "fresh");
+  await mkdir(fresh);
+  await git(fresh, ["init", "--initial-branch=main"]);
+  await git(fresh, ["remote", "add", "origin", remote]);
+  // Linux's non-recursive watch on .git sees only FETCH_HEAD for a first
+  // fetch; refs/remotes/origin is created below it, unwatched.
+  const onlyFetchHead = ((target: string, options: unknown, listener: (event: string, name: string | null) => void) =>
+    nodeWatch(target, options as never, (event, name) => { if (name?.toString() === "FETCH_HEAD") listener(event, name.toString()); })) as unknown as typeof nodeWatch;
+  const { observer, names } = observe([dir(fresh)], onlyFetchHead);
+  await observer.start();
+  const origin = path.join(fresh, ".git", "refs", "remotes", "origin");
+  expect(observer.directories()).not.toContain(origin);
+  await git(fresh, ["fetch", "--quiet", "origin"]);
+  await until(() => observer.directories().includes(origin), "the new remote ref directory to be watched");
+  await until(() => names.includes(null), "a change for the newly watched directory");
+}, 20_000);
+
+test("a narrow root keeps tracked files that the .gitignore matches observable", async () => {
+  const { work } = await checkout();
+  await mkdir(path.join(work, "docs"));
+  await mkdir(path.join(work, "build"));
+  await writeFile(path.join(work, ".gitignore"), "build/\n");
+  await writeFile(path.join(work, "build", "kept.txt"), "kept\n");
+  await git(work, ["add", ".gitignore"]);
+  await git(work, ["add", "-f", "build/kept.txt"]);
+  await git(work, ["commit", "-m", "track a file the .gitignore matches"]);
+  const { observer, names } = observe([dir(path.join(work, "docs"))]);
+  await observer.start();
+
+  await writeFile(path.join(work, "build", "kept.txt"), "kept, edited\n");
+  await until(() => names.includes("kept.txt"), "the tracked-but-ignored edit");
+
+  // Force-adding another one after start is picked up through the index.
+  await writeFile(path.join(work, "build", "late.txt"), "late\n");
+  await git(work, ["add", "-f", "build/late.txt"]);
+  const deadline = performance.now() + 10_000;
+  for (let attempt = 0; !names.includes("late.txt"); attempt++) {
+    if (performance.now() > deadline) throw new Error("the force-added file never became observable");
+    await writeFile(path.join(work, "build", "late.txt"), `late ${attempt}\n`);
+    await Bun.sleep(50);
+  }
+}, 20_000);

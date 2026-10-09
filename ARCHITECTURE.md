@@ -525,8 +525,8 @@ branch and compare-base refs. It ignores lock and temp files, `objects`,
 `FETCH_HEAD` and fsmonitor cookies, and re-resolves its paths when a `HEAD`
 moves. A watch root narrower than its repository also gets one recursive
 working-tree watch on the repository top level, filtered by `.git`, the root
-itself, and the top-level `.gitignore`, because edits there never reach the
-content watcher. The browser never polls for repository data. In polling mode,
+itself, and the top-level `.gitignore` (tracked files it matches stay
+observed), because edits there never reach the content watcher. The browser never polls for repository data. In polling mode,
 or after a watch fails, a stat probe of the same Git files runs every 5 s
 instead, collecting on every tick for narrow roots. Collections start at most
 once per 2 s after the first prompt one; Git reads run with

@@ -99,11 +99,18 @@ export async function hasNarrowRoot(entries: WatchEntry[]): Promise<boolean> {
   return false;
 }
 
-type TreeWatch = { handle: FSWatcher; roots: string[]; ignored: Ignore };
+// `ignored` is the top-level .gitignore; `trackedIgnored` the tracked files
+// it nonetheless matches, which Git still reports and so must stay visible.
+type TreeWatch = { handle: FSWatcher; roots: string[]; ignored: Ignore; trackedIgnored: Set<string>; refreshing: Promise<void> | null; refreshAgain: boolean };
 
 async function loadGitignore(topLevel: string): Promise<Ignore> {
   const content = await readFile(path.join(topLevel, ".gitignore"), "utf8").catch(() => "");
   return ignore().add(content);
+}
+
+async function loadTrackedIgnored(topLevel: string): Promise<Set<string>> {
+  const result = await safeGit(topLevel, ["ls-files", "-z", "--cached", "--ignored", "--exclude-standard"], { maxBuffer: 8 * 1024 * 1024 });
+  return new Set(result.ok ? result.stdout.split("\0").filter(Boolean) : []);
 }
 
 export function createGitObserver(options: Options): GitObserver {
@@ -125,12 +132,31 @@ export function createGitObserver(options: Options): GitObserver {
 
   function receive(directory: string, name: string | null) {
     if (closed || failed) return;
-    if (name !== null && isGitNoise(path.basename(name))) return;
+    const base = name === null ? null : path.basename(name);
+    // A directory that did not exist yet may exist now. Even a noise event
+    // counts: on Linux the first fetch reports only FETCH_HEAD here, while it
+    // creates refs/remotes/origin below a directory nobody watches.
+    if (missing) void resync();
+    if (base !== null && isGitNoise(base)) return;
     // A moved HEAD symref (branch switch, a new origin/HEAD) can change which
-    // ref directories matter, and a directory that did not exist yet (the
-    // first fetch creates refs/remotes/origin) may exist now.
-    if (missing || name === null || path.basename(name) === "HEAD") void resync();
-    options.onChange(name === null ? null : path.basename(name));
+    // ref directories matter.
+    if (!missing && (base === null || base === "HEAD")) void resync();
+    // Staging can track a file the .gitignore matches (git add -f).
+    if (base === "index" && trees.size) for (const [topLevel, tree] of trees) void refreshTracked(topLevel, tree);
+    options.onChange(base);
+  }
+
+  function refreshTracked(topLevel: string, tree: TreeWatch): Promise<void> {
+    if (tree.refreshing) { tree.refreshAgain = true; return tree.refreshing; }
+    tree.refreshing = (async () => {
+      do {
+        tree.refreshAgain = false;
+        const [ignored, trackedIgnored] = await Promise.all([loadGitignore(topLevel), loadTrackedIgnored(topLevel)]);
+        tree.ignored = ignored;
+        tree.trackedIgnored = trackedIgnored;
+      } while (tree.refreshAgain && !closed && !failed);
+    })().catch(() => {}).finally(() => { tree.refreshing = null; });
+    return tree.refreshing;
   }
 
   // Working-tree events from a narrow root's repository. Errs towards
@@ -145,9 +171,8 @@ export function createGitObserver(options: Options): GitObserver {
     if (relative.split("/").includes(".git")) return;
     const absolute = path.join(topLevel, name);
     if (tree.roots.some(root => contains(root, absolute))) return;
-    if (relative === ".gitignore") {
-      void loadGitignore(topLevel).then(ignored => { tree.ignored = ignored; });
-    } else if (tree.ignored.ignores(relative)) return;
+    if (relative === ".gitignore") void refreshTracked(topLevel, tree);
+    else if (tree.ignored.ignores(relative) && !tree.trackedIgnored.has(relative)) return;
     options.onChange(path.basename(name));
   }
 
@@ -158,16 +183,18 @@ export function createGitObserver(options: Options): GitObserver {
     for (const [topLevel, roots] of wanted) {
       const existing = trees.get(topLevel);
       if (existing) { existing.roots = roots; continue; }
-      const ignored = await loadGitignore(topLevel);
+      const [ignored, trackedIgnored] = await Promise.all([loadGitignore(topLevel), loadTrackedIgnored(topLevel)]);
       if (closed || failed) return;
       const handle = watchDirectory(topLevel, { recursive: true }, (_event, filename) => receiveTree(topLevel, filename == null ? null : filename.toString()));
       handle.on("error", fail);
-      trees.set(topLevel, { handle, roots, ignored });
+      trees.set(topLevel, { handle, roots, ignored, trackedIgnored, refreshing: null, refreshAgain: false });
     }
   }
 
-  async function open(directories: string[]) {
+  // Returns how many directories gained a handle.
+  async function open(directories: string[]): Promise<number> {
     let anyMissing = false;
+    let opened = 0;
     const wanted = new Set<string>();
     for (const candidate of directories) {
       // rev-parse mixes real paths with cwd-relative ones (/tmp vs
@@ -177,7 +204,7 @@ export function createGitObserver(options: Options): GitObserver {
       if (!directory || !info?.isDirectory()) { anyMissing = true; continue; }
       wanted.add(directory);
     }
-    if (closed || failed) return;
+    if (closed || failed) return 0;
     for (const [directory, handle] of handles) {
       if (!wanted.has(directory)) { handle.close(); handles.delete(directory); }
     }
@@ -193,22 +220,25 @@ export function createGitObserver(options: Options): GitObserver {
       }
       handle.on("error", fail);
       handles.set(directory, handle);
+      opened++;
     }
     missing = anyMissing;
+    return opened;
   }
 
-  async function resolveAll() {
+  async function resolveAll(): Promise<number> {
     const directories = new Set<string>();
     const narrow = new Map<string, string[]>();
     for (const entry of options.entries) {
       for (const directory of await candidateDirectories(entry)) directories.add(directory);
       const repository = await narrowRepository(entry);
       if (repository) narrow.set(repository.topLevel, [...(narrow.get(repository.topLevel) ?? []), repository.root]);
-      if (closed || failed) return;
+      if (closed || failed) return 0;
     }
-    await open([...directories]);
-    if (closed || failed) return;
+    const opened = await open([...directories]);
+    if (closed || failed) return 0;
     await openTrees(narrow);
+    return opened;
   }
 
   // Coalesced: one resolution at a time, plus one follow-up if events asked
@@ -218,8 +248,12 @@ export function createGitObserver(options: Options): GitObserver {
     resolving = (async () => {
       do {
         resolveAgain = false;
-        try { await resolveAll(); }
+        let opened: number;
+        try { opened = await resolveAll(); }
         catch (error) { fail(error); return; }
+        // A newly watched directory's current entries were written before
+        // its watch existed (the fetch that created refs/remotes/origin).
+        if (opened > 0 && !closed && !failed) options.onChange(null);
       } while (resolveAgain && !closed && !failed);
     })().finally(() => { resolving = null; });
     return resolving;
