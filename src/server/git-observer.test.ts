@@ -293,7 +293,9 @@ test("a root that becomes a repository is observed from its first commit", async
   await git(directory, ["init", "--initial-branch=main"]);
   await until(() => names.includes(".git"), "the new .git directory");
   const gitDir = path.join(directory, ".git");
-  await until(() => observer.directories().includes(gitDir), "the new Git directory to be watched");
+  // On Linux the half-made .git is watched first; wait for the full set.
+  await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the new repository's Git-metadata watches");
+  expect(observer.directories()).toContain(gitDir);
   expect(observer.directories()).not.toContain(directory);
   names.length = 0;
   await git(directory, ["add", "."]);
