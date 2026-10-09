@@ -4,7 +4,7 @@
 
 Repository snapshots SHALL refresh independently of file indexing and file-update delivery. A slow or failed repository refresh MUST NOT delay publication of file changes or Source and Rendered previews. Repository results SHALL carry their own freshness state and SHALL preserve the last successful result while a replacement is pending or fails. Git-only changes SHALL remain observable, including commits, index changes, branch switches and fetched remote refs with no document edit.
 
-While at least one client is subscribed, the system SHALL learn about Git-only changes from filesystem events on the repository's Git metadata. That covers the top level of the Git directory and, for a linked worktree, of the shared Git directory, plus the ref files of the current branch and the resolved compare base. The Git directory MUST NOT be watched recursively. Lock files, object storage and fsmonitor cookie files SHALL NOT trigger a refresh. When a watch root is narrower than its repository, the system SHALL also observe the repository's working tree outside that root, so that edits there update repository data. That observation excludes the Git directory and untracked paths the repository's top-level `.gitignore` excludes, and it never adds those files to the document index. In any watched root, a tracked file stays observed even when the `.gitignore` matches it, because Git still reports its changes while the content watcher honours the `.gitignore`. Clients MUST NOT drive repository collection with periodic requests. Periodic polling SHALL be used only where native observation is unavailable or failed, or when the session runs in polling mode. No Git metadata observation, polling or repository collection SHALL run while no client is subscribed.
+While at least one client is subscribed, the system SHALL learn about Git-only changes from filesystem events on the repository's Git metadata. That covers the top level of the Git directory and, for a linked worktree, of the shared Git directory, plus the ref files of the current branch and the resolved compare base. The Git directory MUST NOT be watched recursively. Lock files, object storage and fsmonitor cookie files SHALL NOT trigger a refresh. When a watch root is narrower than its repository, the system SHALL also observe the repository's working tree outside that root, so that edits there update repository data. That observation excludes the Git directory and untracked paths the repository's top-level `.gitignore` excludes, and it never adds those files to the document index. In any watched root, changes to paths the content watcher excludes (built-in folders such as `dist/`, configured excludes, or a `.gitignore` it honours) still count when Git can see them: tracked files, and untracked files no `.gitignore` excludes. Clients MUST NOT drive repository collection with periodic requests. Periodic polling SHALL be used only where native observation is unavailable or failed, or when the session runs in polling mode. No Git metadata observation, polling or repository collection SHALL run while no client is subscribed.
 
 A repository collection SHALL start promptly after the first trigger that follows a quiet period. Under sustained triggers, successive collections SHALL start no closer together than a minimum interval. Triggers that arrive in the meantime SHALL coalesce into one follow-up collection that reflects the latest state. Repository reads MUST NOT write to the repository, including Git's opportunistic index refresh.
 
@@ -35,6 +35,10 @@ A refresh whose result matches the published result SHALL publish nothing and ke
 
 #### Scenario: A tracked file the .gitignore matches
 - **WHEN** the watch root is a subdirectory of its repository and a tracked file outside it, which the `.gitignore` matches, is modified
+- **THEN** repository information updates
+
+#### Scenario: A tracked file in a folder the content watcher excludes
+- **WHEN** a tracked file under `dist/`, which the document index always excludes, is modified
 - **THEN** repository information updates
 
 #### Scenario: A tracked file the .gitignore matches in a whole-repository root
@@ -83,7 +87,7 @@ A refresh whose result matches the published result SHALL publish nothing and ke
 #### Scenario: Native Git observation is unavailable
 - **WHEN** the session runs in polling mode or native observation of the Git metadata or working tree fails
 - **THEN** Git-only changes are still observed through periodic polling while a client is subscribed
-- **AND** for a narrow watch root, each poll also collects repository data, so edits outside the root still appear
+- **AND** each poll collects repository data, so edits outside a narrow root, edits to tracked files the content watcher excludes, and a root becoming a repository still appear
 
 #### Scenario: The last client leaves
 - **WHEN** the last subscribed client disconnects

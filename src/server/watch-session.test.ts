@@ -300,6 +300,35 @@ describe("watchSession scope", () => {
     }
   });
 
+  test("an edit to a tracked file in an excluded folder reaches the Git observer", async () => {
+    const repository = await mkdtemp(path.join(os.tmpdir(), "uatu-excluded-tracked-"));
+    tempDirectories.push(repository);
+    await mkdir(path.join(repository, "dist"));
+    await writeFile(path.join(repository, "README.md"), "# Readme\n");
+    await writeFile(path.join(repository, "dist", "bundle.js"), "bundle\n");
+    const git = (args: string[]) => safeGit(repository, ["-c", "user.name=Test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false", ...args]);
+    await git(["init", "--initial-branch=main"]);
+    await git(["add", "."]);
+    await git(["commit", "-m", "tracked dist"]);
+    const metrics = new MetricsRegistry();
+    const session = createWatchSession([{ kind: "dir", absolutePath: repository }], true, { metrics });
+    try {
+      await session.start();
+      const reader = session.eventsResponse().body!.getReader();
+      await readSseFrame(reader);
+      // dist/ is excluded from the document index, but Git tracks the file.
+      const deadline = performance.now() + 10_000;
+      for (let attempt = 0; (metrics.get("git_observer.events_total") ?? 0) === 0; attempt++) {
+        if (performance.now() > deadline) throw new Error("the excluded tracked edit never reached the Git observer");
+        await writeFile(path.join(repository, "dist", "bundle.js"), `bundle ${attempt}\n`);
+        await Bun.sleep(50);
+      }
+      await reader.cancel();
+    } finally {
+      await session.stop();
+    }
+  });
+
   test("the production keepalive cadence matches the Chat streams", () => {
     expect(DOCUMENT_KEEPALIVE_MS).toBe(15_000);
   });

@@ -321,30 +321,20 @@ async function layout() {
   return repository;
 }
 
-for (const narrow of [true, false]) {
-  test(`a polling tick ${narrow ? "collects for a narrow root" : "only stats for a whole-repository root"}`, async () => {
-    const repository = await layout();
-    let collections = 0;
-    let polls = 0;
-    const refresh = createRepositoryRefresh({ entries: [{ kind: "dir", absolutePath: narrow ? path.join(repository, "docs") : repository }], roots: () => [],
-      publish: () => {}, usePolling: true, probeIntervalMs: 20, minCollectionGapMs: 0,
-      collect: async () => { collections++; return []; }, onPoll: () => { polls++; } });
-    try {
-      refresh.demand(true);
-      await until(() => polls >= 2 && refresh.freshness.status === "ready");
-      const before = collections;
-      if (narrow) {
-        await until(() => collections > before);
-      } else {
-        // Ticks every 20 ms keep pushing the scheduler's debounce out to its
-        // max-wait, so wait out more polls than that span before counting.
-        const pollsBefore = polls;
-        await until(() => polls >= pollsBefore + Math.ceil((REFRESH_MAX_WAIT_MS + 500) / 20));
-        expect(collections).toBe(before);
-      }
-    } finally { refresh.stop(); await rm(repository, { recursive: true, force: true }); }
-  });
-}
+test("each polling tick collects, so polling still sees what only native events would", async () => {
+  const repository = await layout();
+  let collections = 0;
+  let polls = 0;
+  const refresh = createRepositoryRefresh({ entries: [{ kind: "dir", absolutePath: repository }], roots: () => [],
+    publish: () => {}, usePolling: true, pollIntervalMs: 20, minCollectionGapMs: 0,
+    collect: async () => { collections++; return []; }, onPoll: () => { polls++; } });
+  try {
+    refresh.demand(true);
+    await until(() => polls >= 2 && refresh.freshness.status === "ready");
+    const before = collections;
+    await until(() => collections > before);
+  } finally { refresh.stop(); await rm(repository, { recursive: true, force: true }); }
+});
 
 test("a collection follows the observer's start, covering changes made while its watches were installed", async () => {
   const { state, observe } = fakeObserver();

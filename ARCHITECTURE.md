@@ -524,11 +524,15 @@ Git directory of a linked worktree, and the directories holding the current
 branch and compare-base refs. It ignores lock and temp files, `objects`,
 `FETCH_HEAD` and fsmonitor cookies, and re-resolves its paths when a `HEAD`
 moves. A watch root narrower than its repository also gets one recursive
-working-tree watch on the repository top level, filtered by `.git`, the root
-itself, and the top-level `.gitignore` (tracked files it matches stay
-observed), because edits there never reach the content watcher. The browser never polls for repository data. In polling mode,
-or after a watch fails, a stat probe of the same Git files runs every 5 s
-instead, collecting on every tick for narrow roots. Collections start at most
+working-tree watch on the repository top level, because edits outside the root
+never reach the content watcher. Inside a root, the content watcher forwards
+every path it sees (its `raw` event), including the ones its policy excludes,
+such as `dist/`, `node_modules`, `.uatu.json` excludes and gitignored paths.
+The observer drops `.git` paths and untracked paths the top-level `.gitignore`
+matches, and keeps tracked files it matches (`git ls-files --cached --ignored`,
+refreshed on index and any `.gitignore` change). The browser never polls for
+repository data. In polling mode, or after a watch fails, a collection runs
+every 5 s instead, as v0.7.0 always did. Collections start at most
 once per 2 s after the first prompt one; Git reads run with
 `GIT_OPTIONAL_LOCKS=0`, so collection never rewrites the index it observes. A
 result identical to the published one (ignoring Git's wall-clock

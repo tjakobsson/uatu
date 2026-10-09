@@ -317,7 +317,47 @@ test("a .git directory that appears before git init finishes is still resolved",
   await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the full Git-metadata watch set");
 }, 20_000);
 
-test("a whole-repository root still observes tracked files the .gitignore matches", async () => {
+test("excluded working-tree paths count only when Git can see them", async () => {
+  const { work } = await checkout();
+  await mkdir(path.join(work, "build"));
+  await mkdir(path.join(work, "dist"));
+  await writeFile(path.join(work, ".gitignore"), "build/\n");
+  await writeFile(path.join(work, "build", "kept.txt"), "kept\n");
+  await writeFile(path.join(work, "dist", "bundle.js"), "bundle\n");
+  await git(work, ["add", ".gitignore", "dist/bundle.js"]);
+  await git(work, ["add", "-f", "build/kept.txt"]);
+  await git(work, ["commit", "-m", "tracked output"]);
+  const { observer, names } = observe([dir(work)]);
+  await observer.start();
+  // A whole-repository root needs no working-tree watch of its own.
+  expect(observer.trees()).toEqual([]);
+
+  // The content watcher excludes dist/ (built in) and build/ (.gitignore);
+  // Git tracks files in both.
+  observer.noteWorkingTreeChange(path.join(work, "dist", "bundle.js"));
+  observer.noteWorkingTreeChange(path.join(work, "build", "kept.txt"));
+  // Untracked output the .gitignore excludes, and Git's own files, do not count.
+  observer.noteWorkingTreeChange(path.join(work, "build", "scratch.txt"));
+  observer.noteWorkingTreeChange(path.join(work, ".git", "index"));
+  expect(names).toEqual(["bundle.js", "kept.txt"]);
+}, 20_000);
+
+test("a nested .gitignore cannot hide a tracked file from repository updates", async () => {
+  const { work } = await checkout();
+  await mkdir(path.join(work, "docs"));
+  await writeFile(path.join(work, "docs", "a.md"), "# A\n");
+  await git(work, ["add", "docs/a.md"]);
+  await git(work, ["commit", "-m", "docs"]);
+  // The narrow root's own .gitignore now matches a tracked file; the content
+  // watcher honours it.
+  await writeFile(path.join(work, "docs", ".gitignore"), "a.md\n");
+  const { observer, names } = observe([dir(path.join(work, "docs"))]);
+  await observer.start();
+  observer.noteWorkingTreeChange(path.join(work, "docs", "a.md"));
+  expect(names).toEqual(["a.md"]);
+}, 20_000);
+
+test("a force-added file under the .gitignore counts once the index records it", async () => {
   const { work } = await checkout();
   await mkdir(path.join(work, "build"));
   await writeFile(path.join(work, ".gitignore"), "build/\n");
@@ -325,18 +365,17 @@ test("a whole-repository root still observes tracked files the .gitignore matche
   await git(work, ["commit", "-m", "ignore build"]);
   const { observer, names } = observe([dir(work)]);
   await observer.start();
-  // Nothing tracked is ignored yet, so no working-tree watch.
-  expect(observer.trees()).toEqual([]);
-
-  // Force-adding one makes the index event open a watch for it.
-  await writeFile(path.join(work, "build", "kept.txt"), "kept\n");
-  await git(work, ["add", "-f", "build/kept.txt"]);
-  await until(() => observer.trees().includes(work), "the working-tree watch for the tracked ignored file");
+  const late = path.join(work, "build", "late.txt");
+  await writeFile(late, "late\n");
+  observer.noteWorkingTreeChange(late);
+  expect(names).toEqual([]);
+  await git(work, ["add", "-f", "build/late.txt"]);
+  // The index event refreshes what is tracked but ignored.
   const deadline = performance.now() + 10_000;
-  for (let attempt = 0; !names.includes("kept.txt"); attempt++) {
-    if (performance.now() > deadline) throw new Error("the tracked ignored edit was never reported");
-    await writeFile(path.join(work, "build", "kept.txt"), `kept ${attempt}\n`);
-    await Bun.sleep(50);
+  while (!names.includes("late.txt")) {
+    if (performance.now() > deadline) throw new Error("the force-added file never counted");
+    observer.noteWorkingTreeChange(late);
+    await Bun.sleep(20);
   }
 }, 20_000);
 

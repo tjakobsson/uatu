@@ -54,9 +54,11 @@ The observer re-resolves its path set itself. It does so when it sees a `HEAD` e
 - **Reuse `file-observer.ts` with a recursive watch on `.git`.** Rejected. `objects/` churns on every fetch and gc, a recursive watch over `.git` is exactly what the spec forbids for content watching, and FSEvents coalescing gains nothing.
 - **Keep the probe and shorten its interval.** Rejected. It is still a timer, and still spawns `rev-parse` whenever the path set is recomputed.
 
-### 2. The probe becomes the fallback
+### 2. Polling is the fallback, and it collects
 
-The existing stat-fingerprint probe, unchanged apart from its trigger, runs only in three cases: when `usePolling` is set, when `fs.watch` throws while opening a handle, or when a handle later emits `error`. On a watcher error the observer closes its handles, starts the probe, and logs one diagnostic. It does not retry native watching for the life of that demand period, because flapping between the two modes is worse than steady polling. The next `demand(true)` tries native watching again.
+Polling runs only when `usePolling` is set, when `fs.watch` throws while opening a handle, or when a handle later emits `error`. On a watcher error the observer closes its handles, polling starts, and one diagnostic is logged. Native watching is not retried for the rest of that demand period, because flapping between the two modes is worse than steady polling. The next `demand(true)` tries native watching again.
+
+Each 5 s tick requests a collection, as v0.7.0 always did. #497's stat probe of a dozen Git files was dropped during review: by stat alone it cannot see edits outside a narrow root, tracked files the content watcher excludes, or a root that becomes a repository. Since #501 an unchanged collection publishes nothing.
 
 ### 3. Pacing: a prompt start, then a minimum gap between starts
 
@@ -98,7 +100,7 @@ For each watch entry, the observer compares the entry with `git rev-parse --show
 - inside the watched root itself (the content watcher already requests a collection for those);
 - under a path matched by the repository's top-level `.gitignore`, unless Git tracks that file anyway (`git ls-files --cached --ignored --exclude-standard`, refreshed when `.gitignore` or the index changes). This uses the `ignore` package the ignore engine already uses; nested `.gitignore` files are not consulted.
 
-A repository whose root covers it entirely also gets this watch when it tracks files its `.gitignore` matches, because the content watcher honours the `.gitignore` and never reports them. Inside a watched root the watch reports only those tracked-but-ignored files. When a whole-repository root has none, its index changes are checked with one `ls-files` call, so a later `git add -f` opens the watch. After the observer starts, one more collection runs, covering a change made while its watches were being installed.
+Inside a watched root, nothing extra is watched. The content watcher already sees every path there and emits each one as a `raw` event before applying its policy. The watch session forwards those events to the observer, which applies the same Git-side filter. That covers tracked files in folders the content watcher always excludes (`dist/`, `build/`, `node_modules`), `.uatu.json` excludes, and `.gitignore` rules it honours, nested ones included, with no second recursive watch. Any `.gitignore` change and any index change refreshes the tracked-but-ignored set. After the observer starts, one more collection runs, covering a change made while its watches were being installed.
 
 A missed nested `.gitignore` only costs a paced collection whose unchanged result publishes nothing. A filter that wrongly dropped a tracked path would leave data stale, so the filter errs towards triggering. Several narrow entries in one repository share one tree watch. Whole-repository roots open no tree watch.
 
@@ -112,7 +114,7 @@ In the fallback (polling mode, or a failed watch), a narrow root has nothing equ
 
 - **[Risk] A recursive tree watch on Linux costs one inotify watch per directory, including ignored ones such as `node_modules`.** → Only narrow roots open one, and Hub workspaces are usually whole repositories. An `ENOSPC` or other watch error takes the polling fallback above, with one diagnostic.
 
-- **[Risk] Native directory watches on macOS can miss events or report them late under load.** → The observer is reconciled by the next file-triggered collection anyway, and the fallback probe takes over on any watcher error. A unit test drives real `git commit`, `git checkout -b`, `git fetch` against a local remote, and `git pack-refs`, and asserts that each one is observed.
+- **[Risk] Native directory watches on macOS can miss events or report them late under load.** → The observer is reconciled by the next file-triggered collection anyway, and polling takes over on any watcher error. A unit test drives real `git commit`, `git checkout -b`, `git fetch` against a local remote, and `git pack-refs`, and asserts that each one is observed.
 - **[Risk] A missed watched path, for example a ref namespace we didn't enumerate, means a missed Git-only change.** → Any file edit still triggers a full collection. Unenumerated refs don't feed the published snapshot, which is built only from `HEAD`, the branch, the compare base and the index.
 - **[Risk] Ages could disagree with Git's `%cr` wording.** → One shared formatter, with thresholds that follow Git's (seconds, minutes, hours, days, weeks, then the date), covered by unit tests.
 - **[Trade-off] The 2 s gap delays the second of two quick commits by up to 2 s.** → This is acceptable for preview data, and the first change after a quiet period is still prompt.
@@ -120,7 +122,7 @@ In the fallback (polling mode, or a failed watch), a narrow root has nothing equ
 
 ## Migration Plan
 
-This is server and client in one binary, with no stored state. The new field is additive on an open schema. Older clients ignore it and keep showing `relativeTime`, which still freezes for them, exactly as after #501. To roll back, revert the change. The probe code stays in the tree as the fallback, so it can't be lost.
+This is server and client in one binary, with no stored state. The new field is additive on an open schema. Older clients ignore it and keep showing `relativeTime`, which still freezes for them, exactly as after #501. To roll back, revert the change.
 
 ## Open Questions
 

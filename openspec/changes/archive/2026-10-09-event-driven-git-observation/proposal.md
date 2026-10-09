@@ -37,7 +37,7 @@ None.
 
 ## Impact
 
-- **Server:** `src/server/repository-refresh.ts` (probe replaced by an observer and pacing), `src/server/file-observer.ts` (reused for the narrow Git-metadata watch, including the polling fallback), `src/server/watch-session.ts` (metrics: `reconcile.ticks_total` is replaced by Git-observer event counters), `src/document/git-data.ts` (commit time in `collectCommitLog`).
+- **Server:** `src/server/repository-refresh.ts` (probe replaced by an observer and pacing), `src/server/file-observer.ts` (shares its polling decision; its raw events carry excluded paths to the Git observer), `src/server/watch-session.ts` (metrics: `reconcile.ticks_total` is replaced by Git-observer event counters), `src/document/git-data.ts` (commit time in `collectCommitLog`).
 - **Client:** `src/shell/events.ts` (the 5-second repository refresh timer is removed), `src/sidebar/git-log.ts` and `src/preview/commit-message.ts` (client-side ages and a periodic re-render of visible ages), `src/shell/events.ts` and `src/preview/diff.ts` (diff refresh limited to relevant repository changes).
 - **API:** commit-log items are open objects (`additionalProperties: true`), so the new commit-time field is additive. The OpenAPI description, examples and changelog gain the field. A workspace API revision bump happens only if the compatibility check requires one.
 - **Docs:** `ARCHITECTURE.md` (repository refresh section) and the `CLAUDE.md` folder-map line for `repository-refresh`.

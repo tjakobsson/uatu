@@ -17,19 +17,43 @@ function within(directory: string, file: string): boolean {
 // The repository's changed-files paths are relative to its top level, which
 // Git reports as a real path (/private/tmp/...), while document ids keep the
 // watched root's spelling (/tmp/...). Ownership therefore goes through the
-// watched roots, whose ids share the documents' spelling; the top level is
-// only used for the root's offset when it is spelled the same way.
+// watched roots, whose ids share the documents' spelling. The root's offset
+// inside the repository comes from the top level when both are spelled alike,
+// otherwise from where the top level's name appears in the root's path.
+function segmentsOf(value: string): string[] {
+  return value.split("/").filter(Boolean);
+}
+
+function rootOffset(owner: RepositorySnapshot, rootId: string): string | null {
+  if (within(owner.rootPath, rootId)) return rootId.slice(withSlash(owner.rootPath).length).replace(/\/$/, "");
+  const name = segmentsOf(owner.rootPath).at(-1);
+  const segments = segmentsOf(rootId);
+  for (let below = 0; below < segments.length; below++) {
+    if (segments[segments.length - 1 - below] === name) return segments.slice(segments.length - below).join("/");
+  }
+  return null;
+}
+
 function changeEntry(owner: RepositorySnapshot, documentId: string, rootId: string): ChangedFileSummary | undefined {
   const fromRoot = documentId.slice(withSlash(rootId).length);
-  if (within(owner.rootPath, rootId)) {
-    const relative = documentId.slice(withSlash(owner.rootPath).length);
+  const offset = rootOffset(owner, rootId);
+  if (offset !== null) {
+    const relative = offset ? `${offset}/${fromRoot}` : fromRoot;
     return owner.changedFiles.find(file => file.path === relative || file.oldPath === relative);
   }
-  // Spelled differently: the repository-relative path ends with the
-  // root-relative one. The longest such entry is the most specific.
-  const matches = (candidate: string | null) => candidate !== null && (candidate === fromRoot || candidate.endsWith(`/${fromRoot}`));
+  // The top level's name never appears (a renamed symlink): an entry must be
+  // the root-relative path under a prefix that is itself a trailing part of
+  // the root's path. The longest such prefix is the most specific.
+  const segments = segmentsOf(rootId);
+  const fits = (candidate: string | null) => {
+    if (candidate === null) return false;
+    if (candidate === fromRoot) return true;
+    if (!candidate.endsWith(`/${fromRoot}`)) return false;
+    const prefix = segmentsOf(candidate.slice(0, -fromRoot.length));
+    return prefix.every((segment, index) => segments[segments.length - prefix.length + index] === segment);
+  };
   return owner.changedFiles
-    .filter(file => matches(file.path) || matches(file.oldPath))
+    .filter(file => fits(file.path) || fits(file.oldPath))
     .sort((a, b) => b.path.length - a.path.length)[0];
 }
 

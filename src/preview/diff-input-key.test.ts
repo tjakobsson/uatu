@@ -66,3 +66,23 @@ test("a watched root spelled differently from Git's top level still owns its doc
   expect(keyOf(spelled("aaaaaaa", [file("docs/b.md")]))).not.toBe(keyOf(spelled()));
   expect(keyOf(spelled("aaaaaaa", [file("docs/a.md"), file("docs/b.md", 5)]))).toBe(keyOf(spelled()));
 });
+
+test("an unrelated changed file sharing the document's name is not taken for it", () => {
+  // Codex's case: /tmp/link/docs/a.md, with docs/a.md and very/deep/a.md changed.
+  const snapshot = (files: ChangedFileSummary[]) => repository({ rootPath: "/private/tmp/link", watchedRootIds: ["/tmp/link/docs"], changedFiles: files });
+  const id = "/tmp/link/docs/a.md";
+  const keyOf = (files: ChangedFileSummary[]) => diffInputKey(id, [snapshot(files)], "base");
+  // Removing the document's own entry (git rm --cached) moves the key even
+  // though a longer unrelated path ends the same way.
+  expect(keyOf([file("docs/a.md"), file("very/deep/a.md")])).not.toBe(keyOf([file("very/deep/a.md")]));
+  // And a change to the unrelated one alone leaves it.
+  expect(keyOf([file("docs/a.md"), file("very/deep/a.md")])).toBe(keyOf([file("docs/a.md"), { ...file("very/deep/a.md"), status: "A" }]));
+});
+
+test("a symlink renamed away from the repository's name still rejects unrelated prefixes", () => {
+  const snapshot = (files: ChangedFileSummary[]) => repository({ rootPath: "/private/var/real-repo", watchedRootIds: ["/Users/me/link/docs"], changedFiles: files });
+  const id = "/Users/me/link/docs/a.md";
+  const keyOf = (files: ChangedFileSummary[]) => diffInputKey(id, [snapshot(files)], "base");
+  expect(keyOf([file("docs/a.md"), file("very/deep/a.md")])).not.toBe(keyOf([file("very/deep/a.md")]));
+  expect(keyOf([file("very/deep/a.md")])).toBe(keyOf([]));
+});

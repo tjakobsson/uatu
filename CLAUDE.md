@@ -97,8 +97,9 @@ src/
 │                   (path map, bounded classification and event batches),
 │                   repository-refresh (independent, paced Git
 │                   collection) + git-observer (event-driven Git metadata
-│                   watch, plus the working tree for narrow roots; a stat
-│                   probe only as the polling fallback),
+│                   watch, plus the working tree for narrow roots and the
+│                   content watcher's excluded paths; collection every 5 s
+│                   only as the polling fallback),
 │                   newest-document (incremental Follow catch-up),
 │                   roots (resolution + one-shot scanning),
 │                   search (content sweep over the watched roots),

@@ -1,19 +1,21 @@
-import { stat } from "node:fs/promises";
-import path from "node:path";
-import { collectRepositorySnapshots, collectRepositorySnapshotsByTarget, safeGit } from "../document/git-data";
+import { collectRepositorySnapshots, collectRepositorySnapshotsByTarget } from "../document/git-data";
 import type { CompareTarget, RepositorySnapshot, RootGroup } from "../shared/types";
 import type { RepositoryFreshness } from "../shared/document-updates";
 import type { WatchEntry } from "./roots";
 import { createRefreshScheduler, type RefreshSchedulerClock } from "./refresh-scheduler";
 import { withGitCancellation } from "../document/git-base-ref";
-import { createGitObserver, hasNarrowRoot, type GitObserver } from "./git-observer";
+import { createGitObserver, type GitObserver } from "./git-observer";
 import { pollingRequested } from "./file-observer";
 
 export const STALE_NOTICE_MS = 1000;
 // Successive collections start at least this far apart. The first trigger
 // after a quiet period still collects within the scheduler's debounce.
 export const MIN_COLLECTION_GAP_MS = 2000;
-// Only the polling fallback uses this; native observation has no timer.
+// Only the polling fallback uses this; native observation has no timer. The
+// fallback collects on every tick, as v0.7.0 always did: without native
+// events there is nothing cheaper that sees out-of-root edits, excluded
+// tracked files, or a root becoming a repository. Unchanged results publish
+// nothing.
 export const GIT_POLL_INTERVAL_MS = 5000;
 const realClock: RefreshSchedulerClock = {
   now: () => performance.now(),
@@ -33,7 +35,7 @@ export function createRepositoryRefresh(options: {
   roots: () => RootGroup[];
   collect?: typeof collectRepositorySnapshots;
   publish: (results: RepositoryResults, freshness: RepositoryFreshness) => void;
-  probeIntervalMs?: number;
+  pollIntervalMs?: number;
   staleNoticeMs?: number;
   minCollectionGapMs?: number;
   // Polling mode skips native Git observation, like the content watcher.
@@ -54,13 +56,7 @@ export function createRepositoryRefresh(options: {
   let running = false;
   let dirty = false;
   let demanded = false;
-  let probeTimer: ReturnType<typeof setInterval> | null = null;
-  let probing = false;
-  let probeFiles: string[] | null = null;
-  let fingerprint: string | null = null;
-  // A narrow root's out-of-root edits have no file to stat, so each fallback
-  // tick collects instead.
-  let narrow = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
   let observer: GitObserver | null = null;
   let fellBack = false;
   let demandEpoch = 0;
@@ -83,7 +79,7 @@ export function createRepositoryRefresh(options: {
 
   // A routine refresh finishes well inside this window. Announcing "stale" at
   // its start would swap the change overview and the facts strip to a
-  // refreshing notice and back on every probe; only a slow one says so.
+  // refreshing notice and back on every refresh; only a slow one says so.
   let staleNotice: ReturnType<typeof setTimeout> | null = null;
   let staleAnnounced = false;
   let published: RepositoryFreshness | null = null;
@@ -150,54 +146,13 @@ export function createRepositoryRefresh(options: {
     }
   }
 
-  async function probe() {
-    if (stopped || probing) return;
-    probing = true;
-    try {
-      if (!probeFiles) {
-        narrow = await hasNarrowRoot(options.entries);
-        const files = new Set<string>();
-        for (const entry of options.entries) {
-          if (stopped || !demanded) return;
-          const cwd = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
-          for (const name of ["HEAD", "index", "packed-refs", "refs", "logs/HEAD", "config", "refs/heads/main", "refs/heads/master", "refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master"]) {
-            if (stopped || !demanded) return;
-            const result = await safeGit(cwd, ["rev-parse", "--git-path", name]);
-            if (result.ok) files.add(path.resolve(cwd, result.stdout.trim()));
-          }
-          const head = await safeGit(cwd, ["symbolic-ref", "-q", "HEAD"]);
-          if (head.ok) {
-            const ref = await safeGit(cwd, ["rev-parse", "--git-path", head.stdout.trim()]);
-            if (ref.ok) files.add(path.resolve(cwd, ref.stdout.trim()));
-          }
-          const remote = await safeGit(cwd, ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"]);
-          if (remote.ok) {
-            const ref = await safeGit(cwd, ["rev-parse", "--git-path", remote.stdout.trim()]);
-            if (ref.ok) files.add(path.resolve(cwd, ref.stdout.trim()));
-          }
-        }
-        probeFiles = [...files];
-      }
-      if (stopped || !demanded) return;
-      const next = (await Promise.all(probeFiles.map(async file => {
-        const s = await stat(file).catch(() => null);
-        return s ? `${file}:${s.mtimeMs}:${s.ctimeMs}:${s.size}:${s.ino}` : `${file}:missing`;
-      }))).join("\n");
-      if (stopped || !demanded) return;
-      if (fingerprint !== null && (next !== fingerprint || narrow)) {
-        if (next !== fingerprint) probeFiles = null; // A branch switch can change the active ref path.
-        dirty = true;
-        scheduler.schedule();
-      }
-      fingerprint = next;
-      options.onPoll?.();
-    } finally { probing = false; }
-  }
-
   function startPolling() {
-    void withGitCancellation(cancellation.signal, probe).catch(() => {});
-    probeTimer = setInterval(() => { void withGitCancellation(cancellation.signal, probe).catch(() => {}); }, options.probeIntervalMs ?? GIT_POLL_INTERVAL_MS);
-    probeTimer.unref?.();
+    pollTimer = setInterval(() => {
+      if (stopped || !demanded) return;
+      options.onPoll?.();
+      request();
+    }, options.pollIntervalMs ?? GIT_POLL_INTERVAL_MS);
+    pollTimer.unref?.();
   }
 
   // Native observation failed: poll for the rest of this demand period rather
@@ -209,7 +164,7 @@ export function createRepositoryRefresh(options: {
     observer = null;
     options.onFallback?.(error);
     const reason = error instanceof Error ? error.message : String(error);
-    console.error(`uatu: Git metadata watching failed (${reason}); checking every ${(options.probeIntervalMs ?? GIT_POLL_INTERVAL_MS) / 1000} s instead`);
+    console.error(`uatu: Git metadata watching failed (${reason}); checking every ${(options.pollIntervalMs ?? GIT_POLL_INTERVAL_MS) / 1000} s instead`);
     startPolling();
     // A change may have gone unreported while the watch was failing.
     dirty = true;
@@ -219,10 +174,8 @@ export function createRepositoryRefresh(options: {
   function release() {
     observer?.close();
     observer = null;
-    if (probeTimer) clearInterval(probeTimer);
-    probeTimer = null;
-    probeFiles = null;
-    fingerprint = null;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
     fellBack = false;
   }
 
@@ -232,9 +185,12 @@ export function createRepositoryRefresh(options: {
     get results() { return results; },
     get freshness() { return freshness; },
     // Whether Git metadata is currently polled rather than observed.
-    get polling() { return probeTimer !== null; },
+    get polling() { return pollTimer !== null; },
     request,
     refresh,
+    // An excluded working-tree path from the content watcher. While polling,
+    // every tick collects anyway.
+    noteWorkingTreeChange(file: string) { observer?.noteWorkingTreeChange(file); },
     demand(active: boolean) {
       if (active === demanded || stopped) return;
       demanded = active;

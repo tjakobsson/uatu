@@ -212,6 +212,14 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       }
       index.observe(event, file, stats);
     });
+    // Every path the native watcher saw, excluded ones included. The content
+    // policy drops built-in folders (dist/, build/, node_modules) and
+    // .uatu.json excludes that Git may still track; the Git observer filters
+    // these by Git's own ignore rules. Accepted paths also arrive here and
+    // coalesce with the file batch's own repository request.
+    watcher.on("raw", (_event: string, file: string) => {
+      if (!stopped && owned.has(root)) repositories.noteWorkingTreeChange(file);
+    });
     watcher.once("ready", () => {
       root.ready = true; index.markReady();
       void index.idle().then(() => ready.resolve());
