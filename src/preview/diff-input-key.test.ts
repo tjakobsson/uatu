@@ -4,9 +4,9 @@ import { diffInputKey } from "./diff-input-key";
 
 const file = (path: string, additions = 1): ChangedFileSummary => ({ path, oldPath: null, status: "M", additions, deletions: 0, hunks: 1 });
 
-function repository(overrides: { head?: string; mergeBase?: string; changedFiles?: ChangedFileSummary[]; rootPath?: string } = {}): RepositorySnapshot {
+function repository(overrides: { head?: string; mergeBase?: string; changedFiles?: ChangedFileSummary[]; rootPath?: string; watchedRootIds?: string[] } = {}): RepositorySnapshot {
   return {
-    id: "repo", rootPath: overrides.rootPath ?? "/work/repo", label: "repo", watchedRootIds: [], status: "available",
+    id: "repo", rootPath: overrides.rootPath ?? "/work/repo", label: "repo", watchedRootIds: overrides.watchedRootIds ?? [overrides.rootPath ?? "/work/repo"], status: "available",
     metadata: { id: "repo", rootPath: "/work/repo", label: "repo", watchedRootIds: [], status: "git", branch: "main", detached: false, commitShort: overrides.head ?? "aaaaaaa", dirty: true, message: null },
     base: { mode: "remote-default", ref: "origin/main", mergeBase: overrides.mergeBase ?? "bbbbbbb", compareTarget: "base", comparedAgainstRef: "origin/main", targetsCollapsed: false },
     changedFiles: overrides.changedFiles ?? [file("docs/a.md"), file("docs/b.md")],
@@ -53,4 +53,16 @@ test("the innermost repository owns a nested document", () => {
 
 test("a document outside every repository has a stable key", () => {
   expect(diffInputKey("/elsewhere/a.md", [repository()], "base")).toBe(diffInputKey("/elsewhere/a.md", [repository({ head: "ccccccc" })], "base"));
+});
+
+test("a watched root spelled differently from Git's top level still owns its documents", () => {
+  // macOS: the session watches /tmp/..., Git reports /private/tmp/....
+  const spelled = (head = "aaaaaaa", files = [file("docs/a.md"), file("docs/b.md")]) =>
+    repository({ rootPath: "/private/tmp/repo", watchedRootIds: ["/tmp/repo/docs"], head, changedFiles: files });
+  const id = "/tmp/repo/docs/a.md";
+  const keyOf = (snapshot: RepositorySnapshot) => diffInputKey(id, [snapshot], "base");
+  expect(keyOf(spelled())).not.toBe(JSON.stringify(["base", null]));
+  expect(keyOf(spelled("ccccccc"))).not.toBe(keyOf(spelled()));
+  expect(keyOf(spelled("aaaaaaa", [file("docs/b.md")]))).not.toBe(keyOf(spelled()));
+  expect(keyOf(spelled("aaaaaaa", [file("docs/a.md"), file("docs/b.md", 5)]))).toBe(keyOf(spelled()));
 });

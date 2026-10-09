@@ -18,6 +18,8 @@ export type GitObserver = {
   directories(): string[];
   // Repository top levels watched recursively for narrow roots.
   trees(): string[];
+  // How many times the watched paths were resolved, for tests.
+  resolutions(): number;
   close(): void;
 };
 
@@ -52,13 +54,25 @@ async function symbolicTarget(cwd: string, ref: string): Promise<string | null> 
   return result.ok ? result.stdout.trim() || null : null;
 }
 
+// Lock and temp files around an atomic update. They never create a missing
+// directory, so they never warrant re-resolving paths either.
+function isLockOrTemp(name: string): boolean {
+  return name.endsWith(".lock") || name.endsWith(".new") || name.includes(".watchman-cookie-");
+}
+
+type Candidates = { directories: string[]; nonGitRoot: string | null };
+
 // The directories whose entries carry the published repository state for one
 // watch entry. Every compare-base candidate (origin/HEAD's target,
 // origin/main|master, main|master) lives in refs/remotes/origin or refs/heads.
-async function candidateDirectories(entry: WatchEntry): Promise<string[]> {
+// Optional directories are included only when they can matter: reftable/
+// only for a reftable repository, refs/remotes/origin only with an origin
+// remote. Otherwise they would stay "missing" forever and make every event
+// re-resolve. A root outside any repository is watched for `.git` appearing.
+async function candidateDirectories(entry: WatchEntry): Promise<Candidates> {
   const cwd = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
   const gitDir = await gitPath(cwd, ["rev-parse", "--absolute-git-dir"]);
-  if (!gitDir) return [];
+  if (!gitDir) return { directories: [], nonGitRoot: cwd };
   const directories = new Set<string>([gitDir]);
   const add = async (args: string[], parent = false) => {
     const resolved = await gitPath(cwd, args);
@@ -66,13 +80,14 @@ async function candidateDirectories(entry: WatchEntry): Promise<string[]> {
   };
   await add(["rev-parse", "--git-common-dir"]);
   await add(["rev-parse", "--git-path", "refs/heads"]);
-  await add(["rev-parse", "--git-path", "refs/remotes/origin"]);
-  await add(["rev-parse", "--git-path", "reftable"]);
+  if ((await safeGit(cwd, ["config", "--get", "remote.origin.url"])).ok) await add(["rev-parse", "--git-path", "refs/remotes/origin"]);
+  const reftable = await gitPath(cwd, ["rev-parse", "--git-path", "reftable"]);
+  if (reftable && await stat(reftable).then(info => info.isDirectory(), () => false)) directories.add(reftable);
   for (const symref of ["HEAD", "refs/remotes/origin/HEAD"]) {
     const target = await symbolicTarget(cwd, symref);
     if (target) await add(["rev-parse", "--git-path", target], true);
   }
-  return [...directories];
+  return { directories: [...directories], nonGitRoot: null };
 }
 
 function contains(parent: string, child: string): boolean {
@@ -117,7 +132,11 @@ export function createGitObserver(options: Options): GitObserver {
   const watchDirectory = options.watch ?? nodeWatch;
   const handles = new Map<string, FSWatcher>();
   const trees = new Map<string, TreeWatch>();
+  // Watched roots outside any repository, by real path: only `.git`
+  // appearing in them matters.
+  let nonGitRoots = new Set<string>();
   let missing = false;
+  let resolutionCount = 0;
   let closed = false;
   let failed = false;
   let resolving: Promise<void> | null = null;
@@ -133,14 +152,21 @@ export function createGitObserver(options: Options): GitObserver {
   function receive(directory: string, name: string | null) {
     if (closed || failed) return;
     const base = name === null ? null : path.basename(name);
-    // A directory that did not exist yet may exist now. Even a noise event
-    // counts: on Linux the first fetch reports only FETCH_HEAD here, while it
-    // creates refs/remotes/origin below a directory nobody watches.
-    if (missing) void resync();
+    if (nonGitRoots.has(directory)) {
+      // `git init` (or a clone into place) makes this root a repository.
+      if (base === null || base === ".git") { void resync(); options.onChange(base); }
+      return;
+    }
+    // A directory that did not exist yet may exist now. FETCH_HEAD counts:
+    // on Linux the first fetch reports only FETCH_HEAD here, while it creates
+    // refs/remotes/origin below a directory nobody watches. Lock and temp
+    // names never create one.
+    const lockOrTemp = base !== null && isLockOrTemp(base);
+    if (missing && !lockOrTemp) void resync();
     if (base !== null && isGitNoise(base)) return;
-    // A moved HEAD symref (branch switch, a new origin/HEAD) can change which
-    // ref directories matter.
-    if (!missing && (base === null || base === "HEAD")) void resync();
+    // A moved HEAD symref (branch switch, a new origin/HEAD) or a config
+    // change (a remote added) can change which ref directories matter.
+    if (!missing && (base === null || base === "HEAD" || base === "config")) void resync();
     // Staging can track a file the .gitignore matches (git add -f).
     if (base === "index" && trees.size) for (const [topLevel, tree] of trees) void refreshTracked(topLevel, tree);
     options.onChange(base);
@@ -227,14 +253,22 @@ export function createGitObserver(options: Options): GitObserver {
   }
 
   async function resolveAll(): Promise<number> {
+    resolutionCount++;
     const directories = new Set<string>();
     const narrow = new Map<string, string[]>();
+    const nonGit = new Set<string>();
     for (const entry of options.entries) {
-      for (const directory of await candidateDirectories(entry)) directories.add(directory);
+      const candidates = await candidateDirectories(entry);
+      for (const directory of candidates.directories) directories.add(directory);
+      if (candidates.nonGitRoot) {
+        const real = await realpath(candidates.nonGitRoot).catch(() => null);
+        if (real) { directories.add(real); nonGit.add(real); }
+      }
       const repository = await narrowRepository(entry);
       if (repository) narrow.set(repository.topLevel, [...(narrow.get(repository.topLevel) ?? []), repository.root]);
       if (closed || failed) return 0;
     }
+    nonGitRoots = nonGit;
     const opened = await open([...directories]);
     if (closed || failed) return 0;
     await openTrees(narrow);
@@ -273,6 +307,7 @@ export function createGitObserver(options: Options): GitObserver {
     },
     directories: () => [...handles.keys()].sort(),
     trees: () => [...trees.keys()].sort(),
+    resolutions: () => resolutionCount,
     close,
   };
 }

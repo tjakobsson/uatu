@@ -260,3 +260,43 @@ test("a narrow root keeps tracked files that the .gitignore matches observable",
     await Bun.sleep(50);
   }
 }, 20_000);
+
+for (const remote of [true, false]) {
+  test(`lock churn never re-resolves paths ${remote ? "in a clone" : "in a repository without a remote"}`, async () => {
+    const { directory, work } = await checkout();
+    const root = remote ? work : path.join(directory, "local");
+    if (!remote) {
+      await mkdir(root);
+      await git(root, ["init", "--initial-branch=main"]);
+      await git(root, ["commit", "--allow-empty", "-m", "initial"]);
+    }
+    const gitDir = path.join(root, ".git");
+    const { observer, names } = observe([dir(root)]);
+    await observer.start();
+    expect(observer.resolutions()).toBe(1);
+    for (let i = 0; i < 5; i++) {
+      await writeFile(path.join(gitDir, "index.lock"), "");
+      await rm(path.join(gitDir, "index.lock"));
+    }
+    await settle(gitDir, names);
+    expect(observer.resolutions()).toBe(1);
+  }, 20_000);
+}
+
+test("a root that becomes a repository is observed from its first commit", async () => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "uatu-git-observer-plain-")));
+  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(path.join(directory, "README.md"), "# Plain\n");
+  const { observer, names } = observe([dir(directory)]);
+  await observer.start();
+  expect(observer.directories()).toEqual([directory]);
+  await git(directory, ["init", "--initial-branch=main"]);
+  await until(() => names.includes(".git"), "the new .git directory");
+  const gitDir = path.join(directory, ".git");
+  await until(() => observer.directories().includes(gitDir), "the new Git directory to be watched");
+  expect(observer.directories()).not.toContain(directory);
+  names.length = 0;
+  await git(directory, ["add", "."]);
+  await git(directory, ["commit", "-m", "first"]);
+  await until(() => names.includes("main") || names.includes("HEAD") || names.includes("index"), "the first commit");
+}, 20_000);

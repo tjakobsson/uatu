@@ -41,6 +41,10 @@ A refresh whose result matches the published result SHALL publish nothing and ke
 - **WHEN** a repository whose remote has never been fetched is fetched for the first time
 - **THEN** repository information updates, although the remote's ref directory did not exist when observation started
 
+#### Scenario: A watched root becomes a repository
+- **WHEN** a client is subscribed to a watched root that is not in a Git repository, and `git init` and a first commit are run in it
+- **THEN** repository information updates without a client request
+
 #### Scenario: A page with Git views open sends no periodic requests
 - **WHEN** a page shows the Change Overview, the Git Log or a Diff and nothing changes for several minutes
 - **THEN** the page sends no repository refresh requests

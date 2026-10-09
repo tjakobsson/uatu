@@ -42,11 +42,13 @@ The watched directories are:
 - the shared Git directory (`rev-parse --git-common-dir`) when it differs, which covers `packed-refs` and `config`;
 - the directory holding the current branch's ref file, under the shared directory's `refs/heads/`;
 - the directory holding the compare base's remote ref (for example `refs/remotes/origin/`), plus `refs/remotes/origin/` itself for the `origin/HEAD` symref;
-- `reftable/`, when the repository uses the reftable backend.
+- `reftable/`, only when the repository uses the reftable backend, and `refs/remotes/origin/` only when an `origin` remote is configured (a `config` change re-resolves). An optional directory that never exists would otherwise keep the path set "missing" and make every event re-resolve.
+
+A watched root outside any repository is itself watched, non-recursively, for a `.git` entry appearing. `git init` there re-resolves into the normal set.
 
 Events for lock and temp files (`*.lock`, `*.new`), `objects`, `FETCH_HEAD`, `gc.pid`/`gc.log` and watchman cookies are dropped. `FETCH_HEAD` changes on every fetch, even one that moves no ref; a fetch that moves a ref also renames that ref or `packed-refs`. Every other event calls `request()`.
 
-The observer re-resolves its path set itself. It does so when it sees a `HEAD` entry change in a watched directory (a branch switch moves the worktree's `HEAD`, and a new remote default moves `refs/remotes/origin/HEAD`). It also does so on any event while a candidate directory is missing, for example before the first fetch creates `refs/remotes/origin`. Re-resolution is coalesced, closes handles that are no longer wanted, and opens new ones. While any candidate directory is missing, every event re-resolves, including the noise names. On Linux the first fetch reports only `FETCH_HEAD` at the Git directory, while it creates `refs/remotes/origin` below it. A directory that gains a handle on re-resolution reports a change, since its entries were written before the watch existed. Directories are compared by real path, so `/tmp` and `/private/tmp` spellings of one directory share a handle. Handles are opened while demanded and closed when demand drops.
+The observer re-resolves its path set itself. It does so when it sees a `HEAD` entry change in a watched directory (a branch switch moves the worktree's `HEAD`, and a new remote default moves `refs/remotes/origin/HEAD`). It also does so on any event while a candidate directory is missing, for example before the first fetch creates `refs/remotes/origin`. Re-resolution is coalesced, closes handles that are no longer wanted, and opens new ones. While any candidate directory is missing, every event except lock and temp names re-resolves, `FETCH_HEAD` included. On Linux the first fetch reports only `FETCH_HEAD` at the Git directory, while it creates `refs/remotes/origin` below it. A directory that gains a handle on re-resolution reports a change, since its entries were written before the watch existed. Directories are compared by real path, so `/tmp` and `/private/tmp` spellings of one directory share a handle. Handles are opened while demanded and closed when demand drops.
 
 *Alternatives considered:*
 - **Reuse `file-observer.ts` with a recursive watch on `.git`.** Rejected. `objects/` churns on every fetch and gc, a recursive watch over `.git` is exactly what the spec forbids for content watching, and FSEvents coalescing gains nothing.
@@ -78,6 +80,8 @@ A single client ticker re-renders the age text nodes of visible Git Log rows and
 - `metadata.commitShort` (`HEAD`);
 - `base.mergeBase ?? base.ref` with `base.compareTarget` (the compare base);
 - the file's `changedFiles` entry (`path`, `status`, `oldPath`), or none.
+
+The owning repository is found through its `watchedRootIds`, which share the document ids' spelling. Git's top level is a real path (`/private/tmp/…` on macOS) and may not. When the top level is spelled differently from the root, the entry is the longest changed path that ends with the root-relative path.
 
 `diff.ts` records the key each cached diff was fetched under. On a repository update, `events.ts` drops only the entries whose key moved, and re-fetches the active diff only if its own entry was dropped. It no longer clears `documentDiffCache` wholesale, except on a new epoch or compare target, where every recorded diff counts as dropped. The facts-strip enrichment keeps using the repository generation. With #501 the generation advances only on real changes, and facts are per document and cheap.
 
