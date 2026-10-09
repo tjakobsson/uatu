@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { openTreeFile, revealTreeRow, treeRow } from "./tree-helpers";
 import { showGitLogPane, standardBeforeEach } from "./fixtures";
+import { captureScreenshot } from "./evidence";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -327,7 +328,7 @@ test.describe("repository updates while Diff is open", () => {
   // hide them, as in the slow-fetch test above.
   test.use({ serviceWorkers: "block" });
 
-  test("only a change to the open file's diff inputs re-fetches it", async ({ page, request }) => {
+  test("only a change to the open file's diff inputs re-fetches it", async ({ page, request }, testInfo) => {
     await request.post("/__e2e/reset", {
       data: { git: true, dirty: { "feature.md": "# Feature\n\nCommitted branch change.\n\nAdded review-time edit.\n" } },
     });
@@ -355,6 +356,7 @@ test.describe("repository updates while Diff is open", () => {
     await expect(treeRow(page, "README.md")).toHaveAttribute("data-item-git-status", /.+/);
     expect(diffRequests).toEqual([]);
     expect(await busyCount()).toBe(0);
+    await captureScreenshot(page, testInfo, "diff-kept-after-another-file-changed");
 
     // A commit moves HEAD: the open diff is fetched again, once.
     const { execFileSync } = await import("node:child_process");

@@ -2,6 +2,7 @@ import { expect, test } from "./fixtures";
 
 import { treeRow } from "./tree-helpers";
 import { showGitLogPane, standardBeforeEach } from "./fixtures";
+import { captureScreenshot } from "./evidence";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -66,7 +67,7 @@ test("commit preview URLs show an unavailable state when data is missing", async
   await expect(page.locator("#git-log")).toContainText("add feature doc");
 });
 
-test("Git Log rows and the commit preview show the commit's age from its commit time", async ({ page, request }) => {
+test("Git Log rows and the commit preview show the commit's age from its commit time", async ({ page, request }, testInfo) => {
   await request.post("/__e2e/reset", { data: { git: true } });
   await page.goto("/");
   await showGitLogPane(page);
@@ -77,14 +78,16 @@ test("Git Log rows and the commit preview show the commit's age from its commit 
   await expect(age).toHaveText(/^\d+ (second|minute)s? ago$/);
   const committedAt = Number(await age.getAttribute("data-committed-at"));
   expect(new Date(await age.getAttribute("datetime") ?? "").getTime()).toBe(committedAt);
+  await captureScreenshot(page, testInfo, "git-log-commit-age");
 
   await row.click();
   const previewAge = page.locator(".commit-preview header time.commit-age");
   await expect(previewAge).toHaveAttribute("data-committed-at", String(committedAt));
   await expect(previewAge).toHaveText(/^\d+ (second|minute)s? ago$/);
+  await captureScreenshot(page, testInfo, "commit-preview-age");
 });
 
-test("commit ages advance in place without asking the server", async ({ page, request }) => {
+test("commit ages advance in place without asking the server", async ({ page, request }, testInfo) => {
   await request.post("/__e2e/reset", { data: { git: true } });
   await page.clock.install();
   await page.goto("/");
@@ -103,6 +106,7 @@ test("commit ages advance in place without asking the server", async ({ page, re
   await page.clock.runFor("20:00");
 
   await expect(age).toHaveText(/^(19|20) minutes ago$/);
+  await captureScreenshot(page, testInfo, "git-log-age-after-20-minutes");
   // Same element, still focused: the row was not rebuilt.
   expect(await row.evaluate(element => element === (window as unknown as { __ageRow?: Element }).__ageRow && document.activeElement === element)).toBe(true);
   expect(repositoryReads).toEqual([]);
