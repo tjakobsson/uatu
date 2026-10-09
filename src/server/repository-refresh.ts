@@ -30,6 +30,10 @@ function repositoryFingerprint(results: RepositoryResults): string {
   return JSON.stringify(results, (key, value) => key === "relativeTime" ? undefined : value);
 }
 
+function repositorySet(results: RepositoryResults): string {
+  return results.base.map(repository => `${repository.rootPath}\u0000${repository.metadata?.status ?? repository.status}`).sort().join("\n");
+}
+
 export function createRepositoryRefresh(options: {
   entries: WatchEntry[];
   roots: () => RootGroup[];
@@ -130,6 +134,9 @@ export function createRepositoryRefresh(options: {
       // An identical result keeps its identity and generation, so clients
       // neither repaint repository views nor refetch Git facts.
       const changed = freshness.generation === 0 || repositoryFingerprint(next) !== repositoryFingerprint(results);
+      // A repository appeared, vanished or was replaced (git init above a
+      // narrow root, a re-clone): the observer's paths may no longer match.
+      if (changed && repositorySet(next) !== repositorySet(results) && freshness.generation > 0) void observer?.resync();
       if (changed) results = next;
       // A queued follow-up keeps any announced "stale" until it completes.
       const status = dirty && staleAnnounced ? "stale" : "ready";

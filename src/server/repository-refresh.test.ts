@@ -45,11 +45,11 @@ test("repeated requests during collection retain only one follow-up", async () =
 });
 
 function fakeObserver() {
-  const state = { closed: 0, starts: 0, onFailure: null as ((error: unknown) => void) | null, onChange: null as ((name: string | null) => void) | null, start: () => Promise.resolve() };
+  const state = { closed: 0, starts: 0, resyncs: 0, onFailure: null as ((error: unknown) => void) | null, onChange: null as ((name: string | null) => void) | null, start: () => Promise.resolve() };
   const observe = ((options: { onChange: (name: string | null) => void; onFailure: (error: unknown) => void }) => {
     state.onFailure = options.onFailure;
     state.onChange = options.onChange;
-    return { start: () => { state.starts++; return state.start(); }, directories: () => [], close: () => { state.closed++; } };
+    return { start: () => { state.starts++; return state.start(); }, directories: () => [], close: () => { state.closed++; }, resync: async () => { state.resyncs++; } };
   }) as unknown as typeof createGitObserver;
   return { state, observe };
 }
@@ -349,5 +349,27 @@ test("a collection follows the observer's start, covering changes made while its
     const before = collections;
     started.resolve();
     await until(() => collections > before);
+  } finally { refresh.stop(); }
+});
+
+test("a collection that finds a different set of repositories re-resolves the observer", async () => {
+  const { state, observe } = fakeObserver();
+  let status = "non-git";
+  let head = "a";
+  const snapshot = () => [{ id: "/repo", rootPath: "/repo", metadata: { status, commitShort: head } }] as unknown as RepositorySnapshot[];
+  const refresh = createRepositoryRefresh({ entries: [], roots: () => [], publish: () => {}, observe, minCollectionGapMs: 0, collect: async () => snapshot() });
+  try {
+    refresh.demand(true);
+    await until(() => state.starts === 1 && refresh.freshness.status === "ready");
+    await refresh.refresh();
+    expect(state.resyncs).toBe(0);
+    // git init above a narrow root: the next collection sees a repository.
+    status = "git";
+    await refresh.refresh();
+    expect(state.resyncs).toBe(1);
+    // An ordinary change inside the same repository does not.
+    head = "b";
+    await refresh.refresh();
+    expect(state.resyncs).toBe(1);
   } finally { refresh.stop(); }
 });

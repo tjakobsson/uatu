@@ -24,6 +24,9 @@ export type GitObserver = {
   noteWorkingTreeChange(file: string): void;
   // How many times the watched paths were resolved, for tests.
   resolutions(): number;
+  // Re-resolve the watched paths, e.g. after a collection found a repository
+  // the watches do not cover yet.
+  resync(): Promise<void>;
   close(): void;
 };
 
@@ -378,6 +381,7 @@ export function createGitObserver(options: Options): GitObserver {
     trees: () => [...repositories].filter(([, state]) => state.handle).map(([topLevel]) => topLevel).sort(),
     noteWorkingTreeChange,
     resolutions: () => resolutionCount,
+    resync,
     close,
   };
 }
