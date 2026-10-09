@@ -95,10 +95,11 @@ function contains(parent: string, child: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-// A watch entry is narrow when it covers less than its repository: a
-// subdirectory, or a single file. Edits elsewhere in that repository change
-// its Git data but never reach the content watcher.
-export async function narrowRepository(entry: WatchEntry): Promise<{ topLevel: string; root: string } | null> {
+// The repository a watch entry belongs to, by real path. The entry is narrow
+// when it covers less than its repository: a subdirectory, or a single file.
+// Edits elsewhere in that repository change its Git data but never reach the
+// content watcher.
+async function repositoryOf(entry: WatchEntry): Promise<{ topLevel: string; root: string; narrow: boolean } | null> {
   const cwd = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
   const result = await safeGit(cwd, ["rev-parse", "--show-toplevel"]);
   const reported = result.ok ? result.stdout.trim() : "";
@@ -106,7 +107,12 @@ export async function narrowRepository(entry: WatchEntry): Promise<{ topLevel: s
   const topLevel = await realpath(reported).catch(() => null);
   const root = await realpath(entry.absolutePath).catch(() => null);
   if (!topLevel || !root) return null;
-  return entry.kind === "file" || root !== topLevel ? { topLevel, root } : null;
+  return { topLevel, root, narrow: entry.kind === "file" || root !== topLevel };
+}
+
+export async function narrowRepository(entry: WatchEntry): Promise<{ topLevel: string; root: string } | null> {
+  const repository = await repositoryOf(entry);
+  return repository?.narrow ? { topLevel: repository.topLevel, root: repository.root } : null;
 }
 
 export async function hasNarrowRoot(entries: WatchEntry[]): Promise<boolean> {
@@ -135,6 +141,9 @@ export function createGitObserver(options: Options): GitObserver {
   // Watched roots outside any repository, by real path: only `.git`
   // appearing in them matters.
   let nonGitRoots = new Set<string>();
+  // Repository top levels whose roots cover the whole repository and that
+  // currently need no working-tree watch.
+  let wholeRepositories = new Set<string>();
   let missing = false;
   let resolutionCount = 0;
   let closed = false;
@@ -168,7 +177,10 @@ export function createGitObserver(options: Options): GitObserver {
     // change (a remote added) can change which ref directories matter.
     if (!missing && (base === null || base === "HEAD" || base === "config")) void resync();
     // Staging can track a file the .gitignore matches (git add -f).
-    if (base === "index" && trees.size) for (const [topLevel, tree] of trees) void refreshTracked(topLevel, tree);
+    if (base === "index") {
+      for (const [topLevel, tree] of trees) void refreshTracked(topLevel, tree);
+      checkQuietRepositories();
+    }
     options.onChange(base);
   }
 
@@ -185,9 +197,11 @@ export function createGitObserver(options: Options): GitObserver {
     return tree.refreshing;
   }
 
-  // Working-tree events from a narrow root's repository. Errs towards
-  // triggering: a missed ignore costs one silent collection, while a dropped
-  // tracked path would leave the Change Overview stale.
+  // Working-tree events the content watcher cannot see: anything outside a
+  // narrow root, and tracked files the .gitignore matches anywhere (the
+  // content watcher honours the .gitignore, Git still reports them). Errs
+  // towards triggering: a missed ignore costs one silent collection, while a
+  // dropped tracked path would leave the Change Overview stale.
   function receiveTree(topLevel: string, name: string | null) {
     if (closed || failed) return;
     const tree = trees.get(topLevel);
@@ -196,24 +210,51 @@ export function createGitObserver(options: Options): GitObserver {
     const relative = name.split(path.sep).join("/");
     if (relative.split("/").includes(".git")) return;
     const absolute = path.join(topLevel, name);
-    if (tree.roots.some(root => contains(root, absolute))) return;
     if (relative === ".gitignore") void refreshTracked(topLevel, tree);
-    else if (tree.ignored.ignores(relative) && !tree.trackedIgnored.has(relative)) return;
+    if (tree.trackedIgnored.has(relative)) { options.onChange(path.basename(name)); return; }
+    if (tree.roots.some(root => contains(root, absolute))) return;
+    if (relative !== ".gitignore" && tree.ignored.ignores(relative)) return;
     options.onChange(path.basename(name));
   }
 
-  async function openTrees(wanted: Map<string, string[]>) {
+  // A repository gets a working-tree watch when a watched root is narrower
+  // than it, or when it tracks files its .gitignore matches. A whole-repository
+  // root without such files needs none; it is rechecked when its index changes.
+  async function openTrees(repositories: Map<string, { roots: string[]; narrow: boolean }>) {
+    const wanted = new Map<string, { roots: string[]; ignored: Ignore; trackedIgnored: Set<string> }>();
+    const quiet = new Set<string>();
+    for (const [topLevel, repository] of repositories) {
+      const existing = trees.get(topLevel);
+      const trackedIgnored = existing?.trackedIgnored ?? await loadTrackedIgnored(topLevel);
+      if (closed || failed) return;
+      if (!repository.narrow && trackedIgnored.size === 0) { quiet.add(topLevel); continue; }
+      wanted.set(topLevel, { roots: repository.roots, ignored: existing?.ignored ?? await loadGitignore(topLevel), trackedIgnored });
+    }
+    if (closed || failed) return;
+    wholeRepositories = quiet;
     for (const [topLevel, tree] of trees) {
       if (!wanted.has(topLevel)) { tree.handle.close(); trees.delete(topLevel); }
     }
-    for (const [topLevel, roots] of wanted) {
+    for (const [topLevel, want] of wanted) {
       const existing = trees.get(topLevel);
-      if (existing) { existing.roots = roots; continue; }
-      const [ignored, trackedIgnored] = await Promise.all([loadGitignore(topLevel), loadTrackedIgnored(topLevel)]);
-      if (closed || failed) return;
+      if (existing) { existing.roots = want.roots; continue; }
       const handle = watchDirectory(topLevel, { recursive: true }, (_event, filename) => receiveTree(topLevel, filename == null ? null : filename.toString()));
       handle.on("error", fail);
-      trees.set(topLevel, { handle, roots, ignored, trackedIgnored, refreshing: null, refreshAgain: false });
+      trees.set(topLevel, { handle, roots: want.roots, ignored: want.ignored, trackedIgnored: want.trackedIgnored, refreshing: null, refreshAgain: false });
+    }
+  }
+
+  // A whole-repository root with no tracked-but-ignored files has no tree
+  // watch. Staging can create one (git add -f), so its index changes are
+  // checked with one ls-files call; a hit re-resolves to open the watch.
+  const checkingQuiet = new Set<string>();
+  function checkQuietRepositories() {
+    for (const topLevel of wholeRepositories) {
+      if (checkingQuiet.has(topLevel)) continue;
+      checkingQuiet.add(topLevel);
+      void loadTrackedIgnored(topLevel).then(found => {
+        if (found.size && !closed && !failed) void resync();
+      }).finally(() => checkingQuiet.delete(topLevel));
     }
   }
 
@@ -255,7 +296,7 @@ export function createGitObserver(options: Options): GitObserver {
   async function resolveAll(): Promise<number> {
     resolutionCount++;
     const directories = new Set<string>();
-    const narrow = new Map<string, string[]>();
+    const repositories = new Map<string, { roots: string[]; narrow: boolean }>();
     const nonGit = new Set<string>();
     for (const entry of options.entries) {
       const candidates = await candidateDirectories(entry);
@@ -272,14 +313,17 @@ export function createGitObserver(options: Options): GitObserver {
           if (await stat(pending).then(info => info.isDirectory(), () => false)) directories.add(pending);
         }
       }
-      const repository = await narrowRepository(entry);
-      if (repository) narrow.set(repository.topLevel, [...(narrow.get(repository.topLevel) ?? []), repository.root]);
+      const repository = await repositoryOf(entry);
+      if (repository) {
+        const known = repositories.get(repository.topLevel);
+        repositories.set(repository.topLevel, { roots: [...(known?.roots ?? []), repository.root], narrow: (known?.narrow ?? false) || repository.narrow });
+      }
       if (closed || failed) return 0;
     }
     nonGitRoots = nonGit;
     const opened = await open([...directories]);
     if (closed || failed) return 0;
-    await openTrees(narrow);
+    await openTrees(repositories);
     return opened;
   }
 

@@ -98,6 +98,8 @@ For each watch entry, the observer compares the entry with `git rev-parse --show
 - inside the watched root itself (the content watcher already requests a collection for those);
 - under a path matched by the repository's top-level `.gitignore`, unless Git tracks that file anyway (`git ls-files --cached --ignored --exclude-standard`, refreshed when `.gitignore` or the index changes). This uses the `ignore` package the ignore engine already uses; nested `.gitignore` files are not consulted.
 
+A repository whose root covers it entirely also gets this watch when it tracks files its `.gitignore` matches, because the content watcher honours the `.gitignore` and never reports them. Inside a watched root the watch reports only those tracked-but-ignored files. When a whole-repository root has none, its index changes are checked with one `ls-files` call, so a later `git add -f` opens the watch. After the observer starts, one more collection runs, covering a change made while its watches were being installed.
+
 A missed nested `.gitignore` only costs a paced collection whose unchanged result publishes nothing. A filter that wrongly dropped a tracked path would leave data stale, so the filter errs towards triggering. Several narrow entries in one repository share one tree watch. Whole-repository roots open no tree watch.
 
 In the fallback (polling mode, or a failed watch), a narrow root has nothing equivalent to observe by stat. Each poll tick therefore requests a collection, which is the old browser timer's behavior moved to the server and confined to the fallback.

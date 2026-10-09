@@ -314,3 +314,26 @@ test("a .git directory that appears before git init finishes is still resolved",
   await git(directory, ["init", "--initial-branch=main"]);
   await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the full Git-metadata watch set");
 }, 20_000);
+
+test("a whole-repository root still observes tracked files the .gitignore matches", async () => {
+  const { work } = await checkout();
+  await mkdir(path.join(work, "build"));
+  await writeFile(path.join(work, ".gitignore"), "build/\n");
+  await git(work, ["add", ".gitignore"]);
+  await git(work, ["commit", "-m", "ignore build"]);
+  const { observer, names } = observe([dir(work)]);
+  await observer.start();
+  // Nothing tracked is ignored yet, so no working-tree watch.
+  expect(observer.trees()).toEqual([]);
+
+  // Force-adding one makes the index event open a watch for it.
+  await writeFile(path.join(work, "build", "kept.txt"), "kept\n");
+  await git(work, ["add", "-f", "build/kept.txt"]);
+  await until(() => observer.trees().includes(work), "the working-tree watch for the tracked ignored file");
+  const deadline = performance.now() + 10_000;
+  for (let attempt = 0; !names.includes("kept.txt"); attempt++) {
+    if (performance.now() > deadline) throw new Error("the tracked ignored edit was never reported");
+    await writeFile(path.join(work, "build", "kept.txt"), `kept ${attempt}\n`);
+    await Bun.sleep(50);
+  }
+}, 20_000);

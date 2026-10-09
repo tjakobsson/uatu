@@ -4,7 +4,7 @@
 
 Repository snapshots SHALL refresh independently of file indexing and file-update delivery. A slow or failed repository refresh MUST NOT delay publication of file changes or Source and Rendered previews. Repository results SHALL carry their own freshness state and SHALL preserve the last successful result while a replacement is pending or fails. Git-only changes SHALL remain observable, including commits, index changes, branch switches and fetched remote refs with no document edit.
 
-While at least one client is subscribed, the system SHALL learn about Git-only changes from filesystem events on the repository's Git metadata. That covers the top level of the Git directory and, for a linked worktree, of the shared Git directory, plus the ref files of the current branch and the resolved compare base. The Git directory MUST NOT be watched recursively. Lock files, object storage and fsmonitor cookie files SHALL NOT trigger a refresh. When a watch root is narrower than its repository, the system SHALL also observe the repository's working tree outside that root, so that edits there update repository data. That observation excludes the Git directory and untracked paths the repository's top-level `.gitignore` excludes, and it never adds those files to the document index. A tracked file stays observed even when the `.gitignore` matches it, because Git still reports its changes. Clients MUST NOT drive repository collection with periodic requests. Periodic polling SHALL be used only where native observation is unavailable or failed, or when the session runs in polling mode. No Git metadata observation, polling or repository collection SHALL run while no client is subscribed.
+While at least one client is subscribed, the system SHALL learn about Git-only changes from filesystem events on the repository's Git metadata. That covers the top level of the Git directory and, for a linked worktree, of the shared Git directory, plus the ref files of the current branch and the resolved compare base. The Git directory MUST NOT be watched recursively. Lock files, object storage and fsmonitor cookie files SHALL NOT trigger a refresh. When a watch root is narrower than its repository, the system SHALL also observe the repository's working tree outside that root, so that edits there update repository data. That observation excludes the Git directory and untracked paths the repository's top-level `.gitignore` excludes, and it never adds those files to the document index. In any watched root, a tracked file stays observed even when the `.gitignore` matches it, because Git still reports its changes while the content watcher honours the `.gitignore`. Clients MUST NOT drive repository collection with periodic requests. Periodic polling SHALL be used only where native observation is unavailable or failed, or when the session runs in polling mode. No Git metadata observation, polling or repository collection SHALL run while no client is subscribed.
 
 A repository collection SHALL start promptly after the first trigger that follows a quiet period. Under sustained triggers, successive collections SHALL start no closer together than a minimum interval. Triggers that arrive in the meantime SHALL coalesce into one follow-up collection that reflects the latest state. Repository reads MUST NOT write to the repository, including Git's opportunistic index refresh.
 
@@ -36,6 +36,14 @@ A refresh whose result matches the published result SHALL publish nothing and ke
 #### Scenario: A tracked file the .gitignore matches
 - **WHEN** the watch root is a subdirectory of its repository and a tracked file outside it, which the `.gitignore` matches, is modified
 - **THEN** repository information updates
+
+#### Scenario: A tracked file the .gitignore matches in a whole-repository root
+- **WHEN** the watch root is its repository's top level and a tracked file that the `.gitignore` matches is modified
+- **THEN** repository information updates
+
+#### Scenario: A change while observation starts
+- **WHEN** Git metadata changes after the first collection but before the observer's watches are in place
+- **THEN** a collection after the observer starts reflects that change
 
 #### Scenario: The first fetch of a remote
 - **WHEN** a repository whose remote has never been fetched is fetched for the first time

@@ -345,3 +345,19 @@ for (const narrow of [true, false]) {
     } finally { refresh.stop(); await rm(repository, { recursive: true, force: true }); }
   });
 }
+
+test("a collection follows the observer's start, covering changes made while its watches were installed", async () => {
+  const { state, observe } = fakeObserver();
+  const started = Promise.withResolvers<void>();
+  state.start = () => started.promise;
+  let collections = 0;
+  const refresh = createRepositoryRefresh({ entries: [], roots: () => [], publish: () => {}, observe, minCollectionGapMs: 0,
+    collect: async () => { collections++; return []; } });
+  try {
+    refresh.demand(true);
+    await until(() => collections >= 2 && refresh.freshness.status === "ready");
+    const before = collections;
+    started.resolve();
+    await until(() => collections > before);
+  } finally { refresh.stop(); }
+});

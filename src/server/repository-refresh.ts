@@ -249,7 +249,11 @@ export function createRepositoryRefresh(options: {
         onFailure: error => { if (observer === next) fallBack(error); },
       });
       observer = next;
-      void withGitCancellation(cancellation.signal, () => next.start()).catch(error => {
+      void withGitCancellation(cancellation.signal, () => next.start()).then(() => {
+        // A change between the first collection and the watches going live
+        // reported nothing; collect once more now that they are.
+        if (epoch === demandEpoch && observer === next) request();
+      }, error => {
         if (epoch === demandEpoch && observer === next) fallBack(error);
       });
     },
