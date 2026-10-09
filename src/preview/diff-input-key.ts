@@ -34,7 +34,9 @@ function rootOffset(owner: RepositorySnapshot, rootId: string): string | null {
   return null;
 }
 
-function changeEntry(owner: RepositorySnapshot, documentId: string, rootId: string): ChangedFileSummary | undefined {
+function changeEntry(owner: RepositorySnapshot, documentId: string, watchedRoot: string): ChangedFileSummary | undefined {
+  // A single-file root is the document itself; its directory plays the root.
+  const rootId = watchedRoot === documentId ? documentId.slice(0, documentId.lastIndexOf("/")) || "/" : watchedRoot;
   const fromRoot = documentId.slice(withSlash(rootId).length);
   const offset = rootOffset(owner, rootId);
   if (offset !== null) {

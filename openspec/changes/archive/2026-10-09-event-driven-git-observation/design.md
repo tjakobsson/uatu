@@ -42,6 +42,7 @@ The watched directories are:
 - the shared Git directory (`rev-parse --git-common-dir`) when it differs, which covers `packed-refs` and `config`;
 - the directory holding the current branch's ref file, under the shared directory's `refs/heads/`;
 - the directory holding the compare base's remote ref (for example `refs/remotes/origin/`), plus `refs/remotes/origin/` itself for the `origin/HEAD` symref;
+- `info/`, for `info/exclude`, which changes what Git reports as untracked and ignored (an edit also refreshes the tracked-but-ignored set);
 - `reftable/`, only when the repository uses the reftable backend, and `refs/remotes/origin/` only when an `origin` remote is configured (a `config` change re-resolves). An optional directory that never exists would otherwise keep the path set "missing" and make every event re-resolve.
 
 A watched root outside any repository is itself watched, non-recursively, for a `.git` entry appearing. `git init` there re-resolves into the normal set.

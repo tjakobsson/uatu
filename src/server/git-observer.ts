@@ -85,8 +85,12 @@ async function candidateDirectories(entry: WatchEntry): Promise<Candidates> {
   await add(["rev-parse", "--git-common-dir"]);
   await add(["rev-parse", "--git-path", "refs/heads"]);
   if ((await safeGit(cwd, ["config", "--get", "remote.origin.url"])).ok) await add(["rev-parse", "--git-path", "refs/remotes/origin"]);
+  const isDirectory = (candidate: string) => stat(candidate).then(info => info.isDirectory(), () => false);
   const reftable = await gitPath(cwd, ["rev-parse", "--git-path", "reftable"]);
-  if (reftable && await stat(reftable).then(info => info.isDirectory(), () => false)) directories.add(reftable);
+  if (reftable && await isDirectory(reftable)) directories.add(reftable);
+  // info/exclude changes what Git reports as untracked and ignored.
+  const exclude = await gitPath(cwd, ["rev-parse", "--git-path", "info/exclude"]);
+  if (exclude && await isDirectory(path.dirname(exclude))) directories.add(path.dirname(exclude));
   for (const symref of ["HEAD", "refs/remotes/origin/HEAD"]) {
     const target = await symbolicTarget(cwd, symref);
     if (target) await add(["rev-parse", "--git-path", target], true);
@@ -178,8 +182,9 @@ export function createGitObserver(options: Options): GitObserver {
     // A moved HEAD symref (branch switch, a new origin/HEAD) or a config
     // change (a remote added) can change which ref directories matter.
     if (!missing && (base === null || base === "HEAD" || base === "config")) void resync();
-    // Staging can track a file the .gitignore matches (git add -f).
-    if (base === "index") for (const [topLevel, state] of repositories) void refreshTracked(topLevel, state);
+    // Staging can track a file the .gitignore matches (git add -f), and
+    // info/exclude changes what counts as ignored.
+    if (base === "index" || base === "exclude") for (const [topLevel, state] of repositories) void refreshTracked(topLevel, state);
     options.onChange(base);
   }
 

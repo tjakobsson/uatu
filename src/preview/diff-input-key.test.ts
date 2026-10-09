@@ -86,3 +86,13 @@ test("a symlink renamed away from the repository's name still rejects unrelated 
   expect(keyOf([file("docs/a.md"), file("very/deep/a.md")])).not.toBe(keyOf([file("very/deep/a.md")]));
   expect(keyOf([file("very/deep/a.md")])).toBe(keyOf([]));
 });
+
+test("a single-file root finds the file's own change entry", () => {
+  for (const [rootPath, id] of [["/work/repo", "/work/repo/README.md"], ["/private/tmp/repo", "/tmp/repo/README.md"]] as const) {
+    const snapshot = (files: ChangedFileSummary[]) => repository({ rootPath, watchedRootIds: [id], changedFiles: files });
+    const keyOf = (files: ChangedFileSummary[]) => diffInputKey(id, [snapshot(files)], "base");
+    // git rm --cached README.md changes the entry without touching the file.
+    expect(keyOf([file("README.md")])).not.toBe(keyOf([{ ...file("README.md"), status: "D" }]));
+    expect(keyOf([file("README.md")])).not.toBe(keyOf([]));
+  }
+});

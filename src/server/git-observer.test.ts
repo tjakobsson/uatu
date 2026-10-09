@@ -399,3 +399,12 @@ test("git init finishing before the half-made .git's watch opens is still resolv
   await observer.start();
   await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the repository initialized inside the window");
 }, 20_000);
+
+test("editing .git/info/exclude is observed", async () => {
+  const { work } = await checkout();
+  const { observer, names } = observe([dir(work)]);
+  await observer.start();
+  expect(observer.directories()).toContain(path.join(work, ".git", "info"));
+  await writeFile(path.join(work, ".git", "info", "exclude"), "scratch/\n");
+  await until(() => names.includes("exclude"), "the info/exclude edit");
+}, 20_000);
