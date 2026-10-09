@@ -100,6 +100,29 @@ test.describe("repository preview updates", () => {
     });
   }
 
+  test("a snapshot carrying a changed .gitattributes re-fetches the open diff", async ({ page, request }) => {
+    let baseRef = "before-attributes";
+    await page.route("**/api/document/diff?*", route => route.fulfill({ json: { kind: "unchanged", baseRef } }));
+    await page.goto("/README.md");
+    await expect(page.locator("#preview-path")).toHaveText("README.md");
+    const state: DocumentSnapshot = await request.get("/api/state").then(r => r.json());
+    // An attributes file in the corpus, as the content index lists it.
+    const root = state.roots[0]!;
+    const attributes = { id: `${root.id}/.gitattributes`, name: ".gitattributes", relativePath: ".gitattributes", mtimeMs: Date.now(), rootId: root.id, kind: "text" as const, revision: 1 };
+    root.docs.push(attributes as never);
+    state.revision++;
+    await deliver(page, state);
+    await page.locator("#view-diff").click();
+    await expect(page.locator(".uatu-diff-state")).toContainText("before-attributes");
+    baseRef = "after-attributes";
+    // Reconnecting after a missed .gitattributes edit delivers a snapshot,
+    // not the patch; nothing else about the repository changed.
+    attributes.revision = 2;
+    state.revision++;
+    await deliver(page, state);
+    await expect(page.locator(".uatu-diff-state")).toContainText("after-attributes");
+  });
+
   test("a repository update invalidates a cached diff while Rendered stays visible", async ({ page, request }) => {
     let baseRef = "cached-before-commit";
     let documentReads = 0;

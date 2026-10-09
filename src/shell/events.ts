@@ -23,6 +23,7 @@ import {
   hasDocument,
   shouldRefreshPreview,
   type StatePayload,
+  type RootGroup,
 } from "../shared/types";
 import { applyChannelStatus } from "./connection";
 import type { LiveSubscriptionHandle, LiveTopicConsumer } from "./live-channel";
@@ -97,12 +98,34 @@ function hasNewRepositoryState(update: DocumentUpdate): boolean {
 // `scope`). The SSE reducer below is the ongoing writer; the boot path
 // (`shell/boot.ts`) applies its initial /api/state payload through
 // `adoptBootSnapshot`, which also records its freshness.
+// .gitattributes documents and their revisions: a change decides how Git
+// diffs files without touching them, so cached diffs are dropped.
+function attributesSignature(roots: readonly RootGroup[] | undefined): string {
+  return (roots ?? []).flatMap(root => root.docs)
+    .filter(doc => /(^|\/)\.gitattributes$/.test(doc.id))
+    .map(doc => `${doc.id}:${doc.revision}`).sort().join("\n");
+}
+// Set when a snapshot changed attributes, so the frame or reconciler path
+// that applied it re-fetches an open diff.
+let attributesRefetch = false;
+function takeAttributesRefetch(): boolean {
+  const value = attributesRefetch;
+  attributesRefetch = false;
+  return value;
+}
+
 function applyServerSnapshot(payload: StatePayload): boolean {
   let repositoryUpdated = false;
   if ((payload as DocumentSnapshot).kind === "snapshot") {
     const snapshot = payload as DocumentSnapshot;
     repositoryUpdated = hasNewRepositoryState(snapshot);
     const previous = documentIndex.view();
+    // A snapshot replaces patches missed while disconnected, including a
+    // .gitattributes edit.
+    if (previous && attributesSignature(previous.roots) !== attributesSignature(snapshot.roots)) {
+      forgetAllDiffs();
+      attributesRefetch = true;
+    }
     if (previous && !sameDocumentContext(previous, snapshot)) resetDocumentIndex();
     if (documentIndex.apply(snapshot) !== "applied") return false;
     // A new epoch or compare target invalidates every diff; a repository
@@ -367,7 +390,7 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
 
   if (appState.selectedId && !hasDocument(payload.roots, appState.selectedId)) {
     await loadDocument(appState.selectedId);
-  } else if (appState.selectedId && repositoryChanged && appState.viewMode === "diff" && diffInputsMoved(appState.selectedId)) {
+  } else if (appState.selectedId && appState.viewMode === "diff" && (takeAttributesRefetch() || repositoryChanged && diffInputsMoved(appState.selectedId))) {
     await applyDiffForActiveDocument(appState.selectedId);
   } else if (!appState.selectedId) {
     if (!renderPendingDocument()) renderEmptyPreview("No document selected", "Waiting for viewable files");
@@ -457,7 +480,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
         // silent.
         if (appState.selectedId === selectedId && hasDocument(appState.roots, selectedId)) signalActiveDocumentUpdated();
       });
-    } else if (activeId && repositoryChanged && appState.viewMode === "diff" && diffInputsMoved(activeId)) {
+    } else if (activeId && appState.viewMode === "diff" && (takeAttributesRefetch() || repositoryChanged && diffInputsMoved(activeId))) {
       void applyDiffForActiveDocument(activeId);
     } else if (!activeId && !renderPendingDocument() && reconcileFollow) renderEmptyPreview("No document selected", "Waiting for viewable files");
   },
