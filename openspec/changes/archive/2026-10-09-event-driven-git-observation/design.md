@@ -88,6 +88,8 @@ The owning repository is found through its `watchedRootIds`, which share the doc
 
 `diff.ts` records the key each cached diff was fetched under. On a repository update, `events.ts` drops only the entries whose key moved, and re-fetches the active diff only if its own entry was dropped. It no longer clears `documentDiffCache` wholesale, except on a new epoch or compare target, where every recorded diff counts as dropped. The facts-strip enrichment keeps using the repository generation. With #501 the generation advances only on real changes, and facts are per document and cheap.
 
+A `.gitattributes` change can alter a diff without touching the file or its entry (marking it binary, a diff driver). A document patch that touches any `.gitattributes` therefore drops every cached diff and re-fetches the open one.
+
 Line counts (`additions`, `deletions`, `hunks`) stay out of the key. They change only when the file's content changes, and a content change already re-fetches through the document revision. With them in the key, every save would fetch the diff twice: once for the file patch, then again for the repository update that follows it.
 
 ### 6. Narrow roots: watch the working tree; the browser stops polling

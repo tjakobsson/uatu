@@ -326,7 +326,7 @@ Pierre SHALL NOT be invoked on the normal Source view or Rendered view — its s
 - **THEN** the `@pierre/diffs` library is not loaded or invoked for that render
 
 ### Requirement: Diff view follows only repository changes that can affect the active diff
-After a repository update, the Diff view SHALL re-fetch the active file's diff only when that update can change the diff. That is the case when the file's entry in the changed-files context changed, the resolved compare base changed, or `HEAD` moved. Any other repository update MUST NOT re-fetch the diff, re-render it, or show the Diff loading indicator. This requirement does not affect refreshing when the active file itself changes on disk.
+After a repository update, the Diff view SHALL re-fetch the active file's diff only when that update can change the diff. That is the case when the file's entry in the changed-files context changed, the resolved compare base changed, `HEAD` moved, or a `.gitattributes` file changed, since attributes decide how Git diffs a file. Any other repository update MUST NOT re-fetch the diff, re-render it, or show the Diff loading indicator. This requirement does not affect refreshing when the active file itself changes on disk.
 
 #### Scenario: Another file changes
 - **WHEN** the Diff view is active for file A
@@ -343,6 +343,11 @@ After a repository update, the Diff view SHALL re-fetch the active file's diff o
 - **WHEN** the Diff view is active for a file
 - **AND** a repository update reports a different resolved compare base
 - **THEN** the Diff view re-fetches and re-renders the file's diff against the new base
+
+#### Scenario: Attributes change how the file is diffed
+- **WHEN** the Diff view is active for a file
+- **AND** a `.gitattributes` file changes
+- **THEN** the Diff view re-fetches and re-renders the file's diff
 
 #### Scenario: The active file's change entry changes
 - **WHEN** the Diff view is active for a file

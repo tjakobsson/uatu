@@ -10,7 +10,7 @@ import { applyProjectIdentity } from "./identity";
 import { findDocumentById, findDocumentByRelativePath, syncStateGeneration } from "./storage";
 import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
 import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
-import { applyDiffForActiveDocument, diffInputsMoved, dropStaleDiffs } from "../preview/diff";
+import { applyDiffForActiveDocument, diffInputsMoved, dropStaleDiffs, forgetAllDiffs } from "../preview/diff";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar, renderSidebarPatch } from "../sidebar/shell";
 import { documentIndex, resetDocumentIndex, documentRevisionKey } from "./document-state";
@@ -201,6 +201,8 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   appState.roots = payload.roots;
   appState.repositories = payload.repositories;
   if (repositoryChanged) dropStaleDiffs();
+  const attributesChanged = [...patch.upserts, ...patch.removals].some(doc => /(^|\/)\.gitattributes$/.test(doc.id));
+  if (attributesChanged) forgetAllDiffs();
   appState.discovery = payload.discovery;
   appState.repositoryFreshness = payload.repositoryState;
   appState.unscopedFingerprint = payload.unscopedFingerprint ?? null;
@@ -249,7 +251,7 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   if (next && reload) {
     await loadDocument(next);
     if (next === selected && appState.selectedId === next && current) signalActiveDocumentUpdated();
-  } else if (next && repositoryChanged && appState.viewMode === "diff" && diffInputsMoved(next)) {
+  } else if (next && appState.viewMode === "diff" && (attributesChanged || repositoryChanged && diffInputsMoved(next))) {
     await applyDiffForActiveDocument(next);
   } else if (!next && !renderPendingDocument() && reload) renderEmptyPreview("No document selected", "Waiting for viewable files");
 }

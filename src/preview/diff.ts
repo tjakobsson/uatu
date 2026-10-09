@@ -80,6 +80,14 @@ export function dropStaleDiffs(): void {
   }
 }
 
+// .gitattributes decides how Git diffs a file (binary, diff drivers, eol)
+// without changing the file or its change entry, so an edit to one makes
+// every cached diff suspect.
+export function forgetAllDiffs(): void {
+  documentDiffCache.clear();
+  cachedDiffKeys.clear();
+}
+
 // Whether the repository data the document's diff was requested under has
 // moved on in a way that can change that diff.
 export function diffInputsMoved(documentId: string): boolean {

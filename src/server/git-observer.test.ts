@@ -408,3 +408,16 @@ test("editing .git/info/exclude is observed", async () => {
   await writeFile(path.join(work, ".git", "info", "exclude"), "scratch/\n");
   await until(() => names.includes("exclude"), "the info/exclude edit");
 }, 20_000);
+
+test("a nested .gitignore that re-includes a path keeps it observable", async () => {
+  const { work } = await checkout();
+  await mkdir(path.join(work, "sub"));
+  await writeFile(path.join(work, ".gitignore"), "*.log\n");
+  await writeFile(path.join(work, "sub", ".gitignore"), "!foo.log\n");
+  const { observer, names } = observe([dir(work)]);
+  await observer.start();
+  // Git reports sub/foo.log as untracked; other logs stay ignored.
+  observer.noteWorkingTreeChange(path.join(work, "sub", "foo.log"));
+  observer.noteWorkingTreeChange(path.join(work, "other.log"));
+  expect(names).toEqual(["foo.log"]);
+}, 20_000);

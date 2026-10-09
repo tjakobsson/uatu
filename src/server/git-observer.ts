@@ -3,7 +3,7 @@
 // entries change when a commit, stage, branch switch, fetch or ref packing
 // happens. Directories, not files: Git replaces refs and the index by
 // renaming a lock file over them, which a file watch would not survive.
-import { watch as nodeWatch, type FSWatcher } from "node:fs";
+import { readFileSync, watch as nodeWatch, type FSWatcher } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import ignore, { type Ignore } from "ignore";
@@ -204,17 +204,42 @@ export function createGitObserver(options: Options): GitObserver {
     return state.refreshing;
   }
 
+  // Directories (relative to their repository) whose .gitignore negates
+  // something (`!pattern`), so a path the top-level rules ignore may be
+  // re-included below them. Cleared on any .gitignore change.
+  const negations = new Map<string, boolean>();
+  function negates(topLevel: string, directory: string): boolean {
+    const key = `${topLevel}\u0000${directory}`;
+    let known = negations.get(key);
+    if (known === undefined) {
+      let content = "";
+      try { content = readFileSync(path.join(topLevel, directory, ".gitignore"), "utf8"); } catch {}
+      known = /^\s*!/m.test(content);
+      negations.set(key, known);
+    }
+    return known;
+  }
+  function mayBeReincluded(topLevel: string, relative: string): boolean {
+    const segments = relative.split("/");
+    for (let depth = 1; depth < segments.length; depth++) {
+      if (negates(topLevel, segments.slice(0, depth).join("/"))) return true;
+    }
+    return false;
+  }
+
   // Whether a working-tree change can matter to Git. Errs towards
   // triggering: a missed ignore costs one silent collection, while a dropped
-  // tracked path would leave the Change Overview stale.
+  // path Git reports would leave the Change Overview stale. Only the
+  // top-level .gitignore is evaluated, so a path under a nested .gitignore
+  // that negates anything is kept.
   function consider(topLevel: string, state: RepositoryState, relative: string) {
     const segments = relative.split("/");
     if (segments.includes(".git")) return;
     const base = segments[segments.length - 1] ?? relative;
     // Any .gitignore, nested ones included, can change what is tracked but
-    // ignored.
-    if (base === ".gitignore") void refreshTracked(topLevel, state);
-    else if (state.ignored.ignores(relative) && !state.trackedIgnored.has(relative)) return;
+    // ignored, and which directories negate.
+    if (base === ".gitignore") { negations.clear(); void refreshTracked(topLevel, state); }
+    else if (state.ignored.ignores(relative) && !state.trackedIgnored.has(relative) && !mayBeReincluded(topLevel, relative)) return;
     options.onChange(base);
   }
 

@@ -328,6 +328,22 @@ test.describe("repository updates while Diff is open", () => {
   // hide them, as in the slow-fetch test above.
   test.use({ serviceWorkers: "block" });
 
+  test("a .gitattributes edit re-fetches the open diff", async ({ page, request }) => {
+    await request.post("/__e2e/reset", {
+      data: { git: true, dirty: { "feature.md": "# Feature\n\nCommitted branch change.\n\nAdded review-time edit.\n" } },
+    });
+    await page.reload();
+    await revealTreeRow(page, "feature.md");
+    await openTreeFile(page, "feature.md");
+    await page.locator("#view-diff").click();
+    await expect(page.locator(".uatu-diff-host")).toBeVisible();
+    const diffRequests: string[] = [];
+    page.on("request", candidate => { if (new URL(candidate.url()).pathname.endsWith("/api/document/diff")) diffRequests.push(candidate.url()); });
+    // How Git diffs the file changes; the file and its change entry do not.
+    await fs.writeFile(workspacePath(".gitattributes"), "feature.md binary\n", "utf8");
+    await expect.poll(() => diffRequests.length).toBeGreaterThan(0);
+  });
+
   test("only a change to the open file's diff inputs re-fetches it", async ({ page, request }, testInfo) => {
     await request.post("/__e2e/reset", {
       data: { git: true, dirty: { "feature.md": "# Feature\n\nCommitted branch change.\n\nAdded review-time edit.\n" } },
