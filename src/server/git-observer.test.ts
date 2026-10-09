@@ -339,3 +339,24 @@ test("a whole-repository root still observes tracked files the .gitignore matche
     await Bun.sleep(50);
   }
 }, 20_000);
+
+test("git init finishing before the half-made .git's watch opens is still resolved", async () => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "uatu-git-observer-window-")));
+  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const gitDir = path.join(directory, ".git");
+  await mkdir(gitDir);
+  // git init completes in the window between "no repository yet" and the
+  // .git watch going live, so that watch never sees a write.
+  const { execFileSync } = await import("node:child_process");
+  let initialized = false;
+  const lateWatch = ((target: string, options: unknown, listener: never) => {
+    if (target === gitDir && !initialized) {
+      initialized = true;
+      execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: directory });
+    }
+    return nodeWatch(target, options as never, listener);
+  }) as unknown as typeof nodeWatch;
+  const { observer } = observe([dir(directory)], lateWatch);
+  await observer.start();
+  await until(() => observer.directories().includes(path.join(gitDir, "refs", "heads")), "the repository initialized inside the window");
+}, 20_000);

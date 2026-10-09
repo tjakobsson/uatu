@@ -298,6 +298,7 @@ export function createGitObserver(options: Options): GitObserver {
     const directories = new Set<string>();
     const repositories = new Map<string, { roots: string[]; narrow: boolean }>();
     const nonGit = new Set<string>();
+    const pendingGit = new Set<string>();
     for (const entry of options.entries) {
       const candidates = await candidateDirectories(entry);
       for (const directory of candidates.directories) directories.add(directory);
@@ -310,7 +311,7 @@ export function createGitObserver(options: Options): GitObserver {
           // resolution can still find no repository. Watching the half-made
           // .git lets its HEAD or config write resolve again.
           const pending = path.join(real, ".git");
-          if (await stat(pending).then(info => info.isDirectory(), () => false)) directories.add(pending);
+          if (await stat(pending).then(info => info.isDirectory(), () => false)) { directories.add(pending); pendingGit.add(pending); }
         }
       }
       const repository = await repositoryOf(entry);
@@ -321,8 +322,13 @@ export function createGitObserver(options: Options): GitObserver {
       if (closed || failed) return 0;
     }
     nonGitRoots = nonGit;
+    const watchedBefore = new Set(handles.keys());
     const opened = await open([...directories]);
     if (closed || failed) return 0;
+    // git init may have finished between finding no repository and the
+    // half-made .git's watch going live, leaving no event to come. Resolve
+    // once more now that later writes are observed.
+    if ([...pendingGit].some(directory => handles.has(directory) && !watchedBefore.has(directory))) resolveAgain = true;
     await openTrees(repositories);
     return opened;
   }
@@ -355,7 +361,9 @@ export function createGitObserver(options: Options): GitObserver {
 
   return {
     async start() {
+      resolveAgain = false;
       await resolveAll();
+      if (resolveAgain && !closed && !failed) await resync();
     },
     directories: () => [...handles.keys()].sort(),
     trees: () => [...trees.keys()].sort(),
