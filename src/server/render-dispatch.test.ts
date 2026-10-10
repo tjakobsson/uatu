@@ -264,24 +264,51 @@ describe("documentErrorStatus", () => {
     expect(await statusOf(renderDocument(roots, filePath))).toBe(415);
   });
 
+  test("an indexed file replaced by a directory of the same name is not found", async () => {
+    const { filePath, roots } = await scannedMarkdown("uatu-render-eisdir-");
+    await rm(filePath);
+    await mkdir(filePath);
+    expect(await statusOf(renderDocument(roots, filePath))).toBe(404);
+  });
+
   // chmod 0o000 cannot deny root a read, so as root this case would render
   // the file and prove nothing.
   test.skipIf(process.getuid?.() === 0)(
-    "a file that exists but cannot be read is a server failure, not a missing file (skipped as root: chmod cannot deny root a read)",
+    "a file that exists but cannot be read is forbidden, not missing and not a server failure (skipped as root: chmod cannot deny root a read)",
     async () => {
       const { filePath, roots } = await scannedMarkdown("uatu-render-unreadable-");
       await chmod(filePath, 0o000);
       try {
-        expect(await statusOf(renderDocument(roots, filePath))).toBe(500);
+        expect(await statusOf(renderDocument(roots, filePath))).toBe(403);
       } finally {
         await chmod(filePath, 0o644);
       }
     },
   );
 
-  test("errors that say nothing about the document's absence are server failures", () => {
-    expect(documentErrorStatus(Object.assign(new Error("too many open files"), { code: "EMFILE" }))).toBe(500);
+  const errno = (code: string) => Object.assign(new Error(code), { code });
+
+  test.each([
+    ["ENOENT", 404],
+    ["ENOTDIR", 404],
+    ["EISDIR", 404],
+    ["ELOOP", 404],
+    ["ENAMETOOLONG", 404],
+    ["EACCES", 403],
+    ["EPERM", 403],
+    ["EMFILE", 500],
+    ["ENFILE", 500],
+    ["EAGAIN", 500],
+    ["EBUSY", 500],
+    ["EIO", 500],
+    ["EUNKNOWNCODE", 500],
+  ] as const)("a read failing with %s answers %d", (code, status) => {
+    expect(documentErrorStatus(errno(code))).toBe(status);
+  });
+
+  test("errors that say nothing about the document itself are server failures", () => {
     expect(documentErrorStatus(new Error("asciidoctor exploded"))).toBe(500);
     expect(documentErrorStatus("not an error")).toBe(500);
+    expect(documentErrorStatus(null)).toBe(500);
   });
 });

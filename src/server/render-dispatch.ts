@@ -39,18 +39,30 @@ export type RenderDocumentOptions = {
 };
 
 // The HTTP status `/api/document` answers a `renderDocument` failure with.
-// Only an honest "not found" is a 404: an id the index doesn't hold, or a
-// file that vanished from disk after it was indexed (the watcher reports
-// that change). A binary document is 415. Anything else (a read failure
-// such as EMFILE or EACCES, a renderer that throws) is the server failing,
-// not the document being absent; a 500 lets the client retry instead of
-// declaring the file gone.
-export function documentErrorStatus(error: unknown): 404 | 415 | 500 {
+// A failure that will not clear on its own is a final 4xx, so the client
+// shows one notice instead of retrying:
+// - 404: the index does not hold the id, or the indexed path no longer
+//   resolves to a readable file (ENOENT, ENOTDIR, EISDIR, ELOOP,
+//   ENAMETOOLONG). The watcher reports the change that caused it.
+// - 403: the process is not allowed to read the file (EACCES, EPERM; macOS
+//   privacy protection surfaces as EPERM). Stable until someone changes the
+//   permissions.
+// - 415: a binary document.
+// Anything else (a renderer that throws, EMFILE, ENFILE, EAGAIN, EBUSY, EIO,
+// an unrecognized error) is the server failing or a condition that may
+// clear: a 500, which the client retries on its bounded schedule.
+const NOT_FOUND_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR", "ELOOP", "ENAMETOOLONG"]);
+const NOT_READABLE_CODES = new Set(["EACCES", "EPERM"]);
+
+export function documentErrorStatus(error: unknown): 403 | 404 | 415 | 500 {
   const message = error instanceof Error ? error.message : "";
   if (message === "document not found") return 404;
   if (message === "document is binary") return 415;
   const code = (error as { code?: unknown } | null)?.code;
-  if (code === "ENOENT" || code === "ENOTDIR") return 404;
+  if (typeof code === "string") {
+    if (NOT_FOUND_CODES.has(code)) return 404;
+    if (NOT_READABLE_CODES.has(code)) return 403;
+  }
   return 500;
 }
 

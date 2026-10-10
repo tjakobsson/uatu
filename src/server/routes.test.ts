@@ -1,10 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { buildFetchFallback, buildRoutes } from "./routes";
+import { DOCUMENT_NOT_READABLE_ERROR } from "../shared/document-errors";
 import { scanRoots } from "./roots";
+import * as markdownRenderer from "../render/markdown";
 import { NotificationFeed, CHILD_NOTIFICATIONS_PATH } from "../chat/notification-feed";
 
 // Minimal stub: the asset routes never touch the session, so a thrown
@@ -247,12 +249,35 @@ describe("buildRoutes — /api/document failures", () => {
     expect(result.logged).toEqual([]);
   });
 
+  test("an indexed file that became a directory answers 404 and logs nothing", async () => {
+    const result = await documentStatus(async filePath => {
+      await rm(filePath);
+      await mkdir(filePath);
+    });
+    expect({ status: result.status, body: result.body }).toEqual({ status: 404, body: { error: "document not found" } });
+    expect(result.logged).toEqual([]);
+  });
+
   // chmod 0o000 cannot deny root a read, so as root this case would render
   // the file and prove nothing.
   test.skipIf(process.getuid?.() === 0)(
-    "a file that exists but fails to render answers 500, not 404, and logs the document and cause (skipped as root: chmod cannot deny root a read)",
+    "a file that exists but cannot be read answers 403 and logs nothing (skipped as root: chmod cannot deny root a read)",
     async () => {
       const result = await documentStatus(filePath => chmod(filePath, 0o000));
+      expect({ status: result.status, body: result.body }).toEqual({
+        status: 403,
+        body: { error: DOCUMENT_NOT_READABLE_ERROR },
+      });
+      expect(result.logged).toEqual([]);
+    },
+  );
+
+  test("a readable file whose renderer throws answers 500 and logs the document and cause", async () => {
+    const renderSpy = spyOn(markdownRenderer, "renderMarkdownToHtml").mockImplementation(() => {
+      throw new Error("renderer exploded");
+    });
+    try {
+      const result = await documentStatus(async () => {});
       expect({ status: result.status, body: result.body }).toEqual({
         status: 500,
         body: { error: "document render failed" },
@@ -260,9 +285,11 @@ describe("buildRoutes — /api/document failures", () => {
       expect(result.logged).toHaveLength(1);
       const [message, cause] = result.logged[0]!;
       expect(String(message)).toContain(result.filePath);
-      expect((cause as NodeJS.ErrnoException).code).toBe("EACCES");
-    },
-  );
+      expect((cause as Error).message).toBe("renderer exploded");
+    } finally {
+      renderSpy.mockRestore();
+    }
+  });
 });
 
 describe("buildFetchFallback — base-path gating", () => {
