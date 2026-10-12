@@ -60,15 +60,33 @@ test("multi-file batches retain all invalidations and the last eligible edit", a
   index.markReady();
   index.observe("add", "/docs/a.md", stat());
   index.observe("add", "/docs/b.md", stat());
-  index.observe("add", "/docs/image.png", stat());
+  index.observe("add", "/docs/bundle.zip", stat());
   await index.idle();
-  expect(batches.at(-1)?.upserts.map(doc => doc.name)).toEqual(["a.md", "b.md", "image.png"]);
+  expect(batches.at(-1)?.upserts.map(doc => doc.name)).toEqual(["a.md", "b.md", "bundle.zip"]);
   expect(batches.at(-1)?.changedId).toBe("/docs/b.md");
   index.observe("change", "/docs/a.md", stat());
   index.observe("unlink", "/docs/b.md");
   await index.idle();
   expect(batches.at(-1)?.changedId).toBe("/docs/a.md");
   expect(batches.at(-1)?.removals).toEqual([{ rootId: "/docs", id: "/docs/b.md" }]);
+});
+
+test("a previewable image edit is nominated for Follow; another binary edit is not", async () => {
+  const { index, batches } = fixture();
+  index.markReady();
+  index.observe("add", "/docs/a.md", stat());
+  await index.idle();
+  index.observe("change", "/docs/a.md", stat());
+  index.observe("change", "/docs/hero.svg", stat());
+  await index.idle();
+  expect(batches.at(-1)?.changedId).toBe("/docs/hero.svg");
+  index.observe("change", "/docs/a.md", stat());
+  index.observe("change", "/docs/bundle.zip", stat());
+  await index.idle();
+  expect(batches.at(-1)?.changedId).toBe("/docs/a.md");
+  index.observe("change", "/docs/bundle.zip", stat());
+  await index.idle();
+  expect(batches.at(-1)?.changedId).toBeNull();
 });
 
 test("unknown classification is bounded and stale results cannot resurrect a subtree", async () => {

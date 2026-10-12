@@ -630,9 +630,11 @@ sequenceDiagram
 The four authoritative rules of the `follow-mode` capability — defined in `openspec/specs/follow-mode/spec.md` — are the only paths that change `appState.followEnabled` or `appState.selectedId`:
 
 - **Rule A** (user clicks a tree row): selection moves to that file; follow turns off. Guarded by `TreeView.duringProgrammaticUpdate` so library-fired callbacks during mount or `resetPaths` are not mistaken for user input.
-- **Rule B** (user clicks the Follow toggle): `followEnabled` flips. Turning on jumps to the newest-mtime file in the current session.
-- **Rule C** (file event + follow on): selection moves to the changed file.
+- **Rule B** (user clicks the Follow toggle): `followEnabled` flips. Turning on jumps to the newest-mtime document in the current session (images are not candidates).
+- **Rule C** (file event + follow on): selection moves to the changed file when the preview can show it — a document, or an image it renders inline (`isFollowableFile` in `src/shared/types.ts`, used by the server's `changedId` nomination in `src/server/file-index.ts` and by the client). Other binaries are ignored. The exception is an image embedded in the document on screen: its change keeps the selection and the embedded image refreshes in place. The embedded images come from the document's rendered payload (`src/preview/embedded-images.ts`), never from the live preview DOM, so the exception holds in Rendered, Source, Diff, and split views; a document shown only as Source or Diff has its rendered payload looked up once per revision for this. What a document embeds is known only for its current revision; until then an image change is held, not guessed (`imageChangeOutcome` in `src/shell/follow-rules.ts` answers select, stay, or defer). `src/shell/image-follow.ts` holds that one decision and settles it when the lookup answers — embedded stays, otherwise, or if the lookup fails or goes unanswered for 10 s, the image is followed — but only while Follow is on and the selection, user activation, Follow switches, and the document's revision are unchanged; any newer file change cancels it. All three selection paths in `events.ts` (incremental patch, full frame, reconcile) apply it through one helper, `followableChange`.
 - **Rule D** (file event + follow off): selection unchanged; if the changed file equals the current selection, the preview reloads in place; otherwise just the tree refreshes.
+
+Images in the preview — an opened image or one embedded in a rendered document — that resolve to a watched file carry that file's change revision as a `?revision=` query (`documentRevisionKey`, applied by `src/preview/image-revision.ts`), updated in place on mount and on every applied state update. A browser reuses an already-decoded image for an unchanged URL whatever the cache headers say, so this is what makes a changed image show its new content without re-rendering the document around it; the static-file fallback matches on the path and ignores the query. An image Follow switched to is an ordinary destination afterwards: reload, workspace-root resume, and Back restore it (`boot.ts`, `history.ts` accept any `isFollowableFile`).
 
 ## Chat surface
 
@@ -828,7 +830,7 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 | Default `Follow` at boot | on at `/`; forced off when arriving via a direct document URL (e.g. `/guides/setup.md`) |
 | `--no-follow` child flag | flips the default at `/` to off (source runs only; the hub never passes it) |
 | User clicks a tree row | selection moves; follow turns off (Rule A) |
-| User clicks the Follow switch | flips state; turning on jumps to the newest-mtime file (Rule B) |
+| User clicks the Follow switch | flips state; turning on jumps to the newest-mtime document; images are not candidates (Rule B) |
 | File changes on disk + follow on | selection moves to the changed file (Rule C) |
 | File changes on disk + follow off | current file reloads in place if it's what changed; otherwise tree refreshes silently (Rule D) |
 | Single-file root (a source run such as `bun run src/cli.ts serve some-file.md`; hub workspaces are folders) | Follow switch disabled — nothing else to follow |

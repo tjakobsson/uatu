@@ -5,7 +5,7 @@ import type { Stats } from "node:fs";
 import path from "node:path";
 import { loadIgnoreMatcher } from "../ignore/engine";
 import { collectRepositorySnapshots } from "../document/git-data";
-import type { BuildSummary, RootGroup } from "../shared/types";
+import { isFollowableFile, type BuildSummary, type RootGroup } from "../shared/types";
 import { BUILD, BUNDLED_WEB_REVISION, formatBuildIdentifier, WORKSPACE_API_REVISION } from "../shared/version";
 import { DEFAULT_WATCH_CONTEXT, type WatchContext } from "../shared/watch-context";
 import { normalizeDocumentContext, projectDocumentPatch, projectDocumentSnapshot, sameDocumentContext,
@@ -129,6 +129,13 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
     },
   });
 
+  // A reconnecting client follows the latest change only while that file is
+  // still present and still one Follow can show (see `isFollowableFile`).
+  const isFollowableLatestChange = (id: string): boolean => {
+    const doc = find(id);
+    return doc !== undefined && isFollowableFile(doc);
+  };
+
   function snapshot(context: WatchContext = DEFAULT_WATCH_CONTEXT, changedId: string | null = null): DocumentSnapshot {
     const normalized = normalize(context);
     const state: DocumentSnapshot = {
@@ -137,7 +144,7 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
       initialFollow, defaultDocumentId: discovery().status === "ready" ? newest() : null, changedId, generatedAt, build: BUILD_SUMMARY,
       scope: { kind: "folder" }, discovery: discovery(), repositoryState: repositories.freshness,
       unscopedFingerprint: `${epoch}:${corpusRevision}`, terminal: options.terminalEnabled ? "enabled" : "disabled",
-      ...(latestChange && find(latestChange.id)?.kind !== "binary" && find(latestChange.id) ? { latestChange } : {}),
+      ...(latestChange && isFollowableLatestChange(latestChange.id) ? { latestChange } : {}),
     };
     return projectDocumentSnapshot(state, normalized, state.repositories);
   }

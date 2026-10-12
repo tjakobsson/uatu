@@ -83,11 +83,17 @@ export function clearPreviewType() {
   previewTypeElement.hidden = true;
 }
 
+// The base URL a document's relative references resolve against: its
+// directory under the session's base path.
+export function previewBaseUrl(relativePath: string): string {
+  const lastSlash = relativePath.lastIndexOf("/");
+  const directory = lastSlash === -1 ? "" : relativePath.slice(0, lastSlash + 1);
+  return new URL(appUrl(`/${directory}`), window.location.origin).toString();
+}
+
 export function setPreviewBase(relativePath: string) {
   // The preview's base href points at the document's directory so relative
   // references inside the markdown (e.g. <img src="./hero.svg">) resolve to
   // URLs the server's static file fallback already knows how to serve.
-  const lastSlash = relativePath.lastIndexOf("/");
-  const directory = lastSlash === -1 ? "" : relativePath.slice(0, lastSlash + 1);
-  previewBaseElement.href = new URL(appUrl(`/${directory}`), window.location.origin).toString();
+  previewBaseElement.href = previewBaseUrl(relativePath);
 }

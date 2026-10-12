@@ -201,8 +201,11 @@ describe("nextSelectedDocumentId", () => {
     );
   });
 
-  test("ignores a binary changedId under follow mode", () => {
-    const mixed: RootGroup[] = [
+  // Follow mode follows what the preview can show: a previewable image
+  // renders inline, so its change moves the selection like a text file's.
+  // Other binaries have nothing to show and stay ignored.
+  function withAsset(asset: { name: string; mtimeMs?: number }): RootGroup[] {
+    return [
       {
         id: "/tmp/repo",
         label: "repo",
@@ -217,10 +220,10 @@ describe("nextSelectedDocumentId", () => {
             kind: "markdown",
           },
           {
-            id: "/tmp/repo/logo.png",
-            name: "logo.png",
-            relativePath: "logo.png",
-            mtimeMs: 99,
+            id: `/tmp/repo/${asset.name}`,
+            name: asset.name,
+            relativePath: asset.name,
+            mtimeMs: asset.mtimeMs ?? 99,
             rootId: "/tmp/repo",
             kind: "binary",
           },
@@ -228,9 +231,29 @@ describe("nextSelectedDocumentId", () => {
         hiddenCount: 0,
       },
     ];
+  }
 
-    expect(nextSelectedDocumentId(mixed, "/tmp/repo/README.md", "/tmp/repo/logo.png", true)).toBe(
-      "/tmp/repo/README.md",
+  test("follows a changed previewable image under follow mode", () => {
+    for (const name of ["logo.png", "hero.svg", "photo.JPG", "anim.gif", "pic.webp"]) {
+      expect(nextSelectedDocumentId(withAsset({ name }), "/tmp/repo/README.md", `/tmp/repo/${name}`, true)).toBe(
+        `/tmp/repo/${name}`,
+      );
+    }
+  });
+
+  test("ignores a changed binary the preview cannot show under follow mode", () => {
+    for (const name of ["bundle.zip", "manual.pdf", "data.bin", "scan.tiff"]) {
+      expect(nextSelectedDocumentId(withAsset({ name }), "/tmp/repo/README.md", `/tmp/repo/${name}`, true)).toBe(
+        "/tmp/repo/README.md",
+      );
+    }
+  });
+
+  test("keeps a followed image selected through later updates under follow mode", () => {
+    // An unrelated frame (no changedId) must not bounce the selection from
+    // the image Follow just switched to back to the newest document.
+    expect(nextSelectedDocumentId(withAsset({ name: "hero.svg", mtimeMs: 0 }), "/tmp/repo/hero.svg", null, true)).toBe(
+      "/tmp/repo/hero.svg",
     );
   });
 

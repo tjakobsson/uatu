@@ -53,11 +53,20 @@ export function initFollowToggle(): void {
   });
 }
 
+// Counts Follow switches, so a decision Follow deferred while it was on
+// (shell/image-follow.ts) is not carried out after the user switched it off,
+// or off and on again.
+let followSwitches = 0;
+export function getFollowSwitches(): number {
+  return followSwitches;
+}
+
 // Owner mutator for `appState.followEnabled`. The four follow-mode rules in
 // this module flip it; boot / URL routing / navigation call sites use this
 // instead of assigning directly (module-structure appState field ownership).
 export function setFollowEnabled(next: boolean, restore = false): void {
   if (!next) pendingCatchUp = null;
+  if (next !== appState.followEnabled) followSwitches++;
   // Reading a saved Follow preference during boot is not a user enabling it.
   if (next && !restore) resumeDocumentSelection();
   appState.followEnabled = next;

@@ -3,14 +3,14 @@
 // the preview DOM. Extracted from `app.ts` so the preview/ feature folder
 // owns the entire render-on-load flow.
 
-import { appUrl } from "../shared/app-url";
+import { appBasePath, appUrl } from "../shared/app-url";
 import { deferHiddenPreview } from "./deferred";
 import { contextualAppUrl } from "../shell/watch-context";
 import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
-import type { FileFacts, ViewMode } from "../shared/types";
+import type { FileFacts, RootGroup, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
 import { previewObserverRoot, previewScrollRoot } from "../shell/preview-scroll-root";
 import { renderBinaryUnavailable } from "./binary";
@@ -19,6 +19,7 @@ import { renderEmptyPreview } from "./empty";
 import {
   clearPreviewType,
   previewPathElement,
+  previewBaseUrl,
   previewTitleElement,
   setPreviewBase,
   setPreviewType,
@@ -31,7 +32,11 @@ import {
   mountLayoutToolbar,
   syncLayoutChooser,
 } from "./layout";
-import { isViewableImageName, renderImagePreview } from "./image";
+import { renderImagePreview } from "./image";
+import { imageSources, refreshImageRevisions } from "./image-revision";
+import { canEmbedImages, createEmbeddedImagesLearner, recordEmbeddedImages, type EmbeddedImagesLookup } from "./embedded-images";
+import { fetchWithinBudget } from "../shell/bounded-fetch";
+import { isViewableImageName } from "../shared/viewable-image";
 import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
 import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
@@ -112,12 +117,61 @@ export function rememberDocumentPayload(payload: RenderedDocument): void {
   const entry = documentViewCache.get(payload.id) ?? {};
   entry[payload.view] = payload;
   documentViewCache.set(payload.id, entry);
+  // Only the shown document's images are remembered; every caller has
+  // already checked that this payload is current for the selection.
+  if (payload.view === "rendered" && documentSupportsSplit(payload) && appState.selectedId === payload.id) {
+    recordEmbeddedImages(payload.id, documentRevisionKey(payload.id), previewBaseUrl(payload.path), renderedImageSources(payload));
+  }
+}
+
+// The authored `src` of each image a rendered payload embeds. Parsed in an
+// inert <template>, so nothing is fetched or run.
+function renderedImageSources(payload: RenderedDocument): string[] {
+  const template = document.createElement("template");
+  template.innerHTML = payload.html;
+  return imageSources(template.content);
+}
+
+// A Markdown or AsciiDoc document shown as Source or Diff has no rendered
+// payload on the page, so the images it embeds are unknown. Look that payload
+// up once per revision, in the background, so Follow can still tell an
+// embedded image's change from any other image's (Rule C); until it answers,
+// Follow holds an image decision rather than guessing (shell/image-follow.ts).
+// The learner drops an answer that arrives after the selection or the
+// document's revision moved on. The request is bounded so a held decision
+// always settles: no answer within the budget counts as a failed lookup.
+export const EMBEDDED_IMAGES_LOOKUP_TIMEOUT_MS = 10_000;
+const learnEmbeddedImagesOf = createEmbeddedImagesLearner({
+  revisionOf: documentRevisionKey,
+  isSelected: documentId => appState.selectedId === documentId,
+  fetchSources: async documentId => {
+    const payload = await fetchWithinBudget(
+      (input, init) => fetch(input, { ...init, cache: "no-store" }),
+      contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=rendered`)),
+      EMBEDDED_IMAGES_LOOKUP_TIMEOUT_MS,
+      async response => response.ok ? await response.json() as RenderedDocument : null,
+    );
+    return payload ? { baseUrl: previewBaseUrl(payload.path), sources: renderedImageSources(payload) } : null;
+  },
+});
+export function learnEmbeddedImages(documentId: string): Promise<EmbeddedImagesLookup> {
+  const doc = findDocumentById(documentId);
+  if (!doc || !canEmbedImages(doc)) return Promise.resolve("known");
+  return learnEmbeddedImagesOf(documentId);
 }
 
 export function forgetDocumentCache(documentId: string): void {
   forgetDocumentFacts(documentId);
   documentViewCache.delete(documentId);
   documentDiffCache.delete(documentId);
+}
+
+// Called on every state update: points each image in the preview at the
+// current revision of its file (see image-revision.ts). Only a document
+// preview is live; a commit preview stays historical.
+export function refreshPreviewImages(roots: RootGroup[]): void {
+  if (appState.previewMode.kind !== "document") return;
+  refreshImageRevisions(previewElement, appBasePath(), roots, documentRevisionKey);
 }
 
 // Mount a fetched document payload into the preview body. Centralizes the
@@ -218,6 +272,7 @@ export async function renderSinglePayload(
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
+  refreshImageRevisions(previewElement, appBasePath(), appState.roots, documentRevisionKey);
   // For markdown / asciidoc, mount the inline layout chooser above the
   // preview body so users can switch between Single / Side by side /
   // Stacked from beside the content — same pattern as the diff view's
@@ -350,6 +405,7 @@ export async function renderSplitPayloads(
 
   mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
+  refreshImageRevisions(renderedPane, appBasePath(), appState.roots, documentRevisionKey);
 
   attachMetadataCardToggleListener(renderedPane);
   // Lazy install (resolves on setup, diagrams stream in) — see the
@@ -467,6 +523,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   // toggling out of Diff will lazy-load the rendered/source view on demand.
   if (appState.viewMode === "diff") {
     documentLoadRetry.settle();
+    void learnEmbeddedImages(documentId);
     await applyDiffForActiveDocument(documentId);
     return;
   }
@@ -506,6 +563,7 @@ async function executeLoadDocument(documentId: string, trigger: DocumentLoadTrig
   const payload = result.payload;
   documentLoadRetry.settle();
   rememberDocumentPayload(payload);
+  if (payload.view !== "rendered") void learnEmbeddedImages(documentId);
   await applyDocumentPayload(payload, isCurrent);
 }
 

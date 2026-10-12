@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import { workspacePath } from "./config";
 import { openTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
-import { afterAnimationFrames } from "./sync-helpers";
+import { afterAnimationFrames, naturalWidth } from "./sync-helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -45,13 +45,17 @@ test("relative image references in a README are served natively from the watched
   const img = page.locator('#preview img[alt="hero"]');
   await expect(img).toBeVisible();
 
-  // Rendered HTML preserves the original relative URL verbatim.
-  expect(await img.getAttribute("src")).toBe("./hero.svg");
+  // The authored relative URL resolves against the document's directory and
+  // carries the file's change revision, the same parameter an opened image
+  // carries, so a later change to the image is refetched.
+  await expect.poll(async () => new URL((await img.getAttribute("src"))!, page.url()).searchParams.get("revision"))
+    .toMatch(/:\d+$/);
+  expect(new URL((await img.getAttribute("src"))!, page.url()).pathname).toBe("/hero.svg");
 
   // The browser actually loaded the image through the static file fallback.
-  await img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0);
+  await expect.poll(() => naturalWidth(page, '#preview img[alt="hero"]')).toBe(16);
   const resolved = await img.evaluate((el: HTMLImageElement) => el.currentSrc);
-  expect(resolved).toMatch(/\/hero\.svg$/);
+  expect(resolved).toMatch(/\/hero\.svg\?revision=/);
 
   const response = await request.get("/hero.svg");
   expect(response.ok()).toBe(true);
@@ -113,6 +117,52 @@ test("a multi-file burst refreshes the active document when another path is nomi
 
   await expect(page.locator("#preview")).toContainText(`${marker} ${round}`);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
+});
+
+// An SVG whose intrinsic width is `width` — the decoded image's
+// naturalWidth tells which version of the file the browser is showing.
+function sizedSvg(width: number): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${width}"><rect width="${width}" height="${width}" fill="#1ca8a7"/></svg>`;
+}
+
+test("an open image refreshes in place when the file changes on disk", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { extras: { "hero.svg": sizedSvg(16) } } });
+  await page.goto("/");
+  await openTreeFile(page, "hero.svg");
+  await expect(page.locator("#preview-path")).toHaveText("hero.svg");
+  const selector = "#preview .image-preview img";
+  await expect.poll(() => naturalWidth(page, selector)).toBe(16);
+  // Marks the element on screen: an in-place refresh keeps it.
+  await page.locator(selector).evaluate(el => { el.dataset.e2eMounted = "1"; });
+
+  await fs.writeFile(workspacePath("hero.svg"), sizedSvg(48), "utf8");
+
+  await expect.poll(() => naturalWidth(page, selector)).toBe(48);
+  await expect(page.locator(selector)).toHaveAttribute("data-e2e-mounted", "1");
+  await expect(page.locator("#preview-path")).toHaveText("hero.svg");
+});
+
+test("an image embedded in the open document refreshes when only the image changes", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: { extras: { "hero.svg": sizedSvg(16), "embed.md": `# Embed\n\n<img src="./hero.svg" alt="hero" />\n` } },
+  });
+  await page.goto("/");
+  // Opened by a click, so Rule A turns Follow off: this is the Follow-off
+  // variant (follow-mode.e2e.ts covers the same refresh with Follow on).
+  await openTreeFile(page, "embed.md");
+  await expect(page.locator("#preview-path")).toHaveText("embed.md");
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  const selector = '#preview img[alt="hero"]';
+  await expect.poll(() => naturalWidth(page, selector)).toBe(16);
+  // The document itself did not change, so it must not be re-rendered: the
+  // marked heading survives and only the image's source moves.
+  await page.locator("#preview h1").evaluate(el => { el.dataset.e2eMounted = "1"; });
+
+  await fs.writeFile(workspacePath("hero.svg"), sizedSvg(48), "utf8");
+
+  await expect.poll(() => naturalWidth(page, selector)).toBe(48);
+  await expect(page.locator("#preview h1")).toHaveAttribute("data-e2e-mounted", "1");
+  await expect(page.locator("#preview-path")).toHaveText("embed.md");
 });
 
 test("server falls back with 404 for paths outside every watched root", async ({ request }) => {

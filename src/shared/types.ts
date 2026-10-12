@@ -1,3 +1,5 @@
+import { isViewableImageName } from "./viewable-image";
+
 export type DocumentKind = "markdown" | "asciidoc" | "text" | "binary";
 
 export type DocumentMeta = {
@@ -431,6 +433,15 @@ export function findDocument(
   return flattenDocuments(roots).find(doc => doc.id === documentId);
 }
 
+// Follow mode (Rule C) follows what the preview can show: every non-binary
+// document, and binary files the preview renders inline as an image. Other
+// binaries (archives, PDFs, fonts, …) have only a "not viewable" notice and
+// never take the preview over. The default document and Rule B's catch-up
+// stay documents-only (see `defaultDocumentId`).
+export function isFollowableFile(doc: DocumentMeta): boolean {
+  return doc.kind !== "binary" || isViewableImageName(doc.name);
+}
+
 export function defaultDocumentId(roots: RootGroup[]): string | null {
   const docs = flattenDocuments(roots).filter(doc => doc.kind !== "binary");
   if (docs.length === 0) {
@@ -484,14 +495,14 @@ export function nextSelectedDocumentId(
 
   if (followEnabled && changedId) {
     const changed = findDocument(roots, changedId);
-    if (changed && changed.kind !== "binary") {
+    if (changed && isFollowableFile(changed)) {
       return changedId;
     }
   }
 
   if (currentId) {
     const current = findDocument(roots, currentId);
-    if (current && current.kind !== "binary") {
+    if (current && isFollowableFile(current)) {
       return currentId;
     }
   }

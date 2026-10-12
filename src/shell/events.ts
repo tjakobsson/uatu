@@ -4,12 +4,15 @@
 // build-freshness checking, follow-mode auto-switching, and on-disk-change
 // reloads lives in here, intentionally close to its trigger (the envelope).
 
-import { chooseSelectionForFileEvent, finishFollowDiscovery } from "./follow";
+import { chooseSelectionForFileEvent, finishFollowDiscovery, getFollowSwitches } from "./follow";
+import { imageChangeOutcome } from "./follow-rules";
+import { createDeferredImageFollow } from "./image-follow";
 import { checkBuildFreshness } from "./freshness";
 import { applyProjectIdentity } from "./identity";
 import { findDocumentById, findDocumentByRelativePath, syncStateGeneration } from "./storage";
 import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
-import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
+import { documentDiffCache, forgetDocumentCache, learnEmbeddedImages, loadDocument, refreshPreviewImages } from "../preview/mount";
+import { embeddedImageMembership, type EmbeddedImageMembership } from "../preview/embedded-images";
 import { applyDiffForActiveDocument, diffInputsMoved, dropStaleDiffs, forgetAllDiffs } from "../preview/diff";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar, renderSidebarPatch } from "../sidebar/shell";
@@ -21,6 +24,7 @@ import { sameDocumentContext, unseenSnapshotChange, type DocumentPatch, type Doc
 import { markSearchResultsStale, noteSearchCorpusChange, syncSearchScope } from "../sidebar/search-pane";
 import {
   hasDocument,
+  isFollowableFile,
   shouldRefreshPreview,
   type StatePayload,
   type RootGroup,
@@ -31,11 +35,11 @@ import { fetchWithinBudget } from "./bounded-fetch";
 import { liveChannel, registerLiveTeardown, registerRecoveryWork } from "./live";
 import { createStateReconciler } from "./recovery";
 import { renderBuildBadge } from "./connection";
-import { appUrl } from "../shared/app-url";
+import { appBasePath, appUrl } from "../shared/app-url";
 import { documentContextKey } from "../shared/live-protocol";
 import { applyWatchContext } from "../shared/watch-context";
 import { replaceSelection } from "./history";
-import { setSelectedId, getPendingDocumentPath } from "./selection";
+import { setSelectedId, getPendingDocumentPath, getSelectionActivation, getSelectionGeneration } from "./selection";
 import { appState } from "./state";
 import { renderCommitPreview } from "./url";
 import { contextualAppUrl, currentWatchContext, setClientScope } from "./watch-context";
@@ -86,6 +90,53 @@ function renderPendingDocument(): boolean {
   renderEmptyPreview(complete ? "Document not found" : "Document indexing",
     complete ? `Document not found at ${path}.` : `Waiting for indexing to resolve ${path}.`);
   return true;
+}
+
+// What the shown document embeds, read from its rendered payload for the
+// current revision (see preview/embedded-images.ts), so the answer is the
+// same in Rendered, Source, Diff, and split views.
+function shownDocumentImages(documentId: string | null): EmbeddedImageMembership {
+  const document = documentId ? documentIndex.find(documentId) : undefined;
+  return embeddedImageMembership(document, documentId ? documentRevisionKey(documentId) : "", appState.roots, appBasePath());
+}
+
+// Rule C's image decision held while the shown document's images are unknown
+// (see shell/image-follow.ts). Settling it to "follow" switches the selection
+// like any Follow switch: replace the URL, reveal in the tree, load.
+const deferredImageFollow = createDeferredImageFollow({
+  guard: documentId => [
+    getSelectionGeneration(), getSelectionActivation(), getFollowSwitches(),
+    appState.selectedId === documentId, documentRevisionKey(documentId),
+  ].join("\n"),
+  canFollow: () => appState.followEnabled && appState.previewMode.kind !== "commit",
+  lookup: learnEmbeddedImages,
+  membership: shownDocumentImages,
+  follow: imageId => {
+    const image = documentIndex.find(imageId);
+    if (!image || !isFollowableFile(image)) return;
+    setSelectedId(imageId);
+    replaceSelection(imageId, image.relativePath);
+    renderSidebar();
+    void loadDocument(imageId);
+  },
+});
+
+// Rule C's image exception, applied identically on the incremental patch,
+// full frame, and reconcile paths: the change the selection decision may
+// follow. An image the shown document embeds is kept off the selection (it
+// refreshes in place); an image whose membership is unknown is held until the
+// document's rendered payload answers, and the selection stays put meanwhile.
+// Any other change — a document, a non-embedded image — supersedes a held
+// image decision.
+function followableChange(selectedId: string | null, changedId: string | null): string | null {
+  if (!appState.followEnabled || !changedId) return changedId;
+  const outcome = imageChangeOutcome(appState.roots, selectedId, changedId, shownDocumentImages(selectedId));
+  if (outcome === "defer" && selectedId) {
+    deferredImageFollow.defer(selectedId, changedId);
+    return null;
+  }
+  deferredImageFollow.cancel();
+  return outcome === "stay" ? null : changedId;
 }
 
 function hasNewRepositoryState(update: DocumentUpdate): boolean {
@@ -151,6 +202,10 @@ function applyServerSnapshot(payload: StatePayload): boolean {
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.
   applyProjectIdentity(payload.roots);
+  // An image changed on disk gets a new URL wherever the preview shows it —
+  // embedded in the open document or opened as an image itself — even when
+  // the document around it did not change and is not reloaded.
+  refreshPreviewImages(payload.roots);
   return true;
 }
 
@@ -229,6 +284,7 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   appState.discovery = payload.discovery;
   appState.repositoryFreshness = payload.repositoryState;
   appState.unscopedFingerprint = payload.unscopedFingerprint ?? null;
+  refreshPreviewImages(payload.roots);
   documentStateHeld = true;
   stateReconciler.recordApplied(payload.generatedAt);
   liveChannel().confirm(generation);
@@ -245,7 +301,8 @@ async function applyDocumentPatch(patch: DocumentPatch, generation: number): Pro
   const pendingPath = getPendingDocumentPath();
   let next = (pendingPath ? patch.upserts.find(doc => doc.relativePath === pendingPath)?.id : null) ?? selected;
   const catchUp = finishFollowDiscovery(payload.defaultDocumentId, patch.changedId);
-  if (appState.followEnabled && patch.changedId) next = patch.changedId;
+  const followed = followableChange(selected, patch.changedId);
+  if (appState.followEnabled && followed) next = followed;
   else if (catchUp) next = catchUp;
   else if (payload.discovery.status === "ready" && !appState.selectionCleared && appState.previewMode.kind === "document"
     && (!selected || appState.followEnabled && !documentIndex.find(selected))) next = payload.defaultDocumentId;
@@ -349,7 +406,7 @@ async function applyDocumentFrame(payload: StatePayload, generation: number): Pr
   setSelectedId(pendingDocument?.id ?? catchUp ?? (preserveEmpty || discovering && !changedId ? previousSelectedId : chooseSelectionForFileEvent(
     payload.roots,
     previousSelectedId,
-    changedId,
+    followableChange(previousSelectedId, changedId),
     appState.followEnabled,
     appState.selectionCleared,
   )));
@@ -458,7 +515,7 @@ const stateReconciler = createStateReconciler<StatePayload>({
     const pendingPath = getPendingDocumentPath();
     const pendingDocument = pendingPath ? findDocumentByRelativePath(pendingPath) : null;
     const reconcileFollow = appState.followEnabled && appState.discovery.status === "ready" && appState.previewMode.kind !== "commit";
-    const followTarget = pendingDocument?.id ?? catchUp ?? (reconcileFollow ? chooseSelectionForFileEvent(payload.roots, selectedId, changedId, true) : null);
+    const followTarget = pendingDocument?.id ?? catchUp ?? (reconcileFollow ? chooseSelectionForFileEvent(payload.roots, selectedId, followableChange(selectedId, changedId), true) : null);
     if (reconcileFollow || followTarget) {
       setSelectedId(followTarget);
       const document = followTarget ? findDocumentById(followTarget) : null;

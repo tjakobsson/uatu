@@ -3,6 +3,7 @@ import { lstat } from "node:fs/promises";
 import path from "node:path";
 import { classifyFile, classifyFileName } from "../document/classify";
 import type { DiscoveryState, DocumentRoot, RevisionedDocument, RevisionedRoot } from "../shared/document-updates";
+import { isFollowableFile } from "../shared/types";
 import type { IgnoreMatcher } from "../ignore/engine";
 import type { WatchEntry } from "./roots";
 import { NewestDocument } from "./newest-document";
@@ -157,7 +158,10 @@ export class FileIndex {
         this.documents.set(id, value.doc);
         this.newest.update(value.doc);
         upserts.push(value.doc);
-        if (value.live && value.doc.kind !== "binary" && value.order > changedOrder) {
+        // Only a file Follow can show is nominated: documents and previewable
+        // images. Other binaries are still published but never move a
+        // following client's selection.
+        if (value.live && isFollowableFile(value.doc) && value.order > changedOrder) {
           changedId = id;
           changedOrder = value.order;
         }

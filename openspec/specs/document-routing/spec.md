@@ -82,7 +82,7 @@ The browser URL pathname SHALL track the document currently rendered in the prev
 - **AND** the URL remains parseable and round-trips back to the original relative path on decode
 
 ### Requirement: Open a document by direct URL
-The browser UI SHALL initialize on the document or preview identified by the explicit URL when the SPA boots. When the workspace-root URL has no explicit preview query, the system MUST select a valid document path from the current user's personal workspace state, falling back to the server-provided default document when no valid saved path exists. When `location.pathname` resolves to a known non-binary document under a watched root, the system MUST select that document as the initial active preview, overriding both personal state and `defaultDocumentId`. Explicit commit-preview and review-score query parameters likewise MUST override a saved document. When the watch session was started against a single file and an explicit path resolves outside that scope, the SPA MUST render the existing scoped-session empty state. Unknown paths SHALL follow the existing static-fallback/SPA behavior. A fragment SHALL scroll the matching element into view after render.
+The browser UI SHALL initialize on the document or preview identified by the explicit URL when the SPA boots. When the workspace-root URL has no explicit preview query, the system MUST select a valid document path from the current user's personal workspace state, falling back to the server-provided default document when no valid saved path exists. When `location.pathname` resolves to a known non-binary document or a previewable image under a watched root, the system MUST select that file as the initial active preview, overriding both personal state and `defaultDocumentId`. A saved personal document path SHALL likewise be valid when it names a non-binary document or a previewable image, so an image Follow switched to survives a reload and a workspace-root resume. Explicit commit-preview and review-score query parameters likewise MUST override a saved document. When the watch session was started against a single file and an explicit path resolves outside that scope, the SPA MUST render the existing scoped-session empty state. Unknown paths SHALL follow the existing static-fallback/SPA behavior. A fragment SHALL scroll the matching element into view after render.
 
 #### Scenario: Root URL restores the personal document
 - **WHEN** a user opens the workspace root and personal state names `guides/setup.md`
@@ -103,6 +103,15 @@ The browser UI SHALL initialize on the document or preview identified by the exp
 #### Scenario: Refreshing an explicit document preserves it
 - **WHEN** the current URL identifies a document and the user refreshes
 - **THEN** the SPA renders that URL's document rather than a different saved document
+
+#### Scenario: Refreshing an image Follow switched to preserves it
+- **WHEN** Follow switched the preview to `hero.svg`, so the URL is `/hero.svg`, and the user refreshes
+- **THEN** the SPA renders `hero.svg` in the preview
+- **AND** follow mode is disabled, as for any direct link
+
+#### Scenario: Root URL restores a saved image
+- **WHEN** a user opens the workspace root and personal state names `hero.svg`, a previewable image
+- **THEN** the SPA's initial preview is `hero.svg`
 
 #### Scenario: Explicit preview query wins over saved document
 - **WHEN** the root URL contains a resolvable commit-preview or review-score query
@@ -132,15 +141,15 @@ The server's navigation fallback SHALL distinguish HTML-preferring navigation re
 - **THEN** the response status is `404`
 - **AND** the response body is `Not Found`
 
-#### Scenario: HTML-preferring navigation to an existing static file still serves the bytes
+#### Scenario: HTML-preferring navigation to a watched image serves the SPA shell
 - **WHEN** the server receives a GET to `/diagram.png` with `Accept: text/html,application/xhtml+xml,*/*`
-- **AND** `diagram.png` exists under a watched root
+- **AND** `diagram.png` is a known file under a watched root
 - **THEN** the response status is `200`
-- **AND** the response body is the file's bytes
-- **AND** the response is NOT the SPA shell
+- **AND** the response body is the SPA shell, which renders `diagram.png` in the preview
+- **AND** the response is NOT the file's bytes
 
 ### Requirement: Force follow mode off when arriving via a direct document URL
-When the SPA boots with `location.pathname` resolving to a known non-binary document (i.e. anything other than `/`), the system MUST disable follow mode for the session, regardless of the server-provided `initialFollow` value derived from the CLI flags. The follow toggle MUST reflect the disabled state. The user MAY re-enable follow mode after arrival via the existing follow toggle. When `location.pathname` is `/`, the system MUST honor the server-provided `initialFollow` value (today's behavior preserved).
+When the SPA boots with `location.pathname` resolving to a known non-binary document or a previewable image (i.e. anything other than `/`), the system MUST disable follow mode for the session, regardless of the server-provided `initialFollow` value derived from the CLI flags. The follow toggle MUST reflect the disabled state. The user MAY re-enable follow mode after arrival via the existing follow toggle. When `location.pathname` is `/`, the system MUST honor the server-provided `initialFollow` value (today's behavior preserved).
 
 #### Scenario: Direct link arrival turns follow mode off
 - **WHEN** a user navigates directly to `http://127.0.0.1:NNNN/guides/setup.md`
@@ -160,7 +169,7 @@ When the SPA boots with `location.pathname` resolving to a known non-binary docu
 - **AND** the active preview catches up to the latest changed non-binary file under the watched roots
 
 ### Requirement: Navigate document history with the browser back and forward buttons
-The system SHALL handle the browser's `popstate` event by re-selecting the document identified by the new URL pathname, without itself pushing or replacing additional history entries. The newly active document MUST be loaded through the in-app document load path (no full-page navigation). When the URL pathname resolves to a document outside the current scope or to no known document, the system MUST apply the same empty-preview rules defined in "Open a document by direct URL". When `popstate` fires AND follow mode is currently enabled, the system MUST disable follow mode for the session so the next file-system change does not immediately undo the back/forward navigation; this mirrors the follow-off rule that already applies to sidebar clicks, cross-document link clicks, and direct-link arrival. When `popstate` fires AND the new URL's pathname (decoded, leading slashes stripped) matches the active document's relative path AND only the fragment has changed, the system MUST treat the event as a same-document scroll: scroll the matching element into view when the new URL has a fragment, scroll the preview to the top when the new URL has no fragment, and MUST NOT reload the document, MUST NOT push or replace history, and MUST NOT disable follow mode.
+The system SHALL handle the browser's `popstate` event by re-selecting the document identified by the new URL pathname, without itself pushing or replacing additional history entries. A pathname naming a previewable image re-selects that image, so Back returns to an image Follow switched to as it does to a document. The newly active document MUST be loaded through the in-app document load path (no full-page navigation). When the URL pathname resolves to a document outside the current scope or to no known document, the system MUST apply the same empty-preview rules defined in "Open a document by direct URL". When `popstate` fires AND follow mode is currently enabled, the system MUST disable follow mode for the session so the next file-system change does not immediately undo the back/forward navigation; this mirrors the follow-off rule that already applies to sidebar clicks, cross-document link clicks, and direct-link arrival. When `popstate` fires AND the new URL's pathname (decoded, leading slashes stripped) matches the active document's relative path AND only the fragment has changed, the system MUST treat the event as a same-document scroll: scroll the matching element into view when the new URL has a fragment, scroll the preview to the top when the new URL has no fragment, and MUST NOT reload the document, MUST NOT push or replace history, and MUST NOT disable follow mode.
 
 #### Scenario: Back button restores a previously selected document
 - **WHEN** a user has navigated from `README.md` to `guides/setup.md` to `guides/troubleshooting.md` via in-app clicks
@@ -172,6 +181,12 @@ The system SHALL handle the browser's `popstate` event by re-selecting the docum
 - **WHEN** a user has stepped back from `guides/troubleshooting.md` to `guides/setup.md`
 - **AND** the user clicks the browser forward button
 - **THEN** the active preview returns to `guides/troubleshooting.md`
+
+#### Scenario: Back button returns to an image Follow switched to
+- **WHEN** Follow switched the preview to `hero.svg` and the user then clicked `guides/setup.md` in the tree
+- **AND** the user clicks the browser back button
+- **THEN** the active preview returns to `hero.svg`, rendered as an image
+- **AND** the preview does NOT show "Document not found"
 
 #### Scenario: Popstate to a no-longer-existent document renders empty preview
 - **WHEN** a history entry refers to a document that has since been deleted from disk

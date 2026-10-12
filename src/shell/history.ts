@@ -14,7 +14,7 @@ import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
-import { defaultDocumentId } from "../shared/types";
+import { defaultDocumentId, isFollowableFile } from "../shared/types";
 import { appState } from "./state";
 import { clearDocumentSelection, resumeDocumentSelection, setPreviewMode, setSelectedId } from "./selection";
 import {
@@ -209,7 +209,9 @@ export function attachPopstateHandler() {
     }
 
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
-    if (requestedDoc && requestedDoc.kind !== "binary") {
+    // Documents and previewable images: Back can return to an image Follow
+    // switched to (Rule C) as well as to a document.
+    if (requestedDoc && isFollowableFile(requestedDoc)) {
       setSelectedId(requestedDoc.id);
       setPreviewMode({ kind: "document" });
       renderSidebar();
