@@ -108,9 +108,17 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   // Paths awaiting their check, in due order.
   private due = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
+  // One batch at a time: paths that come due while a batch runs wait for the
+  // next one, so the 16-path bound holds however slow the metadata reads are.
+  private checking = false;
   private closed = false;
 
-  constructor(private watcher: PolledWatcher, private ignored: Options["ignored"], private settleMs = POLL_BASELINE_SETTLE_MS) {
+  constructor(
+    private watcher: PolledWatcher,
+    private ignored: Options["ignored"],
+    private settleMs = POLL_BASELINE_SETTLE_MS,
+    private fs: { stat: typeof stat; readdir: typeof readdir } = { stat, readdir },
+  ) {
     super();
     watcher.on("all", (event: string, file: string, stats?: Stats) => {
       // Chokidar's own reports pass through unchanged, even one that repeats
@@ -155,10 +163,14 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   }
 
   private arm(): void {
-    if (this.closed || this.timer) return;
+    if (this.closed || this.timer || this.checking) return;
     const next = this.due.values().next();
     if (next.done) return;
-    this.timer = setTimeout(() => { this.timer = null; void this.check(); }, Math.max(0, next.value - performance.now()));
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.checking = true;
+      void this.check().finally(() => { this.checking = false; this.arm(); });
+    }, Math.max(0, next.value - performance.now()));
     this.timer.unref?.();
   }
 
@@ -179,13 +191,12 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
       }
     };
     await Promise.all(Array.from({ length: Math.min(16, paths.length) }, worker));
-    this.arm();
   }
 
   private async checkFile(file: string): Promise<void> {
     const expected = this.reported.get(file);
     if (!expected) return;
-    const stats = await stat(file).catch(() => null);
+    const stats = await this.fs.stat(file).catch(() => null);
     // Removal stays with Chokidar's own unlink. A newer report while this
     // stat ran means the file's polling is live, and this stat may be older
     // than that report.
@@ -197,7 +208,7 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   private async checkDirectory(directory: string): Promise<void> {
     // A directory removed meanwhile, or one that cannot be read, is left to
     // Chokidar.
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => null);
+    const entries = await this.fs.readdir(directory, { withFileTypes: true }).catch(() => null);
     const known = this.children.get(directory);
     if (this.closed || !entries || !known) return;
     for (const entry of entries) {

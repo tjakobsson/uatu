@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -299,6 +299,40 @@ test("polling reports an edit written before the stat watcher's baseline", async
   const change = events.find(event => event.event === "change")!;
   expect(change.file).toBe(file);
   expect(change.stats!.size).toBe((await stat(file)).size);
+});
+
+test("polling checks stay within one bounded batch while metadata reads are slow", async () => {
+  const root = await fixture();
+  const file = path.join(root, "a.md");
+  await writeFile(file, "# A\n");
+  const stats = await stat(file);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let calls = 0;
+  const held: (() => void)[] = [];
+  const slowStat = (async () => {
+    calls++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise<void>(resolve => held.push(resolve));
+    inFlight--;
+    return stats;
+  }) as unknown as typeof stat;
+  const chokidarWatcher = Object.assign(new EventEmitter(), { close: async () => {}, add: () => {} });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, 10, { stat: slowStat, readdir });
+  observers.push(check);
+  for (let i = 0; i < 40; i++) chokidarWatcher.emit("all", "add", path.join(root, `first-${i}.md`), stats);
+  await until(() => inFlight === 16, "first batch saturated");
+  // More paths come due while the first batch is still blocked.
+  for (let i = 0; i < 40; i++) chokidarWatcher.emit("all", "add", path.join(root, `second-${i}.md`), stats);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  expect(maxInFlight).toBe(16);
+  while (calls < 80) {
+    held.splice(0).forEach(release => release());
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  held.splice(0).forEach(release => release());
+  await until(() => inFlight === 0, "every check finished");
+  expect(maxInFlight).toBe(16);
+  expect(calls).toBe(80);
 });
 
 test("polling reports nothing extra when the file is unchanged or removed", async () => {
