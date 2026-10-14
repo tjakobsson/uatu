@@ -10,6 +10,7 @@
 // syntax errors, patterns that match everywhere, patterns that can match the
 // empty string, and patterns that are simply too expensive to run.
 
+import { openContainedFile } from "../document/contained-file";
 import { buildMatchPattern, nextCodePointIndex } from "../shared/match-pattern";
 import type { DocumentMeta, RootGroup } from "../shared/types";
 
@@ -212,29 +213,35 @@ export function searchableDocuments(roots: readonly RootGroup[]): DocumentMeta[]
   return documents;
 }
 
+// One opened document. Its size is known before any read, so an oversized
+// file is never loaded at all.
+export type SearchFile = {
+  size: number;
+  read: () => Promise<string>;
+  close: () => Promise<void>;
+};
+
 export type SearchDeps = {
   // Injected so the sweep can be tested without touching the filesystem.
-  readFile: (absolutePath: string) => Promise<string | null>;
-  // Size in bytes, or null when the file is unreadable. Consulted before the
-  // read so an oversized file is never loaded at all.
-  fileSize: (absolutePath: string) => Promise<number | null>;
+  // Null when the file is gone, unreadable, or no longer reached from its
+  // watch root without crossing a symbolic link. Not an error worth
+  // surfacing: the tree will catch up.
+  open: (absolutePath: string, rootPath: string) => Promise<SearchFile | null>;
   now: () => number;
 };
 
 const defaultDeps: SearchDeps = {
-  fileSize: async absolutePath => {
+  open: async (absolutePath, rootPath) => {
     try {
-      return Bun.file(absolutePath).size;
+      // The size and the text both come from the handle whose path was
+      // checked, never from the path again.
+      const { handle, stats } = await openContainedFile(rootPath, absolutePath);
+      return {
+        size: stats.size,
+        read: () => handle.readFile({ encoding: "utf8" }),
+        close: () => handle.close().catch(() => undefined),
+      };
     } catch {
-      return null;
-    }
-  },
-  readFile: async absolutePath => {
-    try {
-      return await Bun.file(absolutePath).text();
-    } catch {
-      // Deleted between the scan and the read, or unreadable. Not an error
-      // worth surfacing — the tree will catch up.
       return null;
     }
   },
@@ -273,6 +280,7 @@ export async function* searchDocuments(
   let truncated = false;
   let abandoned = false;
   const sweepStartedAt = deps.now();
+  const rootPaths = new Map(roots.map(root => [root.id, root.path]));
 
   for (const doc of searchableDocuments(roots)) {
     if (signal?.aborted) {
@@ -287,13 +295,18 @@ export async function* searchDocuments(
       break;
     }
 
-    const size = await deps.fileSize(doc.id);
-    if (size !== null && size > MAX_FILE_BYTES) {
+    const rootPath = rootPaths.get(doc.rootId);
+    const file = rootPath === undefined ? null : await deps.open(doc.id, rootPath);
+    if (!file) {
+      continue;
+    }
+    const oversized = file.size > MAX_FILE_BYTES;
+    const contents = oversized ? null : await file.read().catch(() => null);
+    await file.close();
+    if (oversized) {
       yield { kind: "oversized", relativePath: doc.relativePath };
       continue;
     }
-
-    const contents = await deps.readFile(doc.id);
     if (contents === null) {
       continue;
     }

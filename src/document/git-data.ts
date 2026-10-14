@@ -17,6 +17,7 @@ import type {
 } from "../shared/types";
 import { DEFAULT_COMPARE_TARGET } from "../shared/types";
 import type { WatchEntry } from "../server/roots";
+import { readContainedFile, statContainedFile } from "./contained-file";
 import { applyCompareTarget, resolveCompareBase, safeGit, throwIfGitCancelled } from "./git-base-ref";
 import { loadIgnoreConfig } from "../ignore/config";
 
@@ -379,7 +380,7 @@ async function collectUntrackedFiles(repoRoot: string): Promise<ChangedFileSumma
   const files: ChangedFileSummary[] = [];
   for (const relativePath of result.stdout.trim().split("\n")) {
     throwIfGitCancelled();
-    const additions = await countFileLines(path.join(repoRoot, relativePath));
+    const additions = await countFileLines(repoRoot, path.join(repoRoot, relativePath));
     files.push({
       path: relativePath,
       oldPath: null,
@@ -393,17 +394,20 @@ async function collectUntrackedFiles(repoRoot: string): Promise<ChangedFileSumma
 }
 
 const lineCountCache = new Map<string, { identity: string; lines: number }>();
-async function countFileLines(filePath: string): Promise<number> {
+// An untracked link is counted as no lines: its target, possibly outside the
+// repository, is never read.
+async function countFileLines(repoRoot: string, filePath: string): Promise<number> {
   throwIfGitCancelled();
-  const stat = await fs.stat(filePath).catch(() => null);
-  if (!stat || !stat.isFile() || stat.size > GIT_MAX_BUFFER) {
+  const stat = await statContainedFile(repoRoot, filePath).catch(() => null);
+  if (!stat || stat.size > GIT_MAX_BUFFER) {
     lineCountCache.delete(filePath);
     return 0;
   }
   const identity = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   const previous = lineCountCache.get(filePath);
   if (previous?.identity === identity) return previous.lines;
-  const source = await fs.readFile(filePath, "utf8").catch(() => "");
+  const source = await readContainedFile(repoRoot, filePath, { maxBytes: GIT_MAX_BUFFER })
+    .then(({ text }) => text ?? "", () => "");
   throwIfGitCancelled();
   if (!source) {
     return 0;

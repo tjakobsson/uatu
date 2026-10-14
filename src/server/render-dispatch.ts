@@ -3,9 +3,7 @@
 // kind and requested view (rendered / source), and extracts a display title
 // from the rendered output.
 
-import { promises as fs } from "node:fs";
-import path from "node:path";
-
+import { readContainedFile, UNCONTAINED } from "../document/contained-file";
 import { collectFileFacts } from "../document/file-facts";
 import { type DocumentMetadata, sanitizeMetadata } from "../document/metadata";
 import { languageForName } from "../document/languages";
@@ -43,7 +41,9 @@ export type RenderDocumentOptions = {
 // shows one notice instead of retrying:
 // - 404: the index does not hold the id, or the indexed path no longer
 //   resolves to a readable file (ENOENT, ENOTDIR, EISDIR, ELOOP,
-//   ENAMETOOLONG). The watcher reports the change that caused it.
+//   ENAMETOOLONG), or reaching it would cross a symbolic link below its
+//   watch root (UNCONTAINED; the outside file is never read). The watcher
+//   reports the change that caused it.
 // - 403: the process is not allowed to read the file (EACCES, EPERM; macOS
 //   privacy protection surfaces as EPERM). Stable until someone changes the
 //   permissions.
@@ -51,7 +51,7 @@ export type RenderDocumentOptions = {
 // Anything else (a renderer that throws, EMFILE, ENFILE, EAGAIN, EBUSY, EIO,
 // an unrecognized error) is the server failing or a condition that may
 // clear: a 500, which the client retries on its bounded schedule.
-const NOT_FOUND_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR", "ELOOP", "ENAMETOOLONG"]);
+const NOT_FOUND_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR", "ELOOP", "ENAMETOOLONG", UNCONTAINED]);
 const NOT_READABLE_CODES = new Set(["EACCES", "EPERM"]);
 
 export function documentErrorStatus(error: unknown): 403 | 404 | 415 | 500 {
@@ -80,16 +80,21 @@ export async function renderDocument(
     throw new Error("document is binary");
   }
 
-  const source = await fs.readFile(document.id, "utf8");
+  // The root group always exists for a found document; without it there is
+  // no root to prove containment against.
+  const rootPath = roots.find(root => root.id === document.rootId)?.path;
+  if (rootPath === undefined) throw new Error("document not found");
+  // Read through the handle whose path was proven link-free below the root.
+  // The facts reuse that handle's metadata instead of statting the path again.
+  const { text, stats } = await readContainedFile(rootPath, document.id);
+  const source = text ?? "";
   // Filesystem facts overlap rendering. Git provenance is requested by the
   // browser independently and cannot delay this content response.
-  // The root group always exists for a found document; the dirname fallback
-  // is a type-level guard only.
-  const rootPath = roots.find(root => root.id === document.rootId)?.path ?? path.dirname(document.id);
   const fileFactsPromise = collectFileFacts({
     absolutePath: document.id,
     rootPath,
     source,
+    stats,
     includeGit: false,
   });
   const requestedView: ViewMode = options.view ?? "rendered";

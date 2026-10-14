@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -252,6 +252,26 @@ describe("getDocumentDiff", () => {
     ];
 
     await expect(getDocumentDiff(roots, filePath)).rejects.toThrow(/document not found/);
+  });
+
+  test("refuses a document whose path now crosses a link out of its watched root", async () => {
+    // The watched root is `sub/`; `secret/` is in the same repository but
+    // outside the root. Once `sub/docs` links there, neither git nor the
+    // worktree read may describe `secret/in.md`.
+    const repo = await createSeededRepo();
+    await mkdir(path.join(repo, "sub", "docs"), { recursive: true });
+    await mkdir(path.join(repo, "secret"));
+    await writeFile(path.join(repo, "sub", "docs", "in.md"), "inside\n");
+    await writeFile(path.join(repo, "secret", "in.md"), "baseline\n");
+    await safeGit(repo, ["add", "."]);
+    await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "seed"]);
+    await writeFile(path.join(repo, "secret", "in.md"), "OUTSIDE SECRET\n");
+    const root = path.join(repo, "sub");
+    const roots = rootsFor(root, "docs/in.md", "markdown");
+    await rm(path.join(root, "docs"), { recursive: true });
+    await symlink(path.join(repo, "secret"), path.join(root, "docs"));
+
+    await expect(getDocumentDiff(roots, path.join(root, "docs", "in.md"))).rejects.toThrow(/document not found/);
   });
 
   test("base spans committed-since-base + worktree; last-commit shows only the worktree", async () => {

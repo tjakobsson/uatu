@@ -1,7 +1,7 @@
 import type { Stats } from "node:fs";
-import { lstat } from "node:fs/promises";
 import path from "node:path";
 import { classifyFile, classifyFileName } from "../document/classify";
+import { statContainedFile, UNCONTAINED } from "../document/contained-file";
 import type { DiscoveryState, DocumentRoot, RevisionedDocument, RevisionedRoot } from "../shared/document-updates";
 import { isFollowableFile } from "../shared/types";
 import type { IgnoreMatcher } from "../ignore/engine";
@@ -195,8 +195,12 @@ export class FileIndex {
     this.pathWaiters.clear();
   }
 
+  private get rootPath(): string {
+    return this.entry.kind === "dir" ? this.entry.absolutePath : this.entry.parentDir;
+  }
+
   private track(id: string, add: boolean): void {
-    const rootPath = this.entry.kind === "dir" ? this.entry.absolutePath : this.entry.parentDir;
+    const rootPath = this.rootPath;
     for (let parent = path.dirname(id); ; parent = path.dirname(parent)) {
       if (add) {
         let members = this.directories.get(parent);
@@ -248,14 +252,21 @@ export class FileIndex {
 
   private async process(job: Job): Promise<void> {
     try {
-      if (!job.stats) this.options.onWork?.("stat");
-      const stats = job.stats ?? await (this.options.stat ?? lstat)(job.id) as Stats;
+      // Discovery's metadata is the observer's own lstat from a walk that
+      // never descends through a link, and a targeted request carries metadata
+      // already checked below the root. A live event's metadata is not
+      // trusted: the polling observer (`fs.watchFile`) follows links, and a
+      // directory on the path may have become one. It is re-read below the
+      // root, which refuses (UNCONTAINED) a path that crosses a link.
+      const trusted = job.stats !== undefined && !job.live;
+      if (!trusted) this.options.onWork?.("stat");
+      const stats = trusted ? job.stats! : await (this.options.stat ?? (id => statContainedFile(this.rootPath, id)))(job.id);
       const valid = () => !this.stopped && this.current.get(job.id) === job.order;
       if (!valid()) return;
       if (!stats.isFile() || !this.policy.accepts(job.id, stats)) { this.remove(job.id, job.order); return; }
       const name = path.basename(job.id);
       this.options.onWork?.("classify");
-      const kind = classifyFileName(name) ?? await (this.options.classify ?? classifyFile)(job.id, name);
+      const kind = classifyFileName(name) ?? await (this.options.classify ?? classifyFile)(job.id, name, this.rootPath);
       if (!valid()) return;
       const doc: RevisionedDocument = {
         id: job.id, rootId: this.entry.absolutePath, name, relativePath: rootRelative(this.entry, job.id)!,
@@ -265,7 +276,7 @@ export class FileIndex {
       this.schedule();
     } catch (error) {
       if (this.stopped || this.current.get(job.id) !== job.order) return;
-      if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) this.remove(job.id, job.order);
+      if (["ENOENT", "ENOTDIR", UNCONTAINED].includes((error as NodeJS.ErrnoException).code ?? "")) this.remove(job.id, job.order);
       else if (job.attempts < 2) {
         // Retain the job's generation while its retry is outstanding.
         const retry = { ...job, stats: undefined, attempts: job.attempts + 1 };

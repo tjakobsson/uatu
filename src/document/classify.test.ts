@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { classifyFile, isAsciidocPath, isMarkdownPath } from "./classify";
+import { isUncontained } from "./contained-file";
 
 const tempDirectories: string[] = [];
 
@@ -110,5 +111,23 @@ describe("classifyFile", () => {
   test("treats empty files as text", async () => {
     const filePath = await makeTempFile("empty.weirdtype", "");
     expect(await classifyFile(filePath)).toBe("text");
+  });
+});
+
+describe("classifyFile below a watch root", () => {
+  test("sniffs a contained file", async () => {
+    const filePath = await makeTempFile("notes.weirdtype", "plain text\n");
+    expect(await classifyFile(filePath, undefined, path.dirname(filePath))).toBe("text");
+  });
+
+  test("refuses to sniff a file reached through a link instead of classifying it", async () => {
+    const outsidePath = await makeTempFile("secret.weirdtype", "\0binary\0");
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-classify-root-"));
+    tempDirectories.push(root);
+    const linked = path.join(root, "docs");
+    await symlink(path.dirname(outsidePath), linked);
+    const failure = await classifyFile(path.join(linked, "secret.weirdtype"), undefined, root)
+      .then(() => null, (error: unknown) => error);
+    expect(isUncontained(failure)).toBe(true);
   });
 });

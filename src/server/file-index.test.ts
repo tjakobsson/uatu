@@ -1,21 +1,40 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { Stats } from "node:fs";
+import { lstat, mkdir, mkdtemp, rm, stat as followStat, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { FileIndex, type FileIndexBatch, type FileIndexOptions } from "./file-index";
 import { NewestDocument } from "./newest-document";
 import type { DocumentMeta } from "../shared/types";
 import type { RevisionedDocument } from "../shared/document-updates";
 
 const indexes: FileIndex[] = [];
-afterEach(() => { for (const index of indexes.splice(0)) index.stop(); });
+const tempDirectories: string[] = [];
+afterEach(async () => {
+  for (const index of indexes.splice(0)) index.stop();
+  await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+});
 function stat(mtime = 1): Stats {
   return Object.assign(Object.create(Stats.prototype) as Stats, { mode: 0o100644, mtimeMs: mtime });
+}
+// The fixture's disk holds what its observer last reported: a live event's
+// metadata is re-read below the root, and here that read answers from it.
+class ObservedIndex extends FileIndex {
+  readonly disk = new Map<string, Stats>();
+  override observe(event: string, id: string, stats?: Stats, priority = false): void {
+    if (stats) this.disk.set(id, stats);
+    else if (event === "unlink") this.disk.delete(id);
+    super.observe(event, id, stats, priority);
+  }
 }
 function fixture(options: Partial<FileIndexOptions> = {}) {
   let sequence = 0;
   const batches: FileIndexBatch[] = [];
-  const index = new FileIndex({ kind: "dir", absolutePath: "/docs" }, {
+  const index: ObservedIndex = new ObservedIndex({ kind: "dir", absolutePath: "/docs" }, {
     shouldIgnore: () => false, toChokidarIgnored: () => () => false,
-  }, { revision: () => ++sequence, publish: batch => batches.push(batch), ...options });
+  }, { revision: () => ++sequence, publish: batch => batches.push(batch),
+    stat: async id => index.disk.get(id) ?? Promise.reject(Object.assign(new Error("missing"), { code: "ENOENT" })),
+    ...options });
   indexes.push(index);
   return { index, batches };
 }
@@ -186,7 +205,8 @@ test.each([1000, 10000])("one edit in a %i-file inventory does not revisit unrel
   classifications = 0;
   index.observe("change", "/docs/0.md", stat(2));
   await index.idle();
-  expect(stats).toBe(0);
+  // Only the edited file's metadata is re-read below the root.
+  expect(stats).toBe(1);
   expect(reads).toBe(0);
   expect(classifications).toBe(1);
   expect(batches).toHaveLength(1);
@@ -205,4 +225,52 @@ test("newest eligible document stays correct after replacement, reclassification
     const expected = [...docs.values()].filter(d => d.kind !== "binary").sort((a, b) => b.mtimeMs - a.mtimeMs || a.relativePath.localeCompare(b.relativePath))[0]?.id ?? null;
     expect(heap.id).toBe(expected);
   }
+});
+
+describe("observer metadata for a file outside the root", () => {
+  // A real root holding `docs/in.md`, indexed by discovery, and an outside
+  // directory whose files a polling observer would describe after `docs`
+  // becomes a link to it (`fs.watchFile` follows links).
+  async function linkedAway() {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-index-root-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "uatu-index-outside-"));
+    tempDirectories.push(root, outside);
+    const id = path.join(root, "docs", "in.md");
+    await mkdir(path.dirname(id));
+    await writeFile(id, "# Inside\n");
+    await writeFile(path.join(outside, "in.md"), "# Outside\n");
+    await writeFile(path.join(outside, "new.weirdtype"), "outside text\n");
+    let sequence = 0;
+    let sniffs = 0;
+    const batches: FileIndexBatch[] = [];
+    const index = new FileIndex({ kind: "dir", absolutePath: root }, {
+      shouldIgnore: () => false, toChokidarIgnored: () => () => false,
+    }, { revision: () => ++sequence, publish: batch => batches.push(batch), classify: async () => { sniffs++; return "text"; } });
+    indexes.push(index);
+    index.observe("add", id, await lstat(id));
+    index.markReady();
+    await index.idle();
+    expect(index.documents.has(id)).toBe(true);
+    await rm(path.dirname(id), { recursive: true });
+    await symlink(outside, path.dirname(id));
+    return { root, outside, id, index, batches, sniffs: () => sniffs };
+  }
+
+  test("a live change carrying the outside file's metadata drops the document", async () => {
+    const { outside, id, index, batches } = await linkedAway();
+    index.observe("change", id, await followStat(path.join(outside, "in.md")));
+    await index.idle();
+    expect(index.documents.has(id)).toBe(false);
+    expect(batches.at(-1)?.removals).toEqual([{ rootId: index.entry.absolutePath, id }]);
+  });
+
+  test("a live add through the link is neither indexed nor sniffed", async () => {
+    const { root, outside, index, sniffs } = await linkedAway();
+    const added = path.join(root, "docs", "new.weirdtype");
+    index.observe("add", added, await followStat(path.join(outside, "new.weirdtype")));
+    await index.idle();
+    expect(index.documents.has(added)).toBe(false);
+    expect(sniffs()).toBe(0);
+    expect(index.discovery.status).toBe("ready");
+  });
 });

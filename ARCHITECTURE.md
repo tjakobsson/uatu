@@ -502,7 +502,21 @@ that file. The observer bounds metadata work to 16 concurrent paths, excludes
 denied directories before descent, and does not follow symlink entries.
 Unsupported recursive watching and explicit polling use Chokidar's normalized
 initial events instead. Both backends supply stats to the index and normalize
-atomic replacement with a short removal delay.
+atomic replacement with a short removal delay. The index uses the supplied
+stats only for discovery, which comes from the observer's own link-free walk.
+Live events are re-read below the root, because Chokidar's poller
+(`fs.watchFile`) follows links and a directory on the path may have become one.
+
+Every read of a watched file's content or metadata goes through
+`document/contained-file.ts`: render, file facts, the diff's worktree side,
+project search, unknown-type sniffing, and untracked line counts. The watch
+root is trusted as given, even when it is a symlink. Below it, no path segment
+may be a link, and the target must be a regular file. Reads open the file
+without following a final link, then check that the walked path names the
+opened file, and read from that handle. A refusal behaves like a missing file:
+the index drops the path, `/api/document` answers a final 404, and search skips
+the file. Static fallback serving keeps its own rule: real-path containment,
+which also allows an in-root directory link.
 
 A native rename notification may name only the temporary source. The observer
 coalesces those notifications into a shallow metadata check of the containing
