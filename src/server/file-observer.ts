@@ -83,7 +83,9 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
   });
   return polling
-    ? new PolledBaselineCheck(watcher, options.ignored, { root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir })
+    ? new PolledBaselineCheck(watcher, options.ignored, {
+      root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir, watched: entry.absolutePath,
+    })
     : watcher;
 }
 
@@ -118,16 +120,18 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   private closed = false;
 
   private root: string;
+  private watched: string;
   private settleMs: number;
   private fs: { lstat: typeof lstat; readdir: typeof readdir };
 
   constructor(
     private watcher: PolledWatcher,
     private ignored: Options["ignored"],
-    options: { root: string; settleMs?: number; fs?: { lstat: typeof lstat; readdir: typeof readdir } },
+    options: { root: string; watched?: string; settleMs?: number; fs?: { lstat: typeof lstat; readdir: typeof readdir } },
   ) {
     super();
     this.root = options.root;
+    this.watched = options.watched ?? options.root;
     this.settleMs = options.settleMs ?? POLL_BASELINE_SETTLE_MS;
     this.fs = options.fs ?? { lstat, readdir };
     watcher.on("all", (event: string, file: string, stats?: Stats) => {
@@ -211,6 +215,10 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   // is watched and reported, and a later replacement is noticed through the
   // parent directory as usual.
   private handBack(target: string): void {
+    // The watched path itself has no parent subscription to notice a later
+    // replacement, so its registration stays with Chokidar, as without this
+    // check.
+    if (target === this.watched) return;
     this.watcher.unwatch(target);
     this.watcher.add(target);
   }
@@ -290,10 +298,16 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
       return;
     }
     const entries = await this.fs.readdir(directory, { withFileTypes: true }).catch(() => null);
-    // Swapped while it was read: what readdir listed may not be this
-    // directory's. Chokidar, or the next reported state, settles it.
+    // lstat again: if the directory was swapped while it was read, what
+    // readdir listed may not be this directory's.
     const after = await this.fs.lstat(directory).catch(() => null);
-    if (!entries || !current() || !after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) return;
+    if (!entries || !current()) return;
+    if (!after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) {
+      // Replaced while it was read, possibly before Chokidar's baseline:
+      // check it again, which reports whatever it is now.
+      this.schedule(directory);
+      return;
+    }
     for (const entry of entries) {
       const child = path.join(directory, entry.name);
       if (known!.has(child) || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory()) || this.ignored(child, entry)) continue;

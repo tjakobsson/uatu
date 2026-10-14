@@ -502,6 +502,43 @@ test("a directory check overtaken by Chokidar removing and re-adding the directo
   expect(events).toEqual(["addDir docs", "unlinkDir docs", "addDir docs"]);
 });
 
+test("polling never hands back the watched root itself", async () => {
+  const parent = await fixture();
+  const outside = await fixture();
+  const root = path.join(parent, "root");
+  await symlink(outside, root);
+  // The root was a directory when Chokidar reported it; it is a link now.
+  const { chokidarWatcher, events, added, unwatched } = polledBaseline(root, 20);
+  chokidarWatcher.emit("all", "addDir", root);
+  await until(() => events.some(event => event.event === "unlinkDir"), "root replacement reported");
+  // Unwatching the root would drop its only subscription; it stays with Chokidar.
+  expect(unwatched).toEqual([]);
+  expect(added).toEqual([]);
+});
+
+test("a directory swapped while it was read is checked again", async () => {
+  const root = await fixture();
+  const directory = path.join(root, "docs");
+  await mkdir(directory);
+  await writeFile(path.join(directory, "missed.md"), "# Missed\n");
+  let directoryLstats = 0;
+  const swappingLstat = (async (target: string) => {
+    const stats = await lstat(target);
+    // The second lstat of the first check sees a different directory.
+    if (target === directory && ++directoryLstats === 2) return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { ino: stats.ino + 1 });
+    return stats;
+  }) as typeof lstat;
+  const added: string[] = [];
+  const chokidarWatcher = Object.assign(new EventEmitter(), { close: async () => {}, add: (file: string) => { added.push(file); }, unwatch: () => {} });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, { root, settleMs: 10, fs: { lstat: swappingLstat, readdir } });
+  observers.push(check);
+  chokidarWatcher.emit("all", "addDir", directory);
+  // The first check discards its listing; the second, scheduled by it, hands the child over.
+  await until(() => added.length > 0, "directory checked again");
+  expect(directoryLstats).toBe(4);
+  expect(added).toEqual([path.join(directory, "missed.md")]);
+});
+
 test("a child handed to polling Chokidar is reported and then polled", async () => {
   const root = await fixture();
   const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true, isSingleFileRoot: false });
