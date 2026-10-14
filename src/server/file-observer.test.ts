@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat, lstat, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -317,7 +317,7 @@ test("polling checks stay within one bounded batch while metadata reads are slow
     return stats;
   }) as unknown as typeof stat;
   const chokidarWatcher = Object.assign(new EventEmitter(), { close: async () => {}, add: () => {} });
-  const check = new PolledBaselineCheck(chokidarWatcher, () => false, 10, { stat: slowStat, readdir });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, 10, { lstat: slowStat as unknown as typeof lstat, readdir });
   observers.push(check);
   for (let i = 0; i < 40; i++) chokidarWatcher.emit("all", "add", path.join(root, `first-${i}.md`), stats);
   await until(() => inFlight === 16, "first batch saturated");
@@ -333,6 +333,21 @@ test("polling checks stay within one bounded batch while metadata reads are slow
   await until(() => inFlight === 0, "every check finished");
   expect(maxInFlight).toBe(16);
   expect(calls).toBe(80);
+});
+
+test("polling reports a file replaced by a symlink before its baseline as removed", async () => {
+  const root = await fixture();
+  const target = path.join(root, "target.md");
+  const file = path.join(root, "doc.md");
+  await writeFile(target, "# Target, much longer than the original file\n");
+  await writeFile(file, "# Doc\n");
+  const discovered = await stat(file);
+  await rm(file);
+  await symlink(target, file);
+  const { chokidarWatcher, events } = polledBaseline(20);
+  chokidarWatcher.emit("all", "add", file, discovered);
+  await until(() => events.some(event => event.event === "unlink"), "symlink replacement reported");
+  expect(events.filter(event => event.event !== "add")).toEqual([{ event: "unlink", file, stats: undefined }]);
 });
 
 test("polling reports nothing extra when the file is unchanged or removed", async () => {

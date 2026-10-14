@@ -117,7 +117,7 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     private watcher: PolledWatcher,
     private ignored: Options["ignored"],
     private settleMs = POLL_BASELINE_SETTLE_MS,
-    private fs: { stat: typeof stat; readdir: typeof readdir } = { stat, readdir },
+    private fs: { lstat: typeof lstat; readdir: typeof readdir } = { lstat, readdir },
   ) {
     super();
     watcher.on("all", (event: string, file: string, stats?: Stats) => {
@@ -196,11 +196,21 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   private async checkFile(file: string): Promise<void> {
     const expected = this.reported.get(file);
     if (!expected) return;
-    const stats = await this.fs.stat(file).catch(() => null);
+    // lstat: following a link would report its target as this file.
+    const stats = await this.fs.lstat(file).catch(() => null);
     // Removal stays with Chokidar's own unlink. A newer report while this
     // stat ran means the file's polling is live, and this stat may be older
     // than that report.
-    if (this.closed || !stats?.isFile() || this.reported.get(file) !== expected || sameState(expected, stats)) return;
+    if (this.closed || !stats || this.reported.get(file) !== expected) return;
+    if (stats.isSymbolicLink()) {
+      // Replaced by a link before the baseline: the watch policy excludes
+      // links, so the file is gone from the index's point of view.
+      this.reported.delete(file);
+      this.children.get(path.dirname(file))?.delete(file);
+      this.emit("all", "unlink", file);
+      return;
+    }
+    if (!stats.isFile() || sameState(expected, stats)) return;
     this.reported.set(file, stats);
     this.emit("all", "change", file, stats);
   }
