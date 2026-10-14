@@ -45,8 +45,10 @@ describe("contained files", () => {
     const { root, outside, file } = await layout();
     await rm(path.join(root, "docs"), { recursive: true });
     await symlink(outside, path.join(root, "docs"));
-    for (const attempt of [statContainedFile(root, file), openContainedFile(root, file), readContainedFile(root, file)]) {
-      expect(isUncontained(await rejection(attempt))).toBe(true);
+    // Each read starts only when it is awaited: started together, a later one
+    // would reject before its handler is attached.
+    for (const attempt of [() => statContainedFile(root, file), () => openContainedFile(root, file), () => readContainedFile(root, file)]) {
+      expect(isUncontained(await rejection(attempt()))).toBe(true);
     }
   });
 
