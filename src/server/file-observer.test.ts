@@ -388,6 +388,25 @@ test("polling hands Chokidar the children a directory gained before its baseline
   expect(added.sort()).toEqual([path.join(root, "missed-dir"), path.join(root, "missed.md")]);
 });
 
+test("polling reports a directory replaced by a symlink before its baseline as removed", async () => {
+  const root = await fixture();
+  const outside = await fixture();
+  await writeFile(path.join(outside, "secret.md"), "# Outside the root\n");
+  const directory = path.join(root, "docs");
+  await mkdir(directory);
+  await writeFile(path.join(directory, "a.md"), "# A\n");
+  const fileStats = await stat(path.join(directory, "a.md"));
+  await rm(directory, { recursive: true });
+  await symlink(outside, directory);
+  const { chokidarWatcher, events, added } = polledBaseline(20);
+  chokidarWatcher.emit("all", "addDir", directory);
+  chokidarWatcher.emit("all", "add", path.join(directory, "a.md"), fileStats);
+  await until(() => events.some(event => event.event === "unlinkDir"), "symlink replacement reported");
+  await new Promise(resolve => setTimeout(resolve, 60));
+  expect(added).toEqual([]);
+  expect(events.filter(event => event.event !== "add" && event.event !== "addDir")).toEqual([{ event: "unlinkDir", file: directory, stats: undefined }]);
+});
+
 test("a child handed to polling Chokidar is reported and then polled", async () => {
   const root = await fixture();
   const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true, isSingleFileRoot: false });

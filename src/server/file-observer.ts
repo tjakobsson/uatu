@@ -193,6 +193,16 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     await Promise.all(Array.from({ length: Math.min(16, paths.length) }, worker));
   }
 
+  // Drops a path and everything under it from the check's own state.
+  private forget(target: string): void {
+    const prefix = target + path.sep;
+    const under = (p: string) => p === target || p.startsWith(prefix);
+    this.children.get(path.dirname(target))?.delete(target);
+    for (const p of [...this.reported.keys()]) if (under(p)) this.reported.delete(p);
+    for (const p of [...this.children.keys()]) if (under(p)) this.children.delete(p);
+    for (const p of [...this.due.keys()]) if (under(p)) this.due.delete(p);
+  }
+
   private async checkFile(file: string): Promise<void> {
     const expected = this.reported.get(file);
     if (!expected) return;
@@ -217,10 +227,24 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
 
   private async checkDirectory(directory: string): Promise<void> {
     // A directory removed meanwhile, or one that cannot be read, is left to
-    // Chokidar.
+    // Chokidar. lstat first: readdir would follow a link and list its
+    // target's children as this directory's.
+    const before = await this.fs.lstat(directory).catch(() => null);
+    if (this.closed || !before || !this.children.has(directory)) return;
+    if (before.isSymbolicLink()) {
+      // Replaced by a link before the baseline: the watch policy excludes
+      // links, so the directory and everything under it are gone.
+      this.forget(directory);
+      this.emit("all", "unlinkDir", directory);
+      return;
+    }
+    if (!before.isDirectory()) return;
     const entries = await this.fs.readdir(directory, { withFileTypes: true }).catch(() => null);
+    // Swapped while it was read: what readdir listed may not be this
+    // directory's. Chokidar, or the next reported state, settles it.
+    const after = await this.fs.lstat(directory).catch(() => null);
     const known = this.children.get(directory);
-    if (this.closed || !entries || !known) return;
+    if (this.closed || !entries || !known || !after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) return;
     for (const entry of entries) {
       const child = path.join(directory, entry.name);
       if (known.has(child) || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory()) || this.ignored(child, entry)) continue;
