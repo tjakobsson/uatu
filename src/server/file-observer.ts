@@ -226,6 +226,8 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   // True when every directory between the root and the path is still a real
   // directory, not a link or something else.
   private async underRealDirectories(target: string): Promise<boolean> {
+    // The root's own ancestors are outside the watch and are not checked.
+    if (target === this.root) return true;
     for (let directory = path.dirname(target); directory !== this.root; directory = path.dirname(directory)) {
       const relative = path.relative(this.root, directory);
       if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return false;
@@ -273,9 +275,17 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
       this.emit("all", "unlink", file);
       return;
     }
+    // The file itself may have been replaced while its ancestors were
+    // checked; report only the regular file that is there now, with nothing
+    // awaited between this lstat and the report.
+    const confirmed = await this.fs.lstat(file).catch(() => null);
     if (this.closed || this.reported.get(file) !== expected) return;
-    this.reported.set(file, stats);
-    this.emit("all", "change", file, stats);
+    if (!confirmed?.isFile() || confirmed.ino !== stats.ino || confirmed.dev !== stats.dev) {
+      this.schedule(file);
+      return;
+    }
+    this.reported.set(file, confirmed);
+    this.emit("all", "change", file, confirmed);
   }
 
   private async checkDirectory(directory: string): Promise<void> {
@@ -308,13 +318,23 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
       this.schedule(directory);
       return;
     }
-    for (const entry of entries) {
-      const child = path.join(directory, entry.name);
-      if (known!.has(child) || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory()) || this.ignored(child, entry)) continue;
-      // Chokidar stats, watches and reports the child itself; one it has
-      // meanwhile found on its own is not reported twice.
-      this.watcher.add(child);
+    const missed = entries
+      .map(entry => ({ entry, child: path.join(directory, entry.name) }))
+      .filter(({ entry, child }) => !known!.has(child) && !entry.isSymbolicLink() && (entry.isFile() || entry.isDirectory()) && !this.ignored(child, entry));
+    if (missed.length === 0) return;
+    // lstat and readdir resolve through a directory above this one that
+    // became a link; then the listing is that link target's, not this
+    // directory's, and the directory is gone from under the root.
+    if (!await this.underRealDirectories(directory)) {
+      if (!current()) return;
+      this.forget(directory);
+      this.emit("all", "unlinkDir", directory);
+      return;
     }
+    if (!current()) return;
+    // Chokidar stats, watches and reports each child itself; one it has
+    // meanwhile found on its own is not reported twice.
+    for (const { child } of missed) this.watcher.add(child);
   }
 }
 

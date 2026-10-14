@@ -539,6 +539,52 @@ test("a directory swapped while it was read is checked again", async () => {
   expect(added).toEqual([path.join(directory, "missed.md")]);
 });
 
+test("a file replaced by a symlink while its ancestors are checked is never reported changed", async () => {
+  const root = await fixture();
+  const outside = await fixture();
+  await writeFile(path.join(outside, "a.md"), "# Outside the root\n");
+  const directory = path.join(root, "docs");
+  await mkdir(directory);
+  const file = path.join(directory, "a.md");
+  await writeFile(file, "# A\n");
+  const discovered = await stat(file);
+  await writeFile(file, "# A, edited after Chokidar's report\n");
+  let swapped = false;
+  const swappingLstat = (async (target: string) => {
+    // The ancestor check is where the swap lands.
+    if (target === directory && !swapped) { swapped = true; await rm(file); await symlink(path.join(outside, "a.md"), file); }
+    return lstat(target);
+  }) as typeof lstat;
+  const events: string[] = [];
+  const chokidarWatcher = Object.assign(new EventEmitter(), { close: async () => {}, add: () => {}, unwatch: () => {} });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, { root, settleMs: 10, fs: { lstat: swappingLstat, readdir } });
+  observers.push(check);
+  check.on("all", (event, changed) => events.push(`${event} ${path.basename(changed)}`));
+  chokidarWatcher.emit("all", "add", file, discovered);
+  // Not reported as the edit it was; checked again and found to be a link.
+  await until(() => events.includes("unlink a.md"), "replacement reported");
+  expect(events).toEqual(["add a.md", "unlink a.md"]);
+});
+
+test("a directory under an ancestor that became a symlink hands nothing to Chokidar", async () => {
+  const root = await fixture();
+  const outside = await fixture();
+  await mkdir(path.join(outside, "child"));
+  await writeFile(path.join(outside, "child", "secret.md"), "# Outside the root\n");
+  const parent = path.join(root, "parent");
+  const child = path.join(parent, "child");
+  await mkdir(child, { recursive: true });
+  await rm(parent, { recursive: true });
+  await symlink(outside, parent);
+  const { chokidarWatcher, events, added, unwatched } = polledBaseline(root, 20);
+  // Only the nested directory's check runs, so no ancestor check removes it first.
+  chokidarWatcher.emit("all", "addDir", child);
+  await until(() => events.some(event => event.event === "unlinkDir"), "nested directory reported gone");
+  expect(events.map(event => `${event.event} ${path.basename(event.file)}`)).toEqual(["addDir child", "unlinkDir child"]);
+  expect(added).toEqual([]);
+  expect(unwatched).toEqual([]);
+});
+
 test("a child handed to polling Chokidar is reported and then polled", async () => {
   const root = await fixture();
   const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true, isSingleFileRoot: false });
