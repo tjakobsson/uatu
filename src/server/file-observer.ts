@@ -100,7 +100,7 @@ const missing = (error: NodeJS.ErrnoException): boolean => error.code === "ENOEN
 const sameState = (a: Stats | undefined, b: Stats): boolean => a !== undefined && a.mtimeMs === b.mtimeMs
   && a.ctimeMs === b.ctimeMs && a.size === b.size && a.ino === b.ino;
 
-type PolledWatcher = EventEmitter & { add(path: string): unknown; close(): Promise<void> };
+type PolledWatcher = EventEmitter & { add(path: string): unknown; unwatch(path: string): unknown; close(): Promise<void> };
 
 export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   // The stats each file was last reported with.
@@ -222,7 +222,16 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
       this.emit("all", "unlink", file);
       return;
     }
-    if (!stats.isFile() || sameState(expected, stats)) return;
+    if (!stats.isFile()) {
+      // Became a directory before the baseline: the file is gone, and
+      // Chokidar watches and reports the directory once it is handed back.
+      this.reported.delete(file);
+      this.children.get(path.dirname(file))?.delete(file);
+      this.emit("all", "unlink", file);
+      if (stats.isDirectory() && !this.ignored(file, stats)) this.watcher.add(file);
+      return;
+    }
+    if (sameState(expected, stats)) return;
     this.reported.set(file, stats);
     this.emit("all", "change", file, stats);
   }
@@ -231,8 +240,12 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     // lstat first: readdir would follow a link and list its target's
     // children as this directory's. A failure other than the path being
     // gone is left to Chokidar.
+    // The children set is replaced when Chokidar reports the directory
+    // removed and added again; a result for the old one is stale.
+    const known = this.children.get(directory);
+    const current = () => !this.closed && known !== undefined && this.children.get(directory) === known;
     const before = await this.fs.lstat(directory).catch((error: NodeJS.ErrnoException) => missing(error) ? "missing" as const : null);
-    if (this.closed || !before || !this.children.has(directory)) return;
+    if (!before || !current()) return;
     if (before === "missing" || before.isSymbolicLink()) {
       // Removed, or replaced by a link, before the baseline: the directory
       // and everything under it are gone from the index's point of view.
@@ -240,16 +253,23 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
       this.emit("all", "unlinkDir", directory);
       return;
     }
-    if (!before.isDirectory()) return;
+    if (!before.isDirectory()) {
+      // Became a file before the baseline: the subtree is gone. Chokidar
+      // still holds the path as a directory, so it is dropped and handed
+      // back for Chokidar to stat and report as a file.
+      this.forget(directory);
+      this.emit("all", "unlinkDir", directory);
+      if (before.isFile() && !this.ignored(directory, before)) { this.watcher.unwatch(directory); this.watcher.add(directory); }
+      return;
+    }
     const entries = await this.fs.readdir(directory, { withFileTypes: true }).catch(() => null);
     // Swapped while it was read: what readdir listed may not be this
     // directory's. Chokidar, or the next reported state, settles it.
     const after = await this.fs.lstat(directory).catch(() => null);
-    const known = this.children.get(directory);
-    if (this.closed || !entries || !known || !after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) return;
+    if (!entries || !current() || !after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) return;
     for (const entry of entries) {
       const child = path.join(directory, entry.name);
-      if (known.has(child) || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory()) || this.ignored(child, entry)) continue;
+      if (known!.has(child) || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory()) || this.ignored(child, entry)) continue;
       // Chokidar stats, watches and reports the child itself; one it has
       // meanwhile found on its own is not reported twice.
       this.watcher.add(child);
