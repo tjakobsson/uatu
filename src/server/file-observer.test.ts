@@ -350,7 +350,7 @@ test("polling reports a file replaced by a symlink before its baseline as remove
   expect(events.filter(event => event.event !== "add")).toEqual([{ event: "unlink", file, stats: undefined }]);
 });
 
-test("polling reports nothing extra when the file is unchanged or removed", async () => {
+test("polling reports a file removed before its baseline, and nothing for an unchanged one", async () => {
   const root = await fixture();
   const kept = path.join(root, "kept.md");
   const removed = path.join(root, "removed.md");
@@ -369,6 +369,8 @@ test("polling reports nothing extra when the file is unchanged or removed", asyn
   chokidarWatcher.emit("all", "add", marker, discovered);
   await until(() => events.some(event => event.event === "change" && event.file === marker), "marker checked");
   expect(events.filter(event => event.event === "change").map(event => event.file)).toEqual([marker]);
+  // Chokidar's baseline never saw the file, so it cannot report the removal.
+  expect(events.filter(event => event.event === "unlink").map(event => event.file)).toEqual([removed]);
 });
 
 test("polling hands Chokidar the children a directory gained before its baseline", async () => {
@@ -378,14 +380,15 @@ test("polling hands Chokidar the children a directory gained before its baseline
   await mkdir(path.join(root, "missed-dir"));
   await writeFile(path.join(root, "denied.md"), "# Denied\n");
   await symlink(path.join(root, "known.md"), path.join(root, "link.md"));
-  const { chokidarWatcher, added } = polledBaseline(20, file => path.basename(file) === "denied.md");
-  // A directory removed before its check is skipped quietly.
+  const { chokidarWatcher, added, events } = polledBaseline(20, file => path.basename(file) === "denied.md");
+  // A directory removed before its check is reported removed, not read.
   chokidarWatcher.emit("all", "addDir", path.join(root, "gone"));
   // Chokidar reported the root and one child; the rest arrived unseen.
   chokidarWatcher.emit("all", "addDir", root);
   chokidarWatcher.emit("all", "add", path.join(root, "known.md"), await stat(path.join(root, "known.md")));
   await until(() => added.length >= 2, "missed children handed to Chokidar");
   expect(added.sort()).toEqual([path.join(root, "missed-dir"), path.join(root, "missed.md")]);
+  expect(events.filter(event => event.event === "unlinkDir").map(event => event.file)).toEqual([path.join(root, "gone")]);
 });
 
 test("polling reports a directory replaced by a symlink before its baseline as removed", async () => {

@@ -95,6 +95,8 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
 // is handed to Chokidar to watch.
 export const POLL_BASELINE_SETTLE_MS = 1000;
 
+const missing = (error: NodeJS.ErrnoException): boolean => error.code === "ENOENT" || error.code === "ENOTDIR";
+
 const sameState = (a: Stats | undefined, b: Stats): boolean => a !== undefined && a.mtimeMs === b.mtimeMs
   && a.ctimeMs === b.ctimeMs && a.size === b.size && a.ino === b.ino;
 
@@ -207,14 +209,14 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     const expected = this.reported.get(file);
     if (!expected) return;
     // lstat: following a link would report its target as this file.
-    const stats = await this.fs.lstat(file).catch(() => null);
-    // Removal stays with Chokidar's own unlink. A newer report while this
-    // stat ran means the file's polling is live, and this stat may be older
-    // than that report.
+    const stats = await this.fs.lstat(file).catch((error: NodeJS.ErrnoException) => missing(error) ? "missing" as const : null);
+    // A newer report while this stat ran means the file's polling is live,
+    // and this stat may be older than that report. A failure other than the
+    // path being gone is left to Chokidar.
     if (this.closed || !stats || this.reported.get(file) !== expected) return;
-    if (stats.isSymbolicLink()) {
-      // Replaced by a link before the baseline: the watch policy excludes
-      // links, so the file is gone from the index's point of view.
+    // Removed, or replaced by a link the watch policy excludes, before the
+    // baseline: Chokidar has no earlier state to report the removal from.
+    if (stats === "missing" || stats.isSymbolicLink()) {
       this.reported.delete(file);
       this.children.get(path.dirname(file))?.delete(file);
       this.emit("all", "unlink", file);
@@ -226,14 +228,14 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   }
 
   private async checkDirectory(directory: string): Promise<void> {
-    // A directory removed meanwhile, or one that cannot be read, is left to
-    // Chokidar. lstat first: readdir would follow a link and list its
-    // target's children as this directory's.
-    const before = await this.fs.lstat(directory).catch(() => null);
+    // lstat first: readdir would follow a link and list its target's
+    // children as this directory's. A failure other than the path being
+    // gone is left to Chokidar.
+    const before = await this.fs.lstat(directory).catch((error: NodeJS.ErrnoException) => missing(error) ? "missing" as const : null);
     if (this.closed || !before || !this.children.has(directory)) return;
-    if (before.isSymbolicLink()) {
-      // Replaced by a link before the baseline: the watch policy excludes
-      // links, so the directory and everything under it are gone.
+    if (before === "missing" || before.isSymbolicLink()) {
+      // Removed, or replaced by a link, before the baseline: the directory
+      // and everything under it are gone from the index's point of view.
       this.forget(directory);
       this.emit("all", "unlinkDir", directory);
       return;
