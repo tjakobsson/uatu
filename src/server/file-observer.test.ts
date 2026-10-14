@@ -3,8 +3,9 @@ import { mkdtemp, mkdir, writeFile, rename, rm, symlink, utimes, stat } from "no
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import chokidar from "chokidar";
 import type { Stats, FSWatcher, watch } from "node:fs";
-import { observeFiles, type FileObserver } from "./file-observer";
+import { observeFiles, PolledBaselineCheck, type FileObserver } from "./file-observer";
 import { createWatchPolicy } from "./watch-policy";
 import { loadIgnoreMatcher } from "../ignore/engine";
 import { createWatchSession } from "./watch-session";
@@ -272,3 +273,91 @@ for (const usePolling of [false, true]) {
     }
   }, 15000);
 }
+
+// A stand-in for Chokidar's polling watcher whose stat watcher took its
+// baseline after the write, so it never reports the change itself.
+function polledBaseline(settleMs: number, ignored: (file: string) => boolean = () => false) {
+  const added: string[] = [];
+  const chokidarWatcher = Object.assign(new EventEmitter(), { close: async () => {}, add: (file: string) => { added.push(file); } });
+  const check = new PolledBaselineCheck(chokidarWatcher, ignored, settleMs);
+  observers.push(check);
+  const events: { event: string; file: string; stats?: Stats }[] = [];
+  check.on("all", (event, file, stats) => events.push({ event, file, stats }));
+  return { chokidarWatcher, events, added };
+}
+
+test("polling reports an edit written before the stat watcher's baseline", async () => {
+  const root = await fixture();
+  const file = path.join(root, ".uatu.json");
+  await writeFile(file, "{}");
+  const discovered = await stat(file);
+  await writeFile(file, JSON.stringify({ ignore: { exclude: ["package-lock.json"] } }));
+  const { chokidarWatcher, events } = polledBaseline(20);
+  // Chokidar reports the file as discovered; the edit after it goes unseen.
+  chokidarWatcher.emit("all", "add", file, discovered);
+  await until(() => events.some(event => event.event === "change"), "missed edit reported");
+  const change = events.find(event => event.event === "change")!;
+  expect(change.file).toBe(file);
+  expect(change.stats!.size).toBe((await stat(file)).size);
+});
+
+test("polling reports nothing extra when the file is unchanged or removed", async () => {
+  const root = await fixture();
+  const kept = path.join(root, "kept.md");
+  const removed = path.join(root, "removed.md");
+  await writeFile(kept, "# Kept\n");
+  await writeFile(removed, "# Removed\n");
+  const removedStats = await stat(removed);
+  await rm(removed);
+  const { chokidarWatcher, events } = polledBaseline(20);
+  chokidarWatcher.emit("all", "add", kept, await stat(kept));
+  chokidarWatcher.emit("all", "add", removed, removedStats);
+  // Checked after the others, so its report shows they have run.
+  const marker = path.join(root, "marker.md");
+  await writeFile(marker, "# Marker\n");
+  const discovered = await stat(marker);
+  await writeFile(marker, "# Marker, edited\n");
+  chokidarWatcher.emit("all", "add", marker, discovered);
+  await until(() => events.some(event => event.event === "change" && event.file === marker), "marker checked");
+  expect(events.filter(event => event.event === "change").map(event => event.file)).toEqual([marker]);
+});
+
+test("polling hands Chokidar the children a directory gained before its baseline", async () => {
+  const root = await fixture();
+  await writeFile(path.join(root, "known.md"), "# Known\n");
+  await writeFile(path.join(root, "missed.md"), "# Missed\n");
+  await mkdir(path.join(root, "missed-dir"));
+  await writeFile(path.join(root, "denied.md"), "# Denied\n");
+  await symlink(path.join(root, "known.md"), path.join(root, "link.md"));
+  const { chokidarWatcher, added } = polledBaseline(20, file => path.basename(file) === "denied.md");
+  // A directory removed before its check is skipped quietly.
+  chokidarWatcher.emit("all", "addDir", path.join(root, "gone"));
+  // Chokidar reported the root and one child; the rest arrived unseen.
+  chokidarWatcher.emit("all", "addDir", root);
+  chokidarWatcher.emit("all", "add", path.join(root, "known.md"), await stat(path.join(root, "known.md")));
+  await until(() => added.length >= 2, "missed children handed to Chokidar");
+  expect(added.sort()).toEqual([path.join(root, "missed-dir"), path.join(root, "missed.md")]);
+});
+
+test("a child handed to polling Chokidar is reported and then polled", async () => {
+  const root = await fixture();
+  const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true, isSingleFileRoot: false });
+  const policy = createWatchPolicy({ kind: "dir", absolutePath: root }, matcher);
+  // An interval this long means Chokidar's own polling reports nothing here.
+  const chokidarWatcher = chokidar.watch(root, { ignored: policy.ignored, usePolling: true, interval: 60_000,
+    ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false });
+  const check = new PolledBaselineCheck(chokidarWatcher, policy.ignored, 20);
+  observers.push(check);
+  const events: { event: string; file: string }[] = [];
+  check.on("all", (event, file) => events.push({ event, file }));
+  await new Promise<void>(resolve => check.once("ready", resolve));
+  const folder = path.join(root, "generated");
+  const file = path.join(folder, "a.md");
+  await mkdir(folder);
+  await writeFile(file, "# Generated\n");
+  // Chokidar reporting the root again asks for its children to be checked.
+  chokidarWatcher.emit("all", "addDir", root);
+  await until(() => events.some(event => event.event === "add" && event.file === file), "child reported through Chokidar");
+  expect(events.filter(event => event.event === "addDir" && event.file === folder)).toHaveLength(1);
+  expect(chokidarWatcher.getWatched()[folder]).toEqual(["a.md"]);
+});

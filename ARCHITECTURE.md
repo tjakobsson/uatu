@@ -502,7 +502,13 @@ that file. The observer bounds metadata work to 16 concurrent paths, excludes
 denied directories before descent, and does not follow symlink entries.
 Unsupported recursive watching and explicit polling use Chokidar's normalized
 initial events instead. Both backends supply stats to the index and normalize
-atomic replacement with a short removal delay.
+atomic replacement with a short removal delay. Polling takes each file's and
+directory's baseline stat asynchronously, after the watch is registered, so
+an edit or a new child that lands first would never be reported. The polling
+observer therefore checks every reported file state and every reported
+directory once more, a second later: a missed edit is reported then, and a
+missed child is handed to Chokidar (`add`), which watches and reports it. Each
+check runs once per reported state, never on a timer.
 
 A native rename notification may name only the temporary source. The observer
 coalesces those notifications into a shallow metadata check of the containing

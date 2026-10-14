@@ -78,10 +78,136 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
       if (!["ERR_FEATURE_UNAVAILABLE_ON_PLATFORM", "ERR_INVALID_ARG_VALUE", "ENOSYS", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
     }
   }
-  return chokidar.watch(entry.absolutePath, {
+  const watcher = chokidar.watch(entry.absolutePath, {
     ignored: options.ignored, usePolling: polling, interval: 100,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
   });
+  return polling ? new PolledBaselineCheck(watcher, options.ignored) : watcher;
+}
+
+// Chokidar polls each file and directory with fs.watchFile, which (in Bun, as
+// in Node's libuv) takes its baseline stat asynchronously after the watch is
+// registered. A change that lands before that stat becomes the baseline and is
+// never reported: an edit to a file, or a file created in a directory that
+// was just found. The index has no periodic rescan to repair either. So each
+// state reported for a file, and each directory reported, is checked once
+// more after this delay; a missed edit is reported then, and a missed child
+// is handed to Chokidar to watch.
+export const POLL_BASELINE_SETTLE_MS = 1000;
+
+const sameState = (a: Stats | undefined, b: Stats): boolean => a !== undefined && a.mtimeMs === b.mtimeMs
+  && a.ctimeMs === b.ctimeMs && a.size === b.size && a.ino === b.ino;
+
+type PolledWatcher = EventEmitter & { add(path: string): unknown; close(): Promise<void> };
+
+export class PolledBaselineCheck extends EventEmitter implements FileObserver {
+  // The stats each file was last reported with.
+  private reported = new Map<string, Stats>();
+  // The children reported for each reported directory.
+  private children = new Map<string, Set<string>>();
+  // Paths awaiting their check, in due order.
+  private due = new Map<string, number>();
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private closed = false;
+
+  constructor(private watcher: PolledWatcher, private ignored: Options["ignored"], private settleMs = POLL_BASELINE_SETTLE_MS) {
+    super();
+    watcher.on("all", (event: string, file: string, stats?: Stats) => {
+      // Chokidar's own reports pass through unchanged, even one that repeats
+      // a state: the session reads a policy file's change as an edit it may
+      // not have loaded yet.
+      if (event === "add" || event === "change") {
+        this.children.get(path.dirname(file))?.add(file);
+        if (stats) { this.reported.set(file, stats); this.schedule(file); }
+      } else if (event === "addDir") {
+        this.children.get(path.dirname(file))?.add(file);
+        if (!this.children.has(file)) this.children.set(file, new Set());
+        this.schedule(file);
+      } else if (event === "unlink" || event === "unlinkDir") {
+        this.children.get(path.dirname(file))?.delete(file);
+        this.children.delete(file);
+        this.reported.delete(file);
+        this.due.delete(file);
+      }
+      this.emit("all", event, file, stats);
+    });
+    watcher.on("raw", (...args: unknown[]) => this.emit("raw", ...args));
+    watcher.on("ready", () => this.emit("ready"));
+    watcher.on("error", (error: unknown) => this.emit("error", error));
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.due.clear();
+    this.reported.clear();
+    this.children.clear();
+    await this.watcher.close();
+    this.removeAllListeners();
+  }
+
+  private schedule(file: string): void {
+    this.due.delete(file);
+    this.due.set(file, performance.now() + this.settleMs);
+    this.arm();
+  }
+
+  private arm(): void {
+    if (this.closed || this.timer) return;
+    const next = this.due.values().next();
+    if (next.done) return;
+    this.timer = setTimeout(() => { this.timer = null; void this.check(); }, Math.max(0, next.value - performance.now()));
+    this.timer.unref?.();
+  }
+
+  private async check(): Promise<void> {
+    const now = performance.now();
+    const paths: string[] = [];
+    for (const [file, at] of this.due) {
+      if (at > now) break;
+      paths.push(file);
+      this.due.delete(file);
+    }
+    // Bounded like the native observer's metadata work.
+    let next = 0;
+    const worker = async () => {
+      while (next < paths.length && !this.closed) {
+        const file = paths[next++]!;
+        await (this.children.has(file) ? this.checkDirectory(file) : this.checkFile(file));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(16, paths.length) }, worker));
+    this.arm();
+  }
+
+  private async checkFile(file: string): Promise<void> {
+    const expected = this.reported.get(file);
+    if (!expected) return;
+    const stats = await stat(file).catch(() => null);
+    // Removal stays with Chokidar's own unlink. A newer report while this
+    // stat ran means the file's polling is live, and this stat may be older
+    // than that report.
+    if (this.closed || !stats?.isFile() || this.reported.get(file) !== expected || sameState(expected, stats)) return;
+    this.reported.set(file, stats);
+    this.emit("all", "change", file, stats);
+  }
+
+  private async checkDirectory(directory: string): Promise<void> {
+    // A directory removed meanwhile, or one that cannot be read, is left to
+    // Chokidar.
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => null);
+    const known = this.children.get(directory);
+    if (this.closed || !entries || !known) return;
+    for (const entry of entries) {
+      const child = path.join(directory, entry.name);
+      if (known.has(child) || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory()) || this.ignored(child, entry)) continue;
+      // Chokidar stats, watches and reports the child itself; one it has
+      // meanwhile found on its own is not reported twice.
+      this.watcher.add(child);
+    }
+  }
 }
 
 class DirectoryObserver extends EventEmitter implements FileObserver {
