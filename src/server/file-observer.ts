@@ -82,7 +82,9 @@ export function observeFiles(entry: WatchEntry, options: Options): FileObserver 
     ignored: options.ignored, usePolling: polling, interval: 100,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false,
   });
-  return polling ? new PolledBaselineCheck(watcher, options.ignored) : watcher;
+  return polling
+    ? new PolledBaselineCheck(watcher, options.ignored, { root: entry.kind === "dir" ? entry.absolutePath : entry.parentDir })
+    : watcher;
 }
 
 // Chokidar polls each file and directory with fs.watchFile, which (in Bun, as
@@ -115,13 +117,19 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   private checking = false;
   private closed = false;
 
+  private root: string;
+  private settleMs: number;
+  private fs: { lstat: typeof lstat; readdir: typeof readdir };
+
   constructor(
     private watcher: PolledWatcher,
     private ignored: Options["ignored"],
-    private settleMs = POLL_BASELINE_SETTLE_MS,
-    private fs: { lstat: typeof lstat; readdir: typeof readdir } = { lstat, readdir },
+    options: { root: string; settleMs?: number; fs?: { lstat: typeof lstat; readdir: typeof readdir } },
   ) {
     super();
+    this.root = options.root;
+    this.settleMs = options.settleMs ?? POLL_BASELINE_SETTLE_MS;
+    this.fs = options.fs ?? { lstat, readdir };
     watcher.on("all", (event: string, file: string, stats?: Stats) => {
       // Chokidar's own reports pass through unchanged, even one that repeats
       // a state: the session reads a policy file's change as an edit it may
@@ -195,6 +203,30 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     await Promise.all(Array.from({ length: Math.min(16, paths.length) }, worker));
   }
 
+  // Chokidar still polls a path whose type changed unseen, as what it was:
+  // its file poller would follow a link and report the target as this path,
+  // and its directory poller would list a link target's children. Unwatching
+  // closes those pollers; adding the path back lets Chokidar lstat it afresh
+  // under the watch policy, so a link stays unwatched, a new file or directory
+  // is watched and reported, and a later replacement is noticed through the
+  // parent directory as usual.
+  private handBack(target: string): void {
+    this.watcher.unwatch(target);
+    this.watcher.add(target);
+  }
+
+  // True when every directory between the root and the path is still a real
+  // directory, not a link or something else.
+  private async underRealDirectories(target: string): Promise<boolean> {
+    for (let directory = path.dirname(target); directory !== this.root; directory = path.dirname(directory)) {
+      const relative = path.relative(this.root, directory);
+      if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+      const stats = await this.fs.lstat(directory).catch(() => null);
+      if (!stats?.isDirectory()) return false;
+    }
+    return true;
+  }
+
   // Drops a path and everything under it from the check's own state.
   private forget(target: string): void {
     const prefix = target + path.sep;
@@ -214,24 +246,26 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     // and this stat may be older than that report. A failure other than the
     // path being gone is left to Chokidar.
     if (this.closed || !stats || this.reported.get(file) !== expected) return;
-    // Removed, or replaced by a link the watch policy excludes, before the
+    // Removed, replaced by a link, or turned into a directory before the
     // baseline: Chokidar has no earlier state to report the removal from.
-    if (stats === "missing" || stats.isSymbolicLink()) {
+    if (stats === "missing" || !stats.isFile()) {
       this.reported.delete(file);
       this.children.get(path.dirname(file))?.delete(file);
       this.emit("all", "unlink", file);
-      return;
-    }
-    if (!stats.isFile()) {
-      // Became a directory before the baseline: the file is gone, and
-      // Chokidar watches and reports the directory once it is handed back.
-      this.reported.delete(file);
-      this.children.get(path.dirname(file))?.delete(file);
-      this.emit("all", "unlink", file);
-      if (stats.isDirectory() && !this.ignored(file, stats)) this.watcher.add(file);
+      if (stats !== "missing") this.handBack(file);
       return;
     }
     if (sameState(expected, stats)) return;
+    // lstat guards only the last component: a directory above the file that
+    // became a link would make this the link target's file.
+    if (!await this.underRealDirectories(file)) {
+      if (this.closed || this.reported.get(file) !== expected) return;
+      this.reported.delete(file);
+      this.children.get(path.dirname(file))?.delete(file);
+      this.emit("all", "unlink", file);
+      return;
+    }
+    if (this.closed || this.reported.get(file) !== expected) return;
     this.reported.set(file, stats);
     this.emit("all", "change", file, stats);
   }
@@ -246,20 +280,13 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     const current = () => !this.closed && known !== undefined && this.children.get(directory) === known;
     const before = await this.fs.lstat(directory).catch((error: NodeJS.ErrnoException) => missing(error) ? "missing" as const : null);
     if (!before || !current()) return;
-    if (before === "missing" || before.isSymbolicLink()) {
-      // Removed, or replaced by a link, before the baseline: the directory
-      // and everything under it are gone from the index's point of view.
+    if (before === "missing" || !before.isDirectory()) {
+      // Removed, replaced by a link, or turned into a file before the
+      // baseline: the directory and everything under it are gone from the
+      // index's point of view.
       this.forget(directory);
       this.emit("all", "unlinkDir", directory);
-      return;
-    }
-    if (!before.isDirectory()) {
-      // Became a file before the baseline: the subtree is gone. Chokidar
-      // still holds the path as a directory, so it is dropped and handed
-      // back for Chokidar to stat and report as a file.
-      this.forget(directory);
-      this.emit("all", "unlinkDir", directory);
-      if (before.isFile() && !this.ignored(directory, before)) { this.watcher.unwatch(directory); this.watcher.add(directory); }
+      if (before !== "missing") this.handBack(directory);
       return;
     }
     const entries = await this.fs.readdir(directory, { withFileTypes: true }).catch(() => null);

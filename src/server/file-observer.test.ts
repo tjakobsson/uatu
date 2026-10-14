@@ -276,13 +276,13 @@ for (const usePolling of [false, true]) {
 
 // A stand-in for Chokidar's polling watcher whose stat watcher took its
 // baseline after the write, so it never reports the change itself.
-function polledBaseline(settleMs: number, ignored: (file: string) => boolean = () => false) {
+function polledBaseline(root: string, settleMs: number, ignored: (file: string) => boolean = () => false) {
   const added: string[] = [];
   const unwatched: string[] = [];
   const chokidarWatcher = Object.assign(new EventEmitter(), {
     close: async () => {}, add: (file: string) => { added.push(file); }, unwatch: (file: string) => { unwatched.push(file); },
   });
-  const check = new PolledBaselineCheck(chokidarWatcher, ignored, settleMs);
+  const check = new PolledBaselineCheck(chokidarWatcher, ignored, { root, settleMs });
   observers.push(check);
   const events: { event: string; file: string; stats?: Stats }[] = [];
   check.on("all", (event, file, stats) => events.push({ event, file, stats }));
@@ -295,7 +295,7 @@ test("polling reports an edit written before the stat watcher's baseline", async
   await writeFile(file, "{}");
   const discovered = await stat(file);
   await writeFile(file, JSON.stringify({ ignore: { exclude: ["package-lock.json"] } }));
-  const { chokidarWatcher, events } = polledBaseline(20);
+  const { chokidarWatcher, events } = polledBaseline(root, 20);
   // Chokidar reports the file as discovered; the edit after it goes unseen.
   chokidarWatcher.emit("all", "add", file, discovered);
   await until(() => events.some(event => event.event === "change"), "missed edit reported");
@@ -320,7 +320,7 @@ test("polling checks stay within one bounded batch while metadata reads are slow
     return stats;
   }) as unknown as typeof stat;
   const chokidarWatcher = Object.assign(new EventEmitter(), { close: async () => {}, add: () => {}, unwatch: () => {} });
-  const check = new PolledBaselineCheck(chokidarWatcher, () => false, 10, { lstat: slowStat as unknown as typeof lstat, readdir });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, { root, settleMs: 10, fs: { lstat: slowStat as unknown as typeof lstat, readdir } });
   observers.push(check);
   for (let i = 0; i < 40; i++) chokidarWatcher.emit("all", "add", path.join(root, `first-${i}.md`), stats);
   await until(() => inFlight === 16, "first batch saturated");
@@ -347,10 +347,13 @@ test("polling reports a file replaced by a symlink before its baseline as remove
   const discovered = await stat(file);
   await rm(file);
   await symlink(target, file);
-  const { chokidarWatcher, events } = polledBaseline(20);
+  const { chokidarWatcher, events, added, unwatched } = polledBaseline(root, 20);
   chokidarWatcher.emit("all", "add", file, discovered);
   await until(() => events.some(event => event.event === "unlink"), "symlink replacement reported");
   expect(events.filter(event => event.event !== "add")).toEqual([{ event: "unlink", file, stats: undefined }]);
+  // Chokidar's poller for the file would follow the link; it is replaced.
+  expect(unwatched).toEqual([file]);
+  expect(added).toEqual([file]);
 });
 
 test("polling reports a file removed before its baseline, and nothing for an unchanged one", async () => {
@@ -361,7 +364,7 @@ test("polling reports a file removed before its baseline, and nothing for an unc
   await writeFile(removed, "# Removed\n");
   const removedStats = await stat(removed);
   await rm(removed);
-  const { chokidarWatcher, events } = polledBaseline(20);
+  const { chokidarWatcher, events } = polledBaseline(root, 20);
   chokidarWatcher.emit("all", "add", kept, await stat(kept));
   chokidarWatcher.emit("all", "add", removed, removedStats);
   // Checked after the others, so its report shows they have run.
@@ -383,7 +386,7 @@ test("polling hands Chokidar the children a directory gained before its baseline
   await mkdir(path.join(root, "missed-dir"));
   await writeFile(path.join(root, "denied.md"), "# Denied\n");
   await symlink(path.join(root, "known.md"), path.join(root, "link.md"));
-  const { chokidarWatcher, added, events } = polledBaseline(20, file => path.basename(file) === "denied.md");
+  const { chokidarWatcher, added, events } = polledBaseline(root, 20, file => path.basename(file) === "denied.md");
   // A directory removed before its check is reported removed, not read.
   chokidarWatcher.emit("all", "addDir", path.join(root, "gone"));
   // Chokidar reported the root and one child; the rest arrived unseen.
@@ -404,13 +407,38 @@ test("polling reports a directory replaced by a symlink before its baseline as r
   const fileStats = await stat(path.join(directory, "a.md"));
   await rm(directory, { recursive: true });
   await symlink(outside, directory);
-  const { chokidarWatcher, events, added } = polledBaseline(20);
+  const { chokidarWatcher, events, added, unwatched } = polledBaseline(root, 20);
   chokidarWatcher.emit("all", "addDir", directory);
   chokidarWatcher.emit("all", "add", path.join(directory, "a.md"), fileStats);
-  await until(() => events.some(event => event.event === "unlinkDir"), "symlink replacement reported");
-  await new Promise(resolve => setTimeout(resolve, 60));
-  expect(added).toEqual([]);
-  expect(events.filter(event => event.event !== "add" && event.event !== "addDir")).toEqual([{ event: "unlinkDir", file: directory, stats: undefined }]);
+  await until(() => events.some(event => event.event === "unlinkDir") && added.length > 0, "symlink replacement reported and handed back");
+  // Handed back as itself (Chokidar's policy leaves a link unwatched); none
+  // of the target's children are.
+  expect(unwatched).toEqual([directory]);
+  expect(added).toEqual([directory]);
+  // The file's own check, if it ran first in the same batch, may also report
+  // it removed (it no longer resolves under the root); nothing else is emitted.
+  const removals = events.filter(event => event.event !== "add" && event.event !== "addDir").map(event => `${event.event} ${path.basename(event.file)}`);
+  expect(removals).toContain("unlinkDir docs");
+  expect(removals.filter(removal => removal !== "unlinkDir docs" && removal !== "unlink a.md")).toEqual([]);
+});
+
+test("polling never reports a file through a parent directory that became a symlink", async () => {
+  const root = await fixture();
+  const outside = await fixture();
+  // The link target holds a file of the same name with a different state.
+  await writeFile(path.join(outside, "a.md"), "# Outside the root, and longer than the original\n");
+  const directory = path.join(root, "docs");
+  await mkdir(directory);
+  const file = path.join(directory, "a.md");
+  await writeFile(file, "# A\n");
+  const fileStats = await stat(file);
+  await rm(directory, { recursive: true });
+  await symlink(outside, directory);
+  const { chokidarWatcher, events } = polledBaseline(root, 20);
+  // Only the file's check runs, so nothing else removes it first.
+  chokidarWatcher.emit("all", "add", file, fileStats);
+  await until(() => events.some(event => event.event !== "add"), "file checked");
+  expect(events.filter(event => event.event !== "add")).toEqual([{ event: "unlink", file, stats: undefined }]);
 });
 
 test("polling reports a path whose type changed before its baseline as removed and hands it back", async () => {
@@ -427,12 +455,11 @@ test("polling reports a path whose type changed before its baseline as removed a
   const innerStats = await stat(path.join(becameFile, "inner.md"));
   await rm(becameFile, { recursive: true });
   await writeFile(becameFile, "# Now a file\n");
-  const { chokidarWatcher, events, added, unwatched } = polledBaseline(20);
+  const { chokidarWatcher, events, added, unwatched } = polledBaseline(root, 20);
   chokidarWatcher.emit("all", "add", becameDirectory, fileStats);
   chokidarWatcher.emit("all", "addDir", becameFile);
   chokidarWatcher.emit("all", "add", path.join(becameFile, "inner.md"), innerStats);
-  await until(() => events.some(event => event.event === "unlink") && events.some(event => event.event === "unlinkDir"), "both type changes reported");
-  await new Promise(resolve => setTimeout(resolve, 60));
+  await until(() => added.length === 2 && unwatched.length === 2, "both type changes reported and handed back");
   const removals = events.filter(event => event.event === "unlink" || event.event === "unlinkDir").map(event => `${event.event} ${path.basename(event.file)}`);
   expect(removals).toContain("unlink was-file");
   expect(removals).toContain("unlinkDir was-dir");
@@ -441,8 +468,9 @@ test("polling reports a path whose type changed before its baseline as removed a
   expect(removals.filter(removal => removal !== "unlink was-file" && removal !== "unlinkDir was-dir")).toEqual(
     removals.includes("unlink inner.md") ? ["unlink inner.md"] : [],
   );
+  // Both are unwatched first, so Chokidar re-registers each as its new type.
   expect(added.sort()).toEqual([becameFile, becameDirectory].sort());
-  expect(unwatched).toEqual([becameFile]);
+  expect(unwatched.sort()).toEqual([becameFile, becameDirectory].sort());
 });
 
 test("a directory check overtaken by Chokidar removing and re-adding the directory is discarded", async () => {
@@ -456,7 +484,7 @@ test("a directory check overtaken by Chokidar removing and re-adding the directo
     return lstat(target);
   }) as typeof lstat;
   const chokidarWatcher = Object.assign(new EventEmitter(), { close: async () => {}, add: () => {}, unwatch: () => {} });
-  const check = new PolledBaselineCheck(chokidarWatcher, () => false, 10, { lstat: heldLstat, readdir });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, { root, settleMs: 10, fs: { lstat: heldLstat, readdir } });
   observers.push(check);
   const events: string[] = [];
   check.on("all", (event, file) => events.push(`${event} ${path.basename(file)}`));
@@ -467,7 +495,9 @@ test("a directory check overtaken by Chokidar removing and re-adding the directo
   chokidarWatcher.emit("all", "unlinkDir", directory);
   chokidarWatcher.emit("all", "addDir", directory);
   releaseLstat();
-  await new Promise(resolve => setTimeout(resolve, 80));
+  // The recreated directory's own check (an lstat before and after its read)
+  // runs after the stale one has settled.
+  await until(() => lstatCalls >= 3, "recreated directory checked");
   // The stale "missing" result emits nothing; the recreated directory's own check finds it present.
   expect(events).toEqual(["addDir docs", "unlinkDir docs", "addDir docs"]);
 });
@@ -479,7 +509,7 @@ test("a child handed to polling Chokidar is reported and then polled", async () 
   // An interval this long means Chokidar's own polling reports nothing here.
   const chokidarWatcher = chokidar.watch(root, { ignored: policy.ignored, usePolling: true, interval: 60_000,
     ignoreInitial: false, alwaysStat: true, followSymlinks: false, atomic: true, awaitWriteFinish: false });
-  const check = new PolledBaselineCheck(chokidarWatcher, policy.ignored, 20);
+  const check = new PolledBaselineCheck(chokidarWatcher, policy.ignored, { root, settleMs: 20 });
   observers.push(check);
   const events: { event: string; file: string }[] = [];
   check.on("all", (event, file) => events.push({ event, file }));
