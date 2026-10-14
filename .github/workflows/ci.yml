@@ -404,13 +404,5 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Active changes are held to every rule, warnings included. Main specs
-      # fail only on errors: openspec 1.14.1 made "requirement text over 500
-      # characters" a warning, and the specs written before it would fail
-      # strict mode on wording alone. New requirements meet the limit when
-      # their change is validated here.
-      - name: Validate OpenSpec changes (strict)
-        run: bunx @fission-ai/openspec validate --changes --strict
-
-      - name: Validate OpenSpec specs
-        run: bunx @fission-ai/openspec validate --specs
+      - name: Validate OpenSpec specs and changes
+        run: bunx @fission-ai/openspec validate --all --strict
