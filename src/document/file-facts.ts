@@ -7,10 +7,11 @@
 // Any git error (non-git root, timeout, missing binary) degrades to the
 // filesystem-only shape; a stat failure degrades to no facts at all.
 
-import { promises as fs } from "node:fs";
+import type { Stats } from "node:fs";
 
 import { escapeHtml } from "../shared/html";
 import type { FileFacts, FileFactsGit } from "../shared/types";
+import { statContainedFile } from "./contained-file";
 import { safeGit } from "./git-base-ref";
 
 export type CollectFileFactsOptions = {
@@ -27,6 +28,10 @@ export type CollectFileFactsOptions = {
   // or a diff-first load of a large file would bypass the diff endpoint's
   // blob-size caps.
   source?: string;
+  // Metadata of the handle the source was read through. Without it, the file
+  // is statted below its root; a path that crosses a symbolic link yields no
+  // facts, like a missing file.
+  stats?: Stats;
   includeGit?: boolean;
 };
 
@@ -34,7 +39,7 @@ export async function collectFileFacts(
   options: CollectFileFactsOptions,
 ): Promise<FileFacts | undefined> {
   const [stat, git] = await Promise.all([
-    fs.stat(options.absolutePath).catch(() => null),
+    options.stats ?? statContainedFile(options.rootPath, options.absolutePath).catch(() => null),
     options.includeGit === false ? undefined : collectGitFacts(options.rootPath, options.absolutePath),
   ]);
 

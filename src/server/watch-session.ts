@@ -1,8 +1,7 @@
 // Session coordination. File events own the index; Git runs independently.
 import type chokidar from "chokidar";
-import { lstat, realpath } from "node:fs/promises";
-import type { Stats } from "node:fs";
 import path from "node:path";
+import { statContainedFile } from "../document/contained-file";
 import { loadIgnoreMatcher } from "../ignore/engine";
 import { collectRepositorySnapshots } from "../document/git-data";
 import { isFollowableFile, type BuildSummary, type RootGroup } from "../shared/types";
@@ -339,21 +338,8 @@ export function createWatchSession(entries: WatchEntry[], initialFollow: boolean
           respectGitignore: options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE, isSingleFileRoot: entry.kind === "file" });
         if (entry.kind === "dir" && matcher.shouldIgnore(relative)) continue;
         const base = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
-        const realBase = await realpath(base);
-        const realFile = await realpath(id).catch(() => null);
-        if (!realFile) continue;
-        const contained = path.relative(realBase, realFile);
-        if (contained === ".." || contained.startsWith(`..${path.sep}`) || path.isAbsolute(contained)) continue;
-        let current = base;
-        let allowed = true;
-        let leafStats: Stats | null = null;
-        for (const segment of relative.split("/")) {
-          current = path.join(current, segment);
-          const stats = await lstat(current).catch(() => null);
-          if (!stats || stats.isSymbolicLink()) { allowed = false; break; }
-          leafStats = stats;
-        }
-        if (!allowed || !leafStats) continue;
+        const leafStats = await statContainedFile(base, id).catch(() => null);
+        if (!leafStats) continue;
         await root.index.request(id, leafStats);
         return find(id);
       }

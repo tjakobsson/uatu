@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import { isUncontained, readContainedFile, statContainedFile } from "./contained-file";
 import { applyCompareTarget, compareRefForTarget, recordGitMetric, resolveCompareBase, safeGit } from "./git-base-ref";
 import { DEFAULT_COMPARE_TARGET, findDocument } from "../shared/types";
 import type { CompareBase, CompareTarget, RootGroup } from "../shared/types";
@@ -111,9 +112,17 @@ export async function getDocumentDiff(
   compareTarget: CompareTarget = DEFAULT_COMPARE_TARGET,
 ): Promise<DocumentDiffResponse> {
   const document = findDocument(roots, documentId);
-  if (!document) {
+  const rootPath = document ? roots.find(root => root.id === document.rootId)?.path : undefined;
+  if (!document || rootPath === undefined) {
     throw new Error("document not found");
   }
+  // A path that now crosses a symbolic link below its root names a file
+  // outside it; neither git nor the worktree read may see it. A missing file
+  // still diffs (the deletion shows until the index catches up).
+  const refuseUncontained = () => statContainedFile(rootPath, document.id).then(() => undefined, error => {
+    if (isUncontained(error)) throw new Error("document not found");
+  });
+  await refuseUncontained();
   recordGitMetric("diff.requests_total");
 
   const probeDir = path.dirname(document.id);
@@ -124,11 +133,13 @@ export async function getDocumentDiff(
   const { repoRoot } = context;
   const base = applyCompareTarget(context.resolvedBase, compareTarget);
 
-  // Canonicalize both ends through realpath so a symlinked watched root
+  // Canonicalize through the root's realpath so a symlinked watched root
   // (or macOS's /var → /private/var) still yields a relative path that
-  // lives under repoRoot. Falls back to the original on ENOENT (e.g. the
-  // file was deleted between findDocument and now).
-  const realDocPath = await fs.realpath(document.id).catch(() => document.id);
+  // lives under repoRoot. Nothing below the root is a link (checked above),
+  // so the document's real path is the root's plus its relative path; the
+  // document's own path is not resolved again, as it may have changed since.
+  const realRootPath = await fs.realpath(rootPath).catch(() => rootPath);
+  const realDocPath = path.join(realRootPath, path.relative(rootPath, document.id));
   const relativePath = path.relative(repoRoot, realDocPath);
 
   // For the `base` target we compare against the merge-base tree so the diff
@@ -166,6 +177,10 @@ export async function getDocumentDiff(
         ["diff", "--no-index", "--no-ext-diff", "--", "/dev/null", relativePath],
         { maxBuffer: MAX_DIFF_BUFFER },
       );
+      // Unlike `git diff <ref>`, `--no-index` opens the path as given and
+      // would follow a directory that became a link after the check above.
+      // Check again now that git has read it.
+      await refuseUncontained();
       // `--no-index` exits with status 1 when files differ (which is the
       // expected case for a new file vs /dev/null), so non-empty stdout
       // is the success signal here, not `result.ok`.
@@ -210,7 +225,8 @@ export async function getDocumentDiff(
     repoRoot,
     compareRef,
     relativePath,
-    realDocPath,
+    rootPath,
+    documentPath: document.id,
     oldRelativePath: renameOldPath ?? relativePath,
   }));
 
@@ -236,7 +252,8 @@ async function fetchBlobs(args: {
   repoRoot: string;
   compareRef: string;
   relativePath: string;
-  realDocPath: string;
+  rootPath: string;
+  documentPath: string;
   oldRelativePath: string;
 }): Promise<{ oldContents?: string; newContents?: string }> {
   // The worktree read and the base-ref `git show` are independent — run
@@ -247,11 +264,9 @@ async function fetchBlobs(args: {
   const [newContents, old] = await Promise.all([
     (async (): Promise<string | null> => {
       try {
-        const stat = await fs.stat(args.realDocPath);
-        if (stat.size > MAX_BLOB_BYTES) {
-          return null;
-        }
-        return await fs.readFile(args.realDocPath, "utf8");
+        // Over the cap, the file is not read: text comes back null.
+        const { text } = await readContainedFile(args.rootPath, args.documentPath, { maxBytes: MAX_BLOB_BYTES });
+        return text;
       } catch {
         return null;
       }

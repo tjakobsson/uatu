@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -164,6 +164,17 @@ describe("collectFileFacts", () => {
       rootPath: dir,
       source: "",
     });
+
+    expect(facts).toBeUndefined();
+  });
+
+  test("a file reached through a link yields no facts, like a missing file", async () => {
+    const dir = await createDir();
+    const outside = await createDir();
+    await writeFile(path.join(outside, "secret.md"), "outside bytes\n");
+    await symlink(path.join(outside, "secret.md"), path.join(dir, "notes.md"));
+
+    const facts = await collectFileFacts({ absolutePath: path.join(dir, "notes.md"), rootPath: dir });
 
     expect(facts).toBeUndefined();
   });

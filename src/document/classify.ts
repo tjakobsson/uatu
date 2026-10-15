@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import { isUncontained, openContainedFile } from "./contained-file";
 import { languageForName } from "./languages";
 import type { DocumentKind } from "../shared/types";
 
@@ -170,15 +171,22 @@ export function classifyFileName(fileName: string): DocumentKind | null {
   return null;
 }
 
-export async function classifyFile(absolutePath: string, name?: string): Promise<DocumentKind> {
-  return classifyFileName(name ?? path.basename(absolutePath)) ?? await sniffBinary(absolutePath);
+// With `rootPath`, the sniff reads only a file reached from that watch root
+// without crossing a symbolic link; any other file rejects with
+// `UNCONTAINED` rather than classifying, so the index drops the path. An
+// unreadable contained file still classifies as binary.
+export async function classifyFile(absolutePath: string, name?: string, rootPath?: string): Promise<DocumentKind> {
+  return classifyFileName(name ?? path.basename(absolutePath)) ?? await sniffBinary(absolutePath, rootPath);
 }
 
-async function sniffBinary(absolutePath: string): Promise<DocumentKind> {
+async function sniffBinary(absolutePath: string, rootPath?: string): Promise<DocumentKind> {
   let handle;
   try {
-    handle = await fs.open(absolutePath, "r");
-  } catch {
+    handle = rootPath === undefined
+      ? await fs.open(absolutePath, "r")
+      : (await openContainedFile(rootPath, absolutePath)).handle;
+  } catch (error) {
+    if (isUncontained(error)) throw error;
     return "binary";
   }
 

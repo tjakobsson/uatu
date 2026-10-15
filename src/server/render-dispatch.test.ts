@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { documentErrorStatus, renderDocument } from "./render-dispatch";
-import { scanRoots } from "./roots";
+import { resolveWatchRoots, scanRoots } from "./roots";
 import { setGitMetricsSink } from "../document/git-data";
 
 const tempDirectories: string[] = [];
@@ -271,6 +271,51 @@ describe("documentErrorStatus", () => {
     expect(await statusOf(renderDocument(roots, filePath))).toBe(404);
   });
 
+  async function outsideFile(name: string, contents: string) {
+    const outside = await mkdtemp(path.join(os.tmpdir(), "uatu-render-outside-"));
+    tempDirectories.push(outside);
+    await writeFile(path.join(outside, name), contents);
+    return outside;
+  }
+
+  test("a document whose directory became a link out of the root is not found", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-render-dir-link-"));
+    tempDirectories.push(root);
+    const filePath = path.join(root, "docs", "in.md");
+    await mkdir(path.dirname(filePath));
+    await writeFile(filePath, "# Inside\n");
+    const roots = await scanRoots([{ kind: "dir", absolutePath: root }]);
+    const outside = await outsideFile("in.md", "# OUTSIDE SECRET\n");
+    await rm(path.dirname(filePath), { recursive: true });
+    await symlink(outside, path.dirname(filePath));
+
+    expect(await statusOf(renderDocument(roots, filePath))).toBe(404);
+  });
+
+  test("a document that became a link itself is not found", async () => {
+    const { filePath, roots } = await scannedMarkdown("uatu-render-file-link-");
+    const outside = await outsideFile("secret.md", "# OUTSIDE SECRET\n");
+    await rm(filePath);
+    await symlink(path.join(outside, "secret.md"), filePath);
+    expect(await statusOf(renderDocument(roots, filePath))).toBe(404);
+  });
+
+  test("a document under a root given as a symlink still renders", async () => {
+    const real = await mkdtemp(path.join(os.tmpdir(), "uatu-render-real-root-"));
+    tempDirectories.push(real);
+    await mkdir(path.join(real, "docs"));
+    await writeFile(path.join(real, "docs", "guide.md"), "# Guide\n");
+    const holder = await mkdtemp(path.join(os.tmpdir(), "uatu-render-root-link-"));
+    tempDirectories.push(holder);
+    const linkedRoot = path.join(holder, "root");
+    await symlink(real, linkedRoot);
+    const [entry] = await resolveWatchRoots([linkedRoot], holder);
+    const roots = await scanRoots([entry!]);
+    const rendered = await renderDocument(roots, path.join(linkedRoot, "docs", "guide.md"));
+    expect(rendered.title).toBe("Guide");
+    expect(rendered.fileFacts).toMatchObject({ lines: 1, bytes: 8 });
+  });
+
   // chmod 0o000 cannot deny root a read, so as root this case would render
   // the file and prove nothing.
   test.skipIf(process.getuid?.() === 0)(
@@ -294,6 +339,7 @@ describe("documentErrorStatus", () => {
     ["EISDIR", 404],
     ["ELOOP", 404],
     ["ENAMETOOLONG", 404],
+    ["EUNCONTAINED", 404],
     ["EACCES", 403],
     ["EPERM", 403],
     ["EMFILE", 500],

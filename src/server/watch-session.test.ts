@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import chokidar from "chokidar";
@@ -8,6 +8,7 @@ import { MetricsRegistry } from "../debug/metrics";
 import { activeGauge, closedCounter, openedCounter, reconnectedCounter } from "../debug/stream-metrics";
 import { WORKSPACE_API_REVISION } from "../shared/version";
 import { DocumentStateIndex, type DocumentUpdate, type DocumentSnapshot } from "../shared/document-updates";
+import { documentErrorStatus, renderDocument } from "./render-dispatch";
 import { resolveWatchRoots } from "./roots";
 import { safeGit } from "../document/git-base-ref";
 import {
@@ -572,6 +573,62 @@ describe("createWatchSession watcher resilience", () => {
       });
       expect(() => internal!.emit("error", synthetic)).not.toThrow();
       expect(session.getRoots()).toBeDefined();
+    } finally {
+      await session.stop();
+    }
+  });
+});
+
+describe("containment under the polling observer", () => {
+  // Chokidar's poller (`fs.watchFile`) follows links. Once `docs` becomes a
+  // link out of the root, its poller for `docs/in.md` reports the outside
+  // file's metadata as a change, and after the path is re-added it keeps
+  // reporting every edit of the outside file.
+  test("a directory replaced by a link out of the root is neither indexed nor read", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-poll-root-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "uatu-poll-outside-"));
+    tempDirectories.push(root, outside);
+    const docs = path.join(root, "docs");
+    const id = path.join(docs, "in.md");
+    await mkdir(docs);
+    await writeFile(id, "# Inside\n");
+    await writeFile(path.join(outside, "in.md"), "# OUTSIDE SECRET\n");
+
+    const session = createWatchSession([{ kind: "dir", absolutePath: root }], false, {
+      usePolling: true, collectRepositories: async () => [],
+    });
+    try {
+      await session.start();
+      expect(session.findDocument(id)).toBeDefined();
+      const staleRoots = session.getDocumentRoots(id);
+      const seen: string[] = [];
+      session._internalWatcher()!.on("all", (event: string, file: string) => seen.push(`${event} ${path.resolve(file)}`));
+
+      await rm(docs, { recursive: true });
+      await symlink(outside, docs);
+      // As in the reported reproduction: re-adding the path keeps the poller
+      // on `docs/in.md` without an `unlinkDir` that would drop it anyway.
+      const poller = session._internalWatcher() as unknown as { unwatch(file: string): void; add(file: string): void };
+      poller.unwatch(docs);
+      poller.add(docs);
+      await waitUntil(() => seen.includes(`change ${id}`), 5000);
+      await waitUntil(() => session.findDocument(id) === undefined, 5000);
+
+      // Edit the outside file and wait for the poller to report it under the
+      // root. A sentinel created afterwards is indexed after that event.
+      const reported = seen.length;
+      await writeFile(path.join(outside, "in.md"), "# OUTSIDE SECRET, edited\n");
+      await waitUntil(() => seen.slice(reported).includes(`change ${id}`), 5000);
+      const sentinel = path.join(root, "sentinel.md");
+      await writeFile(sentinel, "# Sentinel\n");
+      await waitUntil(() => session.findDocument(sentinel) !== undefined, 5000);
+
+      expect(session.findDocument(id)).toBeUndefined();
+      expect(session.getUnscopedRoots().flatMap(group => group.docs).some(doc => doc.id === id)).toBe(false);
+      expect(await session.ensureDocument(id)).toBeUndefined();
+      // Even a root group taken before the swap cannot render the outside file.
+      const failure = await renderDocument(staleRoots, id).then(() => null, (error: unknown) => error);
+      expect(documentErrorStatus(failure)).toBe(404);
     } finally {
       await session.stop();
     }

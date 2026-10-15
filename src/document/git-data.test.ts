@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -92,6 +92,24 @@ describe("repository snapshots", () => {
     const entry = snapshots[0]?.changedFiles.find(file => file.path === "scratch.md");
     expect(entry).toBeDefined();
     expect(entry?.status.startsWith("?")).toBe(true);
+    expect(entry?.additions).toBe(1);
+  });
+
+  test("an untracked link is listed without reading its target's lines", async () => {
+    const repo = await createRepo();
+    const outside = await mkdtemp(path.join(os.tmpdir(), "uatu-git-data-outside-"));
+    tempDirectories.push(outside);
+    await writeFile(path.join(outside, "secret.md"), "one\ntwo\nthree\n");
+    await symlink(path.join(outside, "secret.md"), path.join(repo, "linked.md"));
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    const entry = snapshots[0]?.changedFiles.find(file => file.path === "linked.md");
+    expect(entry?.status.startsWith("?")).toBe(true);
+    expect(entry?.additions).toBe(0);
   });
 
   test("reports staged-but-uncommitted files with the 'A' status, not '?'", async () => {

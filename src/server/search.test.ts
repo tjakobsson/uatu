@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   DEFAULT_SEARCH_OPTIONS,
@@ -12,6 +15,7 @@ import {
   type SearchEvent,
   type SearchOptions,
 } from "./search";
+import { resolveWatchRoots, scanRoots } from "./roots";
 import type { DocumentKind, RootGroup } from "../shared/types";
 
 function doc(relativePath: string, kind: DocumentKind = "markdown") {
@@ -29,13 +33,38 @@ function roots(...docs: ReturnType<typeof doc>[]): RootGroup[] {
   return [{ id: "/abs", label: "abs", path: "/abs", docs, hiddenCount: 0 }];
 }
 
-function depsFor(files: Record<string, string>, clock?: () => number): SearchDeps {
+// A fake filesystem: `fileSize` answers the open (null: the file is gone),
+// `readFile` the read that only follows an open under the byte cap.
+function fakeDeps(fake: {
+  fileSize: (absolutePath: string) => Promise<number | null>;
+  readFile: (absolutePath: string) => Promise<string | null>;
+  now: () => number;
+}): SearchDeps {
   return {
+    open: async absolutePath => {
+      const size = await fake.fileSize(absolutePath);
+      if (size === null) return null;
+      return {
+        size,
+        read: async () => {
+          const text = await fake.readFile(absolutePath);
+          if (text === null) throw new Error("gone");
+          return text;
+        },
+        close: async () => {},
+      };
+    },
+    now: fake.now,
+  };
+}
+
+function depsFor(files: Record<string, string>, clock?: () => number): SearchDeps {
+  return fakeDeps({
     readFile: async absolutePath => files[absolutePath] ?? null,
     fileSize: async absolutePath =>
       files[absolutePath] === undefined ? null : files[absolutePath]!.length,
     now: clock ?? (() => 0),
-  };
+  });
 }
 
 async function collect(
@@ -167,28 +196,28 @@ describe("searchDocuments", () => {
 
   test("binaries are never read", async () => {
     const read: string[] = [];
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       readFile: async path => {
         read.push(path);
         return "match";
       },
       fileSize: async () => 5,
       now: () => 0,
-    };
+    });
     await collect(roots(doc("a.md"), doc("logo.png", "binary")), "match", {}, {}, deps);
     expect(read).toEqual(["/abs/a.md"]);
   });
 
   test("a query below the minimum length dispatches no reads", async () => {
     const read: string[] = [];
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       readFile: async path => {
         read.push(path);
         return "a";
       },
       fileSize: async () => 1,
       now: () => 0,
-    };
+    });
     const events = await collect(roots(doc("a.md")), "a", {}, {}, deps);  // 1 char
     expect(read).toEqual([]);
     expect(doneEvent(events).totalMatches).toBe(0);
@@ -260,14 +289,14 @@ describe("bounds", () => {
 
   test("stops reading further documents once the cap is reached", async () => {
     const read: string[] = [];
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       readFile: async path => {
         read.push(path);
         return "xy\n".repeat(MAX_RESULTS + 10);
       },
       fileSize: async () => 100,
       now: () => 0,
-    };
+    });
     await collect(roots(doc("a.md"), doc("b.md")), "xy", {}, {}, deps);
     expect(read).toEqual(["/abs/a.md"]);
   });
@@ -280,7 +309,7 @@ describe("bounds", () => {
     // deadline, so this exercises the per-document path alone.
     let readingSlow = false;
     let callsSinceRead = 0;
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       fileSize: async () => 10,
       readFile: async path => {
         readingSlow = path === "/abs/slow.md";
@@ -293,7 +322,7 @@ describe("bounds", () => {
         // The first reading after the read is the document's start stamp.
         return callsSinceRead <= 1 ? 0 : 1_000;
       },
-    };
+    });
     const events = await collect(roots(doc("slow.md"), doc("fast.md")), "hit", {}, {}, deps);
     expect(events.some(e => e.kind === "expensive" && e.relativePath === "slow.md")).toBe(true);
     expect(doneEvent(events)).toBeDefined();
@@ -308,13 +337,13 @@ describe("bounds", () => {
     // Ordinal/total derivation scans the document once per hit; on a
     // single-line file there is no next line-top check to catch it.
     let calls = 0;
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       fileSize: async () => 100,
       readFile: async () => "aa bb cc dd",
       // Stay inside the budget through the line-top checks (first four
       // readings), then blow it on the per-hit check.
       now: () => ((calls += 1) <= 4 ? 0 : 1000),
-    };
+    });
     const events = await collect(roots(doc("a.md")), "\\w+", {}, { regex: true }, deps);
     expect(events.map(e => e.kind)).toEqual(["expensive", "done"]);
   });
@@ -324,11 +353,11 @@ describe("bounds", () => {
     // its zero-width matches inside `matchLine`, so the interruption has to
     // come from the budget callback threaded into it.
     let clock = 0;
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       fileSize: async () => 10_000,
       readFile: async () => "a".repeat(10_000),
       now: () => (clock += 50),
-    };
+    });
     const events = await collect(roots(doc("a.md")), "(?=a)", {}, { regex: true }, deps);
     expect(events.map(e => e.kind)).toEqual(["expensive", "done"]);
   });
@@ -422,14 +451,14 @@ describe("sweep deadline", () => {
     const docs = Array.from({ length: 100 }, (_, i) => doc(`f${i}.md`));
     const files = Object.fromEntries(docs.map(d => [d.id, "needle\n"]));
     let clock = 0;
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       readFile: async path => files[path] ?? null,
       fileSize: async () => 10,
       // 50ms per reading. Four readings per document keeps each one inside
       // the 250ms per-document budget, so only the 10s sweep deadline fires —
       // which is the bound under test.
       now: () => (clock += 50),
-    };
+    });
     const events: SearchEvent[] = [];
     for await (const e of searchDocuments(roots(...docs), "needle", DEFAULT_SEARCH_OPTIONS, deps)) {
       events.push(e);
@@ -444,11 +473,11 @@ describe("sweep deadline", () => {
     const docs = Array.from({ length: 100 }, (_, i) => doc(`f${i}.md`));
     const files = Object.fromEntries(docs.map(d => [d.id, "needle\n"]));
     let clock = 0;
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       readFile: async path => files[path] ?? null,
       fileSize: async () => 10,
       now: () => (clock += 50),
-    };
+    });
     const events: SearchEvent[] = [];
     for await (const e of searchDocuments(roots(...docs), "needle", DEFAULT_SEARCH_OPTIONS, deps)) {
       events.push(e);
@@ -540,35 +569,83 @@ describe("oversized files", () => {
   // costs its full read no matter what the deadline says.
   test("a file past the byte cap is never read", async () => {
     const read: string[] = [];
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       fileSize: async path => (path === "/abs/huge.md" ? MAX_FILE_BYTES + 1 : 10),
       readFile: async path => {
         read.push(path);
         return "needle\n";
       },
       now: () => 0,
-    };
+    });
     await collect(roots(doc("huge.md"), doc("small.md")), "needle", {}, {}, deps);
     expect(read).toEqual(["/abs/small.md"]);
   });
 
   test("skipping is disclosed, not silent", async () => {
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       fileSize: async () => MAX_FILE_BYTES + 1,
       readFile: async () => "needle\n",
       now: () => 0,
-    };
+    });
     const events = await collect(roots(doc("huge.md")), "needle", {}, {}, deps);
     expect(events.some(e => e.kind === "oversized" && e.relativePath === "huge.md")).toBe(true);
   });
 
   test("a file at the cap is still searched", async () => {
-    const deps: SearchDeps = {
+    const deps = fakeDeps({
       fileSize: async () => MAX_FILE_BYTES,
       readFile: async () => "needle\n",
       now: () => 0,
-    };
+    });
     const events = await collect(roots(doc("edge.md")), "needle", {}, {}, deps);
     expect(fileResults(events)).toHaveLength(1);
+  });
+});
+
+describe("reading from disk", () => {
+  const tempDirectories: string[] = [];
+  afterEach(async () => {
+    await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+  });
+
+  async function tempDirectory(prefix: string): Promise<string> {
+    const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
+    tempDirectories.push(directory);
+    return directory;
+  }
+
+  async function sweep(rootGroups: RootGroup[], query: string): Promise<SearchEvent[]> {
+    const events: SearchEvent[] = [];
+    for await (const event of searchDocuments(rootGroups, query)) events.push(event);
+    return events;
+  }
+
+  test("files whose path now crosses a link out of the root are skipped, not read", async () => {
+    const root = await tempDirectory("uatu-search-root-");
+    const outside = await tempDirectory("uatu-search-outside-");
+    await mkdir(path.join(root, "docs"));
+    await writeFile(path.join(root, "a.md"), "needle\n");
+    await writeFile(path.join(root, "docs", "in.md"), "inside\n");
+    await writeFile(path.join(root, "b.md"), "inside\n");
+    await writeFile(path.join(outside, "in.md"), "needle outside\n");
+    await writeFile(path.join(outside, "secret.md"), "needle secret\n");
+    const rootGroups = await scanRoots([{ kind: "dir", absolutePath: root }]);
+    await rm(path.join(root, "docs"), { recursive: true });
+    await symlink(outside, path.join(root, "docs"));
+    await rm(path.join(root, "b.md"));
+    await symlink(path.join(outside, "secret.md"), path.join(root, "b.md"));
+
+    const events = await sweep(rootGroups, "needle");
+    expect(fileResults(events).map(result => result.relativePath)).toEqual(["a.md"]);
+    expect(doneEvent(events).filesSearched).toBe(1);
+  });
+
+  test("a root given as a symlink is searched", async () => {
+    const real = await tempDirectory("uatu-search-real-");
+    await writeFile(path.join(real, "a.md"), "needle\n");
+    const holder = await tempDirectory("uatu-search-holder-");
+    await symlink(real, path.join(holder, "root"));
+    const rootGroups = await scanRoots(await resolveWatchRoots([path.join(holder, "root")], holder));
+    expect(fileResults(await sweep(rootGroups, "needle")).map(result => result.relativePath)).toEqual(["a.md"]);
   });
 });
