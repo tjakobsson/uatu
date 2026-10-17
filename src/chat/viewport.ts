@@ -84,6 +84,9 @@ export class ChatViewportController {
     const root = document.documentElement;
     root.toggleAttribute("data-chat-keyboard", metrics.keyboardVisible);
     const touch = root.getAttribute("data-ui-mode") === "touch";
+    root.toggleAttribute("data-chat-compact", touch && metrics.keyboardVisible && height <= 450);
+    root.toggleAttribute("data-chat-short", touch && height <= 450);
+    root.toggleAttribute("data-chat-wide-short", touch && height <= 390 && window.innerWidth >= 600);
     // While a request is being answered the keyboard covers the chrome rather
     // than removing it: the surface keeps its LAYOUT height, so the composer
     // and the pinned tracks slide down underneath the keyboard, still there
@@ -100,6 +103,10 @@ export class ChatViewportController {
     const pannedOnly = touch && this.lastTop !== null && this.lastTop !== top
       && this.lastHeight === surfaceHeight && this.lastVisualHeight === height;
     if (touch) {
+      this.surface.style.removeProperty("--chat-panel-height");
+      // Only transcript/dock containers own scrolling. Browser caret reveal
+      // must not pan the surface's header or composer outside its hard band.
+      this.surface.scrollTop = 0;
       // Rewriting a value the surface already carries re-enters through our own
       // ResizeObserver, so each write has to be a real change.
       if (this.lastTop !== top) this.surface.style.setProperty("--chat-visual-top", `${top}px`);
@@ -110,6 +117,10 @@ export class ChatViewportController {
       this.lastVisualHeight = height;
       this.lastCovered = covered;
     } else {
+      // Desktop's available band is the panel, not a guessed rem fallback
+      // or the window: other shell surfaces can consume part of that height.
+      const panelHeight = `${this.surface.clientHeight}px`;
+      if (this.surface.style.getPropertyValue("--chat-panel-height") !== panelHeight) this.surface.style.setProperty("--chat-panel-height", panelHeight);
       // The desktop shell owns this rectangle, including its safe areas.
       this.surface.style.removeProperty("--chat-visual-top");
       this.surface.style.removeProperty("--chat-visual-height");

@@ -1,0 +1,20 @@
+{
+  "provenance": {
+    "kind": "source-shaped, not a live capture",
+    "service": "2.0.29",
+    "commit": "042d0832f5f3a73eaa039a58a7d565776f6d4290",
+    "client": "2.0.28",
+    "sources": ["packages/core/src/tool/plugin/subagent.ts", "packages/core/src/session/subagent-completion.ts", "packages/core/src/tool/plugin/shell.ts", "packages/core/src/shell/result.ts", "packages/server/src/handlers/session.ts"],
+    "note": "Design evidence 3. Public wire shapes with invented safe test values; no job generation or generic job endpoint."
+  },
+  "child": {"id":"ses_child","parentID":"ses_parent","title":"Check fixture","location":{"directory":"/tmp/oc-v2-ws"},"time":{"created":10,"updated":10}},
+  "launch": {"id":"msg_launch","sessionID":"ses_parent","type":"assistant","time":{"created":20},"content":[{"type":"tool","id":"call_worker","name":"subagent","time":{"created":20,"completed":30},"state":{"status":"completed","input":{"agent":"explore","description":"Check fixture","prompt":"Inspect the safe fixture","background":true},"metadata":{"sessionID":"ses_child","status":"running"},"content":[{"type":"text","text":"The subagent is working in the background (sessionID: ses_child). You will be notified automatically when it finishes.\nDO NOT sleep, poll for progress, ask the subagent for status, or duplicate this subagent's work; avoid working with the same files or topics it is using.\nWork on non-overlapping tasks, or briefly tell the user what you launched and end your response."}]}}]},
+  "progress": {"id":"evt_progress","created":25,"type":"session.tool.progress","location":{"directory":"/tmp/oc-v2-ws"},"data":{"sessionID":"ses_parent","assistantMessageID":"msg_launch","id":"call_worker","metadata":{"sessionID":"ses_child","status":"running"}}},
+  "terminal": {"id":"evt_terminal","created":40,"type":"session.execution.succeeded","location":{"directory":"/tmp/oc-v2-ws"},"data":{"sessionID":"ses_child"}},
+  "pending": {"id":"msg_result","type":"synthetic","delivery":"steer","time":{"created":41},"payload":{"description":"Check fixture","text":"<subagent sessionID=\"ses_child\" state=\"completed\" description=\"Check fixture\">\nFixture checked.\n</subagent>","metadata":{"source":"subagent","childID":"ses_child","agent":"Explore","state":"completed"}}},
+  "delivered": {"id":"evt_delivered","created":42,"type":"session.inbox.delivered","location":{"directory":"/tmp/oc-v2-ws"},"data":{"sessionID":"ses_parent","inboxID":"msg_result"}},
+  "stored": {"id":"msg_result","sessionID":"ses_parent","type":"synthetic","time":{"created":42},"text":"<subagent sessionID=\"ses_child\" state=\"completed\" description=\"Check fixture\">\nFixture checked.\n</subagent>","metadata":{"source":"subagent","childID":"ses_child","agent":"Explore","state":"completed"}},
+  "converted": {"id":"msg_converted","sessionID":"ses_parent","type":"assistant","time":{"created":50},"content":[{"type":"tool","id":"call_converted","name":"subagent","time":{"created":50,"completed":60},"state":{"status":"completed","input":{"agent":"explore","description":"Continue fixture","prompt":"Check another fixture","sessionID":"ses_child"},"metadata":{"sessionID":"ses_child","status":"running"},"content":[{"type":"text","text":"The subagent is working in the background (sessionID: ses_child). You will be notified automatically when it finishes."}]}}]},
+  "shell": {"id":"msg_shell","sessionID":"ses_parent","type":"assistant","time":{"created":70},"content":[{"type":"tool","id":"call_shell","name":"shell","time":{"created":70,"completed":80},"state":{"status":"completed","input":{"command":"printf fixture"},"metadata":{"shellID":"sh_fixture","status":"running","truncated":false},"content":[{"type":"text","text":"Command moved to the background (shell ID: sh_fixture)."}]}}]},
+  "backgroundResponse": {"status":204,"body":null}
+}

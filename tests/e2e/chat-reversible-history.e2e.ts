@@ -28,8 +28,7 @@ async function openClient(page: Page, credential: string, conversationId: string
   await expect(page.locator("#chat-conversation-select")).toHaveValue(conversationId);
 }
 
-// `running`: a turn is in flight, so the send control reads "Cancel response"
-// and the command goes through the form's own submit path instead.
+// Send submits history commands even while a turn is running; Stop is separate.
 async function historyCommand(page: Page, operation: "undo" | "redo", { running = false }: { running?: boolean } = {}) {
   const response = page.waitForResponse(
     candidate => new URL(candidate.url()).pathname.endsWith(`/${operation}`),
@@ -37,14 +36,11 @@ async function historyCommand(page: Page, operation: "undo" | "redo", { running 
   );
   const sendButton = page.locator("#chat-send");
   await page.locator("#chat-input").fill(`/${operation}`);
-  await expect(sendButton).toHaveAttribute("aria-label", running ? "Cancel response" : "Send message");
-  if (running) {
-    await page.locator("#chat-composer").evaluate((form: HTMLFormElement) => form.requestSubmit());
-  } else {
-    await expect(sendButton).toBeEnabled();
-    if (await page.locator("html").getAttribute("data-ui-mode") === "touch") await sendButton.tap();
-    else await sendButton.click();
-  }
+  await expect(page.locator("#chat-stop")).toBeEnabled({ enabled: running });
+  await expect(sendButton).toHaveAttribute("aria-label", "Send message");
+  await expect(sendButton).toBeEnabled();
+  if (await page.locator("html").getAttribute("data-ui-mode") === "touch") await sendButton.tap();
+  else await sendButton.click();
   return response;
 }
 
@@ -239,7 +235,7 @@ test.describe("reversible Chat history", () => {
 
     const replacement = await send(page, "replacement turn");
     expect(replacement.status()).toBe(202);
-    expect(await replacement.json()).toMatchObject({ held: false });
+    expect(await replacement.json()).toMatchObject({ pending: false });
     await expect(page.locator("#chat-items")).toContainText("replacement turn");
     await expect(page.locator("#chat-items")).not.toContainText("discarded active turn");
     await expect(page.locator("#chat-queue .is-held")).toContainText("older queued turn");

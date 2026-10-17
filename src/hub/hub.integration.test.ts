@@ -30,6 +30,7 @@ import { PathReservationCoordinator } from "./path-reservations";
 import { WorkspaceOnboardingCoordinator } from "./onboarding";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { HubPreferencesStore } from "./preferences";
+import { PersonalChatPreferencesStore } from "./personal-chat-preferences";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -82,6 +83,7 @@ let bearerId = "";
 let cloneJobs: CloneJobManager;
 let reservations: PathReservationCoordinator;
 let preferences: HubPreferencesStore;
+let personalChatPreferences: PersonalChatPreferencesStore;
 let notifications: HubNotifications;
 const managedCloneStarts: Array<CloneCredentialProcessContext | undefined> = [];
 const managedCloneAssignments: string[] = [];
@@ -210,6 +212,8 @@ beforeAll(async () => {
   await folderManager.recover();
   preferences = new HubPreferencesStore(path.join(tempRoot, "hub-preferences.json"));
   await preferences.load();
+  personalChatPreferences = new PersonalChatPreferencesStore(path.join(tempRoot, "personal-chat-preferences.json"));
+  await personalChatPreferences.load();
   const onboarding = new WorkspaceOnboardingCoordinator({
     journalPath: path.join(tempRoot, "pending-onboarding.json"),
     recoveryJournalPaths: [path.join(tempRoot, "pending-folder-mutation.json")],
@@ -251,6 +255,7 @@ beforeAll(async () => {
     personalState,
     notifications,
     preferences,
+    personalChatPreferences,
     onboarding,
     cloneJobs,
     folderManager,
@@ -1812,6 +1817,7 @@ describe("hub end to end", () => {
         spawned.push(entry.id);
         return {
           workspaceId: entry.id,
+          instanceId: crypto.randomUUID(), policyTrust: "unavailable",
           basePath: `/s/${entry.id}/`,
           endpoint: { hostname: "127.0.0.1", port: 1 },
           token: null,
@@ -3359,6 +3365,32 @@ describe("hub end to end", () => {
     await assertContract("POST", "/api/hub/worktrees/forget", forgotten);
     expect(await forgotten.clone().json()).toMatchObject({ ok: false, kind: "forget", error: { code: "not-found" } });
   }, 30_000);
+
+  test("personal chat preferences black-box contracts include successful reads, writes and stale conflicts", async () => {
+    const url = `${origin}/api/hub/settings/chat-preferences`;
+    const initial = await fetch(url, { headers: { cookie } });
+    expect(initial.status).toBe(200);
+    await assertContract("GET", "/api/hub/settings/chat-preferences", initial.clone());
+    expect(initial.headers.get("cache-control")).toBe("no-store");
+    const state = await initial.json() as { revision: number; autoBackgroundOnSteer: boolean };
+    expect(state.autoBackgroundOnSteer).toBe(true);
+    const save = () => fetch(url, {
+      method: "PUT", headers: { cookie, origin, "content-type": "application/json" },
+      body: JSON.stringify({ version: 1, expectedRevision: state.revision, autoBackgroundOnSteer: false }),
+    });
+    const updated = await save();
+    expect(updated.status).toBe(200);
+    await assertContract("PUT", "/api/hub/settings/chat-preferences", updated.clone());
+    expect(await updated.json()).toEqual({ version: 1, revision: state.revision + 1, autoBackgroundOnSteer: false });
+    const conflict = await save();
+    expect(conflict.status).toBe(409);
+    await assertContract("PUT", "/api/hub/settings/chat-preferences", conflict.clone());
+    expect(await conflict.json()).toMatchObject({ current: { autoBackgroundOnSteer: false, revision: state.revision + 1 } });
+    const refreshed = await fetch(url, { headers: { authorization: `Bearer ${bearerId}` } });
+    expect(refreshed.status).toBe(200);
+    await assertContract("GET", "/api/hub/settings/chat-preferences", refreshed.clone());
+    expect(await refreshed.json()).toEqual({ version: 1, revision: state.revision + 1, autoBackgroundOnSteer: false });
+  });
 
   test("every documented HTTP operation was black-box validated", () => {
     const documented = new Set<string>();

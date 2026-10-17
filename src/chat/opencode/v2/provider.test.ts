@@ -14,7 +14,7 @@ const STORED = FIXTURES.storedMessages.data;
 const WORKSPACE = "/ws";
 const AUTH = `Basic ${Buffer.from("opencode:pw").toString("base64")}`;
 
-type Call = { method: string; path: string; query: URLSearchParams; body: unknown; headers: Headers };
+type Call = { method: string; path: string; query: URLSearchParams; body: unknown; headers: Headers; signal: AbortSignal };
 const ENVELOPED = [
   /^GET \/api\/session\/[^/]+$/,
   /^POST \/api\/session$/,
@@ -39,7 +39,7 @@ function fakeOpenCode(routes: Record<string, Handler>) {
     const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
     const url = new URL(request.url);
     const text = await request.clone().text().catch(() => "");
-    const call: Call = { method: request.method, path: url.pathname, query: url.searchParams, body: text ? JSON.parse(text) : undefined, headers: request.headers };
+    const call: Call = { method: request.method, path: url.pathname, query: url.searchParams, body: text ? JSON.parse(text) : undefined, headers: request.headers, signal: request.signal };
     calls.push(call);
     const match = patterns.find(candidate => candidate.method === request.method && candidate.regex.test(url.pathname));
     if (!match) return Response.json({ _tag: "NotFoundError", message: `no route ${request.method} ${url.pathname}` }, { status: 404 });
@@ -73,10 +73,20 @@ const skillInfo = (id: string, overrides: { name?: string; description?: string 
 const notFound = (sessionID: string) => Response.json({ _tag: "SessionNotFoundError", sessionID, message: `Session not found: ${sessionID}` }, { status: 404 });
 
 describe("OpenCode 2.x provider: identity and catalogs", () => {
+  test("side generation uses the native isolated endpoint, never prompt/interrupt/background", async () => {
+    const server = fakeOpenCode({
+      "POST /api/session/ses/generate": call => {
+        expect(call.body).toEqual({ prompt: "Side question" });
+        return { data: { text: "Side answer" } };
+      },
+    });
+    expect(await server.provider().generate("ses", "Side question")).toBe("Side answer");
+    expect(server.calls.map(call => `${call.method} ${call.path}`)).toEqual(["POST /api/session/ses/generate"]);
+  });
   test("declares the capabilities the 2.x stack backs", () => {
     const { provider } = fakeOpenCode({});
     expect(provider().describe()).toMatchObject({ id: "opencode", name: "OpenCode" });
-    expect(provider().describe().capabilities).toEqual(["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments", "reversible-history"]);
+    expect(provider().describe().capabilities).toEqual(["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments", "reversible-history", "steering", "send-now", "background-tasks", "background-blocking-work", "side-generation"]);
     expect(provider().describe().permissionScopeNote).toContain("until OpenCode restarts");
   });
 
@@ -150,6 +160,352 @@ describe("OpenCode 2.x provider: identity and catalogs", () => {
 });
 
 describe("OpenCode 2.x provider: sessions", () => {
+  test("post-admission fresh worker evidence cannot join a read begun before the action", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let release!: () => void, entered!: () => void, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const server = fakeOpenCode({
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": async () => {
+        const first = reads++ === 0;
+        if (first) { entered(); await gate; }
+        return { data: first ? [] : [fixture.stored], cursor: {} };
+      },
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/session/active": () => ({}),
+    });
+    const provider = server.provider();
+    const earlier = provider.reconcileBackgroundTasks("ses_parent");
+    await started;
+    const fresh = provider.reconcileBackgroundTasks("ses_parent", { fresh: true });
+    release();
+    expect(await earlier).toEqual([]);
+    expect(await fresh).toEqual([expect.objectContaining({ status: "completed", resultId: fixture.stored.id })]);
+    expect(reads).toBe(2);
+    await provider.dispose();
+  });
+  test("steer and resume response loss is unknown, explicit refusal stays definitive, and resume preserves native acceptance evidence", async () => {
+    for (const operation of ["prompt", "interrupt"] as const) {
+      for (const refused of [false, true]) {
+        const server = fakeOpenCode({
+          [`POST /api/session/ses_parent/${operation}`]: () => refused ? notFound("ses_parent") : new Response("lost after application", { status: 502 }),
+        });
+        const provider = server.provider();
+        const mutation = operation === "prompt" ? provider.prompt("ses_parent", { id: "stable", text: "steer", delivery: "steer" }) : provider.interrupt("ses_parent", { resume: true });
+        await expect(mutation).rejects.toMatchObject({ ...(refused ? { _tag: "SessionNotFoundError" } : { name: "OperationOutcomeUnknownError" }) });
+        expect(server.requests("POST", `/api/session/ses_parent/${operation}`)).toHaveLength(1);
+      }
+    }
+    for (const interrupted of [true, false]) {
+      const server = fakeOpenCode({ "POST /api/session/ses_parent/interrupt": () => ({ interrupted }) });
+      expect(await server.provider().interrupt("ses_parent", { resume: true })).toEqual({ interrupted });
+    }
+  });
+  test("background-all is one parent-scoped native mutation, including an accepted empty no-op", async () => {
+    const server = fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "POST /api/session/ses_parent/background": () => undefined,
+    });
+    await server.provider().backgroundBlockingWork("ses_parent");
+    expect(server.calls.filter(call => call.method === "POST")).toEqual([expect.objectContaining({ path: "/api/session/ses_parent/background", body: undefined })]);
+    expect(server.calls.some(call => /prompt|interrupt|inbox/.test(call.path))).toBe(false);
+  });
+  test("background parent validation refuses foreign sessions before mutation; dispatched response loss is unknown", async () => {
+    const server = fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent", { location: { directory: "/other" } }),
+      "POST /api/session/ses_parent/background": () => undefined,
+    });
+    await expect(server.provider().backgroundBlockingWork("ses_parent")).rejects.toThrow(/unavailable/);
+    expect(server.calls.some(call => call.method === "POST")).toBe(false);
+    const lost = fakeOpenCode({
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "POST /api/session/ses_parent/background": () => new Response("lost", { status: 502 }),
+    });
+    await expect(lost.provider().backgroundBlockingWork("ses_parent")).rejects.toMatchObject({ name: "OperationOutcomeUnknownError" });
+    expect(lost.requests("POST", "/api/session/ses_parent/background")).toHaveLength(1);
+  });
+  test("worker stop verifies its occurrence and interrupts only its child without resuming", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let completed = false;
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({ ses_child: { status: "running" } }),
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": () => ({ data: completed ? [fixture.launch, fixture.stored] : [fixture.launch], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+      "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
+    });
+    const provider = server.provider();
+    await provider.stopTask("ses_parent", "v2:ses_parent:call_worker");
+    expect(server.calls.filter(call => call.method === "POST")).toEqual([expect.objectContaining({ path: "/api/session/ses_child/interrupt", body: undefined })]);
+    expect(server.requests("POST", "/api/session/ses_child/interrupt")[0]!.query.get("resume")).toBe("false");
+    completed = true;
+    await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_worker")).rejects.toThrow(/no longer/);
+    expect(server.calls.filter(call => call.method === "POST")).toHaveLength(1);
+  });
+  test("worker stop does not authorize from a recovery read that predates the stop request", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { started = resolve; });
+    let reads = 0;
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({ ses_child: { status: "running" } }),
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/session/ses_child/message": () => ({ data: [{ id: "idle", type: "idle", time: { created: 40 } }], cursor: {} }),
+      "GET /api/session/ses_parent/message": async () => {
+        if (++reads === 1) { started(); await gate; return { data: [fixture.launch], cursor: {} }; }
+        return { data: [fixture.launch, fixture.stored, fixture.converted], cursor: {} };
+      },
+      "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
+    });
+    const provider = server.provider();
+    const recovery = provider.reconcileBackgroundTasks("ses_parent");
+    await reading;
+    const stop = provider.stopTask("ses_parent", "v2:ses_parent:call_worker");
+    release();
+    // Even the older parent read cannot authorize a task past the child's
+    // independently observed execution boundary.
+    expect(await recovery).toContainEqual(expect.objectContaining({ toolUseId: "call_worker", stateUncertain: true }));
+    await expect(stop).rejects.toThrow(/no longer confirmed/);
+    expect(server.requests("POST", "/api/session/ses_child/interrupt")).toHaveLength(0);
+  });
+  for (const withForegroundLauncher of [false, true]) test(`an unresolved old background task cannot stop a newer child occurrence (${withForegroundLauncher ? "foreground launcher running" : "external child continuation"})`, async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const foreground = structuredClone(fixture.converted);
+    foreground.content[0].state.status = "running";
+    foreground.content[0].time = { created: 50 };
+    foreground.time = { created: 50 };
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({ ses_child: { status: "running" } }),
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": () => ({ data: withForegroundLauncher ? [fixture.launch, foreground] : [fixture.launch], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/session/ses_child/message": () => ({ data: [
+        { id: "idle-old", type: "idle", time: { created: 40 } },
+        { id: "prompt-new", type: "user", text: "New foreground occurrence", time: { created: 50 } },
+      ], cursor: {} }),
+      "POST /api/session/ses_child/interrupt": () => ({ interrupted: true }),
+    });
+    const provider = server.provider();
+    expect(await provider.reconcileBackgroundTasks("ses_parent")).toContainEqual(expect.objectContaining({ taskId: "v2:ses_parent:call_worker", status: "running", stateUncertain: true }));
+    await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_worker")).rejects.toThrow(/no longer confirmed/);
+    expect(server.requests("POST", "/api/session/ses_child/interrupt")).toHaveLength(0);
+  });
+  test("shell output is an owned bounded tail; removal acknowledgement is not a terminal result", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let removed = false;
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({}),
+      "GET /api/session/:id": () => session("ses_parent"),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/shell/sh_fixture": () => removed ? Response.json({ _tag: "ShellNotFoundError" }, { status: 404 }) : scoped({ id: "sh_fixture", status: "exited", metadata: { sessionID: "ses_parent" } }),
+      "GET /api/shell/sh_fixture/output": ({ query }) => scoped({ output: query.get("cursor") === String(Number.MAX_SAFE_INTEGER) ? "" : "tail", size: 1000, cursor: 1000, truncated: false }),
+      "DELETE /api/shell/sh_fixture": () => { removed = true; return undefined; },
+    });
+    const provider = server.provider();
+    expect(await provider.taskOutput("ses_parent", "v2:ses_parent:call_shell", { tailBytes: 4 })).toEqual({ text: "tail", truncated: true, settled: false });
+    await expect(provider.taskOutput("ses_parent", "/private/secret", { tailBytes: 4 })).rejects.toThrow(/unavailable/);
+    await provider.stopTask("ses_parent", "v2:ses_parent:call_shell");
+    expect(await provider.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "running", stateUncertain: true })]);
+    expect(await provider.taskOutput("ses_parent", "v2:ses_parent:call_shell", { tailBytes: 4 })).toBeNull();
+    expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(1);
+    expect(server.calls.filter(call => call.path.startsWith("/api/shell/")).every(call => call.query.get("location[directory]") === WORKSPACE)).toBe(true);
+  });
+  test("foreign shell ownership refuses output and removal; already-missing removal 204 alone settles nothing", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let owner = "other-parent";
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({}),
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.shell], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/shell/sh_fixture": () => scoped({ id: "sh_fixture", metadata: { sessionID: owner } }),
+      // A removal can race another client's removal after our ownership read.
+      "DELETE /api/shell/sh_fixture": () => undefined,
+    });
+    const provider = server.provider();
+    await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_shell")).rejects.toThrow(/no longer confirmed/);
+    await expect(provider.taskOutput("ses_parent", "v2:ses_parent:call_shell", { tailBytes: 10 })).rejects.toThrow(/unavailable/);
+    expect(server.calls.some(call => call.method === "DELETE" || call.path.endsWith("/output"))).toBe(false);
+    owner = "ses_parent";
+    await provider.stopTask("ses_parent", "v2:ses_parent:call_shell");
+    expect(server.requests("DELETE", "/api/shell/sh_fixture")).toHaveLength(1);
+    expect(await provider.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "running" })]);
+  });
+  test("background reconciliation reads pending results even when the parent is idle; active absence is uncertainty", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    let pending = false;
+    let active = true;
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => active ? { ses_child: { status: "running" } } : {},
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: pending ? [fixture.pending] : [] }),
+      "GET /api/session/ses_child/message": () => ({ data: [], cursor: {} }),
+    });
+    const provider = server.provider();
+    expect(await provider.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "running", stateUncertain: false })]);
+    active = false;
+    expect(await provider.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "running", stateUncertain: true })]);
+    pending = true;
+    expect(await provider.reconcileBackgroundTasks("ses_parent")).toEqual([expect.objectContaining({ status: "completed", summary: "Fixture checked.", stateUncertain: false })]);
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  });
+  test("concurrent recovery requests for one parent share every read", async () => {
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({}),
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "GET /api/session/ses_parent/message": async () => { await wait; return { data: [], cursor: {} }; },
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    });
+    const provider = server.provider();
+    const first = provider.reconcileBackgroundTasks("ses_parent");
+    const second = provider.reconcileBackgroundTasks("ses_parent");
+    release();
+    expect(await Promise.all([first, second])).toEqual([[], []]);
+    expect(server.requests("GET", "/api/session/ses_parent/inbox")).toHaveLength(1);
+    expect(server.requests("GET", "/api/session/active")).toHaveLength(1);
+    expect(server.requests("GET", "/api/session/ses_parent/message")).toHaveLength(1);
+  });
+  test("successive background reconciliations reuse complete history but refresh current execution and pending inbox", async () => {
+    const encoder = new TextEncoder();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const server = fakeOpenCode({
+      "GET /api/event": () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        stream = controller;
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "server.connected", data: {} })}\n\n`));
+      } }), { headers: { "content-type": "text/event-stream" } }),
+      "GET /api/session/active": () => ({}),
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "GET /api/session/ses_parent/message": () => ({ data: [], cursor: {} }),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+    });
+    const provider = server.provider();
+    const controller = new AbortController();
+    const events = provider.events(controller.signal)[Symbol.asyncIterator]();
+    await events.next();
+    await provider.reconcileBackgroundTasks("ses_parent");
+    await provider.reconcileBackgroundTasks("ses_parent");
+    expect(server.requests("GET", "/api/session/ses_parent/message")).toHaveLength(1);
+    expect(server.requests("GET", "/api/session/active")).toHaveLength(2);
+    expect(server.requests("GET", "/api/session/ses_parent/inbox")).toHaveLength(2);
+    expect(server.calls.some(call => call.method !== "GET")).toBe(false);
+    const updated = events.next();
+    stream.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "session.message.content.updated", data: { sessionID: "ses_parent", messageID: "msg_new", content: [] } })}\n\n`));
+    await updated;
+    await provider.reconcileBackgroundTasks("ses_parent");
+    expect(server.requests("GET", "/api/session/ses_parent/message")).toHaveLength(2);
+    stream.close();
+    await events.next();
+    // With no stream/replay guarantee, even unchanged history must be read.
+    await provider.reconcileBackgroundTasks("ses_parent");
+    expect(server.requests("GET", "/api/session/ses_parent/message")).toHaveLength(3);
+    await provider.dispose();
+  });
+  test("disposing cancels and awaits owned background reads without touching provider execution", async () => {
+    let started!: () => void;
+    const reading = new Promise<void>(resolve => { started = resolve; });
+    let signal: AbortSignal | undefined;
+    let release!: () => void;
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({}),
+      "GET /api/session/ses_parent": () => session("ses_parent"),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/session/ses_parent/message": call => new Promise((_resolve, reject) => {
+        signal = call.signal;
+        release = () => reject(new DOMException("Stopped read", "AbortError"));
+        signal.addEventListener("abort", release, { once: true });
+        started();
+      }),
+    });
+    const provider = server.provider();
+    const pending = provider.reconcileBackgroundTasks("ses_parent").catch(() => undefined);
+    await reading;
+    try {
+      await provider.dispose();
+      expect(signal?.aborted).toBe(true);
+    } finally { release(); await pending; }
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  });
+  test("a notification for an existing verified child is readable without its creation event", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const event = { id: "evt_notice", type: "session.inbox.enqueued", created: 41, location: { directory: WORKSPACE }, data: { sessionID: "ses_parent", inboxID: "msg_result", item: fixture.pending } };
+    const server = fakeOpenCode({
+      "GET /api/session/ses_child": () => session("ses_child", { parentID: "ses_parent" }),
+      "GET /api/event": () => new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } }),
+    });
+    const updates = [];
+    for await (const event of server.provider().events(new AbortController().signal)) updates.push(...event.updates);
+    expect(updates).toContainEqual({ kind: "upsert", item: expect.objectContaining({ type: "background_task", resultId: "msg_result", status: "completed", summary: "Fixture checked." }) });
+    expect(updates.some(update => update.kind === "upsert" && update.item.type === "notice")).toBe(false);
+  });
+  test("complete history correlates a worker result before paging, without duplicating its envelope", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const server = fakeOpenCode({
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch, fixture.stored], cursor: {} }),
+    });
+    const provider = server.provider();
+    const latest = await provider.listMessages("ses_parent", { limit: 1 });
+    expect(latest.items).toContainEqual(expect.objectContaining({ type: "background_task", status: "completed", summary: "Fixture checked.", childConversationId: "ses_child" }));
+    expect(latest.items.some(item => item.type === "notice")).toBe(false);
+    const older = await provider.listMessages("ses_parent", { limit: 1, cursor: latest.nextCursor });
+    expect(older.items.filter(item => item.type === "background_task")).toEqual([]);
+    expect(latest.completeItems?.filter(item => item.type === "background_task")).toHaveLength(1);
+    expect(latest.completeItems).toContainEqual(expect.objectContaining({ type: "tool", id: "tool:call_worker", status: "completed" }));
+  });
+
+  test("notification-first stored history retires its provisional result when the older launch is restated", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const server = fakeOpenCode({
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.stored, { ...fixture.launch, time: { created: 50 } }], cursor: {} }),
+    });
+    const result = await server.provider().listMessages("ses_parent", { limit: 100 });
+    expect(result.items.filter(item => item.type === "background_task")).toEqual([expect.objectContaining({ toolUseId: "call_worker", resultId: "msg_result", status: "completed" })]);
+  });
+  test("the first history page carries every live worker and its out-of-page launcher aliases", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const server = fakeOpenCode({
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch, { id: "latest", type: "user", time: { created: 100 }, text: "Later prompt" }], cursor: {} }),
+    });
+    const provider = server.provider();
+    const result = await provider.listMessages("ses_parent", { limit: 1 });
+    expect(result.items).toContainEqual(expect.objectContaining({ id: "tool:call_worker", status: "completed" }));
+    expect(result.items.filter(item => item.type === "background_task")).toHaveLength(1);
+    const older = await provider.listMessages("ses_parent", { cursor: result.nextCursor, limit: 1 });
+    expect(new Set([...result.items, ...older.items].filter(item => item.type === "background_task").map(item => item.id)).size).toBe(1);
+  });
+  test("child execution boundaries separate reused occurrences; an ambiguous delayed notice settles neither", async () => {
+    const fixture = JSON.parse(readFileSync(path.join(import.meta.dir, "../../../../tests/fixtures/opencode-v2/background-2.0.29.json"), "utf8"));
+    const notice = { ...fixture.stored, time: { created: 70 } };
+    const server = fakeOpenCode({
+      "GET /api/session/active": () => ({ ses_child: { status: "running" } }),
+      "GET /api/session/:id": ({ path }) => session(path.split("/").at(-1)!, path.endsWith("ses_child") ? { parentID: "ses_parent" } : {}),
+      "GET /api/session/ses_parent/inbox": () => ({ data: [] }),
+      "GET /api/session/ses_parent/message": () => ({ data: [fixture.launch, fixture.converted, notice], cursor: {} }),
+      "GET /api/session/ses_child/message": () => ({ data: [{ id: "msg_idle", type: "idle", outcome: "succeeded", time: { created: 40 } }, { id: "msg_continue", type: "user", text: "Check another fixture", time: { created: 50 } }], cursor: {} }),
+    });
+    const result = await server.provider().listMessages("ses_parent", { limit: 50 });
+    expect(result.items.filter(item => item.type === "background_task" && item.status === "running")).toEqual([
+      expect.objectContaining({ toolUseId: "call_worker", stateUncertain: true }),
+      expect.objectContaining({ toolUseId: "call_converted", stateUncertain: true }),
+    ]);
+    expect(result.items.filter(item => item.type === "background_task" && item.status === "completed")).toEqual([expect.objectContaining({ summary: "Fixture checked." })]);
+    const provider = server.provider();
+    expect((await provider.reconcileBackgroundTasks("ses_parent")).filter(item => item.status === "running").every(item => item.stateUncertain)).toBe(true);
+    await expect(provider.stopTask("ses_parent", "v2:ses_parent:call_converted")).rejects.toThrow(/no longer confirmed/);
+    expect(server.calls.every(call => call.method === "GET")).toBe(true);
+  });
+
   test("lists only the workspace's sessions, following the cursor", async () => {
     const server = fakeOpenCode({
       "GET /api/session": ({ query }) => query.get("cursor") === "page2"
@@ -315,6 +671,66 @@ describe("OpenCode 2.x provider: prompting and events", () => {
       delivery: "queue",
       resume: true,
     });
+  });
+
+  test("a steer is handed to the inbox with resume, and never retargets the session it steers", async () => {
+    // opencode-v2-steering D6: a mid-turn switchModel/switchAgent would
+    // retarget the turn being steered, so a steer carries no model or mode
+    // to the session and runs under whatever it has at delivery.
+    const server = fakeOpenCode({
+      "POST /api/session/:id/model": () => undefined,
+      "POST /api/session/:id/agent": () => undefined,
+      "POST /api/session/:id/prompt": ({ body }) => ({ id: (body as { id: string }).id, sessionID: "ses_1", time: { created: 1 }, type: "user", payload: { text: (body as { text: string }).text }, delivery: "steer" }),
+    });
+    const result = await server.provider().prompt("ses_1", {
+      id: "req-s",
+      text: "stop, do the other thing",
+      delivery: "steer",
+      attachments: [{ id: "att_1", name: "shot.png", mimeType: "image/png", absolutePath: "/tmp/uatu/att_1.png" }],
+      model: { providerId: "berget", modelId: "think" },
+      mode: "plan",
+      variant: "high",
+    });
+    expect(result.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
+    expect(server.calls.map(call => `${call.method} ${call.path}`)).toEqual(["POST /api/session/ses_1/prompt"]);
+    expect(server.requests("POST", "/api/session/ses_1/prompt")[0]?.body).toEqual({
+      id: result.messageId,
+      text: "stop, do the other thing",
+      files: [{ uri: "file:///tmp/uatu/att_1.png", name: "shot.png" }],
+      delivery: "steer",
+      resume: true,
+    });
+  });
+
+  test("interrupt passes resume through, and sends none when the caller names none", async () => {
+    const server = fakeOpenCode({ "POST /api/session/:id/interrupt": () => ({ interrupted: true }) });
+    const provider = server.provider();
+    await provider.interrupt("ses_1");
+    await provider.interrupt("ses_1", { resume: false });
+    await provider.interrupt("ses_1", { resume: true });
+    // The pinned client carries `resume` as a query parameter.
+    expect(server.requests("POST", "/api/session/ses_1/interrupt").map(call => call.query.get("resume"))).toEqual([null, "false", "true"]);
+  });
+
+  test("the pending inbox lists the user's steers only, as pending entries", async () => {
+    const server = fakeOpenCode({
+      "GET /api/session/:id/inbox": () => ({ data: [
+        { id: "msg_steer", sessionID: "ses_1", time: { created: 5 }, type: "user", payload: { text: "steer me", files: [{ mime: "image/png", name: "shot.png", source: { type: "uri", uri: "file:///tmp/uatu/11111111-2222-4333-8444-555555555555.png" } }] }, delivery: "steer" },
+        { id: "msg_queued", sessionID: "ses_1", time: { created: 6 }, type: "user", payload: { text: "native queue" }, delivery: "queue" },
+        { id: "msg_syn", sessionID: "ses_1", time: { created: 7 }, type: "synthetic", payload: { text: "note" }, delivery: "steer" },
+        { id: "msg_cmp", sessionID: "ses_1", time: { created: 8 }, type: "compaction", payload: {}, delivery: "steer" },
+        { id: "msg_mv", sessionID: "ses_1", time: { created: 9 }, type: "move", payload: { location: { directory: "/x" } }, delivery: "steer" },
+      ] }),
+    });
+    expect(await server.provider().listPendingInbox("ses_1")).toEqual([
+      { id: "msg_steer", text: "steer me", delivery: "steer", at: 5, attachments: [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }] },
+    ]);
+  });
+
+  test("cancelling an inbox entry hits its route", async () => {
+    const server = fakeOpenCode({ "DELETE /api/session/:id/inbox/:inboxId": () => undefined });
+    await server.provider().cancelInbox("ses_1", "msg_steer");
+    expect(server.requests("DELETE", "/api/session/ses_1/inbox/msg_steer")).toHaveLength(1);
   });
 
   test("a retried prompt is the same message to OpenCode", async () => {
@@ -577,6 +993,9 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     }), { status: 200, headers: { "content-type": "text/event-stream" } });
     return { route, frame };
   }
+  // The inbox delivering an entry: only then does its row join the timeline
+  // (opencode-v2-steering D4). `enqueued` helpers below push both frames.
+  const delivered = (inboxID: string, created = 10) => ({ id: `evt_${inboxID}_d`, created, type: "session.inbox.delivered", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID } });
 
   test("a slash command's row takes the inbox id the stream names, ahead of the 204", async () => {
     const events = pushableEvents();
@@ -586,6 +1005,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
         // The server enqueues the item and announces it before answering,
         // with its own id and the expanded template as the text.
         events.frame({ id: "evt_1", created: 5, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_srv1", item: { type: "user", payload: { text: "Create or update AGENTS.md" }, delivery: "queue" } } });
+        events.frame(delivered("msg_srv1", 6));
         return undefined;
       },
     });
@@ -597,7 +1017,10 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     })();
     await Bun.sleep(10); // the stream is live once its first frame has arrived
     expect(await provider.command("ses_1", { id: "req-5", name: "init", arguments: "" })).toEqual({ messageId: "msg_srv1" });
-    // The streamed row had already been consumed when the admission returned.
+    // The enqueue named the row's id before the admission returned; the row
+    // itself lands with the delivery that followed it.
+    const deadline = Date.now() + 2_000;
+    while (rows.length < 1 && Date.now() < deadline) await Bun.sleep(5);
     expect(rows).toEqual(["message:msg_srv1"]);
     controller.abort();
     await pump;
@@ -620,9 +1043,10 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
     // The stream names the row only now, after the caller's own upsert.
     events.frame({ id: "evt_9", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_late", item: { type: "user", payload: { text: "Create or update AGENTS.md" }, delivery: "queue" } } });
+    events.frame(delivered("msg_late", 10));
     const deadline = Date.now() + 2_000;
     while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual(["upsert message:msg_late", `remove message:${accepted.messageId}`]);
+    expect(seen).toEqual([`remove message:${accepted.messageId}`, "upsert message:msg_late"]);
     controller.abort();
     await pump;
   });
@@ -642,7 +1066,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
       }
     })();
     await Bun.sleep(10); // the stream is live once its first frame has arrived
-    const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    const enqueued = (inboxID: string) => { events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } }); events.frame(delivered(inboxID)); };
     const a = await provider.command("ses_1", { id: "req-a", name: "init", arguments: "" });
     // B is admitted while A's row is still on its way.
     const b = provider.command("ses_1", { id: "req-b", name: "review", arguments: "" });
@@ -650,12 +1074,12 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     enqueued("msg_a");
     let deadline = Date.now() + 2_000;
     while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual(["upsert message:msg_a", `remove message:${a.messageId}`]);
+    expect(seen).toEqual([`remove message:${a.messageId}`, "upsert message:msg_a"]);
     enqueued("msg_b");
     expect(await b).toEqual({ messageId: "msg_b" });
     deadline = Date.now() + 2_000;
     while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual(["upsert message:msg_a", `remove message:${a.messageId}`, "upsert message:msg_b"]);
+    expect(seen).toEqual([`remove message:${a.messageId}`, "upsert message:msg_a", "upsert message:msg_b"]);
     controller.abort();
     await pump;
   });
@@ -673,14 +1097,14 @@ describe("OpenCode 2.x provider: prompting and events", () => {
       }
     })();
     await Bun.sleep(10); // the stream is live once its first frame has arrived
-    const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    const enqueued = (inboxID: string) => { events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } }); events.frame(delivered(inboxID)); };
     const a = await provider.command("ses_1", { id: "req-a2", name: "init", arguments: "" });
     const b = await provider.command("ses_1", { id: "req-b2", name: "review", arguments: "" });
     enqueued("msg_a");
     enqueued("msg_b");
     const deadline = Date.now() + 2_000;
     while (seen.length < 4 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual(["upsert message:msg_a", `remove message:${a.messageId}`, "upsert message:msg_b", `remove message:${b.messageId}`]);
+    expect(seen).toEqual([`remove message:${a.messageId}`, "upsert message:msg_a", `remove message:${b.messageId}`, "upsert message:msg_b"]);
     controller.abort();
     await pump;
   });
@@ -708,6 +1132,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
     expect(seen).toEqual([`remove message:${accepted.messageId}`, `upsert notice:${accepted.messageId}:refused error`, "status failed"]);
     events.frame({ id: "evt_x", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_x", item: { type: "user", payload: { text: "someone else's prompt" }, delivery: "queue" } } });
+    events.frame(delivered("msg_x", 10));
     deadline = Date.now() + 2_000;
     while (seen.length < 4 && Date.now() < deadline) await Bun.sleep(5);
     await Bun.sleep(30);
@@ -737,9 +1162,10 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     await Bun.sleep(120);
     expect(seen).toEqual([]);
     events.frame({ id: "evt_t", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_t", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    events.frame(delivered("msg_t", 10));
     const deadline = Date.now() + 2_000;
     while (seen.length < 2 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual(["upsert message:msg_t", `remove message:${accepted.messageId}`]);
+    expect(seen).toEqual([`remove message:${accepted.messageId}`, "upsert message:msg_t"]);
     controller.abort();
     await pump;
   });
@@ -761,21 +1187,21 @@ describe("OpenCode 2.x provider: prompting and events", () => {
       }
     })();
     await Bun.sleep(10); // the stream is live once its first frame has arrived
-    const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "t" }, delivery: "queue" } } });
+    const enqueued = (inboxID: string) => { events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "t" }, delivery: "queue" } } }); events.frame(delivered(inboxID)); };
     const command = await provider.command("ses_1", { id: "req-c", name: "init", arguments: "" });
     const prompt = await provider.prompt("ses_1", { id: "req-p", text: "x", delivery: "queue" });
     enqueued(prompt.messageId);
     enqueued("msg_cmd");
     const deadline = Date.now() + 2_000;
     while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual([`upsert message:${prompt.messageId}`, "upsert message:msg_cmd", `remove message:${command.messageId}`]);
+    expect(seen).toEqual([`upsert message:${prompt.messageId}`, `remove message:${command.messageId}`, "upsert message:msg_cmd"]);
     controller.abort();
     await pump;
   });
 
   test("a prompt's row announced before the prompt is answered is still a prompt's", async () => {
     const events = pushableEvents();
-    const enqueued = (inboxID: string) => events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "t" }, delivery: "queue" } } });
+    const enqueued = (inboxID: string) => { events.frame({ id: `evt_${inboxID}`, created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID, item: { type: "user", payload: { text: "t" }, delivery: "queue" } } }); events.frame(delivered(inboxID)); };
     const server = fakeOpenCode({
       "GET /api/event": events.route,
       "POST /api/session/:id/command": () => undefined,
@@ -797,7 +1223,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     enqueued("msg_cmd3");
     const deadline = Date.now() + 2_000;
     while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual([`upsert message:${prompt.messageId}`, "upsert message:msg_cmd3", `remove message:${command.messageId}`]);
+    expect(seen).toEqual([`upsert message:${prompt.messageId}`, `remove message:${command.messageId}`, "upsert message:msg_cmd3"]);
     controller.abort();
     await pump;
   });
@@ -855,6 +1281,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     })();
     await Bun.sleep(20);
     events.frame({ id: "evt_z", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_z", item: { type: "user", payload: { text: "next command" }, delivery: "queue" } } });
+    events.frame(delivered("msg_z", 10));
     const deadline = Date.now() + 2_000;
     while (seen.length < 1 && Date.now() < deadline) await Bun.sleep(5);
     await Bun.sleep(30);
@@ -946,6 +1373,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     expect(accepted.messageId).toMatch(/^msg_[0-9a-f]{26}$/);
     await Bun.sleep(100);
     frame({ id: "evt_q", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_q", item: { type: "user", payload: { text: "next command" }, delivery: "queue" } } });
+    frame(delivered("msg_q", 10));
     const deadline = Date.now() + 2_000;
     while (seen.length < 1 && Date.now() < deadline) await Bun.sleep(5);
     await Bun.sleep(30);
@@ -969,6 +1397,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     const admission = provider.command("ses_1", { id: "req-hs", name: "init", arguments: "" });
     await Bun.sleep(120);
     frame({ id: "evt_h", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_h", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    frame(delivered("msg_h", 10));
     expect(await admission).toEqual({ messageId: "msg_h" });
     controller.abort();
     await pump;
@@ -1021,10 +1450,12 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     events.frame({ id: "evt_k1", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: compaction.messageId, item: { type: "compaction", payload: {}, delivery: "queue" } } });
     // And the shape the finding supposed: a user row under the compaction's id.
     events.frame({ id: "evt_k2", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: compaction.messageId, item: { type: "user", payload: { text: "compact" }, delivery: "queue" } } });
+    events.frame(delivered(compaction.messageId, 10));
     events.frame({ id: "evt_k3", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_cmd9", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    events.frame(delivered("msg_cmd9", 10));
     const deadline = Date.now() + 2_000;
     while (seen.length < 3 && Date.now() < deadline) await Bun.sleep(5);
-    expect(seen).toEqual([`upsert message:${compaction.messageId}`, "upsert message:msg_cmd9", `remove message:${command.messageId}`]);
+    expect(seen).toEqual([`upsert message:${compaction.messageId}`, `remove message:${command.messageId}`, "upsert message:msg_cmd9"]);
     controller.abort();
     await pump;
   });
@@ -1048,6 +1479,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     })();
     await Bun.sleep(20);
     events.frame({ id: "evt_y", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_y", item: { type: "user", payload: { text: "later" }, delivery: "queue" } } });
+    events.frame(delivered("msg_y", 10));
     const deadline = Date.now() + 2_000;
     while (seen.length < 1 && Date.now() < deadline) await Bun.sleep(5);
     await Bun.sleep(30);
@@ -1084,6 +1516,7 @@ describe("OpenCode 2.x provider: prompting and events", () => {
     const admission = provider.command("ses_1", { id: "req-l", name: "init", arguments: "" });
     await Bun.sleep(40);
     events.frame({ id: "evt_l", created: 9, type: "session.inbox.enqueued", location: { directory: WORKSPACE }, data: { sessionID: "ses_1", inboxID: "msg_l", item: { type: "user", payload: { text: "expanded" }, delivery: "queue" } } });
+    events.frame(delivered("msg_l", 10));
     expect(await admission).toEqual({ messageId: "msg_l" });
     controller.abort();
     await pump;

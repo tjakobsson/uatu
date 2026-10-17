@@ -81,6 +81,7 @@
   --chat-activity-fg: light-dark(#454c54, #b1bac4);
   --text-strong: light-dark(#1f2328, #e6edf3);
   --accent: light-dark(#0969da, #4493f8);
+  --chat-send-fill: light-dark(#0969da, #1f6feb);
   --accent-soft: light-dark(#ddf4ff, #121d2f);
   --navy: #0a1c38;
   --teal: #1ca8a7;
@@ -5217,6 +5218,50 @@ body.is-resizing-chat .chat-resizer {
   font-size: 0.9rem;
 }
 
+.chat-work-dock { display: contents; }
+
+/* Desktop tracks and pending input spend one measured panel budget. The
+   aggregate yields before the transcript/composer, without changing each
+   track's disclosure state or its rem-based expanded-list cap. */
+html[data-ui-mode="desktop"] .chat-work-dock {
+  display: block;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(calc(var(--chat-panel-height, 0px) * 0.4), 25rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+html[data-ui-mode="desktop"][data-chat-has-work] .chat-work-dock {
+  min-height: max(52px, 3.25rem);
+}
+html[data-ui-mode="desktop"] :is(#chat-background-tasks-items, #chat-subagents-items, #chat-task-list-items, #chat-scheduled-wakeups-items) {
+  padding-top: 0.25rem;
+  padding-right: 0.25rem;
+  padding-bottom: 0.25rem;
+  scroll-padding-block: 0.25rem;
+}
+html[data-ui-mode="desktop"] .chat-work-dock { scroll-padding-block: 0.25rem; }
+html[data-ui-mode="desktop"] .chat-work-dock button { scroll-margin-block: 0.25rem; }
+html[data-ui-mode="desktop"] .chat-work-dock button:focus-visible { outline-offset: 0; }
+.chat-work-toggle, .chat-work-close { display: none; }
+html[data-ui-mode="desktop"][data-chat-work-constrained] .chat-work-toggle:not([hidden]) {
+  display: block; position: absolute; z-index: 31; top: 0.25rem; right: 0.5rem;
+  min-height: 44px; min-width: 44px;
+}
+html[data-ui-mode="desktop"][data-chat-work-constrained]:not([data-chat-work-expanded]) .chat-work-dock { display: none; }
+html[data-ui-mode="desktop"][data-chat-work-expanded] .chat-work-dock {
+  position: absolute; z-index: 32;
+  inset: var(--chat-workers-top) 0 var(--chat-workers-bottom);
+  max-height: none;
+  background: var(--surface-raised);
+}
+html[data-ui-mode="desktop"][data-chat-work-expanded] .chat-work-close:not([hidden]) {
+  display: block; min-height: 44px; margin: 0.25rem;
+}
+html[data-ui-mode="desktop"] .chat-transcript-area {
+  min-height: min(12rem, calc(var(--chat-panel-height, 0px) * 0.35));
+}
+
 /* Assistant messages render into `.markdown-body`, which github-markdown-css
    pins at an absolute `font-size: 16px` — no scale on the surface can reach
    it. Scoped to the chat surface (0,2,0 beats the vendored 0,1,0, and we sit
@@ -5355,7 +5400,7 @@ html[data-ui-mode="desktop"][data-notification-chat] .chat-expand-strip {
 
 .chat-composer-actions {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 2.25rem 2.55rem;
+  grid-template-columns: auto minmax(0, 1fr) 2.25rem auto;
   align-items: center;
   gap: 0.5rem;
 }
@@ -5363,19 +5408,19 @@ html[data-ui-mode="desktop"][data-notification-chat] .chat-expand-strip {
 .chat-composer-actions > .chat-context-usage { grid-column: 1; }
 .chat-composer-actions > .chat-configuration-trigger { grid-column: 2; }
 .chat-composer-actions > .chat-composer-status { grid-column: 3; }
-.chat-composer-actions > #chat-send { grid-column: 4; }
+.chat-composer-actions > .chat-send-group { grid-column: 4; }
 
 /* With the attach control present (agent declares attachments) the rail gains
    a leading fixed column; without it the four-column layout above stands, so
    capability removal never leaves a hole in the grid. */
 .chat-composer-actions:has(> .chat-attach-button) {
-  grid-template-columns: 2.25rem auto minmax(0, 1fr) 2.25rem 2.55rem;
+  grid-template-columns: 2.25rem auto minmax(0, 1fr) 2.25rem auto;
 }
 .chat-composer-actions:has(> .chat-attach-button) > .chat-attach-button { grid-column: 1; }
 .chat-composer-actions:has(> .chat-attach-button) > .chat-context-usage { grid-column: 2; }
 .chat-composer-actions:has(> .chat-attach-button) > .chat-configuration-trigger { grid-column: 3; }
 .chat-composer-actions:has(> .chat-attach-button) > .chat-composer-status { grid-column: 4; }
-.chat-composer-actions:has(> .chat-attach-button) > #chat-send { grid-column: 5; }
+.chat-composer-actions:has(> .chat-attach-button) > .chat-send-group { grid-column: 5; }
 
 .chat-attach-button {
   display: grid;
@@ -6870,45 +6915,49 @@ html[data-ui-mode="desktop"][data-notification-chat] .chat-expand-strip {
   background: var(--accent);
 }
 
-/* Icon-only in both chromes: the up arrow IS the action, in the accent blue
-   for send and queue alike — the aria-label and title state which one this
-   press is, and the label span stays in the DOM for assistive tech. */
+/* Send never becomes Stop. Each action has a labelled, separate touch target. */
 #chat-send {
+  background: var(--chat-send-fill);
+  border-color: var(--chat-send-fill);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.55rem;
-  height: 2.55rem;
-  min-height: 2.55rem;
-  border-radius: 999px;
+  width: 3.5rem;
+  height: 2.75rem;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+  border-radius: 0.5rem;
   padding: 0;
 }
 
-#chat-send .chat-send-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
+/* Fixed targets and real empty gaps: no overlapping cancellation hit area. */
+.chat-send-group {
+  position: relative;
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+  height: 2.75rem;
 }
 
-.chat-send-icon {
-  display: block;
+.chat-stop-button {
+  width: 3.25rem;
+  min-width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.8em;
+  cursor: pointer;
 }
 
-.chat-send-cancel {
-  display: none;
-}
-
-#chat-send[data-action="cancel"] .chat-send-arrow {
-  display: none;
-}
-
-#chat-send[data-action="cancel"] .chat-send-cancel {
-  display: block;
-}
+.chat-stop-button:disabled { opacity: 0.5; cursor: default; }
+.chat-stop-button:hover:not(:disabled) { background: var(--surface-muted); }
+.chat-stop-button.has-worker-scope { width: 5.5rem; padding-inline: 0.5rem; }
+.chat-send-group button { touch-action: manipulation; }
+.chat-send-group button:focus-visible { outline: 0.125rem solid var(--accent); outline-offset: 0.125rem; }
 
 /* The liveness pulse shared by the timeline's working line and the composer's
    background-work state. */
@@ -6985,6 +7034,7 @@ html[data-ui-mode="desktop"][data-notification-chat] .chat-expand-strip {
 }
 
 .chat-composer {
+  container: chat-composer / inline-size;
   position: relative;
   flex: 0 0 auto;
   padding: 0.75rem max(1rem, calc((100% - 52rem) / 2)) calc(0.75rem + env(safe-area-inset-bottom));
@@ -7408,15 +7458,6 @@ html[data-ui-mode="desktop"]:not(.uatu-desktop-host) .chat-composer {
 
 @container (min-width: 14rem) {
   .chat-configuration-details:not([hidden]) {
-    display: flex;
-  }
-}
-
-/* The attach control costs the rail its own column (~2.75rem with the gap),
-   so with it present the details threshold moves by the same amount — the
-   same panel width keeps showing the same information. */
-@container (min-width: 11.25rem) {
-  .chat-composer-actions:has(> .chat-attach-button) .chat-configuration-details:not([hidden]) {
     display: flex;
   }
 }
@@ -7999,6 +8040,10 @@ html[data-ui-mode="touch"] .plan-meter {
   display: none;
 }
 
+.chat-composer-error.is-notice {
+  color: var(--text-subtle);
+}
+
 .chat-configuration-dialog {
   position: fixed;
   inset: auto auto var(--chat-configuration-bottom) var(--chat-configuration-left);
@@ -8417,7 +8462,8 @@ html[data-ui-mode="touch"][data-active-tab="chat"] .chat-surface {
   left: 0;
   right: 0;
   top: var(--chat-visual-top, 0px);
-  height: var(--chat-visual-height, calc(100dvh - var(--tab-bar-total)));
+  height: var(--chat-visual-height, 100%);
+  overflow: clip;
   z-index: 35;
   padding-top: env(safe-area-inset-top);
   padding-left: env(safe-area-inset-left);
@@ -8444,7 +8490,7 @@ html[data-ui-mode="touch"] .chat-drilldown {
   right: 0;
   top: var(--chat-visual-top, 0px);
   bottom: auto;
-  height: var(--chat-visual-height, calc(100dvh - var(--tab-bar-total)));
+  height: var(--chat-visual-height, 100%);
   z-index: 36;
   border: 0;
   border-radius: 0;
@@ -8576,7 +8622,7 @@ html[data-ui-mode="touch"] .chat-command-menu {
   left: 0;
   right: 0;
   bottom: calc(100% + 0.35rem);
-  max-height: min(19rem, 42vh);
+  max-height: min(19rem, calc(var(--chat-visual-height, 45rem) * 0.42));
 }
 
 html[data-ui-mode="touch"] .chat-composer textarea {
@@ -8602,7 +8648,7 @@ html[data-ui-mode="touch"] .chat-question-custom-editor input {
 }
 
 html[data-ui-mode="touch"] .chat-composer-actions {
-  grid-template-columns: auto minmax(0, 1fr) 2.25rem 2.55rem;
+  grid-template-columns: auto minmax(0, 1fr) 2.25rem auto;
   align-items: center;
   min-height: 2rem;
 }
@@ -8613,18 +8659,39 @@ html[data-ui-mode="touch"] .chat-composer-actions {
    assignments land in touch's four-column grid and squeeze the model name
    into a 2.25rem track. */
 html[data-ui-mode="touch"] .chat-composer-actions:has(> .chat-attach-button) {
-  grid-template-columns: 2.25rem auto minmax(0, 1fr) 2.25rem 2.55rem;
+  grid-template-columns: 2.25rem auto minmax(0, 1fr) 2.25rem auto;
 }
 
-html[data-ui-mode="touch"] #chat-send {
-  display: inline-grid;
-  place-items: center;
-  width: 2.55rem;
-  height: 2.55rem;
-  min-height: 2.55rem;
-  border-radius: 999px;
-  padding: 0;
-  touch-action: manipulation;
+/* At narrow panel widths, two deliberate rails keep settings usable without
+   shrinking the submission targets. This depends on width, never turn state. */
+@container chat-composer (max-width: 30rem) {
+  .chat-composer-actions,
+  html[data-ui-mode="touch"] .chat-composer-actions {
+    grid-template-columns: auto minmax(0, 1fr) 2.25rem;
+  }
+  .chat-composer-actions:has(> .chat-attach-button),
+  html[data-ui-mode="touch"] .chat-composer-actions:has(> .chat-attach-button) {
+    grid-template-columns: 2.25rem auto minmax(0, 1fr) 2.25rem;
+  }
+  .chat-composer-actions > .chat-send-group,
+  .chat-composer-actions:has(> .chat-attach-button) > .chat-send-group {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: end;
+  }
+  .chat-composer-actions:has(.chat-send-group:not([data-steering])) {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+  }
+  .chat-composer-actions:has(> .chat-attach-button):has(.chat-send-group:not([data-steering])) {
+    grid-template-columns: 2.25rem auto minmax(0, 1fr) auto auto;
+  }
+  .chat-composer-actions:has(.chat-send-group:not([data-steering])) > .chat-send-group {
+    grid-column: 4;
+    grid-row: 1;
+  }
+  .chat-composer-actions:has(> .chat-attach-button):has(.chat-send-group:not([data-steering])) > .chat-send-group {
+    grid-column: 5;
+  }
 }
 
 html[data-ui-mode="touch"] .chat-configuration-dialog {
@@ -9022,11 +9089,67 @@ body.terminal-transcript-open .touch-tab-bar {
   padding: 0.5rem max(1rem, calc((100% - 52rem) / 2)) 0;
   border-top: 1px solid var(--border-soft);
   background: var(--surface-raised);
-  max-height: 8.5rem;
+  max-height: min(calc(var(--chat-panel-height, var(--chat-visual-height, 0px)) * 0.4), 25rem);
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+html[data-ui-mode="touch"] .chat-work-dock {
+  display: block;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: calc(var(--chat-visual-height) * 0.4);
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .chat-queue[hidden] {
+  display: none;
+}
+
+.chat-queue-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chat-queue-header {
+  position: sticky;
+  top: -0.5rem;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-block: 0.5rem;
+  background: var(--surface-raised);
+  font-size: 0.8em;
+}
+
+.chat-queue.has-more-below::after,
+html[data-ui-mode="touch"] .chat-work-dock.has-more-below::after {
+  content: "";
+  position: sticky;
+  bottom: 0;
+  flex: 0 0 1rem;
+  margin-top: -1rem;
+  background: linear-gradient(transparent, var(--surface-raised));
+  pointer-events: none;
+}
+html[data-ui-mode="touch"] .chat-work-dock.has-more-below::after { display: block; height: 1rem; grid-column: 1 / -1; }
+
+.chat-queue-items:empty {
+  display: none;
+}
+
+.chat-queue-note {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.75em;
+}
+
+.chat-queue-note[hidden] {
   display: none;
 }
 
@@ -9106,6 +9229,40 @@ body.terminal-transcript-open .touch-tab-bar {
   padding: 0.5rem 0.75rem;
 }
 
+/* A steer is already the agent's: a solid edge says it is on its way, where
+   a held message's dashed one says the workspace still has it. */
+.chat-queued-message.is-steer {
+  border-style: solid;
+  border-inline-start: 0.2rem solid var(--accent);
+}
+
+.chat-queued-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.chat-queued-badge,
+.chat-queued-paused {
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.35rem;
+  font-size: 0.8em;
+}
+
+.is-steer .chat-queued-badge {
+  color: var(--accent);
+}
+
+.chat-queued-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
 .chat-queued-message p {
   margin: 0;
   overflow-wrap: anywhere;
@@ -9114,8 +9271,8 @@ body.terminal-transcript-open .touch-tab-bar {
 
 .chat-queued-row {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: flex-end;
   gap: 0.6rem;
   margin-top: 0.3rem;
 }
@@ -9126,25 +9283,38 @@ body.terminal-transcript-open .touch-tab-bar {
   font-size: 0.75em;
 }
 
-.chat-queued-remove {
-  border: none;
-  background: none;
-  padding: 0;
-  color: var(--text-subtle);
+.chat-queued-action {
+  min-height: 2.25rem;
+  min-width: 2.25rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.4rem;
+  background: var(--surface-raised);
+  padding: 0.35rem 0.5rem;
+  color: var(--text-strong);
   font: inherit;
   font-size: 0.75em;
-  text-decoration: underline;
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.chat-queued-remove:hover,
-.chat-queued-remove:focus-visible {
+.chat-queued-action:hover,
+.chat-queued-action:focus-visible {
   color: var(--text-strong);
 }
 
-.chat-queued-remove:disabled {
+.chat-queued-action:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.chat-queued-action:focus-visible {
+  outline: 0.125rem solid var(--accent);
+  outline-offset: 0.125rem;
+}
+
+html[data-ui-mode="touch"] .chat-queued-action {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
 }
 
 /* Question options are the primary action, so each is a full-width tap target
@@ -9472,12 +9642,36 @@ html[data-ui-mode="touch"] .chat-task-list {
 
 html[data-chat-keyboard] #chat-task-list-items,
 html[data-chat-keyboard] #chat-subagents-items,
-html[data-chat-keyboard] #chat-background-tasks-items,
 html[data-chat-keyboard] #chat-scheduled-wakeups-items,
 html[data-chat-keyboard] .chat-wakeups-release,
-html[data-chat-keyboard] .chat-reverted-items,
-html[data-chat-keyboard] .chat-queue {
+html[data-chat-keyboard] .chat-reverted-items {
   display: none;
+}
+
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-work-dock > :not(#chat-queue):not(#chat-compact-workers),
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue-items,
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue-breakdown,
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue-model-note,
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue-note:not(.is-replacement) {
+  display: none;
+}
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue {
+  padding: 0 0.55rem;
+  gap: 0;
+  overscroll-behavior: contain;
+}
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue-header {
+  top: 0;
+  padding-block: 0;
+  min-height: 1.5rem;
+}
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue-header .chat-queued-action {
+  font-size: inherit;
+}
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-queue-note {
+  padding-bottom: 0.2rem;
+  font-size: 0.8125rem;
+  line-height: 1.25;
 }
 
 /* Answering a request is the one state where the chrome cannot be acted on
@@ -9513,6 +9707,12 @@ html[data-ui-mode="touch"][data-chat-answering] #chat-drilldown-timeline {
 
 /* Rows of the background-task list: the task's description leads, its
    latest progress note follows, and the stop control sits at the end. */
+#chat-background-tasks-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 #chat-background-tasks-items li::before {
   content: "◍";
   flex: 0 0 auto;
@@ -9521,7 +9721,7 @@ html[data-ui-mode="touch"][data-chat-answering] #chat-drilldown-timeline {
 
 .chat-background-tasks li {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.5rem;
   min-width: 0;
 }
@@ -9537,6 +9737,8 @@ html[data-ui-mode="touch"][data-chat-answering] #chat-drilldown-timeline {
 .chat-background-task-progress {
   color: var(--text-subtle);
   font-size: 0.9em;
+  max-width: 35%;
+  overflow-wrap: anywhere;
 }
 
 /* The elapsed readout stands in for the progress note a shell task never
@@ -9551,7 +9753,8 @@ html[data-ui-mode="touch"][data-chat-answering] #chat-drilldown-timeline {
 .chat-background-task-inspect {
   border: 0;
   padding: 0;
-  min-height: 0;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -9566,6 +9769,48 @@ html[data-ui-mode="touch"][data-chat-answering] #chat-drilldown-timeline {
   text-decoration-color: var(--accent);
 }
 
+.chat-background-action {
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.chat-background-action[hidden] { display: none; }
+.chat-background-action > button[hidden] { display: none; }
+.chat-background-action p {
+  margin: 0.25rem 0;
+  font-size: 0.75rem;
+}
+.chat-background-help { font-size: 0.8em; }
+.chat-background-help > summary { cursor: pointer; padding-block: 0.5rem; }
+#chat-background-feedback:empty { display: none; }
+#chat-background-feedback { flex-basis: 100%; }
+.chat-action-confirm {
+  width: min(28rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.75rem;
+  background: var(--surface-raised);
+  color: var(--text-strong);
+}
+.chat-action-confirm::backdrop { background: rgb(0 0 0 / 45%); }
+.chat-action-confirm h2 { margin-top: 0; font-size: 1.1rem; }
+.chat-action-confirm-buttons { display: flex; justify-content: flex-end; gap: 0.5rem; }
+.chat-action-confirm button { min-height: 2.75rem; }
+.chat-action-confirm button:focus-visible { outline: 0.125rem solid var(--accent); outline-offset: 0.125rem; }
+.chat-background-action button,
+.chat-drilldown-task-facts [data-task-result],
+.chat-task-stop {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
+.chat-background-action button:focus-visible,
+.chat-drilldown-task-facts [data-task-result]:focus-visible,
+.chat-task-stop:focus-visible {
+  outline: 0.125rem solid currentColor;
+  outline-offset: 0.125rem;
+}
 .chat-task-stop {
   flex: 0 0 auto;
   padding: 0.15rem 0.5rem;
@@ -10279,3 +10524,294 @@ html[data-ui-mode="touch"][data-active-tab="terminal"] .attention-notices {
   top: calc(env(safe-area-inset-top) + 0.5rem);
   bottom: auto;
 }
+
+/* One shared chrome budget; the transcript owns the remaining visual band. */
+html[data-ui-mode="touch"][data-chat-editing]:not([data-chat-keyboard]) .chat-composer {
+  padding-bottom: calc(0.45rem + env(safe-area-inset-bottom));
+}
+html[data-ui-mode="touch"][data-chat-editing]:not([data-chat-keyboard]) .chat-work-dock {
+  max-height: min(calc(var(--chat-visual-height) * 0.24), var(--chat-work-available, 100vh));
+}
+html[data-ui-mode="touch"] .chat-work-dock {
+  flex-shrink: 0;
+  max-height: min(calc(var(--chat-visual-height) * 0.35), var(--chat-work-available, 100vh));
+}
+@media (min-width: 48rem) {
+  html[data-ui-mode="touch"] .chat-work-dock {
+    max-height: min(calc(var(--chat-visual-height) * 0.25), var(--chat-work-available, 100vh));
+  }
+}
+
+html[data-ui-mode="touch"][data-chat-short] .chat-header {
+  padding-block: 0;
+  border-bottom: 0;
+  row-gap: 0;
+}
+html[data-ui-mode="touch"][data-chat-short] .chat-header .chat-identity {
+  display: none;
+}
+html[data-ui-mode="touch"][data-chat-short] .chat-conversation-controls > :is(select, button):not([hidden]) {
+  min-height: 2.75rem;
+}
+
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-block: 0.125rem;
+}
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer[hidden] { display: none; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer textarea {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  height: 2.75rem !important;
+  min-height: 2.75rem;
+  max-height: 2.75rem;
+}
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer-actions { display: contents; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer-actions > :not(.chat-send-group) { display: none; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-send-group { flex: 0 0 auto; }
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-work-dock > :not(#chat-queue):not(#chat-compact-workers),
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue-items,
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue-breakdown,
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue-model-note,
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue-note:not(.is-replacement) { display: none; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-queue {
+  border-top: 0;
+  padding-block: 0;
+}
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue[hidden] { display: none; }
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue-header { display: contents; }
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-queue-note { flex: 1 1 0; min-width: 0; padding: 0; }
+
+html[data-ui-mode="touch"] :is(.chat-task-stop, .chat-queued-action) {
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-ui-mode="touch"] :is(.chat-task-stop, .chat-queued-action):active {
+  background: var(--surface-muted);
+}
+html[data-ui-mode="touch"] .chat-task-stop { font-size: 0.8125rem; }
+html[data-ui-mode="touch"] .chat-background-action button { font: inherit; }
+html[data-ui-mode="touch"] .chat-conversation-controls select { font-size: 1rem; }
+/* Touch keeps one deliberate worker disclosure and one pending disclosure.
+   Their existing rows/handlers remain the inspection and mutation owners. */
+.chat-queue-items[hidden] { display: none; }
+html[data-ui-mode="touch"] .chat-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.chat-composer-notices:not(:has(> :not([hidden]))) { display: none; }
+/* Feedback owns a bounded, keyboard-scrollable band, never the draft's flex
+   remainder. The leading unresolved notice stays visible as work settles. */
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+}
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer textarea {
+  grid-column: 1;
+  grid-row: 1;
+  width: 100%;
+  box-sizing: border-box;
+}
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-send-group {
+  grid-column: 2;
+  grid-row: 1;
+}
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) #chat-send { width: 2.75rem; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer-notices {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+  max-height: 44px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer-notices > p { margin: 0; }
+@media (min-width: 600px) {
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer:has(.chat-composer-notices > :not([hidden])) {
+    grid-template-columns: minmax(140px, 1fr) minmax(140px, 25%) auto;
+  }
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer-notices { grid-column: 2; grid-row: 1; }
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer:has(.chat-composer-notices > :not([hidden])) .chat-send-group { grid-column: 3; }
+}
+html[data-ui-mode="touch"] .chat-send-group { margin-left: auto; max-width: 100%; height: auto; min-height: 44px; flex-wrap: wrap; justify-content: flex-end; }
+html[data-ui-mode="touch"] .chat-composer-status { align-self: flex-end; }
+html[data-ui-mode="touch"] #chat-configuration-trigger { display: none; }
+.chat-compact-workers[hidden] { display: none; }
+.chat-pending-toggle {
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-pending-toggle::before { content: "▸ "; }
+.chat-pending-toggle[aria-expanded="true"]::before { content: "▾ "; }
+.chat-pending-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The dock is the only scroller. Worker rows never inherit desktop tracks. */
+html[data-ui-mode="touch"] :is(#chat-subagents, #chat-background-tasks) { display: none; }
+html[data-ui-mode="touch"] .chat-work-dock :is(.chat-queue, #chat-task-list-items, #chat-scheduled-wakeups-items, .chat-reverted-items) { max-height: none; overflow: visible; }
+.chat-compact-workers { margin: 0 0.5rem; border: 1px solid var(--border-soft); border-radius: 0.65rem; background: var(--surface-raised); font-size: 0.875rem; }
+.chat-compact-workers > summary { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 6px; min-height: 1.75rem; padding: 0 8px; background: var(--surface-raised); color: var(--text-subtle); cursor: pointer; font-size: 0.8125rem; line-height: 1.25rem; list-style: none; border-radius: inherit; }
+.chat-compact-workers > summary::-webkit-details-marker { display: none; }
+.chat-compact-workers > summary::marker { content: ""; }
+.chat-compact-workers > summary::before { content: ""; width: 5px; height: 5px; flex: 0 0 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); opacity: 0.65; margin-right: 3px; }
+.chat-compact-workers[open] > summary::before { transform: rotate(45deg); }
+#chat-compact-workers-label { min-width: 0; }
+.chat-compact-workers > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#chat-compact-workers-items ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+#chat-compact-workers-items { padding: 0 8px; }
+.chat-worker-row { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.chat-worker-inspect { flex: 1 1 0; min-width: 0; min-height: 2.75rem; padding: 0.125rem 0; display: grid; grid-template-columns: 1rem minmax(0, 1fr); column-gap: 0.375rem; border: 0; border-radius: 0.25rem; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.chat-worker-glyph { grid-row: 1 / 3; align-self: center; color: var(--text-subtle); }
+.chat-worker-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 0.875rem; line-height: 1.25rem; }
+.chat-worker-meta { grid-column: 2; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 0.8125rem; line-height: 1.125rem; color: var(--text-subtle); }
+.chat-worker-row[data-state="working"] .chat-worker-glyph { color: var(--accent); }
+.chat-worker-row[data-state="failed"] .chat-worker-glyph { color: var(--danger, #c44); }
+.chat-worker-row .chat-task-stop { flex: 0 0 auto; min-width: 2.75rem; min-height: 2.75rem; font-size: 0.8125rem; }
+.chat-worker-inspect:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* Approved B: the target stays fixed; only a pointer-transparent extension rises. */
+.chat-inline-configuration, .chat-inline-context { display: none; }
+#chat-configuration-trigger[hidden] { display: none !important; }
+.chat-send-group { position: relative; }
+#chat-send { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.chat-hold-upward { position: fixed; z-index: 125; pointer-events: none; overflow: hidden; border-radius: 12px 12px 6px 6px; background: #245b91; color: white; box-shadow: 0 0 0 1px #ffffff80, 0 -4px 12px #0003; }
+.chat-hold-upward[hidden] { display: none; }
+.chat-hold-upward::before { content: ""; position: absolute; inset: 0; background: #167c62; transform: scaleY(var(--hold-progress, 0)); transform-origin: bottom; }
+.chat-hold-cap { position: absolute; top: 8px; inset-inline: 0; text-align: center; white-space: pre-line; font-size: 12px; line-height: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* Pending inspection/mutations use the explicitly approved 32px density
+   tradeoff. Send/Stop remain 44px; Remove keeps an independent 8px gap. */
+html[data-ui-mode="touch"] .chat-queue { container: chat-pending / inline-size; gap: 4px; padding-top: 0; }
+html[data-ui-mode="touch"] .chat-queue-header { top: 0; gap: 8px; padding-block: 0; min-height: 32px; }
+html[data-ui-mode="touch"] .chat-pending-toggle { min-height: 32px; }
+html[data-ui-mode="touch"] .chat-queued-message { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 4px 8px; }
+html[data-ui-mode="touch"] .chat-queued-heading { display: contents; }
+html[data-ui-mode="touch"] .chat-queued-badge { border: 0; padding: 0; font-size: 0.75rem; }
+html[data-ui-mode="touch"] .chat-queued-tag { font-size: 0.6875rem; }
+html[data-ui-mode="touch"] .chat-queued-message > p { flex: 1 1 120px; font-size: 0.875rem; line-height: 1.25rem; }
+html[data-ui-mode="touch"] .chat-queued-message > .chat-message-attachments { flex: 1 1 100%; min-width: 0; }
+html[data-ui-mode="touch"] .chat-queued-message .chat-message-attachment { min-width: 0; max-width: 100%; }
+html[data-ui-mode="touch"] .chat-queued-message .chat-attachment-view { min-width: 0; max-width: 100%; }
+html[data-ui-mode="touch"] .chat-queued-message .chat-message-attachment-thumb { max-width: min(8rem, 100%); box-sizing: border-box; }
+html[data-ui-mode="touch"] .chat-queued-message > .chat-queued-row { flex: 1 1 100%; min-width: 0; max-width: 100%; margin-top: 0; }
+html[data-ui-mode="touch"] .chat-queued-actions { min-width: 0; max-width: 100%; gap: 8px; }
+html[data-ui-mode="touch"] .chat-queued-message .chat-queued-action { min-width: 32px; min-height: 32px; max-width: 100%; box-sizing: border-box; padding: 2px 6px; font-size: 0.75rem; white-space: normal; overflow-wrap: anywhere; }
+/* Enlarged batch chrome must scroll away to expose a whole wrapped action.
+   A text-relative threshold preserves normal-size sticky count behavior. */
+@container chat-pending (max-width: 12rem) {
+  html[data-ui-mode="touch"] .chat-queue-header:has([data-queue-send-now]) { position: static; }
+}
+#chat-send.is-holding { box-shadow: inset 0 2px 4px #0005; }
+html[data-ui-mode="touch"] .chat-composer-actions { flex-wrap: nowrap; width: 100%; gap: 8px; }
+html[data-ui-mode="touch"] #chat-attach { display: inline-flex; flex: 0 0 44px; width: 44px; height: 44px; align-items: center; justify-content: center; }
+html[data-ui-mode="touch"] #chat-configuration-trigger { display: flex; flex: 1 1 0; width: 0; min-width: 44px; min-height: 44px; padding: 3px 6px; flex-direction: column; justify-content: center; gap: 2px; overflow: hidden; }
+html[data-ui-mode="touch"] #chat-configuration-done { min-width: 44px; min-height: 44px; }
+html[data-ui-mode="touch"] #chat-configuration-trigger > :is(.chat-configuration-summary, .chat-configuration-details) { display: none; }
+html[data-ui-mode="touch"] :is(.chat-inline-configuration, .chat-inline-context) { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; line-height: 16px; text-align: left; }
+html[data-ui-mode="touch"] .chat-inline-context { color: var(--accent); }
+html[data-ui-mode="touch"] .chat-composer-status { display: none; }
+html[data-ui-mode="touch"] .chat-send-group { flex: 0 0 auto; display: flex; flex-wrap: nowrap; gap: 8px; margin: 0; min-height: 44px; height: 44px; }
+html[data-ui-mode="touch"] :is(#chat-send, #chat-stop) { flex: 0 0 44px; width: 44px; min-width: 44px; min-height: 44px; padding-inline: 2px; box-sizing: border-box; font-size: 11px; }
+html[data-ui-mode="touch"] #chat-send { order: 0; }
+html[data-ui-mode="touch"] #chat-stop { order: 2; }
+/* Occupancy is already in the picker pill on touch; retain desktop breakdown. */
+html[data-ui-mode="touch"] #chat-context-usage { display: none; }
+/* Keep unique account usage controls on their own row, not squeezed inline. */
+html[data-ui-mode="touch"] .chat-composer-actions:has(> .chat-composer-chips:not([hidden])) { flex-wrap: wrap; }
+html[data-ui-mode="touch"] .chat-composer-chips { flex: 0 0 100%; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; padding-block: 0; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer textarea { grid-row: 1; grid-column: 1; width: 100%; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer-actions { display: flex; grid-row: 2; grid-column: 1 / -1; margin-top: 0; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer-actions > .chat-send-group { display: flex; }
+html[data-ui-mode="touch"]:is([data-chat-compact], [data-chat-wide-short]) .chat-composer-notices { grid-row: 3; grid-column: 1; }
+html[data-ui-mode="touch"][data-chat-compact]:not([data-chat-wide-short]) .chat-composer:has(.chat-composer-notices > :not([hidden])) { grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr); column-gap: 8px; }
+html[data-ui-mode="touch"][data-chat-compact]:not([data-chat-wide-short]) .chat-composer-notices { grid-row: 1; grid-column: 2; }
+@media (min-width: 600px) {
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer { grid-template-columns: minmax(140px, 1fr) minmax(360px, 1fr); gap: 8px; }
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer-actions { grid-row: 1; grid-column: 2; }
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer-notices { grid-row: 2; grid-column: 1 / -1; }
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer:has(.chat-composer-notices > :not([hidden])) { grid-template-columns: minmax(140px, 1fr) minmax(140px, 25%) minmax(300px, auto); }
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer:has(.chat-composer-notices > :not([hidden])) .chat-composer-actions { grid-row: 1; grid-column: 3; }
+  html[data-ui-mode="touch"][data-chat-wide-short] .chat-composer:has(.chat-composer-notices > :not([hidden])) .chat-composer-notices { grid-row: 1; grid-column: 2; }
+}
+/* Closed summaries share a band while typing; warnings still span its width.
+   On wide/short screens the worker header shares the conversation header,
+   leaving the original pending/batch warning band and transcript budget intact. */
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) .chat-work-dock:has(#chat-compact-workers:not([open]):not([hidden])) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 0.5rem;
+  padding-inline: 0.5rem;
+}
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) .chat-work-dock:has(#chat-compact-workers:not([open]):not([hidden])):has(.chat-queue-header [data-queue-send-now]) {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.1fr);
+}
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) .chat-work-dock:has(#chat-compact-workers:not([open]):not([hidden])):not(:has(.chat-queue:not([hidden]))) {
+  grid-template-columns: minmax(0, 1fr);
+}
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) .chat-work-dock:has(#chat-compact-workers:not([open]):not([hidden])) :is(.chat-queue:not([hidden]), .chat-queue-header) { display: contents; }
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) .chat-work-dock:has(#chat-compact-workers:not([open]):not([hidden])) .chat-queue-header > button { min-width: 2.75rem; white-space: normal; }
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) #chat-compact-workers:not([open]) { margin: 0; }
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) #chat-compact-workers > summary { padding-block: 0; line-height: 1.25rem; }
+html[data-ui-mode="touch"][data-chat-keyboard]:not([data-chat-wide-short]) .chat-work-dock:has(#chat-compact-workers:not([open]):not([hidden])) .chat-queue-note { grid-column: 1 / -1; }
+html[data-ui-mode="touch"][data-chat-wide-short] .chat-surface:has(#chat-compact-workers:not([open]):not([hidden])) .chat-conversation-controls { padding-inline-end: 13.5rem; }
+html[data-ui-mode="touch"][data-chat-wide-short] #chat-compact-workers:not([open]):not([hidden]) {
+  position: absolute;
+  top: 0;
+  right: max(0.5rem, env(safe-area-inset-right));
+  width: 13rem;
+  margin: 0;
+  border: 0;
+  z-index: 2;
+}
+/* A deliberate expansion overlays the transcript on constrained viewports.
+   Composer/draft and its focus remain owned; no synthetic keyboard blur. */
+html[data-ui-mode="touch"]:not([data-chat-answering]):is([data-chat-keyboard], [data-chat-short], [data-chat-wide-short]) .chat-work-dock:has(#chat-compact-workers[open]:not([hidden]) [data-worker-id]) {
+  position: absolute;
+  z-index: 30;
+  inset: max(var(--chat-workers-top, 44px), env(safe-area-inset-top)) max(0px, env(safe-area-inset-right)) var(--chat-workers-bottom, 7rem) max(0px, env(safe-area-inset-left));
+  height: fit-content;
+  max-height: max(0px, calc(var(--chat-visual-height) - var(--chat-workers-top, 44px) - var(--chat-workers-bottom, 7rem)));
+  background: var(--surface-raised);
+  border-block: 1px solid var(--border-soft);
+}
+/* Interaction forms retain the keyboard band; a worker sheet must never
+   cover the question/permission controls the user is answering. */
+html[data-ui-mode="touch"][data-chat-answering] #chat-compact-workers { display: none; }
+html[data-ui-mode="touch"] .chat-subagent-open { min-height: 2.75rem; }
+html[data-ui-mode="touch"] .chat-surface:has(#chat-work-dock > details[open]:not([hidden])) #chat-prompt-rail {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 28px overview rows/headers are the explicitly approved density exception.
+   Worker mutations retain their independent 44px target and 8px gap. */
+#chat-compact-workers-items ul { gap: 0; }
+.chat-worker-row { border-top: 1px solid var(--border-soft); }
+.chat-worker-row:has(.chat-task-stop) + .chat-worker-row,
+.chat-worker-row + .chat-worker-row:has(.chat-task-stop) { margin-top: 8px; }
+.chat-worker-inspect { min-height: 27px; padding-block: 3px; grid-template-columns: 12px minmax(0, 1fr) minmax(44px, 22%) 56px; align-items: center; gap: 5px; }
+.chat-worker-glyph { grid-row: 1; }
+.chat-worker-name { font-size: 0.875rem; line-height: 1.25rem; }
+.chat-worker-meta { display: none; }
+.chat-worker-model, .chat-worker-tokens { color: var(--text-subtle); font-size: 0.6875rem; line-height: 1rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.chat-worker-tokens { text-align: right; font-variant-numeric: tabular-nums; }
+.chat-workers-dismiss { flex: 0 0 auto; margin-left: auto; min-height: 1.75rem; padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 0.75rem; cursor: pointer; }
+.chat-workers-dismiss[hidden], #chat-aside-ready[hidden] { display: none; }
+.chat-aside-dialog { max-width: min(42rem, calc(100vw - 32px)); max-height: calc(var(--chat-visual-height, 100dvh) - 32px); overflow: auto; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-soft); border-radius: 12px; padding: 20px; }
+.chat-aside-dialog::backdrop { background: #0006; }
+#chat-aside-answer { white-space: pre-wrap; overflow-wrap: anywhere; margin-block: 16px; }
+.chat-aside-note { color: var(--text-subtle); font-size: 12px; }
+#chat-aside-close, #chat-aside-ready { min-height: 44px; min-width: 44px; }

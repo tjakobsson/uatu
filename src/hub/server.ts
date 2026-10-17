@@ -67,6 +67,8 @@ import { createHubUpstreamSource } from "./live-source";
 import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceRegistry } from "./registry";
 import { OnboardingError, resolveOnboardingAssignments, type WorkspaceOnboardingCoordinator } from "./onboarding";
 import { HubPreferencesError, type HubPreferencesStore } from "./preferences";
+import { isChildPolicyAction, type VerifiedChatPolicy } from "./child-policy";
+import { PersonalChatPreferencesError, type PersonalChatPreferencesStore } from "./personal-chat-preferences";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import type { ActivityMarkSink } from "./activity-marks";
 import type { SessionManager } from "./sessions";
@@ -97,6 +99,7 @@ export type HubDeps = {
   // harness leave the broker lazy, watching from its first activity feed.
   watchActivityFromStart?: boolean;
   preferences?: HubPreferencesStore;
+  personalChatPreferences?: PersonalChatPreferencesStore;
   onboarding?: WorkspaceOnboardingCoordinator;
   folderManager?: Pick<FolderManager, "create" | "rename" | "remove" | "assertNoPendingMutation">;
   reservations?: PathReservationCoordinator;
@@ -1696,6 +1699,17 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         return upgradeToBridge(request, server, running);
       }
+      if (isChildPolicyAction(request.method, url.pathname, running.basePath)) {
+        let policy: VerifiedChatPolicy;
+        try {
+          const state = deps.personalChatPreferences?.get(session.user);
+          if (!state) throw new Error("personal preferences unavailable");
+          policy = { principal: session.user, revision: state.revision, autoBackgroundOnSteer: state.autoBackgroundOnSteer };
+        } catch {
+          policy = { principal: session.user, revision: 0, autoBackgroundOnSteer: false, unavailable: true };
+        }
+        return proxyHttp(request, running, policy);
+      }
       return proxyHttp(request, running);
     }
 
@@ -1708,6 +1722,34 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
     if (pathname === "/settings" && request.method === "GET") {
       return htmlResponse(settingsPage(session.user));
+    }
+    if (pathname === "/api/hub/settings/chat-preferences") {
+      if (request.method !== "GET" && !csrfOk(request, session.transport)) {
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      if (request.method !== "GET" && request.method !== "PUT") {
+        return json(405, { error: "method not allowed" }, { ...NO_STORE_HEADERS, allow: "GET, PUT" });
+      }
+      // Identity is selected exclusively from the verified session. There
+      // are no query/header selectors on this closed personal resource.
+      if (url.search !== "" || request.headers.has("x-hub-user") || request.headers.has("x-hub-account")) {
+        return json(400, { error: "personal identity selectors are not supported" }, NO_STORE_HEADERS);
+      }
+      if (!deps.personalChatPreferences) return json(503, { error: "personal chat preferences are unavailable" }, NO_STORE_HEADERS);
+      try {
+        if (request.method === "GET") return json(200, deps.personalChatPreferences.get(session.user), NO_STORE_HEADERS);
+        let input: unknown;
+        try { input = await request.json(); } catch { return json(400, { error: "invalid JSON body" }, NO_STORE_HEADERS); }
+        return json(200, await deps.personalChatPreferences.update(session.user, input), NO_STORE_HEADERS);
+      } catch (error) {
+        if (error instanceof PersonalChatPreferencesError) {
+          return json(error.code === "conflict" ? 409 : error.code === "invalid-input" ? 400 : 503, {
+            error: error.message,
+            ...(error.current ? { current: error.current } : {}),
+          }, NO_STORE_HEADERS);
+        }
+        return json(503, { error: "personal chat preferences are unavailable" }, NO_STORE_HEADERS);
+      }
     }
     // The published JSON worktree family, behind the same gate as the
     // dashboard. A cookie transport keeps the same-origin rule on every

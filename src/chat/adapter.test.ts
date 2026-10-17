@@ -1,25 +1,47 @@
 import { describe, expect, test } from "bun:test";
 
-import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
+import { BackgroundTasksUnsupportedError, ChatQueueFullError, CommandAttachmentsError, CommandSteeringError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, ChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, ScheduledWakeupsUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteerAlreadyDeliveredError, SteeringUnsupportedError, SteerWithdrawalUnconfirmedError, UnknownAttachmentError, UsageUnsupportedError } from "./adapter";
 import { createClaudeEventMemory, normalizeClaudeMessage } from "./claude/normalization";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderMessage } from "./opencode/v1/normalization";
-import type { ChatAgent } from "./types";
+import type { ChatAgent, ChatActionContext } from "./types";
 import type {
+  InboxDelta,
   NormalizedProviderEvent,
   ChatProvider,
+  PendingInboxEntry,
   ProviderHistoryPage,
   ProviderPermissionReply,
   ProviderSession,
   StoredMessageAccounting,
 } from "./provider";
-import { ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
-import type { ChatCommand, ChatEvent, ChatModel, ConversationItem, ToolItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
+import { OperationOutcomeUnknownError, ReversibleHistoryTargetError, UnsupportedVariantSelectionError } from "./provider";
+import type { ChatCommand, ChatEvent, ChatModel, ConversationItem, MessageDelivery, ToolItem, ModelSelection, ReversibleHistoryResult, ReversibleHistoryState } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
 import type { ConversationInventorySubscription } from "./inventory-broadcaster";
 import { OpenCodeNotificationLifecycle } from "./opencode/notification-lifecycle";
 import type { AgentNotificationEvent } from "./notifications";
 import { notificationPipeline } from "../../tests/notification-pipeline";
+
+test("side answers preserve foreground/history, never share cached personal responses and reject foreign/unsupported sessions", async () => {
+  const provider = new FakeProvider();
+  provider.agent.capabilities.push("side-generation");
+  provider.sessions.push(fixtureSession("local", process.cwd(), 1), fixtureSession("foreign", "/outside-workspace", 2));
+  const calls: string[] = [];
+  provider.generate = async (_id, question) => { calls.push(question); return "Independent answer"; };
+  const adapter = new ChatAdapter({ provider, workspacePath: process.cwd() });
+  const before = await adapter.history("local");
+  expect(await adapter.generate("local", "request", "Why?")).toEqual({ text: "Independent answer" });
+  expect(await adapter.generate("local", "request", "Why?")).toEqual({ text: "Independent answer" });
+  expect(calls).toHaveLength(2);
+  expect(calls[0]).toContain("Do not call any tools and do not take any actions.");
+  expect((await adapter.history("local")).items).toEqual(before.items);
+  expect(provider.prompts).toEqual([]); expect(provider.interrupts).toEqual([]);
+  await expect(adapter.generate("foreign", "request", "Why?")).rejects.toBeInstanceOf(ConversationNotFoundError);
+  provider.agent.capabilities = [];
+  await expect(adapter.generate("local", "other", "Why?")).rejects.toThrow("Side answers are not supported");
+  await expect(adapter.prompt("local", "prompt", "/btw Why?")).rejects.toThrow("separate side-answer action");
+});
 
 class EventQueue implements AsyncIterable<ProviderEvent> {
   private values: ProviderEvent[] = [];
@@ -61,21 +83,30 @@ class FakeProvider implements ChatProvider {
   // the suite that can exercise a surface whose agent is missing a capability.
   agent: ChatAgent = { id: "fake", name: "Fake Agent", capabilities: ["models", "commands", "permissions"] };
   describe(): ChatAgent { return this.agent; }
-  commands = [
-    { name: "review", description: "Review", argumentHint: "[focus]", kind: "command" as const },
-    { name: "compact", description: "Compact", argumentHint: "", kind: "command" as const },
+  commands: ChatCommand[] = [
+    { name: "review", description: "Review", argumentHint: "[focus]", kind: "command" },
+    { name: "compact", description: "Compact", argumentHint: "", kind: "command" },
   ];
   models: ChatModel[] = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }];
   sessions: ProviderSession[] = [];
   pages = new Map<string, RawPage>();
   eventQueue = new EventQueue();
   notificationLifecycle = new OpenCodeNotificationLifecycle();
-  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }> = [];
+  prompts: Array<{ sessionId: string; id: string; text: string; delivery: MessageDelivery; model?: ModelSelection; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }> = [];
   commandOperation?: "reload";
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
   interrupts: string[] = [];
+  // What each interrupt asked for (opencode-v2-steering D9): Cancel passes
+  // `resume: false`, a Send now on a paused steer `resume: true`.
+  interruptOptions: Array<{ resume?: boolean } | undefined> = [];
+  // The agent's own inbox, for a fake declaring `steering`.
+  pendingInbox: PendingInboxEntry[] = [];
+  cancelledInbox: string[] = [];
+  listPendingInbox?: ChatProvider["listPendingInbox"];
+  generate?: ChatProvider["generate"];
+  cancelInbox?: ChatProvider["cancelInbox"];
   modelSwitches: Array<{ sessionId: string; selection: ModelSelection }> = [];
   renameSession?: ChatProvider["renameSession"];
   listPermissions?: ChatProvider["listPermissions"];
@@ -130,7 +161,7 @@ class FakeProvider implements ChatProvider {
       }
     }
   }
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }) {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; model?: ModelSelection; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }) {
     this.prompts.push({ sessionId, ...input });
     return { messageId: input.id };
   }
@@ -140,7 +171,7 @@ class FakeProvider implements ChatProvider {
     this.commandCalls.push({ sessionId, ...input });
     return { messageId: input.id, ...(this.commandText ? { text: this.commandText } : {}), ...(this.commandOperation ? { operation: this.commandOperation } : {}) };
   }
-  async interrupt(sessionId: string) { this.interrupts.push(sessionId); }
+  async interrupt(sessionId: string, options?: { resume?: boolean }) { this.interrupts.push(sessionId); this.interruptOptions.push(options); }
   async replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply) {
     this.permissionReplies.push({ sessionId, requestId, reply });
   }
@@ -214,6 +245,32 @@ async function expectInventorySignal(subscription: ConversationInventorySubscrip
 }
 
 describe("live notification confinement", () => {
+  test("worker recovery and child completion do not notify a parent success; its later real turn still does", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("one"), { ...fixtureSession("child"), parentId: "one" }];
+    const result = { id: "task:worker", type: "background_task" as const, taskId: "worker", childConversationId: "child", createdAt: 1, description: "Worker", status: "completed" as const, summary: "Report", resultId: "notice" };
+    Object.assign(provider, { reconcileBackgroundTasks: async () => [result] });
+    const events: AgentNotificationEvent[] = [];
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), onNotification: event => events.push(event) });
+    await adapter.history("one");
+    const pump = adapter.startEventPump();
+    const now = Date.now();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    provider.eventQueue.push({ type: "session.next.step.started", data: { sessionID: "child", assistantMessageID: "child-answer", timestamp: now } });
+    provider.eventQueue.push({ type: "session.next.step.ended", data: { sessionID: "child", assistantMessageID: "child-answer", finish: "stop", timestamp: now + 1 } });
+    provider.eventQueue.push({ normalized: { conversationId: "one", eventType: "session.inbox.enqueued", outcome: "handled", updates: [{ kind: "upsert", item: result }] } } as unknown as ProviderEvent);
+    await waitUntil(() => provider.eventQueue.waiting);
+    expect(events.filter(event => event.type === "notification")).toEqual([]);
+    // OpenCode, not Uatu, resumes the parent to consume the notification.
+    provider.eventQueue.push({ type: "session.next.step.started", data: { sessionID: "one", assistantMessageID: "parent-answer", timestamp: now + 2 } });
+    provider.eventQueue.push({ type: "session.next.step.ended", data: { sessionID: "one", assistantMessageID: "parent-answer", finish: "stop", timestamp: now + 3 } });
+    await waitUntil(() => events.some(event => event.type === "notification"));
+    expect(events.filter(event => event.type === "notification")).toEqual([expect.objectContaining({ notification: expect.objectContaining({ conversationId: "one", kind: "turn-completed" }) })]);
+    expect(adapter.projectionForTests("one").items().filter(item => item.type === "background_task")).toEqual([result]);
+    expect(provider.prompts).toEqual([]);
+    expect(provider.interrupts).toEqual([]);
+    await adapter.dispose(); await pump;
+  });
   test("OpenCode events reach both enrolled devices without an open page", async () => {
     const provider = new FakeProvider();
     provider.agent = { ...provider.agent, id: "opencode" };
@@ -1046,7 +1103,7 @@ describe("reversible history coordination", () => {
     await adapter.history("session");
     adapter.projectionForTests("session").statusUpdate("running");
     const held = await adapter.prompt("session", "queued", "older queued message");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
     const firstClient = await adapter.subscribe("session");
     const secondClient = await adapter.subscribe("session");
 
@@ -1384,7 +1441,7 @@ describe("reversible history coordination", () => {
     adapter.projectionForTests("session").statusUpdate("interrupted");
 
     const replacement = await adapter.prompt("session", "replacement", "replacement");
-    expect(replacement.held).toBe(false);
+    expect(replacement.pending).toBe(false);
     expect(order).toEqual(["replacement"]);
     expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: older.messageId })]);
     adapter.projectionForTests("session").statusUpdate("completed");
@@ -1681,7 +1738,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     // The second submission was accepted while the turn ran: held by the
     // workspace with its configuration committed in admission order, and
     // nothing dispatched to the provider yet.
-    expect((await second).held).toBe(true);
+    expect((await second).pending).toBe(true);
     expect((await second).configuration).toEqual({ model: anthropic });
     expect(calls).toBe(1);
 
@@ -1791,7 +1848,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.commandOperation = "reload";
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
     const accepted = await adapter.prompt("session", "request", "/review");
-    expect(accepted).toMatchObject({ messageId: "message", held: false, operation: "reload" });
+    expect(accepted).toMatchObject({ messageId: "message", pending: false, operation: "reload" });
   });
 
   test("dispatches recognized slash commands without changing the prompt contract", async () => {
@@ -1801,7 +1858,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const model = { providerId: "anthropic", modelId: "claude" };
 
     const accepted = await adapter.prompt("session", "request", "/review   API compatibility", model);
-    expect(accepted).toEqual({ messageId: "message", held: false, configuration: { model } });
+    expect(accepted).toEqual({ messageId: "message", pending: false, delivery: "queue", configuration: { model } });
     // The listed entry the text matched rides along, so the provider dispatches what was classified.
     expect(provider.commandCalls).toEqual([{ sessionId: "session", id: "message", name: "review", arguments: "API compatibility", listed: expect.objectContaining({ name: "review", kind: "command" }), model }]);
     expect(provider.prompts).toEqual([]);
@@ -1957,10 +2014,10 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect(predicate()).toBe(true);
     };
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     const second = await adapter.prompt("session", "r2", "second");
     const third = await adapter.prompt("session", "r3", "third");
-    expect([second.held, third.held]).toEqual([true, true]);
+    expect([second.pending, third.pending]).toEqual([true, true]);
     expect(provider.prompts).toHaveLength(1);
     expect((await adapter.history("session")).queued).toEqual([
       expect.objectContaining({ id: second.messageId, text: "second", requestId: "r2" }),
@@ -1982,7 +2039,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     // The next submission joins the back of the queue and resumes delivery
     // from its head, preserving submission order.
     const fourth = await adapter.prompt("session", "r4", "fourth");
-    expect(fourth.held).toBe(true);
+    expect(fourth.pending).toBe(true);
     await until(() => provider.prompts.length === 3);
     expect(provider.prompts[2]).toEqual(expect.objectContaining({ text: "third" }));
     adapter.projectionForTests("session").statusUpdate("completed");
@@ -1997,7 +2054,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     await adapter.prompt("session", "r2", "second");
     const third = await adapter.prompt("session", "r3", "third");
 
@@ -2097,7 +2154,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     await adapter.prompt("session", "r2", "second");
     await adapter.prompt("session", "r3", "third");
 
@@ -2133,9 +2190,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
 
     const lookup = provider.getSession.bind(provider);
     provider.getSession = async () => { throw new Error("transient lookup failure"); };
@@ -2161,9 +2218,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
 
     // The merged stream corrects a stale terminal report while the delivery's
     // session lookup is still awaiting. The busy guard already passed before
@@ -2192,9 +2249,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 2, id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("a", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("a", "r1", "first")).pending).toBe(false);
     const held = await adapter.prompt("a", "r2", "second");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
     const original = adapter.projectionForTests("a");
 
     // The delivery's session lookup stalls; meanwhile activity on other
@@ -2261,7 +2318,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     projection.statusUpdate("background");
     // Not live: the next prompt is delivered, not held (spec: prompting
     // remains possible while background work runs).
-    expect((await adapter.prompt("session", "r1", "meanwhile")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "meanwhile")).pending).toBe(false);
     expect(provider.prompts).toHaveLength(1);
     // Stop is idempotent per request id and addressed to the owning session.
     expect(await adapter.stopTask("session", "b1", "req-1")).toEqual({ stopped: true });
@@ -2318,6 +2375,431 @@ describe("prompt, abort, permission, and question mutations", () => {
     await adapter.dispose();
   });
 
+  test("evidence-bearing background recovery never turns missing or failed reads into stopped", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const task = { id: "task:v2:session:call", type: "background_task" as const, taskId: "v2:session:call", createdAt: 1, description: "Worker", status: "running" as const };
+    let fail = false;
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { if (fail) throw new Error("offline"); return [{ ...task, stateUncertain: false }]; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    expect((await adapter.history("session")).items).toContainEqual({ ...task, stateUncertain: false });
+    expect(adapter.activity().working).toBe(true);
+    fail = true;
+    expect((await adapter.history("session")).items).toContainEqual({ ...task, stateUncertain: true });
+    expect(adapter.activity().working).toBe(true);
+    fail = false;
+    expect((await adapter.history("session")).items).toContainEqual({ ...task, stateUncertain: false });
+    await adapter.dispose();
+  });
+  test("recovery replaces a live joined-call identity with the canonical history worker, not a second worker", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const canonical = { id: "task:first", type: "background_task" as const, taskId: "first", createdAt: 1, description: "Worker", status: "running" as const, toolUseId: "first", toolUseIds: ["first", "joined"] };
+    Object.assign(provider, { reconcileBackgroundTasks: async () => [canonical] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    adapter.projectionForTests("session").apply({ kind: "upsert", item: { ...canonical, id: "task:joined", taskId: "joined", toolUseId: "joined", toolUseIds: undefined } });
+    const snapshot = await adapter.history("session");
+    expect(snapshot.items.filter(item => item.type === "background_task")).toEqual([canonical]);
+    expect(adapter.projectionForTests("session").items().filter(item => item.type === "background_task")).toEqual([canonical]);
+    await adapter.dispose();
+  });
+  for (const evict of [false, true]) test(`idle-parent snapshot recovers an out-of-page worker and its pending result${evict ? " after projection eviction" : ""}`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session"), fixtureSession("other")];
+    const worker = { id: "task:old-launch", type: "background_task" as const, taskId: "old-launch", createdAt: 1, description: "Worker", toolUseId: "old-launch", childConversationId: "child", status: "running" as const };
+    let completed = false;
+    // The visible page contains no launch. Scoped recovery has the complete
+    // history and pending synthetic inbox, independently of this page.
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "session" ? [{ ...worker, ...(completed ? { status: "completed", resultId: "pending-result", summary: "Done" } : {}) }] : [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 1 });
+    const first = await adapter.history("session", { limit: 1 });
+    expect(first.items).toContainEqual(worker);
+    expect(first.conversation.status).toBe("background");
+    expect(adapter.activity().working).toBe(true);
+    if (evict) await adapter.history("other");
+    completed = true;
+    const after = await adapter.history("session", { limit: 1 });
+    expect(after.items.filter(item => item.type === "background_task")).toEqual([expect.objectContaining({ status: "completed", resultId: "pending-result" })]);
+    expect(after.conversation.status).not.toBe("background");
+    expect(adapter.activity().working).toBe(false);
+    await adapter.dispose();
+  });
+  test("connected-before-read recovery discovers unselected parents with at most four reads and no text-delta rereads", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = Array.from({ length: 6 }, (_, i) => fixtureSession(`parent-${i}`));
+    const releases: Array<() => void> = [];
+    const seen: string[] = [];
+    let concurrent = 0;
+    let maximum = 0;
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => {
+      seen.push(id); concurrent++; maximum = Math.max(maximum, concurrent);
+      await new Promise<void>(resolve => releases.push(resolve));
+      concurrent--;
+      return [{ id: `task:${id}`, type: "background_task", taskId: id, description: "Worker", createdAt: 1, status: "running", stateUncertain: false }];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    void adapter.startEventPump();
+    await waitUntil(() => provider.eventQueue.waiting);
+    expect(seen).toEqual([]);
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => seen.length === 4);
+    expect(maximum).toBe(4);
+    releases.splice(0).forEach(release => release());
+    await waitUntil(() => seen.length === 6);
+    releases.splice(0).forEach(release => release());
+    await waitUntil(() => adapter.activity().working);
+    provider.eventQueue.push({ type: "session.next.text.delta", data: { sessionID: "parent-0", textID: "text", delta: "text" } });
+    await waitUntil(() => provider.eventQueue.waiting);
+    expect(seen).toHaveLength(6);
+    await adapter.dispose();
+  });
+  test("disposing bounded recovery retires queued parents and awaits reads without execution mutations", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = Array.from({ length: 6 }, (_, index) => fixtureSession(`parent-${index}`));
+    let reads = 0;
+    const releases: Array<() => void> = [];
+    Object.assign(provider, {
+      reconcileBackgroundTasks: async () => { reads++; await new Promise<void>(resolve => releases.push(resolve)); return []; },
+      dispose: async () => { releases.splice(0).forEach(release => release()); },
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => reads === 4);
+    await adapter.dispose(); await pump;
+    expect(reads).toBe(4);
+    expect(provider.prompts).toEqual([]);
+    expect(provider.interrupts).toEqual([]);
+  });
+  for (const kind of ["permission", "question"] as const) test(`unselected inventory recovery discovers a child's pending ${kind} without opening history`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let reads = 0;
+    Object.assign(provider, {
+      reconcileBackgroundTasks: async () => [{ id: "task:worker", type: "background_task", taskId: "worker", childConversationId: "child", description: "Worker", createdAt: 1, status: "running" }],
+      listPermissions: async () => { if (kind === "permission") reads++; return kind === "permission" ? [{ conversationId: "child", requestId: "pending", action: "read", resources: ["safe-fixture"] }] : []; },
+      listQuestions: async () => { if (kind === "question") reads++; return kind === "question" ? [{ conversationId: "child", requestId: "pending", questions: [{ prompt: "Choose?", header: "", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }] : []; },
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => adapter.activity().working);
+    expect(reads).toBeGreaterThan(0);
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    expect(adapter.projectionForTests("parent").find(item => item.id === `${kind}:pending`)).toMatchObject({ type: kind, status: "pending", conversationId: "child" });
+    expect(provider.prompts).toEqual([]);
+    expect(provider.interrupts).toEqual([]);
+    await adapter.dispose(); await pump;
+  });
+  for (const kind of ["permission", "question"] as const) test(`inventory ${kind} recovery discards a read raced by a child resolution`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let reads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const stale = kind === "permission"
+      ? { conversationId: "child", requestId: "stale", action: "read", resources: ["safe-fixture"] }
+      : { conversationId: "child", requestId: "stale", questions: [{ prompt: "Choose?", header: "", options: [], multiple: false, allowFreeForm: true }] };
+    Object.assign(provider, {
+      reconcileBackgroundTasks: async () => [{ id: "task:worker", type: "background_task", taskId: "worker", childConversationId: "child", description: "Worker", createdAt: 1, status: "running" }],
+      [kind === "permission" ? "listPermissions" : "listQuestions"]: async () => { if (++reads === 1) { await gate; return [stale]; } return []; },
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => reads === 1);
+    provider.eventQueue.push({ normalized: { conversationId: "child", eventType: `${kind}.resolved`, outcome: "handled", updates: [{ kind: "remove", itemId: `${kind}:stale` }] } } as unknown as ProviderEvent);
+    await waitUntil(() => provider.eventQueue.waiting);
+    release();
+    await waitUntil(() => reads >= 2 && adapter.activity().working);
+    expect(adapter.activity().awaiting).toBe(false);
+    expect(adapter.projectionForTests("parent").find(item => item.id === `${kind}:stale`)).toBeUndefined();
+    await adapter.dispose(); await pump;
+  });
+  test("failed inventory permission reads preserve needs-answer until a successful retry revokes the request", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let reads = 0;
+    let fail = false;
+    let pending = true;
+    Object.assign(provider, {
+      reconcileBackgroundTasks: async () => [{ id: "task:worker", type: "background_task", taskId: "worker", childConversationId: "child", description: "Worker", createdAt: 1, status: "running" }],
+      listPermissions: async () => { reads++; if (fail) throw new Error("Transient pending read failure"); return pending ? [{ conversationId: "child", requestId: "pending", action: "read", resources: ["safe-fixture"] }] : []; },
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => adapter.activity().awaiting);
+    fail = true;
+    provider.eventQueue.push({ normalized: { conversationId: "child", eventType: "session.execution.succeeded", outcome: "handled", updates: [] } } as unknown as ProviderEvent);
+    await waitUntil(() => reads >= 2);
+    expect(adapter.activity()).toEqual({ working: true, awaiting: true });
+    fail = false; pending = false;
+    await waitUntil(() => reads >= 3 && !adapter.activity().awaiting);
+    expect(adapter.activity().working).toBe(true);
+    await adapter.dispose(); await pump;
+  });
+  test("recovered detached work survives parent completion and child requests retain needs-answer priority", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const worker = { id: "task:worker", type: "background_task" as const, taskId: "worker", childConversationId: "child", createdAt: 1, description: "Worker", status: "running" as const };
+    Object.assign(provider, { reconcileBackgroundTasks: async (id: string) => id === "parent" ? [worker] : [] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => adapter.activity().working);
+    provider.eventQueue.push({ type: "session.status", properties: { sessionID: "parent", status: { type: "idle" } } });
+    provider.eventQueue.push({ type: "question.asked", data: { sessionID: "child", id: "q", questions: [{ question: "Choose?", options: [{ label: "A" }] }] } });
+    await waitUntil(() => adapter.activity().awaiting);
+    expect(adapter.activity().working).toBe(true);
+    await waitUntil(() => adapter.projectionForTests("parent").items().some(item => item.type === "question"));
+    provider.listQuestions = async () => [{ conversationId: "child", requestId: "q", questions: [{ prompt: "Choose?", header: "", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }] }];
+    expect((await adapter.history("parent")).items).toContainEqual(expect.objectContaining({ type: "question", requestId: "q", conversationId: "child" }));
+    await adapter.dispose(); await pump;
+  });
+  test("snapshot worker recovery waits for an already-starting provider stream's connected marker", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let reads = 0;
+    Object.assign(provider, { reconcileBackgroundTasks: async () => { reads++; return []; } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const pump = adapter.startEventPump();
+    await waitUntil(() => provider.eventQueue.waiting);
+    const snapshot = adapter.history("session");
+    await Bun.sleep(20);
+    expect(reads).toBe(0);
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await snapshot;
+    expect(reads).toBeGreaterThan(0);
+    await adapter.dispose(); await pump;
+  });
+  test("a terminal update racing recovery wins, and disconnect marks only unresolved work uncertain", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const running = { id: "task:worker", type: "background_task" as const, taskId: "worker", description: "Worker", createdAt: 1, status: "running" as const };
+    let release!: () => void;
+    let reads = 0;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      reads++;
+      if (reads === 1) { await waiting; return [running]; }
+      return [{ ...running, status: "completed", summary: "Done" }, { ...running, id: "task:other", taskId: "other" }];
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => reads === 1);
+    provider.eventQueue.push({ normalized: { conversationId: "session", eventType: "session.inbox.enqueued", outcome: "handled", updates: [{ kind: "upsert", item: { ...running, status: "completed", summary: "Done" } }] } } as unknown as ProviderEvent);
+    await waitUntil(() => adapter.projectionForTests("session").find(item => item.id === running.id)?.type === "background_task");
+    release();
+    await waitUntil(() => reads === 2 && !!adapter.projectionForTests("session").find(item => item.id === "task:other"));
+    provider.eventQueue.close();
+    await pump;
+    expect(adapter.projectionForTests("session").find(item => item.id === running.id)).toMatchObject({ status: "completed", summary: "Done" });
+    expect(adapter.projectionForTests("session").find(item => item.id === "task:other")).toMatchObject({ status: "running", stateUncertain: true });
+    expect(adapter.activity().working).toBe(true);
+    await adapter.dispose();
+  });
+  test("a new provider stream fences a still-pending older recovery and reads again without duplicating the worker", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const worker = { id: "task:worker", taskId: "worker", type: "background_task" as const, createdAt: 1, description: "Worker", status: "running" as const };
+    let reads = 0;
+    let concurrent = 0;
+    let maximum = 0;
+    let release!: () => void;
+    const older = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, { reconcileBackgroundTasks: async () => {
+      maximum = Math.max(maximum, ++concurrent);
+      try {
+        if (++reads === 1) { await older; return [worker]; }
+        return [{ ...worker, status: "completed", summary: "New generation result", stateUncertain: false }];
+      } finally { concurrent--; }
+    } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 0 });
+    const firstPump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => reads === 1);
+    provider.eventQueue.close();
+    await firstPump;
+    provider.eventQueue = new EventQueue();
+    const secondPump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => provider.eventQueue.waiting);
+    release();
+    await waitUntil(() => adapter.projectionForTests("session").find(item => item.id === worker.id && item.type === "background_task" && item.status === "completed") !== undefined);
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(maximum).toBe(1);
+    expect(adapter.projectionForTests("session").filter(item => item.type === "background_task")).toEqual([expect.objectContaining({ status: "completed", summary: "New generation result", stateUncertain: false })]);
+    expect(provider.prompts).toEqual([]);
+    expect(provider.interrupts).toEqual([]);
+    await adapter.dispose(); await secondPump;
+  });
+  test("inconclusive recovery backs off and clears uncertainty after evidence returns", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let reads = 0;
+    const item = { id: "task:worker", taskId: "worker", type: "background_task" as const, createdAt: 1, description: "Worker", status: "running" as const };
+    Object.assign(provider, { reconcileBackgroundTasks: async () => [{ ...item, stateUncertain: ++reads === 1 }] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => reads === 1);
+    await Bun.sleep(20);
+    expect(reads).toBe(1);
+    await waitUntil(() => reads === 2);
+    expect(adapter.projectionForTests("session").find(item => item.id === "task:worker")).toMatchObject({ stateUncertain: false });
+    await adapter.dispose(); await pump;
+  });
+  for (const expired of [false, true]) test(`background completion ${expired ? "uses a fresh read after an expired cursor" : "replays from a retained cursor"} without execution mutations`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const worker = { id: "task:worker", taskId: "worker", type: "background_task" as const, createdAt: 1, description: "Worker", status: "running" as const };
+    let completed = false;
+    Object.assign(provider, { reconcileBackgroundTasks: async () => [{ ...worker, ...(completed ? { status: "completed", summary: "Confirmed result" } : {}) }] });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", replayBytes: expired ? 128 : 256 * 1024, coalesceWindowMs: 0 });
+    const before = await adapter.history("session");
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "server.connected", data: {} });
+    await waitUntil(() => provider.eventQueue.waiting);
+    completed = true;
+    provider.eventQueue.push({ normalized: { conversationId: "session", eventType: "session.inbox.enqueued", outcome: "handled", updates: [{ kind: "upsert", item: { ...worker, status: "completed", summary: "Confirmed result" } }] } } as unknown as ProviderEvent);
+    await waitUntil(() => adapter.projectionForTests("session").find(item => item.id === worker.id && item.type === "background_task" && item.status === "completed") !== undefined);
+    const subscription = await adapter.subscribe("session", { cursor: before.cursor });
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    if (expired) {
+      expect((await iterator.next()).value).toMatchObject({ type: "resync", reason: "retention-gap" });
+      expect((await adapter.history("session")).items.filter(item => item.type === "background_task")).toEqual([expect.objectContaining({ status: "completed", summary: "Confirmed result" })]);
+    } else {
+      let terminal: ChatEvent | undefined;
+      for (let i = 0; i < 10; i++) {
+        const next = await iterator.next();
+        if (next.value?.type === "item.upsert" && next.value.item.type === "background_task" && next.value.item.status === "completed") { terminal = next.value; break; }
+      }
+      expect(terminal).toMatchObject({ type: "item.upsert", item: { id: worker.id, status: "completed", summary: "Confirmed result" } });
+    }
+    expect(subscription.snapshot.items.filter(item => item.type === "background_task")).toHaveLength(1);
+    expect(provider.prompts).toEqual([]);
+    expect(provider.interrupts).toEqual([]);
+    subscription.events.cancel();
+    await adapter.dispose(); await pump;
+  });
+  for (const first of ["background", "stop"] as const) test(`${first} admission serializes against the other parent action without sending held input`, async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.agent.capabilities.push("background-blocking-work");
+    const calls: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(provider, {
+      backgroundBlockingWork: async () => { calls.push("background"); if (first === "background") await gate; },
+      interrupt: async (_id: string, options: { resume: boolean }) => { expect(options).toEqual({ resume: false }); calls.push("stop"); if (first === "stop") await gate; },
+    });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    adapter.projectionForTests("session").statusUpdate("running");
+    await adapter.prompt("session", "held", "Keep queued", undefined, undefined, undefined, undefined, "queue");
+    const start = (kind: "background" | "stop") => kind === "background" ? adapter.backgroundBlockingWork("session", "background") : adapter.abort("session", "stop");
+    const one = start(first);
+    await waitUntil(() => calls.length === 1);
+    const two = start(first === "background" ? "stop" : "background");
+    // Admission is still held by the first native call.
+    expect(calls).toEqual([first]);
+    release();
+    await Promise.all([one, two]);
+    expect(calls).toEqual([first, first === "background" ? "stop" : "background"]);
+    expect(provider.prompts).toEqual([]);
+    expect((await adapter.history("session")).queued?.map(item => item.text)).toEqual(["Keep queued"]);
+    await adapter.dispose();
+  });
+  test("background-all retains an unknown receipt rather than replaying against newer blockers", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.agent.capabilities.push("background-blocking-work");
+    let calls = 0;
+    Object.assign(provider, { backgroundBlockingWork: async () => { calls++; throw new OperationOutcomeUnknownError(); } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await expect(adapter.backgroundBlockingWork("session", "request")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    await expect(adapter.backgroundBlockingWork("session", "request")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    expect(calls).toBe(1);
+    await expect(adapter.backgroundBlockingWork("session", "new-request")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    expect(calls).toBe(2);
+    expect(provider.prompts).toEqual([]);
+    await adapter.dispose();
+  });
+  test("a worker-stop unknown receipt is retained without changing unrelated error retry policy", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.agent.capabilities.push("background-tasks");
+    let calls = 0;
+    Object.assign(provider, { stopTask: async () => { calls++; throw new OperationOutcomeUnknownError(); } });
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await expect(adapter.stopTask("session", "worker", "request")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    await expect(adapter.stopTask("session", "worker", "request")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    expect(calls).toBe(1);
+    await adapter.dispose();
+  });
+  for (const operation of ["background", "stop"] as const) {
+    test(`${operation} rejected before dispatch does not create an accepted or unknown receipt`, async () => {
+      const provider = new FakeProvider();
+      provider.sessions = [fixtureSession("session")];
+      let calls = 0;
+      Object.assign(provider, { backgroundBlockingWork: async () => { calls++; }, stopTask: async () => { calls++; } });
+      const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+      const run = () => operation === "background" ? adapter.backgroundBlockingWork("session", "same-id") : adapter.stopTask("session", "worker", "same-id");
+      await expect(run()).rejects.toBeInstanceOf(BackgroundTasksUnsupportedError);
+      expect(calls).toBe(0);
+      provider.agent.capabilities.push("background-tasks", "background-blocking-work");
+      await run(); await run();
+      expect(calls).toBe(1);
+      await adapter.dispose();
+    });
+  }
+  for (const operation of ["background", "stop"] as const) for (const unknown of [false, true]) {
+    for (const budget of [{ receiptEntries: 1 }, { receiptBytes: 180 }]) {
+      test(`${operation} ${unknown ? "unknown" : "accepted"} receipt deduplication ends at ${JSON.stringify(budget)} eviction`, async () => {
+        const provider = new FakeProvider();
+        provider.sessions = [fixtureSession("session")];
+        provider.agent.capabilities.push("background-tasks", "background-blocking-work");
+        let calls = 0;
+        const dispatch = async () => { calls++; if (unknown) throw new OperationOutcomeUnknownError(); };
+        Object.assign(provider, { backgroundBlockingWork: dispatch, stopTask: dispatch });
+        const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", ...budget });
+        const run = (id: string) => (operation === "background" ? adapter.backgroundBlockingWork("session", id) : adapter.stopTask("session", "worker", id))
+          .catch(error => { expect(unknown).toBe(true); expect(error).toBeInstanceOf(OperationOutcomeUnknownError); });
+        await run("first"); await run("first");
+        expect(calls).toBe(1);
+        await run("second"); await run("first");
+        expect(calls).toBe(3);
+        expect(provider.prompts).toEqual([]);
+        await adapter.dispose();
+      });
+    }
+    test(`${operation} ${unknown ? "unknown" : "accepted"} receipts expire after settlement and do not survive adapter recreation`, async () => {
+      const provider = new FakeProvider();
+      provider.sessions = [fixtureSession("session")];
+      provider.agent.capabilities.push("background-tasks", "background-blocking-work");
+      let clock = 0;
+      let calls = 0;
+      const dispatch = async () => { calls++; if (unknown) throw new OperationOutcomeUnknownError(); };
+      Object.assign(provider, { backgroundBlockingWork: dispatch, stopTask: dispatch });
+      const create = () => new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", now: () => clock });
+      let adapter = create();
+      const run = () => (operation === "background" ? adapter.backgroundBlockingWork("session", "request") : adapter.stopTask("session", "worker", "request")).catch(error => { expect(error).toBeInstanceOf(OperationOutcomeUnknownError); });
+      await run();
+      clock = 899_999;
+      await run();
+      expect(calls).toBe(1);
+      clock = 900_000;
+      await run();
+      expect(calls).toBe(2);
+      await adapter.dispose();
+      adapter = create();
+      await run();
+      expect(calls).toBe(3);
+      await adapter.dispose();
+    });
+  }
+
   test("a scheduled conversation accepts prompts, reopens scheduled with its live wakeups, and releases once per request", async () => {
     const provider = new FakeProvider();
     provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "scheduled-wakeups"] };
@@ -2337,7 +2819,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     projection.statusUpdate("completed");
     projection.statusUpdate("scheduled");
     // Not live: a prompt is delivered into the held session, not held back.
-    expect((await adapter.prompt("session", "r1", "meanwhile")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "meanwhile")).pending).toBe(false);
     projection.statusUpdate("completed");
     // Reopened while the provider still holds the wakeup: its row (this
     // conversation's only) and the scheduled state.
@@ -2462,7 +2944,7 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect(predicate()).toBe(true);
     };
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     // Submitted with no explicit model — under the configuration the user
     // saw at the time (model A)...
     await adapter.prompt("session", "r2", "second");
@@ -2483,9 +2965,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("session", "r0", "start")).held).toBe(false);
+    expect((await adapter.prompt("session", "r0", "start")).pending).toBe(false);
     for (let index = 1; index <= 20; index += 1) {
-      expect((await adapter.prompt("session", `count-${index}`, `held ${index}`)).held).toBe(true);
+      expect((await adapter.prompt("session", `count-${index}`, `held ${index}`)).pending).toBe(true);
     }
     await expect(adapter.prompt("session", "count-21", "one too many")).rejects.toBeInstanceOf(ChatQueueFullError);
     expect((await adapter.history("session")).queued).toHaveLength(20);
@@ -2496,10 +2978,10 @@ describe("prompt, abort, permission, and question mutations", () => {
       fresh.sessions = [fixtureSession("session")];
       return fresh;
     })(), workspacePath: process.cwd(), generation: "g2", id: () => `byte-${++message}` });
-    expect((await bytes.prompt("session", "b0", "start")).held).toBe(false);
+    expect((await bytes.prompt("session", "b0", "start")).pending).toBe(false);
     const large = "x".repeat(60 * 1024);
     for (let index = 1; index <= 4; index += 1) {
-      expect((await bytes.prompt("session", `bytes-${index}`, large)).held).toBe(true);
+      expect((await bytes.prompt("session", `bytes-${index}`, large)).pending).toBe(true);
     }
     await expect(bytes.prompt("session", "bytes-5", large)).rejects.toBeInstanceOf(ChatQueueFullError);
   });
@@ -2510,9 +2992,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
 
     // The provider publishes the interrupt's idle transition before the
     // interrupt request itself resolves — the pump is faster than the HTTP
@@ -2529,9 +3011,9 @@ describe("prompt, abort, permission, and question mutations", () => {
 
     // A failed interrupt leaves the turn running and must roll back only the
     // pause this cancellation added — the next natural end still delivers.
-    expect((await adapter.prompt("session", "r3", "third")).held).toBe(false);
+    expect((await adapter.prompt("session", "r3", "third")).pending).toBe(false);
     const fourth = await adapter.prompt("session", "r4", "fourth");
-    expect(fourth.held).toBe(true);
+    expect(fourth.pending).toBe(true);
     provider.interrupt = async () => { throw new Error("interrupt refused"); };
     await expect(adapter.abort("session", "cancel-2")).rejects.toThrow("interrupt refused");
     adapter.projectionForTests("session").statusUpdate("completed");
@@ -2545,9 +3027,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     let message = 0;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
 
     // The interrupt is refused while the provider turn keeps running. The
     // projection must keep reporting that turn live — a "failed" downgrade
@@ -2557,7 +3039,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     await expect(adapter.abort("session", "cancel-1")).rejects.toThrow("interrupt refused");
     expect(adapter.projectionForTests("session").status).toBe("running");
 
-    expect((await adapter.prompt("session", "r3", "third")).held).toBe(true);
+    expect((await adapter.prompt("session", "r3", "third")).pending).toBe(true);
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(provider.prompts).toHaveLength(1);
     expect((await adapter.history("session")).queued).toHaveLength(2);
@@ -2578,9 +3060,9 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect(predicate()).toBe(true);
     };
 
-    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    expect((await adapter.prompt("session", "r1", "first")).pending).toBe(false);
     const held = await adapter.prompt("session", "r2", "second");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
 
     let attempts = 0;
     const accept = provider.prompt.bind(provider);
@@ -2620,12 +3102,12 @@ describe("prompt, abort, permission, and question mutations", () => {
     ]);
     expect(first).toEqual(duplicate);
     expect(provider.prompts).toHaveLength(1);
-    expect(first.held).toBe(false);
+    expect(first.pending).toBe(false);
     expect(projection.status).toBe("running");
 
     // A busy submission is held by the workspace, not delivered mid-turn.
     const held = await adapter.prompt("session", "request-2", "follow-up");
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
     expect(provider.prompts).toHaveLength(1);
 
     await Promise.all([adapter.abort("session", "cancel-1"), adapter.abort("session", "cancel-1")]);
@@ -4846,7 +5328,7 @@ describe("prompt attachments", () => {
     // The client claims image/png; the store sniffed webp. The store wins on
     // both the provider hand-off and the projected reference.
     const accepted = await adapter.prompt("session", "r1", "look at this", undefined, undefined, undefined, [ref("22222222-2222-4333-8444-555555555555", "actually.webp")]);
-    expect(accepted.held).toBe(false);
+    expect(accepted.pending).toBe(false);
     expect(provider.prompts[0]!.attachments).toEqual([{
       id: "22222222-2222-4333-8444-555555555555",
       name: "actually.webp",
@@ -4917,8 +5399,8 @@ describe("prompt attachments", () => {
     await Bun.sleep(5);
     expect(provider.prompts).toHaveLength(0);
     releaseListing();
-    expect((await first).held).toBe(false);
-    expect((await second).held).toBe(true);
+    expect((await first).pending).toBe(false);
+    expect((await second).pending).toBe(true);
     expect(provider.prompts).toHaveLength(1);
     expect(provider.prompts[0]!.text).toBe("/unknown focus");
   });
@@ -4947,7 +5429,7 @@ describe("prompt attachments", () => {
 
     await adapter.prompt("session", "r1", "first");
     const held = await adapter.prompt("session", "r2", "with image", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
-    expect(held.held).toBe(true);
+    expect(held.pending).toBe(true);
     expect(provider.prompts).toHaveLength(1);
     expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({
       id: held.messageId,
@@ -5012,7 +5494,7 @@ describe("image-only prompts reach the provider", () => {
       : null;
     const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
     const accepted = await adapter.prompt("session", "r1", "", undefined, undefined, undefined, [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }]);
-    expect(accepted.held).toBe(false);
+    expect(accepted.pending).toBe(false);
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ text: "", attachments: [expect.objectContaining({ id: "11111111-2222-4333-8444-555555555555" })] }));
     await expect(adapter.prompt("session2", "r2", "")).rejects.toThrow("prompt must not be empty");
   });
@@ -5292,5 +5774,811 @@ describe("plan usage on demand", () => {
     settle[1]!({ report });
     expect(await click).toEqual({ report });
     expect(await another).toEqual({ report });
+  });
+});
+
+describe("steering (opencode-v2-steering)", () => {
+  // A fake shaped like the OpenCode 2.x agent: it declares steering and
+  // send-now, keeps an inbox the adapter can list and cancel, and announces
+  // inbox changes as the 2.x normalizer would — as `inbox` deltas.
+  function steering(options: { capabilities?: Array<"steering" | "send-now" | "background-blocking-work">; steerWithdrawTimeoutMs?: number; automaticBackgroundTimeoutMs?: number; steerAdmissionTimeoutMs?: number; receiptEntries?: number; receiptBytes?: number; receiptTtlMs?: number; now?: () => number } = {}) {
+    const provider = new FakeProvider();
+    provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, ...(options.capabilities ?? ["steering", "send-now"])] };
+    provider.sessions = [fixtureSession("session")];
+    // The agent's inbox lists what it was handed until it settles, as the
+    // real server does: a steer the adapter admits is listed at once.
+    provider.listPendingInbox = async () => provider.pendingInbox;
+    provider.cancelInbox = async (_sessionId, inboxId) => { provider.cancelledInbox.push(inboxId); };
+    const accept = provider.prompt.bind(provider);
+    provider.prompt = async (sessionId, input) => {
+      const accepted = await accept(sessionId, input);
+      if (input.delivery === "steer") provider.pendingInbox = [...provider.pendingInbox, { id: accepted.messageId, text: input.text, delivery: "steer", at: Date.now() }];
+      return accepted;
+    };
+    let n = 0;
+    const adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++n}`, coalesceWindowMs: 1, steerWithdrawTimeoutMs: options.steerWithdrawTimeoutMs ?? 60, automaticBackgroundTimeoutMs: options.automaticBackgroundTimeoutMs, steerAdmissionTimeoutMs: options.steerAdmissionTimeoutMs, receiptEntries: options.receiptEntries, receiptBytes: options.receiptBytes, receiptTtlMs: options.receiptTtlMs, now: options.now });
+    const inbox = (delta: InboxDelta, eventType = `session.inbox.${delta.kind === "pending" ? "enqueued" : delta.kind === "delivery" ? "delivery.changed" : delta.outcome}`) => {
+      if (delta.kind === "settled") provider.pendingInbox = provider.pendingInbox.filter(entry => entry.id !== delta.id);
+      if (delta.kind === "pending" && delta.delivery === "steer" && !provider.pendingInbox.some(entry => entry.id === delta.id)) provider.pendingInbox = [...provider.pendingInbox, { id: delta.id, text: delta.text, delivery: "steer", at: delta.at }];
+      provider.eventQueue.push({ normalized: { conversationId: "session", updates: [{ kind: "inbox", delta }], outcome: "handled", eventType } });
+    };
+    const steer = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "steer");
+    const queue = (requestId: string, text: string) => adapter.prompt("session", requestId, text, undefined, undefined, undefined, undefined, "queue");
+    const queued = async () => (await adapter.history("session")).queued ?? [];
+    return { provider, adapter, inbox, steer, queue, queued };
+  }
+  // The queue events a subscriber saw, as `kind:messageId`.
+  for (const outcome of ["accepted", "primary-unknown", "follow-up-unknown"] as const) {
+    for (const boundary of ["ttl", "entries", "bytes", "recreation"] as const) test(`composite ${outcome} receipt protection ends at ${boundary}, never by read-side replay`, async () => {
+      let clock = 0, backgrounds = 0;
+      const { provider, adapter: initial } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"], now: () => clock,
+        ...(boundary === "entries" ? { receiptEntries: 1 } : boundary === "bytes" ? { receiptBytes: 360 } : {}),
+      });
+      let adapter = initial;
+      const prepare = () => {
+        adapter.projectionForTests("session").statusUpdate("running");
+        adapter.projectionForTests("session").apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+      };
+      prepare();
+      const admit = provider.prompt.bind(provider);
+      provider.prompt = async (...args) => { const result = await admit(...args); if (outcome === "primary-unknown") throw new OperationOutcomeUnknownError(); return result; };
+      Object.assign(provider, { backgroundBlockingWork: async () => { backgrounds++; if (outcome === "follow-up-unknown") throw new OperationOutcomeUnknownError(); } });
+      const context: ChatActionContext = { receiptScope: "alice", automaticBackground: "on" };
+      const send = async (id = "original") => {
+        try { return await adapter.prompt("session", id, "Retain input", undefined, undefined, undefined, undefined, "steer", context); }
+        catch (error) { expect(outcome).toBe("primary-unknown"); expect(error).toBeInstanceOf(OperationOutcomeUnknownError); return "unknown"; }
+      };
+      const first = await send();
+      expect(await send()).toEqual(first);
+      expect(provider.prompts).toHaveLength(1);
+      if (boundary === "ttl") {
+        clock = 899_999; expect(await send()).toEqual(first); expect(provider.prompts).toHaveLength(1);
+        clock = 900_000;
+      } else if (boundary === "recreation") {
+        await adapter.dispose();
+        let id = 100;
+        adapter = new ChatAdapter({ provider, workspacePath: process.cwd(), generation: "restart-equivalent", id: () => `recreated-${++id}`, now: () => clock });
+        prepare();
+      } else await send(boundary === "bytes" ? "evict-original-".padEnd(220, "x") : "evict-original");
+      const beforeReads = provider.prompts.length;
+      await adapter.history("session");
+      const { events } = await adapter.subscribe("session"); events.cancel();
+      expect(provider.prompts).toHaveLength(beforeReads);
+      prepare();
+      await send(); // explicit repeat after protection ended; not an automatic retry
+      expect(provider.prompts).toHaveLength(boundary === "entries" || boundary === "bytes" ? 3 : 2);
+      expect(backgrounds).toBe(outcome === "primary-unknown" ? 0 : provider.prompts.length);
+      if (outcome !== "primary-unknown") {
+        const prompts = provider.prompts.length;
+        await adapter.backgroundBlockingWork("session", "fresh-explicit-continue").catch(error => { expect(error).toBeInstanceOf(OperationOutcomeUnknownError); });
+        expect(provider.prompts).toHaveLength(prompts);
+        expect(backgrounds).toBe(prompts + 1);
+      }
+      await adapter.dispose();
+    });
+  }
+  test("fresh parent history supplies a running shell before its streamed tool frame arrives", async () => {
+    const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+    adapter.projectionForTests("session").statusUpdate("running");
+    provider.readMessages = async () => ({ items: [{ info: { id: "shell-message", role: "assistant", time: { created: 1 } }, parts: [{ id: "shell", type: "tool", tool: "shell", state: { status: "running", input: { command: "fixture only" } } }] } as never] });
+    let backgrounds = 0;
+    Object.assign(provider, { reconcileBackgroundTasks: async () => [], backgroundBlockingWork: async () => { backgrounds++; } });
+    const result = await adapter.prompt("session", "fresh-shell", "steer", undefined, undefined, undefined, undefined, "steer", { receiptScope: "alice", automaticBackground: "on" });
+    expect(result.automaticBackground).toBe("accepted");
+    expect(backgrounds).toBe(1);
+    await adapter.dispose();
+  });
+
+  test("standalone native steer ambiguity is retained without any automatic-policy context", async () => {
+    const { adapter, provider } = steering({ capabilities: ["steering", "background-blocking-work"] });
+    adapter.projectionForTests("session").statusUpdate("running");
+    let admissions = 0, backgrounds = 0;
+    provider.prompt = async () => { admissions++; throw new OperationOutcomeUnknownError(); };
+    Object.assign(provider, { backgroundBlockingWork: async () => { backgrounds++; } });
+    const send = () => adapter.prompt("session", "standalone-id", "Preserve unknown input", undefined, undefined, undefined, undefined, "steer");
+    await expect(send()).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    await expect(send()).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    expect(admissions).toBe(1); expect(backgrounds).toBe(0);
+    await adapter.dispose();
+  });
+
+  test("automatic eligibility excludes pending, generating, detached, settled and uncertain work; failed evidence preserves admission", async () => {
+    for (const kind of ["pending", "generating", "detached", "settled", "uncertain", "unavailable", "empty-race"] as const) {
+      const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+      const projection = adapter.projectionForTests("session"); projection.statusUpdate("running");
+      if (kind !== "generating") projection.apply({ kind: "upsert", item: { id: "tool:call", type: "tool", name: "task", status: kind === "pending" ? "pending" : "running", createdAt: 1 } });
+      let backgrounds = 0;
+      Object.assign(provider, {
+        reconcileBackgroundTasks: async () => {
+          if (kind === "unavailable") throw new Error("read failed");
+          if (!["detached", "settled", "uncertain"].includes(kind)) return [];
+          return [{ id: "worker", type: "background_task", taskId: "worker", toolUseId: "call", description: kind, status: kind === "settled" ? "completed" : "running", foreground: kind !== "detached", stateUncertain: kind === "uncertain", createdAt: 1 }];
+        },
+        // The evidence can qualify even when the native inventory has raced
+        // to empty. Its successful no-op acknowledgement is still accepted.
+        backgroundBlockingWork: async () => { backgrounds++; },
+      });
+      const result = await adapter.prompt("session", kind, "Keep accepted input", undefined, undefined, undefined, undefined, "steer", { receiptScope: "alice", automaticBackground: "on" });
+      expect(result).toMatchObject({ pending: true, delivery: "steer", automaticBackground: kind === "unavailable" ? "unavailable" : kind === "empty-race" ? "accepted" : "not-needed" });
+      expect(backgrounds).toBe(kind === "empty-race" ? 1 : 0);
+      expect(provider.prompts).toHaveLength(1);
+      await adapter.dispose();
+    }
+  });
+
+  test("automatic policy cannot background idle sends, queue/command admissions, no-op conversions, standalone or unsupported agents", async () => {
+    for (const kind of ["idle", "queue", "command", "no-op", "standalone", "no-steering", "no-background"] as const) {
+      const capabilities = kind === "no-steering" ? ["background-blocking-work"] as const : kind === "no-background" ? ["steering"] as const : ["steering", "background-blocking-work"] as const;
+      const { adapter, provider } = steering({ capabilities: [...capabilities] });
+      let backgrounds = 0;
+      Object.assign(provider, { backgroundBlockingWork: async () => { backgrounds++; } });
+      const projection = adapter.projectionForTests("session");
+      if (kind !== "idle") projection.statusUpdate("running");
+      projection.apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+      const context = kind === "standalone" ? undefined : { receiptScope: "alice", automaticBackground: "on" as const };
+      const result = await adapter.prompt("session", "primary", kind === "command" ? "/review fixture" : "Fixture input", undefined, undefined, undefined, undefined, kind === "queue" ? "queue" : "steer", context);
+      if (kind === "no-op") {
+        expect(backgrounds).toBe(1);
+        const noOp = await adapter.changeDelivery("session", result.messageId, "already-steer", "steer", context);
+        expect(noOp).not.toHaveProperty("automaticBackground");
+      } else expect(result).not.toHaveProperty("automaticBackground");
+      expect(backgrounds).toBe(kind === "no-op" ? 1 : 0);
+      await adapter.dispose();
+    }
+  });
+
+  test("automatic held conversion retains attachment and message identity before follow-up and serializes parent Stop afterward", async () => {
+    const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+    const stored = { id: "11111111-2222-4333-8444-555555555555", mimeType: "image/png", absolutePath: "/fixture/attachment.png" };
+    (adapter as unknown as { resolveAttachment: () => Promise<typeof stored> }).resolveAttachment = async () => stored;
+    const projection = adapter.projectionForTests("session"); projection.statusUpdate("running");
+    const held = await adapter.prompt("session", "held", "Image input", undefined, undefined, undefined, [{ id: stored.id, name: "fixture.png", mimeType: stored.mimeType }], "queue");
+    projection.apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const calls: string[] = [];
+    let nativeId: string | undefined;
+    const admit = provider.prompt.bind(provider);
+    provider.prompt = async (...args) => { const accepted = await admit(...args); nativeId = accepted.messageId; calls.push("admitted"); return accepted; };
+    Object.assign(provider, { backgroundBlockingWork: async () => {
+      expect(provider.prompts[0]).toMatchObject({ id: nativeId, attachments: [expect.objectContaining({ id: stored.id })] });
+      calls.push("background"); await gate;
+    } });
+    provider.interrupt = async (_id, options) => { expect(options).toEqual({ resume: false }); calls.push("stop"); };
+    const conversion = adapter.changeDelivery("session", held.messageId, "convert", "steer", { receiptScope: "alice", automaticBackground: "on" });
+    await waitUntil(() => calls.includes("background"));
+    const stop = adapter.abort("session", "stop-after-convert");
+    expect(calls).toEqual(["admitted", "background"]);
+    release();
+    expect(await conversion).toMatchObject({ messageId: nativeId, automaticBackground: "accepted" });
+    await stop;
+    expect(calls).toEqual(["admitted", "background", "stop"]);
+    expect(provider.prompts).toHaveLength(1);
+    await adapter.dispose();
+  });
+
+  test("unknown batch resume remains unconfirmed despite inbox presence and cannot be resent under a fresh ID", async () => {
+    const { adapter, provider, steer } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+    const projection = adapter.projectionForTests("session");
+    projection.statusUpdate("running");
+    const first = await steer("first", "first paused");
+    await steer("second", "second paused");
+    projection.statusUpdate("completed");
+    let resumes = 0, backgrounds = 0;
+    provider.interrupt = async () => { resumes++; throw new OperationOutcomeUnknownError(); };
+    Object.assign(provider, { backgroundBlockingWork: async () => { backgrounds++; } });
+    const context: ChatActionContext = { receiptScope: "alice", automaticBackground: "on" };
+    await expect(adapter.sendNow("session", first.messageId, "resume", context)).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    const uncertain = await adapter.history("session");
+    expect(uncertain.queued).toHaveLength(2);
+    expect(uncertain.queued?.every(entry => entry.unconfirmed)).toBe(true);
+    await expect(adapter.sendNow("session", first.messageId, "fresh-resume", context)).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    expect(resumes).toBe(1);
+    projection.statusUpdate("running");
+    expect((await adapter.history("session")).queued?.some(entry => entry.unconfirmed)).toBe(false);
+    expect(provider.prompts).toHaveLength(2);
+    expect(backgrounds).toBe(0);
+    await adapter.dispose();
+  });
+
+  test("unknown composer admission retains a bounded unconfirmed handle and original request identity for reload recovery", async () => {
+    const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+    adapter.projectionForTests("session").statusUpdate("running");
+    provider.prompt = async () => { throw new OperationOutcomeUnknownError(); };
+    provider.listPendingInbox = async () => { throw new Error("read unavailable"); };
+    const context: ChatActionContext = { receiptScope: "alice", automaticBackground: "on" };
+    await expect(adapter.prompt("session", "original-request", "Keep this input", undefined, undefined, undefined, undefined, "steer", context)).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    const snapshot = await adapter.history("session");
+    expect(snapshot.queued).toEqual([expect.objectContaining({ requestId: "original-request", text: "Keep this input", delivery: "steer", unconfirmed: true })]);
+    const id = snapshot.queued![0]!.id;
+    await expect(adapter.sendNow("session", id, "fresh-id", context)).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    await expect(adapter.removeQueued("session", id, "remove-id")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    await adapter.dispose();
+  });
+
+  test("unknown held-to-steer admission blocks fresh-ID resend and queue release until read-only confirmation", async () => {
+    const { adapter, provider, queue } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+    adapter.projectionForTests("session").statusUpdate("running");
+    const held = await queue("held", "preserve text");
+    const admit = provider.prompt.bind(provider);
+    provider.prompt = async (...args) => { await admit(...args); throw new OperationOutcomeUnknownError(); };
+    provider.listPendingInbox = async () => { throw new Error("read unavailable"); };
+    let backgrounds = 0;
+    Object.assign(provider, { backgroundBlockingWork: async () => { backgrounds++; } });
+    const context: ChatActionContext = { receiptScope: "alice", automaticBackground: "on" };
+    await expect(adapter.changeDelivery("session", held.messageId, "switch", "steer", context)).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    await expect(adapter.sendNow("session", held.messageId, "new-id", context)).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    await expect(adapter.removeQueued("session", held.messageId, "remove")).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+    expect(provider.prompts).toHaveLength(1);
+    const unconfirmed = await adapter.history("session");
+    expect(unconfirmed.queued).toEqual([expect.objectContaining({ id: held.messageId, text: "preserve text", unconfirmed: true })]);
+    provider.listPendingInbox = async () => provider.pendingInbox;
+    const recovered = await adapter.history("session");
+    expect(recovered.queued).toEqual([expect.objectContaining({ text: "preserve text", delivery: "steer" })]);
+    expect(recovered.queued?.[0]).not.toHaveProperty("unconfirmed");
+    expect(backgrounds).toBe(0);
+    expect(provider.prompts).toHaveLength(1);
+    await adapter.dispose();
+  });
+
+  test("primary admission unknown is retained without a second prompt or a late follow-up", async () => {
+    for (const unknown of ["transport", "timeout"] as const) {
+      const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"], steerAdmissionTimeoutMs: 10 });
+      const projection = adapter.projectionForTests("session");
+      projection.statusUpdate("running");
+      projection.apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+      const admit = provider.prompt.bind(provider);
+      let release!: () => void, backgrounds = 0;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      provider.prompt = async (...args) => {
+        const accepted = await admit(...args);
+        if (unknown === "transport") throw new OperationOutcomeUnknownError();
+        await gate;
+        return accepted;
+      };
+      Object.assign(provider, { backgroundBlockingWork: async () => { backgrounds++; } });
+      const context: ChatActionContext = { receiptScope: "alice", automaticBackground: "on" };
+      const send = () => adapter.prompt("session", "uncertain", "keep this text", undefined, undefined, undefined, undefined, "steer", context);
+      await expect(send()).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      await expect(send()).rejects.toBeInstanceOf(OperationOutcomeUnknownError);
+      expect(provider.prompts).toHaveLength(1);
+      release();
+      await gate;
+      await Promise.resolve();
+      expect(backgrounds).toBe(0);
+      const snapshot = await adapter.history("session");
+      expect(snapshot.queued?.map(message => message.text)).toEqual(["keep this text"]);
+      await adapter.dispose();
+    }
+  });
+
+  test("every accepted steer transition follows once under ON and never under OFF, including one follow-up per batch resume", async () => {
+    for (const action of ["composer", "convert", "held-now", "paused-now", "replacement"] as const) for (const enabled of [true, false]) {
+      const { adapter, provider, queue, steer } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+      const context: ChatActionContext = { receiptScope: "alice", automaticBackground: enabled ? "on" : "off" };
+      const projection = adapter.projectionForTests("session");
+      projection.statusUpdate("running");
+      projection.apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+      const calls: string[] = [];
+      const admit = provider.prompt.bind(provider);
+      provider.prompt = async (...args) => { const accepted = await admit(...args); calls.push("admit"); return accepted; };
+      Object.assign(provider, {
+        backgroundBlockingWork: async () => { calls.push("background"); },
+        // Replacement reconciliation correctly discards the old transcript.
+        // Fresh provider evidence, not that discarded tool row, qualifies.
+        reconcileBackgroundTasks: async () => [{ id: "worker:live", type: "background_task", taskId: "live", description: "Still blocking", status: "running", foreground: true, createdAt: 1 }],
+      });
+      let result: { automaticBackground?: string };
+      if (action === "composer" || action === "replacement") {
+        if (action === "replacement") {
+          provider.agent.capabilities.push("reversible-history");
+          provider.getReversibleHistoryState = async () => ({ staged: true, canUndo: false, canRedo: true, revertedMessages: [] });
+          const unchanged = async (): Promise<ReversibleHistoryResult> => ({ outcome: "nothing-to-undo", state: { staged: true, canUndo: false, canRedo: true, revertedMessages: [] } });
+          provider.undo = unchanged;
+          provider.redo = unchanged;
+          provider.revert = unchanged;
+          provider.restore = unchanged;
+        }
+        result = await adapter.prompt("session", "primary", "steer", undefined, undefined, undefined, undefined, action === "replacement" ? "queue" : "steer", context);
+      } else if (action === "paused-now") {
+        const first = await steer("first", "first paused");
+        await steer("second", "second paused");
+        projection.statusUpdate("completed");
+        calls.length = 0;
+        provider.interrupt = async (_id, options) => {
+          expect(options).toEqual({ resume: true }); calls.push("resume"); projection.statusUpdate("running");
+        };
+        result = await adapter.sendNow("session", first.messageId, "resume", context);
+        expect(provider.prompts).toHaveLength(2);
+      } else {
+        const held = await queue("held", "held input");
+        expect(calls).toEqual([]);
+        result = action === "convert" ? await adapter.changeDelivery("session", held.messageId, "convert", "steer", context)
+          : await adapter.sendNow("session", held.messageId, "send-now", context);
+      }
+      expect(calls, `${action}, policy ${enabled ? "ON" : "OFF"}`).toEqual([action === "paused-now" ? "resume" : "admit", ...(enabled ? ["background"] : [])]);
+      expect(result.automaticBackground).toBe(enabled ? "accepted" : undefined);
+      await adapter.dispose();
+    }
+  });
+
+  test("late eligibility never backgrounds after its bound, and dispatched unknown follows remain receipt-protected", async () => {
+    for (const stage of ["evidence", "background"] as const) {
+      const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"], automaticBackgroundTimeoutMs: 10 });
+      adapter.projectionForTests("session").statusUpdate("running");
+      adapter.projectionForTests("session").apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+      let release!: () => void, backgrounds = 0;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      if (stage === "evidence") Object.assign(provider, { reconcileBackgroundTasks: async () => { await gate; return []; } });
+      Object.assign(provider, { backgroundBlockingWork: async () => { backgrounds++; if (stage === "background") await gate; } });
+      const context = { receiptScope: "alice", automaticBackground: "on" as const };
+      const send = () => adapter.prompt("session", "bounded", "steer", undefined, undefined, undefined, undefined, "steer", context);
+      const result = await send();
+      expect(result).toMatchObject({ pending: true, delivery: "steer", automaticBackground: stage === "evidence" ? "unavailable" : "unknown" });
+      release();
+      await gate;
+      await Promise.resolve();
+      expect(await send()).toEqual(result);
+      expect(provider.prompts).toHaveLength(1);
+      expect(backgrounds).toBe(stage === "evidence" ? 0 : 1);
+      const { snapshot, events } = await adapter.subscribe("session");
+      expect(snapshot.queued?.map(message => message.text)).toEqual(["steer"]);
+      events.cancel();
+      await adapter.dispose();
+    }
+  });
+
+  test("verified personal ON follows confirmed steer acceptance once and scopes receipts to the account", async () => {
+    const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+    adapter.projectionForTests("session").statusUpdate("running");
+    adapter.projectionForTests("session").apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+    const calls: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const admit = provider.prompt.bind(provider);
+    provider.prompt = async (...args) => { const result = await admit(...args); calls.push("admitted"); await gate; calls.push("acknowledged"); return result; };
+    Object.assign(provider, { backgroundBlockingWork: async () => { calls.push("background"); } });
+    const policy: ChatActionContext = { receiptScope: "alice", automaticBackground: "on" };
+    const send = (context = policy) => adapter.prompt("session", "same-id", "steer", undefined, undefined, undefined, undefined, "steer", context);
+    const pending = send();
+    await waitUntil(() => calls.includes("admitted"));
+    expect(calls).toEqual(["admitted"]);
+    release();
+    const result = await pending;
+    expect(result).toMatchObject({ pending: true, delivery: "steer", automaticBackground: "accepted" });
+    expect(calls).toEqual(["admitted", "acknowledged", "background"]);
+    expect(await send({ ...policy, automaticBackground: "off" })).toEqual(result);
+    expect(calls).toHaveLength(3);
+    const other = await send({ ...policy, receiptScope: "bob", automaticBackground: "off" });
+    expect(other).not.toHaveProperty("automaticBackground");
+    expect(provider.prompts).toHaveLength(2);
+    expect(calls.filter(call => call === "background")).toHaveLength(1);
+    await adapter.dispose();
+  });
+
+  test("accepted steer survives automatic background refusal and missing evidence without becoming a failed prompt", async () => {
+    const { adapter, provider } = steering({ capabilities: ["steering", "send-now", "background-blocking-work"] });
+    const policy = { receiptScope: "alice", automaticBackground: "on" as const };
+    adapter.projectionForTests("session").statusUpdate("running");
+    Object.assign(provider, { backgroundBlockingWork: async () => {} });
+    const send = (id: string) => adapter.prompt("session", id, "steer", undefined, undefined, undefined, undefined, "steer", policy);
+    expect(await send("none")).toMatchObject({ pending: true, automaticBackground: "not-needed" });
+    adapter.projectionForTests("session").apply({ kind: "upsert", item: { id: "tool:shell", type: "tool", name: "shell", status: "running", createdAt: 1 } });
+    let calls = 0;
+    Object.assign(provider, { backgroundBlockingWork: async () => { calls++; throw new Error("private provider refusal details"); } });
+    const refused = await send("refused");
+    expect(refused).toMatchObject({ pending: true, delivery: "steer", automaticBackground: "failed" });
+    expect(JSON.stringify(refused)).not.toContain("private provider refusal");
+    expect(await send("refused")).toEqual(refused);
+    expect(calls).toBe(1);
+    expect(provider.prompts).toHaveLength(2);
+    await adapter.dispose();
+  });
+
+  async function watchQueue(adapter: ChatAdapter): Promise<{ changes: string[]; stop: () => void }> {
+    const { events } = await adapter.subscribe("session");
+    const changes: string[] = [];
+    void (async () => { for await (const event of events) if (event.type === "conversation.queue") changes.push(`${event.change.kind}:${event.change.messageId}`); })();
+    return { changes, stop: () => events.cancel() };
+  }
+
+  test("a busy steer reaches the provider as a steer, counts as pending, and lists before held messages", async () => {
+    const { adapter, provider, steer, queue, queued } = steering();
+    const watch = await watchQueue(adapter);
+    adapter.projectionForTests("session").statusUpdate("running");
+    const held = await queue("r-q", "later");
+    const steered = await steer("r-s", "now");
+    expect(held).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+    expect(steered).toEqual(expect.objectContaining({ pending: true, delivery: "steer", messageId: "id-2" }));
+    expect(provider.prompts).toEqual([expect.objectContaining({ id: "id-2", text: "now", delivery: "steer" })]);
+    // No model or mode travels with a steer (D6): the session keeps its own.
+    expect(provider.prompts[0]!.model).toBeUndefined();
+    expect(provider.prompts[0]!.mode).toBeUndefined();
+    expect(await queued()).toEqual([
+      expect.objectContaining({ id: "id-2", text: "now", delivery: "steer", requestId: "r-s" }),
+      expect.objectContaining({ id: "id-1", text: "later", delivery: "queue", requestId: "r-q" }),
+    ]);
+    await waitUntil(() => watch.changes.length === 2);
+    expect(watch.changes).toEqual(["held:id-1", "steered:id-2"]);
+    watch.stop();
+    await adapter.dispose();
+  });
+
+  test("commands, skills, and reload are held whatever the delivery; so is a steer to an agent without steering, and an omitted delivery", async () => {
+    const { adapter, provider, steer } = steering();
+    provider.commands = [...provider.commands, { name: "reload", description: "Reload", argumentHint: "", kind: "command" as const }, { name: "pdf", description: "PDF", argumentHint: "", kind: "skill" as const }];
+    adapter.projectionForTests("session").statusUpdate("running");
+    for (const text of ["/review focus", "/pdf read it", "/reload"]) {
+      expect(await steer(`r-${text}`, text)).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+    }
+    expect(await adapter.prompt("session", "r-omitted", "no delivery named")).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+    expect(provider.prompts).toEqual([]);
+    expect(((await adapter.history("session")).queued ?? []).map(entry => entry.delivery)).toEqual(["queue", "queue", "queue", "queue"]);
+
+    const plain = steering({ capabilities: [] });
+    plain.adapter.projectionForTests("session").statusUpdate("running");
+    expect(await plain.steer("r-plain", "steer please")).toEqual(expect.objectContaining({ pending: true, delivery: "queue" }));
+    expect(plain.provider.prompts).toEqual([]);
+    await adapter.dispose();
+    await plain.adapter.dispose();
+  });
+
+  test("submitting while idle with nothing pending dispatches at once whatever the delivery", async () => {
+    const { adapter, provider, steer } = steering();
+    expect(await steer("r-idle", "go")).toEqual(expect.objectContaining({ pending: false, delivery: "queue" }));
+    expect(provider.prompts).toEqual([expect.objectContaining({ text: "go", delivery: "queue" })]);
+    await adapter.dispose();
+  });
+
+  test("inbox deltas keep the dock: another client's steer joins it, a delivery leaves it, and the snapshot lists steers first", async () => {
+    const { adapter, provider, inbox, queue, queued } = steering();
+    const pump = adapter.startEventPump();
+    const watch = await watchQueue(adapter);
+    adapter.projectionForTests("session").statusUpdate("running");
+    await queue("r-q", "held one");
+    inbox({ kind: "pending", id: "msg_other", text: "from the TUI", delivery: "steer", at: 5 });
+    await liveEventsApplied(adapter, provider);
+    expect(await queued()).toEqual([
+      expect.objectContaining({ id: "msg_other", text: "from the TUI", delivery: "steer" }),
+      expect.objectContaining({ id: "id-1", delivery: "queue" }),
+    ]);
+    // A natively queued entry or an internal one is not the dock's.
+    inbox({ kind: "pending", id: "msg_native", text: "native queue", delivery: "queue", at: 6 });
+    await liveEventsApplied(adapter, provider);
+    expect((await queued()).map(entry => entry.id)).toEqual(["msg_other", "id-1"]);
+    inbox({ kind: "settled", id: "msg_other", outcome: "delivered" });
+    await liveEventsApplied(adapter, provider);
+    expect((await queued()).map(entry => entry.id)).toEqual(["id-1"]);
+    await waitUntil(() => watch.changes.length === 3);
+    expect(watch.changes).toEqual(["held:id-1", "steered:msg_other", "delivered:msg_other"]);
+    watch.stop();
+    await adapter.stopEventPump();
+    await pump;
+    await adapter.dispose();
+  });
+
+  test("attach and reconnect replace the pending steers from the agent's own list", async () => {
+    const { adapter, provider, queued } = steering();
+    provider.pendingInbox = [{ id: "msg_listed", text: "raised while away", delivery: "steer", at: 7 }];
+    expect(await queued()).toEqual([expect.objectContaining({ id: "msg_listed", text: "raised while away", delivery: "steer" })]);
+    // The stream reconnecting re-reads the list: a steer delivered meanwhile
+    // leaves, one raised meanwhile joins.
+    provider.pendingInbox = [{ id: "msg_newer", text: "raised during the gap", delivery: "steer", at: 8 }];
+    const pump = adapter.startEventPump();
+    await waitUntil(() => provider.eventQueue.waiting);
+    await waitUntil(() => adapter.pendingSteersForTests("session").map(entry => entry.id).join() === "msg_newer");
+    // A failed list is unknown, not empty: the map stands.
+    provider.listPendingInbox = async () => { throw new Error("inbox unavailable"); };
+    expect((await queued()).map(entry => entry.id)).toEqual(["msg_newer"]);
+    await adapter.stopEventPump();
+    await pump;
+    await adapter.dispose();
+  });
+
+  test("the bound counts steers and held messages together, including steers raised elsewhere", async () => {
+    const { adapter, provider, inbox, steer, queue, queued } = steering();
+    const pump = adapter.startEventPump();
+    adapter.projectionForTests("session").statusUpdate("running");
+    for (let index = 1; index <= 9; index += 1) await steer(`s-${index}`, `steer ${index}`);
+    for (let index = 1; index <= 9; index += 1) await queue(`q-${index}`, `held ${index}`);
+    inbox({ kind: "pending", id: "msg_tui1", text: "tui 1", delivery: "steer", at: 1 });
+    inbox({ kind: "pending", id: "msg_tui2", text: "tui 2", delivery: "steer", at: 2 });
+    await liveEventsApplied(adapter, provider);
+    expect((await queued()).length).toBe(20);
+    await expect(steer("s-21", "one too many")).rejects.toBeInstanceOf(ChatQueueFullError);
+    await expect(queue("q-21", "one too many")).rejects.toBeInstanceOf(ChatQueueFullError);
+    expect((await queued()).length).toBe(20);
+    expect(provider.prompts).toHaveLength(9);
+    // Bytes count across both as well.
+    const bytes = steering();
+    bytes.adapter.projectionForTests("session").statusUpdate("running");
+    const large = "x".repeat(100 * 1024);
+    await bytes.steer("b-1", large);
+    await bytes.queue("b-2", large);
+    await expect(bytes.steer("b-3", large)).rejects.toBeInstanceOf(ChatQueueFullError);
+    await expect(bytes.queue("b-4", large)).rejects.toBeInstanceOf(ChatQueueFullError);
+    await adapter.stopEventPump();
+    await pump;
+    await adapter.dispose();
+    await bytes.adapter.dispose();
+  });
+
+  test("a steer enqueued before the conversation last went idle reads paused; a new steer or a wake resumes it", async () => {
+    const { adapter, provider, inbox, steer, queued } = steering();
+    const pump = adapter.startEventPump();
+    const watch = await watchQueue(adapter);
+    adapter.projectionForTests("session").statusUpdate("running");
+    const first = await steer("s-1", "steer one");
+    expect((await queued())[0]).not.toHaveProperty("paused");
+    // The turn ends without delivering it: stranded, and said so.
+    adapter.projectionForTests("session").statusUpdate("completed");
+    expect(await queued()).toEqual([expect.objectContaining({ id: first.messageId, paused: true })]);
+    await waitUntil(() => watch.changes.includes(`paused:${first.messageId}`));
+    // A new steer wakes the agent, which delivers every pending steer:
+    // nothing reads paused any more, and the wake is announced.
+    const second = await steer("s-2", "steer two");
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ id: second.messageId, delivery: "steer" }));
+    expect((await queued()).map(entry => entry.paused ?? false)).toEqual([false, false]);
+    await waitUntil(() => watch.changes.includes(`resumed:${first.messageId}`));
+    // Delivered together, oldest first.
+    inbox({ kind: "settled", id: first.messageId, outcome: "delivered" });
+    inbox({ kind: "settled", id: second.messageId, outcome: "delivered" });
+    await liveEventsApplied(adapter, provider);
+    expect(await queued()).toEqual([]);
+    watch.stop();
+    await adapter.stopEventPump();
+    await pump;
+    await adapter.dispose();
+  });
+
+  test("held messages read paused while delivery is paused: after a cancel, and behind a staged revert", async () => {
+    const fixture = steering();
+    const { adapter, queue, queued } = fixture;
+    const watch = await watchQueue(adapter);
+    expect((await adapter.prompt("session", "r-1", "start")).pending).toBe(false);
+    const held = await queue("r-2", "held");
+    expect((await queued())[0]).not.toHaveProperty("paused");
+    await adapter.abort("session", "cancel-1");
+    expect(await queued()).toEqual([expect.objectContaining({ id: held.messageId, paused: true })]);
+    await waitUntil(() => watch.changes.includes(`paused:${held.messageId}`));
+    // A new submission resumes the queue: the entry stops reading paused,
+    // and as the conversation is idle the head is delivered at once.
+    const { provider } = fixture;
+    await queue("r-3", "resume");
+    await waitUntil(() => watch.changes.includes(`resumed:${held.messageId}`));
+    await waitUntil(() => provider.prompts.length === 2);
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ id: held.messageId, delivery: "queue" }));
+    expect((await queued()).map(entry => entry.paused ?? false)).toEqual([false]);
+    watch.stop();
+    await adapter.dispose();
+  });
+
+  test("cancel interrupts without resuming: held messages go dormant, pending steers stay pending and paused, nothing delivers", async () => {
+    const { adapter, provider, steer, queue, queued } = steering();
+    expect((await adapter.prompt("session", "r-1", "start")).pending).toBe(false);
+    const held = await queue("r-2", "held");
+    const steered = await steer("r-3", "steered");
+    await adapter.abort("session", "cancel-1");
+    expect(provider.interruptOptions).toEqual([{ resume: false }]);
+    adapter.projectionForTests("session").statusUpdate("idle");
+    await Bun.sleep(20);
+    expect(provider.prompts).toHaveLength(2);
+    expect(await queued()).toEqual([
+      expect.objectContaining({ id: steered.messageId, delivery: "steer", paused: true }),
+      expect.objectContaining({ id: held.messageId, delivery: "queue", paused: true }),
+    ]);
+    await adapter.dispose();
+  });
+
+  test("a replacement under a staged revert goes out as a steer on a steering agent, and dispatches as before on one without", async () => {
+    for (const declares of [true, false]) {
+      const { adapter, provider, steer, queue, queued, inbox } = steering({ capabilities: declares ? ["steering", "send-now"] : [] });
+      const pump = adapter.startEventPump();
+      provider.agent = { ...provider.agent, capabilities: [...provider.agent.capabilities, "reversible-history"] };
+      let state: ReversibleHistoryState = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+      provider.getReversibleHistoryState = async () => state;
+      provider.undo = async () => { state = { staged: true, canUndo: false, canRedo: true, revertedMessages: [{ id: "message:old", text: "old" }] }; return { outcome: "changed", state }; };
+      provider.redo = async () => ({ outcome: "nothing-to-redo", state });
+      provider.revert = async () => ({ outcome: "changed", state });
+      provider.restore = async () => ({ outcome: "changed", state });
+      const accept = provider.prompt.bind(provider);
+      provider.prompt = async (sessionId, input) => {
+        const accepted = await accept(sessionId, input);
+        // Real OpenCode commits the revert on replacement acceptance. Its
+        // running event can arrive later than this HTTP response.
+        if (input.text === "replacement") state = { staged: false, canUndo: true, canRedo: false, revertedMessages: [] };
+        return accepted;
+      };
+      adapter.projectionForTests("session").statusUpdate("running");
+      const held = await queue("r-held", "held one");
+      const paused = declares ? await steer("r-steer", "steer one") : undefined;
+      await adapter.undo("session", "undo-1");
+      // Undo interrupted the turn: the held message waits, and so does the steer.
+      expect((await queued()).every(entry => entry.paused)).toBe(true);
+      const replacement = await adapter.prompt("session", "r-replace", "replacement");
+      if (declares) {
+        expect(replacement).toEqual(expect.objectContaining({ pending: true, delivery: "steer" }));
+        expect(provider.prompts.at(-1)).toEqual(expect.objectContaining({ text: "replacement", delivery: "steer" }));
+        // Held stays held; the paused steer stays, to be delivered with the
+        // replacement oldest first (the agent batches them on resume).
+        expect((await queued()).map(entry => entry.id)).toEqual([paused!.messageId, replacement.messageId, held.messageId]);
+        inbox({ kind: "settled", id: paused!.messageId, outcome: "delivered" });
+        inbox({ kind: "settled", id: replacement.messageId, outcome: "delivered" });
+        await liveEventsApplied(adapter, provider);
+        expect((await queued()).map(entry => entry.id)).toEqual([held.messageId]);
+      } else {
+        expect(replacement).toEqual(expect.objectContaining({ pending: false, delivery: "queue" }));
+        expect(provider.prompts.at(-1)).toEqual(expect.objectContaining({ text: "replacement", delivery: "queue" }));
+        expect((await queued()).map(entry => entry.id)).toEqual([held.messageId]);
+      }
+      await adapter.stopEventPump();
+      await pump;
+      await adapter.dispose();
+    }
+  });
+
+  test("withdrawing a steer waits for the agent's confirmation: cancelled removes it or holds it in submission order with the current configuration", async () => {
+    const { adapter, provider, inbox, steer, queue, queued } = steering();
+    const pump = adapter.startEventPump();
+    const watch = await watchQueue(adapter);
+    provider.configurations.set("session", { model: { providerId: "anthropic", modelId: "claude" }, mode: "build" });
+    adapter.projectionForTests("session").statusUpdate("running");
+    // Spaced by a clock tick each: submission order is by time, and three
+    // submissions in one millisecond would tie.
+    const older = await queue("q-1", "held first");
+    await Bun.sleep(2);
+    const steered = await steer("s-1", "steer me");
+    await Bun.sleep(2);
+    const newer = await queue("q-2", "held later");
+    // The agent confirms the withdrawal on its stream, not in the response.
+    const answerCancel = (id: string) => { provider.cancelInbox = async (_s, inboxId) => { provider.cancelledInbox.push(inboxId); setTimeout(() => inbox({ kind: "settled", id, outcome: "cancelled" }), 5); }; };
+    answerCancel(steered.messageId);
+    // Held again under a fresh id: the agent's inbox id named an entry it
+    // has now cancelled, and a later dispatch must not reuse it.
+    const switched = await adapter.changeDelivery("session", steered.messageId, "switch-1", "queue");
+    expect(switched).toEqual({ messageId: expect.not.stringMatching(steered.messageId), delivery: "queue" });
+    expect(provider.cancelledInbox).toEqual([steered.messageId]);
+    // Back in the held queue at its submission-order position, frozen to the
+    // session's configuration as it stands now.
+    expect((await queued()).map(entry => `${entry.id}:${entry.delivery}`)).toEqual([`${older.messageId}:queue`, `${switched.messageId}:queue`, `${newer.messageId}:queue`]);
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await waitUntil(() => provider.prompts.length === 2);
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ id: older.messageId, delivery: "queue" }));
+    // Removing a steer goes the same way.
+    adapter.projectionForTests("session").statusUpdate("running");
+    const removable = await steer("s-2", "remove me");
+    answerCancel(removable.messageId);
+    await expect(adapter.removeQueued("session", removable.messageId, "remove-1")).resolves.toEqual({ removed: true });
+    expect((await queued()).map(entry => entry.id)).toEqual([switched.messageId, newer.messageId]);
+    await waitUntil(() => watch.changes.includes(`switched:${switched.messageId}`) && watch.changes.includes(`removed:${removable.messageId}`));
+    watch.stop();
+    await adapter.stopEventPump();
+    await pump;
+    await adapter.dispose();
+  });
+
+  test("a steer the agent delivers first cannot be withdrawn: already delivered, nothing held, nothing sent twice; retries apply once", async () => {
+    const { adapter, provider, inbox, steer, queued } = steering();
+    const pump = adapter.startEventPump();
+    adapter.projectionForTests("session").statusUpdate("running");
+    const steered = await steer("s-1", "too late");
+    provider.cancelInbox = async (_s, inboxId) => { provider.cancelledInbox.push(inboxId); setTimeout(() => inbox({ kind: "settled", id: steered.messageId, outcome: "delivered" }), 5); };
+    await expect(adapter.changeDelivery("session", steered.messageId, "switch-1", "queue")).rejects.toBeInstanceOf(SteerAlreadyDeliveredError);
+    expect(await queued()).toEqual([]);
+    expect(provider.prompts).toHaveLength(1);
+    // Delivered before the withdrawal was even asked for: still "already
+    // delivered", not merely "not held".
+    await expect(adapter.removeQueued("session", steered.messageId, "remove-1")).rejects.toBeInstanceOf(SteerAlreadyDeliveredError);
+    expect(provider.cancelledInbox).toEqual([steered.messageId]);
+    // A retry with the same request id replays, asking the agent nothing more.
+    const again = await steer("s-2", "again");
+    provider.cancelInbox = async (_s, inboxId) => { provider.cancelledInbox.push(inboxId); setTimeout(() => inbox({ kind: "settled", id: again.messageId, outcome: "cancelled" }), 5); };
+    await Promise.all([adapter.removeQueued("session", again.messageId, "remove-2"), adapter.removeQueued("session", again.messageId, "remove-2")]);
+    expect(provider.cancelledInbox).toEqual([steered.messageId, again.messageId]);
+    await adapter.stopEventPump();
+    await pump;
+    await adapter.dispose();
+  });
+
+  test("with no confirmation before the bounded wait, the outcome comes from the agent's list and history", async () => {
+    const { adapter, provider, steer, queued } = steering({ steerWithdrawTimeoutMs: 30 });
+    const pump = adapter.startEventPump();
+    adapter.projectionForTests("session").statusUpdate("running");
+    const silent = await steer("s-1", "no event");
+    // Absent from the list and present in history: delivered.
+    provider.pendingInbox = [];
+    provider.readMessages = async () => ({ items: [{ info: { id: silent.messageId, role: "user", sessionID: "session", time: { created: 1 } }, parts: [{ id: "p1", type: "text", text: "no event" }] }] });
+    await expect(adapter.removeQueued("session", silent.messageId, "remove-1")).rejects.toBeInstanceOf(SteerAlreadyDeliveredError);
+    expect(await queued()).toEqual([]);
+    // Absent from both: cancelled.
+    const gone = await steer("s-2", "vanished");
+    provider.pendingInbox = [];
+    provider.readMessages = async () => ({ items: [] });
+    await expect(adapter.removeQueued("session", gone.messageId, "remove-2")).resolves.toEqual({ removed: true });
+    // Still listed: the withdrawal did not take; the steer stays and the
+    // mutation says so rather than guessing.
+    const stuck = await steer("s-3", "stuck");
+    provider.pendingInbox = [{ id: stuck.messageId, text: "stuck", delivery: "steer", at: 1 }];
+    await expect(adapter.removeQueued("session", stuck.messageId, "remove-3")).rejects.toBeInstanceOf(SteerWithdrawalUnconfirmedError);
+    expect((await queued()).map(entry => entry.id)).toEqual([stuck.messageId]);
+    await adapter.stopEventPump();
+    await pump;
+    await adapter.dispose();
+  });
+
+  test("switching a held message to steer hands it to the agent with its attachments; a dormant queue stays dormant for the rest", async () => {
+    const { adapter, provider, queue, queued } = steering();
+    const watch = await watchQueue(adapter);
+    const stored = { id: "11111111-2222-4333-8444-555555555555", mimeType: "image/png", absolutePath: "/tmp/uatu/att.png" };
+    (adapter as unknown as { resolveAttachment: (id: string) => Promise<typeof stored | null> }).resolveAttachment = async id => id === stored.id ? stored : null;
+    expect((await adapter.prompt("session", "r-1", "start")).pending).toBe(false);
+    const first = await queue("q-1", "held first");
+    const second = await adapter.prompt("session", "q-2", "with image", undefined, undefined, undefined, [{ id: stored.id, name: "shot.png", mimeType: "image/png" }], "queue");
+    await adapter.abort("session", "cancel-1");
+    // Dormant. Switching the second to steer sends it now, with its image,
+    // under no frozen configuration; the first stays held and dormant.
+    const switched = await adapter.changeDelivery("session", second.messageId, "switch-1", "steer");
+    expect(switched).toEqual({ messageId: switched.messageId, delivery: "steer" });
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "with image", delivery: "steer", attachments: [expect.objectContaining({ id: stored.id, absolutePath: "/tmp/uatu/att.png" })] }));
+    expect(provider.prompts[1]!.model).toBeUndefined();
+    expect((await queued()).map(entry => `${entry.id}:${entry.delivery}`)).toEqual([`${switched.messageId}:steer`, `${first.messageId}:queue`]);
+    expect((await queued())[1]).toEqual(expect.objectContaining({ paused: true }));
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await Bun.sleep(20);
+    expect(provider.prompts).toHaveLength(2);
+    await waitUntil(() => watch.changes.includes(`switched:${switched.messageId}`));
+    // Send now on a steering agent is the same operation.
+    const third = await queue("q-3", "send me now");
+    const sent = await adapter.sendNow("session", third.messageId, "send-1");
+    expect(sent).toEqual({ messageId: sent.messageId, delivery: "steer" });
+    expect(provider.prompts.at(-1)).toEqual(expect.objectContaining({ text: "send me now", delivery: "steer" }));
+    // A command is refused a switch to steer.
+    adapter.projectionForTests("session").statusUpdate("running");
+    const command = await queue("q-4", "/review all");
+    await expect(adapter.changeDelivery("session", command.messageId, "switch-2", "steer")).rejects.toBeInstanceOf(CommandSteeringError);
+    await expect(adapter.sendNow("session", command.messageId, "send-2")).rejects.toBeInstanceOf(CommandSteeringError);
+    watch.stop();
+    await adapter.dispose();
+  });
+
+  test("send now on a paused steer wakes the agent with resume; on a running one it is refused", async () => {
+    const { adapter, provider, steer, queued } = steering();
+    expect((await adapter.prompt("session", "r-1", "start")).pending).toBe(false);
+    const steered = await steer("s-1", "steer me");
+    await expect(adapter.sendNow("session", steered.messageId, "send-0")).rejects.toBeInstanceOf(SendNowUnavailableError);
+    await adapter.abort("session", "cancel-1");
+    expect((await queued())[0]).toEqual(expect.objectContaining({ id: steered.messageId, paused: true }));
+    await expect(adapter.sendNow("session", steered.messageId, "send-1")).resolves.toEqual({ messageId: steered.messageId, delivery: "steer" });
+    expect(provider.interruptOptions).toEqual([{ resume: false }, { resume: true }]);
+    expect((await queued())[0]).not.toHaveProperty("paused");
+    await adapter.dispose();
+  });
+
+  test("send now without steering (Claude-shaped) is refused while a turn runs, and otherwise dispatches that message under its frozen configuration", async () => {
+    const { adapter, provider, queue, queued } = steering({ capabilities: ["send-now"] });
+    const watch = await watchQueue(adapter);
+    provider.models = [...provider.models, { selection: { providerId: "anthropic", modelId: "haiku" }, provider: "Anthropic", name: "Haiku" }];
+    expect((await adapter.prompt("session", "r-1", "start")).pending).toBe(false);
+    const first = await queue("q-1", "held first");
+    const second = await adapter.prompt("session", "q-2", "send me", { providerId: "anthropic", modelId: "haiku" }, undefined, undefined, undefined, "queue");
+    await expect(adapter.sendNow("session", second.messageId, "send-0")).rejects.toBeInstanceOf(SendNowUnavailableError);
+    await adapter.abort("session", "cancel-1");
+    await expect(adapter.sendNow("session", second.messageId, "send-1")).resolves.toEqual({ messageId: second.messageId, delivery: "queue" });
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ id: second.messageId, text: "send me", delivery: "queue", model: { providerId: "anthropic", modelId: "haiku" } }));
+    expect((await queued()).map(entry => entry.id)).toEqual([first.messageId]);
+    await waitUntil(() => watch.changes.includes(`delivered:${second.messageId}`));
+    // The rest stay dormant: the turn ending delivers nothing by itself.
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await Bun.sleep(20);
+    expect(provider.prompts).toHaveLength(2);
+    // Without send-now, or steering, the operations are refused outright.
+    const plain = steering({ capabilities: [] });
+    plain.adapter.projectionForTests("session").statusUpdate("running");
+    const held = await plain.queue("q-1", "held");
+    await expect(plain.adapter.sendNow("session", held.messageId, "send-1")).rejects.toBeInstanceOf(SendNowUnsupportedError);
+    await expect(plain.adapter.changeDelivery("session", held.messageId, "switch-1", "steer")).rejects.toBeInstanceOf(SteeringUnsupportedError);
+    watch.stop();
+    await adapter.dispose();
+    await plain.adapter.dispose();
   });
 });

@@ -41,7 +41,7 @@ export const BUNDLED_WEB_REVISION = 2;
 // Public wire-contract compatibility identities. Breaking changes increment
 // only the affected domain; product and bundled-web changes do not.
 export const HUB_API_REVISION = 11;
-export const WORKSPACE_API_REVISION = 24;
+export const WORKSPACE_API_REVISION = 28;
 
 function runGit(args: string[]): string | null {
   try {

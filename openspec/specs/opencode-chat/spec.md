@@ -252,9 +252,9 @@ The Chat action that creates another conversation with the current workspace age
 - **AND** activating it does not change the workspace agent
 
 ### Requirement: The workspace API exposes normalized chat operations
-The workspace API SHALL provide authenticated operations to list, create, and read conversations; start a prompt turn; remove a queued message; cancel the active turn; answer a pending permission; and answer or reject a structured question. Mutation requests SHALL be origin-protected under cookie authentication, SHALL validate conversation ownership against the workspace directory, and SHALL use client-generated request identifiers to make network retries idempotent. Provider-specific payloads and credentials MUST NOT be exposed as the public contract when a normalized UatuCode representation exists.
+The workspace API SHALL provide authenticated operations to list, create, and read conversations; start a prompt turn; remove a queued message; change a pending message's delivery; send a pending message now; cancel the active turn; answer a pending permission; and answer or reject a structured question. Mutation requests SHALL be origin-protected under cookie authentication, SHALL validate conversation ownership against the workspace directory, and SHALL use client-generated request identifiers to make network retries idempotent. Provider-specific payloads and credentials MUST NOT be exposed as the public contract when a normalized UatuCode representation exists.
 
-A prompt accepted while the conversation is running SHALL be reported as queued, identifying the held message so a client can later remove it. Conversation reads SHALL include the currently held messages in submission order, so a client joining or reloading mid-run presents the same queue as one that watched it build.
+A prompt MAY name its delivery, steer or queue. A prompt that names steer SHALL be accepted as a steer only when the owning agent declares the `steering` capability, the conversation is running, and the text is not a command. Otherwise it SHALL be handled as a queued prompt. A prompt that names no delivery SHALL be handled as a queued prompt. A prompt accepted while the conversation is running SHALL be reported as pending, identifying the message and its delivery so that a client can later remove it or change its delivery. Conversation reads SHALL include the currently pending messages in delivery order, each with its delivery and whether it is paused. A client that joins or reloads mid-run therefore presents the same dock as a client that watched it build.
 
 The API SHALL report every agent a workspace's Chat offers, and which capabilities each agent declares. A capability is declared only when the agent actually supports it; the absence of a declaration SHALL be a normal, expected state rather than an error or an empty result. Consumers SHALL be able to decide what to present from an agent's declaration alone, without probing an operation to discover whether it works. Agent-scoped catalog reads — models, modes, commands — SHALL identify which agent they describe.
 
@@ -271,12 +271,22 @@ The API SHALL name a way of working a **mode**, and SHALL name the program Chat 
 - **AND** at most one held message is removed
 
 #### Scenario: A reload shows the queue as it stands
-- **WHEN** a client loads a conversation snapshot while messages are held
-- **THEN** the response identifies the held messages in submission order
-- **AND** the client can present and remove them without having observed their submission
+- **WHEN** a client loads a conversation snapshot while messages are pending
+- **THEN** the response identifies the pending messages in delivery order, each with its delivery and paused state
+- **AND** the client can present, remove, and switch them without having observed their submission
+
+#### Scenario: Retried delivery change is applied once
+- **WHEN** a client retries a change of a pending message's delivery, or a send-now, with the same request identifier after losing the response
+- **THEN** the server reports the original outcome
+- **AND** the message is delivered to the agent at most once
+
+#### Scenario: A steer request to an agent without steering is queued
+- **WHEN** a client submits a prompt naming steer delivery to a conversation whose agent does not declare `steering`
+- **THEN** the prompt is handled as a queued prompt
+- **AND** nothing is delivered to the agent mid-turn
 
 #### Scenario: Cross-origin mutation is rejected
-- **WHEN** a cookie-authenticated cross-origin request attempts to prompt, remove a queued message, cancel, or answer an agent request
+- **WHEN** a cookie-authenticated cross-origin request attempts to prompt, remove a queued message, change a pending message's delivery, send a pending message now, cancel, or answer an agent request
 - **THEN** the workspace rejects it without changing the conversation
 
 #### Scenario: Base-path deployment uses relocated chat routes
@@ -302,7 +312,7 @@ The API SHALL name a way of working a **mode**, and SHALL name the program Chat 
 ### Requirement: Conversation updates are structured and reconnectable
 The server SHALL normalize OpenCode activity into ordered conversation events covering user and assistant content, reasoning, tool lifecycle, permission requests and resolutions, structured questions and resolutions, context compaction, reverted work, turn status, cancellation, completion, warnings, and errors. Normalization SHALL recognize each of these regardless of which of OpenCode's event-naming generations announced it, and when one logical occurrence is announced more than once the timeline SHALL contain a single entry for it.
 
-Changes to a conversation's held-message queue — a message held, a message removed, a message delivered to the agent — SHALL be announced on the same ordered event stream, so every connected client presents the same queue at the same point in the conversation.
+Changes to a conversation's pending messages SHALL be announced on the same ordered event stream, so every connected client presents the same dock at the same point in the conversation. Those changes are: a message held, a message accepted as a steer, a message removed, a message's delivery changed, a message paused or resumed, and a message delivered to the agent.
 
 An event the server does not recognize, or whose payload it cannot parse, SHALL be skipped without ending or restarting the event stream, and SHALL be counted by type so an operator can discover what a running workspace is discarding. Counting MUST NOT record event payloads.
 
@@ -313,9 +323,9 @@ A history snapshot SHALL identify a stream cursor; reconnecting from a retained 
 - **THEN** every event after that cursor is replayed once in order before live output continues
 
 #### Scenario: Queue changes reach every connected client
-- **WHEN** a message is held, removed, or delivered while more than one client watches the conversation
+- **WHEN** a message is held, steered, removed, switched, paused, or delivered while more than one client watches the conversation
 - **THEN** each client receives the change on the ordered event stream
-- **AND** all clients present the same held messages in the same order
+- **AND** all clients present the same pending messages, deliveries, and paused states in the same order
 
 #### Scenario: Stale cursor requests resynchronization
 - **WHEN** a client reconnects with a cursor outside retained history or from an earlier workspace-server generation
@@ -848,7 +858,7 @@ A pending request SHALL remain discoverable and answerable even when the server 
 ### Requirement: Chat supports reversible conversation undo and redo
 When the connected agent declares reversible-history support, Chat SHALL offer local `/undo` and `/redo` commands that operate on the selected conversation and MUST NOT send those command strings as ordinary prompts or provider-defined slash commands. Each visible user turn in the main transcript SHALL also offer a direct Revert message action. Undo SHALL stage the previous visible user turn as the conversation's revert boundary; direct Revert SHALL stage the selected visible user turn in one boundary mutation rather than repeated Undo mutations. Both SHALL hide the boundary turn and all later work from the current transcript and restore affected workspace files through the agent's revert operation. The invoking client SHALL receive the boundary turn's non-synthetic prompt text and any still-available attachments as an editable composer draft; other clients' private drafts MUST NOT be overwritten.
 
-If work is running, Undo SHALL interrupt it before changing the boundary. Messages queued behind that work MUST NOT be admitted between interruption and the completed revert. Existing queued messages SHALL remain visible and removable but paused while a revert is staged; they SHALL resume only after Redo clears the revert or after the user submits a replacement prompt, with that replacement admitted before the older queue resumes.
+If work is running, Undo SHALL interrupt it before changing the boundary. Messages queued behind that work MUST NOT be admitted between interruption and the completed revert. Existing pending messages SHALL remain visible and removable but paused while a revert is staged. They SHALL resume only after Redo clears the revert or after the user submits a replacement prompt, with that replacement admitted before the older held queue resumes. When the agent declares `steering`, the replacement SHALL be sent as a steer. Messages held in the workspace's queue SHALL stay pending rather than being discarded. Steers already pending with the agent SHALL be delivered together with the replacement, the oldest first. When Undo succeeds while steers are pending, Chat's undo confirmation SHALL count those steers without repeating their message text and say that they will be delivered together with the replacement.
 
 Repeated Undo SHALL move the boundary backward one visible user turn at a time. While a boundary is staged, Chat SHALL list the hidden user turns from the boundary onward and offer a Restore message action for each. Redo SHALL move forward one hidden user turn at a time. Restoring a selected hidden turn SHALL make history current through that turn in one mutation by staging the following hidden user turn, or SHALL clear the boundary when the selected turn is newest. The invoking client's composer SHALL receive the next boundary turn when one remains and SHALL clear when the original transcript is fully restored. Submitting a replacement prompt while a revert is staged SHALL commit the reverted history before starting the replacement turn, after which the hidden turns can no longer be restored by Redo or Restore.
 
@@ -882,8 +892,8 @@ Every successful boundary change SHALL reconcile the authoritative conversation 
 - **AND** no queued message is admitted during that transition
 
 #### Scenario: Queued messages pause behind a staged revert
-- **WHEN** Undo succeeds while messages are queued
-- **THEN** the queued messages remain visible and removable
+- **WHEN** Undo succeeds while messages are pending
+- **THEN** the pending messages remain visible and removable, presented as paused
 - **AND** none is delivered while the revert remains staged
 
 #### Scenario: Repeated Undo walks backward by user turn
@@ -923,8 +933,19 @@ Every successful boundary change SHALL reconcile the authoritative conversation 
 #### Scenario: A replacement prompt commits the reverted branch
 - **WHEN** the user edits the restored draft and submits it while a revert is staged
 - **THEN** the hidden history is committed as reverted before the replacement turn starts
-- **AND** the replacement is admitted before previously queued messages resume
+- **AND** the replacement is admitted before previously held messages resume
 - **AND** Redo no longer restores the discarded branch
+
+#### Scenario: A replacement on a steering agent is a steer
+- **WHEN** the agent declares `steering` and the user submits a replacement prompt while a revert is staged and messages are pending
+- **THEN** the replacement is sent to the agent as a steer
+- **AND** the messages held in the workspace's queue remain pending
+- **AND** steers already pending with the agent are delivered with the replacement, the oldest first
+
+#### Scenario: The undo confirmation counts pending steers
+- **WHEN** the agent declares `steering` and Undo succeeds while steers are pending
+- **THEN** Chat's undo confirmation counts pending steers without repeating their message text
+- **AND** says they will be delivered together with the replacement prompt
 
 #### Scenario: Other clients reconcile without losing private drafts
 - **WHEN** one client successfully changes the revert boundary
@@ -1611,41 +1632,82 @@ A subagent's timeline row and its row in the composer's subagent list SHALL stat
 - **THEN** the record is accepted under the workspace API revision that introduced it
 
 ### Requirement: The composer's subagent list counts subagents and tasks distinctly
-The composer's subagent list SHALL keep one row per task, and its summary line SHALL NOT count a subagent once per task it was given. Where every task went to its own subagent the summary SHALL count subagents as it does today. Where a subagent was given more than one task, the summary SHALL state the number of distinct subagents and the number of tasks.
+On desktop the composer's subagent list SHALL keep one row per task, and its summary line SHALL NOT count a subagent once per task it was given. Where every task went to its own subagent the summary SHALL count subagents as it does today. Where a subagent was given more than one task, the summary SHALL state the number of distinct subagents and the number of tasks.
+
+On touch, the compact worker disclosure SHALL replace duplicate pinned subagent/background lists with one canonical row projection and renderer. The summary and rows SHALL count the same worker execution occurrences rather than launcher aliases. Ordinary foreground shell commands SHALL remain in the timeline and SHALL NOT count as workers; actual background shell tasks SHALL count. Historical timeline launch/result records, distinct task references and their model/cost attribution SHALL remain available through inspection and the timeline; consolidation SHALL NOT create a second lifecycle or combine separate worker executions into one.
 
 #### Scenario: One task per subagent reads as before
-- **WHEN** a conversation launched four subagents with one task each and all have finished
+- **WHEN** a desktop conversation launched four subagents with one task each and all have finished
 - **THEN** the summary reads "4 subagents finished"
 
 #### Scenario: A subagent given two tasks is one subagent
-- **WHEN** a conversation launched three subagents, gave one of them a second task, and all have finished
+- **WHEN** a desktop conversation launched three subagents, gave one of them a second task, and all have finished
 - **THEN** the list shows four rows
 - **AND** the summary reads "3 subagents · 4 tasks finished"
 
-### Requirement: Chat composer actions keep a stable one-line layout
-The Chat composer SHALL place context usage, one configuration trigger, routine status, and the Send/Cancel action in a deliberate non-wrapping action rail. The configuration trigger SHALL take the flexible space and truncate its visible label when necessary. Routine status and the trailing action SHALL keep fixed footprints, and routine lifecycle changes MUST NOT move either control or reorder the rail. Deliberate panel resizing can change the flexible label width but MUST NOT make individual controls jump between rows.
+#### Scenario: Touch worker summary avoids launcher duplicates
+- **WHEN** two launching task references refer to the same confirmed live worker occurrence
+- **THEN** the touch summary counts one working occurrence
+- **AND** expanding it shows one inspection row, with both launch references and their attribution retained in the timeline rather than duplicate worker rows
 
-Actionable failures SHALL remain visible as explanatory text outside the routine status footprint. Displaying or dismissing that text can change composer height but MUST NOT horizontally reorder the action rail. Textarea autosizing remains independent of action-rail stability.
+### Requirement: Chat composer actions keep a stable responsive layout
+The Chat composer SHALL present context usage, one flexible configuration trigger, routine status, a persistent visible Send action, and a separate Stop action, subject to the compact touch layout below. A capability-gated delivery selector SHALL precede Send where supported. Send SHALL NOT become Stop while work runs. Each submission control SHALL have a target at least 44×44 CSS pixels with at least 8px separation from adjacent submission controls and a visible keyboard-focus indicator. Stop SHALL remain in place but disabled when no turn is live. Routine lifecycle changes and opening the delivery menu MUST NOT move or resize these controls at unchanged panel dimensions and keyboard/editing state.
+
+Wide desktop panels SHALL use one non-wrapping rail. At narrow desktop widths steering-capable composers SHALL use two deliberate rails: context/configuration/status above delivery/Send/Stop. Desktop composers without a delivery selector SHALL keep one compact rail without reserving an empty delivery row. The configuration label SHALL truncate as needed, without shrinking submission targets or causing horizontal overflow. Resizing MAY switch the entire rail arrangement; individual desktop controls MUST NOT wrap independently. Touch uses the compact options contract below, including reachable primary controls at enlarged text sizes. Actionable failures SHALL remain explanatory text outside the routine status footprint, without horizontally reordering the controls. Textarea autosizing remains independent of rail stability.
+
+When the touch software-keyboard visual band is at most 450px, or a touch landscape band is at most 390px with width at least 600px, the composer SHALL instead use a single compact row containing the text input and submission controls, hiding routine configuration/status chrome. Short touch headers SHALL omit the identity row. Parent-composer viewport handling SHALL keep the header and submission controls within the available visual band without scrolling the outer surface; transcript and dock scrolling remain separate. Existing interaction-request answering behavior is unchanged. Hardware-keyboard editing SHALL retain the bottom safe-area inset without doubling it under a software keyboard.
 
 #### Scenario: Routine lifecycle keeps trailing controls stationary
-- **WHEN** a prompt moves through ready, sending, working, cancelling, and ready states at an unchanged Chat-panel width
-- **THEN** the routine status and Send/Cancel controls retain their dimensions and positions
-- **AND** the configuration trigger remains on the same row
+- **WHEN** a prompt moves through ready, sending, working, cancelling, and ready states at unchanged Chat-panel dimensions and keyboard/editing state
+- **THEN** the status, Send, Stop, and supported delivery selector retain their dimensions and positions
+- **AND** Stop is enabled only during live work and unavailable during its cancellation request
 
 #### Scenario: Narrow desktop panel truncates configuration
-- **WHEN** the desktop Chat panel narrows while remaining open
-- **THEN** the configuration trigger label truncates to the available width
-- **AND** context, status, and Send/Cancel remain on one action row
+- **WHEN** a desktop Chat panel is too narrow for one rail
+- **THEN** the submission controls occupy one separate non-wrapping row below settings/status
+- **AND** their minimum target sizes and separation are preserved without horizontal overflow
+- **AND** the configuration label truncates to its available width
 
 #### Scenario: Context usage does not displace the trailing action
 - **WHEN** context usage becomes available or its displayed value changes
-- **THEN** it does not move the routine status or Send/Cancel action
-- **AND** it does not create another action row
+- **THEN** it does not move the routine status, Send, or Stop
+- **AND** it does not change the number of action rows
 
 #### Scenario: Failure remains explanatory
 - **WHEN** sending, cancellation, or the active turn fails
 - **THEN** Chat displays explanatory failure text
-- **AND** the action rail keeps its horizontal ordering
+- **AND** the action rails keep their horizontal ordering
+
+#### Scenario: Non-steering narrow composer stays compact
+- **WHEN** an agent without steering is shown in a desktop composer at most 30rem wide
+- **THEN** settings, status, Send and Stop share one rail with no empty selector row
+
+#### Scenario: Delivery choice explains its shortcuts and restores focus
+- **WHEN** the delivery menu opens
+- **THEN** its current choice has a visible check and the device-appropriate submit hint (Enter on desktop, Send / Ctrl+Enter on touch), and the other choice has Alt+Enter
+- **AND** Escape restores the previously focused control, including the composer on touch
+- **AND** the selector title explains Send's delivery and whether Enter submits or adds a newline, or why selection is disabled while idle
+- **AND** busy Send's accessible name says Send as steer, Send to queue, or Queue message as appropriate
+- **AND** enabled Send text has at least 4.5:1 contrast in light and dark themes
+
+#### Scenario: Gap taps do not activate adjacent actions
+- **WHEN** a touch lands in the gap between submission controls
+- **THEN** no prompt or cancellation is sent, even if the browser attempts to retarget that tap
+
+#### Scenario: An outside delivery-menu tap consumes activation
+- **WHEN** a touch user taps outside the open delivery menu over an underlying Revert or other action
+- **THEN** the menu closes without activating that action or altering the draft
+- **AND** Escape retains its existing focus-restoration behavior
+
+#### Scenario: Compact parent composer stays in the keyboard band
+- **WHEN** loaded work is shown at 390px width with a 380px or 450px visual band, or at 844px landscape width with a 230px band
+- **THEN** Send, delivery selection and Stop remain fully inside the band with their target sizes and gaps preserved
+- **AND** at least 40% of that band remains available to the transcript in the tested standard-size layout
+
+#### Scenario: Loaded hardware-keyboard portrait preserves conversation space
+- **WHEN** the 390×844 touch parent composer is focused without a software keyboard, with 47px top and 34px bottom safe insets, workers and pending messages
+- **THEN** the aggregate dock is capped at 24% of visual height and the transcript retains at least 40% of visual height in the standard-size layout
+- **AND** the composer respects the bottom safe inset and its submission controls remain reachable
 
 ### Requirement: Chat configuration uses one adaptive searchable picker
 Chat SHALL expose model, mode, and reasoning configuration through one configuration trigger rather than separate composer controls. The trigger SHALL summarize the displayed model when model selection is supported and SHALL have an accessible name that identifies every displayed configuration value. A capability the active agent does not declare MUST be absent from both the trigger summary and picker.
@@ -1745,11 +1807,27 @@ Code-block copy controls SHALL be keyboard operable and directly reachable on co
 - **AND** Chat reports failure without an uncaught error
 
 ### Requirement: Users can prompt, queue, and cancel the active conversation
-The Chat composer SHALL submit a message with content — non-empty text, at least one image attachment, or both — to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. A prompt submitted while the conversation is running SHALL be held in a workspace-owned queue rather than delivered to the agent mid-turn. Held messages SHALL be presented adjacent to the composer, in submission order, visibly marked as queued, and SHALL NOT appear as part of the running turn's timeline. While the agent continues to stream output, held messages SHALL remain adjacent to the composer rather than drifting into the transcript. The queue SHALL be bounded per conversation; a submission that would exceed the bound SHALL be refused without altering the held messages, with the draft preserved.
+The Chat composer SHALL submit a message with content — non-empty text, at least one image attachment, or both — to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. A prompt submitted while the conversation is running SHALL be held in a workspace-owned queue rather than delivered to the agent mid-turn. The exception is a prompt the user explicitly submits as a steer to an agent that declares `steering`, which "OpenCode 2.x conversations can steer the running turn" governs. Pending messages, steers and queued messages alike, SHALL be presented adjacent to the composer as one list in delivery order, with steers listed before queued messages. Each SHALL be visibly labelled with its delivery and SHALL NOT appear as part of the running turn's timeline. While the agent continues to stream output, pending messages SHALL remain adjacent to the composer rather than drifting into the transcript. Pending messages SHALL be bounded per conversation, with steers and queued messages counted together. A submission that would exceed the bound SHALL be refused without altering the pending messages, with the draft preserved.
 
-When the running turn ends on its own, the workspace SHALL deliver held messages to the agent one at a time in submission order; a delivered message SHALL leave the queue presentation and begin its own turn at the end of the timeline. The user SHALL be able to remove any message that is still held; a removed message is never delivered. Removal of a message that has already been delivered SHALL be refused without altering the conversation.
+Every message held in the workspace's queue SHALL stay held until delivery, whatever its kind: prompts, skills, slash commands, and `/reload`. When the running turn ends on its own, the workspace SHALL deliver held messages to the agent one at a time in submission order. Each held message SHALL be delivered under the model, mode, and reasoning variant fixed at its submission. A delivered message SHALL leave the dock and begin its own turn at the end of the timeline. The user SHALL be able to remove any message that is still pending; a removed message is never delivered. Removal of a message that has already been delivered SHALL be refused without altering the conversation. The user SHALL be able to edit a pending message: the message leaves the dock under the same rules as removal, and the invoking client's composer receives its text and attachments.
 
-The user SHALL be able to cancel an active turn without deleting its completed history. Cancellation SHALL NOT deliver held messages: they remain queued, removable, and visible, and the queue stays dormant until the user next submits a prompt, which joins the end of the queue and resumes delivery from its head. Transport failure SHALL preserve the draft until acceptance is known.
+The user SHALL be able to cancel an active turn without deleting its completed history. Cancellation SHALL NOT deliver pending messages. They remain pending, removable, and visible, and are presented as paused. The queue stays dormant until the user next submits a prompt, which joins the end of the queue and resumes delivery from its head. The other ways out of the dormant state are switching an entry to steer and Send now. Transport failure SHALL preserve the draft until acceptance is known; uncertain Hub steer actions follow the unconfirmed, no-automatic-replay contract below.
+
+Send SHALL remain visible while work runs and SHALL submit the draft with the selected delivery, or queue it when steering is unsupported. A separate Stop button SHALL cancel active work without submitting or discarding an unsent draft. Changing delivery SHALL only change the per-device selection, never submit a message or cancel work. Send SHALL be unavailable for an empty draft, during submission, or while a cancellation request is pending. The shared submit path SHALL also refuse keyboard submission during cancellation, preserving the draft and discarding any one-shot delivery override from the refused attempt.
+
+#### Scenario: Visible Send works while busy for every agent
+- **WHEN** the user clicks or taps Send with a non-empty draft while work runs
+- **THEN** the draft is submitted with the selected delivery, or queued when the agent does not support steering
+- **AND** the running turn is not cancelled
+
+#### Scenario: Stop does not send the draft
+- **WHEN** the user activates Stop while work runs and an unsent draft exists
+- **THEN** only cancellation is requested and the draft remains intact
+
+#### Scenario: Keyboard submission cannot bypass pending cancellation
+- **WHEN** a cancellation request is pending and the user presses Enter or Option/Alt+Enter
+- **THEN** no prompt is sent and the draft remains intact
+- **AND** after cancellation settles, a normal submission uses the device preference rather than any override from the refused attempt
 
 The surface SHALL name the agent it is talking to, taking that name from what the agent reports rather than from fixed copy. Text presented to the user SHALL NOT assume a particular agent, so that installing a different agent changes the name shown and nothing else.
 
@@ -1766,29 +1844,44 @@ A control the surface offers the user to start an operation — a picker such as
 - **THEN** the send action is available and the message submits with empty text
 
 #### Scenario: Follow-up queues while the agent works
-- **WHEN** the user submits a prompt while the selected conversation is running
+- **WHEN** the user submits a prompt with queue delivery while the selected conversation is running
 - **THEN** the message is held by the workspace rather than delivered to the agent
-- **AND** it is presented adjacent to the composer, marked as queued
+- **AND** it is presented adjacent to the composer, labelled as queued
+
+#### Scenario: Follow-up on an agent without steering always queues
+- **WHEN** the conversation's agent does not declare `steering` and the user submits a prompt while it is running
+- **THEN** the message is held and labelled as queued
+- **AND** no steer choice is offered
+
+#### Scenario: Commands always queue
+- **WHEN** the user submits a skill, a slash command, or `/reload` while the conversation is running, whatever the selected delivery
+- **THEN** it is held in the workspace's queue in submission order
+- **AND** it is not delivered to the agent mid-turn
 
 #### Scenario: Queued messages stay with the composer while output streams
 - **WHEN** the agent continues streaming output after messages were queued
-- **THEN** the held messages remain adjacent to the composer
-- **AND** no held message appears between items of the running turn
+- **THEN** the pending messages remain adjacent to the composer
+- **AND** no pending message appears between items of the running turn
 
 #### Scenario: A queued message is delivered when the turn ends
 - **WHEN** the running turn completes on its own while messages are held
-- **THEN** the workspace delivers the oldest held message to the agent
-- **AND** it leaves the queue presentation and starts its own turn at the end of the timeline
+- **THEN** the workspace delivers the oldest held message to the agent under its submission-time model, mode, and variant
+- **AND** it leaves the dock and starts its own turn at the end of the timeline
 
 #### Scenario: A queued message can be removed
 - **WHEN** the user removes a message that is still held
-- **THEN** it disappears from the queue on every client
+- **THEN** it disappears from the dock on every client
 - **AND** it is never delivered to the agent
 
 #### Scenario: A full queue refuses further submissions
-- **WHEN** a conversation's held queue is at its bound and the user submits another prompt while the agent works
+- **WHEN** a conversation's pending steers and queued messages together are at the bound and the user submits another prompt while the agent works
 - **THEN** the submission is refused and the draft is preserved
-- **AND** the messages already held are unaffected
+- **AND** the pending messages are unaffected
+
+#### Scenario: A queued message can be edited
+- **WHEN** the user edits a message that is still held
+- **THEN** it disappears from the dock on every client and is never delivered
+- **AND** the invoking client's composer receives its text and attachments
 
 #### Scenario: Removing an already-delivered message is refused
 - **WHEN** a removal arrives for a message the workspace has already delivered to the agent
@@ -1797,18 +1890,22 @@ A control the surface offers the user to start an operation — a picker such as
 
 #### Scenario: Cancellation preserves completed content
 - **WHEN** the user cancels a running turn
-- **THEN** OpenCode is asked to abort that turn
+- **THEN** OpenCode is asked to abort that turn without resuming
 - **AND** content and tool activity already received remain in the timeline with an interrupted outcome
 
 #### Scenario: Cancellation leaves the queue dormant
-- **WHEN** the user cancels a running turn while messages are held
-- **THEN** the held messages remain queued, visible, and removable
+- **WHEN** the user cancels a running turn while messages are pending
+- **THEN** the pending messages remain visible and removable, presented as paused
 - **AND** none of them is delivered as a consequence of the cancellation
 
 #### Scenario: A new submission resumes a dormant queue
 - **WHEN** the user submits a prompt while the conversation is idle and messages are held from before a cancellation
 - **THEN** the new message joins the end of the queue
 - **AND** delivery resumes from the head of the queue in submission order
+
+#### Scenario: Submitting while idle sends at once
+- **WHEN** the conversation is idle and nothing is held
+- **THEN** a submitted prompt starts its turn immediately whatever the selected delivery
 
 #### Scenario: The surface names its agent
 - **WHEN** a conversation is open and the agent has reported its identity
@@ -1978,26 +2075,29 @@ labeled placeholder rather than a broken presentation.
 - **AND** the rest of the message renders normally
 
 ### Requirement: Held messages keep their attachments
-A message submitted with attachments while the conversation is running SHALL
-be held with its attachments, per the existing queue behavior: the queue
-presentation SHALL show the message's thumbnails, removal of a held message
-SHALL discard the message together with its attachment references, and
-delivery SHALL carry the attachments exactly as submitted. Switching the
-composer's model after a message is held SHALL NOT alter the held message's
-attachments: held messages deliver under their frozen configuration.
+A message submitted with attachments while the conversation is running SHALL keep its attachments while it is pending, whether it is held or steered. The dock SHALL show the message's thumbnails. Removal of a pending message SHALL discard the message together with its attachment references. Editing a pending message SHALL return its attachments to the composer with its text. Changing a pending message's delivery SHALL keep its attachments. Delivery SHALL carry the attachments exactly as submitted. Switching the composer's model after a message is held SHALL NOT alter the held message's attachments: held messages deliver under their frozen configuration.
 
 #### Scenario: A queued message shows its thumbnails
-- **WHEN** a message with attachments is held while the agent works
-- **THEN** the queue presentation shows the message with its image thumbnails
+- **WHEN** a message with attachments is held or steered while the agent works
+- **THEN** the dock shows the message with its image thumbnails
 
 #### Scenario: Removing a held message discards its attachments
-- **WHEN** the user removes a held message that has attachments
-- **THEN** the message and its attachment references leave the queue on every client
+- **WHEN** the user removes a pending message that has attachments
+- **THEN** the message and its attachment references leave the dock on every client
 - **AND** the message is never delivered
 
 #### Scenario: A held message delivers with its attachments
 - **WHEN** the running turn ends and a held message with attachments is delivered
 - **THEN** the agent receives the message text and its attachments under the configuration frozen at submission
+
+#### Scenario: Editing a pending message returns its attachments
+- **WHEN** the user edits a pending message that has attachments
+- **THEN** the invoking client's composer receives the message's text and its attachments
+
+#### Scenario: Switching delivery keeps attachments
+- **WHEN** the user switches a pending message with attachments between steer and queue
+- **THEN** the message keeps its attachments
+- **AND** delivers with them
 
 ### Requirement: Timeline order follows the conversation's message order
 The Chat timeline SHALL present items in the conversation's own order — parent messages in their provider-assigned order, and within a message, parts in the order the provider delivers them — regardless of the order in which updates arrived. An update belonging to an earlier message MUST NOT render after items of a later message. A client that applied a conversation's events live SHALL present the same cross-message order as a client that loaded the same conversation from a fresh snapshot. Within one message, live events carry no provider position, so parts the provider itself delivered out of order remain in delivery order until the next snapshot load.
@@ -2107,12 +2207,14 @@ Merely revealing Chat SHALL NOT acknowledge unseen conversations because the add
 - **AND** none are marked unseen solely because they were present in that initial list
 
 ### Requirement: Background work is a distinct conversation state
-Where an agent declares that it can run work in the background, Chat SHALL present live background tasks as a state of the conversation distinct from working and idle: the composer status SHALL name how many tasks run, a list SHALL name each task with its description and progress where reported, each SHALL offer a stop action, and a settled task SHALL appear in the timeline as a row with its outcome and summary. The state SHALL be populated when an existing conversation with live background work is opened, and SHALL clear when the agent reports no live tasks. An agent that does not declare the capability SHALL show none of it.
+Where an agent declares that it can run work in the background, Chat SHALL present live background tasks as a state of the conversation distinct from working and idle: the composer status SHALL name how many tasks run, a list SHALL name each task with its description and progress where reported, each confirmed running and controllable task SHALL offer a stop action, and a settled task SHALL appear in the timeline as a row with its outcome and summary. The state SHALL be populated when an existing conversation with live background work is opened, and SHALL clear when the agent authoritatively reports no live tasks. An agent that does not declare the capability SHALL show none of it.
+
+Background tasks SHALL remain visible while the parent also has a foreground turn, subject to the compact touch visibility rules in "Background inspection and controls remain accessible and workspace-confined". When only background work remains, the parent composer SHALL remain usable without requiring those workers to finish. If recovery cannot establish current task state, Chat SHALL distinguish last-known state from current evidence, show that status is unavailable, and withhold controls whose target cannot be verified. Missing or failed reads alone MUST NOT be reported as successful completion or cancellation. A later successful reconciliation SHALL clear the uncertainty.
 
 #### Scenario: Background tasks are listed while they run
 - **WHEN** a conversation's agent reports one or more live background tasks
 - **THEN** the composer status names the count
-- **AND** each task is listed with a stop action
+- **AND** each confirmed running and controllable task is listed with a stop action
 
 #### Scenario: A settled task lands in the timeline
 - **WHEN** a background task completes, fails, or is stopped
@@ -2122,6 +2224,16 @@ Where an agent declares that it can run work in the background, Chat SHALL prese
 #### Scenario: A reopened conversation shows its live work
 - **WHEN** the user opens a conversation whose agent still reports live background tasks
 - **THEN** the background-work state is shown from that report
+
+#### Scenario: Foreground and background coexist
+- **WHEN** the parent is generating a response while two detached workers run
+- **THEN** the parent reads as working and both workers remain listed
+- **AND** when the parent ends, its background-work summary still names two live workers and its composer accepts new input
+
+#### Scenario: Recovery cannot establish liveness
+- **WHEN** a previously running task cannot be reconciled because provider reads fail or evidence is incomplete
+- **THEN** Chat labels its state as unavailable rather than asserting a terminal outcome
+- **AND** it preserves inspectable known content and offers recovery feedback without an unverified stop action
 
 ### Requirement: Persistent-approval scope copy is the owning agent's
 When a permission card offers an approval that outlives the request, the sentence stating what that approval covers SHALL describe the owning agent's actual persistence semantics and SHALL name only that agent. Two agents with different semantics SHALL have different sentences.
@@ -2567,3 +2679,608 @@ unless a single token is wider than the whole suggestion list.
 - **WHEN** a narrow touch layout offers a command whose argument hint, such as `[path/to/a/long/argument] [--comment]`, does not fit on one line
 - **THEN** the hint wraps between its tokens, so `[--comment]` stays whole and no `]` is left on a line of its own
 - **AND** only a token wider than the whole suggestion list is broken inside
+
+### Requirement: OpenCode 2.x conversations can steer the running turn
+An agent that can deliver a message into its running turn at the next safe step boundary, and can withdraw or switch a message before then, SHALL declare the `steering` capability. The OpenCode 2.x agent SHALL declare it. The OpenCode 1.x agent and the Claude Code agent SHALL NOT declare it.
+
+While a conversation whose agent declares `steering` is running or has pending messages, the composer SHALL offer two deliveries. Send and desktop Enter submit with the default delivery. Touch Enter SHALL insert a newline, idle or busy, including while a command candidate is shown; Ctrl/Command+Enter explicitly submits with the default delivery. ⌥Enter (Option/Alt+Enter) submits with the other delivery where the choice is offered. A separate labelled selector preceding Send SHALL offer Steer and Queue by name and display the current choice. Selecting a delivery SHALL preserve the draft without submitting it. The default delivery SHALL be a per-device preference, initially steer. Opening the menu SHALL NOT change control footprints or rail order. The selector SHALL support keyboard navigation, dismissal and visible focus, and menu choices SHALL be at least 44px high. On capable conversations it SHALL remain visible but disabled while idle with no pending messages; on other agents it SHALL be absent. The delivery choice SHALL apply only to prompts: skills, slash commands, and `/reload` are always held in the workspace's queue. Idle submission retains immediate-delivery semantics with these device-specific keys.
+
+A steer SHALL be handed to the agent at once and kept pending by the agent until the agent delivers it. Steers SHALL be delivered before any held message. The expanded dock SHALL list the user's pending steers, from any client of the conversation, labelled "Steer", and SHALL NOT list the agent's own internal inbox entries. A steer SHALL NOT appear in the timeline until the agent reports it delivered, at which point it SHALL appear as an ordinary user message. Outside compact keyboard/short-landscape mode, pending steers SHALL carry the dock note that they run with the conversation's model and mode as they stand when they are delivered.
+
+For each pending entry, the user SHALL be able to:
+- switch a queued message to steer, which hands it to the agent as a steer at once; on a dormant queue or an idle conversation this is how a held message is sent now;
+- switch a steer back to queue, which withdraws it from the agent and holds it in the workspace's queue in its submission order;
+- edit or remove a steer, which withdraws it from the agent.
+
+Withdrawing a steer SHALL complete only when the agent confirms the withdrawal. If the agent delivers the steer first, the withdrawal SHALL fail, the message SHALL stay delivered, and the user SHALL be told it was already delivered. A message SHALL never be delivered twice.
+
+Skills, slash commands, and `/reload` in the queue SHALL NOT offer the switch to steer.
+
+Cancelling the turn SHALL leave pending steers with the agent and SHALL present them as paused. A steer is paused when it was pending before the conversation last became idle. The dock SHALL offer one action labelled `Send N paused steers now`, which resumes the agent so that it delivers every pending steer. Submitting a new steer SHALL also resume delivery of paused steers.
+
+The expanded pending dock SHALL have a sticky count header identifying total pending messages, steers and queued messages. Its desktop scroll budget SHALL use 40% of the actual measured panel height, capped at 25rem, rather than an assumed viewport height. On touch, all work tracks and pending messages SHALL share a contained scroll budget of at most 35% of visual height, 25% at tablet widths from 48rem, or 24% while editing without a software keyboard. The pending list SHALL show a bottom fade only while content remains below. Entries SHALL lead with a distinct Steer or Queue badge and a separate Paused chip where applicable. Timing labels SHALL say `Next step`, `After this turn`, or `Sends after your next message` for paused entries. Dock actions SHALL have at least 36px targets on desktop and 44px on touch, visible focus outlines, and accessible names quoting their message. Successful move, send and remove actions SHALL produce polite composer feedback. An already-delivered refusal SHALL appear once as neutral informational feedback, not duplicate red errors.
+
+When pending messages exist, software-keyboard mode or short touch landscape SHALL collapse the work dock to a pending-count summary rather than hide it. Any paused-steer batch Send action SHALL retain a 44px target, and the count-only replacement warning SHALL remain readable while typing or editing a pending entry. Entry details and the routine model-at-delivery note MAY be hidden in this compact state; the replacement warning SHALL NOT be hidden. Dock growth SHALL reserve its final bounded layout height before a visual reveal, respect reduced motion, and preserve a remote-update reading anchor and deliberate bottom pinning. Sending a prompt SHALL retain the existing explicit jump-to-latest behavior.
+
+When the workspace attaches to a conversation, or reconnects to the agent, it SHALL reconcile the pending steers with the agent's own list, so the dock shows steers raised while the stream was interrupted or by another client.
+
+#### Scenario: Short desktop budgets use the panel rather than the window
+- **WHEN** six long pending messages occupy a 1280px-wide desktop window at 600px or 480px height, or the panel is shorter than its window
+- **THEN** the queue is bounded by the measured panel height and Send and Stop remain inside that panel and hit-testable
+
+#### Scenario: Keyboard retains pending safety information
+- **WHEN** a replacement is staged with paused steers, or a pending message is edited into the focused touch composer
+- **THEN** compact pending counts remain visible while typing
+- **AND** any paused-steer batch Send action and replacement warning remain available above the composer
+
+#### Scenario: Dock growth preserves reading intent with either motion preference
+- **WHEN** remote work grows the dock while the user reads an earlier message, then the user deliberately returns to latest and submits a prompt
+- **THEN** the earlier reading anchor survives the remote update and the submitted exchange remains bottom-pinned through dock growth
+- **AND** reduced motion omits the reveal animation without changing these positioning rules
+
+#### Scenario: Steering is offered only where declared
+- **WHEN** a running conversation's agent declares `steering`
+- **THEN** the composer offers steer and queue delivery
+- **AND** on a conversation whose agent does not declare it, no steer choice appears and busy submissions queue
+
+#### Scenario: Desktop Enter steers by default
+- **WHEN** the default delivery preference has not been changed and the desktop user presses Enter while the agent works
+- **THEN** the message is handed to the agent as a steer
+- **AND** the dock lists it labelled "Steer", ahead of any queued messages
+
+#### Scenario: Option+Enter uses the other delivery
+- **WHEN** the default delivery is steer and the user presses ⌥Enter while the agent works
+- **THEN** the message is held in the workspace's queue labelled "Queue"
+
+#### Scenario: The default delivery is a per-device choice
+- **WHEN** the user changes the default delivery to queue on one device
+- **THEN** desktop Enter or touch Ctrl/Command+Enter queues on that device
+- **AND** other devices keep their own default
+
+#### Scenario: Touch Enter is always a newline
+- **WHEN** a touch user presses unmodified Enter while idle, busy, or viewing a command candidate
+- **THEN** a newline is inserted without a prompt mutation
+- **AND** Send or Ctrl/Command+Enter remains the explicit submission path
+
+#### Scenario: The delivery menu is available on touch
+- **WHEN** the user opens the separate delivery selector while the agent works
+- **THEN** both Steer and Queue are offered by name
+- **AND** the action rail keeps its layout
+
+#### Scenario: Selecting delivery is not submission
+- **WHEN** the user chooses Queue or Steer with an existing draft
+- **THEN** the selector shows the choice, the draft remains, and focus returns to the composer
+- **AND** no prompt or cancellation request is made until the corresponding explicit action is activated
+
+#### Scenario: A steer joins the turn at the next step
+- **WHEN** a steer is pending and the agent reaches its next step boundary
+- **THEN** the agent delivers the steer into the running turn
+- **AND** it leaves the dock and appears in the timeline as a user message
+
+#### Scenario: A steer shown pending is not yet in the timeline
+- **WHEN** a steer has been handed to the agent but not delivered
+- **THEN** it appears only in the dock
+- **AND** the timeline contains no user message for it
+
+#### Scenario: Duplicate or image-only entries remain distinguishable
+- **WHEN** pending entries have duplicate text or only attachments
+- **THEN** their action names include distinct human-readable pending-message numbers
+- **AND** a pending entry retains its number across reordering, delivery switches and sibling removal during the current client view
+
+#### Scenario: Repeated successful mutations each announce once
+- **WHEN** the user successfully removes, moves or sends two pending messages in succession
+- **THEN** each success produces one polite live update even if the words are identical
+- **AND** later routine paints do not replay the retained note
+
+#### Scenario: Pending steers note the model they run with
+- **WHEN** at least one steer is pending outside compact keyboard/short-landscape mode
+- **THEN** the dock says that steers run with the conversation's model and mode at delivery
+
+#### Scenario: A queued message is switched to steer
+- **WHEN** the user switches a held message to steer while the agent works
+- **THEN** the message leaves the workspace's queue and is handed to the agent as a steer with its attachments
+- **AND** every client shows it labelled "Steer"
+
+#### Scenario: A steer is switched back to queue
+- **WHEN** the user switches a pending steer to queue and the agent confirms the withdrawal
+- **THEN** the message is held in the workspace's queue in its submission order, labelled "Queue"
+- **AND** the agent does not deliver it mid-turn
+
+#### Scenario: A steer delivered before it could be withdrawn
+- **WHEN** the user switches, edits, or removes a pending steer and the agent delivers it before confirming the withdrawal
+- **THEN** the user is told the message was already delivered
+- **AND** it appears once in the timeline and is not held, returned to the composer, or delivered again
+
+#### Scenario: A steer is edited
+- **WHEN** the user edits a pending steer and the agent confirms the withdrawal
+- **THEN** the steer leaves the dock on every client
+- **AND** the invoking client's composer receives its text and attachments
+
+#### Scenario: Commands cannot be steered
+- **WHEN** a skill, slash command, or `/reload` is held in the queue
+- **THEN** its entry offers no switch to steer
+- **AND** submitting one with the steer delivery holds it in the queue
+
+#### Scenario: Cancel pauses pending steers
+- **WHEN** the user cancels the running turn while steers are pending
+- **THEN** the agent is not resumed and no steer is delivered
+- **AND** the steers remain in the dock presented as paused
+
+#### Scenario: Send now wakes paused steers together
+- **WHEN** steers are paused and the user chooses the dock's Send N paused steers now action
+- **THEN** the agent resumes and delivers every paused steer
+- **AND** the control said beforehand that all paused steers go together
+
+#### Scenario: A new steer resumes paused steers
+- **WHEN** steers are paused and the user submits a new steer
+- **THEN** the paused steers and the new one are delivered
+
+#### Scenario: Pending steers survive a reload
+- **WHEN** a client reloads while steers are pending
+- **THEN** the dock lists the same pending steers, with the same paused states
+
+#### Scenario: Steers raised while disconnected are recovered
+- **WHEN** a steer was handed to the agent while the workspace's stream was interrupted
+- **THEN** after reconnecting, the dock lists it as pending
+
+#### Scenario: Internal inbox entries are not shown
+- **WHEN** the agent holds a pending entry that is not a user message, such as a synthetic note, a compaction, or a move
+- **THEN** the dock does not list it
+
+### Requirement: A paused or idle queued message can be sent now
+An agent that can deliver a held message ahead of the rest of the queue SHALL declare the `send-now` capability. The OpenCode 2.x and Claude Code agents SHALL declare it. The OpenCode 1.x agent SHALL NOT declare it. A held message SHALL offer Send now only when its agent declares `send-now`.
+
+On an agent that declares `steering`, Send now SHALL hand the held message to the agent as a steer. This is the same operation as switching it to steer, and it is available while the turn runs, while the queue is dormant, and while the conversation is idle.
+
+When paused steers exist, the queued Send now control SHALL explicitly name that it also sends paused steers and SHALL confirm that batch effect before submission. Cancelling the confirmation SHALL leave all pending messages unchanged. The remaining held queue SHALL stay dormant.
+
+On an agent that declares `send-now` but not `steering`, Send now SHALL be offered only while the held queue is dormant or the conversation is idle, never while a turn runs. Send now SHALL deliver that message immediately, ahead of the other held messages, under the configuration fixed at its submission. The other held messages SHALL remain held in submission order.
+
+#### Scenario: Claude Code sends a dormant queued message now
+- **WHEN** a Claude Code conversation's queue is dormant after a cancellation and the user chooses Send now on a held message
+- **THEN** that message is delivered and starts its turn
+- **AND** the other held messages remain held in submission order
+
+#### Scenario: Send now is unavailable while a Claude Code turn runs
+- **WHEN** a Claude Code conversation is running
+- **THEN** held messages offer no Send now
+
+#### Scenario: OpenCode 2.x Send now steers
+- **WHEN** an OpenCode 2.x conversation has held messages and the user chooses Send now on one
+- **THEN** the message is handed to the agent as a steer
+
+#### Scenario: OpenCode 1.x offers no Send now
+- **WHEN** the conversation's agent is OpenCode 1.x, which does not declare `send-now`
+- **THEN** held messages offer no Send now
+- **AND** a direct send-now request is refused without changing the queue
+
+### Requirement: OpenCode V2 background workers have a lifecycle independent of their launchers
+For native V2 background subagents, Uatu SHALL track the worker independently of the launching tool call. A successful launcher that reports a running worker SHALL NOT make the subagent appear finished. Confirmed worker completion, error, and cancellation SHALL appear as completed, failed, and stopped respectively, consistently across the launch card, subagent track, background list, and open child view. The worker SHALL remain associated with its parent, chosen agent, and child identity without altering configured agent/model defaults or requiring project instructions.
+
+The subagent track SHALL retain one row per task as specified by its existing counting contract, with the compact touch summary exception below. Multiple representations or overlapping calls known to share one live worker SHALL NOT inflate the count of independently running workers. A later task in a reused child session SHALL have a distinct occurrence from its earlier completed task; stale progress or terminal evidence for one occurrence MUST NOT reopen or settle another.
+
+#### Scenario: Completed launcher still has a running child
+- **WHEN** OpenCode returns a completed background launcher with child metadata reporting running
+- **THEN** the launch is recorded as accepted and the worker remains visibly running
+- **AND** launch instruction text is not presented as the child's finished report
+
+#### Scenario: Terminal outcomes override launcher success
+- **WHEN** the same worker subsequently reports completed, error, or cancelled
+- **THEN** every presentation of that occurrence shows the corresponding completed, failed, or stopped worker outcome in words
+- **AND** its tool launch is not incorrectly reclassified as a failed launch
+
+#### Scenario: Reused child and duplicate frames
+- **WHEN** a child completes a task, later starts another task, and old completion or progress frames are replayed
+- **THEN** the earlier task remains terminal and the new task remains in its independently established state
+- **AND** duplicate representations do not create additional live workers or report rows
+
+#### Scenario: Foreground default remains unchanged
+- **WHEN** the chosen agent launches a subagent without requesting background execution and no qualifying accepted Hub steer or explicit background action occurs
+- **THEN** the call retains its native foreground behavior
+- **AND** Uatu does not inject instructions, change launch policy, or convert it on an ordinary send
+
+### Requirement: OpenCode V2 worker notifications become correlated inspectable results
+Uatu SHALL recognize provider-authored synthetic worker completion records using their structured source, identity, and state, including records still pending in the parent's inbox. It SHALL present one readable settled task/result per confirmed occurrence with a link to the associated launch and available child transcript. The report body SHALL have a single canonical presentation; other worker surfaces SHALL expose its outcome and a link rather than duplicate the report. Raw provider envelopes and background-launch instruction text MUST NOT stand in for the report. Error and cancellation SHALL retain their explanation and SHALL NOT be presented as successful worker completion.
+
+Notification enqueue, delivery, history, and replay SHALL converge without duplicate results or synthetic user prompts. Worker notifications MUST NOT enter the editable user steer/queue dock. Uatu MUST NOT inject another completion into OpenCode or independently resume the parent. Child completion and historical recovery SHALL continue to be excluded from successful top-level-turn push notifications; a real subsequent parent turn follows existing notification rules.
+
+#### Scenario: Notification arrives before delivery to the parent
+- **WHEN** a worker completion is in the provider's pending synthetic inbox but has not entered parent history
+- **THEN** Uatu shows the worker's outcome and report without waiting for a user prompt
+- **AND** later delivery and history reads update the same logical result rather than add another
+
+#### Scenario: Worker start predates the launcher row
+- **WHEN** a settled worker retains a start timestamp earlier than its correlated launcher row
+- **THEN** the timeline presents its result after its launcher, without changing canonical report identity or duplicating its body
+
+#### Scenario: A synthetic result wakes the parent
+- **WHEN** OpenCode resumes an idle parent to consume a worker notification
+- **THEN** Uatu shows the correlated result and the actual resumed parent activity
+- **AND** it sends neither a duplicate notification nor an extra resume operation
+
+#### Scenario: Untrusted lookalike content
+- **WHEN** a human message or ordinary tool text contains a subagent-looking envelope without matching provider-authored metadata
+- **THEN** it remains inert content and changes no worker state
+- **AND** markup and unsafe links in genuine reports remain inert under the existing rendering rules
+
+#### Scenario: Correlation is ambiguous
+- **WHEN** a notification names a reused child but the available evidence cannot distinguish which task occurrence it completes
+- **THEN** the report remains readable and linked to the verified child without speculatively settling a different occurrence
+- **AND** affected state is visibly uncertain until authoritative evidence resolves it
+
+#### Scenario: Worker completion is not a top-level push completion
+- **WHEN** a child finishes or an old result is recovered on reconnect
+- **THEN** no successful top-level-turn push notification is emitted for that event
+
+### Requirement: OpenCode V2 worker state recovers without relying on provider event replay
+Opening or returning to a conversation, reconnecting after missed provider events, or replacing an expired Uatu stream cursor SHALL reconcile its known background work against provider-owned history, pending notifications, and available current execution evidence. The final snapshot and subsequent stream SHALL agree without duplicate workers or state regression. Recovery SHALL include launches and results outside the initially visible history page and work launched from another client. Parent idleness, an absent child from an active-only listing, or a failed read SHALL NOT alone establish a worker's terminal state.
+
+Recovery SHALL be read-only with respect to execution: it MUST NOT prompt, interrupt, relaunch, or background work. After a service/workspace restart, completed provider history SHALL remain inspectable and unresolved work SHALL be revalidated; Uatu MUST NOT promise continued execution solely because a pre-restart launch exists.
+
+#### Scenario: Completion is missed while disconnected
+- **WHEN** a worker completes while the V2 event connection is absent and the provider offers no replay
+- **THEN** reconnect recovers its terminal result from history or pending notification state
+- **AND** the worker does not remain running indefinitely or become falsely cancelled from list absence
+
+#### Scenario: Completion races a stale snapshot
+- **WHEN** a worker terminal event arrives while recovery is reading an older running launch
+- **THEN** applying recovery and the event stream leaves one terminal worker with its report
+
+#### Scenario: Navigation and pagination preserve the worker
+- **WHEN** the user switches sessions or workspaces, then returns to a parent whose launch is on an older page
+- **THEN** current worker state and its child inspection link are available without manually loading every older page
+- **AND** loading older pages does not duplicate the worker
+
+#### Scenario: Another client launches work
+- **WHEN** native background work is launched in a confined parent by another OpenCode client while Uatu is disconnected
+- **THEN** Uatu discovers that work when it next reconciles the parent or workspace activity
+
+#### Scenario: Restart has inconclusive execution evidence
+- **WHEN** persisted history contains a background launch but current provider evidence cannot establish whether it survived a restart
+- **THEN** Uatu reports uncertainty and retains available history without claiming durable execution or fabricating a final result
+
+### Requirement: Users explicitly continue the parent while all eligible blocking jobs run
+For OpenCode V2 that declares backgrounding support, Chat SHALL offer a distinct action labelled `Continue while workers run` only while an active parent has running blocking tool/command or confirmed foreground-task evidence. Pending tools, a merely generating parent, and launchers already correlated to detached, settled or uncertain workers SHALL NOT expose it. A tooltip and collapsed explanation SHALL state that it backgrounds all eligible blocking jobs in that parent, including shell commands, without stopping them. It SHALL use the provider's native parent-wide background operation and MUST NOT imply selected-child scope or an exact eligible count the provider does not report. If nothing remains eligible when the request reaches the provider, the action SHALL be a harmless accepted no-op. Accepted feedback SHALL clear once the parent and workers settle and no background request is in flight.
+
+The mutation SHALL be authenticated, workspace-confined, origin-protected under cookie authentication, and agent-qualified. It SHALL deduplicate a client request identifier while its in-memory receipt is retained. Its acceptance SHALL NOT be represented as proof that a specific worker is running. If the provider may have applied a dispatched mutation but its response is lost, Uatu SHALL retain an explicit unknown outcome within the same bounded receipt lifetime rather than discard it as an ordinary retryable error. A retained unknown outcome SHALL produce explanatory uncertainty, not a false acceptance, and retries against that retained receipt SHALL not dispatch again. Concurrent duplicate actions SHALL be suppressed within that retention scope.
+
+Receipt retention SHALL be bounded: the default settled lifetime is up to 15 minutes, capacity eviction can end it sooner, and adapter recreation or process restart ends it entirely. No persistent receipt storage is required. The contract SHALL NOT promise deduplication after any of those boundaries; an old identifier with no retained receipt can be treated as a new request. The client SHALL NOT automatically replay an uncertain mutation on reconnect or reload, including with the same identifier. It SHALL recover state read-only and require a fresh explicit action before making another attempt.
+
+The action MUST NOT cancel a parent or worker, send or clear a draft, change model/mode/delivery preferences, flush a held queue, or manufacture steers. Sending or selecting a delivery mode SHALL NOT implicitly background work outside the verified personal Hub accepted-steer exception below. Unsupported agents SHALL have no such action.
+
+#### Scenario: Mixed blocking jobs become background work
+- **WHEN** the parent is blocked by two eligible subagents and a native shell job and the user activates Continue while workers run
+- **THEN** one parent-wide background operation is requested for all eligible jobs, not only one selected child
+- **AND** provider-confirmed background jobs remain visible and inspectable while the parent can continue
+- **AND** no interrupt or prompt is sent by the action
+
+#### Scenario: No eligible blocker remains
+- **WHEN** all blockers finish just before the background request reaches OpenCode
+- **THEN** the accepted no-op neither invents running workers nor raises a task failure
+
+#### Scenario: A busy parent has no running blocker
+- **WHEN** the parent is generating, has only pending tools, or has already detached its workers
+- **THEN** Continue is absent rather than suggesting another background operation
+
+#### Scenario: Retrying a lost response does not affect newer jobs
+- **WHEN** Uatu has recorded the outcome, the browser response is lost, and the same client request identifier is retried while that receipt is still retained after another blocker appears
+- **THEN** Uatu returns the recorded outcome without issuing the operation again or affecting the newer blocker
+
+#### Scenario: Upstream response is lost after application
+- **WHEN** OpenCode applies the background request but the response to Uatu is lost and the provider call fails ambiguously
+- **THEN** Uatu retains an unknown outcome instead of deleting the receipt as a retryable failure
+- **AND** a same-identifier retry while that receipt is retained returns uncertainty without a second native operation, even if newer blockers have appeared
+
+#### Scenario: Receipt retention ends
+- **WHEN** an operation's receipt expires, is evicted for capacity, or is lost with adapter recreation or process restart
+- **THEN** Uatu does not claim that resubmitting the old identifier is deduplicated
+- **AND** the client does not automatically replay an uncertain request, but refreshes state and requires a new explicit action before another attempt
+
+#### Scenario: Draft and steering state are preserved
+- **WHEN** Continue while workers run is activated with a staged draft, attachments, a pending steer, and held queued messages
+- **THEN** those values remain intact and no pending user input is edited, removed, or sent by that action
+- **AND** subsequent provider lifecycle transitions follow the existing steering and queue rules
+
+#### Scenario: Unsupported or foreign request
+- **WHEN** an unsupported agent, unauthorized client, cross-origin cookie request, or foreign-workspace parent is targeted
+- **THEN** Uatu rejects the mutation without contacting a worker or revealing foreign session content
+
+### Requirement: Parent stop and worker stop have explicit separate effects
+For V2 background work, Chat SHALL distinguish parent interruption from stopping one verified worker. Parent Stop SHALL interrupt the current parent execution without explicitly waking pending input, leave held queue/steer behavior governed by the existing cancellation contract, and not stop detached workers. The UI SHALL explain that still-blocking foreground work can be cancelled by parent interruption and that future provider-owned worker notifications can wake the parent again. With no parent execution, parent Stop SHALL remain disabled rather than become a stop-all-workers action.
+
+On touch, activating Stop parent with worker records SHALL first open an in-app scope explanation and confirmation. Cancelling SHALL make no cancellation request; confirmation SHALL recheck that the same parent still has live work before acting. Desktop parent-stop behavior and native cancellation scope remain unchanged.
+
+Worker Stop SHALL resolve the selected task under its verified parent/workspace and target only that worker's native execution. A known stale, settled, uncertain, foreign, or unrelated task target SHALL be refused without redirecting the request to a newer child occurrence. Worker-stop receipts SHALL use the same bounded retention, preservation of transport-ambiguous outcomes, and no-automatic-replay behavior specified for backgrounding; deduplication SHALL NOT be promised after expiry, eviction, adapter recreation, or process restart. An accepted interruption SHALL show pending stopping feedback until authoritative settlement; it SHALL NOT overwrite a confirmed completed result with stopped. Native effects on a worker's own blocking descendants remain provider semantics, not a new stop-all operation.
+
+Native shell Stop removes the provider's shell record and output. The UI SHALL explain before activation that output can become unavailable and the provider may report a failed result rather than cancellation. Removal acknowledgement or a missing output record SHALL NOT alone establish a cancelled job. Uatu SHALL preserve a confirmed completed result if capture and completion already won the race; if removal prevents the final capture and the provider reports error, it SHALL present failed with output-unavailable context rather than force completed or stopped.
+
+Shell Stop SHALL use an in-app confirmation with Cancel initially focused. Escape SHALL cancel that confirmation without closing the child/output view, restore the invoking control or surviving equivalent, and send no mutation. Confirmation SHALL revalidate current task state before dispatch.
+
+#### Scenario: Touch parent-stop confirmation explains detached work
+- **WHEN** a touch user activates Stop parent with worker records present
+- **THEN** the confirmation explains still-blocking work, continuing detached workers and possible later provider wakeup
+- **AND** Cancel leaves work untouched while confirmation cancels only the same still-live parent execution
+
+#### Scenario: Stop parent with mixed workers
+- **WHEN** the parent has both still-blocking foreground children and detached background children and the user selects Stop parent
+- **THEN** the parent is interrupted and foreground dependencies follow native cancellation semantics
+- **AND** detached workers continue, stay inspectable, and held user input is not resumed by that stop
+
+#### Scenario: Stop one detached child
+- **WHEN** the user stops one verified running background child
+- **THEN** only that child's execution is targeted and sibling detached workers are not interrupted
+- **AND** the parent is not explicitly interrupted or resumed by Uatu
+
+#### Scenario: Completion wins a stop race
+- **WHEN** a completed worker result is confirmed before the requested interruption settles
+- **THEN** its confirmed completed result remains completed rather than being overwritten with an optimistic stopped outcome
+
+#### Scenario: Worker-stop response is lost upstream
+- **WHEN** OpenCode may have applied a child interruption or shell removal but Uatu loses its response
+- **THEN** Uatu retains an unknown receipt outcome within the bounded retention scope and reconciles state without an automatic mutation retry
+- **AND** same-identifier retries while retained do not issue another interruption or removal
+
+#### Scenario: Removal prevents a shell's final capture
+- **WHEN** shell removal deletes its record/output before the plugin completes its result capture, including after the process has exited, and the provider reports error
+- **THEN** the task shows failed with stop-request and output-unavailable context, not invented cancellation or success
+- **AND** record deletion or a removal acknowledgement is not itself treated as a terminal job notification
+
+#### Scenario: Shell result capture wins the removal race
+- **WHEN** the provider has captured and confirmed a completed shell result before removal makes further output reads unavailable
+- **THEN** the completed result is retained without an optimistic stopped outcome
+- **AND** unavailable additional output is disclosed independently of the completed result
+
+#### Scenario: Stop acknowledgement precedes settlement
+- **WHEN** the provider acknowledges interruption before its cleanup and terminal notification finish
+- **THEN** the task shows Stopping feedback and suppresses duplicate stop requests
+- **AND** its final outcome follows confirmed provider evidence
+
+#### Scenario: Old stop target has been superseded
+- **WHEN** a stop references an old task and reconciliation already identifies a newer execution in that same child session
+- **THEN** the stop is refused without interrupting the newer execution
+
+#### Scenario: Late completion notification resumes a stopped parent
+- **WHEN** OpenCode subsequently wakes the parent for a detached worker's notification after the user stopped an earlier parent turn
+- **THEN** Chat shows that actual new parent activity without claiming that Stop permanently disabled future wakeups
+
+### Requirement: Background inspection and controls remain accessible and workspace-confined
+V2 background children SHALL open through the existing parent drill-down while running and after settlement, by their verified child identity rather than top-level picker membership. The parent selection, draft, attachments, reading state, and return path SHALL be preserved. A failed child read SHALL retain the parent and provide actionable Retry feedback rather than navigate to a different conversation or leave a dead control. Child permissions/questions SHALL remain reachable through existing interaction handling. No direct child messaging control is introduced.
+
+Native shell work affected by backgrounding SHALL retain inspectable already-received output and outcome through the task inspection surface within their existing retained view/history lifetime; reads and stops SHALL verify its workspace and parent ownership and SHALL NOT accept arbitrary output paths. When provider removal deletes output, the surface SHALL explain that further output is unavailable, preserve what is still locally available, and not promise that lost bytes can be recovered after reload. No persistent output archive is required. Both task inspection and result rendering SHALL preserve existing output safety and distinguish upstream truncation from output removal.
+
+Desktop pointer, keyboard, and touch users SHALL be able to inspect workers, return to the parent, request backgrounding, and stop a verified worker using labelled controls with visible focus, at least 44 CSS pixel targets and 8 CSS pixel gaps between adjacent mutation actions. State and failure SHALL be conveyed in words, not colour or animation alone. Reduced-motion preferences SHALL be respected. Dynamic updates SHALL NOT steal focus, discard reading position, or replace the existing separate Send, delivery selector, and Stop actions. Opening a child SHALL move focus into its view; return SHALL restore the invoking control or a logical surviving equivalent. Layered output Escape SHALL NOT also dismiss its owning child view.
+
+The live worker list SHALL remain reachable through the bounded scrollable work dock while composing without a software keyboard, except in short touch landscape. With the software keyboard open, or in a visual band at most 390px high and at least 600px wide, worker/subagent tracks and Continue SHALL be hidden to preserve conversation and composer space; dismissing the keyboard or leaving short landscape SHALL restore access. Compact pending counts, any paused-batch Send action and replacement warnings follow the steering dock's safety rules and SHALL remain available while typing. Touch SHALL use one deliberate compact worker disclosure rather than duplicate pinned worker presentations. Worker Stop and parent Stop SHALL be distinctly labelled; routine worker appearance SHALL preserve the reserved composer control geometry. Expanded touch work tracks SHALL keep the prompt rail from covering worker actions.
+
+The shared touch work dock SHALL observe the visual-height budgets and final-height reservation specified by the steering composer/dock contract, rather than separately budgeting each track. This includes the 24% cap during hardware-keyboard editing and reduced-motion handling. These compact-layout rules do not change worker execution, ownership, stop targets or the existing interaction-request answering flow.
+
+#### Scenario: A child excluded from the picker opens reliably
+- **WHEN** a user opens a verified background child from its running task or historical result on desktop or touch
+- **THEN** its exact transcript opens with the parent still selected and a first-class way back
+- **AND** settlement while it is open updates the task outcome without closing the transcript
+
+#### Scenario: A temporary child read failure is recoverable
+- **WHEN** opening a child fails transiently
+- **THEN** the parent and draft remain intact and Retry can open the same child after recovery
+
+#### Scenario: Keyboard and touch control separation
+- **WHEN** a narrow desktop or touch user navigates visible task controls by keyboard or taps adjacent action targets and gaps
+- **THEN** inspection, Continue, worker Stop, Send, and parent Stop remain distinguishable and reachable without overlapping hit regions
+- **AND** focus restoration and status announcements do not submit a draft or trigger another action
+
+#### Scenario: Continue is first-touch usable while composing
+- **WHEN** the touch composer is focused in a layout where Continue is visible and the user taps Continue while workers run
+- **THEN** that first tap submits exactly one background request without losing the composing draft or its focus
+
+#### Scenario: Keyboard and short landscape defer worker controls, not pending safety
+- **WHEN** a touch parent composer enters software-keyboard mode or short landscape with live workers and pending messages
+- **THEN** worker tracks and Continue are hidden while the compact pending counts, paused-batch Send and replacement warning remain available as applicable
+- **AND** leaving that compact state restores worker access without stopping work or losing the draft
+
+#### Scenario: Foreground work becomes a duplicate background presentation
+- **WHEN** foreground work is detached on touch
+- **THEN** the one compact worker disclosure updates without opening itself or adding a duplicate pinned track
+- **AND** a deliberately expanded worker disclosure remains open
+
+#### Scenario: Automatic expansion survives a conversation switch
+- **WHEN** desktop conversation A automatically opens its foreground track, the user selects B without touching the disclosure, and B's foreground work is detached
+- **THEN** the retained open state remains classified as automatic and the duplicate track collapses in B
+- **AND** provenance for a deliberately opened retained track stays deliberate; touch instead retains deliberate per-conversation compact state
+
+#### Scenario: Shell settles while confirmation is open
+- **WHEN** settlement removes the invoking shell Stop control before the user dismisses its confirmation
+- **THEN** Escape keeps the inspection open, sends no removal and restores its surviving result action or logical inspection equivalent before the composer
+
+#### Scenario: Shell output and stop remain owned by the task
+- **WHEN** a native shell job is backgrounded alongside subagents
+- **THEN** its available output and terminal outcome remain inspectable, and stopping it targets only its verified shell execution
+- **AND** another session's shell identity or arbitrary filesystem output path is refused
+
+### Requirement: V2 background work participates in workspace activity without false completion
+Confirmed live V2 background work SHALL keep the existing workspace activity summary working even while its parent is idle, unselected, or viewed from another workspace. Requests needing user input SHALL retain existing needs-answer priority. Once all confirmed work settles and no parent turn remains, normal finished/unviewed behavior SHALL apply once. A failed or incomplete reconciliation SHALL NOT create a finished transition merely by dropping unknown tasks. Activity messages SHALL retain their existing bounded, content-free contract and authenticated workspace scope.
+
+#### Scenario: Unselected parent still has work
+- **WHEN** the parent finishes its response but a detached child continues while the user views another workspace
+- **THEN** the owning workspace remains working in the activity summary
+- **AND** returning to it exposes the same live child without another launch
+
+#### Scenario: Worker needs input while the parent is idle
+- **WHEN** a detached worker raises a permission request or question
+- **THEN** the owning workspace reports needs-answer and the request remains reachable from the parent
+
+#### Scenario: Last worker settles or recovery fails
+- **WHEN** the last confirmed worker settles with no parent turn active
+- **THEN** normal workspace-finished behavior occurs once
+- **AND** a later replay, duplicate notice, or failed refresh does not create another completion
+
+### Requirement: Touch pending messages and workers use compact deliberate disclosures
+Touch chat SHALL show at most one initially collapsed pending-message summary and one initially collapsed worker summary, omitting an empty summary. Pending text SHALL identify the total and steer/queued breakdown, such as `3 pending · 2 steers · 1 queued`. Worker text SHALL identify confirmed working and finished occurrences, such as `2 working · 4 finished`; finished SHALL include terminal failures/stops without implying successful completion. Uncertain workers SHALL be separately named rather than counted as confirmed working or finished. New work, replay and settlement SHALL update the summaries without automatically expanding touch details. Deliberate per-conversation expansion SHALL survive repaint, reselection and viewport changes within the page without leaking to other conversations.
+
+Expanded pending details SHALL retain delivery order and existing edit/remove/convert/Send now actions. Expanded worker details SHALL retain inspection, truthful terminal outcomes, available shell output and existing parent/worker-stop safeguards. Replacement consequences, paused-batch warnings and applicable batch Send, and actionable operation failure/uncertainty SHALL remain visible outside collapsed details. Desktop disclosure defaults SHALL remain unchanged. The collapsed touch defaults are an explicit exception to earlier automatic-running-track expansion behavior.
+
+Expanded worker details SHALL show confirmed working and unknown workers first, followed by a separately collapsed Finished history ordered newest first from available execution timestamps. Each occurrence SHALL have one whole-row inspection target, readable names of at least 14px and metadata of at least 13px, with state-specific glyphs distinguishing working, unknown, finished, failed and stopped. A settled glyph SHALL NOT imply live work. Headers and inspection/Stop targets SHALL remain at least 44px tall with 8px separation from Stop. Only current owned, confirmed live background workers SHALL offer enabled Stop worker; an unknown outcome SHALL disable Stop. Settled results SHALL remain accessible. Only live workers SHALL cause the parent Stop label to read Stop parent. Known successful automatic-background acknowledgements MAY clear on status change or complete settlement; failed, unavailable and unknown outcomes SHALL remain persistent.
+
+#### Scenario: Loaded touch chat starts compact
+- **WHEN** a touch conversation has two pending steers, one queued message, two working and four confirmed terminal worker occurrences
+- **THEN** its pending and worker summaries are collapsed and show their respective counts
+- **AND** no second pinned worker list duplicates the same work
+
+#### Scenario: Work changes without opening details
+- **WHEN** a worker appears or settles, or the conversation rehydrates while its touch details are collapsed
+- **THEN** summary counts and outcome/uncertainty wording update without opening the details or moving focus
+
+#### Scenario: Expanded details preserve actions and deliberate state
+- **WHEN** the user expands details, changes conversations, returns and receives live updates
+- **THEN** the original conversation retains its deliberate disclosure state and existing pending/worker actions
+- **AND** another conversation does not inherit that deliberate state
+
+#### Scenario: Replacement and batch risks remain readable while collapsed
+- **WHEN** Undo/revert has staged a replacement and paused steers would resume together with the replacement or batch Send
+- **THEN** pending counts, the applicable batch action and the full replacement/batch consequence remain readable without expanding details, including while typing
+- **AND** no hidden warning is treated as user confirmation
+
+#### Scenario: Settled and uncertain workers remain truthful
+- **WHEN** the retained worker set includes a failure, a stopped worker and one unresolved outcome
+- **THEN** the confirmed terminal occurrences contribute to finished with their individual outcomes available in details
+- **AND** the unresolved occurrence is named uncertain rather than declared finished or successful
+
+### Requirement: Compact touch composition preserves safe targets and conversation space
+Touch chat SHALL keep Send and Stop distinct, retain operable capability-gated delivery selection and existing submission shortcuts, and put less-used settings/context/help/actions behind an accessible touch options menu rather than reducing touch target size. Visible action targets SHALL be at least 44×44 CSS pixels, with at least 8px separation between adjacent mutation actions, visible focus and non-overlapping hit regions. Opening configuration from the menu SHALL use the existing single adaptive picker rather than stack another options layer. Unsupported actions SHALL be absent, and explicit Continue SHALL remain available in layouts where worker controls are supported and blocking evidence exists, regardless of the account's automatic preference.
+
+The in-flow dock SHALL retain the existing aggregate visual-height caps: 35%, 25% from 48rem width, and 24% during hardware-keyboard editing. Standard-size loaded phone layouts SHALL leave at least 40% of the visual band for the transcript; the tested tablet layouts SHALL leave at least 35%. Software-keyboard and short-landscape states SHALL retain a 44px worker summary; deliberate expansion MAY overlay the transcript above the composer when inline details cannot meet those budgets. The dock SHALL have one scroller rather than nested worker lists. Opening and closing the overlay SHALL preserve composing drafts and owned focus without forced keyboard blur. Composer Send/Stop, delivery/options controls and existing pending replacement/batch safety SHALL remain reachable; explicit Continue suppression in constrained states SHALL remain unchanged. Safe-area handling, measured desktop geometry, explicit bottom pinning, remote reading anchors and interaction-request answering SHALL be preserved. Larger text SHALL retain readable warnings and reachable primary controls using scrolling/reduced secondary content rather than shrunken targets.
+
+Menus SHALL fit the visual viewport, support keyboard navigation and one-layer Escape with invoker restoration, and consume outside touch dismissal without activating underlying actions. Visible controls SHALL activate reliably on the first tap during composition without discarding drafts or attachment/configuration state. Live updates and reduced-motion presentation SHALL NOT steal focus or fabricate completion announcements.
+
+#### Scenario: Keyboard and landscape keep conversation space
+- **WHEN** loaded touch chat uses 390px width with a 380px or 450px visual band, or 844px landscape width with a 230px visual band and the existing safe-area fixtures
+- **THEN** Send, supported delivery and Stop fit inside the visual band with their minimum targets/gaps
+- **AND** at least 40% remains for the transcript while pending replacement/batch safety remains reachable
+
+#### Scenario: Hardware keyboard and tablet budgets stay bounded
+- **WHEN** loaded 390×844 chat is focused without a software keyboard, or the tested 768×1024 and 1024×768 tablet layouts are used
+- **THEN** the aggregate dock respects its applicable height cap and bottom safe inset
+- **AND** the transcript keeps the phone/tablet minimum share without outer-surface scrolling
+
+#### Scenario: Options dismiss without executing an underlying action
+- **WHEN** a touch user taps outside options over Revert, Send or Stop
+- **THEN** only the menu dismisses and no underlying mutation is sent
+- **AND** Escape closes only the top layer and restores its invoker or surviving equivalent
+
+#### Scenario: Disclosure changes preserve the reading intention
+- **WHEN** pending/worker details expand, collapse or settle while the reader is remotely scrolled or explicitly bottom-pinned
+- **THEN** the current reading anchor or explicit bottom-pin intention is preserved respectively
+- **AND** controls remain hit-testable after final layout reservation and reduced-motion handling
+
+### Requirement: Desktop work shares measured panel space
+Desktop worker tracks and pending messages SHALL share an aggregate scroller capped at 40% of the actual measured chat panel height and 25rem. The aggregate SHALL yield further to reserve the lesser of 12rem or 35% of that panel for the transcript while keeping the composer fully visible. Existing desktop disclosure defaults, per-track rem caps, drafts, focus and reading intent SHALL remain intact. A newly staged replacement warning SHALL be revealed once after composer layout settles; subsequent updates SHALL respect deliberate dock scrolling.
+
+#### Scenario: Detached worker and pending steer coexist in a short split
+- **WHEN** default-split desktop chat has a running turn, one pending steer and one detached worker at 1280×600 or 1280×480
+- **THEN** Send and Stop are fully inside the measured panel and center-hit-testable without collapsing tracks
+- **AND** the transcript retains its reserved space, the draft/focus survives resizing, and a subsequent Revert reveals its replacement consequence
+
+#### Scenario: Long history cannot compress actionable work into a sliver
+- **WHEN** long history, a live worker and pending input coexist in a short desktop panel
+- **THEN** non-empty work reserves at least max(52px, 3.25rem) when feasible, yielding transcript space down to its reserved floor first
+- **AND** keyboard navigation can expose the full 44px worker action and its visible focus outline within every clipping ancestor
+- **AND** if the measured remaining space cannot fit that minimum, an accessible 44px Show work entry opens a scrollable sheet above the composer, with Close work/Escape restoring the entry while retaining drafts and warnings
+
+### Requirement: Accepted Hub steer actions can automatically background eligible work
+For an initiating Hub account whose authoritative personal preference is ON, chat SHALL consider one automatic native background-all follow-up after a confirmed steer action on an agent supporting both steering and background-blocking-work. This includes new composer steers, Queue → Steer, Send now of held input or paused steers, and submitted Undo/revert replacement steers. A paused batch resume SHALL result in at most one follow-up per accepted user action, not per resumed message. The initiating user's policy SHALL apply even in a workspace shared with users having different preferences, without changing those users' settings.
+
+Automatic follow-up SHALL additionally require verified Hub policy authority bound to the current child instance, independent of the workspace/terminal credential. Missing bootstrap trust SHALL produce explanatory automatic-background-unavailable state rather than infer ON or trust unsigned principal metadata. This SHALL NOT undo an otherwise accepted steer or weaken existing primary-action access checks; a valid workspace credential alone SHALL NOT grant Hub principal authority.
+
+The primary admission/resume SHALL be confirmed first; an optimistic message, timeout or staged replacement SHALL NOT count as acceptance. The automatic follow-up SHALL use current verified parent-scoped running-blocker evidence. Merely generating, pending, already detached, settled or uncertain work SHALL NOT force a background request; absent evidence SHALL NOT schedule a later job-start follow-up. Native eligibility racing to empty SHALL be an accepted no-op, not failure. The native operation affects all jobs still eligible when executed, including shell commands; it SHALL NOT be described as targeting one selected child or a fixed snapshot of workers.
+
+This is the scoped exception to the earlier rule forbidding implicit backgrounding on sending: outside confirmed Hub steer actions with ON policy and both capabilities, that rule remains in force. Ordinary queued/idle sends, job starts, preference/menu selection, Undo/revert staging alone, repeated no-op conversion, standalone and unsupported agents SHALL retain existing behavior. Automatic backgrounding SHALL NOT create a steer, launch a new agent, flush the Uatu queue or change staged configuration/delivery preferences. Native steer next-step delivery, paused batch behavior and resume/interruption semantics remain authoritative; the UI SHALL NOT promise immediate delivery, atomic admit-and-background, or preservation of every foreground worker across native resume.
+
+#### Scenario: Each accepted steer action qualifies once
+- **WHEN** an ON Hub account confirms a new composer steer, Queue → Steer, held-message Send now or submitted replacement steer while verified eligible blocking evidence remains
+- **THEN** its primary admission and pending transition complete before at most one native background-all attempt for the same parent
+- **AND** the accepted message and attachments remain intact independently of the follow-up outcome
+
+#### Scenario: Send now resumes a paused batch
+- **WHEN** an ON Hub account successfully sends one paused steer now and native resume wakes all paused steers
+- **THEN** the existing batch behavior is preserved without admitting duplicate prompts
+- **AND** the action makes at most one post-resume eligible background attempt, with no promise that resume preserved still-blocking foreground work
+
+#### Scenario: Admission has not been confirmed
+- **WHEN** a steer is refused, pending admission exceeds its bound, or a resume outcome is ambiguous
+- **THEN** no automatic background mutation follows that action
+- **AND** uncertainty is reconciled without automatically resending or later backgrounding on a job event
+
+#### Scenario: Private policy trust is unavailable after child replacement
+- **WHEN** an ON account's steer is otherwise accepted but the replacement child has not established verified current-instance Hub policy trust
+- **THEN** no automatic follow-up is authorized using a workspace credential, old-instance signature or unsigned principal metadata
+- **AND** the accepted steer is preserved with explanatory unavailable feedback and existing explicit Continue behavior where permitted
+
+#### Scenario: Nothing qualifies after acceptance
+- **WHEN** an accepted steer leaves no verified running-blocker evidence, or workers are only detached/settled/uncertain
+- **THEN** no automatic background call is forced and no future job-start watcher is installed
+
+#### Scenario: Mixed eligible jobs race with native execution
+- **WHEN** an accepted steer is followed by one background request while eligible subagents and shell jobs block that parent
+- **THEN** native all-eligible behavior is used rather than a subagent-only operation
+- **AND** a race to no eligible jobs is harmless while a new blocker present at native execution is not promised exclusion
+
+#### Scenario: OFF, unsupported and non-steer actions do not trigger automation
+- **WHEN** the preference is OFF, no Hub account context exists, either capability is absent, or the action is a queue/idle send, menu choice, job start, replacement staging or no-op conversion
+- **THEN** no automatic background request occurs and existing delivery/Continue behavior is preserved
+
+### Requirement: Automatic background outcomes never erase or resend accepted steer actions
+Affected action responses SHALL distinguish the primary steer/resume outcome from any automatic-background outcome. Once primary acceptance is confirmed, a follow-up refusal, unavailable evidence, timeout or ambiguous response SHALL preserve and report the accepted primary action; it SHALL NOT restore it as a failed draft, roll it back to the queue, or resend it. Background acknowledgement SHALL mean only request acceptance, not a count of affected workers, immediate steer delivery or worker completion. Actionable partial/unknown outcome text SHALL remain visible outside collapsed details with read-only state recovery and capability-gated explicit Continue available when eligible; no automatic mutation retry is introduced.
+
+The composite operation SHALL share original admission ordering and retain primary plus follow-up results under an initiating-account-scoped receipt. While retained, a same-identifier retry SHALL return the same result without repeating primary admission/resume or backgrounding, reevaluating a changed preference or affecting later blockers. A primary-unknown or follow-up-unknown outcome SHALL be retained rather than treated as a retryable deleted failure; no follow-up SHALL start after a timed-out primary or from late evidence. The client SHALL NOT automatically replay uncertain mutations across reconnect/reload. Receipt expiry, capacity eviction, adapter recreation or restart end deduplication; the system SHALL NOT promise durable exactly-once execution across those boundaries.
+
+Native steer/resume unknown retention SHALL remain active without automatic-policy context, including degraded Hub and standalone operations. Queue → Steer and held/paused Send now browser transport failures or server 5xx SHALL produce persistent page-local unconfirmed guidance and read-only reconciliation, without changing an unrelated composing draft or retrying the mutation. Definite refusals SHALL retain their existing handling.
+
+#### Scenario: Background fails after steer acceptance
+- **WHEN** the provider confirms the steer but definitively refuses its background follow-up
+- **THEN** the action reports the accepted steer and failed/unavailable follow-up separately with explanatory text
+- **AND** the accepted message is neither restored to the draft nor requeued/resubmitted
+
+#### Scenario: Upstream background response is lost after application
+- **WHEN** native backgrounding may have applied but Uatu cannot confirm its response
+- **THEN** the accepted primary result retains an unknown follow-up receipt and neutral uncertainty feedback
+- **AND** retrying the same identifier while retained issues neither a second steer/resume nor another background request
+
+#### Scenario: Browser loses a known composite result
+- **WHEN** Uatu retained the accepted composite result but the browser lost its response, another blocker appeared and the account changed its preference
+- **THEN** the same-account same-identifier retry returns the original result/policy without repeating either native mutation
+
+#### Scenario: Primary admission response is unknown
+- **WHEN** the provider may have accepted a steer/resume but its acknowledgement is lost
+- **THEN** the primary-unknown receipt is retained, no background request is made and the action's message/attachments remain available as unconfirmed rather than automatically resubmittable failed input
+- **AND** same-identifier retries while retained do not duplicate the primary action
+
+#### Scenario: Late response and ended receipt lifetime
+- **WHEN** a timed-out native operation later settles, or its receipt expires, is evicted or is lost on adapter/process recreation
+- **THEN** read-side evidence can update visible state without initiating a delayed follow-up or automatic mutation replay
+- **AND** old request identifiers are not claimed to remain deduplicated after receipt loss
+
+#### Scenario: Shared-workspace users reuse an identifier
+- **WHEN** A and B issue actions in the same conversation using the same client request identifier but opposite personal preferences
+- **THEN** neither receives the other's personal action receipt or policy metadata
+- **AND** each action uses its own authenticated initiating-account scope while conversation/worker state remains shared
+
+#### Scenario: Unrelated mutations preserve unresolved operation feedback
+
+- **WHEN** Remove, a delivery change or a later successful steer follows an unknown, failed or unavailable automatic-background outcome
+- **THEN** the unresolved feedback remains tied to its source operation and is not cleared by the unrelated result or ordinary status settlement
+- **AND** constrained touch layouts retain visible, scrollable feedback without consuming the usable draft field or hiding the options entry point
+
+#### Scenario: Settings browser cannot read saved policy
+
+- **WHEN** the Settings browser fails to read personal preferences
+- **THEN** it reports that it cannot confirm the saved setting, without promising automation is disabled
+- **AND** saved server policy continues to govern independently admitted steers in other tabs or devices
+
+#### Scenario: Unknown retention survives unavailable bootstrap
+- **WHEN** native steer admission or resume applies but its acknowledgement is lost while private Hub policy trust is unavailable
+- **THEN** an immediate same-account same-identifier retry retains unknown with only one native primary mutation
+- **AND** no automatic background request or unsigned policy context is introduced
+
+#### Scenario: Queue action loses its browser acknowledgement
+- **WHEN** a Queue → Steer, held Send now or paused-batch Send now result is lost to browser transport failure or a server 5xx
+- **THEN** unconfirmed guidance remains visible through read-only reconciliation and later paints
+- **AND** the unrelated composing draft stays unchanged and reconnect/reload sends no automatic mutation retry

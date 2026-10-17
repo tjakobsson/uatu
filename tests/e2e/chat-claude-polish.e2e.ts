@@ -93,6 +93,13 @@ const skillTool = (id: string, createdAt: number, skill: string, status: "runnin
  * collapse it.
  */
 async function openTaskList(page: Page) {
+  if (await page.locator("html").getAttribute("data-ui-mode") === "touch") {
+    const compact = page.locator("#chat-compact-workers");
+    if (await compact.getAttribute("open") === null) await compact.locator(":scope > summary").click();
+    await expect(compact).toBeVisible();
+    await expect(compact).toHaveAttribute("open", "");
+    return compact;
+  }
   const list = page.locator("#chat-background-tasks");
   await expect(list).toBeVisible();
   await expect(list).toHaveAttribute("open", "");
@@ -437,7 +444,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     // not Cancel, while the task runs.
     await page.locator("#chat-input").fill("still there?");
     await expect(page.locator("#chat-send")).toBeEnabled();
-    await expect(page.locator("#chat-send")).not.toHaveAttribute("aria-label", /Cancel/);
+    await expect(page.locator("#chat-stop")).toBeDisabled();
     await page.locator("#chat-input").fill("");
     const list = page.locator("#chat-background-tasks");
     await expect(list).toBeVisible();
@@ -625,7 +632,11 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await control(request, { action: "item", conversationId: id, item: { ...task, status: "completed", summary: "Reviewed 4 files." } });
     await expect(page.locator("#chat-drilldown-items")).toContainText("Findings filed.");
     await expect(strip).toHaveAttribute("data-task-state", "settled");
-    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("finished · Reviewed 4 files.");
+    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("finished");
+    await expect(strip).not.toContainText("Reviewed 4 files.");
+    await strip.getByRole("button", { name: "View worker result" }).click();
+    await expect(drilldown).toBeHidden();
+    await expect(page.locator('[data-chat-item-id="task:ada2b"] .chat-task-summary')).toHaveText("Reviewed 4 files.");
   });
 
   test("a running shell task opens an output view whose pane follows the output as it is written", async ({ page, request }, testInfo) => {
@@ -693,13 +704,16 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     expect((await stopped).status()).toBe(200);
     await expect(strip).toHaveAttribute("data-task-state", "settled");
     await expect(strip).toHaveClass(/is-settled/);
-    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("stopped · Stopped by the user.");
+    await expect(strip.locator(".chat-drilldown-task-settled")).toHaveText("stopped");
+    await expect(strip).not.toContainText("Stopped by the user.");
     await expect(strip.locator("[data-stop-task]")).toHaveCount(0);
 
     // Behind the view the row has left the list and taken its timeline place.
-    await page.locator("#chat-drilldown-back").click();
+    await strip.getByRole("button", { name: "View worker result" }).click();
+    await expect(page.locator("#chat-drilldown")).toBeHidden();
     await expect(page.locator("#chat-background-tasks")).toBeHidden();
     await expect(page.locator('[data-chat-item-id="task:tailer"]')).toContainText("Background task stopped");
+    await expect(page.locator('[data-chat-item-id="task:tailer"] .chat-task-summary')).toHaveText("Stopped by the user.");
   });
 
   test("a running fork is named in the track and opens a complete transcript once its result names it", async ({ page, request }, testInfo) => {
@@ -835,7 +849,7 @@ test.describe("Claude Code chat polish (fixture-driven)", () => {
     await expect(status).toHaveAttribute("data-state", "retrying");
     await expect(status).toHaveAttribute("aria-label", "Retrying (attempt 2 of 10, HTTP 529)");
     // Still a live turn: the primary action is Cancel, not Send.
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", /Cancel/);
+    await expect(page.locator("#chat-stop")).toBeEnabled();
     // The standing is the composer's, not the timeline's: one chip, opened
     // for the detail, and no row anywhere.
     await control(request, { action: "item", conversationId: id, item: { id: "notice:rate-limit", type: "notice", createdAt: 5, level: "error", message: "Rate limit reached for your 5-hour window.", code: "rate-limit-rejected", resetsAt: Date.now() + 3_600_000 } });
@@ -1336,8 +1350,13 @@ for (const touch of [false, true]) {
       const label = page.locator("#chat-context-usage-label");
       await expect(label).toHaveText("213k");
       await expect(page.locator("#chat-context-usage")).toHaveAttribute("data-fill", "unknown");
-      await page.locator("#chat-context-usage > summary").click();
-      await expect(page.locator("#chat-context-usage-breakdown")).toContainText("Limit unavailable");
+      if (touch) {
+        await expect(page.locator("#chat-inline-context")).toContainText("limit unknown");
+        await expect(page.locator("#chat-context-usage")).toBeHidden();
+      } else {
+        await page.locator("#chat-context-usage > summary").click();
+        await expect(page.locator("#chat-context-usage-breakdown")).toContainText("Limit unavailable");
+      }
       await capture(page, testInfo, "context-limit-unavailable");
       await control(request, { action: "item", conversationId: id, item: {
         id: "window:live", type: "context_window", createdAt: 3, model, limit: 1_000_000,
@@ -1444,7 +1463,7 @@ test.describe("Claude Code scheduled wakeups (fixture-driven)", () => {
     // Prompting stays possible: Send, not Cancel.
     await page.locator("#chat-input").fill("anything new?");
     await expect(page.locator("#chat-send")).toBeEnabled();
-    await expect(page.locator("#chat-send")).not.toHaveAttribute("aria-label", /Cancel/);
+    await expect(page.locator("#chat-stop")).toBeDisabled();
     await page.locator("#chat-input").fill("");
     await capture(page, testInfo, "scheduled-composer");
 

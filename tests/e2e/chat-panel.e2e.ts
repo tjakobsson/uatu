@@ -125,7 +125,7 @@ test.describe("desktop chat panel layout", () => {
         const value = document.querySelector(selector)!.getBoundingClientRect();
         return { top: value.top, left: value.left, right: value.right, width: value.width, height: value.height };
       };
-      return { rail: rect(".chat-composer-actions"), trigger: rect("#chat-configuration-trigger"), status: rect("#chat-composer-status"), send: rect("#chat-send") };
+      return { rail: rect(".chat-composer-actions"), trigger: rect("#chat-configuration-trigger"), status: rect("#chat-composer-status"), send: rect("#chat-send"), stop: rect("#chat-stop") };
     });
 
     // The rail has settled at a width once two consecutive measurements
@@ -148,7 +148,9 @@ test.describe("desktop chat panel layout", () => {
       await page.evaluate(value => document.documentElement.style.setProperty("--chat-fraction", String(value)), fraction);
       const ready = await settled();
       expect(ready.trigger.top + ready.trigger.height / 2).toBeCloseTo(ready.status.top + ready.status.height / 2, 0);
-      expect(ready.status.top + ready.status.height / 2).toBeCloseTo(ready.send.top + ready.send.height / 2, 0);
+      expect(ready.send.top).toBeCloseTo(ready.stop.top, 0);
+      expect(ready.stop.left - ready.send.right).toBeGreaterThanOrEqual(8);
+      expect(ready.send.top + ready.send.height / 2).toBeGreaterThanOrEqual(ready.status.top + ready.status.height / 2);
       expect(ready.send.right).toBeLessThanOrEqual(ready.rail.right + 1);
       for (const status of ["sending", "running", "failed", "idle"] as const) {
         await request.post("/__e2e/chat", { data: { action: "status", conversationId, status, ...(status === "failed" ? { message: "fixture failure" } : {}) } });
@@ -157,6 +159,8 @@ test.describe("desktop chat panel layout", () => {
         expect(current.status.width).toBeCloseTo(ready.status.width, 1);
         expect(current.status.left).toBeCloseTo(ready.status.left, 1);
         expect(current.send.left).toBeCloseTo(ready.send.left, 1);
+        expect(current.send.top).toBeCloseTo(ready.send.top, 1);
+        expect(current.stop).toEqual(ready.stop);
       }
     }
     const withoutContext = await measure();

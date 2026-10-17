@@ -89,6 +89,7 @@ async function fixture(root: string) {
       backendEvents.runningProviderTokens.set(entry.id, rawTokens);
       return {
         workspaceId: entry.id,
+        instanceId: crypto.randomUUID(), policyTrust: "unavailable" as const,
         basePath: `/s/${entry.id}/`,
         endpoint: { hostname: "127.0.0.1", port: 1 },
         token: null,

@@ -1,4 +1,26 @@
-import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+import type { AgentUsageReport, BackgroundTaskOutput, BackgroundTaskUsage, ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, MessageDelivery, ModelSelection, PermissionChoice, ReversibleHistoryResult, ReversibleHistoryState, ScheduledWakeupItem, StructuredQuestion, TokenUsage, UsageReadMode, UsageReadResult } from "./types";
+
+// One user entry pending in the agent's own inbox — a steer the agent holds
+// until its running turn's next step boundary (opencode-v2-steering D3). The
+// adapter's pending-steer map is built from these and reconciled against
+// `listPendingInbox`. `id` is the agent's inbox id, which is also the
+// message id the adapter minted for a steer it submitted itself.
+export type PendingInboxEntry = {
+  id: string;
+  text: string;
+  attachments?: MessageAttachment[];
+  delivery: MessageDelivery;
+  at: number;
+};
+
+// What an inbox event says about one entry: it is pending, it settled
+// (delivered into the turn, or cancelled), or its delivery changed. Not a
+// timeline item — the adapter keeps the dock from these, and the delivered
+// message's row arrives as an ordinary upsert alongside the settled delta.
+export type InboxDelta =
+  | ({ kind: "pending" } & PendingInboxEntry)
+  | { kind: "settled"; id: string; outcome: "delivered" | "cancelled" }
+  | { kind: "delivery"; id: string; delivery: MessageDelivery };
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -72,7 +94,11 @@ export type NormalizedProviderUpdate =
   | { kind: "upsert"; item: ConversationItem }
   | { kind: "text"; itemId: string; identity: string; mode: "cumulative" | "incremental"; text: string; item?: ConversationItem }
   | { kind: "remove"; itemId: string }
-  | { kind: "status"; status: ConversationStatus; message?: string };
+  | { kind: "status"; status: ConversationStatus; message?: string }
+  // The agent's inbox changed (a steer pending, delivered, cancelled, or
+  // switched). The adapter applies these to its pending-steer map; they
+  // never reach a projection's timeline.
+  | { kind: "inbox"; delta: InboxDelta };
 
 export type NormalizedSessionLifecycle = {
   kind: "created" | "updated" | "deleted";
@@ -196,6 +222,16 @@ export class BackgroundTaskUnavailableError extends Error {
   }
 }
 
+/** A dispatched mutation may have applied. Retain this outcome in receipts;
+ * rejecting it through the ordinary receipt helper would permit a replay.
+ */
+export class OperationOutcomeUnknownError extends Error {
+  constructor() {
+    super("Operation outcome unknown; refresh state before a new explicit action. Do not automatically retry.");
+    this.name = "OperationOutcomeUnknownError";
+  }
+}
+
 /**
  * A release the session cannot take right now: a turn is running, or live
  * background work would die with it. A conflict with the current state —
@@ -278,7 +314,18 @@ export interface ChatProvider {
    * its own disposal, so a retired adapter leaves no agent process behind.
    */
   dispose?(): Promise<void>;
-  prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  /**
+   * `delivery` says who holds the message until the agent takes it. `queue`
+   * is the workspace's held queue releasing a message onto an idle session,
+   * with the model, mode, and variant frozen at submission applied first.
+   * `steer` hands the message to a running turn for its next step boundary
+   * (opencode-v2-steering D1): only an agent declaring `steering` is asked,
+   * and a steer carries no model or mode to the session — a mid-turn switch
+   * would retarget the turn being steered (D6).
+   */
+  prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  /** Native identity known before dispatch, for read-only unknown recovery. */
+  promptIdentity?(identity: string): string;
   /**
    * `text`, when set, is what the user's row reads as because the provider
    * sent something other than the typed command — a 2.x skill runs as a
@@ -297,7 +344,28 @@ export interface ChatProvider {
   // Only the provider knows — a config command or skill named `reload`
   // shadows the built-in — so clients key reload behavior off this answer.
   command(sessionId: string, input: { id: string; name: string; arguments: string; listed?: ChatCommand; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string; text?: string; operation?: "reload" }>;
-  interrupt(sessionId: string): Promise<void>;
+  /**
+   * Stop the running turn. `resume: true` asks the agent to wake and deliver
+   * the steers it still holds (Send now on a paused steer, D8); `false`, or
+   * no option, leaves them pending (Cancel, D9). Agents without an inbox
+   * ignore the option.
+   */
+  interrupt(sessionId: string, options?: { resume?: boolean }): Promise<void | { interrupted: boolean }>;
+  /**
+   * The user's steers the agent still holds for this session, in enqueue
+   * order — what the adapter's pending-steer map is rebuilt from on attach
+   * and after a stream reconnect (D3). Optional: only an agent declaring
+   * `steering`.
+   */
+  listPendingInbox?(sessionId: string): Promise<PendingInboxEntry[]>;
+  /**
+   * Withdraw one pending inbox entry. The agent confirms on its stream with
+   * a cancelled (or, if it got there first, delivered) settlement; a missing
+   * or already-delivered entry is a quiet no-op, which is why callers wait
+   * for the event rather than trusting the answer (D7). Optional: only an
+   * agent declaring `steering`.
+   */
+  cancelInbox?(sessionId: string, inboxId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply, choiceId?: string): Promise<void>;
   /**
    * Every pending permission request the server holds, each naming the session
@@ -324,6 +392,13 @@ export interface ChatProvider {
    * Optional: a provider without background work never lists any.
    */
   listBackgroundTasks?(): Promise<PendingBackgroundTask[]>;
+  /** Scoped evidence, including terminal results and uncertain last-known rows.
+   * Unlike a live-only list, absence is never an instruction to cancel a task.
+   */
+  reconcileBackgroundTasks?(sessionId: string, options?: { fresh?: boolean }): Promise<import("./types").BackgroundTaskItem[]>;
+  backgroundBlockingWork?(sessionId: string): Promise<void>;
+  /** Native one-shot context answer, with no admission, tool loop or turn interruption. */
+  generate?(sessionId: string, prompt: string): Promise<string>;
   /**
    * Stop one running background task; the agent reports the stop as that
    * task settling. Optional: only an agent declaring `background-tasks`.

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { ConversationReplay } from "../../src/chat/replay";
 import { NotificationFeed } from "../../src/chat/notification-feed";
-import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../../src/chat/adapter";
+import { deriveConversationTitle, QueuedMessageNotHeldError, ReversibleHistoryUnsupportedError, SendNowUnavailableError, SendNowUnsupportedError, SteeringUnsupportedError, UnknownAttachmentError, UsageUnsupportedError } from "../../src/chat/adapter";
 import { createAttachmentStore } from "../../src/chat/attachment-store";
 import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "../../src/chat/inventory-broadcaster";
 import { ReversibleHistoryTargetError } from "../../src/chat/provider";
@@ -24,6 +24,8 @@ import type {
   ConversationSnapshot,
   ConversationSummary,
   MessageAttachment,
+  MessageDelivery,
+  QueueChangeKind,
   ModelSelection,
   PermissionOutcome,
   QueuedMessage,
@@ -77,7 +79,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly olderItems = new Map<string, ConversationItem[]>();
   // Mirrors the real adapter's workspace-held queue: busy submissions wait
   // here, deliver on the turn's own end, pause on cancellation.
-  private readonly queues = new Map<string, QueuedMessage[]>();
+  private readonly queues = new Map<string, Array<QueuedMessage & { configuration: ConversationConfiguration }>>();
   private readonly dormant = new Set<string>();
   private nextCreatedConfiguration: ConversationConfiguration = {};
   // Conversations a subagent runs as. The real adapter keeps them out of the
@@ -398,16 +400,17 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.attachmentStore.resolve(id);
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], _delivery?: MessageDelivery): Promise<{
     messageId: string;
-    held: boolean;
+    pending: boolean;
+    delivery: MessageDelivery;
     conversation?: ConversationSummary;
     configuration: ConversationConfiguration;
   }> {
     if (mode) this.promptModes.push(mode);
     if (variant) this.promptVariants.push(variant);
     const key = `prompt:${id}:${requestId}`;
-    const existing = this.receipts.get(key) as { messageId: string; held: boolean; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
+    const existing = this.receipts.get(key) as { messageId: string; pending: boolean; delivery: MessageDelivery; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
     const previousConfiguration = this.configurations.get(id) ?? {};
@@ -453,7 +456,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     if (this.revertBoundaries.has(id)) {
       this.commitRevertedBranch(id);
       const messageId = this.dispatch(id, text, requestId, attachmentRefs);
-      const result = { messageId, held: false, configuration };
+      const result = { messageId, pending: false, delivery: "queue" as const, configuration };
       this.receipts.set(key, result);
       return result;
     }
@@ -461,7 +464,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     // holds the message instead of delivering it, exactly like the adapter.
     const queue = this.queues.get(id) ?? [];
     if (conversation.status === "running" || conversation.status === "sending" || queue.length > 0) {
-      const held: QueuedMessage = { id: `held-${this.nextId++}`, text, queuedAt: Date.now(), requestId, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) };
+      const held = { id: `held-${this.nextId++}`, text, queuedAt: Date.now(), delivery: "queue" as const, requestId, configuration: structuredClone(configuration), ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) };
       queue.push(held);
       this.queues.set(id, queue);
       this.dormant.delete(id);
@@ -469,7 +472,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       // A submission onto an idle conversation with a backlog reactivates
       // the queue, exactly like the adapter's schedule-on-hold.
       if (conversation.status !== "running" && conversation.status !== "sending") this.deliverNext(id);
-      const result = { messageId: held.id, held: true, configuration };
+      const result = { messageId: held.id, pending: true, delivery: "queue" as const, configuration };
       this.receipts.set(key, result);
       return result;
     }
@@ -479,7 +482,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       this.conversations.set(id, renamed);
     }
     const messageId = this.dispatch(id, text, requestId, attachmentRefs);
-    const result = { messageId, held: false, configuration, ...(renamed ? { conversation: renamed } : {}) };
+    const result = { messageId, pending: false, delivery: "queue" as const, configuration, ...(renamed ? { conversation: renamed } : {}) };
     this.receipts.set(key, result);
     return result;
   }
@@ -517,12 +520,54 @@ export class FakeE2EChatService implements WorkspaceChatService {
     if (!queue || !held) return;
     queue.shift();
     if (queue.length === 0) this.queues.delete(id);
+    this.publishConfiguration(id, structuredClone(held.configuration));
     this.dispatch(id, held.text, held.requestId, held.attachments);
     this.publishQueue(id, { kind: "delivered", messageId: held.id });
   }
 
-  private publishQueue(id: string, change: { kind: "held" | "removed" | "delivered"; messageId: string }): void {
-    this.replay.get(id)!.publish({ type: "conversation.queue", queued: structuredClone(this.queues.get(id) ?? []), change });
+  private publishQueue(id: string, change: { kind: QueueChangeKind; messageId: string }): void {
+    this.replay.get(id)!.publish({ type: "conversation.queue", queued: this.dock(id), change });
+  }
+
+  // The held queue as the wire shows it: paused while dormant or behind a
+  // staged revert, as the adapter derives it (opencode-v2-steering D3).
+  private dock(id: string): QueuedMessage[] {
+    const paused = this.dormant.has(id) || this.revertBoundaries.has(id);
+    return (this.queues.get(id) ?? []).map(({ configuration: _configuration, ...held }) => ({ ...structuredClone(held), ...(paused ? { paused: true as const } : {}) }));
+  }
+
+  // This fake never steers: it stands in for Claude Code and OpenCode 1.x,
+  // whose busy submissions always queue. The real 2.x stack is exercised
+  // end to end through the scripted OpenCode server instead (design D13).
+  async changeDelivery(id: string, _messageId: string, _requestId: string, _delivery: MessageDelivery): Promise<{ messageId: string; delivery: MessageDelivery }> {
+    this.require(id);
+    throw new SteeringUnsupportedError();
+  }
+
+  /**
+   * Send now on an agent with `send-now` but no `steering` (design D8): only
+   * while nothing runs, the chosen held message is dispatched under its own
+   * configuration ahead of the others, which stay held — and dormant, if
+   * they were.
+   */
+  async sendNow(id: string, messageId: string, requestId: string): Promise<{ messageId: string; delivery: MessageDelivery }> {
+    const key = `send-now:${id}:${requestId}`;
+    const existing = this.receipts.get(key) as { messageId: string; delivery: MessageDelivery } | undefined;
+    if (existing) return existing;
+    const conversation = this.require(id);
+    if (!this.capabilities.includes("send-now")) throw new SendNowUnsupportedError();
+    if (conversation.status === "running" || conversation.status === "sending") throw new SendNowUnavailableError();
+    const queue = this.queues.get(id) ?? [];
+    const index = queue.findIndex(held => held.id === messageId);
+    if (index < 0) throw new QueuedMessageNotHeldError();
+    const [held] = queue.splice(index, 1);
+    if (queue.length === 0) this.queues.delete(id);
+    this.publishConfiguration(id, structuredClone(held!.configuration));
+    this.dispatch(id, held!.text, held!.requestId, held!.attachments);
+    this.publishQueue(id, { kind: "delivered", messageId: held!.id });
+    const result = { messageId: held!.id, delivery: "queue" as const };
+    this.receipts.set(key, result);
+    return result;
   }
 
   async renameConversation(id: string, requestId: string, rawTitle: string): Promise<{ conversation: ConversationSummary }> {
@@ -547,6 +592,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
     // Cancel pauses the queue before the status transition can deliver.
     if (this.queues.get(id)?.length) this.dormant.add(id);
     this.setStatus(id, "interrupted");
+    for (const held of this.queues.get(id) ?? []) {
+      this.publishQueue(id, { kind: "paused", messageId: held.id });
+    }
     const result = { cancelled: true } as const;
     this.receipts.set(key, result);
     return result;
@@ -1183,7 +1231,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       generation: this.generation,
       cursor: this.replay.get(id)!.latestCursor(),
       items: [...this.items.get(id)!.values()],
-      queued: structuredClone(this.queues.get(id) ?? []),
+      queued: this.dock(id),
       ...(this.capabilities.includes("reversible-history")
         ? { reversibleHistory: this.reversibleState(id) }
         : {}),

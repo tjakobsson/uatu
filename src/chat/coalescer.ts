@@ -111,7 +111,7 @@ export class ProviderUpdateCoalescer {
 
 /** Returns true when the update must flush the buffer immediately. */
 function mergeUpdate(buffer: NormalizedProviderUpdate[], update: NormalizedProviderUpdate, mergeUpsert?: CoalescerOptions["mergeUpsert"]): boolean {
-  if (update.kind === "status" || update.kind === "remove") {
+  if (update.kind === "status" || update.kind === "remove" || update.kind === "inbox") {
     buffer.push(update);
     return true;
   }

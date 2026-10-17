@@ -26,8 +26,10 @@ import {
   timestamp,
   tokensToUsage,
   usageUpsert, compactionNoticeId } from "../normalization";
-import type { ConversationItem, StructuredQuestion, TokenUsage } from "../../types";
+import type { ConversationItem, MessageAttachment, MessageDelivery, StructuredQuestion, TokenUsage } from "../../types";
 import { LOGIN_FAILED_NOTICE_CODE } from "../../types";
+import type { InboxDelta, PendingInboxEntry } from "../../provider";
+import { BackgroundWorkers } from "./background";
 
 export type { NormalizedProviderEvent };
 
@@ -39,7 +41,8 @@ export type { NormalizedProviderEvent };
  * is `<assistantMessageID>:<kind>:<ordinal>`, a tool's call id is `data.id`, a
  * shell's fields sit under `data.shell`). What 2.x alone announces is handled
  * here: the `session.execution.*` turn lifecycle, the inbox (where a prompt
- * becomes a user message), per-step usage on `session.step.ended` (the
+ * is pending until OpenCode delivers it, and only then a user message —
+ * opencode-v2-steering D4), per-step usage on `session.step.ended` (the
  * per-message figure the cost receipt keys on — `session.usage.updated` is
  * the session's running total and is deliberately not a second carrier),
  * `form.*` presented as structured questions, and content restatements.
@@ -49,9 +52,11 @@ export type { NormalizedProviderEvent };
  * owns only its own.
  */
 export type OpenCodeV2Memory = ProviderEventMemory & {
+  workers: BackgroundWorkers;
   // Tool name by call id: `session.tool.called` carries no name, only the
   // preceding `session.tool.input.started` does.
   toolNames: Map<string, string>;
+  toolInputs: Map<string, unknown>;
   // The step that produced an assistant message, for the usage carrier's
   // model and agent and for attributing the message on its parent's row.
   steps: Map<string, { agent?: string; model?: { providerId: string; modelId: string }; startedAt: number }>;
@@ -61,17 +66,19 @@ export type OpenCodeV2Memory = ProviderEventMemory & {
   // The message of a session's failed step, so the turn's own failure event,
   // which repeats it, adds no second notice.
   failures: Map<string, string>;
+  // Enqueued user entries not yet delivered, by inbox id: the payload the
+  // delivered event — which carries only the id — turns into the user's row.
+  // A delivery the memory never saw (a restart) adds no row; history has it.
+  inbox: Map<string, { text: string; attachments?: MessageAttachment[] }>;
 };
 
-export function createOpenCodeV2Memory(): OpenCodeV2Memory {
-  return { ...createProviderEventMemory(), toolNames: new Map(), steps: new Map(), forms: new Map(), failures: new Map() };
+export function createOpenCodeV2Memory(options: { backgroundEntries?: number; backgroundBytes?: number } = {}): OpenCodeV2Memory {
+  return { ...createProviderEventMemory(), workers: new BackgroundWorkers({ entries: options.backgroundEntries, bytes: options.backgroundBytes }), toolNames: new Map(), toolInputs: new Map(), steps: new Map(), forms: new Map(), failures: new Map(), inbox: new Map() };
 }
 
 // 2.x wire types recognized as deliberately carrying nothing for the
 // timeline, beyond the core's canonical list.
 const IGNORED: ReadonlySet<string> = new Set([
-  "session.inbox.delivered",
-  "session.inbox.delivery.changed",
   "session.instructions.updated",
   "session.step.streamed",
   // The session's running total; per-message figures ride `session.step.ended`.
@@ -163,6 +170,12 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
     const { conversationId, eventId } = context;
     const createdAt = number(event.created) ?? context.createdAt;
     switch (event.type) {
+      case "session.created": {
+        const child = optionalString(data.sessionID);
+        const parent = optionalString(data.parentID);
+        if (child && parent) memory?.workers.verifyChild(child, parent);
+        return undefined;
+      }
       case "session.renamed": {
         // Only the id and the title travel. Passed to the core as a full
         // `session.updated`, the missing parent would read as "top-level"
@@ -190,20 +203,20 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         const payload = record(item.payload);
         const messageId = string(data.inboxID, "inbox id");
         if (item.type === "user") {
-          const sessionId = conversationId;
+          // Pending, not yet a row: the message joins the timeline when
+          // `session.inbox.delivered` names it (D4). Until then the dock
+          // shows it from this delta, and the payload waits in memory.
+          const attachments = storedAttachments(payload.files);
           if (memory) {
             remember(memory.roles, messageId, "user");
-            if (sessionId) remember(memory.prompts, sessionId, messageId);
+            remember(memory.inbox, messageId, { text: text(payload.text), ...(attachments.length ? { attachments } : {}) });
           }
-          return { conversationId, updates: [{ kind: "upsert", item: {
-            id: `message:${messageId}`,
-            type: "user_message",
-            createdAt,
-            text: text(payload.text),
-            requestId: messageId,
-          } }] };
+          const delta: InboxDelta = { kind: "pending", id: messageId, text: text(payload.text), delivery: inboxDelivery(item.delivery), at: createdAt, ...(attachments.length ? { attachments } : {}) };
+          return { conversationId, updates: [{ kind: "inbox", delta }] };
         }
         if (item.type === "synthetic") {
+          const workers = conversationId ? memory?.workers.notification(conversationId, messageId, payload, createdAt) : undefined;
+          if (workers) return { conversationId, updates: workers };
           // A shell command's transcript is delivered to the model as a
           // synthetic note; the command item already shows it.
           if (optionalString(record(payload.metadata).source) === "shell") return { conversationId, updates: [] };
@@ -217,14 +230,48 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         }
         return { conversationId, updates: [] };
       }
+      case "session.inbox.delivered": {
+        const messageId = string(data.inboxID, "inbox id");
+        const updates: NormalizedProviderUpdate[] = [{ kind: "inbox", delta: { kind: "settled", id: messageId, outcome: "delivered" } }];
+        const remembered = memory?.inbox.get(messageId);
+        if (remembered && memory) {
+          memory.inbox.delete(messageId);
+          // Now the prompt an assistant message answers: a steer pending
+          // behind a running step was not answered by that step.
+          if (conversationId) remember(memory.prompts, conversationId, messageId);
+          // Timed at delivery, so the row sorts after the output that came
+          // before it in the turn (the timeline order rule).
+          updates.push({ kind: "upsert", item: {
+            id: `message:${messageId}`,
+            type: "user_message",
+            createdAt,
+            text: remembered.text,
+            requestId: messageId,
+            ...(remembered.attachments ? { attachments: remembered.attachments } : {}),
+          } });
+        }
+        return { conversationId, updates };
+      }
+      case "session.inbox.cancelled": {
+        const messageId = string(data.inboxID, "inbox id");
+        memory?.inbox.delete(messageId);
+        return { conversationId, updates: [{ kind: "inbox", delta: { kind: "settled", id: messageId, outcome: "cancelled" } }] };
+      }
+      case "session.inbox.delivery.changed": {
+        const messageId = string(data.inboxID, "inbox id");
+        return { conversationId, updates: [{ kind: "inbox", delta: { kind: "delivery", id: messageId, delivery: inboxDelivery(data.delivery) } }] };
+      }
       case "session.execution.started":
         if (memory && conversationId) memory.failures.delete(conversationId);
         return { conversationId, updates: [{ kind: "status", status: "running" }] };
       case "session.execution.succeeded":
+        if (conversationId) memory?.workers.executionEnded(conversationId, createdAt);
         return { conversationId, updates: [{ kind: "status", status: "completed" }] };
       case "session.execution.interrupted":
+        if (conversationId) memory?.workers.executionEnded(conversationId, createdAt);
         return { conversationId, updates: [{ kind: "status", status: "interrupted" }] };
       case "session.execution.failed": {
+        if (conversationId) memory?.workers.executionEnded(conversationId, createdAt);
         const message = errorMessage(data.error) || "The turn failed";
         // A step that failed has already shown this message on its own
         // event; the turn's end repeats it. One red row, not two.
@@ -291,8 +338,15 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         const callId = optionalString(data.id);
         const name = callId ? memory?.toolNames.get(callId) : undefined;
         if (!name) return undefined;
+        if (memory && callId && event.type === "session.tool.called") remember(memory.toolInputs, callId, data.input);
         const canonical = toCanonical(String(event.type), { ...data, tool: name }, event);
-        return canonical ? normalizeCanonicalEvent(canonical.type, canonical.data, { ...context, createdAt }) : undefined;
+        const normalized = canonical ? normalizeCanonicalEvent(canonical.type, canonical.data, { ...context, createdAt }) : undefined;
+        if (normalized && memory && conversationId && event.type === "session.tool.success") {
+          normalized.updates.push(...memory.workers.launch(conversationId, {
+            id: callId, name, state: { ...data, status: "completed", input: data.input ?? memory.toolInputs.get(callId!) },
+          }, createdAt));
+        }
+        return normalized;
       }
       case "session.compaction.failed":
         // The same row the started phase opened, so the failure replaces
@@ -308,6 +362,7 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
         const messageId = string(data.messageID, "message id");
         const skippedBlocks: string[] = [];
         const updates = assistantContentUpdates(messageId, array(data.content), createdAt, skippedBlocks);
+        if (conversationId && memory) updates.push(...memory.workers.content(conversationId, data.content, createdAt));
         return { conversationId, updates, ...(skippedBlocks.length ? { skippedBlocks } : {}) };
       }
       case "form.created": {
@@ -352,6 +407,32 @@ export function createOpenCodeV2Mapper(directory: string): GenerationMapper<Open
   }
 
   return { own, toCanonical, ignored: IGNORED };
+}
+
+// OpenCode's default delivery is steer; anything it does not spell as
+// queue reads as such, which is also what the server would do with it.
+function inboxDelivery(value: unknown): MessageDelivery {
+  return value === "queue" ? "queue" : "steer";
+}
+
+/**
+ * One `session.inbox.list` record as a pending entry: the same reading the
+ * live `session.inbox.enqueued` gets, so a steer reconciled from the list
+ * reads exactly as the one the stream announced. Null for anything but a
+ * user entry.
+ */
+export function pendingInboxEntry(value: unknown): PendingInboxEntry | null {
+  const entry = record(value);
+  if (entry.type !== "user") return null;
+  const payload = record(entry.payload);
+  const attachments = storedAttachments(payload.files);
+  return {
+    id: string(entry.id, "inbox id"),
+    text: text(payload.text),
+    delivery: inboxDelivery(entry.delivery),
+    at: timestamp(record(entry.time).created, 0),
+    ...(attachments.length ? { attachments } : {}),
+  };
 }
 
 // Streamed parts are identified by their message, kind, and per-kind
@@ -527,7 +608,7 @@ export function createOpenCodeV2Normalizer(directory: string): (value: unknown, 
 // Stored 2.x message records (`message.list`), for history and accounting.
 
 import { attachmentIdFromFileUri } from "../../attachment-store";
-import { CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment } from "../../types";
+import { CHAT_ATTACHMENTS_PER_MESSAGE } from "../../types";
 import type { StoredMessageAccounting } from "../../provider";
 import { boundReplayedName, contractImageMime, errorMessage as storedErrorMessage } from "../normalization";
 
@@ -538,7 +619,7 @@ import { boundReplayedName, contractImageMime, errorMessage as storedErrorMessag
  * carrier, as on 1.x. Idle markers and agent/model/location switches carry
  * nothing for the timeline.
  */
-export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true): ConversationItem[] {
+export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true, background?: { workers: BackgroundWorkers; parent: string }): ConversationItem[] {
   const message = record(value);
   const id = string(message.id, "message id");
   const createdAt = timestamp(record(message.time).created, 0);
@@ -553,6 +634,7 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true):
         if (update.kind === "text" && update.item) return [update.item];
         return [];
       });
+      if (background) items.push(...background.workers.content(background.parent, message.content, createdAt).flatMap(update => update.kind === "upsert" ? [update.item] : []));
       const usage = tokensToUsage(message.tokens, message.cost);
       if (usage && mintUsageCarrier) {
         const model = modelSelection(message.model);
@@ -584,10 +666,13 @@ export function normalizeStoredMessage(value: unknown, mintUsageCarrier = true):
         ...(completed === undefined ? {} : { completedAt: completed }),
       }];
     }
-    case "synthetic":
+    case "synthetic": {
+      const workers = background?.workers.notification(background.parent, id, message, createdAt);
+      if (workers) return workers.flatMap(update => update.kind === "upsert" ? [update.item] : []);
       // A shell transcript's note to the model is already the command item.
       if (optionalString(record(message.metadata).source) === "shell") return [];
       return [{ id: `notice:${id}`, type: "notice", createdAt, level: "info", message: text(message.text) || "synthetic" }];
+    }
     case "system":
       // Provider-owned context with no live counterpart: showing it on a
       // reload would change the transcript and expose the agent's own

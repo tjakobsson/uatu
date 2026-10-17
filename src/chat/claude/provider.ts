@@ -18,7 +18,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "../provider";
-import type { ContextWindowItem, ContextWindowMetadata, ConversationItem, ScheduledWakeupItem } from "../types";
+import type { ContextWindowItem, ContextWindowMetadata, ConversationItem, MessageDelivery, ScheduledWakeupItem } from "../types";
 import { claudeWindowAnswer, type ClaudeWindowAnswer, type WindowDiagnostic } from "./context-window";
 import { ScheduledWakeupUnavailableError } from "../provider";
 import { LOGIN_FAILED_NOTICE_CODE, TASK_OUTPUT_TAIL_MAX_BYTES, type AgentUsageReport, type BackgroundTaskOutput, type ChatAgent, type ChatLoginState, type ChatCommand, type ChatMode, type ChatModel, type ConversationConfiguration, type ModelSelection, type PermissionRequest, type PlanExtraUsage, type PlanModelWindow, type PlanUtilization, type PlanUtilizationWindow, type QuestionRequest, type ReversibleHistoryResult, type ReversibleHistoryState, type SessionModelTotals, type SessionTotals, type StructuredQuestion, type UsageReadMode, type UsageReadResult } from "../types";
@@ -798,7 +798,10 @@ export class ClaudeProvider implements ChatProvider {
     return {
       id: "claude",
       name: "Claude Code",
-      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "scheduled-wakeups", "conversation-rename", "usage"],
+      // `send-now` without `steering`: a dormant or idle queue's message can
+      // be dispatched ahead of the rest, but the SDK has no inbox to deliver
+      // into a running turn (opencode-v2-steering D2).
+      capabilities: ["context", "permissions", "questions", "models", "modes", "variants", "commands", "attachments", "reversible-history", "subagents", "custom-model-id", "background-tasks", "scheduled-wakeups", "conversation-rename", "usage", "send-now"],
       permissionScopeNote: CLAUDE_PERMISSION_SCOPE_NOTE,
     };
   }
@@ -1328,7 +1331,10 @@ export class ClaudeProvider implements ChatProvider {
     }
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  // `delivery` is accepted for the seam's sake and not read: this agent does
+  // not declare `steering`, so the adapter never asks it to steer, and every
+  // prompt it receives is a dispatch onto an idle session.
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     await this.restoreDurableState();
     if (this.disposed) throw new Error("Claude provider is disposed");
     if (parseSubagentId(sessionId)) throw new Error("a subagent transcript is read-only");

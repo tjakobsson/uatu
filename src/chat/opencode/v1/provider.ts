@@ -23,7 +23,7 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, normalizeQuestion, pendingPermissionFields, storedMessageUsage, storedPromptId, type ProviderEvent, type ProviderEventMemory, type ProviderMessage } from "./normalization";
-import type { ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
+import type { ChatAccountChange, ChatAgent, ChatLoginState, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
 
 type Result<T> = { data?: T; error?: unknown };
 type ReversibleTurn = { id: string; providerId: string; draft: RestoredDraft; summary: string };
@@ -584,7 +584,10 @@ export class OpenCodeV1Provider implements ChatProvider {
     this.compatibilitySessions.clear();
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  // `delivery` is accepted for the seam's sake and not read: this agent does
+  // not declare `steering`, so the adapter never asks it to steer, and every
+  // prompt it receives is a dispatch onto an idle session.
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     this.historyReuse.invalidate(sessionId);
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {

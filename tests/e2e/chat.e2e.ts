@@ -53,13 +53,13 @@ test.describe("desktop OpenCode chat", () => {
     await expect(configurationTrigger).toBeDisabled();
     const response = await firstResponse;
     expect(response.request().postDataJSON()).toMatchObject({ model: { providerId: "openai", modelId: "gpt-5" } });
-    expect(await response.json()).toMatchObject({ held: false, conversation: { title: "Initial prompt" } });
+    expect(await response.json()).toMatchObject({ pending: false, conversation: { title: "Initial prompt" } });
     await expect(page.locator("#chat-title")).toHaveText("Initial prompt");
     await expect(page.locator("#chat-conversation-select option:checked")).toHaveText("Initial prompt");
     await expect(configurationTrigger).toBeEnabled();
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
-    // The fixed trailing action becomes cancel while the turn is live.
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+    // Send stays available; the separate Stop action is enabled while live.
+    await expect(page.locator("#chat-stop")).toBeEnabled();
     // With a turn in flight and nothing back yet, the timeline's working
     // line says so — the same line the first step will join.
     await expect(page.locator(".chat-activity-group.is-awaiting")).toBeVisible();
@@ -68,7 +68,7 @@ test.describe("desktop OpenCode chat", () => {
     await input.fill("Use the smaller approach");
     const heldResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await input.press("Enter");
-    expect(await (await heldResponse).json()).toMatchObject({ held: true });
+    expect(await (await heldResponse).json()).toMatchObject({ pending: true, delivery: "queue" });
     // The busy submission pins at the composer as a held message.
     await expect(page.locator("#chat-queue .is-held")).toContainText("Use the smaller approach");
 
@@ -83,7 +83,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(input).toHaveValue("draft retained across surfaces");
     await expect(configurationTrigger).toContainText("GPT-5");
 
-    await page.locator("#chat-send").click();
+    await page.locator("#chat-stop").click();
     await expect(page.locator("#chat-composer-status")).toHaveAttribute("aria-label", "Cancelled");
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
 
@@ -255,7 +255,7 @@ test.describe("desktop OpenCode chat", () => {
       await accepted;
     };
     await send("Start the work");
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+    await expect(page.locator("#chat-stop")).toBeEnabled();
     await send("/reload");
     await expect(page.locator("#chat-queue .is-held")).toHaveCount(1);
     // The running turn ends; the held /reload is delivered and starts.
@@ -284,7 +284,7 @@ test.describe("desktop OpenCode chat", () => {
       await accepted;
     };
     await send("Start the work");
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+    await expect(page.locator("#chat-stop")).toBeEnabled();
     await send("/reload");
     await send("/reload");
     await expect(page.locator("#chat-queue .is-held")).toHaveCount(2);
@@ -840,6 +840,17 @@ test.describe("desktop OpenCode chat", () => {
 });
 
 test("the chat backend starts only when the panel opens", async ({ page, request }) => {
+  // The preceding page's inventory source lingers after disconnect. Reset
+  // restarts retained broker sources, whose catalog read calls status even
+  // without a new browser request. Begin this cold-start test only after the
+  // old source is actually released, rather than resetting its counters early.
+  const inventoryState = async () => {
+    const stats = await control(request, { action: "stats" }) as { inventorySubscribers: number; pendingInventorySubscriptions: number };
+    return { active: stats.inventorySubscribers, pending: stats.pendingInventorySubscriptions };
+  };
+  const beforeRelease = await inventoryState();
+  await expect.poll(inventoryState, { message: "previous page's inventory source released before cold-start reset" }).toEqual({ active: 0, pending: 0 });
+  await test.info().attach("cold-start-isolation", { body: JSON.stringify({ beforeRelease, readyForReset: await inventoryState() }), contentType: "application/json" });
   await request.post("/__e2e/reset");
   const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
   // Chat initializes once the workspace state has loaded and the URL

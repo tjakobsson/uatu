@@ -3,6 +3,41 @@ import { describe, expect, test } from "bun:test";
 import { RunningWorkDisclosure } from "./running-work-disclosure";
 
 describe("a pinned list of running work", () => {
+  test("an automatic open retained across conversations stays automatic when the new work detaches", () => {
+    const list = new RunningWorkDisclosure();
+    expect(list.paint("A", 1)).toBe(true);
+    list.toggled(true);
+    expect(list.paint(null, 0)).toBeUndefined();
+    expect(list.paint("B", 0)).toBeUndefined();
+    expect(list.paint("B", 1)).toBeUndefined();
+    expect(list.paint("B", 0, true)).toBe(false);
+  });
+
+  test("a deliberate open retained across conversations stays deliberate when the new work detaches", () => {
+    const list = new RunningWorkDisclosure();
+    list.paint("A", 1);
+    list.toggled(false);
+    list.toggled(true);
+    expect(list.paint("B", 0)).toBeUndefined();
+    expect(list.paint("B", 1)).toBeUndefined();
+    expect(list.paint("B", 0, true)).toBeUndefined();
+  });
+  test("detaching work collapses only the automatic expansion, including its late toggle echo", () => {
+    const list = new RunningWorkDisclosure();
+    expect(list.paint("one", 1)).toBe(true);
+    expect(list.paint("one", 0, true)).toBe(false);
+    list.toggled(false);
+    expect(list.paint("one", 0, true)).toBeUndefined();
+    expect(list.paint("one", 1)).toBe(true);
+  });
+
+  test("a deliberate reopening is retained when the work detaches", () => {
+    const list = new RunningWorkDisclosure();
+    list.paint("one", 1);
+    list.toggled(false);
+    list.toggled(true);
+    expect(list.paint("one", 0, true)).toBeUndefined();
+  });
   test("opens when running work first appears, and only then", () => {
     const list = new RunningWorkDisclosure();
     expect(list.paint("one", 0)).toBeUndefined();

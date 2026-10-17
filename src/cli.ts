@@ -53,6 +53,8 @@ import {
 } from "./debug/metrics";
 import { setGitMetricsSink } from "./document/git-base-ref";
 import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
+import { consumeChildPolicyDescriptor } from "./hub/child-policy-bootstrap";
+import type { readChildPolicyBootstrap } from "./hub/child-policy";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -60,6 +62,11 @@ async function main() {
   // (chokidar, server, terminal stack) should run. parseWatchdogArgs throws
   // on malformed input, which we surface to stderr.
   const argv = Bun.argv.slice(2);
+  let childPolicy: ReturnType<typeof readChildPolicyBootstrap> | null = null;
+  if (argv[0] === "serve" && argv.includes("--hub-policy-bootstrap")) {
+    argv.splice(argv.indexOf("--hub-policy-bootstrap"), 1);
+    childPolicy = await consumeChildPolicyDescriptor();
+  }
   if (argv[0] === "--ssh-agent-supervisor") {
     if (argv.length !== 1) {
       process.exitCode = 2;
@@ -125,7 +132,7 @@ async function main() {
       await runHashPassword();
       return;
     }
-    await runWatch(parsed.options);
+    await runWatch(parsed.options, childPolicy);
   } catch (error) {
     console.error(`uatu: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
@@ -134,7 +141,11 @@ async function main() {
 
 // The session child. parseCommand only routes here for the hub's spawn
 // (--exit-on-stdin-close) or a source run; users get serveRemovedText().
-async function runWatch(options: WatchOptions) {
+async function runWatch(options: WatchOptions, childPolicy: ReturnType<typeof readChildPolicyBootstrap> | null = null) {
+  if (childPolicy && childPolicy.basePath !== options.basePath) {
+    childPolicy.dispose();
+    childPolicy = null;
+  }
   // Diagnostic plumbing comes before any heavy startup work — the cache dir
   // and the metrics registry are needed by createWatchSession and by the
   // watchdog spawn. Failures in this layer must never fail the watch session.
@@ -297,6 +308,7 @@ async function runWatch(options: WatchOptions) {
           chatService: chatService!,
           getWorkspaceCredential: () => watchSession!.getTerminalToken(),
           basePath: options.basePath,
+          childPolicy: childPolicy?.basePath === options.basePath ? childPolicy : undefined,
           manifestScope: options.manifestScope,
           metrics,
           debug: options.debug,
@@ -386,6 +398,7 @@ async function runWatch(options: WatchOptions) {
       return;
     }
     shuttingDown = true;
+    childPolicy?.dispose();
     console.error("uatu: shutting down");
 
     // The OpenCode child is detached as its own process group, so dispose it

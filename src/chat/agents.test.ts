@@ -5,7 +5,7 @@ import { ConversationInventoryBroadcaster } from "./inventory-broadcaster";
 import { ReplaySubscription } from "./replay";
 import type { WorkspaceChatService } from "./service";
 import { ConversationNotFoundError } from "./workspace";
-import type { ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary, UsageReadMode } from "./types";
+import type { ChatActivity, ChatAvailability, ChatEvent, ConversationSnapshot, ConversationSummary, MessageDelivery, UsageReadMode } from "./types";
 
 function summary(id: string, updatedAt = 1): ConversationSummary {
   return { id, title: `Conversation ${id}`, createdAt: updatedAt, updatedAt, status: "idle" };
@@ -51,12 +51,15 @@ class StubAgentService implements WorkspaceChatService {
   async prompt(id: string, requestId: string, text: string) {
     return this.record("prompt", [id, requestId, text], {
       messageId: "msg-1",
-      held: false,
+      pending: false,
+      delivery: "queue" as const,
       configuration: {},
       conversation: summary(id),
     });
   }
   async removeQueued(id: string, messageId: string) { return this.record("removeQueued", [id, messageId], { removed: true as const }); }
+  async changeDelivery(id: string, messageId: string, _requestId: string, delivery: MessageDelivery) { return this.record("changeDelivery", [id, messageId, delivery], { messageId, delivery }); }
+  async sendNow(id: string, messageId: string) { return this.record("sendNow", [id, messageId], { messageId, delivery: "queue" as const }); }
   async saveAttachment(): Promise<{ id: string; mimeType: string; sizeBytes: number }> { throw new Error("unused: the router owns the store"); }
   async resolveAttachment(): Promise<null> { throw new Error("unused: the router owns the store"); }
   async renameConversation(id: string, _requestId: string, title: string) {
@@ -87,6 +90,17 @@ class StubAgentService implements WorkspaceChatService {
 }
 
 describe("background task stops route to the owning agent", () => {
+  test("parent backgrounding dispatches the bare parent and receipt only to its owning agent", async () => {
+    const { service, a, b } = fixture();
+    const calls: unknown[] = [];
+    Object.assign(a, { backgroundBlockingWork: async (...args: unknown[]) => { calls.push(args); return { accepted: true as const }; } });
+    expect(await service.backgroundBlockingWork("opencode:parent", "receipt")).toEqual({ accepted: true });
+    expect(calls).toEqual([["parent", "receipt"]]);
+    expect(b.calls).toEqual([]);
+    await expect(service.backgroundBlockingWork("nope:parent", "receipt")).rejects.toThrow();
+    await expect(service.backgroundBlockingWork("claude:parent", "receipt")).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+  });
   test("stopTask strips the qualifier and reaches the agent that owns the conversation", async () => {
     const { service, a, b } = fixture();
     expect(await service.stopTask("claude:conv-1", "task-9", "req-1")).toEqual({ stopped: true });

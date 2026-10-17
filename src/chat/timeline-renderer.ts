@@ -1,4 +1,7 @@
 import { appUrl } from "../shared/app-url";
+import { backgroundTasksByTool } from "./background-tasks";
+import { workerStateLabel } from "./worker-state";
+import type { BackgroundTaskItem } from "./types";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { loginActionMarkup, type LoginAction } from "./login-action";
 import { renderTerminalText, tailStart, terminalLinesToHtml, terminalTextToHtml } from "./ansi";
@@ -133,6 +136,7 @@ export class TimelineRenderer {
     }
     const activeRequests = new Set<string>([...activeByOwner.values()].map(entry => entry.id));
     const toolRows = toolRowIndex(projection.items);
+    const workers = backgroundTasksByTool(projection.items);
 
     const todoLabels = todoActivityLabels(projection.items);
     const durations = turnDurations(projection.items);
@@ -164,6 +168,18 @@ export class TimelineRenderer {
       && !isRateLimitStanding(item)
       && !(item.type === "background_task" && (item.status === "running" || item.foreground === true)));
 
+    // A worker retains its start timestamp for elapsed time/correlation. Its
+    // launcher can be reported later, but the settled report cannot precede
+    // that cause. Preserve all unrelated conversation order and report bodies.
+    for (const result of [...visible]) {
+      if (result.type !== "background_task") continue;
+      const resultIndex = visible.indexOf(result);
+      const launcherIndex = visible.findLastIndex(item => (item.type === "tool" || item.type === "command") && workers.get(item.id) === result);
+      if (launcherIndex <= resultIndex) continue;
+      visible.splice(resultIndex, 1);
+      visible.splice(launcherIndex, 0, result);
+    }
+
     const nodes = new Map<string, HTMLElement>();
     for (const [visibleIndex, item] of visible.entries()) {
       const active = activeRequests.has(item.id);
@@ -192,7 +208,8 @@ export class TimelineRenderer {
       // the card first rendered (a recovered request, a 1.x part under
       // load), and the card must fill in when it does.
       const linkedTool = item.type === "permission" ? linkedToolRow(item, toolRows) : undefined;
-      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming), linkedTool?.id ?? "", linkedTool?.input ?? "", this.loginAction ? `${this.loginAction.agentName}\u0002${this.loginAction.href ?? ""}` : ""].join("\u0001");
+      const worker = workers.get(item.id);
+      const variant = [JSON.stringify(worker ?? null), todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), origin?.conversationId ?? "", origin?.label ?? "", String(allowSubagents), String(allowRevert), String(completedAssistant), this.permissionScopeNote ?? "", String(confirming), linkedTool?.id ?? "", linkedTool?.input ?? "", this.loginAction ? `${this.loginAction.agentName}\u0002${this.loginAction.href ?? ""}` : ""].join("\u0001");
       if (entry?.shellVariant !== undefined && entry.item === item && entry.active === active && entry.variant === variant
         && entry.shellVariant === this.shellVariant(entry.node, item.id)) {
         nodes.set(item.id, entry.node);
@@ -244,7 +261,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer, confirming, linkedTool, this.loginAction);
+      const markup = (defer: boolean) => renderItem(item, open, active, todo, duration, origin, readerClosed, allowSubagents, completedAssistant, allowRevert, this.permissionScopeNote, defer, confirming, linkedTool, this.loginAction, worker);
       const node = buildNode(markup(this.deferClosedActivity));
       if (this.deferClosedActivity && node.matches("details.chat-activity:not([open])")) {
         node.setAttribute("data-chat-lazy", "");
@@ -308,7 +325,7 @@ export class TimelineRenderer {
       }
       ordered.push(node);
     };
-    for (const segment of activitySegments(visible, projection.status, projection.acceptedDrafts.length > 0)) {
+    for (const segment of activitySegments(visible, projection.status, projection.acceptedDrafts.some(draft => !draft.unconfirmed))) {
       if (!segment.group) {
         for (const item of segment.items) {
           const node = nodes.get(item.id);
@@ -665,10 +682,7 @@ export function subagentEntries(items: readonly ConversationItem[]): SubagentEnt
   // it. The task item knows the child from its start edge — the launching row
   // only learns it from the tool result, at the end — so while the run is
   // going, the task is what makes the row openable and names its progress.
-  const runningTasks = new Map<string, Extract<ConversationItem, { type: "background_task" }>>();
-  for (const item of items) {
-    if (item.type === "background_task" && item.status === "running" && item.toolUseId) runningTasks.set(`tool:${item.toolUseId}`, item);
-  }
+  const runningTasks = backgroundTasksByTool(items);
   const entries: SubagentEntry[] = [];
   // The fork currently running, if any, and when its launching row was
   // created. Nothing in a tool item says which run produced it, so the
@@ -731,12 +745,12 @@ export function subagentEntries(items: readonly ConversationItem[]): SubagentEnt
     // that knows the run is still going, so while it runs the entry reads as
     // running and carries the agent's latest progress note. A settled task,
     // or none at all, leaves the row to speak for itself.
-    const progress = task?.progress;
+    const progress = task?.status === "running" ? task.progress : undefined;
     entries.push({
       id: item.id,
       description: detail.description,
       ...(detail.subagent === undefined ? {} : { subagent: detail.subagent }),
-      status: task ? "running" : item.status,
+      status: task?.stateUncertain ? "status unavailable" : task?.status ?? item.status,
       ...(conversationId === undefined ? {} : { conversationId }),
       ...(item.model === undefined ? {} : { model: item.model }),
       ...(item.usage === undefined ? {} : { usage: item.usage }),
@@ -1095,61 +1109,198 @@ export function decorateAttachmentImages(root: HTMLElement): void {
 }
 
 function renderDraft(draft: AcceptedDraft): string {
-  const label = draft.messageId.startsWith("pending:") ? "Sending…" : "Delivered, waiting for agent history";
+  const label = draft.unconfirmed ? "Acceptance unconfirmed — refreshing status" : draft.messageId.startsWith("pending:") ? "Sending…" : "Delivered, waiting for agent history";
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}">${renderMessageAttachments(draft.attachments)}${draft.text ? `<p>${escapeHtml(draft.text)}</p>` : ""}<small>${label}</small></article>`;
 }
 
-// A held message is not a timeline item: it renders in the dock above the
-// composer, keeps its removal control, and only becomes a transcript entry
-// when the workspace delivers it.
-function renderQueued(held: QueuedMessage): string {
-  const id = escapeHtmlAttribute(held.id);
-  return `<article class="chat-queued-message is-held" role="listitem" data-chat-queued-id="${id}">${renderMessageAttachments(held.attachments)}${held.text ? `<p>${escapeHtml(held.text)}</p>` : ""}<footer class="chat-queued-row"><small class="chat-queued-tag">Queued — sends when the agent is ready</small><button type="button" class="chat-queued-remove" data-queue-remove="${id}">Remove</button></footer></article>`;
+// What the dock needs beyond the entries to decide each one's actions
+// (opencode-v2-steering D10): the agent's capabilities, whether the turn
+// runs, and whether an entry's text is a command (commands are never steered).
+export type QueueDockContext = {
+  steering: boolean;
+  sendNow: boolean;
+  running: boolean;
+  isCommand: (text: string) => boolean;
+  // The dock note while any steer is pending: delivery-time configuration,
+  // plus a visible warning above the entries when a replacement is staged.
+  note?: HTMLElement;
+  replacement?: boolean;
+  pausedSteers?: number;
+  // Defined only on touch; desktop retains the established open list.
+  compactOpen?: boolean;
+};
+
+export const STEER_MODEL_NOTE = "Steers run with the conversation's model and mode as they stand when delivered.";
+
+export function pendingSteerReplacementNote(queued: readonly QueuedMessage[]): string {
+  const steers = queued.filter(entry => entry.delivery === "steer");
+  if (!steers.length) return "";
+  return `${steers.length} pending steer${steers.length === 1 ? "" : "s"} will be delivered together with your replacement.`;
+}
+
+function queuedTag(entry: QueuedMessage): string {
+  return entry.paused ? "Sends after your next message" : entry.delivery === "steer" ? "Next step" : "After this turn";
+}
+
+// The entry's own actions, in rail order (switch or send first, then edit,
+// then remove), as `[attribute, label]` pairs — a pure decision the renderer
+// and the tests share.
+export function queuedActions(entry: QueuedMessage, context: QueueDockContext): Array<[string, string]> {
+  const actions: Array<[string, string]> = [];
+  if (entry.delivery === "steer") {
+    actions.push(["data-queue-queue", "Queue"]);
+  } else if (context.steering) {
+    // On a steering agent, Send now IS the switch to steer (D8); a command
+    // cannot go to the agent's inbox either way.
+    if (!context.isCommand(entry.text)) actions.push(context.running ? ["data-queue-steer", context.pausedSteers ? "Steer + paused steers" : "Steer"] : ["data-queue-send-now", context.pausedSteers ? "Send now + paused steers" : "Send now"]);
+  } else if (context.sendNow && !context.running) {
+    actions.push(["data-queue-send-now", "Send now"]);
+  }
+  actions.push(["data-queue-edit", "Edit"], ["data-queue-remove", "Remove"]);
+  return actions;
+}
+
+// A pending message is not a timeline item: it renders in the dock above the
+// composer with its delivery label and its actions, and only becomes a
+// transcript entry when the agent delivers it.
+function renderQueued(entry: QueuedMessage, context: QueueDockContext, discriminator?: number): string {
+  const id = escapeHtmlAttribute(entry.id);
+  const classes = `chat-queued-message ${entry.delivery === "steer" ? "is-steer" : "is-held"}`;
+  const message = entry.text.trim() ? entry.text : "Image attachment";
+  const buttons = (entry.unconfirmed ? [] : queuedActions(entry, context)).map(([attribute, label]) => `<button type="button" class="chat-queued-action${attribute === "data-queue-remove" ? " chat-queued-remove" : ""}" aria-label="${escapeHtmlAttribute(`${label} “${message}”${discriminator === undefined ? "" : `, pending message ${discriminator}`}`)}" ${attribute}="${id}">${escapeHtml(label)}</button>`).join("");
+  return `<article class="${classes}" role="listitem" data-chat-queued-id="${id}" data-delivery="${entry.delivery}"${entry.paused ? " data-paused" : ""}><div class="chat-queued-heading"><strong class="chat-queued-badge">${entry.delivery === "steer" ? "Steer" : "Queue"}</strong>${entry.unconfirmed ? '<span class="chat-queued-paused">Acceptance unconfirmed</span>' : entry.paused ? '<span class="chat-queued-paused">Paused</span>' : ""}<small class="chat-queued-tag">${entry.unconfirmed ? "Refreshing status; do not repeat this action" : escapeHtml(queuedTag(entry))}</small></div>${renderMessageAttachments(entry.attachments)}${entry.text ? `<p>${escapeHtml(entry.text)}</p>` : ""}<footer class="chat-queued-row"><span class="chat-queued-actions">${buttons}</span></footer></article>`;
 }
 
 /**
  * Reconciles the queue dock — the strip docked to the composer that shows
- * what the workspace holds. Deliberately outside the timeline scroll: a held
- * message must sit against the composer whatever length the transcript is
- * and wherever the reader has scrolled it.
+ * what is pending: steers first, then the workspace's held queue (D5).
+ * Deliberately outside the timeline scroll: a pending message must sit
+ * against the composer whatever length the transcript is and wherever the
+ * reader has scrolled it.
  */
 export class QueueDockRenderer {
-  private readonly entries = new Map<string, { node: HTMLElement; held: QueuedMessage }>();
+  private readonly entries = new Map<string, { node: HTMLElement; html: string; number: number; disambiguated: boolean }>();
+  private nextPendingNumber = 0;
+  private replacementWarningShown = false;
 
-  render(target: HTMLElement, queued: readonly QueuedMessage[]): void {
+  render(target: HTMLElement, queued: readonly QueuedMessage[], context: QueueDockContext = { steering: false, sendNow: false, running: true, isCommand: () => false }): void {
+    context = { ...context, pausedSteers: queued.filter(entry => entry.delivery === "steer" && entry.paused).length };
+    let header = target.querySelector<HTMLElement>(":scope > .chat-queue-header");
+    if (!header) {
+      header = target.ownerDocument.createElement("div");
+      header.className = "chat-queue-header";
+      target.prepend(header);
+    }
+    const steers = queued.filter(entry => entry.delivery === "steer").length;
+    const paused = queued.some(entry => entry.unconfirmed) ? undefined : queued.find(entry => entry.delivery === "steer" && entry.paused);
+    const breakdown = [steers > 0 && `${steers} steer${steers === 1 ? "" : "s"}`, queued.length > steers && `${queued.length - steers} queued`].filter(Boolean).join(" · ");
+    const counts = context.compactOpen === undefined
+      ? `<span>${queued.length} pending</span><span class="chat-queue-breakdown">${breakdown ? ` · ${breakdown}` : ""}</span>`
+      : `<span>${breakdown || "No pending messages"}</span>`;
+    const heading = context.compactOpen === undefined ? `<strong>${counts}</strong>` : `<button type="button" class="chat-pending-toggle" data-pending-toggle aria-expanded="${context.compactOpen}" aria-controls="chat-queue-items">${counts}</button>`;
+    const headerHtml = `${heading}${paused ? `<button type="button" class="chat-queued-action" data-queue-send-now="${escapeHtmlAttribute(paused.id)}">Send ${context.pausedSteers} paused steer${context.pausedSteers === 1 ? "" : "s"} now</button>` : ""}`;
+    if (header.innerHTML !== headerHtml) header.innerHTML = headerHtml;
+    // The entries live in the dock's own list; the note sits beside it, so
+    // the list holds list items only.
+    let list = target.querySelector<HTMLElement>(":scope > .chat-queue-items");
+    if (!list) {
+      list = target.ownerDocument.createElement("div");
+      list.className = "chat-queue-items";
+      list.id = "chat-queue-items";
+      list.setAttribute("role", "list");
+      header.after(list);
+    }
+    list.hidden = context.compactOpen === false;
     const ordered: HTMLElement[] = [];
-    for (const held of queued) {
-      const entry = this.entries.get(held.id);
-      if (entry && entry.held.text === held.text && JSON.stringify(entry.held.attachments ?? []) === JSON.stringify(held.attachments ?? [])) {
-        ordered.push(entry.node);
+    const textCounts = new Map<string, number>();
+    const accessibleText = (text: string) => text.trim().replace(/\s+/g, " ");
+    for (const entry of queued) {
+      const text = accessibleText(entry.text);
+      textCounts.set(text, (textCounts.get(text) ?? 0) + 1);
+    }
+    for (const entry of queued) {
+      // Rebuilt when anything shown changes — text, attachments, delivery,
+      // paused state, or the actions the context allows — and kept otherwise.
+      const existing = this.entries.get(entry.id);
+      // Once disambiguated, a pending entry keeps its client-local number
+      // through reorder, delivery switches and sibling removal. State is
+      // bounded by the live dock, not a lifetime tombstone map.
+      const number = existing?.number ?? ++this.nextPendingNumber;
+      const text = accessibleText(entry.text);
+      const disambiguated = existing?.disambiguated === true || !text || (textCounts.get(text) ?? 0) > 1;
+      const html = renderQueued(entry, context, disambiguated ? number : undefined);
+      if (existing && existing.html === html) {
+        ordered.push(existing.node);
         continue;
       }
-      const node = buildNode(renderQueued(held));
+      const node = buildNode(html);
       decorateAttachmentImages(node);
-      entry?.node.remove();
-      this.entries.set(held.id, { node, held });
+      existing?.node.remove();
+      this.entries.set(entry.id, { node, html, number, disambiguated });
       ordered.push(node);
     }
-    const live = new Set(queued.map(held => held.id));
+    const live = new Set(queued.map(entry => entry.id));
     for (const [id, entry] of this.entries) {
       if (!live.has(id)) {
         entry.node.remove();
         this.entries.delete(id);
       }
     }
-    let cursor = target.firstElementChild;
+    let cursor = list.firstElementChild;
     for (const node of ordered) {
       if (node === cursor) {
         cursor = cursor.nextElementSibling;
         continue;
       }
-      target.insertBefore(node, cursor);
+      list.insertBefore(node, cursor);
     }
     target.hidden = queued.length === 0;
+    if (context.note) {
+      const steering = queued.some(entry => entry.delivery === "steer");
+      context.note.hidden = !steering;
+      const replacementNote = context.replacement ? pendingSteerReplacementNote(queued) : "";
+      const note = `${replacementNote ? `<span class="chat-queue-replacement">${escapeHtml(replacementNote)} </span>` : ""}<span class="chat-queue-model-note">${escapeHtml(STEER_MODEL_NOTE)}</span>`;
+      context.note.classList.toggle("is-replacement", Boolean(replacementNote));
+      if (steering && context.note.innerHTML !== note) context.note.innerHTML = note;
+      // The replacement warning must be visible before the user submits,
+      // not buried below the entries in the dock's scrollable list.
+      if (replacementNote) {
+        if (context.note.nextElementSibling !== list) list.before(context.note);
+        // Moving the note before the list alone leaves it clipped when the
+        // reader was at the bottom. Reveal once on entry into this state;
+        // subsequent queue updates must respect the reader's own scrolling.
+        if (!this.replacementWarningShown) {
+          target.scrollTop = 0;
+          const note = context.note;
+          // The queue may itself sit below live tracks in the aggregate dock.
+          // Reveal the consequence once there too, without panning the surface
+          // or stealing later deliberate dock/transcript scrolling.
+          const reveal = () => {
+            if (!target.isConnected || !this.replacementWarningShown) return;
+            const dock = target.parentElement;
+            if (dock?.clientHeight === 0 && document.documentElement.hasAttribute("data-chat-work-constrained")) dock.dispatchEvent(new Event("chat-work-reveal"));
+            if (!dock?.classList.contains("chat-work-dock") || dock.clientHeight <= 0) return;
+            const warning = note.querySelector(".chat-queue-replacement") ?? note;
+            const bounds = warning.getBoundingClientRect();
+            const visible = dock.getBoundingClientRect();
+            const top = visible.top + dock.clientTop;
+            const bottom = top + dock.clientHeight;
+            if (bounds.top < top) dock.scrollTop += Math.floor(bounds.top - top);
+            else if (bounds.bottom > bottom) dock.scrollTop += Math.ceil(Math.min(bounds.top - top, bounds.bottom - bottom));
+          };
+          // Undo also restores text into the composer, changing the aggregate
+          // space after this renderer returns. Measure that final layout.
+          if (typeof requestAnimationFrame === "function") requestAnimationFrame(reveal);
+        }
+      } else if (list.nextElementSibling !== context.note) list.after(context.note);
+      this.replacementWarningShown = Boolean(replacementNote);
+    }
   }
 
   reset(): void {
     this.entries.clear();
+    this.nextPendingNumber = 0;
+    this.replacementWarningShown = false;
   }
 }
 
@@ -1207,7 +1358,7 @@ export class RevertedMessagesDockRenderer {
 
 type RequestOrigin = { conversationId: string; label: string };
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false, linkedTool?: ToolItem, loginAction?: LoginAction): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, origin?: RequestOrigin, readerClosed = false, allowSubagents = true, completedAssistant = false, allowRevert = false, permissionScopeNote?: string, deferClosed = false, confirming = false, linkedTool?: ToolItem, loginAction?: LoginAction, worker?: BackgroundTaskItem): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A prompt a scheduled wakeup submitted opens that wakeup's turn. It is
@@ -1256,8 +1407,8 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // place. (Running ones are filtered out above and listed by the composer.)
   if (item.type === "background_task") {
     const outcome = item.status === "completed" ? "completed" : item.status === "failed" ? "failed" : item.status === "stopped" ? "cancelled" : "running";
-    const body = deferClosed && !open ? "" : `${item.summary ? `<pre class="chat-task-summary">${escapeHtml(item.summary)}</pre>` : ""}${item.toolUseId ? `<p class="chat-tool-meta">Started by the ${escapeHtml(item.taskType === "local_agent" ? "Agent" : "Bash")} step above.</p>` : ""}`;
-    return activityShell(id, outcome, backgroundTaskLabel(item), item.description, body, open, false, readerClosed, stamp, item.status === "stopped" ? "stopped" : undefined);
+    const body = deferClosed && !open ? "" : `${item.summary ? `<pre class="chat-task-summary">${escapeHtml(item.summary)}</pre>` : ""}${item.toolUseId ? `<p class="chat-tool-meta"><button type="button" data-chat-jump="tool:${escapeHtmlAttribute(item.toolUseId)}">Go to launch</button></p>` : ""}${allowSubagents && item.childConversationId ? `<button type="button" data-open-conversation="${escapeHtmlAttribute(item.childConversationId)}">Open transcript</button>` : ""}`;
+    return activityShell(id, outcome, backgroundTaskLabel(item), item.description, body, open, false, readerClosed, stamp, workerStateLabel(item.status, item.stateUncertain));
   }
   // A wakeup the agent scheduled for itself, drawn at every point of its
   // life: pending with its fire time, fired with a link to the turn it
@@ -1285,7 +1436,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   }
   if (item.type === "permission") return renderPermission(item, open, activeRequest, origin, allowSubagents, permissionScopeNote, confirming, linkedTool);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, origin, allowSubagents);
-  if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents, deferClosed);
+  if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents, deferClosed, worker);
   // A command's text is the subject, not the label. As a label it lands in the
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
   // of truncating; "Shell" names the step and the command ellipsizes beside it.
@@ -1391,9 +1542,9 @@ function renderActivityOutput(output: string | undefined, status: ActivityStatus
   return `<pre${block}>${preview}</pre><details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary><pre${block}>${rest}</pre></details>`;
 }
 
-function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: TodoSummary | undefined, allowSubagents: boolean, deferClosed = false): string {
+function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: TodoSummary | undefined, allowSubagents: boolean, deferClosed = false, worker?: BackgroundTaskItem): string {
   const detail = describeToolDetail(item);
-  const body = deferClosed && !open && !(autoOpen(item.status, item.output) && !readerClosed) ? "" : toolBody(detail, item, allowSubagents);
+  const body = deferClosed && !open && !(autoOpen(item.status, item.output) && !readerClosed) ? "" : toolBody(detail, item, allowSubagents, worker);
   // A todo update stays collapsed, but its summary reports what moved and to
   // which task — every todowrite call carries the whole list, so showing the
   // list each time reprints it verbatim on every tool call.
@@ -1402,7 +1553,9 @@ function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: 
   // the child has reported a price; zero is an unpriced model, not free.
   const subagentCost = detail.kind === "agent" && item.usage?.costUsd ? ` · ${formatUsd(item.usage.costUsd)}` : "";
   const subject = detail.kind === "todo" ? todo?.task : `${toolSubject(detail) ?? ""}${subagentCost}` || undefined;
-  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, timestampAttribute(item.createdAt), activityStatusText(item.status, item.elapsedMs));
+  const outcome = worker?.status === "stopped" ? "cancelled" : worker?.status ?? item.status;
+  const state = worker ? worker.stateUncertain ? "unknown · Status unavailable — reconnecting" : worker.status === "running" ? "working · Started in background" : workerStateLabel(worker.status) : undefined;
+  return activityShell(escapeHtmlAttribute(item.id), outcome, label, subject, body, open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, timestampAttribute(item.createdAt), state ?? activityStatusText(item.status, item.elapsedMs));
 }
 
 // One rendering for every diff the chat shows — a tool's edit, a patch, and a
@@ -1411,7 +1564,7 @@ function chatDiffMarkup(diff: DiffLine[]): string {
   return `<pre class="chat-diff">${diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>`;
 }
 
-function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): string {
+function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean, worker?: BackgroundTaskItem): string {
   // An error is a process's stderr as often as not, escapes included.
   const errorBlock = (terminal: boolean) => (item.error ? `<pre class="chat-tool-error${terminal ? " chat-tool-terminal" : ""}">${terminalTextToHtml(item.error)}</pre>` : "");
   const error = errorBlock(false);
@@ -1441,7 +1594,7 @@ function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): 
     case "agent":
       // The result is the subagent's report — prose, rendered like assistant
       // markdown rather than dumped as the raw task envelope.
-      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${allowSubagents && detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
+      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${allowSubagents && (worker?.childConversationId ?? detail.conversationId) ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute((worker?.childConversationId ?? detail.conversationId)!)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${worker ? worker.status === "running" ? `<p>Started in background</p>` : `<button type="button" data-chat-jump="${escapeHtmlAttribute(worker.id)}">View ${escapeHtml(worker.status)} worker result</button>` : detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
     case "skill":
       // A skill Claude Code ran as a fork is a conversation of its own. The
       // subagents track lists the fork too (as a fork entry, beside the agent
@@ -1515,7 +1668,7 @@ function activityShell(id: string, status: string, label: string, subject: strin
 /** "Background task finished" / "failed" / "stopped", or "Background task" while it runs. */
 export function backgroundTaskLabel(item: Extract<ConversationItem, { type: "background_task" }>): string {
   const noun = item.taskType === "local_agent" ? "Background agent" : item.taskType === "local_workflow" ? "Background workflow" : "Background task";
-  return item.status === "completed" ? `${noun} finished` : item.status === "failed" ? `${noun} failed` : item.status === "stopped" ? `${noun} stopped` : noun;
+  return item.status === "running" ? noun : `${noun} ${workerStateLabel(item.status, item.stateUncertain)}`;
 }
 
 /** "running · 12s" for a tool the agent reports elapsed time for, else the bare status. */

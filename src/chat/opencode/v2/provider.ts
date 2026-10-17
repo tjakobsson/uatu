@@ -8,7 +8,7 @@ import { OPENCODE_PERMISSION_SCOPE_NOTE } from "../permission-scope";
 import { stableProviderId } from "../message-id";
 import { measureChatWork } from "../../performance";
 import { HistoryReuse, historyPageCursor, historyPageEnd, historyVersion } from "../../history-reuse";
-import { InvalidQuestionAnswerError, ReversibleHistoryTargetError } from "../../provider";
+import { BackgroundTaskUnavailableError, OperationOutcomeUnknownError, InvalidQuestionAnswerError, ReversibleHistoryTargetError, type PendingInboxEntry } from "../../provider";
 import type {
   ChatProvider,
   NormalizedProviderEvent,
@@ -21,8 +21,10 @@ import type {
   StoredMessageAccounting,
 } from "../../provider";
 import { pendingPermissionFields } from "../normalization";
-import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, storedAccounting, storedPromptId, supportedFormFields } from "./normalization";
-import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
+import { BackgroundWorkers } from "./background";
+import { createOpenCodeV2Memory, createOpenCodeV2Normalizer, formPresentation, modelSelection, normalizeStoredMessage, pendingInboxEntry, storedAccounting, storedPromptId, supportedFormFields } from "./normalization";
+import type { ChatAccountChange, ChatAgent, ChatCommand, ChatLoginState, ChatMode, ChatModel, ConversationConfiguration, MessageDelivery, ModelSelection, RestoredDraft, ReversibleHistoryResult, ReversibleHistoryState } from "../../types";
+import { TASK_OUTPUT_TAIL_MAX_BYTES } from "../../types";
 
 /**
  * The OpenCode 2.x provider: the same `ChatProvider` seam as the 1.x stack,
@@ -57,6 +59,8 @@ export function createOpenCodeV2Provider(options: {
 
 export class OpenCodeV2Provider implements ChatProvider {
   private readonly historyReuse = new HistoryReuse<StoredMessage[]>();
+  private readonly readLifetime = new AbortController();
+  private readonly backgroundReads = new Map<string, Promise<import("../../types").BackgroundTaskItem[]>>();
   private readonly notificationLifecycle = new OpenCodeNotificationLifecycle();
   // How many models the last catalog read offered; null before the first.
   private offeredModels: number | null = null;
@@ -124,7 +128,10 @@ export class OpenCodeV2Provider implements ChatProvider {
     return {
       id: "opencode",
       name: "OpenCode",
-      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments", "reversible-history"],
+      // `steering` and `send-now` ride the 2.x session inbox: a steer is an
+      // inbox entry OpenCode delivers at the next step boundary and can
+      // cancel before then (opencode-v2-steering D2).
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments", "reversible-history", "steering", "send-now", "background-tasks", "background-blocking-work", "side-generation"],
       permissionScopeNote: OPENCODE_PERMISSION_SCOPE_NOTE,
     };
   }
@@ -319,6 +326,9 @@ export class OpenCodeV2Provider implements ChatProvider {
     const end = historyPageEnd(options.cursor, version, visible.length);
     const start = Math.max(0, end - Math.max(1, options.limit));
     const page = visible.slice(start, end);
+    const normalized = await this.backgroundHistory(sessionId, visible);
+    const liveLaunches = new Set([...normalized.values()].flatMap(({ item }) => item.type === "background_task" && item.status === "running"
+      ? [...(item.toolUseIds ?? []), ...(item.toolUseId ? [item.toolUseId] : [])].map(id => `tool:${id}`) : []));
     const accounting: StoredMessageAccounting[] = [];
     let newestPrompt: string | undefined;
     for (let index = 0; index < end; index += 1) {
@@ -329,15 +339,115 @@ export class OpenCodeV2Provider implements ChatProvider {
       if (reported) accounting.push(newestPrompt === undefined ? reported : { ...reported, promptId: newestPrompt });
     }
     return {
-      items: page.flatMap(message => normalizeStoredMessage(message)),
+      items: [...normalized.values()].filter(({ item, index }) => index >= start && index < end
+        || options.cursor === undefined && (item.type === "background_task" && item.status === "running" || liveLaunches.has(item.id))).map(({ item }) => item),
       accounting,
-      completeItems: visible.flatMap(message => normalizeStoredMessage(message)),
+      completeItems: [...normalized.values()].map(({ item }) => item),
       nextCursor: historyPageCursor(start, version),
     };
   }
 
+  private async backgroundHistory(sessionId: string, visible: StoredMessage[]) {
+    // A finite complete-history fold is discarded after this read; only
+    // long-lived stream memory uses the retention budget/fallback.
+    const workers = new BackgroundWorkers({ entries: Infinity, bytes: Infinity });
+    const unavailableChildren = new Set<string>();
+    // Only scoped session records establish child ownership. Tool metadata
+    // supplies an identity to verify, never permission to read a foreign child.
+    const children = new Set(visible.flatMap(message => message.type === "synthetic" && asRecord(message.metadata).source === "subagent"
+      ? [stringValue(asRecord(message.metadata).childID)].filter((id): id is string => !!id) : Array.isArray(message.content)
+      ? message.content.flatMap(part => {
+        const child = stringValue(asRecord(asRecord(asRecord(part).state).metadata).sessionID);
+        return child ? [child] : [];
+      }) : []));
+    for (const child of children) {
+      const session = await this.getSession(child);
+      if (session?.parentId !== sessionId) continue;
+      workers.verifyChild(child, sessionId);
+      const launches = visible.flatMap(message => Array.isArray(message.content) ? message.content : [])
+        .filter(part => asRecord(asRecord(asRecord(part).state).metadata).sessionID === child);
+      if (launches.length > 1 || launches.some(part => asRecord(asRecord(part).state).status === "completed" && asRecord(asRecord(asRecord(part).state).metadata).status === "running")) {
+        // An idle record is an execution boundary, not a worker report. It
+        // constrains old-task authorization even before a newer foreground
+        // launcher completes (or when another client continued the child).
+        // An active child alone cannot verify that old occurrence.
+        try {
+          for (const message of await this.allMessages(child)) {
+            if (message.type === "idle") workers.executionEnded(child, messageCreatedAt(message));
+          }
+        } catch { unavailableChildren.add(child); }
+      }
+    }
+    const normalized = new Map<string, { item: import("../../types").ConversationItem; index: number }>();
+    visible.forEach((message, index) => {
+      for (const item of normalizeStoredMessage(message, true, { workers, parent: sessionId })) {
+        // The stored-message seam returns items rather than remove operations.
+        // Retire the notification-first placeholder as soon as the same
+        // provider result has acquired its canonical launch identity.
+        if (item.type === "background_task" && item.resultId && item.toolUseId) {
+          for (const [id, previous] of normalized) {
+            if (previous.item.type === "background_task" && previous.item.resultId === item.resultId && id !== item.id) normalized.delete(id);
+          }
+        }
+        normalized.set(item.id, { item: item.type === "background_task" && item.status === "running" && item.childConversationId && unavailableChildren.has(item.childConversationId)
+          ? { ...item, stateUncertain: true } : item, index });
+      }
+    });
+    return normalized;
+  }
+
+  reconcileBackgroundTasks(sessionId: string, options?: { fresh?: boolean }): Promise<import("../../types").BackgroundTaskItem[]> {
+    if (options?.fresh) {
+      const read = () => {
+        // An older in-flight inventory is not post-action evidence. Invalidate
+        // reuse (including child execution boundaries) before the new read.
+        this.historyReuse.invalidate();
+        return this.reconcileBackgroundTasks(sessionId);
+      };
+      const previous = this.backgroundReads.get(sessionId);
+      return previous ? previous.catch(() => undefined).then(read) : read();
+    }
+    const pending = this.backgroundReads.get(sessionId);
+    if (pending) return pending;
+    const read = this.readBackgroundTasks(sessionId).finally(() => {
+      if (this.backgroundReads.get(sessionId) === read) this.backgroundReads.delete(sessionId);
+    });
+    this.backgroundReads.set(sessionId, read);
+    return read;
+  }
+
+  private async readBackgroundTasks(sessionId: string): Promise<import("../../types").BackgroundTaskItem[]> {
+    if (!await this.getSession(sessionId)) throw new Error("Background parent is unavailable");
+    const [history, pending, active] = await Promise.all([
+      this.allMessages(sessionId),
+      this.client.session.inbox.list({ sessionID: sessionId }, { signal: this.readLifetime.signal }),
+      this.client.session.active({ signal: this.readLifetime.signal }).catch(() => undefined),
+    ]);
+    const stored = new Set(history.map(message => message.id));
+    const notifications = (pending as unknown as StoredMessage[]).filter(entry => entry.type === "synthetic" && !stored.has(entry.id))
+      .map(entry => ({ ...asRecord(entry.payload), id: entry.id, type: "synthetic", time: entry.time }));
+    const folded = await this.backgroundHistory(sessionId, [...history, ...notifications]);
+    const tasks: import("../../types").BackgroundTaskItem[] = [];
+    for (const { item } of folded.values()) {
+      if (item.type !== "background_task") continue;
+      if (item.status !== "running") { tasks.push({ ...item, stateUncertain: false }); continue; }
+      let confirmed = !!item.childConversationId && active?.[item.childConversationId] !== undefined;
+      if (item.taskType === "shell" && item.outputFile?.startsWith("shell:")) {
+        const shell = await this.client.shell.get({ id: item.outputFile.slice(6), ...this.scope }, { signal: this.readLifetime.signal }).catch(() => undefined);
+        // Exit is not job settlement: capture may still be pending. The
+        // unique owned shell remains controllable until its job result arrives.
+        confirmed = shell?.data.metadata.sessionID === sessionId;
+      }
+      tasks.push({ ...item, stateUncertain: item.stateUncertain === true || !confirmed });
+    }
+    return tasks;
+  }
+
   private async allMessages(sessionId: string): Promise<StoredMessage[]> {
-    return this.historyReuse.read(sessionId, undefined, () => this.readAllMessages(sessionId));
+    // Reuse only inside a connected stream generation. Every normalized
+    // session event invalidates its entry (including an in-flight read),
+    // and reconnect starts cold because V2 offers no provider event replay.
+    return this.historyReuse.read(sessionId, this.streaming ? String(this.streamGeneration) : undefined, () => this.readAllMessages(sessionId));
   }
 
   private async readAllMessages(sessionId: string): Promise<StoredMessage[]> {
@@ -350,7 +460,7 @@ export class OpenCodeV2Provider implements ChatProvider {
         // first page.
         const page = await this.client.message.list(cursor
           ? { sessionID: sessionId, limit: 100, cursor }
-          : { sessionID: sessionId, order: "asc", limit: 100 });
+          : { sessionID: sessionId, order: "asc", limit: 100 }, { signal: this.readLifetime.signal });
         for (const item of page.data as StoredMessage[]) byId.set(messageIdentity(item), item);
         cursor = page.data.length > 0 ? page.cursor.next ?? undefined : undefined;
       } while (cursor);
@@ -389,6 +499,25 @@ export class OpenCodeV2Provider implements ChatProvider {
         // that still escapes must cost one event rather than ending the stream.
         let normalized: NormalizedProviderEvent;
         try {
+          const raw = asRecord(event);
+          const location = stringValue(asRecord(raw.location).directory);
+          if (!location || path.resolve(location) === this.workspace) {
+            const data = asRecord(raw.data);
+            const parent = stringValue(data.sessionID);
+            const metadata = asRecord(asRecord(asRecord(data.item).payload).metadata);
+            const children = new Set<string>();
+            if (metadata.source === "subagent" && typeof metadata.childID === "string") children.add(metadata.childID);
+            const toolChild = stringValue(asRecord(data.metadata).sessionID);
+            if (toolChild) children.add(toolChild);
+            for (const part of Array.isArray(data.content) ? data.content : []) {
+              const child = stringValue(asRecord(asRecord(asRecord(part).state).metadata).sessionID);
+              if (child) children.add(child);
+            }
+            if (parent) for (const child of children) {
+              const session = await this.getSession(child);
+              if (session?.parentId === parent) memory.workers.verifyChild(child, parent);
+            }
+          }
           normalized = this.normalize(event, memory);
           const notificationTurns = this.notificationLifecycle.observe(event, normalized);
           if (notificationTurns.length > 0) { normalized.notificationTurns = notificationTurns; normalized.outcome = "handled"; }
@@ -566,9 +695,12 @@ export class OpenCodeV2Provider implements ChatProvider {
 
   private reportEnqueuedUser(event: NormalizedProviderEvent): NormalizedProviderEvent | undefined {
     if (event.eventType !== "session.inbox.enqueued" || !event.conversationId) return;
-    const row = event.updates.find(update => update.kind === "upsert" && update.item.type === "user_message");
-    if (!row || row.kind !== "upsert") return;
-    const serverId = row.item.id.slice("message:".length);
+    // The enqueue carries no timeline row any more (opencode-v2-steering
+    // D4): the server-minted id is read from the pending inbox delta, and
+    // the row itself lands when the inbox delivers the entry.
+    const pending = event.updates.find(update => update.kind === "inbox" && update.delta.kind === "pending");
+    if (!pending || pending.kind !== "inbox") return;
+    const serverId = pending.delta.id;
     // A prompt's row carries the id this process gave it; no command
     // admission, however old, is waiting for that one.
     if (this.promptIds.has(serverId)) return;
@@ -619,15 +751,23 @@ export class OpenCodeV2Provider implements ChatProvider {
   }
 
   async dispose(): Promise<void> {
+    this.readLifetime.abort();
     this.historyReuse.dispose();
+    await Promise.allSettled(this.backgroundReads.values());
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  promptIdentity(identity: string): string { return stableProviderId("msg", identity); }
+
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: MessageDelivery; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     this.historyReuse.invalidate(sessionId);
     // Session-level, not prompt fields: the prompt input carries neither a
-    // model nor an agent.
-    if (input.model) await this.switchModel(sessionId, input.model, input.variant);
-    if (input.mode) await this.client.session.switchAgent({ sessionID: sessionId, agent: input.mode });
+    // model nor an agent. Applied only for a queue delivery — a steer runs
+    // under the session's configuration at delivery, because a mid-turn
+    // switch would retarget the very turn being steered (D6).
+    if (input.delivery === "queue") {
+      if (input.model) await this.switchModel(sessionId, input.model, input.variant);
+      if (input.mode) await this.client.session.switchAgent({ sessionID: sessionId, agent: input.mode });
+    }
     const files = (input.attachments ?? []).map(attachment => ({
       // `file:` over `data:` because the processes share a disk: no base64
       // inflation, and the stored record echoes the uri as the attachment's
@@ -639,7 +779,7 @@ export class OpenCodeV2Provider implements ChatProvider {
     // Known before the request goes out: the server can announce the row
     // before it answers, and the row must already read as a prompt's.
     this.rememberPromptId(messageId);
-    const admitted = await this.client.session.prompt({
+    const dispatch = () => this.client.session.prompt({
       sessionID: sessionId,
       id: messageId,
       text: input.text,
@@ -647,6 +787,7 @@ export class OpenCodeV2Provider implements ChatProvider {
       delivery: input.delivery,
       resume: true,
     });
+    const admitted = input.delivery === "steer" ? await this.backgroundMutation(dispatch) : await dispatch();
     if (admitted.id !== messageId) this.rememberPromptId(admitted.id);
     return { messageId: admitted.id };
   }
@@ -763,8 +904,93 @@ export class OpenCodeV2Provider implements ChatProvider {
     }
   }
 
-  async interrupt(sessionId: string): Promise<void> {
-    await this.client.session.interrupt({ sessionID: sessionId });
+  async interrupt(sessionId: string, options?: { resume?: boolean }): Promise<{ interrupted: boolean }> {
+    // `resume: true` wakes steer-scope input only; omitted or false wakes
+    // nothing. Pending input is never deleted by an interrupt (2.0.28).
+    const dispatch = () => this.client.session.interrupt({ sessionID: sessionId, ...(options?.resume === undefined ? {} : { resume: options.resume }) });
+    return options?.resume === true ? await this.backgroundMutation(dispatch) : await dispatch();
+  }
+
+  async backgroundBlockingWork(sessionId: string): Promise<void> {
+    if (!await this.getSession(sessionId)) throw new BackgroundTaskUnavailableError("Background parent is unavailable");
+    await this.backgroundMutation(() => this.client.session.background({ sessionID: sessionId }));
+  }
+
+  async generate(sessionId: string, prompt: string): Promise<string> {
+    const result = await this.client.session.generate({ sessionID: sessionId, prompt });
+    return result.text;
+  }
+
+  async stopTask(sessionId: string, taskId: string): Promise<void> {
+    // An inventory recovery begun before this request cannot authorize a
+    // destructive mutation. Wait for it, then revalidate against fresh parent
+    // evidence; concurrent stop requests may share that newer read.
+    await this.backgroundReads.get(sessionId)?.catch(() => undefined);
+    // Child execution boundaries authorize the occurrence too, so none of
+    // the parent/child histories used for this mutation may predate it.
+    this.historyReuse.invalidate();
+    const task = (await this.reconcileBackgroundTasks(sessionId)).find(task => task.taskId === taskId);
+    if (!task || task.status !== "running" || task.stateUncertain) throw new BackgroundTaskUnavailableError("Worker is no longer confirmed running");
+    if (task.childConversationId) {
+      // Native interrupt has no generation-conditional precondition. This
+      // refuses known stale occurrences, not an external continuation racing
+      // between the final read and the session-scoped mutation.
+      await this.backgroundMutation(() => this.client.session.interrupt({ sessionID: task.childConversationId!, resume: false }));
+      return;
+    }
+    if (task.taskType === "shell" && task.outputFile?.startsWith("shell:")) {
+      await this.backgroundMutation(() => this.client.shell.remove({ id: task.outputFile!.slice(6), ...this.scope }));
+      return;
+    }
+    throw new BackgroundTaskUnavailableError("Worker cannot be stopped");
+  }
+
+  async taskOutput(sessionId: string, taskId: string, options: { tailBytes: number }): Promise<import("../../types").BackgroundTaskOutput | null> {
+    const task = (await this.reconcileBackgroundTasks(sessionId)).find(task => task.taskId === taskId);
+    if (!task || task.taskType !== "shell" || !task.outputFile?.startsWith("shell:")) throw new BackgroundTaskUnavailableError("Shell output is unavailable");
+    const id = task.outputFile.slice(6);
+    try {
+      const shell = await this.client.shell.get({ id, ...this.scope });
+      if (shell.data.metadata.sessionID !== sessionId) throw new BackgroundTaskUnavailableError("Shell output is unavailable");
+      const limit = Math.min(TASK_OUTPUT_TAIL_MAX_BYTES, Math.max(1, Math.floor(options.tailBytes)));
+      const latest = await this.client.shell.output({ id, ...this.scope, cursor: Number.MAX_SAFE_INTEGER });
+      const cursor = Math.max(0, latest.data.size - limit);
+      const page = await this.client.shell.output({ id, ...this.scope, cursor, limit });
+      return { text: page.data.output, truncated: cursor > 0 || page.data.truncated, settled: task.status !== "running" };
+    } catch (error) {
+      if (asRecord(error)._tag === "ShellNotFoundError") return null;
+      throw error;
+    }
+  }
+
+  private async backgroundMutation<T>(operation: () => Promise<T>): Promise<T> {
+    try { return await operation(); }
+    catch (error) {
+      // Only explicit non-application responses are ordinary retryable errors.
+      // An unknown/server/transport failure after dispatch might follow effects.
+      const tag = asRecord(error)._tag;
+      if (tag === "SessionNotFoundError" || tag === "UnauthorizedError" || tag === "ForbiddenError" || tag === "InvalidRequestError") throw error;
+      throw new OperationOutcomeUnknownError();
+    }
+  }
+
+  /**
+   * The session's pending user steers, in enqueue order. OpenCode's own
+   * entries (synthetic, compaction, move) and natively queued input are not
+   * the dock's: Uatu's queue is held in the workspace, never in this inbox.
+   */
+  async listPendingInbox(sessionId: string): Promise<PendingInboxEntry[]> {
+    const entries = await this.client.session.inbox.list({ sessionID: sessionId });
+    return (entries as Array<Record<string, unknown>>).flatMap(entry => {
+      if (entry.type !== "user" || entry.delivery !== "queue" && entry.delivery !== "steer") return [];
+      if (entry.delivery !== "steer") return [];
+      const pending = pendingInboxEntry(entry);
+      return pending ? [pending] : [];
+    });
+  }
+
+  async cancelInbox(sessionId: string, inboxId: string): Promise<void> {
+    await this.client.session.inbox.cancel({ sessionID: sessionId, inboxID: inboxId });
   }
 
   async replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void> {
@@ -913,7 +1139,7 @@ export class OpenCodeV2Provider implements ChatProvider {
   private async lookupSession(sessionId: string): Promise<SessionRecord | null> {
     let info: SessionRecord;
     try {
-      info = await this.client.session.get({ sessionID: sessionId }) as unknown as SessionRecord;
+      info = await this.client.session.get({ sessionID: sessionId }, { signal: this.readLifetime.signal }) as unknown as SessionRecord;
     } catch (error) {
       if (isLookupMiss(error)) return null;
       throw new Error(`OpenCode session lookup failed: ${stringify(error)}`);

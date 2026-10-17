@@ -59,6 +59,10 @@ export function hubPreferencesPath(stateRoot: string): string {
   return path.join(stateRoot, "hub-preferences.json");
 }
 
+export function personalChatPreferencesPath(stateRoot: string): string {
+  return path.join(stateRoot, "personal-chat-preferences.json");
+}
+
 export function onboardingJournalPath(stateRoot: string): string {
   return path.join(stateRoot, "pending-onboarding.json");
 }

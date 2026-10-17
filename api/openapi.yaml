@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 11.24.0-experimental
+  version: 11.28.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 11 and workspace revision 24
+  summary: Hub revision 11 and workspace revision 28
   description: |
     Canonical HTTP contract for the UatuCode Hub API, the only public API.
     Under `/s/{workspaceId}/` the Hub serves one family itself, personal
@@ -21,7 +21,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 11
-    workspaceApiRevision: 24
+    workspaceApiRevision: 28
 servers:
   - url: https://{hubHost}
     variables:
@@ -414,6 +414,56 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
               example: { error: workspace display name could not be persisted }
+  /api/hub/settings/chat-preferences:
+    get:
+      operationId: hubGetPersonalChatPreferences
+      tags: [Hub]
+      summary: Read the authenticated account's personal chat preferences
+      description: No identity selectors. Absent records default ON at revision zero; unreadable persisted state is unavailable, not reset. Responses are no-store.
+      responses:
+        '200':
+          description: Only the authenticated account's effective personal preference.
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalChatPreferences' }
+              example: { version: 1, revision: 0, autoBackgroundOnSteer: true }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/NoStoreError' }
+    put:
+      operationId: hubUpdatePersonalChatPreferences
+      tags: [Hub]
+      summary: Save the authenticated account's personal chat preferences
+      description: Serialized compare-revision update across devices and workspaces. Identity comes only from the cookie or bearer session. Cookie mutations require same origin. This never changes machine-wide agent logins, workspace defaults or another account's preference. No-store responses.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdatePersonalChatPreferencesRequest' }
+            example: { version: 1, expectedRevision: 0, autoBackgroundOnSteer: false }
+      responses:
+        '200':
+          description: Confirmed persisted own-account state.
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalChatPreferences' }
+              example: { version: 1, revision: 1, autoBackgroundOnSteer: false }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '409':
+          description: A newer own-account revision is already saved. Review current before a fresh explicit update.
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalChatPreferencesConflict' }
+              example: { error: personal chat preferences changed on another device, current: { version: 1, revision: 1, autoBackgroundOnSteer: false } }
+        '503': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/settings/workspace-defaults:
     get:
       operationId: hubGetWorkspaceDefaults
@@ -1817,6 +1867,29 @@ components:
       required: [workspace]
       properties: { workspace: { $ref: '#/components/schemas/OnboardedWorkspace' } }
       additionalProperties: false
+    PersonalChatPreferences:
+      type: object
+      required: [version, revision, autoBackgroundOnSteer]
+      properties:
+        version: { const: 1 }
+        revision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        autoBackgroundOnSteer: { type: boolean, description: "Personal default ON; applies to accepted steer actions, not job starts." }
+      additionalProperties: false
+    UpdatePersonalChatPreferencesRequest:
+      type: object
+      required: [version, expectedRevision, autoBackgroundOnSteer]
+      properties:
+        version: { const: 1 }
+        expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740990 }
+        autoBackgroundOnSteer: { type: boolean }
+      additionalProperties: false
+    PersonalChatPreferencesConflict:
+      type: object
+      required: [error, current]
+      properties:
+        error: { type: string }
+        current: { $ref: '#/components/schemas/PersonalChatPreferences' }
+      additionalProperties: false
     WorkspaceDefaults:
       type: object
       required: [configured, configuredAvailable, effective]
@@ -2281,7 +2354,37 @@ components:
         - { type: object, required: [id, type, createdAt, level, message], properties: { id: { type: string }, type: { const: notice }, createdAt: { type: number }, level: { enum: [info, warning, error] }, message: { type: string }, code: { type: string, minLength: 1, maxLength: 512, description: "A machine-readable kind for notices the surface reacts to: `rate-limit-warning` and `rate-limit-rejected` carry the current rate-limit standing and are data for the composer, never a timeline row — a client MUST treat them the way it treats `context_report`. The standing occupies one item id for the conversation's life, upserted as it changes and removed when requests are allowed again. `refusal-fallback` names a model swap. `login-failed` marks a turn that failed because the agent's login is missing, expired, or refused; `message` is the agent's own words, and a client offers a way to log in. `reauthenticating` is the one item an agent occupies while it signs in again mid-session, removed when that finishes. Absent otherwise." }, resetsAt: { type: number, minimum: 0, description: "When the rate-limit standing's window resets." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, total], description: "The agent's own statement of how full the context window is, at the point in the timeline where it was reported (after a turn, after a compaction). Data for the context readout, never rendered as a row: a client MUST treat it like the empty-markdown usage carrier. The readout uses whichever of a report or a usage carrier is newest in the timeline.", properties: { id: { type: string }, type: { const: context_report }, createdAt: { type: number }, contextKey: { type: string, minLength: 1, maxLength: 512 }, window: { $ref: '#/components/schemas/ContextWindowMetadata' }, total: { type: integer, minimum: 0, description: "Tokens occupying the window." }, max: { type: integer, minimum: 1, description: "The window the total was measured against. Absent when the agent did not state one; the reporting model's known limit then applies." }, model: { $ref: '#/components/schemas/ModelSelection' }, categories: { type: array, items: { type: object, required: [name, tokens, kind], properties: { name: { type: string, minLength: 1 }, tokens: { type: integer, minimum: 0 }, kind: { enum: [used, free, buffer, deferred], description: "`used` rows occupy the window and sum to `total`; `free` is the remaining window; `buffer` a compaction reserve; `deferred` rows are out-of-window tool schemas listed for awareness only." } }, additionalProperties: false } }, plan: { $ref: '#/components/schemas/PlanUtilization' } }, additionalProperties: false }
         - { $ref: '#/components/schemas/ContextWindowItem' }
-        - { type: object, required: [id, type, createdAt, taskId, description, status], description: "One background task the agent runs (a backgrounded command, a backgrounded subagent, a monitor), updated in place as it progresses and settles. A running task is presented in the composer's live list, a settled one as a timeline row with its outcome and summary; `toolUseId` links it to the tool row that launched it. Only for agents declaring `background-tasks`; ambient housekeeping tasks never appear.", properties: { id: { type: string }, type: { const: background_task }, createdAt: { type: number }, taskId: { type: string, minLength: 1, maxLength: 512 }, description: { type: string, minLength: 1 }, taskType: { type: string }, toolUseId: { type: string, minLength: 1, maxLength: 512 }, status: { enum: [running, completed, failed, stopped] }, progress: { type: string, description: "The agent's latest progress note, while running." }, summary: { type: string, description: "The agent's summary, once settled." } }, additionalProperties: false }
+        - type: object
+          required: [id, type, createdAt, taskId, description, status]
+          description: "Worker state independent of its launcher. Missing execution evidence is uncertainty, not completion or cancellation."
+          properties:
+            id: { type: string }
+            type: { const: background_task }
+            createdAt: { type: number }
+            taskId: { type: string, minLength: 1, maxLength: 512 }
+            description: { type: string, minLength: 1 }
+            taskType: { type: string }
+            toolUseId: { type: string, minLength: 1, maxLength: 512 }
+            status: { enum: [running, completed, failed, stopped] }
+            stateUncertain: { type: boolean, description: "Last-known state only; current execution is unverified and must not authorize Stop." }
+            resultId: { type: string, minLength: 1, maxLength: 512, description: "Provider notification identity, stable across enqueue, delivery and history." }
+            toolUseIds: { type: array, minItems: 1, items: { type: string, minLength: 1, maxLength: 512 }, description: "Launch calls known to share this worker occurrence; do not count each alias as another running worker." }
+            progress: { type: string }
+            summary: { type: string, description: "Canonical worker report, not launcher instructions." }
+            subagentType: { type: string }
+            prompt: { type: string }
+            outputFile: { type: string, description: "Provider output reference; never accepted as a client-supplied filesystem path." }
+            childConversationId: { type: string, minLength: 1, maxLength: 512 }
+            foreground: { const: true }
+            usage:
+              type: object
+              required: [totalTokens, toolUses, durationMs]
+              properties:
+                totalTokens: { type: number, minimum: 0 }
+                toolUses: { type: number, minimum: 0 }
+                durationMs: { type: number, minimum: 0 }
+              additionalProperties: false
+          additionalProperties: false
         - { type: object, required: [id, type, createdAt, wakeupId, prompt, recurring, schedule, status], description: "One future turn the agent scheduled for itself (a self-paced wakeup, a cron, a loop), as its session reports it, updated in place through its life. `pending` rows are listed with the conversation's scheduled state and shown in the timeline; a one-shot that fired reads `fired` with `firedTurnId` naming the `user_message` (origin `wakeup`) that opened its turn; a recurring one stays `pending` across fires with `nextFireAt` moving on. `cancelled`: the agent removed it, or the user cancelled it or released the session; the workspace blocks a cancelled wakeup from firing again even if the agent's tooling later rebuilds it. `paused`: the session ended, but the agent's tooling rebuilds this wakeup (a cron) when the conversation runs again; `message` says so, and a conversation opened without a live session lists its paused wakeups. `lost`: the session ended some other way and the schedule ended with it; `message` says so. A reopened conversation whose session is gone replays no pending row. Only for agents declaring `scheduled-wakeups`.", properties: { id: { type: string }, type: { const: scheduled_wakeup }, createdAt: { type: number }, wakeupId: { type: string, minLength: 1, maxLength: 512 }, prompt: { type: string, description: "The prompt the wakeup submits when it fires, as the agent reports it (possibly clipped by the agent)." }, recurring: { type: boolean }, schedule: { type: string, minLength: 1, description: "Five-field cron expression in the workspace host's local time; a one-shot encodes a single fire time." }, nextFireAt: { type: number, minimum: 0, description: "The workspace's reading of the next fire time (epoch ms), for display only: the agent fires on its own clock. Only on a pending row, and absent when the expression could not be read." }, status: { enum: [pending, fired, cancelled, paused, lost] }, firedTurnId: { type: string, minLength: 1, maxLength: 512 }, message: { type: string, description: "What happened to a wakeup that did not fire, when that needs saying (a lost or paused schedule)." } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt], description: "The agent compacted the conversation at this point. Content before the marker stays in the timeline; the figures are the agent's own pre/post token counts when it reported them.", properties: { id: { type: string }, type: { const: compaction }, createdAt: { type: number }, trigger: { enum: [manual, auto] }, preTokens: { type: integer, minimum: 0 }, postTokens: { type: integer, minimum: 0 } }, additionalProperties: false }
     PlanUtilizationWindow: { type: object, properties: { utilization: { type: number, minimum: 0, description: "Percent of the window used, 0-100." }, resetsAt: { type: number, minimum: 0, description: "When the window resets." } }, additionalProperties: false }
@@ -2308,7 +2411,28 @@ components:
       dependentRequired: { variant: [model] }
       additionalProperties: false
     MessageAttachment: { type: object, required: [name, mimeType], description: "An image riding a user message, referenced by workspace attachment id — never by bytes. `id` is absent on a replayed attachment whose reference could not be recovered; clients render those as labeled placeholders.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 200 }, mimeType: { type: string, enum: [image/png, image/jpeg, image/gif, image/webp] } }, additionalProperties: false }
-    QueuedMessage: { type: object, required: [id, text, queuedAt], description: "A submission the workspace holds until the running turn ends. Not a timeline item; it becomes one when delivered. `requestId` echoes the accepting mutation's client request id so the submitting client can reconcile.", properties: { id: { type: string }, text: { type: string, description: "Empty for an image-only message." }, queuedAt: { type: number }, requestId: { type: string }, attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } } }, additionalProperties: false }
+    QueuedMessage:
+      type: object
+      required: [id, text, queuedAt, delivery]
+      description: |
+        A pending submission, not a timeline item. Queue is held by Uatu until
+        the turn ends; steer is pending with a steering-capable agent for its
+        native next-step boundary. Paused means no ordinary delivery is scheduled.
+        Unconfirmed takes precedence over delivery/paused labels: admission or
+        batch resume may have applied, so retain text/attachments, suppress
+        resend/edit/remove/batch actions and reconcile read-only. It neither
+        asserts native admission nor promises native work is paused. The
+        original requestId links the submitting client's unconfirmed input.
+      properties:
+        id: { type: string }
+        text: { type: string, description: Empty for an image-only message. }
+        queuedAt: { type: number }
+        delivery: { enum: [steer, queue] }
+        paused: { const: true }
+        unconfirmed: { const: true }
+        requestId: { type: string }
+        attachments: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MessageAttachment' } }
+      additionalProperties: false
     ChatEvent:
       oneOf:
         - { type: object, required: [generation, sequence, conversationId, type, item], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.upsert }, item: { $ref: '#/components/schemas/ConversationItem' } }, additionalProperties: false }
@@ -2317,7 +2441,7 @@ components:
         - { type: object, required: [generation, sequence, conversationId, type, status], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.status }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, configuration], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.configuration }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, conversation], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.updated }, conversation: { allOf: [{ $ref: '#/components/schemas/ConversationSummary' }], description: "Updated summary for this conversation. Its id is the event conversationId." } }, additionalProperties: false }
-        - { type: object, required: [generation, sequence, conversationId, type, queued, change], description: "Restates the whole held queue after a change, so replayed or duplicated frames converge on the same state.", properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.queue }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' } }, change: { type: object, required: [kind, messageId], properties: { kind: { enum: [held, removed, delivered] }, messageId: { type: string } }, additionalProperties: false } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, queued, change], description: "Restates every pending message after a change — steers first in enqueue order, then held messages in submission order — so replayed or duplicated frames converge on the same state. `change.kind` names what happened to `change.messageId`: `held` or `steered` (accepted), `switched` (delivery changed), `paused` or `resumed` (paused state changed), `removed`, `delivered`.", properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.queue }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' } }, change: { type: object, required: [kind, messageId], properties: { kind: { enum: [held, steered, removed, switched, paused, resumed, delivered] }, messageId: { type: string } }, additionalProperties: false } }, additionalProperties: false }
         - { $ref: '#/components/schemas/ChatResyncEvent' }
     ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor, conversation-rewritten] } }, additionalProperties: false }
     DocumentMeta:

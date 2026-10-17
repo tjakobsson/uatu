@@ -15,6 +15,7 @@ export class RunningWorkDisclosure {
   private conversationId: string | null = null;
   private running = false;
   private userCollapsed = false;
+  private automaticallyOpened = false;
   /**
    * The state the element is known to be in: what this object last told the
    * surface to apply, or what a user toggle was last observed to leave. The
@@ -33,11 +34,11 @@ export class RunningWorkDisclosure {
 
   /**
    * One paint's reading of the list. Returns `true` when the list should be
-   * opened now, and `undefined` when it is to be left as it stands — this
-   * never closes a list: once the work is over, what remains (the subagents
-   * track's finished entries) is shown however the user last left it.
+   * opened now, `false` to collapse a redundant automatic expansion, and
+   * `undefined` to leave it as it stands. Finished lists normally retain
+   * their state; only a caller identifying duplicate detached work opts in.
    */
-  paint(conversationId: string | null, runningCount: number): true | undefined {
+  paint(conversationId: string | null, runningCount: number, collapseAutomatic = false): boolean | undefined {
     // No conversation shown is a selection in flight, not a verdict on the
     // list: a refresh that clears and reinstalls the same conversation must
     // not read as its work ending and forget the user's collapse.
@@ -49,14 +50,22 @@ export class RunningWorkDisclosure {
       this.conversationId = conversationId;
       this.running = false;
       this.userCollapsed = false;
+      // The DOM's open state is retained across selection, so retain its
+      // provenance too. A conversation switch is not a deliberate opening.
     }
     const running = runningCount > 0;
     const started = running && !this.running;
     this.running = running;
     // The work being over ends the collapse, so the next work opens again.
     if (!running) this.userCollapsed = false;
+    if (!running && collapseAutomatic && this.automaticallyOpened && this.knownOpen) {
+      this.knownOpen = false;
+      this.automaticallyOpened = false;
+      return false;
+    }
     if (!started || this.userCollapsed || this.knownOpen) return undefined;
     this.knownOpen = true;
+    this.automaticallyOpened = true;
     return true;
   }
 
@@ -64,6 +73,7 @@ export class RunningWorkDisclosure {
   toggled(open: boolean): void {
     if (open === this.knownOpen) return;
     this.knownOpen = open;
+    this.automaticallyOpened = false;
     // Only a collapse of running work is held. Collapsing a list of finished
     // entries says nothing about work that has not started yet; opening a
     // list is taking back an earlier collapse.

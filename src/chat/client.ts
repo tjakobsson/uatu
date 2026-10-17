@@ -1,4 +1,6 @@
 import { appUrl } from "../shared/app-url";
+import type { AutomaticBackgroundFeedback } from "./types";
+import { parseAutomaticBackground } from "./validation";
 import { liveChannel } from "../shell/live";
 import type { LiveChannel } from "../shell/live-channel";
 import type {
@@ -13,6 +15,7 @@ import type {
   ConversationSnapshot,
   ConversationSummary,
   MessageAttachment,
+  MessageDelivery,
   ModelSelection,
   PermissionOutcome,
   QuestionOutcome,
@@ -30,11 +33,16 @@ import {
   parseBackgroundTaskOutput, parseReversibleHistoryResult, parseUsageReadResult, parseUsageReportResponse } from "./validation";
 
 export class ChatTransportError extends Error {
-  constructor(message: string, readonly status?: number) {
+  // `code` names a refusal the surface treats specially beyond its status —
+  // a steer the agent delivered before it could be withdrawn
+  // (`steer-already-delivered`, opencode-v2-steering D7).
+  constructor(message: string, readonly status?: number, readonly code?: string) {
     super(message);
     this.name = "ChatTransportError";
   }
 }
+
+export const STEER_ALREADY_DELIVERED_CODE = "steer-already-delivered";
 
 // A transport gap the client is already recovering from — distinct from a
 // provider failure, a rejected turn, or invalid data, all of which need the
@@ -150,24 +158,28 @@ export class ChatApiClient {
     return this.get(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}?${query}`), parseConversationSnapshot, signal, cold ? this.coldReadBudget() : undefined);
   }
 
-  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
+  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[], delivery?: MessageDelivery): Promise<{
     messageId: string;
-    held: boolean;
+    // Accepted but not delivered yet: in the dock under `delivery`.
+    pending: boolean;
+    delivery: MessageDelivery;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
     operation?: "reload";
-  }> {
+  } & AutomaticBackgroundFeedback> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
-      { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}), ...(attachments?.length ? { attachments } : {}) },
+      { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}), ...(attachments?.length ? { attachments } : {}), ...(delivery ? { delivery } : {}) },
       value => {
-        const result = value as { messageId: string; held: boolean; configuration?: unknown; conversation?: unknown; operation?: unknown };
+        const result = value as { messageId: string; pending?: unknown; delivery?: unknown; configuration?: unknown; conversation?: unknown; operation?: unknown; automaticBackground?: unknown };
         return {
           messageId: result.messageId,
-          held: result.held === true,
+          pending: result.pending === true,
+          delivery: result.delivery === "steer" ? "steer" as const : "queue" as const,
           ...(result.operation === "reload" ? { operation: "reload" as const } : {}),
           configuration: parseConversationConfiguration(result.configuration),
           ...(result.conversation ? { conversation: parseConversationSummary(result.conversation) } : {}),
+          ...parseAutomaticBackground(result.automaticBackground),
         };
       },
     );
@@ -198,12 +210,36 @@ export class ChatApiClient {
     return appUrl(`/api/chat/attachments/${encodeURIComponent(id)}`);
   }
 
+  // Removes a held message, or withdraws a steer from the agent. A 409
+  // carrying STEER_ALREADY_DELIVERED_CODE means the agent delivered it first.
   removeQueued(conversationId: string, messageId: string, requestId: string): Promise<{ removed: boolean }> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/queue/${encodeURIComponent(messageId)}`),
       { requestId },
       value => value as { removed: boolean },
       "DELETE",
+    );
+  }
+
+  // Switch a pending message between steer and queue (opencode-v2-steering
+  // D7, D8). The answer names the entry as it now stands: a switched message
+  // can come back under a new id.
+  changeDelivery(conversationId: string, messageId: string, requestId: string, delivery: MessageDelivery): Promise<{ messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/queue/${encodeURIComponent(messageId)}`),
+      { requestId, delivery },
+      parseDeliveryResult,
+      "PATCH",
+    );
+  }
+
+  // Send a pending message now (D8): a steer on a steering agent, a dispatch
+  // ahead of the queue on one with send-now alone.
+  sendNow(conversationId: string, messageId: string, requestId: string): Promise<{ messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/queue/${encodeURIComponent(messageId)}/send-now`),
+      { requestId },
+      parseDeliveryResult,
     );
   }
 
@@ -275,6 +311,20 @@ export class ChatApiClient {
 
   stopTask(conversationId: string, taskId: string, requestId: string): Promise<unknown> {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/tasks/${encodeURIComponent(taskId)}/stop`), { requestId }, value => value);
+  }
+
+  backgroundBlockingWork(conversationId: string, requestId: string): Promise<{ accepted: true }> {
+    return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/background`), { requestId }, value => {
+      if (!value || typeof value !== "object" || (value as { accepted?: unknown }).accepted !== true || Object.keys(value).length !== 1) throw new Error("Invalid background acceptance");
+      return { accepted: true };
+    });
+  }
+
+  generate(conversationId: string, requestId: string, question: string): Promise<{ text: string }> {
+    return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/aside`), { requestId, question }, value => {
+      if (!value || typeof value !== "object" || Object.keys(value).length !== 1 || typeof (value as { text?: unknown }).text !== "string") throw new Error("Invalid side answer");
+      return { text: (value as { text: string }).text };
+    });
   }
 
   cancelWakeup(conversationId: string, wakeupId: string, requestId: string): Promise<unknown> {
@@ -414,9 +464,9 @@ export class ChatApiClient {
     }
     const allowance = Number(response.headers.get("x-uatu-chat-startup-read-ms"));
     if (Number.isFinite(allowance) && allowance > 0) this.startupReadMs = allowance;
-    const value = await response.json().catch(() => null) as { error?: unknown } | null;
+    const value = await response.json().catch(() => null) as { error?: unknown; code?: unknown } | null;
     if (!response.ok) {
-      throw new ChatTransportError(typeof value?.error === "string" ? value.error : `Chat request failed (${response.status})`, response.status);
+      throw new ChatTransportError(typeof value?.error === "string" ? value.error : `Chat request failed (${response.status})`, response.status, typeof value?.code === "string" ? value.code : undefined);
     }
     try {
       return parse(value);
@@ -424,4 +474,12 @@ export class ChatApiClient {
       throw new ChatTransportError(error instanceof Error ? error.message : "Chat returned invalid data");
     }
   }
+}
+
+function parseDeliveryResult(value: unknown): { messageId: string; delivery: MessageDelivery } & AutomaticBackgroundFeedback {
+  const result = value as { messageId?: unknown; delivery?: unknown; automaticBackground?: unknown };
+  if (typeof result.messageId !== "string" || (result.delivery !== "steer" && result.delivery !== "queue")) {
+    throw new ChatTransportError("Chat returned an invalid delivery result");
+  }
+  return { messageId: result.messageId, delivery: result.delivery, ...parseAutomaticBackground(result.automaticBackground) };
 }

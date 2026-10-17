@@ -60,6 +60,22 @@ function fixtureRuntime(): OpenCodeService {
 }
 
 describe("LazyChatService", () => {
+  test("explicit parent backgrounding delegates through the initialized adapter and retains its receipt", async () => {
+    const calls: string[] = [];
+    const service = new LazyChatService({
+      workspacePath: "/workspace", runtime: fixtureRuntime(),
+      createProvider: () => ({
+        ...provider(),
+        describe: () => ({ ...FAKE_AGENT, capabilities: [...FAKE_AGENT.capabilities, "background-blocking-work"] }),
+        getSession: async id => ({ id, directory: "/workspace", title: "Fixture", createdAt: 1, updatedAt: 1 }),
+        backgroundBlockingWork: async id => { calls.push(id); },
+      }),
+    });
+    expect(await service.backgroundBlockingWork("parent", "receipt")).toEqual({ accepted: true });
+    expect(await service.backgroundBlockingWork("parent", "receipt")).toEqual({ accepted: true });
+    expect(calls).toEqual(["parent"]);
+    await service.dispose();
+  });
   test("a ready agent reports its login state, and every accounts change bumps the revision and reaches the provider", async () => {
     const changes: unknown[] = [];
     let login: "ok" | "missing" = "missing";

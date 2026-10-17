@@ -13,6 +13,10 @@ describe("OpenCode v2 identity policy", () => {
     expect(provider.describe().capabilities).not.toContain("background-tasks");
     expect(provider.describe().capabilities).not.toContain("scheduled-wakeups");
     expect(provider.describe().capabilities).not.toContain("custom-model-id");
+    // Steering and Send now belong to the 2.x inbox and to Claude Code; the
+    // deprecated 1.x stack is left exactly as it was (opencode-v2-steering D2).
+    expect(provider.describe().capabilities).not.toContain("steering");
+    expect(provider.describe().capabilities).not.toContain("send-now");
   });
 
   test("normalizes native and compatibility persisted configuration without inventing fields", () => {

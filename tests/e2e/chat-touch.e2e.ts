@@ -13,6 +13,12 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
   return response.json();
 }
 
+async function inspectTouchWorker(page: Page, name: string): Promise<void> {
+  const inspect = page.locator("#chat-compact-workers").getByTitle(name, { exact: true });
+  if (!await inspect.isVisible()) await page.locator("#chat-compact-workers > summary").click();
+  await inspect.click();
+}
+
 async function boot(page: Page, request: APIRequestContext, seed?: { items: ConversationItem[]; older?: ConversationItem[] }): Promise<string> {
   await request.post("/__e2e/reset");
   const snapshot = await control(request, { action: "seed", title: "Touch chat", items: seed?.items ?? [], older: seed?.older ?? [] });
@@ -23,7 +29,7 @@ async function boot(page: Page, request: APIRequestContext, seed?: { items: Conv
   await expect(page.locator("#chat-surface")).toBeVisible();
   await expect(page.locator("#chat-conversation-select")).toHaveValue(snapshot.conversation.id);
   await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
-  await expect(page.locator("#chat-send .chat-send-icon")).toBeVisible();
+  await expect(page.locator("#chat-send")).toHaveText("Send");
   return snapshot.conversation.id as string;
 }
 
@@ -137,19 +143,18 @@ async function bootWithPinnedTracks(page: Page, request: APIRequestContext, hist
   } });
 
   await expect(page.locator("#chat-task-list")).toBeVisible();
-  await expect(page.locator("#chat-subagents")).toBeVisible();
-  await expect(page.locator("#chat-background-tasks")).toBeVisible();
+  await page.locator("#chat-compact-workers > summary").click();
+  await expect(page.locator("#chat-compact-workers")).toBeVisible();
   // Expanded, so "hidden" in these cases is about the keyboard rule rather
   // than about a closed <details>. Set rather than tapped: a tap lands on a
   // track row, and the point here is the geometry, not the summary's hit area.
   await page.evaluate(() => {
-    for (const id of ["chat-task-list", "chat-subagents", "chat-background-tasks"]) {
+    for (const id of ["chat-task-list"]) {
       document.querySelector<HTMLDetailsElement>(`#${id}`)!.open = true;
     }
   });
   await expect(page.locator("#chat-task-list-items li")).toHaveCount(6);
-  await expect(page.locator("#chat-subagents-items li")).toHaveCount(1);
-  await expect(page.locator("#chat-background-tasks-items li")).toHaveCount(1);
+  await expect(page.locator("#chat-compact-workers-items [data-worker-id]")).toHaveCount(2);
   return id;
 }
 
@@ -227,7 +232,7 @@ test("questions wait for Answer and send a custom choice as text", async ({ page
   await expect(card).toContainText("Answered");
 });
 
-test("composer stays flush and its trailing action becomes cancel without adding a row", async ({ page, request }) => {
+test("composer stays flush with separate Send and Stop on a stable narrow action row", async ({ page, request }) => {
   const id = await boot(page, request);
   await chooseChatModel(page, "Claude Sonnet");
   await page.locator("#chat-configuration-mode").selectOption("build");
@@ -237,16 +242,19 @@ test("composer stays flush and its trailing action becomes cancel without adding
   await page.locator("#chat-input").press("Enter");
   await expect(page.locator("#chat-input")).toHaveValue("Idle first line\n");
   await page.locator("#chat-input").fill("");
+  const idleActions = await page.locator("#chat-send-group").boundingBox();
   await control(request, { action: "status", conversationId: id, status: "running" });
-  await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
-  await expect(page.locator("#chat-send .chat-send-cancel")).toBeVisible();
+  await expect(page.locator("#chat-stop")).toBeEnabled();
+  await expect(page.locator("#chat-send")).toHaveText("Send");
+  expect(await page.locator("#chat-send-group").boundingBox()).toEqual(idleActions);
   await page.locator("#chat-input").focus();
   await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
 
   const geometry = await page.locator(".chat-composer-actions").evaluate(actions => {
     const send = actions.querySelector<HTMLElement>("#chat-send")!.getBoundingClientRect();
-    const trigger = actions.querySelector<HTMLElement>("#chat-configuration-trigger")!.getBoundingClientRect();
-    const status = actions.querySelector<HTMLElement>("#chat-composer-status")!.getBoundingClientRect();
+    const trigger = document.querySelector<HTMLElement>("#chat-configuration-trigger")!.getBoundingClientRect();
+    const header = document.querySelector<HTMLElement>(".chat-header")!.getBoundingClientRect();
+    const status = actions.querySelector<HTMLElement>("#chat-configuration-trigger")!.getBoundingClientRect();
     const bounds = actions.getBoundingClientRect();
     const composer = actions.closest(".chat-composer")!;
     const style = getComputedStyle(composer);
@@ -254,14 +262,22 @@ test("composer stays flush and its trailing action becomes cancel without adding
       sendTop: send.top,
       sendBottom: send.bottom,
       triggerBottom: trigger.bottom,
+      triggerTop: trigger.top,
+      triggerWidth: trigger.width,
+      triggerHeight: trigger.height,
+      headerTop: header.top,
+      headerBottom: header.bottom,
       statusBottom: status.bottom,
       sendRight: send.right,
       boundsRight: bounds.right,
       margin: style.margin,
     };
   });
-  expect(Math.abs(geometry.sendBottom - geometry.triggerBottom)).toBeLessThanOrEqual(3);
-  expect(Math.abs(geometry.statusBottom - geometry.triggerBottom)).toBeLessThanOrEqual(2);
+  // One real inline picker shares the Send rail, without a duplicate header.
+  expect(geometry.triggerBottom).toBeCloseTo(geometry.sendBottom, 0);
+  expect(geometry.triggerWidth).toBeGreaterThanOrEqual(44);
+  expect(geometry.triggerHeight).toBeGreaterThanOrEqual(44);
+  expect(Math.abs(geometry.statusBottom - geometry.sendBottom)).toBeLessThanOrEqual(2);
   expect(geometry.sendRight).toBeLessThanOrEqual(geometry.boundsRight + 1);
   expect(geometry.margin).toBe("0px");
 
@@ -269,9 +285,9 @@ test("composer stays flush and its trailing action becomes cancel without adding
   await page.locator("#chat-input").press("Shift+Enter");
   await expect(page.locator("#chat-input")).toHaveValue("First line\n");
   await page.locator("#chat-input").fill("Queued from touch");
-  await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+  await expect(page.locator("#chat-stop")).toBeEnabled();
   const queuedResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
-  await page.locator("#chat-input").press("Enter");
+  await page.locator("#chat-input").press("Control+Enter");
   expect((await queuedResponse).request().postDataJSON()).toMatchObject({ text: "Queued from touch" });
   // The busy submission pins at the composer, marked queued and removable.
   await expect(page.locator("#chat-queue .is-held")).toContainText("Queued from touch");
@@ -290,9 +306,9 @@ test("a subagent transcript pushes as a screen and the back gesture pops it", as
     childConversationId: child.conversation.id,
   } });
 
-  await expect(page.locator("#chat-subagents")).toBeVisible();
-  await page.locator("#chat-subagents summary").click();
-  await page.getByRole("button", { name: "explore · Review renderer" }).click();
+  await expect(page.locator("#chat-compact-workers")).toBeVisible();
+  await page.locator("#chat-compact-workers > summary").click();
+  await inspectTouchWorker(page, "Review renderer");
 
   const drilldown = page.locator("#chat-drilldown");
   await expect(drilldown).toBeVisible();
@@ -356,13 +372,13 @@ test("a request the parent is waiting on stays reachable over the pushed screen"
     action: "bash", resources: ["rm -rf build"],
   } });
 
-  await expect(page.locator("#chat-subagents")).toBeVisible();
+  await expect(page.locator("#chat-compact-workers")).toBeVisible();
   // The request card is on screen in the parent transcript — where the pill
   // yields to it — so this also proves the pill returns once the drill-down
   // is pushed over it and the card can no longer be reached.
   await expect(page.locator('[data-chat-item-id="permission:p1"]')).toBeVisible();
-  await page.locator("#chat-subagents summary").click({ position: { x: 8, y: 8 } });
-  await page.getByRole("button", { name: "explore · Review renderer" }).click();
+  await page.locator("#chat-compact-workers > summary").click({ position: { x: 8, y: 8 } });
+  await inspectTouchWorker(page, "Review renderer");
   await expect(page.locator("#chat-drilldown")).toBeVisible();
 
   // Asserted by what is painted, not by `toBeVisible`: the pushed screen
@@ -492,10 +508,11 @@ test("a keyboard the platform pans for is still a keyboard", async ({ page, requ
   await expect(page.locator("#chat-task-list-items")).toBeHidden();
   await expect(page.locator("#chat-subagents-items")).toBeHidden();
   await expect(page.locator("#chat-background-tasks-items")).toBeHidden();
-  // The rows yield; what each track reports does not.
-  await expect(page.locator("#chat-task-list summary")).toBeVisible();
-  await expect(page.locator("#chat-subagents summary")).toBeVisible();
-  await expect(page.locator("#chat-background-tasks summary")).toBeVisible();
+  // Deliberately expanded workers use a sheet, retaining summary/Stop access
+  // without displacing the composer or blurring its draft.
+  await expect(page.locator("#chat-task-list summary")).toBeHidden();
+  await expect(page.locator("#chat-compact-workers > summary")).toBeVisible();
+  await expect(page.locator("#chat-compact-workers [data-stop-task]")).toBeVisible();
 });
 
 test("pinch zoom does not collapse progress tracks as a keyboard", async ({ page, request }) => {
@@ -509,7 +526,7 @@ test("pinch zoom does not collapse progress tracks as a keyboard", async ({ page
   await expect(page.locator("html")).not.toHaveAttribute("data-chat-keyboard");
   await expect(surface).toHaveCSS("--chat-visual-height", normalHeight);
   await expect(page.locator("#chat-task-list-items")).toBeVisible();
-  await expect(page.locator("#chat-background-tasks-items")).toBeVisible();
+  await expect(page.locator("#chat-compact-workers-items")).toBeVisible();
   await setVisualViewport(page, { height: 460, offsetTop: 0, scale: 1 });
   await expect(page.locator("html")).toHaveAttribute("data-chat-keyboard", "");
   await expect(page.locator("#chat-task-list-items")).toBeHidden();
@@ -672,7 +689,7 @@ test("answering a request on touch puts the chrome under the keyboard and brings
     const answerGap = box("[data-question-primary]").bottom - edge;
     return {
       composerTop: Math.round(box("#chat-composer").top - edge) >= -1,
-      tasksTop: Math.round(box("#chat-task-list").top - edge) >= -1,
+      tasksTop: document.querySelector("#chat-task-list")!.getClientRects().length === 0 || Math.round(box("#chat-task-list").top - edge) >= -1,
       fieldBottom: Math.round(box("[data-question-custom-input]").bottom - edge) <= 1,
       answerBottom: Math.round(answerGap) <= 1,
       answerAtBandBottom: answerGap >= -(pad + 4),
@@ -708,8 +725,7 @@ test("answering a request on touch puts the chrome under the keyboard and brings
   })).toBeLessThanOrEqual(1);
   await expect(page.locator("#chat-composer")).toBeVisible();
   await expect(page.locator("#chat-task-list")).toBeVisible();
-  await expect(page.locator("#chat-subagents")).toBeVisible();
-  await expect(page.locator("#chat-background-tasks")).toBeVisible();
+  await expect(page.locator("#chat-compact-workers")).toBeVisible();
 });
 test("the transcript holds still while an answer is typed", async ({ page, request }) => {
   // iOS autoscrolls a scroller natively while a caret or selection handle is
@@ -793,8 +809,8 @@ async function bootAnswerOwner(page: Page, request: APIRequestContext, drilldown
       id: "tool:answer-owner", type: "tool", createdAt: 200, name: "task", status: "completed",
       input: JSON.stringify({ description: "Answer owner", subagent_type: "explore", prompt: "go" }), childConversationId: owner,
     } });
-    await page.locator("#chat-subagents summary").click();
-    await page.getByRole("button", { name: "explore · Answer owner" }).click();
+    await page.locator("#chat-compact-workers > summary").click();
+    await inspectTouchWorker(page, "Answer owner");
     await expect(page.locator("#chat-drilldown")).toBeVisible();
   }
   const timeline = page.locator(drilldown ? "#chat-drilldown-timeline" : "#chat-timeline");
@@ -926,8 +942,8 @@ for (const drilldown of [false, true]) {
         id: "tool:answer-owner", type: "tool", createdAt: 200, name: "task", status: "completed",
         input: JSON.stringify({ description: "Answer owner", subagent_type: "explore", prompt: "go" }), childConversationId: owner,
       } });
-      await page.locator("#chat-subagents summary").click();
-      await page.getByRole("button", { name: "explore · Answer owner" }).click();
+      await page.locator("#chat-compact-workers > summary").click();
+      await inspectTouchWorker(page, "Answer owner");
       await expect(page.locator("#chat-drilldown")).toBeVisible();
     }
     const timeline = page.locator(drilldown ? "#chat-drilldown-timeline" : "#chat-timeline");
@@ -1056,6 +1072,11 @@ test("history prepend and activity expansion preserve semantic position", async 
   const timeline = page.locator("#chat-timeline");
   await timeline.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
   const anchor = page.locator(`[data-chat-item-id="${latest[0]!.id}"]`);
+  // Establish the click's reading position before measuring: initial follow
+  // layout can still settle, and click() otherwise scrolls Load older into view
+  // after the baseline was captured. Keep the exact anchor assertion below.
+  await page.locator("#chat-load-older").scrollIntoViewIfNeeded();
+  await expect.poll(stillScrollTop(timeline)).toBe(true);
   const before = await anchor.evaluate(element => element.getBoundingClientRect().top);
   const olderResponse = page.waitForResponse(response => response.url().includes("cursor=older"));
   await page.locator("#chat-load-older").click();

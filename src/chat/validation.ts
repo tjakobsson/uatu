@@ -1,4 +1,5 @@
 import { TOKEN_USAGE_COMPONENTS } from "./usage";
+import type { AutomaticBackgroundFeedback, AutomaticBackgroundOutcome } from "./types";
 import type {
   AgentChatStatus,
   BackgroundTaskOutput,
@@ -42,6 +43,12 @@ const CONVERSATION_STATUSES = new Set<ConversationStatus>([
   "scheduled",
 ]);
 const ACTIVITY_STATUSES = new Set<ActivityStatus>(["pending", "running", "completed", "failed", "cancelled"]);
+
+export function parseAutomaticBackground(value: unknown): AutomaticBackgroundFeedback {
+  if (value === undefined) return {};
+  if (typeof value !== "string" || !["not-needed", "accepted", "unavailable", "failed", "unknown"].includes(value)) throw new Error("invalid automatic background outcome");
+  return { automaticBackground: value as AutomaticBackgroundOutcome };
+}
 
 export function parseChatAvailability(value: unknown): ChatAvailability {
   const record = expectRecord(value, "chat availability");
@@ -522,7 +529,13 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectContextWindow(record.window);
       break;
     case "background_task":
-      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground"], type);
+      expectKeys(record, ["id", "type", "createdAt", "taskId", "description", "taskType", "toolUseId", "status", "progress", "summary", "subagentType", "prompt", "usage", "outputFile", "childConversationId", "foreground", "stateUncertain", "resultId", "toolUseIds"], type);
+      if (record.stateUncertain !== undefined && typeof record.stateUncertain !== "boolean") throw new Error("background task uncertainty must be a boolean");
+      expectOptionalIdentity(record.resultId, "background result id");
+      if (record.toolUseIds !== undefined) {
+        expectStringArray(record.toolUseIds, "background launch ids", true);
+        for (const id of record.toolUseIds as string[]) expectIdentity(id, "background launch id");
+      }
       expectIdentity(record.taskId, "background task id");
       expectNonEmptyString(record.description, "background task description");
       expectOptionalString(record.taskType, "background task type");
@@ -615,10 +628,13 @@ export function parseQueuedMessages(value: unknown): QueuedMessage[] {
   if (!Array.isArray(value)) throw new Error("queued messages must be an array");
   for (const entry of value) {
     const record = expectRecord(entry, "queued message");
-    expectKeys(record, ["id", "text", "queuedAt", "requestId", "attachments"], "queued message");
+    expectKeys(record, ["id", "text", "queuedAt", "delivery", "paused", "unconfirmed", "requestId", "attachments"], "queued message");
     expectIdentity(record.id, "queued message id");
     expectString(record.text, "queued message text");
     expectTimestamp(record.queuedAt, "queued message queuedAt");
+    expectOneOf(record.delivery, ["steer", "queue"], "queued message delivery");
+    if (record.paused !== undefined && record.paused !== true) throw new Error("queued message paused must be true when present");
+    if (record.unconfirmed !== undefined && record.unconfirmed !== true) throw new Error("queued message unconfirmed must be true when present");
     if (record.requestId !== undefined) expectIdentity(record.requestId, "queued message requestId");
     if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "queued message attachment");
   }
@@ -681,7 +697,7 @@ export function parseChatEvent(value: unknown): ChatEvent {
       parseQueuedMessages(record.queued);
       const change = expectRecord(record.change, "queue change");
       expectKeys(change, ["kind", "messageId"], "queue change");
-      expectOneOf(change.kind, ["held", "removed", "delivered"], "queue change kind");
+      expectOneOf(change.kind, ["held", "steered", "removed", "switched", "paused", "resumed", "delivered"], "queue change kind");
       expectIdentity(change.messageId, "queue change message id");
       break;
     }

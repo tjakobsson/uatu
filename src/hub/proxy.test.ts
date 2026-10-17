@@ -42,6 +42,48 @@ describe("sendableCloseCode", () => {
 });
 
 describe("chat SSE proxying", () => {
+  test("degraded Hub operation tokens separate accounts without asserting a principal or changing client correlation", async () => {
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      return Response.json({ delivery: "steer", headers: Object.fromEntries(request.headers), body: await request.json() });
+    } });
+    const session: RunningSession = { workspaceId: "project", endpoint: { hostname: "127.0.0.1", port: server.port! }, token: "workspace-credential", basePath: "/s/project/", instanceId: crypto.randomUUID(), policyTrust: "unavailable", exited: new Promise(() => {}), stop: async () => {} };
+    const send = async (principal: string, enabled = true) => await (await proxyHttp(new Request("http://hub/s/project/api/chat/conversations/opencode:parent/prompts", {
+      method: "POST", headers: { "content-type": "application/json", "x-uatu-hub-operation-receipt": "opr_forged" }, body: JSON.stringify({ requestId: "shared-client-id", text: "Fixture", delivery: "steer" }),
+    }), session, { principal, revision: enabled ? 0 : 1, autoBackgroundOnSteer: enabled })).json();
+    try {
+      const a = await send("alice"), retry = await send("alice"), b = await send("bob");
+      const key = "x-uatu-hub-operation-receipt";
+      expect(a.headers[key]).toMatch(/^opr_[A-Za-z0-9_-]{43}$/);
+      expect(retry.headers[key]).toBe(a.headers[key]); expect(b.headers[key]).not.toBe(a.headers[key]);
+      expect(a.body.requestId).toBe("shared-client-id");
+      expect((await send("alice", false)).automaticBackground).toBe("unavailable");
+      expect((await send("off-first", false)).automaticBackground).toBeUndefined();
+      expect((await send("off-first", true)).automaticBackground).toBeUndefined();
+      expect(a.headers["x-uatu-hub-chat-policy"]).toBeUndefined();
+      expect(JSON.stringify(a)).not.toMatch(/alice|principal|receiptScope/);
+      const replacement = { ...session, instanceId: crypto.randomUUID() };
+      const response = await proxyHttp(new Request("http://hub/s/project/api/chat/conversations/opencode:parent/prompts", { method: "POST", body: '{"requestId":"shared-client-id","text":"Fixture","delivery":"steer"}' }), replacement, { principal: "alice", revision: 0, autoBackgroundOnSteer: false });
+      expect((await response.json()).headers[key]).not.toBe(a.headers[key]);
+    } finally { server.stop(true); }
+  });
+  test("reserved Hub policy metadata is stripped from ordinary and unrelated requests", async () => {
+    const child = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) { return Response.json(Object.fromEntries(request.headers)); } });
+    const session: RunningSession = {
+      workspaceId: "project", instanceId: crypto.randomUUID(), policyTrust: "unavailable",
+      basePath: "/s/project/", endpoint: { hostname: "127.0.0.1", port: child.port! }, token: null,
+      exited: new Promise(() => undefined), async stop() {},
+    };
+    try {
+      const response = await proxyHttp(new Request("http://hub.example/s/project/api/state", { headers: {
+        "x-uatu-hub-chat-policy": "forged-policy", "x-uatu-hub-principal": "foreign-account", "x-uatu-hub-operation-receipt": `opr_${"a".repeat(43)}`, "x-normal": "preserved",
+      } }), session);
+      const received = await response.json() as Record<string, string>;
+      expect(received["x-uatu-hub-chat-policy"]).toBeUndefined();
+      expect(received["x-uatu-hub-operation-receipt"]).toBeUndefined();
+      expect(received["x-uatu-hub-principal"]).toBeUndefined();
+      expect(received["x-normal"]).toBe("preserved");
+    } finally { await child.stop(true); }
+  });
   test("brokers the child credential and forwards replay frames without buffering or leaking it", async () => {
     let target = "";
     const child = Bun.serve({
@@ -65,6 +107,7 @@ describe("chat SSE proxying", () => {
     });
     const session: RunningSession = {
       workspaceId: "project",
+      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath: "/s/project/",
       endpoint: { hostname: "127.0.0.1", port: child.port! },
       token: "child-secret",
@@ -179,6 +222,7 @@ describe("proxied stream cancellation", () => {
   test("an unreachable child answers 502 without leaving the request listener attached", async () => {
     const session: RunningSession = {
       workspaceId: "project",
+      instanceId: crypto.randomUUID(), policyTrust: "unavailable",
       basePath: "/s/project/",
       // Nothing is listening here; the fetch fails immediately.
       endpoint: { hostname: "127.0.0.1", port: 1 },
@@ -301,6 +345,7 @@ describe("proxied stream diagnostics", () => {
     try {
       const session: RunningSession = {
         workspaceId: "project",
+        instanceId: crypto.randomUUID(), policyTrust: "unavailable",
         basePath: "/s/project/",
         endpoint: { hostname: "127.0.0.1", port: 1 },
         token: "child-secret",
@@ -350,6 +395,7 @@ describe("proxied stream diagnostics", () => {
     try {
       const session: RunningSession = {
         workspaceId: "project",
+        instanceId: crypto.randomUUID(), policyTrust: "unavailable",
         basePath: "/s/project/",
         endpoint: { hostname: "127.0.0.1", port: child.port! },
         token: "child-secret",
@@ -408,6 +454,7 @@ function streamingChild() {
   });
   const session: RunningSession = {
     workspaceId: "project",
+    instanceId: crypto.randomUUID(), policyTrust: "unavailable",
     basePath: "/s/project/",
     endpoint: { hostname: "127.0.0.1", port: server.port! },
     token: "child-secret",
