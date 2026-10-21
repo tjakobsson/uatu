@@ -35,6 +35,10 @@ terminal, and extension points.
 6. Sync changed capability specs and archive completed OpenSpec artifacts as
    part of the change before its final merge.
 
+The project pins OpenSpec exactly so validation-tool updates are reviewed
+separately from routine lockfile maintenance. Renovate can still propose
+version updates; strict validation remains required.
+
 OpenSpec's normal lifecycle is:
 
 ```bash
