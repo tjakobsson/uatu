@@ -1,6 +1,6 @@
 /** Capability-scoped presentation; rows retain their existing action handlers. */
 export function createDashboardGroups() {
-  type Workspace = { id: string; displayName?: string; branch?: string; detached?: boolean; parentId?: string; repositoryId?: string; running: boolean; createWorktree?: boolean };
+  type Workspace = { id: string; displayName?: string; branch?: string; detached?: boolean; parentId?: string; repositoryId?: string; running: boolean; createWorktree?: boolean; availability?: "missing" | "replaced" };
   const expanded = new Map<string, boolean>();
   const make = (tag: string, text = "", className = "") => {
     const node = document.createElement(tag); node.textContent = text; node.className = className; return node;
@@ -37,7 +37,14 @@ export function createDashboardGroups() {
       // FILE) has no fork control and is not this repository's main
       // checkout; label it for what it is instead of promising a fork it
       // does not have.
-      const isMain = parent.createWorktree === true;
+      //
+      // #504: a main checkout whose folder was deleted outside Uatu has no
+      // `.git` left, so createWorktree is gone with it. While linked
+      // worktrees are still registered under it, it is still their main
+      // checkout. With none left nothing says which kind of checkout (or
+      // plain folder) it was, so it carries no chip rather than a false one.
+      const missing = parent.availability === "missing";
+      const isMain = parent.createWorktree === true || (missing && children.length > 0);
       // Bug 2: this used to `replaceChildren(textNode, chip)` directly on
       // `.row-title` (the wrapping div), which discarded the `<a>` the row
       // itself renders for a RUNNING checkout (row(), pages.ts) — silently
@@ -49,7 +56,8 @@ export function createDashboardGroups() {
       const titleRow = main.querySelector<HTMLElement>(".row-title")!;
       const titleEl = titleRow.querySelector<HTMLElement>("a, strong") ?? titleRow;
       titleEl.textContent = parent.detached ? "Detached HEAD" : parent.branch || "Branch unknown";
-      titleRow.replaceChildren(titleEl, make("span", isMain ? "Main checkout" : "Linked checkout", "chip"));
+      if (isMain || !missing) titleRow.replaceChildren(titleEl, make("span", isMain ? "Main checkout" : "Linked checkout", "chip"));
+      else titleRow.replaceChildren(titleEl);
       group.append(main);
       const count = children.filter(w => !w.running).length;
       const hidden = count ? details(`${parent.id}-stopped`, `${count} stopped worktree${count === 1 ? "" : "s"}`) : null;
@@ -58,9 +66,12 @@ export function createDashboardGroups() {
       }
       if (hidden) group.append(hidden);
       if (!active) {
-        const summary = isMain
-          ? `${parent.displayName || parent.id} · all stopped · expand to Start or fork`
-          : `${parent.displayName || parent.id} · all stopped · expand to Start`;
+        // A missing checkout can neither start nor fork; the row says why.
+        const summary = missing
+          ? `${parent.displayName || parent.id} · folder missing · expand to review`
+          : parent.createWorktree === true
+            ? `${parent.displayName || parent.id} · all stopped · expand to Start or fork`
+            : `${parent.displayName || parent.id} · all stopped · expand to Start`;
         const folded = details(`${parent.id}-inactive`, summary);
         folded.append(group); stopped.append(folded);
       } else sessions.append(group);

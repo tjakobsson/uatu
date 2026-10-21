@@ -145,7 +145,11 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
         this.children.get(path.dirname(file))?.add(file);
         if (!this.children.has(file)) this.children.set(file, new Set());
         this.schedule(file);
-      } else if (event === "unlink" || event === "unlinkDir") {
+      } else if (event === "unlinkDir") {
+        // Invalidate pending descendant checks too: their directory sets
+        // belong to the removed generation, even before individual unlinks.
+        this.forget(file);
+      } else if (event === "unlink") {
         this.children.get(path.dirname(file))?.delete(file);
         this.children.delete(file);
         this.reported.delete(file);
@@ -210,7 +214,8 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
   // Chokidar still polls a path whose type changed unseen, as what it was:
   // its file poller would follow a link and report the target as this path,
   // and its directory poller would list a link target's children. Unwatching
-  // closes those pollers; adding the path back lets Chokidar lstat it afresh
+  // closes that path's poller, not necessarily all descendant pollers. Adding
+  // the path back lets Chokidar lstat it afresh
   // under the watch policy, so a link stays unwatched, a new file or directory
   // is watched and reported, and a later replacement is noticed through the
   // parent directory as usual.
@@ -218,7 +223,8 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     // The watched path itself has no parent subscription to notice a later
     // replacement, so its registration stays with Chokidar, as without this
     // check.
-    if (target === this.watched) return;
+    // A removal listener may synchronously close this observer.
+    if (this.closed || target === this.watched) return;
     this.watcher.unwatch(target);
     this.watcher.add(target);
   }
@@ -229,8 +235,7 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
     // The root's own ancestors are outside the watch and are not checked.
     if (target === this.root) return true;
     for (let directory = path.dirname(target); directory !== this.root; directory = path.dirname(directory)) {
-      const relative = path.relative(this.root, directory);
-      if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+      if (!contained(this.root, directory)) return false;
       const stats = await this.fs.lstat(directory).catch(() => null);
       if (!stats?.isDirectory()) return false;
     }
@@ -308,30 +313,30 @@ export class PolledBaselineCheck extends EventEmitter implements FileObserver {
       return;
     }
     const entries = await this.fs.readdir(directory, { withFileTypes: true }).catch(() => null);
-    // lstat again: if the directory was swapped while it was read, what
-    // readdir listed may not be this directory's.
-    const after = await this.fs.lstat(directory).catch(() => null);
     if (!entries || !current()) return;
-    if (!after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) {
-      // Replaced while it was read, possibly before Chokidar's baseline:
-      // check it again, which reports whatever it is now.
-      this.schedule(directory);
-      return;
-    }
     const missed = entries
       .map(entry => ({ entry, child: path.join(directory, entry.name) }))
       .filter(({ entry, child }) => !known!.has(child) && !entry.isSymbolicLink() && (entry.isFile() || entry.isDirectory()) && !this.ignored(child, entry));
-    if (missed.length === 0) return;
     // lstat and readdir resolve through a directory above this one that
     // became a link; then the listing is that link target's, not this
     // directory's, and the directory is gone from under the root.
-    if (!await this.underRealDirectories(directory)) {
+    if (missed.length > 0 && !await this.underRealDirectories(directory)) {
       if (!current()) return;
       this.forget(directory);
       this.emit("all", "unlinkDir", directory);
       return;
     }
+    // Check identity after *all* awaited validation: the directory itself
+    // could have become a link while its ancestors were checked. Nothing is
+    // awaited between this lstat and handing its children to Chokidar.
+    const after = await this.fs.lstat(directory).catch(() => null);
     if (!current()) return;
+    if (!after?.isDirectory() || after.ino !== before.ino || after.dev !== before.dev) {
+      // Replaced while it was read or validated, possibly before Chokidar's
+      // baseline: check it again, which reports whatever it is now.
+      this.schedule(directory);
+      return;
+    }
     // Chokidar stats, watches and reports each child itself; one it has
     // meanwhile found on its own is not reported twice.
     for (const { child } of missed) this.watcher.add(child);

@@ -60,7 +60,7 @@ import type { AgentAccountsApi } from "./agent-account-service";
 import { createWorktreeApi, isWorktreeApiPath, WORKTREE_API_PATH, type WorktreeStartOutcome } from "./worktree-api";
 import { assertNoRegisteredWorktreeDependents, type WorktreeService } from "./worktree-service";
 import { WorktreeReconciler } from "./worktree-reconciler";
-import { checkoutGitLink, readCheckoutHead } from "./worktree-git";
+import { checkoutGitLink, folderPresence, readCheckoutHead } from "./worktree-git";
 import { WorktreeOperationError } from "../shared/worktree-contract";
 import { LiveEndpoint } from "./live-endpoint";
 import { createHubUpstreamSource } from "./live-source";
@@ -505,6 +505,9 @@ export function createHubFetchHandler(deps: HubDeps) {
   // the branch from the checkout's HEAD file, and `sourceRef` only from
   // recorded creation history. `createWorktree` marks a main checkout that
   // can host worktrees (a `.git` directory) — it is the fork entry point.
+  // `availability: "missing"` marks any registration whose folder is gone,
+  // a top-level one included (#504), read with one stat and no Git. A stat
+  // that fails for any reason but ENOENT/ENOTDIR does not make it missing.
   const worktreeStateFacts = async (): Promise<Map<string, Record<string, unknown>>> => {
     const facts = new Map<string, Record<string, unknown>>();
     const service = deps.worktrees;
@@ -533,8 +536,15 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (origin !== undefined) fact.sourceRef = origin;
         const availability = await service.registeredAvailability(entry.id);
         if (availability !== "present") fact.availability = availability;
-      } else if (await checkoutGitLink(entry.path) === "directory") {
-        fact.createWorktree = true;
+      } else {
+        const gitLink = await checkoutGitLink(entry.path);
+        if (gitLink === "directory") fact.createWorktree = true;
+        // Only a folder established to be gone (ENOENT/ENOTDIR) is missing.
+        // One the Hub cannot stat stays as listed, as an unreadable linked
+        // worktree does: absence was never established.
+        else if (gitLink === "none" && await folderPresence(entry.path, { follow: true }) === "missing") {
+          fact.availability = "missing";
+        }
       }
       facts.set(entry.id, fact);
     }));

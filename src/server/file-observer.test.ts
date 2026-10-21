@@ -588,6 +588,123 @@ test("a directory under an ancestor that became a symlink hands nothing to Choki
   expect(unwatched).toEqual([]);
 });
 
+test("a directory replaced by a symlink during its ancestor check hands no children to Chokidar", async () => {
+  const root = await fixture();
+  const outside = await fixture();
+  const parent = path.join(root, "parent");
+  const directory = path.join(parent, "docs");
+  const child = path.join(directory, "missed.md");
+  await mkdir(directory, { recursive: true });
+  await writeFile(child, "# Inside\n");
+  await writeFile(path.join(outside, "missed.md"), "# Outside\n");
+  let swapped = false;
+  const swappingLstat = (async (target: string) => {
+    const stats = await lstat(target);
+    if (target === parent && !swapped) {
+      swapped = true;
+      await rm(directory, { recursive: true });
+      await symlink(outside, directory);
+    }
+    return stats;
+  }) as typeof lstat;
+  const added: string[] = [];
+  const events: string[] = [];
+  const chokidarWatcher = Object.assign(new EventEmitter(), {
+    close: async () => {}, add: (file: string) => { added.push(file); }, unwatch: () => {},
+  });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, { root, settleMs: 10, fs: { lstat: swappingLstat, readdir } });
+  observers.push(check);
+  check.on("all", event => events.push(event));
+  chokidarWatcher.emit("all", "addDir", directory);
+  await until(() => added.length > 0 || events.includes("unlinkDir"), "replacement handled");
+  // Re-registering the directory itself is safe; registering its listed child
+  // through the new link would give Chokidar the outside file.
+  expect(added).not.toContain(child);
+  expect(events).toContain("unlinkDir");
+});
+
+for (const interruption of ["close", "replace directory", "remove ancestor"] as const) {
+  test(`polling discards a directory handoff after ${interruption} during final validation`, async () => {
+    const root = await fixture();
+    const parent = path.join(root, "parent");
+    const directory = path.join(parent, "docs");
+    await mkdir(directory, { recursive: true });
+    const child = path.join(directory, "missed.md");
+    await writeFile(child, "# Missed\n");
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let directoryLstats = 0;
+    let validating = false;
+    let finished = false;
+    const heldLstat = (async (target: string) => {
+      const stats = await lstat(target);
+      if (target === directory && ++directoryLstats === 2) {
+        validating = true;
+        await held;
+        // A following macrotask lets the awaiting check finish its handoff.
+        setTimeout(() => { finished = true; }, 0);
+      }
+      return stats;
+    }) as typeof lstat;
+    const added: string[] = [];
+    const chokidarWatcher = Object.assign(new EventEmitter(), {
+      close: async () => {}, add: (file: string) => { added.push(file); }, unwatch: () => {},
+    });
+    const check = new PolledBaselineCheck(chokidarWatcher, () => false, { root, settleMs: 10, fs: { lstat: heldLstat, readdir } });
+    observers.push(check);
+    chokidarWatcher.emit("all", "addDir", directory);
+    await until(() => validating, "final directory validation held");
+    try {
+      if (interruption === "close") await check.close();
+      else {
+        chokidarWatcher.emit("all", "unlinkDir", interruption === "remove ancestor" ? parent : directory);
+        // Its new generation has no missed child. Only the old listing could
+        // hand that name over after the held validation completes.
+        await rm(child);
+        chokidarWatcher.emit("all", "addDir", directory);
+      }
+    } finally {
+      release();
+    }
+    await until(() => finished, "stale check settled");
+    expect(added).toEqual([]);
+  });
+}
+
+test("polling accepts real ancestor directories whose names start with two dots", async () => {
+  const root = await fixture();
+  const directory = path.join(root, "..notes", "docs");
+  await mkdir(directory, { recursive: true });
+  const child = path.join(directory, "missed.md");
+  await writeFile(child, "# Missed\n");
+  const { chokidarWatcher, added, events } = polledBaseline(root, 10);
+  chokidarWatcher.emit("all", "addDir", directory);
+  await until(() => added.length > 0 || events.some(event => event.event === "unlinkDir"), "directory checked");
+  expect(added).toEqual([child]);
+  expect(events.map(event => event.event)).toEqual(["addDir"]);
+});
+
+test("closing polling from a removal listener does not re-register the removed path", async () => {
+  const root = await fixture();
+  const directory = path.join(root, "docs");
+  const outside = await fixture();
+  await symlink(outside, directory);
+  const added: string[] = [];
+  const unwatched: string[] = [];
+  let closing: Promise<void> | undefined;
+  const chokidarWatcher = Object.assign(new EventEmitter(), {
+    close: async () => {}, add: (file: string) => { added.push(file); }, unwatch: (file: string) => { unwatched.push(file); },
+  });
+  const check = new PolledBaselineCheck(chokidarWatcher, () => false, { root, settleMs: 10 });
+  observers.push(check);
+  check.on("all", event => { if (event === "unlinkDir") closing = check.close(); });
+  chokidarWatcher.emit("all", "addDir", directory);
+  await until(() => closing !== undefined, "removal listener closed observer");
+  await closing;
+  expect(added).toEqual([]);
+  expect(unwatched).toEqual([]);
+});
+
 test("a child handed to polling Chokidar is reported and then polled", async () => {
   const root = await fixture();
   const matcher = await loadIgnoreMatcher({ rootPath: root, respectGitignore: true, isSingleFileRoot: false });

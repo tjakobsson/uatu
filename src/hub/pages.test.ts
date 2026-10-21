@@ -4,6 +4,7 @@ import { parseHTML } from "linkedom";
 import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, parseCloneRemote } from "./credential-context";
 import { createDashboardGroups, dashboardGroupsStyle } from "./dashboard-groups";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
+import { workspaceIsCheckout } from "../shell/worktree-dialog";
 
 const htmlFor = {
   dashboard: () => dashboardPage("alice"),
@@ -78,7 +79,7 @@ function dashboardRefreshHarness(entries: unknown[], overrides: Record<string, u
     fetch: async () => ({ ok: true, json: async () => ({ worktreeApi: "/api/hub/worktrees", workspaces: entries }) }),
     row, renderInto: (container: Element, rows: Element[]) => container.replaceChildren(...rows),
     actionErrorFor: () => ({}), setLocalError: () => {}, api: async () => {}, el: (tag: string) => document.createElement(tag),
-    worktreeProvenanceLabel: () => "", worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: () => {},
+    worktreeProvenanceLabel: () => "", workspaceIsCheckout, worktreeForkIcon: "", renderDashboardGroups: () => {}, openWorktreeDialog: () => {},
     sessionUrl: (id: string) => "/s/" + id + "/",
     ...overrides,
   };
@@ -126,6 +127,110 @@ test("dashboard preserves ordinary-folder removal and routes repository removal 
   await refresh();
   for (const id of ["docs", "main", "child"]) await (document.querySelector(`[data-workspace="${id}"] [aria-label^="Remove "]`) as any).onclick();
   expect(calls).toEqual(["/api/hub/workspaces/docs/forget", "forget:main", "forget:child"]);
+});
+
+// Issue #504 (demo 04a/06a): a top-level row whose folder was deleted
+// outside Uatu answers `availability: "missing"` too. It gets the same
+// missing-checkout state a worktree row gets — warning, no Start, Remove from
+// Uatu through the guarded dialog — whether or not worktrees are left under
+// it, and the dialog is told what the row knows: its name, that its folder
+// is gone, and how many worktrees must go first.
+describe("#504 a top-level row whose folder is missing", () => {
+  const harness = (entries: unknown[]) => {
+    const opened: any[] = [];
+    const calls: string[] = [];
+    const page = dashboardRefreshHarness(entries, {
+      api: async (url: string) => calls.push(url),
+      openWorktreeDialog: (options: any) => opened.push(options),
+      el: (tag: string, className?: string, text?: string) => {
+        const node = page.document.createElement(tag);
+        if (className) node.className = className;
+        if (text) node.textContent = text;
+        return node;
+      },
+    });
+    return { ...page, opened, calls };
+  };
+  const actionsOf = (document: Document, id: string) =>
+    [...document.querySelectorAll(`[data-workspace="${id}"] .row-actions button`)].map(node => node.getAttribute("aria-label") || node.textContent);
+
+  test("with worktrees under it, it reads as a missing checkout and its removal names its dependents", async () => {
+    const { document, refresh, opened, calls } = harness([
+      { id: "atlas", displayName: "Atlas", repositoryId: "r", availability: "missing" },
+      { id: "atlas-a", parentId: "atlas", repositoryId: "r", branch: "feature/a", availability: "missing" },
+    ]);
+    await refresh();
+    const main = document.querySelector('[data-workspace="atlas"]')!;
+    expect(main.querySelector('[role="alert"]')!.textContent)
+      .toBe("Missing checkout. Restore the original checkout externally, then retry, or remove it from Uatu. Nothing will be recreated.");
+    expect(actionsOf(document, "atlas")).toEqual(["Rename workspace Atlas", "Remove Atlas from Uatu", "Retry refresh"]);
+    await (main.querySelector('[aria-label="Remove Atlas from Uatu"]') as any).onclick();
+    expect(calls).toEqual([]);
+    expect(opened).toEqual([expect.objectContaining({ view: "forget", id: "atlas", label: "Atlas", availability: "missing", dependents: 1, checkout: true })]);
+  });
+
+  test("with nothing under it, it is still removed from Uatu through the confirmation, never unregistered on one click", async () => {
+    const { document, refresh, opened, calls } = harness([{ id: "docs", displayName: "Docs", availability: "missing" }]);
+    await refresh();
+    const row = document.querySelector('[data-workspace="docs"]')!;
+    expect(row.querySelector('[role="alert"]')!.textContent)
+      .toBe("Missing folder. Restore the original folder externally, then retry, or remove it from Uatu. Nothing will be recreated.");
+    expect(actionsOf(document, "docs")).toEqual(["Rename workspace Docs", "Remove Docs from Uatu", "Retry refresh"]);
+    await (row.querySelector('[aria-label="Remove Docs from Uatu"]') as any).onclick();
+    expect(calls).toEqual([]);
+    expect(opened).toEqual([expect.objectContaining({ view: "forget", id: "docs", label: "Docs", availability: "missing", dependents: 0, checkout: false })]);
+  });
+
+  // PR #515 review: a workspace still running when its folder was deleted
+  // (the child keeps an unlinked cwd) is a running row. Running rows had no
+  // Remove button to relabel, so the warning promised a removal the row did
+  // not offer. The forget route stops the workspace itself (stop: true).
+  test("still running, it offers Remove from Uatu beside Stop, through the same confirmation", async () => {
+    const { document, refresh, opened, calls } = harness([{ id: "docs", displayName: "Docs", running: true, availability: "missing" }]);
+    await refresh();
+    const row = document.querySelector('#sessions [data-workspace="docs"]')!;
+    expect(row.querySelector('[role="alert"]')!.textContent)
+      .toBe("Missing folder. Restore the original folder externally, then retry, or remove it from Uatu. Nothing will be recreated.");
+    expect(actionsOf(document, "docs")).toEqual(["Rename workspace Docs", "Stop", "Remove Docs from Uatu", "Retry refresh"]);
+    const remove = row.querySelector('[aria-label="Remove Docs from Uatu"]') as any;
+    expect(remove.textContent).toBe("Remove from Uatu");
+    expect(remove.className).toBe("danger");
+    await remove.onclick();
+    expect(calls).toEqual([]);
+    expect(opened).toEqual([expect.objectContaining({ view: "forget", id: "docs", label: "Docs", availability: "missing", dependents: 0, checkout: false })]);
+  });
+
+  test("a running repository family keeps its worktrees-first count and calls itself a checkout", async () => {
+    const { document, refresh, opened } = harness([
+      { id: "atlas", displayName: "Atlas", repositoryId: "r", running: true, availability: "missing" },
+      { id: "atlas-a", parentId: "atlas", repositoryId: "r", branch: "feature/a", running: true, availability: "missing" },
+    ]);
+    await refresh();
+    expect(actionsOf(document, "atlas")).toEqual(["Rename workspace Atlas", "Stop", "Remove Atlas from Uatu", "Retry refresh"]);
+    expect(actionsOf(document, "atlas-a")).toEqual(["Stop", "Remove feature/a from Uatu", "Retry refresh"]);
+    await (document.querySelector('[aria-label="Remove Atlas from Uatu"]') as any).onclick();
+    await (document.querySelector('[aria-label="Remove feature/a from Uatu"]') as any).onclick();
+    expect(opened).toEqual([
+      expect.objectContaining({ view: "forget", id: "atlas", availability: "missing", dependents: 1, checkout: true }),
+      expect.objectContaining({ view: "forget", id: "atlas-a", availability: "missing", checkout: true }),
+    ]);
+    expect(opened[1].dependents).toBeUndefined();
+  });
+
+  test("a running row whose folder is present offers no removal", async () => {
+    const { document, refresh } = harness([{ id: "docs", displayName: "Docs", running: true }]);
+    await refresh();
+    expect(actionsOf(document, "docs")).toEqual(["Open Docs", "Rename workspace Docs", "Stop"]);
+  });
+
+  test("a present ordinary folder keeps its one-step Remove from Hub", async () => {
+    const { document, refresh, opened, calls } = harness([{ id: "docs", displayName: "Docs" }]);
+    await refresh();
+    expect(actionsOf(document, "docs")).toEqual(["Start Docs", "Rename workspace Docs", "Remove Docs from Hub"]);
+    await (document.querySelector('[aria-label="Remove Docs from Hub"]') as any).onclick();
+    expect(calls).toEqual(["/api/hub/workspaces/docs/forget"]);
+    expect(opened).toEqual([]);
+  });
 });
 
 test("dashboard rows disclose a linked worktree's inherited parent credentials", async () => {

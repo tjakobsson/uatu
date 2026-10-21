@@ -480,6 +480,25 @@ export type CheckoutInspection = {
   readonly detail?: string;
 };
 
+// Whether a registered folder is there, as far as the filesystem can say.
+// Only ENOENT and ENOTDIR (or something other than a directory at the path)
+// establish that it is gone. Any other failure — an ancestor that now
+// answers EACCES, a failing mount, an I/O error — establishes nothing: the
+// folder is "unreadable", never "missing". inspectCheckout draws the same
+// line. `follow` stats through a symlink; without it this is lstat, as
+// inspectCheckout's own presence test is.
+export type FolderPresence = "present" | "missing" | "unreadable";
+
+export async function folderPresence(folder: string, options: { follow?: boolean } = {}): Promise<FolderPresence> {
+  try {
+    const stats = options.follow ? await fs.stat(folder) : await fs.lstat(folder);
+    return stats.isDirectory() ? "present" : "missing";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unreadable";
+  }
+}
+
 // The one probe ownership resolution and restart recovery share: what is at
 // this path right now, and can we prove what it is.
 export async function inspectCheckout(checkoutPath: string, options: WorktreeGitOptions = {}): Promise<CheckoutInspection> {
